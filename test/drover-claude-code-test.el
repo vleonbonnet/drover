@@ -337,9 +337,11 @@ serves and a model without effort.")
     (should (eq (drover-engine-property 'claude-code :resolve) #'drover-claude-code--resolve))
     (should (equal (drover-agent-names "/any/") '("plan" "build")))
     (should (equal drover--model-sources '((claude-code 0 drover-claude-code--oauth-source))))
+    ;; Another front end's source survives the engine's unloading.
+    (drover-register-model-source 'claude-code #'ignore -10)
     (drover-claude-code-unload-function)
     (should-not (drover-engines))
-    (should-not drover--model-sources)))
+    (should (equal drover--model-sources '((claude-code -10 ignore))))))
 
 (ert-deftest drover-claude-code-test-defaults-callback ()
   "The engine's defaults come at once; a failure is warned about, without callback."

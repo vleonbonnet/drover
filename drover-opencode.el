@@ -333,7 +333,7 @@ times of the database files stand in.  The engine's :last-used."
 Other front ends may run the engine too, such as agent-shell, whose
 model sources then stay, with the engine's label alone."
   (drover-unregister-model-source 'opencode #'drover-opencode--catalog-source)
-  (if (seq-some (lambda (source) (eq (car source) 'opencode)) drover--model-sources)
+  (if (drover-engine-model-sources 'opencode)
       (drover-register-engine 'opencode :label "OpenCode")
     (drover-unregister-engine 'opencode)))
 

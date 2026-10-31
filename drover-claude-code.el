@@ -669,7 +669,9 @@ fetched once per Emacs session, and again while it gives nothing."
 (drover-claude-code--register)
 
 (defun drover-claude-code-unload-function ()
-  "Forget the `claude-code' engine, and its model sources."
+  "Forget the `claude-code' engine, and the model source this file gave it.
+Sources other files give it, such as agent-shell's, are theirs to remove."
+  (drover-unregister-model-source 'claude-code #'drover-claude-code--oauth-source)
   (drover-unregister-engine 'claude-code)
   nil)
 

@@ -1861,7 +1861,9 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
     (funcall (drover-backend-property 'opencode :create) temporary-file-directory 'codex nil
              (lambda (session) (push (list 'then session) results))
              (lambda (message) (push (list 'else message) results)))
-    (should (equal results '((else "OpenCode sessions run OpenCode, not codex"))))
+    ;; The engine's label, whichever engines are registered.
+    (should (equal results `((else ,(format "OpenCode sessions run OpenCode, not %s"
+                                             (drover-engine-label 'codex))))))
     (should-not created)))
 
 (ert-deftest drover-opencode-test-new-session-does-not-wait ()

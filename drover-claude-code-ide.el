@@ -124,8 +124,6 @@ The interface takes a return arriving with the paste as part of it.")
 (defconst drover-claude-code-ide--capture-timeout 600
   "Seconds drover looks for the conversation of a new terminal.")
 
-(defconst drover-claude-code-ide--guess-ttl 5
-  "Seconds a session list keeps the newest transcript it guessed for a terminal.")
 
 (defconst drover-claude-code-ide--preview-lines 40
   "Lines of a terminal a preview shows.")
@@ -154,8 +152,6 @@ The interface takes a return arriving with the paste as part of it.")
 (defvar-local drover-claude-code-ide--project nil
   "The project of this terminal, as (DIRECTORY . NAME), NAME nil outside one.")
 
-(defvar-local drover-claude-code-ide--guess nil
-  "The transcript last guessed for this terminal, as (TIME . IDENTIFIER).")
 
 (defvar-local drover-claude-code-ide--submitting nil
   "Non-nil while text typed in this terminal waits to be submitted.")
@@ -292,21 +288,6 @@ the terminal's directory."
     (or (drover-claude-code-ide-live-session-id buffer)
         (and (drover-claude-code-ide--claude-buffer-p buffer)
              (drover-claude-code-newest-session-id (drover-claude-code-ide--directory buffer))))))
-
-(defun drover-claude-code-ide--engine-id (buffer directory)
-  "Return the engine identifier of the session of terminal BUFFER in DIRECTORY.
-As `drover-claude-code-ide-current-session-id', but a guess is kept
-`drover-claude-code-ide--guess-ttl' seconds: sessions are listed often,
-and a guess lists the directory's transcripts."
-  (or (drover-claude-code-ide-live-session-id buffer)
-      (with-current-buffer buffer
-        (let ((now (float-time))
-              (cached drover-claude-code-ide--guess))
-          (if (and cached (< (- now (car cached)) drover-claude-code-ide--guess-ttl))
-              (cdr cached)
-            (let ((id (drover-claude-code-newest-session-id directory)))
-              (setq drover-claude-code-ide--guess (cons now id))
-              id))))))
 
 ;;;; Learning the session of a new terminal
 
@@ -558,7 +539,8 @@ and `after-focus-change-function'."
        :updated (or drover-claude-code-ide--updated drover-claude-code-ide--created)
        :created drover-claude-code-ide--created
        :engine 'claude-code
-       :engine-id (drover-claude-code-ide--engine-id buffer directory)))))
+       ;; Never a guess: drover merges sessions of one engine identifier.
+       :engine-id (drover-claude-code-ide-live-session-id buffer)))))
 
 (defun drover-claude-code-ide--sessions ()
   "Return the sessions of the Claude terminals."

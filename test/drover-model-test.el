@@ -126,8 +126,14 @@ table's metadata."
     (should-not (drover-engine-property 'zeta :agents))
     (should (equal (drover-engines) '(opencode codex zeta alpha)))
     (drover-register-model-source 'zeta #'ignore)
+    (drover-register-model-source 'zeta #'identity -1)
+    (should (equal (drover-engine-model-sources 'zeta) '(identity ignore)))
+    ;; Forgetting an engine leaves the sources, which their files remove.
     (drover-unregister-engine 'zeta)
     (should (equal (drover-engines) '(opencode codex alpha)))
+    (should (equal (drover-engine-model-sources 'zeta) '(identity ignore)))
+    (drover-unregister-model-source 'zeta #'ignore)
+    (drover-unregister-model-source 'zeta #'identity)
     (should-not drover--model-sources)))
 
 (ert-deftest drover-model-test-fake-engine ()
@@ -226,6 +232,8 @@ table's metadata."
       (should (equal (drover-models "/elsewhere/") (list live codex catalog)))
       (should (equal (mapcar #'car (reverse calls)) '(live codex catalog)))
       ;; Without its catalog, OpenCode takes the next source.
+      (dolist (function (drover-engine-model-sources 'claude-code))
+        (drover-unregister-model-source 'claude-code function))
       (drover-unregister-engine 'claude-code)
       (setq drover--model-sources (seq-remove (lambda (s) (eq (car s) 'opencode)) drover--model-sources))
       (drover-register-model-source 'opencode (funcall source 'shell (list shell)) 10)

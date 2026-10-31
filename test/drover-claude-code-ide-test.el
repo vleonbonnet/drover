@@ -573,7 +573,7 @@ session of `buffer', a temporary buffer, active."
           (should (eq (drover-session-engine a) 'claude-code))
           (should (eq (drover-session-engine b) 'claude-code))
           (should (equal (drover-session-engine-id a) "tracked-id"))
-          (should (equal (drover-session-engine-id b) "notes-guess"))
+          (should-not (drover-session-engine-id b))
           (should (equal (drover-session-title a) "*claude-code[app]*"))
           (should (equal (drover-session-title b) "~/notes"))
           (should (equal (drover-session-directory a) "/work/app/"))
@@ -591,22 +591,20 @@ session of `buffer', a temporary buffer, active."
           (should (eq (drover-session-buffer (drover-find 'claude-code-ide (drover-session-id a)))
                       tracked)))))))
 
-(ert-deftest drover-claude-code-ide-test-guess-is-kept ()
-  "A guessed session is kept a few seconds, a known one read every time."
+(ert-deftest drover-claude-code-ide-test-engine-id-never-guessed ()
+  "A terminal's engine identifier stays unknown until the CLI records it.
+drover merges sessions of different backends by engine identifier, so a
+guess could hide another session of the directory."
   (drover-claude-code-ide-test-with
-    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* guess"))
-          (drover-claude-code-ide-test-clock 1000.0))
-      (setq drover-claude-code-ide-test-newest '(("/work/drover/" . "first")))
-      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) drover-claude-code-ide-test-clock)))
-        (should (equal (drover-session-engine-id (drover-claude-code-ide-test-session terminal)) "first"))
-        (setq drover-claude-code-ide-test-newest '(("/work/drover/" . "second")))
-        (should (equal (drover-session-engine-id (drover-claude-code-ide-test-session terminal)) "first"))
-        (setq drover-claude-code-ide-test-clock 1006.0)
-        (should (equal (drover-session-engine-id (drover-claude-code-ide-test-session terminal)) "second"))
-        (with-current-buffer terminal
-          (setq-local ghostel--pid 1))
-        (setq drover-claude-code-ide-test-pids '((1 . "live")))
-        (should (equal (drover-session-engine-id (drover-claude-code-ide-test-session terminal)) "live"))))))
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* guess")))
+      (setq drover-claude-code-ide-test-newest '(("/work/drover/" . "newest")))
+      (should-not (drover-session-engine-id (drover-claude-code-ide-test-session terminal)))
+      ;; Links still guess, as they did.
+      (should (equal (drover-claude-code-ide-current-session-id terminal) "newest"))
+      (with-current-buffer terminal
+        (setq-local ghostel--pid 1))
+      (setq drover-claude-code-ide-test-pids '((1 . "live")))
+      (should (equal (drover-session-engine-id (drover-claude-code-ide-test-session terminal)) "live")))))
 
 (ert-deftest drover-claude-code-ide-test-project ()
   "A session's project is its directory's, found once per directory."

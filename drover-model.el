@@ -225,10 +225,11 @@ properties and keeps its place."
   name)
 
 (defun drover-unregister-engine (name)
-  "Forget engine NAME, and its model sources."
-  (setq drover--engines (assq-delete-all name drover--engines)
-        drover--model-sources (seq-remove (lambda (source) (eq (car source) name))
-                                          drover--model-sources)))
+  "Forget engine NAME.
+Its model sources stay: several files may give an engine sources, such
+as the front ends running it, and each removes its own with
+`drover-unregister-model-source'."
+  (setq drover--engines (assq-delete-all name drover--engines)))
 
 (defun drover-engines ()
   "Return the names of the registered engines.
@@ -287,6 +288,12 @@ Registering FUNCTION again for ENGINE changes its depth."
         (seq-remove (lambda (source)
                       (and (eq (car source) engine) (equal (nth 2 source) function)))
                     drover--model-sources)))
+
+(defun drover-engine-model-sources (engine)
+  "Return the functions registered as model sources of ENGINE, lowest depth first."
+  (mapcar (lambda (source) (nth 2 source))
+          (sort (seq-filter (lambda (source) (eq (car source) engine)) drover--model-sources)
+                (lambda (a b) (< (nth 1 a) (nth 1 b))))))
 
 (defun drover--engine-models (engine directory)
   "Return the models of ENGINE in DIRECTORY, from its first source answering.
