@@ -1,0 +1,148 @@
+;;; drover-core-test.el --- Tests of the session model and backends  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026  Valentin Leon
+
+;; This program is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Code:
+
+(require 'drover-test-helpers)
+
+(defun drover-test-ids (sessions)
+  "Return the identifiers of SESSIONS."
+  (mapcar #'drover-session-id sessions))
+
+(ert-deftest drover-test-sort-urgent-first ()
+  (let ((sessions (list (drover-test-session "idle" :status 'idle :updated 50.0)
+                        (drover-test-session "done-new" :status 'done :since 30.0)
+                        (drover-test-session "working" :status 'working :updated 10.0)
+                        (drover-test-session "waiting" :status 'waiting :since 40.0)
+                        (drover-test-session "done-old" :status 'done :since 20.0)
+                        (drover-test-session "working-new" :status 'working :updated 60.0))))
+    (should (equal (drover-test-ids (drover-sort sessions))
+                   '("waiting" "done-old" "done-new" "working-new" "working" "idle")))))
+
+(ert-deftest drover-test-sort-unknown-since-last ()
+  (let ((sessions (list (drover-test-session "unknown" :status 'waiting)
+                        (drover-test-session "known" :status 'waiting :since 5.0))))
+    (should (equal (drover-test-ids (drover-sort sessions)) '("known" "unknown")))))
+
+(ert-deftest drover-test-sort-leaves-input-alone ()
+  (let ((sessions (list (drover-test-session "b" :status 'idle)
+                        (drover-test-session "a" :status 'waiting))))
+    (drover-sort sessions)
+    (should (equal (drover-test-ids sessions) '("b" "a")))))
+
+(ert-deftest drover-test-group-by-status ()
+  (let ((groups (drover-group-by-status
+                 (list (drover-test-session "w" :status 'working)
+                       (drover-test-session "n" :status 'waiting)
+                       (drover-test-session "w2" :status 'working)))))
+    (should (equal (mapcar #'car groups) '(waiting working)))
+    (should (equal (drover-test-ids (alist-get 'working groups)) '("w" "w2")))))
+
+(ert-deftest drover-test-group-by-project ()
+  (let ((groups (drover-group-by-project
+                 (list (drover-test-session "a1" :project "a" :status 'idle)
+                       (drover-test-session "b1" :project "b" :status 'waiting)
+                       (drover-test-session "x" :status 'working)
+                       (drover-test-session "a2" :project "a" :status 'done)))))
+    (should (equal (mapcar #'car groups) '("b" "a" nil)))
+    (should (equal (drover-test-ids (cdr (assoc "a" groups))) '("a2" "a1")))))
+
+(ert-deftest drover-test-visible-sessions-hide-children ()
+  (drover-test-with-backend (list (drover-test-session "root")
+                                  (drover-test-session "child" :parent "root")
+                                  (drover-test-session "asking" :parent "root" :status 'waiting))
+                            (should (equal (drover-test-ids (drover-visible-sessions)) '("root" "asking")))
+                            (let ((drover-show-children t))
+                              (should (equal (drover-test-ids (drover-visible-sessions)) '("root" "child" "asking"))))))
+
+(ert-deftest drover-test-attention-sessions ()
+  (drover-test-with-backend (list (drover-test-session "idle")
+                                  (drover-test-session "done" :status 'done :since 2.0)
+                                  (drover-test-session "waiting" :status 'waiting :since 3.0))
+                            (should (equal (drover-test-ids (drover-attention-sessions)) '("waiting" "done")))))
+
+(ert-deftest drover-test-actions-reach-backend ()
+  (drover-test-with-backend (list (drover-test-session "s"))
+                            (let ((session (drover-find 'fake "s")))
+                              (drover-open session t)
+                              (drover-respond session)
+                              (drover-interrupt session)
+                              (drover-archive session)
+                              (drover-mark-seen session)
+                              (should (equal (reverse drover-test-calls)
+                                             '((:open "s" t) (:respond "s") (:interrupt "s") (:archive "s") (:mark-seen "s")))))))
+
+(ert-deftest drover-test-unsupported-action ()
+  (drover-test-with-backend nil
+                            (drover-register-backend 'bare :label "Bare" :sessions (lambda () nil))
+                            (let ((session (drover-session-create :backend 'bare :id "x")))
+                              (should-not (drover-supports-p session :respond))
+                              (should (drover-supports-p (drover-test-session "s") :respond))
+                              (should-error (drover-respond session) :type 'user-error))))
+
+(ert-deftest drover-test-register-requires-sessions ()
+  (drover-test-with-backend nil
+                            (should-error (drover-register-backend 'broken :label "Broken"))))
+
+(ert-deftest drover-test-start-runs-once ()
+  (drover-test-with-backend nil
+                            (drover-start)
+                            (drover-start)
+                            (should (equal drover-test-calls '((:start nil))))))
+
+(ert-deftest drover-test-failing-backend-contributes-nothing ()
+  (drover-test-with-backend (list (drover-test-session "s"))
+                            (drover-register-backend 'broken :label "Broken" :sessions (lambda () (error "Boom")))
+                            (should (equal (drover-test-ids (drover-sessions)) '("s")))))
+
+(ert-deftest drover-test-changes-coalesce ()
+  (drover-test-with-backend nil
+                            (let ((runs 0))
+                              (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+                              (drover-backend-changed 'fake "a")
+                              (drover-backend-changed 'fake "b")
+                              (drover-changed-now)
+                              (should (= runs 1))
+                              (drover-changed-now)
+                              (should (= runs 1)))))
+
+(ert-deftest drover-test-format-age ()
+  (should (equal (drover-format-age nil) ""))
+  (should (equal (drover-format-age (- drover-test-now 42) drover-test-now) "42s"))
+  (should (equal (drover-format-age (- drover-test-now 300) drover-test-now) "5m"))
+  (should (equal (drover-format-age (- drover-test-now 7200) drover-test-now) "2h"))
+  (should (equal (drover-format-age (- drover-test-now 172800) drover-test-now) "2d")))
+
+(ert-deftest drover-test-session-summary ()
+  (should (equal (drover-session-summary
+                  (drover-test-session "s" :requests '((:kind question :summary "Which branch?"))))
+                 "asks: Which branch?"))
+  (should (equal (drover-session-summary
+                  (drover-test-session "s" :requests '((:kind permission :summary "bash: make"))))
+                 "permit: bash: make"))
+  (should (equal (drover-session-summary (drover-test-session "s" :detail "Rate limited"))
+                 "Rate limited")))
+
+(ert-deftest drover-test-session-at-point ()
+  (with-temp-buffer
+    (should-error (drover-session-at-point) :type 'user-error)
+    (let ((session (drover-test-session "s")))
+      (setq drover-session-at-point-function (lambda () session))
+      (should (eq (drover-session-at-point) session)))))
+
+(provide 'drover-core-test)
+;;; drover-core-test.el ends here

@@ -1,0 +1,38 @@
+#+TITLE: drover design notes
+#+OPTIONS: toc:nil
+
+* Modules
+
+| Module              | Responsibility                                                                                     |
+|---------------------+----------------------------------------------------------------------------------------------------|
+| =drover.el=         | Entry point: loads the core and the interface, and each backend once its front end is loaded       |
+| =drover-core.el=    | The session record, backend registry, status ranking and grouping, change coalescing, actions      |
+| =drover-ui.el=      | Faces, glyphs, labels and ages; the session at point; commands and keys shared by every view       |
+| =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions |
+| =drover-opencode.el= | The opencode.el backend, built on =opencode-state=                                                |
+| =drover-dashboard.el= | Dashboard prototype: collapsible =magit-section= groups                                           |
+| =drover-table.el=   | Dashboard prototype: one =vtable=                                                                  |
+| =drover-sidebar.el= | Dashboard prototype: a narrow side window                                                          |
+
+* Backends describe, drover arranges
+
+A backend owns its sessions and their state; drover asks it for =drover-session= records whenever it draws, and never caches them beyond one redraw.  The record is a snapshot with one status, so every view ranks and groups sessions the same way, through =drover-sort=, =drover-group-by-status= and =drover-group-by-project=.
+
+Backends report changes with =drover-backend-changed=.  A turn streams many events, so changes are coalesced: =drover-changed-hook= runs once the backends have been quiet for =drover-refresh-delay= seconds, and views redraw from it.
+
+* One status per session
+
+| Status     | Meaning                                                      |
+|------------+--------------------------------------------------------------|
+| =waiting=  | A permission request or question waits for the user          |
+| =failed=   | A turn failed while the user was not looking at the session  |
+| =done=     | A turn ended while the user was not looking at the session   |
+| =retrying= | The running turn waits to retry a failed request             |
+| =working=  | A turn runs                                                  |
+| =idle=     | Nothing to do                                                |
+
+The first three need the user (=drover-attention-statuses=).  Among them, the session waiting longest comes first: =since= is when the status began.  Seen and unseen are the backend's to track: for OpenCode, the service records when a client viewed a session, so a turn read in any client is no longer =done=.
+
+* Actions go through the backend
+
+Every action takes a session and calls the matching function its backend registered; an action the backend lacks is a =user-error=, and views can test =drover-supports-p= to hide it.
