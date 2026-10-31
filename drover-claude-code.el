@@ -27,13 +27,36 @@
 ;; transcripts and identifiers of its sessions.  It needs no front end:
 ;; `drover-claude-code-ide' and `drover-agent-shell' show its sessions.
 ;;
-;; Phase 0 of the port: the public names below are frozen, their bodies
-;; not written yet.
+;; The defaults follow Claude Code's documented precedence for the
+;; model, the effort and the permission mode.  The model catalog the
+;; CLI caches resolves aliases, names, supported effort levels and the
+;; defaults it serves.  The starting permission mode stands for an
+;; agent of `drover-claude-code-agent-modes': `plan' while it is plan,
+;; none where the built-in default decides, as that differs between
+;; front ends.  A top-level `effortLevel' of user settings no longer
+;; reaches newer models; the CLI keeps the list of those it does reach
+;; internally, so `drover-claude-code-user-effort-models' mirrors it.
+;; macOS configuration profiles, merged managed sources and effort pins
+;; at launch are not modeled.
+;;
+;; The CLI publishes no model list without a running session.  Live
+;; agent-shell sessions answer for it (see `drover-agent-shell'); when
+;; `drover-claude-code-oauth-catalog' allows it, Anthropic's model list
+;; answers otherwise, read with the CLI's own OAuth token.
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'map)
+(require 'seq)
+(require 'subr-x)
 (require 'drover-core)
 (require 'drover-model)
+
+(declare-function w32-read-registry "w32fns.c" (root key &optional name))
+
+(defvar url-http-response-status)
+(defvar url-request-extra-headers)
 
 ;;;; Options
 
@@ -110,75 +133,259 @@ See `drover-claude-code-agent-modes'."
 
 ;;;; Sessions on disk
 
+(defconst drover-claude-code--uuid-regexp
+  "\\`[[:xdigit:]]\\{8\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{4\\}-[[:xdigit:]]\\{12\\}\\'"
+  "Regexp matching a whole session identifier, a UUID.")
+
 (defun drover-claude-code-projects-directory ()
   "Return the directory of Claude Code's transcripts, one subdirectory per project."
-  (error "Not implemented"))
+  (file-name-as-directory (expand-file-name "projects" drover-claude-code-home)))
 
 (defun drover-claude-code-sessions-directory ()
   "Return the directory where Claude Code records its running sessions by PID."
-  (error "Not implemented"))
+  (file-name-as-directory (expand-file-name "sessions" drover-claude-code-home)))
+
+(defun drover-claude-code--encode (name)
+  "Return NAME with every character that is not alphanumeric replaced by \"-\"."
+  (replace-regexp-in-string "[^a-zA-Z0-9]" "-" name))
 
 (defun drover-claude-code-encode-directory (dir)
   "Return the name of the subdirectory of transcripts of sessions in DIR.
 Claude Code resolves symbolic links, drops the trailing slash and
 replaces every character that is not alphanumeric with \"-\"."
-  (ignore dir)
-  (error "Not implemented"))
+  (drover-claude-code--encode (directory-file-name (file-truename (expand-file-name dir)))))
 
 (defun drover-claude-code-decode-bucket (encoded)
   "Return the directory ENCODED, a subdirectory name of transcripts, stands for.
 Encoding loses characters, so the directory is found by listing the
 file system level by level, encoding each name.  Return it with a
 trailing slash, or nil."
-  (ignore encoded)
-  (error "Not implemented"))
+  (cl-labels
+      ((probe (base remaining)
+         (if (string-empty-p remaining)
+             (file-name-as-directory base)
+           (catch 'found
+             (dolist (entry (ignore-errors (directory-files base nil nil t)))
+               (unless (member entry '("." ".."))
+                 (let* ((full (expand-file-name entry base))
+                        (encoded (drover-claude-code--encode entry))
+                        (size (length encoded)))
+                   (when (file-directory-p full)
+                     (cond
+                      ((string= remaining encoded)
+                       (throw 'found (file-name-as-directory full)))
+                      ;; Several names may encode alike: a wrong one finds
+                      ;; nothing below it, and the next one is tried.
+                      ((and (> (length remaining) size)
+                            (string= (substring remaining 0 (1+ size)) (concat encoded "-")))
+                       (when-let* ((found (probe full (substring remaining (1+ size)))))
+                         (throw 'found found))))))))))))
+    (cond
+     ((string-prefix-p "-" encoded)
+      (probe "/" (substring encoded 1)))
+     ;; A Windows drive root, "c:/", encodes as "c--".
+     ((string-match "\\`\\([a-zA-Z]\\)--" encoded)
+      (probe (concat (match-string 1 encoded) ":/") (substring encoded (match-end 0)))))))
 
 (defun drover-claude-code-session-directory (session-id)
   "Return the directory session SESSION-ID ran in, or nil.
 It is decoded from the subdirectory of transcripts holding its
 transcript."
-  (ignore session-id)
-  (error "Not implemented"))
+  (let ((root (drover-claude-code-projects-directory))
+        (transcript (concat session-id ".jsonl")))
+    (seq-some (lambda (bucket)
+                (and (file-directory-p bucket)
+                     (file-exists-p (expand-file-name transcript bucket))
+                     (drover-claude-code-decode-bucket (file-name-nondirectory bucket))))
+              (and (file-directory-p root) (directory-files root t "\\`[^.]")))))
 
 (defun drover-claude-code-pid-session-id (pid)
   "Return the identifier of the session the Claude Code process PID runs, or nil.
 The CLI records it, by PID, under `drover-claude-code-sessions-directory'."
-  (ignore pid)
-  (error "Not implemented"))
+  (when (integerp pid)
+    ;; Not cached: the record changes as the session is resumed or switched.
+    (let* ((record (drover-read-json (expand-file-name (format "%d.json" pid)
+                                                       (drover-claude-code-sessions-directory))))
+           (id (and (drover-json-object-p record) (alist-get 'sessionId record))))
+      (and (eql (alist-get 'pid record) pid)
+           (stringp id)
+           (string-match-p drover-claude-code--uuid-regexp id)
+           id))))
+
+(defun drover-claude-code--bucket (directory)
+  "Return the subdirectory of transcripts of sessions in DIRECTORY."
+  (expand-file-name (drover-claude-code-encode-directory directory)
+                    (drover-claude-code-projects-directory)))
 
 (defun drover-claude-code-newest-session-id (directory)
   "Return the identifier of the session last written in DIRECTORY, or nil.
 It is the newest transcript of DIRECTORY's subdirectory of transcripts."
-  (ignore directory)
-  (error "Not implemented"))
+  (when-let* ((bucket (drover-claude-code--bucket directory))
+              ((file-directory-p bucket))
+              (files (directory-files bucket t "\\.jsonl\\'" t)))
+    (file-name-base (car (sort files :key (lambda (file) (or (drover-file-mtime file) 0))
+                               :reverse t)))))
 
 (defun drover-claude-code-transcript (id dir)
   "Return the transcript file of session ID, started in DIR."
-  (ignore id dir)
-  (error "Not implemented"))
+  (expand-file-name (concat id ".jsonl") (drover-claude-code--bucket dir)))
+
+(defconst drover-claude-code--transcript-tail 262144
+  "Bytes at the end of a transcript `drover-claude-code-last-turn' reads.")
 
 (defun drover-claude-code-last-turn (file)
   "Return (MODEL-ID . EFFORT) of the newest main turn transcript FILE records.
 Only the end of the file is read.  EFFORT is a symbol, nil for a model
 without effort.  Nil when no turn is found."
-  (ignore file)
-  (error "Not implemented"))
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (let ((size (file-attribute-size (file-attributes file))))
+        (insert-file-contents file nil (max 0 (- size drover-claude-code--transcript-tail)) size))
+      (goto-char (point-max))
+      (let (turn)
+        ;; Searching the key first skips lines that cannot be turns
+        ;; without parsing them; the record itself decides.
+        (while (and (not turn) (re-search-backward "\"requestedModel\":\"" nil t))
+          (when-let* ((record (ignore-errors
+                                (json-parse-string (buffer-substring-no-properties
+                                                    (line-beginning-position) (line-end-position))
+                                                   :object-type 'alist :null-object nil
+                                                   :false-object nil)))
+                      ((drover-json-object-p record))
+                      ((equal (alist-get 'type record) "assistant"))
+                      ((not (alist-get 'isSidechain record)))
+                      (model (alist-get 'requestedModel record))
+                      ((stringp model)))
+            (let ((effort (alist-get 'effort record)))
+              (setq turn (cons model (and (stringp effort) (intern effort))))))
+          (beginning-of-line))
+        turn))))
 
-;;;; Startup defaults
+;;;; Settings
+
+(defun drover-claude-code--registry-policy (root)
+  "Return the Claude Code policy stored in the Windows registry hive ROOT, or nil."
+  (when-let* (((fboundp 'w32-read-registry))
+              (json (ignore-errors
+                      (w32-read-registry root "SOFTWARE\\Policies\\ClaudeCode" "Settings")))
+              ((stringp json)))
+    (ignore-errors
+      (json-parse-string json :object-type 'alist :array-type 'list
+                         :null-object nil :false-object nil))))
+
+(defun drover-claude-code--managed-file-policy ()
+  "Return managed-settings.json with its drop-in directory merged over it.
+Drop-ins apply in the order of their names.  Nil when neither exists."
+  (let* ((directory drover-claude-code-managed-directory)
+         (base (drover-read-json (expand-file-name "managed-settings.json" directory)))
+         (drop-ins (delq nil (mapcar #'drover-read-json
+                                     (ignore-errors
+                                       (directory-files (expand-file-name "managed-settings.d" directory)
+                                                        t "\\`[^.].*\\.json\\'"))))))
+    (when (or base drop-ins)
+      (seq-reduce #'drover-merge-settings drop-ins base))))
+
+(defun drover-claude-code--policy ()
+  "Return the managed settings Claude Code enforces, or nil.
+Only the first source present applies: the settings the server
+manages, the machine's policy, the managed file, then the user's
+policy."
+  (or (drover-read-json (expand-file-name "remote-settings.json" drover-claude-code-home))
+      (drover-claude-code--registry-policy 'HKLM)
+      (drover-claude-code--managed-file-policy)
+      (drover-claude-code--registry-policy 'HKCU)))
 
 (defun drover-claude-code-settings-layers (dir)
   "Return Claude Code's settings for a session in DIR, highest precedence first.
 Each entry is (SOURCE . SETTINGS), SOURCE being `policy', `local',
 `project' or `user'.  In the home directory, the project settings are
 the user ones, read once as user settings."
-  (ignore dir)
-  (error "Not implemented"))
+  (let* ((project (expand-file-name ".claude" dir))
+         (home-p (file-equal-p project drover-claude-code-home)))
+    (seq-filter #'cdr
+                (list (cons 'policy (drover-claude-code--policy))
+                      (unless home-p
+                        (cons 'local (drover-read-json (expand-file-name "settings.local.json" project))))
+                      (unless home-p
+                        (cons 'project (drover-read-json (expand-file-name "settings.json" project))))
+                      (cons 'user (drover-read-json
+                                   (expand-file-name "settings.json" drover-claude-code-home)))))))
+
+(defun drover-claude-code--flag (name)
+  "Return the value of the last option NAME of new sessions' start flags, or nil.
+NAME is the option without its dashes, such as \"model\" for --model.
+The flags come from `drover-claude-code-start-flags-function'."
+  (let ((args (ignore-errors
+                (split-string-and-unquote
+                 (or (and drover-claude-code-start-flags-function
+                          (funcall drover-claude-code-start-flags-function))
+                     ""))))
+        (option (concat "--" name))
+        value)
+    (while args
+      (let ((arg (pop args)))
+        (cond ((equal arg option) (setq value (pop args)))
+              ((string-prefix-p (concat option "=") arg)
+               (setq value (substring arg (1+ (length option))))))))
+    value))
+
+;;;; Models
 
 (defun drover-claude-code-catalog ()
   "Return the model catalog Claude Code last cached, or nil.
 Its `config' lists every model's name, short name and effort options,
 its `state' the default model and the default effort of each model."
-  (error "Not implemented"))
+  (let* ((directory (expand-file-name "cache/model-catalog" drover-claude-code-home))
+         (file (car (sort (ignore-errors (directory-files directory t "-cc\\.json\\'" t))
+                          :key (lambda (file) (or (drover-file-mtime file) 0))
+                          :reverse t)))
+         (catalog (and file (alist-get 'catalog (drover-read-json-cached file)))))
+    (and (drover-json-object-p catalog)
+         (equal (alist-get 'surface catalog) "cc")
+         catalog)))
+
+(defun drover-claude-code--model-key (id)
+  "Return the family-version key of the Claude model ID, a zero minor dropped."
+  (when-let* ((key (and id (drover-model-anthropic-key id))))
+    (string-remove-suffix "-0" key)))
+
+(defun drover-claude-code--base-id (id)
+  "Return model ID without a bracketed context suffix, such as [1m]."
+  (replace-regexp-in-string "\\[[^]]*\\]\\'" "" id))
+
+(defun drover-claude-code--catalog-model (catalog id)
+  "Return CATALOG's entry for the model ID, matched exactly or by model key."
+  (let ((models (map-nested-elt catalog '(config models)))
+        (base (drover-claude-code--base-id id)))
+    (or (seq-find (lambda (model) (equal (alist-get 'id model) base)) models)
+        (when-let* ((key (drover-claude-code--model-key base)))
+          (seq-find (lambda (model) (equal (drover-claude-code--model-key (alist-get 'id model)) key))
+                    models)))))
+
+(defun drover-claude-code--resolve-model (name catalog)
+  "Return the model identifier the model setting NAME selects.
+Full identifiers stay as they are.  An alias takes its
+ANTHROPIC_DEFAULT_FAMILY_MODEL environment variable, else CATALOG's
+model of that family, its main section first; `default' takes the
+default CATALOG serves.  A bracketed suffix such as [1m] is kept.
+NAME itself when nothing resolves it."
+  (if (or (null name) (string-match-p "claude-" name))
+      name
+    (let* ((base (drover-claude-code--base-id name))
+           (alias (downcase base))
+           (family (or (cdr (assoc alias drover-claude-code-alias-families)) alias))
+           (models (map-nested-elt catalog '(config models)))
+           (family-p (lambda (model)
+                       (equal (downcase (or (alist-get 'short_name model) "")) family)))
+           (id (if (equal alias "default")
+                   (map-nested-elt catalog '(state model))
+                 (or (drover-getenv (format "ANTHROPIC_DEFAULT_%s_MODEL" (upcase family)))
+                     (alist-get 'id (or (seq-find (lambda (model)
+                                                    (and (equal (alist-get 'section model) "main")
+                                                         (funcall family-p model)))
+                                                  models)
+                                        (seq-find family-p models)))))))
+      (if id (concat id (substring name (length base))) name))))
 
 (defun drover-claude-code-startup-model-id (layers catalog)
   "Return the identifier of the model a new session starts on, or nil.
@@ -186,8 +393,13 @@ Claude Code's precedence: --model in the start flags (see
 `drover-claude-code-start-flags-function'), ANTHROPIC_MODEL, the first
 of the settings LAYERS naming a `model', ANTHROPIC_DEFAULT_MODEL, then
 CATALOG's default."
-  (ignore layers catalog)
-  (error "Not implemented"))
+  (drover-claude-code--resolve-model
+   (or (drover-claude-code--flag "model")
+       (drover-getenv "ANTHROPIC_MODEL")
+       (seq-some (lambda (layer) (alist-get 'model (cdr layer))) layers)
+       (drover-getenv "ANTHROPIC_DEFAULT_MODEL")
+       (map-nested-elt catalog '(state model)))
+   catalog))
 
 (defun drover-claude-code-startup-mode (layers)
   "Return the permission mode a new session starts in, or nil.
@@ -195,26 +407,126 @@ Claude Code's precedence: --permission-mode in the start flags, then
 the first of the settings LAYERS with a `permissions.defaultMode'.
 Project and local settings cannot start `auto' nor
 `bypassPermissions'."
-  (ignore layers)
-  (error "Not implemented"))
+  (or (drover-claude-code--flag "permission-mode")
+      (when-let* ((layer (seq-find (lambda (layer)
+                                     (map-nested-elt (cdr layer) '(permissions defaultMode)))
+                                   layers))
+                  (mode (map-nested-elt (cdr layer) '(permissions defaultMode))))
+        ;; Refused there, `auto' leaves the built-in default, which
+        ;; differs between front ends, and `bypassPermissions' starts
+        ;; the default mode.
+        (if (and (memq (car layer) '(project local))
+                 (member mode '("auto" "bypassPermissions")))
+            (and (equal mode "bypassPermissions") "default")
+          mode))))
+
+(defun drover-claude-code--layer-effort (layer key base catalog)
+  "Return the effort settings LAYER saves for the model BASE of KEY, or nil.
+A level of `modelSettings' wins, the exact identifier before an alias
+or another identifier of the model, which CATALOG resolves.  A
+top-level `effortLevel' applies to every model, except in user
+settings: there only to the models of
+`drover-claude-code-user-effort-models' and unknown ones."
+  (let* ((settings (cdr layer))
+         (entries (seq-filter (lambda (entry) (alist-get 'effortLevel (cdr-safe entry)))
+                              (alist-get 'modelSettings settings)))
+         (entry (or (seq-find (lambda (entry) (equal (symbol-name (car entry)) base)) entries)
+                    (and key
+                         (seq-find (lambda (entry)
+                                     (equal (drover-claude-code--model-key
+                                             (drover-claude-code--resolve-model
+                                              (symbol-name (car entry)) catalog))
+                                            key))
+                                   entries)))))
+    (or (alist-get 'effortLevel (cdr entry))
+        (and (or (not (eq (car layer) 'user))
+                 (null key)
+                 (member key drover-claude-code-user-effort-models))
+             (alist-get 'effortLevel settings)))))
+
+(defun drover-claude-code--default-effort (entry catalog)
+  "Return the effort CATALOG serves as the default of its model ENTRY, or nil.
+It is the level CATALOG's state keeps for the model, else the option
+the CLI's picker recommends."
+  (let ((id (alist-get 'id entry)))
+    (or (map-nested-elt (seq-find (lambda (model) (equal (alist-get 'id model) id))
+                                  (map-nested-elt catalog '(state thinking_by_model)))
+                        '(thinking effort))
+        (alist-get 'id (seq-find (lambda (option)
+                                   (equal (map-nested-elt option '(badge message)) "Recommended"))
+                                 (map-nested-elt entry '(thinking effort_options)))))))
+
+(defun drover-claude-code--clamp-effort (level supported cap)
+  "Return LEVEL lowered to CAP, then to the highest SUPPORTED level below it.
+LEVEL is a symbol, SUPPORTED a list of symbols, nil when unknown, and
+CAP a level name or nil.  A LEVEL outside
+`drover-claude-code-effort-levels' is returned as it is."
+  (let* ((levels drover-claude-code-effort-levels)
+         (cap (and cap (intern cap)))
+         (level (if (and (memq level levels) (memq cap levels)
+                         (> (seq-position levels level) (seq-position levels cap)))
+                    cap
+                  level)))
+    (if (or (null supported) (not (memq level levels)) (memq level supported))
+        level
+      (car (last (seq-filter (lambda (candidate)
+                               (and (memq candidate supported)
+                                    (<= (seq-position levels candidate) (seq-position levels level))))
+                             levels))))))
 
 (defun drover-claude-code-effort (id layers catalog)
-  "Return the effort a new session runs model ID at, a string, or nil.
+  "Return the effort a new session runs model ID at, a symbol, or nil.
 Claude Code's precedence: CLAUDE_CODE_EFFORT_LEVEL (`auto' being the
 model's default), --effort in the start flags, the first of the
 settings LAYERS with a level for the model, then CATALOG's default for
 it.  The level is lowered to any `maxEffortLevel', and to one the model
 supports; a model without effort options runs none."
-  (ignore id layers catalog)
-  (error "Not implemented"))
+  (let* ((base (drover-claude-code--base-id id))
+         (key (drover-claude-code--model-key base))
+         (entry (drover-claude-code--catalog-model catalog base))
+         (options (map-nested-elt entry '(thinking effort_options)))
+         (env (drover-getenv "CLAUDE_CODE_EFFORT_LEVEL"))
+         (level (cond
+                 ((and entry (null options)) nil)
+                 ((and env (not (equal env "auto"))) env)
+                 (env (drover-claude-code--default-effort entry catalog))
+                 ((drover-claude-code--flag "effort"))
+                 ((seq-some (lambda (layer) (drover-claude-code--layer-effort layer key base catalog))
+                            layers))
+                 (entry (drover-claude-code--default-effort entry catalog)))))
+    (when (stringp level)
+      (drover-claude-code--clamp-effort
+       (intern level)
+       (mapcar (lambda (option) (intern (alist-get 'id option))) options)
+       (seq-some (lambda (layer) (alist-get 'maxEffortLevel (cdr layer))) layers)))))
 
 (defun drover-claude-code-model (id layers catalog)
   "Return the `drover-model' of Claude Code model ID.
 CATALOG names it and offers its effort options as variants; its default
 variant is the effort LAYERS and CATALOG give it.  Its engines are
-those of `drover-model-engines-for' for its identifier."
-  (ignore id layers catalog)
-  (error "Not implemented"))
+`claude-code', then the others of `drover-model-engines-for' for its
+identifier: Claude Code runs whatever model it names, an alias too."
+  (let* ((base (drover-claude-code--base-id id))
+         (entry (drover-claude-code--catalog-model catalog base)))
+    (drover-model-create
+     :provider-name "Anthropic"
+     :id id
+     :name (when-let* ((name (alist-get 'name entry)))
+             (concat name (substring id (length base))))
+     :variants (mapcar (lambda (option) (list (intern (alist-get 'id option))))
+                       (map-nested-elt entry '(thinking effort_options)))
+     :default-variant (drover-claude-code-effort id layers catalog)
+     :engines (delete-dups (cons 'claude-code (drover-model-engines-for nil id))))))
+
+;;;; Defaults
+
+(defun drover-claude-code--project-directory (dir)
+  "Return the directory a new Claude Code session for DIR starts in.
+See `drover-claude-code-project-directory-function'."
+  (let ((dir (file-name-as-directory (expand-file-name dir))))
+    (or (and drover-claude-code-project-directory-function
+             (funcall drover-claude-code-project-directory-function dir))
+        dir)))
 
 (defun drover-claude-code-defaults (dir)
   "Return what a new Claude Code session in DIR starts with, as a plist.
@@ -223,8 +535,143 @@ agent of `drover-claude-code-agent-modes' its starting permission mode
 stands for, nil when none; :layers and :catalog let
 `drover-claude-code-effort' answer for another model.  This is the
 engine's :defaults data."
-  (ignore dir)
-  (error "Not implemented"))
+  (let* ((layers (drover-claude-code-settings-layers (drover-claude-code--project-directory dir)))
+         (catalog (drover-claude-code-catalog))
+         (id (drover-claude-code-startup-model-id layers catalog))
+         (mode (drover-claude-code-startup-mode layers)))
+    (list :model (and id (drover-claude-code-model id layers catalog))
+          :agent (car (rassoc mode drover-claude-code-agent-modes))
+          :layers layers
+          :catalog catalog)))
+
+(defun drover-claude-code--fetch-defaults (directory callback)
+  "Call CALLBACK with the defaults of a new Claude Code session in DIRECTORY.
+They are read at once; a failure is reported, and CALLBACK not called."
+  (when-let* ((defaults (condition-case err
+                            (drover-claude-code-defaults directory)
+                          (error
+                           (drover-warn "Could not read Claude Code's defaults for %s: %s"
+                                        (if (stringp directory) (abbreviate-file-name directory) directory)
+                                        (error-message-string err))
+                           nil))))
+    (funcall callback defaults)))
+
+(defun drover-claude-code--resolve (defaults agent model variant)
+  "Return the options a new Claude Code session runs, from DEFAULTS.
+AGENT, MODEL and VARIANT are the explicit choices, each nil when not
+made; DEFAULTS is a plist of `drover-claude-code-defaults', or nil.
+The model is the startup one unless chosen, the agent the one standing
+for the starting permission mode, and the variant the effort Claude
+Code gives the model."
+  (let ((model (or model (plist-get defaults :model))))
+    (list :agent (or agent (plist-get defaults :agent))
+          :model model
+          :variant (or variant
+                       (and model
+                            (drover-claude-code-effort (drover-model-id model)
+                                                       (plist-get defaults :layers)
+                                                       (plist-get defaults :catalog)))))))
+
+(defun drover-claude-code--agents (_directory)
+  "Return the agents Claude Code runs as permission modes."
+  (mapcar #'car drover-claude-code-agent-modes))
+
+(defun drover-claude-code--last-used ()
+  "Return when Claude Code last took a prompt, as a float time, or nil.
+Interactive sessions append each prompt to history.jsonl; sessions run
+through the SDK, as agent-shell's are, write only their transcripts,
+so the transcripts of the sessions drover lists count too."
+  (let ((times (list (drover-file-mtime (expand-file-name "history.jsonl" drover-claude-code-home)))))
+    (dolist (session (drover-sessions))
+      (when-let* (((eq (drover-session-engine session) 'claude-code))
+                  (id (drover-session-engine-id session))
+                  (directory (drover-session-directory session)))
+        (push (drover-file-mtime (drover-claude-code-transcript id directory)) times)))
+    (when-let* ((times (delq nil times)))
+      (apply #'max times))))
+
+;;;; Anthropic's model list
+
+(defvar drover-claude-code--oauth-models nil
+  "Models Anthropic's model list returned, kept for the Emacs session.")
+
+(defconst drover-claude-code--oauth-timeout 5
+  "Seconds to wait for Anthropic's model list.")
+
+(defun drover-claude-code--oauth-token ()
+  "Return Claude Code's OAuth access token, or nil when absent or expired.
+The CLI refreshes it whenever it runs, so an expired token means no
+recent run: Anthropic's model list is then unavailable, rather than
+the token refreshed here."
+  (let* ((credentials (drover-read-json (expand-file-name ".credentials.json" drover-claude-code-home)))
+         (oauth (and (drover-json-object-p credentials) (alist-get 'claudeAiOauth credentials)))
+         (token (and (drover-json-object-p oauth) (alist-get 'accessToken oauth)))
+         (expires (and token (alist-get 'expiresAt oauth))))
+    (and (stringp token)
+         (numberp expires)
+         (> (/ expires 1000.0) (float-time))
+         token)))
+
+(defun drover-claude-code--oauth-models (token)
+  "Return the models of Anthropic's model list, read with the OAuth TOKEN, or nil.
+The beta header admits OAuth tokens: this is the only interface listing
+Claude Code's models without a running session.  Models have no
+variants, as effort levels show only in a running session."
+  (require 'url)
+  (let* ((url-request-extra-headers `(("Authorization" . ,(concat "Bearer " token))
+                                      ("anthropic-version" . "2023-06-01")
+                                      ("anthropic-beta" . "oauth-2025-04-20")))
+         (buffer (ignore-errors
+                   (url-retrieve-synchronously "https://api.anthropic.com/v1/models?limit=100"
+                                               t t drover-claude-code--oauth-timeout))))
+    (when buffer
+      (unwind-protect
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (when (and (eql (bound-and-true-p url-http-response-status) 200)
+                       (search-forward "\n\n" nil t))
+              (let ((json (ignore-errors
+                            (json-parse-buffer :object-type 'alist :array-type 'list
+                                               :null-object nil :false-object nil))))
+                (delq nil (mapcar (lambda (model)
+                                    (when-let* ((id (and (drover-json-object-p model)
+                                                         (alist-get 'id model)))
+                                                ((stringp id)))
+                                      (drover-model-create :provider-name "Anthropic"
+                                                           :id id
+                                                           :name (alist-get 'display_name model)
+                                                           :engines (drover-model-engines-for nil id))))
+                                  (and (drover-json-object-p json) (alist-get 'data json)))))))
+        (kill-buffer buffer)))))
+
+(defun drover-claude-code--oauth-source (_directory)
+  "Return Claude Code's models from Anthropic's model list, or nil.
+Only when `drover-claude-code-oauth-catalog' allows it; the list is
+fetched once per Emacs session, and again while it gives nothing."
+  (when drover-claude-code-oauth-catalog
+    (or drover-claude-code--oauth-models
+        (when-let* ((token (drover-claude-code--oauth-token)))
+          (setq drover-claude-code--oauth-models (drover-claude-code--oauth-models token))))))
+
+;;;; Registration
+
+(defun drover-claude-code--register ()
+  "Register the `claude-code' engine and its model source."
+  (drover-register-engine 'claude-code
+                          :label "Claude Code"
+                          :defaults #'drover-claude-code--fetch-defaults
+                          :volatile t
+                          :resolve #'drover-claude-code--resolve
+                          :agents #'drover-claude-code--agents
+                          :last-used #'drover-claude-code--last-used)
+  (drover-register-model-source 'claude-code #'drover-claude-code--oauth-source 0))
+
+(drover-claude-code--register)
+
+(defun drover-claude-code-unload-function ()
+  "Forget the `claude-code' engine, and its model sources."
+  (drover-unregister-engine 'claude-code)
+  nil)
 
 (provide 'drover-claude-code)
 ;;; drover-claude-code.el ends here
