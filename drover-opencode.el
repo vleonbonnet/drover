@@ -134,7 +134,8 @@ changes missed while disconnected are fetched like the registry is."
 (defun drover-opencode--session (entry)
   "Return the `drover-session' of `opencode-state' registry ENTRY."
   (let ((directory (plist-get entry :directory))
-        (status (opencode-state-status entry)))
+        (status (opencode-state-status entry))
+        (cache (opencode-state-cache (plist-get entry :id))))
     (drover-session-create
      :backend 'opencode
      :id (plist-get entry :id)
@@ -153,7 +154,9 @@ changes missed while disconnected are fetched like the registry is."
      :created (plist-get entry :created)
      :agent (plist-get entry :agent)
      :model (drover-opencode--model entry)
-     :detail (drover-opencode--detail entry status))))
+     :detail (drover-opencode--detail entry status)
+     :cache-expires (plist-get cache :expires)
+     :cache-ttl (plist-get cache :ttl))))
 
 (defun drover-opencode--sessions ()
   "Return the sessions of the `opencode-state' registry."

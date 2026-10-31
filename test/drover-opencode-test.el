@@ -108,6 +108,8 @@ This follows the `opencode-state' contract."
                   drover-opencode-test-entries))
                ((symbol-function 'opencode-state-status) #'drover-opencode-test--status)
                ((symbol-function 'opencode-state-since) #'drover-opencode-test--since)
+               ((symbol-function 'opencode-state-cache)
+                (lambda (id) (cdr (assoc id drover-opencode-test-caches))))
                ((symbol-function 'opencode-state-ensure) (drover-opencode-test--recorder 'opencode-state-ensure))
                ((symbol-function 'opencode-git-branch)
                 (lambda (directory) (cdr (assoc directory drover-opencode-test-branches))))
@@ -176,6 +178,9 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 (defun drover-opencode-test-handler (type)
   "Return the event handler registered for TYPE."
   (cdr (assoc type drover-opencode-test-handlers)))
+
+(defvar drover-opencode-test-caches nil
+  "Alist of session IDs and their registry cache, for `opencode-state-cache'.")
 
 (defun drover-opencode-test-session (id)
   "Return the drover session ID of the OpenCode backend."
@@ -625,6 +630,17 @@ PROJECTS defaults to `drover-opencode-test-projects'."
   '(send clear attach slash mention revert revert-cancel copy-block agent model effort directory
          compact fork last-answer open-link)
   "The prompt actions OpenCode session buffers define.")
+
+(ert-deftest drover-opencode-test-session-cache ()
+  "A session carries the expiry and lifetime of its prompt cache from the registry."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1") (drover-opencode-test-entry "ses_2"))
+    (let ((drover-opencode-test-caches '(("ses_1" :expires 1000.0 :ttl 300.0 :tokens 42))))
+      (let ((cached (drover-opencode-test-session "ses_1"))
+            (bare (drover-opencode-test-session "ses_2")))
+        (should (= (drover-session-cache-expires cached) 1000.0))
+        (should (= (drover-session-cache-ttl cached) 300.0))
+        (should-not (drover-session-cache-expires bare))
+        (should-not (drover-session-cache-ttl bare))))))
 
 (ert-deftest drover-opencode-test-session-buffer ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
