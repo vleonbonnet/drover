@@ -130,6 +130,19 @@ table's metadata."
     (should (equal (drover-engines) '(opencode codex alpha)))
     (should-not drover--model-sources)))
 
+(ert-deftest drover-model-test-fake-engine ()
+  "Fake engines deliver their defaults and record the calls, as tests expect."
+  (drover-test-with-engines
+    (drover-test-register-engine 'fake :volatile t)
+    (let ((delivered nil))
+      (funcall (drover-engine-property 'fake :defaults) "/work/" (lambda (data) (push data delivered)))
+      (should-not delivered)
+      (setq drover-test-engine-defaults '((fake :model "m")))
+      (funcall (drover-engine-property 'fake :defaults) "/work/" (lambda (data) (push data delivered)))
+      (should (equal delivered '((:model "m"))))
+      (should (drover-engine-property 'fake :volatile))
+      (should (equal drover-test-engine-calls '((:defaults fake "/work/") (:defaults fake "/work/")))))))
+
 (ert-deftest drover-model-test-engine-resolve ()
   (drover-test-with-engines
     (let ((model (drover-test-model "m")))

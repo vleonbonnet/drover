@@ -64,8 +64,8 @@ Its :create is recorded as (:create DIRECTORY ENGINE OPTIONS).")
   "What the fake sessions run, as an alist (ID . PLIST), for :options.")
 
 (defvar drover-test-settable nil
-  "What the fake sessions can change, as an alist (ID . KEYWORDS), for :settable.
-A session missing here can change all three.")
+  "What the fake sessions can change, as an alist (ID . KEYWORDS).
+It answers :settable; a session missing here can change all three.")
 
 (defconst drover-test-now 1800000000.0
   "A fixed current time for tests.")
@@ -175,7 +175,8 @@ PROPERTIES are more properties of `drover-register-backend', such as
 ;;;; Fake engines
 
 (defvar drover-test-engine-calls nil
-  "Calls the fake engines received, newest first, as (OPERATION ENGINE . ARGUMENTS).")
+  "Calls the fake engines received, newest first.
+Each is (OPERATION ENGINE . ARGUMENTS).")
 
 (defvar drover-test-engine-defaults nil
   "Defaults data of the fake engines, as an alist (ENGINE . DEFAULTS).
@@ -222,8 +223,9 @@ give one, so it runs the choices as they are."
      ,@body))
 
 (defun drover-test-model (id &rest properties)
-  "Return a `drover-model' ID with PROPERTIES, keyword arguments of `drover-model-create'.
-Its engines default to (fake)."
+  "Return a `drover-model' ID with PROPERTIES.
+PROPERTIES are keyword arguments of `drover-model-create'; the engines
+default to (fake)."
   (apply #'drover-model-create (append properties (list :id id :engines '(fake)))))
 
 ;;;; Engine homes
