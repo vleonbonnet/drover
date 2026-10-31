@@ -27,7 +27,6 @@
 
 (require 'drover-test-helpers)
 (require 'drover-keys)
-(require 'ol)
 
 (defmacro drover-keys-test-with (sessions &rest body)
   "Run BODY with the fake backend serving SESSIONS and the keys' state isolated."
@@ -37,7 +36,6 @@
            (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
                                    (retrying . "↻") (working . "◐") (idle . "·")))
            (drover-default-prompt-buffer-function nil)
-           (drover-store-link-functions nil)
            (drover-keys-test-actions nil))
        ,@body)))
 
@@ -60,7 +58,7 @@ draw; or `prompt', a buffer with every prompt action.  ID may be nil."
      (pcase ,kind
        ('view (setq-local drover-view-p t))
        ('list (drover-session-keys-mode))
-       ('prompt (dolist (action '(send schedule attach slash mention revert revert-cancel copy-block
+       ('prompt (dolist (action '(send schedule clear attach slash mention revert revert-cancel copy-block
                                        agent model effort directory compact fork last-answer open-link))
                   (drover-prompt-define action (drover-keys-test-action action)))))
      ,@body))
@@ -73,10 +71,20 @@ draw; or `prompt', a buffer with every prompt action.  ID may be nil."
   "Return the groups of transient PREFIX as set up in the current buffer.
 Each group is (TITLE . COLUMNS), each column a list of (KEY . INAPT)
 for its suffixes, in order.  Only groups with a title are returned, and
-only drover's commands unless ALL is non-nil."
+only drover's commands unless ALL is non-nil; groups without any of
+drover's commands are left out.  An untitled group of titled columns,
+as in a row of columns, stands for its columns."
   (let* ((transient--prefix (transient--init-prefix
                              prefix (and (eq prefix 'drover-dispatch) (list :scope (drover--context)))))
-         (layout (transient--init-suffixes prefix)))
+         (layout (mapcan (lambda (group)
+                           (if (and (cl-typep group 'transient-group)
+                                    (not (stringp (and (slot-boundp group 'description)
+                                                       (oref group description))))
+                                    (seq-every-p (lambda (child) (cl-typep child 'transient-group))
+                                                 (oref group suffixes)))
+                               (copy-sequence (oref group suffixes))
+                             (list group)))
+                         (transient--init-suffixes prefix))))
     (cl-labels ((entries (group)
                   (mapcan (lambda (suffix)
                             (and (or all (drover-keys-test--own-p suffix))
@@ -86,7 +94,10 @@ only drover's commands unless ALL is non-nil."
             (mapcar (lambda (group)
                       (when-let* (((cl-typep group 'transient-group))
                                   (title (and (slot-boundp group 'description) (oref group description)))
-                                  ((stringp title)))
+                                  ((stringp title))
+                                  ;; Not transient's own, such as its common commands.
+                                  ((seq-some #'drover-keys-test--own-p
+                                             (transient--flatten-suffixes (list group)))))
                         (cons title
                               (if (seq-every-p (lambda (child) (cl-typep child 'transient-group))
                                                (oref group suffixes))
@@ -124,13 +135,11 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (equal (sort bindings (lambda (a b) (string< (car a) (car b))))
                    (sort (copy-sequence
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
-                            ("k" . drover-interrupt) ("s" . drover-mark-seen)
+                            ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
-                            ("g" . drover-refresh) ("l" . drover-store-link)
-                            ("+" . drover-new-session) ("v" . drover-peek)
-                            ("V" . drover-follow-mode) ("U" . drover-toggle-subagents)
-                            ("G" . drover-group) ("F" . drover-filter)))
+                            ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
+                            ("U" . drover-toggle-subagents) ("V" . drover-view)))
                          (lambda (a b) (string< (car a) (car b))))))
     (dolist (binding bindings)
       (should (commandp (cdr binding))))))
@@ -140,7 +149,8 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should-not (eq (key-binding (kbd "r")) #'drover-rename))
     (drover-session-keys-mode)
     (should (eq (key-binding (kbd "r")) #'drover-rename))
-    (should (eq (key-binding (kbd "F")) #'drover-filter))
+    (should (eq (key-binding (kbd "V")) #'drover-view))
+    (should (eq (key-binding (kbd "K")) #'drover-interrupt))
     (drover-session-keys-mode -1)
     (should-not (eq (key-binding (kbd "r")) #'drover-rename))))
 
@@ -283,35 +293,6 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (with-temp-buffer
       (should-error (call-interactively #'drover-new-session) :type 'user-error))))
 
-(ert-deftest drover-keys-test-store-link ()
-  (drover-keys-test-with (list (drover-test-session "s"))
-    (let ((org-stored-links nil))
-      (add-hook 'drover-store-link-functions (lambda (_) nil))
-      (add-hook 'drover-store-link-functions
-                (lambda (session) (list (concat "drover:" (drover-session-id session)) "The session"))
-                t)
-      (drover-keys-test-in 'view "s"
-        (call-interactively #'drover-store-link))
-      (should (equal org-stored-links '(("drover:s" "The session")))))))
-
-(ert-deftest drover-keys-test-store-link-from-buffer ()
-  (drover-keys-test-with (list (drover-test-session "s"))
-    (let ((session-buffer (generate-new-buffer " session"))
-          (stored nil))
-      (unwind-protect
-          (cl-letf (((symbol-function 'org-store-link)
-                     (lambda (arg interactive)
-                       (should-not arg)
-                       (should interactive)
-                       (push (current-buffer) stored))))
-            (drover-keys-test-in 'view "s"
-              (should-error (call-interactively #'drover-store-link) :type 'user-error)
-              (setf (alist-get 'fake drover--backends)
-                    (append (list :buffer (lambda (_) session-buffer)) (alist-get 'fake drover--backends)))
-              (call-interactively #'drover-store-link))
-            (should (equal stored (list session-buffer))))
-        (kill-buffer session-buffer)))))
-
 ;;;; Following the session at point
 
 (ert-deftest drover-keys-test-follow-mode ()
@@ -375,6 +356,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
   (drover-keys-test-with nil
     (drover-keys-test-in 'prompt nil
       (let ((commands '((drover-prompt-send . send) (drover-prompt-schedule . schedule)
+                        (drover-prompt-clear . clear)
                         (drover-prompt-attach . attach) (drover-prompt-slash . slash)
                         (drover-prompt-mention . mention) (drover-prompt-revert . revert)
                         (drover-prompt-revert-cancel . revert-cancel)
@@ -400,21 +382,22 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
       (should (equal (mapcar #'car groups) '("Global" "Session" "Prompt")))
       (should (equal (mapcar (lambda (group) (mapcar (lambda (column) (mapcar #'car column)) (cdr group)))
                              groups)
-                     '((("j" "b") ("3" "4" "5") ("a" "m" "e" "d") ("C" "f" "." "O"))
-                       (("o" "u" "c" "v" "V") ("A" "k" "s" "+" "g") ("r" "x" "z" "l") ("U" "G" "F"))
-                       (("RET" "S-<return>" "i") ("/" "@" "y") ("t" "T")))))
+                     '((("j" "b") ("l" "L" "p") ("a" "m" "e" "d") ("C" "f" "." "O"))
+                       (("o" "u" "c" "v") ("A" "K" "s" "+" "g") ("r" "x" "z") ("U" "V"))
+                       (("RET" "S-<return>" "i" "k") ("/" "@" "y") ("t" "T")))))
       ;; One key, one command.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-dispatch))))
         (should (equal keys (delete-dups (copy-sequence keys))))))))
 
 (ert-deftest drover-keys-test-dispatch-commands ()
   "Each key of the menu runs the command of the shared key tables."
-  (dolist (entry '(("j" . drover-next) ("b" . drover-select) ("3" . drover-dashboard)
-                   ("4" . drover-table) ("5" . drover-sidebar) ("a" . drover-prompt-agent)
+  (dolist (entry '(("j" . drover-next) ("b" . drover-select) ("l" . drover-list)
+                   ("L" . drover-list-side) ("p" . drover-select-project) ("a" . drover-prompt-agent)
                    ("m" . drover-prompt-model) ("e" . drover-prompt-effort)
                    ("d" . drover-prompt-directory) ("C" . drover-compact) ("f" . drover-fork)
                    ("." . drover-prompt-last-answer) ("O" . drover-prompt-open-link)
                    ("RET" . drover-prompt-send) ("S-<return>" . drover-prompt-schedule)
+                   ("k" . drover-prompt-clear)
                    ("i" . drover-prompt-attach) ("/" . drover-prompt-slash)
                    ("@" . drover-prompt-mention) ("t" . drover-prompt-revert)
                    ("T" . drover-prompt-revert-cancel) ("y" . drover-prompt-copy-block)))
@@ -432,7 +415,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
   "Outside lists and prompt buffers, only the global commands apply."
   (drover-keys-test-with (list (drover-test-session "s"))
     (with-temp-buffer
-      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "3" "4" "5"))))))
+      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "l" "L" "p"))))))
 
 (ert-deftest drover-keys-test-dispatch-in-view ()
   (drover-keys-test-with (list (drover-test-session "s" :status 'working :requests '((:kind question :summary "?"))
@@ -441,12 +424,12 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                                (drover-test-session "sub" :parent "s"))
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "3" "4" "5" "C" "f"
-                       "o" "u" "c" "v" "V" "A" "k" "+" "g" "r" "x" "z" "l" "U" "G" "F"))))
+                     '("j" "b" "l" "L" "p" "C" "f"
+                       "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "U" "V"))))
     ;; Off a session, only what needs none.
     (drover-keys-test-in 'view nil
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "3" "4" "5" "V" "+" "g" "U" "G" "F"))))))
+                     '("j" "b" "l" "L" "p" "+" "g" "U" "V"))))))
 
 (ert-deftest drover-keys-test-dispatch-session-state ()
   "Session commands apply when the session's state allows them."
@@ -455,7 +438,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (drover-keys-test-in 'view "done"
       (let ((apt (drover-keys-test-apt 'drover-dispatch)))
         (should (member "s" apt))
-        (dolist (key '("A" "k" "u" "c"))
+        (dolist (key '("A" "K" "u" "c"))
           (should-not (member key apt)))))
     (drover-keys-test-in 'view "idle"
       (should-not (member "s" (drover-keys-test-apt 'drover-dispatch))))
@@ -470,22 +453,21 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
         (should (member "z" apt))))))
 
 (ert-deftest drover-keys-test-dispatch-in-foreign-list ()
-  "In a list drover does not draw, grouping and filtering do not apply."
+  "In a list drover does not draw, the View menu does not apply."
   (drover-keys-test-with (list (drover-test-session "s"))
     (drover-keys-test-in 'list "s"
       (let ((apt (drover-keys-test-apt 'drover-dispatch)))
-        (dolist (key '("v" "V" "U"))
+        (dolist (key '("v" "U"))
           (should (member key apt)))
-        (dolist (key '("G" "F"))
-          (should-not (member key apt)))))))
+        (should-not (member "V" apt))))))
 
 (ert-deftest drover-keys-test-dispatch-in-prompt ()
   (drover-keys-test-with (list (drover-test-session "s" :status 'working))
     (drover-keys-test-in 'prompt "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "3" "4" "5" "a" "m" "e" "d" "C" "f" "." "O"
-                       "o" "k" "+" "g" "r" "x" "z" "l"
-                       "RET" "S-<return>" "i" "/" "@" "y" "t" "T"))))))
+                     '("j" "b" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O"
+                       "o" "K" "+" "g" "r" "x" "z"
+                       "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T"))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-from-list ()
   "In a list, the session's settings apply to its buffer, its prompt does not.
@@ -506,7 +488,7 @@ shows, so they apply only there."
               (let ((apt (drover-keys-test-apt 'drover-dispatch)))
                 (dolist (key '("a" "f"))
                   (should (member key apt)))
-                (dolist (key '("RET" "t" "T" "m"))
+                (dolist (key '("RET" "k" "t" "T" "m"))
                   (should-not (member key apt))))
               (should-error (call-interactively #'drover-prompt-revert) :type 'user-error)
               (should-not drover-keys-test-actions)
@@ -528,7 +510,7 @@ shows, so they apply only there."
             (setq drover-default-prompt-buffer-function (lambda () default))
             (with-temp-buffer
               (should (equal (drover-keys-test-apt 'drover-dispatch)
-                             '("j" "b" "3" "4" "5" "a" "m" "e" "d")))
+                             '("j" "b" "l" "L" "p" "a" "m" "e" "d")))
               (call-interactively #'drover-prompt-model)
               (should (equal drover-keys-test-actions (list (list 'model default)))))
             ;; Deciding what applies never calls the function, which may
@@ -548,12 +530,13 @@ shows, so they apply only there."
       (with-temp-buffer
         (setq-local drover-view-p t)
         (call-interactively #'drover-dispatch)
-        (call-interactively #'drover-group)
-        (call-interactively #'drover-filter)))
-    (should (= (length setups) 3))
+        (call-interactively #'drover-view)))
+    (should (= (length setups) 2))
     (dolist (setup setups)
       (should (equal (plist-get (nthcdr 3 setup) :display-action) drover-menu-display-action))))
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "C-'")) :command)
+              'transient-quit-one))
+  (should (eq (plist-get (cdr (transient-get-suffix 'drover-view "V")) :command)
               'transient-quit-one))
   ;; A bottom side window, such as the prompt's, stays shown with the menu.
   (save-window-excursion
@@ -569,22 +552,26 @@ shows, so they apply only there."
         (kill-buffer menu)))))
 
 (ert-deftest drover-keys-test-dispatch-extension-points ()
-  "Others place their commands relative to drover's keys."
+  "Others place their commands relative to drover's keys.
+The user's configuration chains its prompt commands after b; other
+lists of sessions go after p, more prompt commands after O."
   (unwind-protect
       (progn
         (transient-append-suffix 'drover-dispatch "b" '("\"" "Prompt" ignore))
-        (transient-insert-suffix 'drover-dispatch "3" '("!" "Lists" ignore))
-        (transient-append-suffix 'drover-dispatch "5" '("6" "More" ignore))
+        (transient-append-suffix 'drover-dispatch "\"" '("'" "Quote" ignore))
+        (transient-append-suffix 'drover-dispatch "'" '("#" "Hash" ignore))
+        (transient-append-suffix 'drover-dispatch "p" '("!" "Lists" ignore))
         (transient-append-suffix 'drover-dispatch "O" '("P" "Other" ignore))
         (with-temp-buffer
           (let ((keys (cdr (assoc "Global" (drover-keys-test-keys 'drover-dispatch t)))))
             (cl-flet ((follows (before after)
                         (equal (cadr (member before keys)) after)))
               (should (follows "b" "\""))
-              (should (follows "!" "3"))
-              (should (follows "5" "6"))
+              (should (follows "\"" "'"))
+              (should (follows "'" "#"))
+              (should (follows "p" "!"))
               (should (follows "O" "P"))))))
-    (dolist (key '("\"" "!" "6" "P"))
+    (dolist (key '("\"" "'" "#" "!" "P"))
       (transient-remove-suffix 'drover-dispatch key))))
 
 (ert-deftest drover-keys-test-dispatch-scope-computed-once ()
@@ -618,58 +605,220 @@ shows, so they apply only there."
           (drover-keys-test-in 'view "s"
             (let ((dispatch (drover-keys-test-render 'drover-dispatch)))
               (should (member " j Next" dispatch))
+              (should (member " l List" dispatch))
+              (should (member " V View" dispatch))
+              (should (member " k Clear" dispatch))
               (should (member " RET Send" dispatch))
               (should (member " S-<return> Schedule" dispatch)))
             ;; The order of the layout is checked elsewhere.
-            (should (seq-set-equal-p (drover-keys-test-render 'drover-group)
-                                     '(" s status" " p project" " n nothing")))
-            (setq drover-filter (list :project "drover" :statuses '(waiting done)
-                                      :since (- (float-time) 7200)))
-            (should (seq-set-equal-p (drover-keys-test-render 'drover-filter)
-                                     '(" p Project drover" " s Status needs you or done"
-                                       " d Updated since 2h" " f Search any" " c Clear all")))))
+            (should (seq-set-equal-p (drover-keys-test-render 'drover-view)
+                                     '(" o urgency" " r [ascending|descending]" " g status"
+                                       " p project any" " s status any" " a agent any"
+                                       " m model any" " d updated any" " f text any" " c clear"
+                                       " F follow [off|on]" " U subagents [hidden|shown]"
+                                       " O older [hidden|shown]")))
+            (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
+                                      :since (- (float-time) 7200))
+                  drover-sort-by 'updated
+                  drover-sort-descending t
+                  drover-group-by nil)
+            (let ((view (drover-keys-test-render 'drover-view)))
+              (dolist (line '(" o last activity" " g nothing" " p project drover"
+                              " s status needs you or done" " a agent build" " d updated since 2h"
+                              " f text any"))
+                (should (member line view))))))
       (set-time-zone-rule zone))))
 
-;;;; Grouping
+;;;; The View menu
 
-(ert-deftest drover-keys-test-group-menu ()
+(defun drover-keys-test-setting (key)
+  "Return the infix of `drover-view' on KEY, set up in the current buffer.
+The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
+  (let ((setup (drover-keys-test-suffixes 'drover-view)))
+    (cons (car setup) (seq-find (lambda (suffix) (equal (oref suffix key) key)) (cdr setup)))))
+
+(defun drover-keys-test-choose (key)
+  "Change the setting of KEY in `drover-view' as pressing KEY would."
+  (pcase-let* ((`(,prefix . ,infix) (drover-keys-test-setting key))
+               (transient--prefix prefix))
+    (cl-letf (((symbol-function 'transient--show) #'ignore))
+      (transient-infix-set infix (transient-infix-read infix)))))
+
+(defun drover-keys-test-value (key)
+  "Return the value the infix of KEY in `drover-view' shows, with its faces."
+  (pcase-let* ((`(,prefix . ,infix) (drover-keys-test-setting key))
+               (transient--prefix prefix))
+    (transient-format-value infix)))
+
+(defun drover-keys-test-highlighted (string)
+  "Return the parts of STRING in the face `transient-value'."
+  (let ((parts nil)
+        (position 0))
+    (while (setq position (text-property-any position (length string) 'face 'transient-value string))
+      (let ((end (or (next-single-property-change position 'face string) (length string))))
+        (push (substring-no-properties string position end) parts)
+        (setq position end)))
+    (nreverse parts)))
+
+(ert-deftest drover-keys-test-view-layout ()
+  (drover-keys-test-with nil
+    (with-temp-buffer
+      (setq-local drover-view-p t)
+      (should (equal (drover-keys-test-keys 'drover-view)
+                     '(("Sort by" "o" "r") ("Group by" "g")
+                       ("Filter by" "p" "s" "a" "m" "d" "f" "c")
+                       ("Toggles" "F" "U" "O"))))
+      ;; One key, one setting.
+      (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
+        (should (equal keys (delete-dups (copy-sequence keys)))))
+      ;; Older sessions need a backend keeping them.
+      (should-not (member "O" (drover-keys-test-apt 'drover-view)))
+      (setf (alist-get 'fake drover--backends)
+            (append (list :history #'ignore) (alist-get 'fake drover--backends)))
+      (should (member "O" (drover-keys-test-apt 'drover-view))))))
+
+(ert-deftest drover-keys-test-view-only-in-views ()
+  (with-temp-buffer
+    (should-error (drover-view) :type 'user-error)
+    (drover-session-keys-mode)
+    (should-error (drover-view) :type 'user-error)))
+
+(ert-deftest drover-keys-test-view-sort-and-group ()
   (drover-keys-test-with nil
     (let ((runs 0))
       (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
       (with-temp-buffer
         (setq-local drover-view-p t)
-        (should (equal (drover-keys-test-keys 'drover-group) '(("Group sessions by" "s" "p" "n"))))
-        (let* ((setup (drover-keys-test-suffixes 'drover-group))
-               (transient--prefix (car setup))
-               (suffixes (cdr setup))
-               (by-key (lambda (key) (seq-find (lambda (suffix) (equal (oref suffix key) key)) suffixes)))
-               (face (lambda (key) (get-text-property 0 'face (transient-format-description
-                                                               (funcall by-key key)))))
-               (choose (lambda (key)
-                         (let ((infix (funcall by-key key)))
-                           (cl-letf (((symbol-function 'transient--show) #'ignore))
-                             (transient-infix-set infix (transient-infix-read infix)))))))
-          ;; The current grouping stands out.
-          (should (eq (funcall face "s") 'transient-value))
-          (should (eq (funcall face "p") 'transient-inactive-value))
-          (funcall choose "p")
-          (should (eq drover-group-by 'project))
-          (should (= runs 1))
-          (should (eq (funcall face "p") 'transient-value))
-          (should (eq (funcall face "s") 'transient-inactive-value))
-          (funcall choose "n")
-          (should-not drover-group-by)
-          (should (eq (funcall face "n") 'transient-value)))))))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "o")) '("urgency")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt candidates &rest _)
+                     (should (equal prompt "Sort by (default urgency): "))
+                     (should (equal candidates (mapcar #'cdr drover-sort-labels)))
+                     "last activity")))
+          (drover-keys-test-choose "o"))
+        (should (eq drover-sort-by 'updated))
+        (should (= runs 1))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "o")) '("last activity")))
+        ;; The order shows both values, the current one highlighted.
+        (should (equal (substring-no-properties (drover-keys-test-value "r")) "[ascending|descending]"))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "r")) '("ascending")))
+        (drover-keys-test-choose "r")
+        (should drover-sort-descending)
+        (should (eq drover-sort-by 'updated))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "r")) '("descending")))
+        (drover-keys-test-choose "r")
+        (should-not drover-sort-descending)
+        ;; Grouping by nothing is a grouping too.
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "g")) '("status")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt candidates &rest _)
+                     (should (member "last activity" candidates))
+                     "nothing")))
+          (drover-keys-test-choose "g"))
+        (should-not drover-group-by)
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "g")) '("nothing")))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "branch")))
+          (drover-keys-test-choose "g"))
+        (should (eq drover-group-by 'branch))
+        (should (= runs 5))))))
 
-(ert-deftest drover-keys-test-group-and-filter-only-in-views ()
+(ert-deftest drover-keys-test-view-filters ()
+  (drover-keys-test-with (list (drover-test-session "a" :project "drover" :agent "build" :model "opus")
+                               (drover-test-session "b" :project "opencode" :agent "plan")
+                               (drover-test-session "c"))
+    (let ((runs 0))
+      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+      (with-temp-buffer
+        (setq-local drover-view-p t)
+        (should (equal (drover-keys-test-value "p") "any"))
+        (should (eq (get-text-property 0 'face (drover-keys-test-value "p")) 'transient-inactive-value))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt candidates &rest _)
+                     ;; The projects of the sessions.
+                     (should (equal candidates '("drover" "opencode")))
+                     "drover")))
+          (drover-keys-test-choose "p"))
+        (should (equal drover-filter '(:project "drover")))
+        (should (= runs 1))
+        (should (equal (drover-keys-test-value "p") "drover"))
+        (should (eq (get-text-property 0 'face (drover-keys-test-value "p")) 'transient-value))
+        (cl-letf (((symbol-function 'completing-read-multiple)
+                   (lambda (_prompt candidates &rest _)
+                     (should (equal (mapcar #'cdr candidates) drover-status-order))
+                     '("Needs you" "Done"))))
+          (drover-keys-test-choose "s"))
+        (should (equal (plist-get drover-filter :statuses) '(waiting done)))
+        (should (equal (drover-keys-test-value "s") "needs you or done"))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt candidates &rest _)
+                     (should (equal candidates '("build" "plan")))
+                     "plan")))
+          (drover-keys-test-choose "a"))
+        (should (equal (plist-get drover-filter :agent) "plan"))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt candidates &rest _)
+                     (should (equal candidates '("opus")))
+                     "opus")))
+          (drover-keys-test-choose "m"))
+        (should (equal (drover-keys-test-value "m") "opus"))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "3d")))
+          (drover-keys-test-choose "d"))
+        (should (< (abs (- (plist-get drover-filter :since) (- (float-time) (* 3 86400)))) 60))
+        (cl-letf (((symbol-function 'read-string) (lambda (_prompt initial &rest _)
+                                                    (should-not initial)
+                                                    "auth")))
+          (drover-keys-test-choose "f"))
+        (should (equal (plist-get drover-filter :search) "auth"))
+        (should (equal (drover-keys-test-value "f") "\"auth\""))
+        ;; An empty answer removes the filter.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+          (drover-keys-test-choose "p"))
+        (should-not (plist-member drover-filter :project))
+        (should (equal (drover-keys-test-value "p") "any"))
+        (drover-filter-clear)
+        (should-not drover-filter)
+        (should (= runs 8))))))
+
+(ert-deftest drover-keys-test-view-toggles ()
+  (drover-keys-test-with (list (drover-test-session "a"))
+    (let ((fetched 0))
+      (setf (alist-get 'fake drover--backends)
+            (append (list :history (lambda (_) (cl-incf fetched))) (alist-get 'fake drover--backends)))
+      (save-window-excursion
+        (delete-other-windows)
+        (drover-keys-test-in 'view "a"
+          (switch-to-buffer (current-buffer))
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("hidden")))
+          (drover-keys-test-choose "U")
+          (should (default-value 'drover-show-children))
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("shown")))
+          (drover-keys-test-choose "U")
+          (should-not drover-show-children)
+          (drover-keys-test-choose "O")
+          (should drover-show-history)
+          (should (= fetched 1))
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "O")) '("shown")))
+          (drover-keys-test-choose "O")
+          (should-not drover-show-history)
+          ;; Follow mode is the list's own.
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "F")) '("off")))
+          (drover-keys-test-choose "F")
+          (should drover-follow-mode)
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "F")) '("on")))
+          (should (equal (car drover-test-calls) '(:open "a" nil)))
+          (drover-keys-test-choose "F")
+          (should-not drover-follow-mode))))))
+
+(ert-deftest drover-keys-test-view-stays-open ()
+  "Every setting of the View menu leaves it open, and its values redrawn."
+  (let ((prefix (get 'drover-view 'transient--prefix)))
+    (should (oref prefix refresh-suffixes)))
   (with-temp-buffer
-    (should-error (drover-group) :type 'user-error)
-    (should-error (drover-filter) :type 'user-error)
-    (drover-session-keys-mode)
-    (should-error (drover-group) :type 'user-error)
-    (should-error (drover-filter) :type 'user-error)))
-
-;;;; Filtering
+    (setq-local drover-view-p t)
+    (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
+      (should (= (length suffixes) 13))
+      (dolist (suffix suffixes)
+        (should (oref suffix transient))))))
 
 (ert-deftest drover-keys-test-parse-since ()
   (let ((zone (getenv "TZ")))
@@ -701,10 +850,10 @@ shows, so they apply only there."
           (set-time-zone-rule "UTC")
           (should-not (drover-filter-description nil now))
           (should (equal (drover-filter-description
-                          (list :project "drover" :statuses '(waiting) :since (- now (* 2 86400))
-                                :search "auth")
+                          (list :project "drover" :statuses '(waiting) :agent "build" :model "opus"
+                                :since (- now (* 2 86400)) :search "auth")
                           now)
-                         "project drover, needs you, since 2d, \"auth\""))
+                         "project drover, needs you, agent build, model opus, since 2d, \"auth\""))
           (should (equal (drover-filter-description (list :statuses '(done failed)) now) "done or failed"))
           (should (equal (drover-filter-description (list :since (- now (* 8 3600))) now) "today"))
           (setq drover-filter '(:search "x"))
@@ -712,72 +861,37 @@ shows, so they apply only there."
       (set-time-zone-rule zone))))
 
 (ert-deftest drover-keys-test-filter-clear-hint ()
-  "The hint names the keys bound to the filter menu, then its clear key."
+  "The hint names the keys bound to the View menu, then its clear key."
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map drover-session-map)
-    (should (equal (substring-no-properties (drover-filter-clear-hint map)) "F c clears the filter."))
+    (should (equal (substring-no-properties (drover-filter-clear-hint map)) "V c clears the filter."))
     (should (eq (get-text-property 0 'face (drover-filter-clear-keys map)) 'help-key-binding))
     (with-temp-buffer
       (use-local-map map)
-      (should (equal (substring-no-properties (drover-filter-clear-keys)) "F c"))
-      (keymap-set map "F" nil)
-      (keymap-set map "C-c f" #'drover-filter)
-      (should (equal (substring-no-properties (drover-filter-clear-keys)) "C-c f c")))))
+      (should (equal (substring-no-properties (drover-filter-clear-keys)) "V c"))
+      (keymap-set map "V" nil)
+      (keymap-set map "C-c v" #'drover-view)
+      (should (equal (substring-no-properties (drover-filter-clear-keys)) "C-c v c")))))
 
-(ert-deftest drover-keys-test-filter-menu ()
+;;;; Projects
+
+(ert-deftest drover-keys-test-select-project ()
   (drover-keys-test-with (list (drover-test-session "a" :project "drover")
                                (drover-test-session "b" :project "opencode")
-                               (drover-test-session "c"))
-    (let ((runs 0))
-      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
-      (with-temp-buffer
-        (setq-local drover-view-p t)
-        (should (equal (drover-keys-test-keys 'drover-filter) '(("Filter sessions" "p" "s" "d" "f"))))
-        (let* ((setup (drover-keys-test-suffixes 'drover-filter))
-               (transient--prefix (car setup))
-               (suffixes (cdr setup))
-               (by-key (lambda (key) (seq-find (lambda (suffix) (equal (oref suffix key) key)) suffixes)))
-               (value (lambda (key) (transient-format-value (funcall by-key key))))
-               (set (lambda (key)
-                      (let ((infix (funcall by-key key)))
-                        (cl-letf (((symbol-function 'transient--show) #'ignore))
-                          (transient-infix-set infix (transient-infix-read infix)))))))
-          (should (equal (funcall value "p") "any"))
-          (should (eq (get-text-property 0 'face (funcall value "p")) 'transient-inactive-value))
-          (cl-letf (((symbol-function 'completing-read)
-                     (lambda (_prompt candidates &rest _)
-                       ;; The projects of the sessions.
-                       (should (equal candidates '("drover" "opencode")))
-                       "drover")))
-            (funcall set "p"))
-          (should (equal drover-filter '(:project "drover")))
-          (should (= runs 1))
-          (should (equal (funcall value "p") "drover"))
-          (should (eq (get-text-property 0 'face (funcall value "p")) 'transient-value))
-          (cl-letf (((symbol-function 'completing-read-multiple)
-                     (lambda (_prompt candidates &rest _)
-                       (should (equal (mapcar #'cdr candidates) drover-status-order))
-                       '("Needs you" "Done"))))
-            (funcall set "s"))
-          (should (equal (plist-get drover-filter :statuses) '(waiting done)))
-          (should (equal (funcall value "s") "needs you or done"))
-          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "3d")))
-            (funcall set "d"))
-          (should (< (abs (- (plist-get drover-filter :since) (- (float-time) (* 3 86400)))) 60))
-          (cl-letf (((symbol-function 'read-string) (lambda (_prompt initial &rest _)
-                                                      (should-not initial)
-                                                      "auth")))
-            (funcall set "f"))
-          (should (equal (plist-get drover-filter :search) "auth"))
-          (should (equal (funcall value "f") "\"auth\""))
-          ;; An empty answer removes the filter.
-          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
-            (funcall set "p"))
-          (should-not (plist-member drover-filter :project))
-          (should (equal (funcall value "p") "any"))
-          (drover-filter-clear)
-          (should-not drover-filter)
-          (should (= runs 6)))))))
+                               (drover-test-session "c" :project "drover"))
+    (let ((listed 0))
+      (cl-letf (((symbol-function 'drover-list) (lambda () (cl-incf listed)))
+                ((symbol-function 'completing-read)
+                 (lambda (prompt candidates &rest _)
+                   (should (equal prompt "Project: "))
+                   (should (equal candidates '("drover" "opencode")))
+                   "opencode")))
+        (call-interactively #'drover-select-project))
+      (should (equal drover-filter '(:project "opencode")))
+      (should (= listed 1))
+      (should (member '(:start nil) drover-test-calls))
+      (setq drover-test-sessions (list (drover-test-session "x")))
+      (should-error (call-interactively #'drover-select-project) :type 'user-error))))
 
 (provide 'drover-keys-test)
 ;;; drover-keys-test.el ends here

@@ -35,11 +35,11 @@
 ;; Bind `drover-dispatch' globally, for instance to C-'; drover binds no
 ;; global key.  Other packages add their own global commands to the menu
 ;; with `transient-append-suffix' and `transient-insert-suffix', placed
-;; relative to drover's keys: `drover-opencode' inserts its session lists
-;; before "3".
+;; relative to drover's keys: `drover-opencode' appends its session
+;; search after "p".
 ;;
-;; `drover-group' and `drover-filter' choose how drover's views group
-;; sessions and which they list.
+;; `drover-view', the View menu, chooses how drover's list sorts, groups
+;; and filters sessions, and what it shows.
 
 ;;; Code:
 
@@ -53,13 +53,10 @@
 
 (autoload 'drover-next "drover-attention" nil t)
 (autoload 'drover-select "drover-attention" nil t)
-(autoload 'drover-dashboard "drover-dashboard" nil t)
-(autoload 'drover-table "drover-table" nil t)
-(autoload 'drover-sidebar "drover-sidebar" nil t)
+(autoload 'drover-list "drover-list" nil t)
+(autoload 'drover-list-side "drover-list" nil t)
 
 (declare-function drover-read-session "drover-attention" (prompt sessions))
-(declare-function org-store-link "ol" (arg &optional interactive?))
-(defvar org-stored-links)
 
 ;;;; Opening sessions
 
@@ -203,8 +200,7 @@ subagent that needs you always shows."
   (interactive)
   (if drover-toggle-subagents-function
       (call-interactively drover-toggle-subagents-function)
-    (setq-default drover-show-children (not (default-value 'drover-show-children)))
-    (drover-view-settings-changed)
+    (drover--set-show-children (not (default-value 'drover-show-children)))
     (message (if (default-value 'drover-show-children) "Showing subagents" "Hiding subagents"))))
 
 (defun drover-refresh ()
@@ -251,28 +247,27 @@ session, or the backend that starts sessions, chosen among several."
       (user-error "%s cannot start sessions" (drover-backend-label backend)))
     (funcall start directory)))
 
-;;;; Org links
+;;;; Projects
 
-(defvar drover-store-link-functions nil
-  "Functions returning an Org link to a session, for `drover-store-link'.
-Each is called with a `drover-session' and returns a list (LINK
-DESCRIPTION), or nil to let the next one try.")
+(defun drover--projects ()
+  "Return the projects of the sessions lists show, sorted, without duplicates."
+  (sort (delete-dups (delq nil (mapcar #'drover-session-project (drover-known-sessions))))
+        #'string<))
 
-(defun drover-store-link (session)
-  "Store an Org link to SESSION, for `org-insert-link'.
-The link comes from the first function of `drover-store-link-functions'
-that returns one; failing that, `org-store-link' runs in the session's
-buffer.  Interactively, SESSION is the session at point."
-  (interactive (list (drover-session-at-point)))
-  (if-let* ((link (run-hook-with-args-until-success 'drover-store-link-functions session)))
-      (progn
-        (require 'ol)
-        (push (list (car link) (cadr link)) org-stored-links)
-        (message "Stored: %s" (or (cadr link) (car link))))
-    (if-let* ((buffer (drover-session-buffer session)))
-        (with-current-buffer buffer
-          (org-store-link nil t))
-      (user-error "No link to %s" (drover-session-display-title session)))))
+(defun drover-select-project (project)
+  "List the sessions of PROJECT, chosen with completion among known projects.
+The list (see `drover-list') shows the sessions the filter keeps, and
+the filter keeps PROJECT's; \\<drover-session-map>\\[drover-view] in the
+list changes or clears it.  Known projects are those of the sessions
+lists show."
+  (interactive (progn
+                 (drover-start)
+                 (let ((projects (drover--projects)))
+                   (unless projects
+                     (user-error "No session belongs to a project"))
+                   (list (completing-read "Project: " projects nil t)))))
+  (drover-set-filter :project project)
+  (drover-list))
 
 ;;;; Prompt actions
 
@@ -285,6 +280,11 @@ buffer.  Interactively, SESSION is the session at point."
   "Schedule the prompt, through the prompt action `schedule'."
   (interactive)
   (drover-prompt-run 'schedule))
+
+(defun drover-prompt-clear ()
+  "Erase the prompt being written, through the prompt action `clear'."
+  (interactive)
+  (drover-prompt-run 'clear))
 
 (defun drover-prompt-attach ()
   "Attach the region, or a file or buffer, through the prompt action `attach'."
@@ -354,7 +354,7 @@ Drover's views inherit it; `drover-session-keys-mode' binds it in
 other lists."
   "o" #'drover-open-other-window
   "A" #'drover-respond
-  "k" #'drover-interrupt
+  "K" #'drover-interrupt
   "s" #'drover-mark-seen
   "u" #'drover-open-parent
   "c" #'drover-open-subagent
@@ -362,13 +362,10 @@ other lists."
   "x" #'drover-delete
   "z" #'drover-archive
   "g" #'drover-refresh
-  "l" #'drover-store-link
   "+" #'drover-new-session
   "v" #'drover-peek
-  "V" #'drover-follow-mode
   "U" #'drover-toggle-subagents
-  "G" #'drover-group
-  "F" #'drover-filter)
+  "V" #'drover-view)
 
 (define-minor-mode drover-session-keys-mode
   "Bind the keys of `drover-session-map' in a list of sessions.
@@ -461,9 +458,9 @@ are shown, greyed out."
   ["Global"
    [("j" "Next" drover-next)
     ("b" "Select" drover-select)]
-   [("3" "Dashboard" drover-dashboard)
-    ("4" "Table" drover-table)
-    ("5" "Sidebar" drover-sidebar)]
+   [("l" "List" drover-list)
+    ("L" "Side list" drover-list-side)
+    ("p" "Project" drover-select-project)]
    [("a" "Agent" drover-prompt-agent :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))
     ("m" "Model" drover-prompt-model :inapt-if-not (lambda () (drover-dispatch-prompt-p 'model)))
     ("e" "Effort" drover-prompt-effort :inapt-if-not (lambda () (drover-dispatch-prompt-p 'effort)))
@@ -483,11 +480,10 @@ are shown, greyed out."
     ("c" "Subagent" drover-open-subagent
      :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
     ("v" "Peek" drover-peek
-     :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
-    ("V" "Follow" drover-follow-mode :inapt-if-not drover-dispatch-list-p)]
+     :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))]
    [("A" "Answer" drover-respond
      :inapt-if-not (lambda () (drover-dispatch-session :respond #'drover-session-requests)))
-    ("k" "Interrupt" drover-interrupt
+    ("K" "Interrupt" drover-interrupt
      :inapt-if-not (lambda () (drover-dispatch-session :interrupt #'drover--running-p)))
     ("s" "Mark seen" drover-mark-seen
      :inapt-if-not (lambda () (drover-dispatch-session :mark-seen #'drover--ended-unseen-p)))
@@ -498,16 +494,15 @@ are shown, greyed out."
      :inapt-if-not (lambda () (or (drover-dispatch-list-p) (drover-dispatch-session))))]
    [("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
     ("x" "Delete" drover-delete :inapt-if-not (lambda () (drover-dispatch-session :delete)))
-    ("z" "Archive" drover-archive :inapt-if-not (lambda () (drover-dispatch-session :archive)))
-    ("l" "Store link" drover-store-link :inapt-if-not (lambda () (drover-dispatch-session)))]
+    ("z" "Archive" drover-archive :inapt-if-not (lambda () (drover-dispatch-session :archive)))]
    [("U" "Subagents" drover-toggle-subagents :inapt-if-not drover-dispatch-list-p)
-    ("G" "Group" drover-group :inapt-if-not drover-dispatch-view-p)
-    ("F" "Filter" drover-filter :inapt-if-not drover-dispatch-view-p)]]
+    ("V" "View" drover-view :inapt-if-not drover-dispatch-view-p)]]
   ["Prompt"
    [("RET" "Send" drover-prompt-send :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send)))
     ("S-<return>" "Schedule" drover-prompt-schedule
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'schedule)))
-    ("i" "Attach" drover-prompt-attach :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))]
+    ("i" "Attach" drover-prompt-attach :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))
+    ("k" "Clear" drover-prompt-clear :inapt-if-not (lambda () (drover-dispatch-prompt-p 'clear)))]
    [("/" "Slash command" drover-prompt-slash :inapt-if-not (lambda () (drover-dispatch-prompt-p 'slash)))
     ("@" "Mention" drover-prompt-mention :inapt-if-not (lambda () (drover-dispatch-prompt-p 'mention)))
     ("y" "Copy block" drover-prompt-copy-block
@@ -522,73 +517,12 @@ are shown, greyed out."
   (transient-setup 'drover-dispatch nil nil :scope (drover--context)
                    :display-action drover-menu-display-action))
 
-;;;; Grouping
+;;;; Reading view settings
 
 (defun drover--check-view ()
   "Signal a `user-error' unless the current buffer is one of drover's views."
   (unless drover-view-p
-    (user-error "Only drover's views group and filter sessions")))
-
-(defclass drover--grouping (transient-variable)
-  ((grouping :initarg :grouping :documentation "The value of `drover-group-by' it sets.")
-   (format :initform " %k %d"))
-  "An infix of `drover-group' choosing one value of `drover-group-by'.")
-
-(cl-defmethod transient-init-value ((obj drover--grouping))
-  "Set the value of OBJ to the current grouping."
-  (oset obj value drover-group-by))
-
-(cl-defmethod transient-infix-read ((obj drover--grouping))
-  "Return the grouping OBJ chooses."
-  (oref obj grouping))
-
-(cl-defmethod transient-infix-set ((obj drover--grouping) value)
-  "Group every view by VALUE, the grouping of OBJ."
-  (oset obj value value)
-  (drover-set-group-by value))
-
-(cl-defmethod transient-format-description ((obj drover--grouping))
-  "Return the description of OBJ, highlighted when it is the current grouping."
-  (propertize (oref obj description)
-              'face (if (eq drover-group-by (oref obj grouping))
-                        'transient-value
-                      'transient-inactive-value)))
-
-(cl-defmethod transient-format-value ((_obj drover--grouping))
-  "Return nothing: the description of a grouping shows whether it is chosen."
-  "")
-
-(transient-define-infix drover-group--status ()
-  "Group sessions by status in every view."
-  :class 'drover--grouping
-  :grouping 'status
-  :description "status")
-
-(transient-define-infix drover-group--project ()
-  "Group sessions by project in every view."
-  :class 'drover--grouping
-  :grouping 'project
-  :description "project")
-
-(transient-define-infix drover-group--none ()
-  "List sessions without groups in every view."
-  :class 'drover--grouping
-  :grouping nil
-  :description "nothing")
-
-(transient-define-prefix drover-group ()
-  "Choose how every drover view groups sessions.
-The current grouping is highlighted; choosing another redraws the views
-at once, and the menu stays open."
-  ["Group sessions by"
-   ("s" drover-group--status)
-   ("p" drover-group--project)
-   ("n" drover-group--none)]
-  (interactive)
-  (drover--check-view)
-  (transient-setup 'drover-group nil nil :display-action drover-menu-display-action))
-
-;;;; Filtering
+    (user-error "Only drover's session list sorts, groups and filters sessions")))
 
 (defun drover--parse-since (string &optional now)
   "Return the float time STRING, read relative to NOW, designates, or nil.
@@ -619,15 +553,36 @@ STRING is nil.  NOW defaults to the current time.  Signal a
                                      nil -1 nil))))
      (t (user-error "Not a time: %s (try today, 24h, 7 days or 2026-10-01)" string)))))
 
+(defun drover--read-choice (prompt labels current)
+  "Read one of LABELS, an alist (VALUE . LABEL), with PROMPT; return its VALUE.
+CURRENT is the value now, offered as the default."
+  (let* ((names (mapcar #'cdr labels))
+         (default (alist-get current labels))
+         (name (completing-read (format-prompt prompt default) names nil t nil nil default)))
+    (car (rassoc name labels))))
+
+(defun drover--read-known (prompt field current)
+  "Read one of the values of FIELD among known sessions, with PROMPT.
+FIELD is a function of a session, such as `drover-session-agent';
+CURRENT is the value now, or nil.  An empty answer returns nil."
+  (let* ((values (sort (delete-dups (delq nil (mapcar field (drover-known-sessions)))) #'string<))
+         (answer (completing-read (if current
+                                      (format "%s (now %s, empty for any): " prompt current)
+                                    (format "%s (empty for any): " prompt))
+                                  values nil t)))
+    (unless (string-empty-p answer) answer)))
+
 (defun drover--read-filter-project (current)
   "Read the project to list, CURRENT being the one listed now, or nil."
-  (let* ((projects (sort (delete-dups (delq nil (mapcar #'drover-session-project (drover-sessions))))
-                         #'string<))
-         (project (completing-read (if current
-                                       (format "Project (now %s, empty for any): " current)
-                                     "Project (empty for any): ")
-                                   projects nil t)))
-    (unless (string-empty-p project) project)))
+  (drover--read-known "Project" #'drover-session-project current))
+
+(defun drover--read-filter-agent (current)
+  "Read the agent whose sessions to list, CURRENT being the one now, or nil."
+  (drover--read-known "Agent" #'drover-session-agent current))
+
+(defun drover--read-filter-model (current)
+  "Read the model whose sessions to list, CURRENT being the one now, or nil."
+  (drover--read-known "Model" #'drover-session-model current))
 
 (defun drover--read-filter-statuses (current)
   "Read the statuses to list, CURRENT being those listed now."
@@ -650,66 +605,17 @@ STRING is nil.  NOW defaults to the current time.  Signal a
     (unless (string-empty-p (string-trim search)) search)))
 
 (defun drover--filter-label (key value)
-  "Return VALUE of the filter member KEY as the filter menu shows it."
+  "Return VALUE of the filter member KEY as the View menu shows it."
   (pcase key
     (:statuses (drover-filter-statuses-label value))
     (:since (drover-filter-since-label value))
     (:search (format "\"%s\"" value))
     (_ (format "%s" value))))
 
-(defclass drover--filter-member (transient-variable)
-  ((filter-key :initarg :filter-key :documentation "The member of `drover-filter' it sets.")
-   (read-function :initarg :read-function
-                  :documentation "Function of the current value reading a new one."))
-  "An infix of `drover-filter' setting one member of the variable `drover-filter'.")
-
-(cl-defmethod transient-init-value ((obj drover--filter-member))
-  "Set the value of OBJ to its member of the variable `drover-filter'."
-  (oset obj value (drover--filter-value drover-filter (oref obj filter-key))))
-
-(cl-defmethod transient-infix-read ((obj drover--filter-member))
-  "Read a new value for the member of the variable `drover-filter' OBJ sets."
-  (funcall (oref obj read-function) (drover--filter-value drover-filter (oref obj filter-key))))
-
-(cl-defmethod transient-infix-set ((obj drover--filter-member) value)
-  "Set the member of the variable `drover-filter' OBJ sets to VALUE."
-  (oset obj value value)
-  (drover-set-filter (oref obj filter-key) value))
-
-(cl-defmethod transient-format-value ((obj drover--filter-member))
-  "Return the value of the member of the variable `drover-filter' OBJ sets."
-  (let ((key (oref obj filter-key)))
-    (if-let* ((value (drover--filter-value drover-filter key)))
-        (propertize (drover--filter-label key value) 'face 'transient-value)
-      (propertize "any" 'face 'transient-inactive-value))))
-
-(transient-define-infix drover-filter--project ()
-  "List the sessions of one project in every view."
-  :class 'drover--filter-member
-  :filter-key :project
-  :read-function #'drover--read-filter-project
-  :description "Project")
-
-(transient-define-infix drover-filter--statuses ()
-  "List the sessions of some statuses in every view."
-  :class 'drover--filter-member
-  :filter-key :statuses
-  :read-function #'drover--read-filter-statuses
-  :description "Status")
-
-(transient-define-infix drover-filter--since ()
-  "List the sessions active since a time in every view."
-  :class 'drover--filter-member
-  :filter-key :since
-  :read-function #'drover--read-filter-since
-  :description "Updated")
-
-(transient-define-infix drover-filter--search ()
-  "List the sessions containing a text in every view."
-  :class 'drover--filter-member
-  :filter-key :search
-  :read-function #'drover--read-filter-search
-  :description "Search")
+(defun drover--set-show-children (show)
+  "Show subagents in every view when SHOW is non-nil, else hide them, and redraw."
+  (setq-default drover-show-children (and show t))
+  (drover-view-settings-changed))
 
 (defun drover-filter-clear ()
   "List every session in every view."
@@ -717,28 +623,239 @@ STRING is nil.  NOW defaults to the current time.  Signal a
   (setq drover-filter nil)
   (drover-view-settings-changed))
 
-(transient-define-prefix drover-filter ()
-  "Choose which sessions every drover view lists.
-Each filter shows its value, or \"any\"; setting one redraws the views
-at once, and the menu stays open.  An empty answer removes a filter."
+;;;; The View menu
+
+(defconst drover-sort-labels
+  '((urgency . "urgency") (title . "title") (project . "project") (branch . "branch")
+    (agent . "agent") (model . "model") (updated . "last activity") (created . "creation"))
+  "Display name of each field of `drover-sort-fields'.")
+
+(defconst drover-grouping-labels
+  '((status . "status") (project . "project") (branch . "branch") (agent . "agent")
+    (model . "model") (updated . "last activity") (nil . "nothing"))
+  "Display name of each grouping of `drover-groupings'.")
+
+(defclass drover--setting (transient-variable)
+  ((getter :initarg :getter :initform nil
+           :documentation "Function of no argument returning the value.")
+   (setter :initarg :setter :initform nil
+           :documentation "Function of a value setting it and redrawing views.")
+   (chooser :initarg :chooser
+            :documentation "Function of the current value returning the new one.")
+   (options :initarg :options :initform nil
+            :documentation "Alist (VALUE . LABEL) of every value, all shown, or nil.")
+   (labeler :initarg :labeler :initform nil
+            :documentation "Function of the value returning how it shows, or nil."))
+  "An infix of `drover-view' showing one setting of drover's views and changing it.
+With OPTIONS, it shows every value, the current one highlighted, as
+Magit shows choices; otherwise the current value, as LABELER returns
+it, or \"any\" for nil.")
+
+(defclass drover--filter-setting (drover--setting)
+  ((filter-key :initarg :filter-key :documentation "The member of `drover-filter' it sets."))
+  "An infix of `drover-view' setting one member of the variable `drover-filter'.")
+
+(cl-defgeneric drover--setting-value (obj)
+  "Return the current value of the setting OBJ shows.")
+
+(cl-defmethod drover--setting-value ((obj drover--setting))
+  "Return the value the getter of OBJ returns."
+  (funcall (oref obj getter)))
+
+(cl-defmethod drover--setting-value ((obj drover--filter-setting))
+  "Return the member of the variable `drover-filter' OBJ sets."
+  (drover--filter-value drover-filter (oref obj filter-key)))
+
+(cl-defgeneric drover--setting-set (obj value)
+  "Set the setting OBJ shows to VALUE, redrawing views.")
+
+(cl-defmethod drover--setting-set ((obj drover--setting) value)
+  "Set the setting of OBJ to VALUE through its setter."
+  (funcall (oref obj setter) value))
+
+(cl-defmethod drover--setting-set ((obj drover--filter-setting) value)
+  "Set the member of the variable `drover-filter' OBJ sets to VALUE."
+  (drover-set-filter (oref obj filter-key) value))
+
+(cl-defgeneric drover--setting-label (obj value)
+  "Return how VALUE of the setting OBJ shows reads, or nil for none set.")
+
+(cl-defmethod drover--setting-label ((obj drover--setting) value)
+  "Return VALUE through the labeler of OBJ, or as is."
+  (if-let* ((labeler (oref obj labeler)))
+      (funcall labeler value)
+    (and value (format "%s" value))))
+
+(cl-defmethod drover--setting-label ((obj drover--filter-setting) value)
+  "Return VALUE of the filter member OBJ sets as the menu shows it, or nil."
+  (and value (drover--filter-label (oref obj filter-key) value)))
+
+(cl-defmethod transient-init-value ((obj drover--setting))
+  "Set the value of OBJ to the current value of its setting."
+  (oset obj value (drover--setting-value obj)))
+
+(cl-defmethod transient-infix-read ((obj drover--setting))
+  "Return the new value of the setting of OBJ."
+  (funcall (oref obj chooser) (drover--setting-value obj)))
+
+(cl-defmethod transient-infix-set ((obj drover--setting) value)
+  "Set the setting of OBJ to VALUE."
+  (oset obj value value)
+  (drover--setting-set obj value))
+
+(cl-defmethod transient-format-value ((obj drover--setting))
+  "Return the value of the setting of OBJ as the menu shows it."
+  (let ((value (drover--setting-value obj)))
+    (if-let* ((options (oref obj options)))
+        (concat (propertize "[" 'face 'transient-delimiter)
+                (mapconcat (pcase-lambda (`(,option . ,label))
+                             (propertize label 'face (if (eq option value)
+                                                         'transient-value
+                                                       'transient-inactive-value)))
+                           options
+                           (propertize "|" 'face 'transient-delimiter))
+                (propertize "]" 'face 'transient-delimiter))
+      (if-let* ((label (drover--setting-label obj value)))
+          (propertize label 'face 'transient-value)
+        (propertize "any" 'face 'transient-inactive-value)))))
+
+(transient-define-infix drover-view--sort-by ()
+  "Sort the sessions of every view by a field."
+  :class 'drover--setting
+  :description "field"
+  :format " %k %v"
+  :getter (lambda () drover-sort-by)
+  :setter (lambda (field) (drover-set-sort field drover-sort-descending))
+  :chooser (lambda (current) (drover--read-choice "Sort by" drover-sort-labels current))
+  :labeler (lambda (field) (alist-get field drover-sort-labels)))
+
+(transient-define-infix drover-view--sort-order ()
+  "Sort the sessions of every view in ascending or descending order."
+  :class 'drover--setting
+  :description "order"
+  :format " %k %v"
+  :getter (lambda () drover-sort-descending)
+  :setter (lambda (descending) (drover-set-sort drover-sort-by descending))
+  :chooser #'not
+  :options '((nil . "ascending") (t . "descending")))
+
+(transient-define-infix drover-view--group-by ()
+  "Group the sessions of every view."
+  :class 'drover--setting
+  :description "grouping"
+  :format " %k %v"
+  :getter (lambda () drover-group-by)
+  :setter #'drover-set-group-by
+  :chooser (lambda (current) (drover--read-choice "Group by" drover-grouping-labels current))
+  :labeler (lambda (grouping) (alist-get grouping drover-grouping-labels)))
+
+(transient-define-infix drover-view--filter-project ()
+  "List the sessions of one project in every view."
+  :class 'drover--filter-setting
+  :description "project"
+  :filter-key :project
+  :chooser #'drover--read-filter-project)
+
+(transient-define-infix drover-view--filter-statuses ()
+  "List the sessions of some statuses in every view."
+  :class 'drover--filter-setting
+  :description "status"
+  :filter-key :statuses
+  :chooser #'drover--read-filter-statuses)
+
+(transient-define-infix drover-view--filter-agent ()
+  "List the sessions of one agent in every view."
+  :class 'drover--filter-setting
+  :description "agent"
+  :filter-key :agent
+  :chooser #'drover--read-filter-agent)
+
+(transient-define-infix drover-view--filter-model ()
+  "List the sessions of one model in every view."
+  :class 'drover--filter-setting
+  :description "model"
+  :filter-key :model
+  :chooser #'drover--read-filter-model)
+
+(transient-define-infix drover-view--filter-since ()
+  "List the sessions active since a time in every view."
+  :class 'drover--filter-setting
+  :description "updated"
+  :filter-key :since
+  :chooser #'drover--read-filter-since)
+
+(transient-define-infix drover-view--filter-search ()
+  "List the sessions containing a text in every view."
+  :class 'drover--filter-setting
+  :description "text"
+  :filter-key :search
+  :chooser #'drover--read-filter-search)
+
+(transient-define-infix drover-view--follow ()
+  "Show the session at point in another window as point moves, or stop."
+  :class 'drover--setting
+  :description "follow"
+  :getter (lambda () (bound-and-true-p drover-follow-mode))
+  :setter (lambda (on) (drover-follow-mode (if on 1 -1)))
+  :chooser #'not
+  :options '((nil . "off") (t . "on")))
+
+(transient-define-infix drover-view--subagents ()
+  "Show or hide subagents in every view."
+  :class 'drover--setting
+  :description "subagents"
+  :getter (lambda () (default-value 'drover-show-children))
+  :setter #'drover--set-show-children
+  :chooser #'not
+  :options '((nil . "hidden") (t . "shown")))
+
+(transient-define-infix drover-view--history ()
+  "Show or hide the older sessions of the backends in every view."
+  :class 'drover--setting
+  :description "older"
+  :getter (lambda () drover-show-history)
+  :setter #'drover-set-show-history
+  :chooser #'not
+  :options '((nil . "hidden") (t . "shown")))
+
+(transient-define-prefix drover-view ()
+  "Choose how drover's session list sorts, groups and filters sessions.
+Each setting shows its value; changing one redraws the list at once,
+and the menu stays open.  Sorting keeps subagents under their parent.
+A filter left empty keeps every session.  The toggles turn follow mode
+on in the list, and show subagents and older sessions."
   :refresh-suffixes t
-  ["Filter sessions"
-   ("p" drover-filter--project)
-   ("s" drover-filter--statuses)
-   ("d" drover-filter--since)
-   ("f" drover-filter--search)]
-  [("c" "Clear all" drover-filter-clear :transient t)]
+  [["Sort by"
+    ("o" drover-view--sort-by)
+    ("r" drover-view--sort-order)]
+   ["Group by"
+    ("g" drover-view--group-by)]
+   ["Filter by"
+    ("p" drover-view--filter-project)
+    ("s" drover-view--filter-statuses)
+    ("a" drover-view--filter-agent)
+    ("m" drover-view--filter-model)
+    ("d" drover-view--filter-since)
+    ("f" drover-view--filter-search)
+    ("c" "clear" drover-filter-clear :transient t)]
+   ["Toggles"
+    ("F" drover-view--follow)
+    ("U" drover-view--subagents)
+    ("O" drover-view--history :inapt-if-not drover-history-available-p)]]
+  ;; The key opening the menu closes it.
+  [:hide always
+   ("V" "Close" transient-quit-one)]
   (interactive)
   (drover--check-view)
-  (transient-setup 'drover-filter nil nil :display-action drover-menu-display-action))
+  (transient-setup 'drover-view nil nil :display-action drover-menu-display-action))
 
 (defun drover-filter-clear-keys (&optional keymap)
-  "Return the keys clearing the filter from KEYMAP, such as \"F c\".
-They are the key of `drover-filter' in KEYMAP, the current local map by
+  "Return the keys clearing the filter from KEYMAP, such as \"V c\".
+They are the key of `drover-view' in KEYMAP, the current local map by
 default, then the key of `drover-filter-clear' in that menu, in the face
 `help-key-binding'."
-  (let ((menu (where-is-internal #'drover-filter (or keymap (current-local-map)) t))
-        (clear (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-filter #'drover-filter-clear)))
+  (let ((menu (where-is-internal #'drover-view (or keymap (current-local-map)) t))
+        (clear (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-view #'drover-filter-clear)))
                           :key)))
     (if (and menu clear)
         (propertize (concat (key-description menu) " " (key-description (kbd clear)))

@@ -33,7 +33,7 @@
 ;; and its prompt actions (`drover-prompt-define'); a session list tells
 ;; the session at point and gets the session keys
 ;; (`drover-session-keys-mode').  The menu `drover-dispatch' gains
-;; opencode.el's session lists.
+;; opencode.el's session search.
 ;;
 ;; `drover' loads this file once opencode.el is loaded.
 
@@ -346,16 +346,16 @@ directory."
 ;;;; The dispatch menu
 
 (defconst drover-opencode--dispatch-suffixes
-  '(("p" "Pick project" opencode-select-project)
-    ("S" "Search sessions" opencode-consult-sessions)
-    ("1" "Project sessions" opencode)
-    ("2" "All sessions" opencode-list-all-sessions))
+  '(("S" "Search sessions" opencode-consult-sessions))
   "Entries of opencode.el commands in `drover-dispatch', in order.")
 
 (defun drover-opencode--add-to-dispatch ()
-  "Add opencode.el's session commands to `drover-dispatch', before drover's views."
-  (dolist (suffix drover-opencode--dispatch-suffixes)
-    (transient-insert-suffix 'drover-dispatch "3" suffix)))
+  "Add opencode.el's session commands to `drover-dispatch', after drover's lists.
+They follow \"p\", the last of drover's commands listing sessions."
+  (let ((after "p"))
+    (dolist (suffix drover-opencode--dispatch-suffixes)
+      (transient-append-suffix 'drover-dispatch after suffix)
+      (setq after (car suffix)))))
 
 (defun drover-opencode--remove-from-dispatch ()
   "Remove what `drover-opencode--add-to-dispatch' added to `drover-dispatch'."

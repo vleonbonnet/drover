@@ -734,13 +734,16 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 (ert-deftest drover-opencode-test-dispatch ()
   (let ((keys (mapcar (lambda (key)
                         (plist-get (cdr (transient-get-suffix 'drover-dispatch key)) :command))
-                      '("p" "S" "1" "2" "3"))))
-    (should (equal keys '(opencode-select-project opencode-consult-sessions opencode
-                                                  opencode-list-all-sessions drover-dashboard))))
-  ;; Before drover's views, in their column.
-  (should (eq (car (transient-get-suffix 'drover-dispatch '(0 1 0))) 'transient-suffix))
-  (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch '(0 1 0))) :key) "p"))
-  (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch '(0 1 4))) :key) "3")))
+                      '("l" "L" "p" "S"))))
+    (should (equal keys '(drover-list drover-list-side drover-select-project
+                                      opencode-consult-sessions))))
+  ;; After drover's lists, in their column.
+  (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
+                         (aref (transient-get-suffix 'drover-dispatch '(0 1)) 2))
+                 '("l" "L" "p" "S")))
+  ;; The keys opencode.el's lists had are gone.
+  (dolist (key '("1" "2" "3"))
+    (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
 
 ;;;; Installing and unloading
 
@@ -765,9 +768,9 @@ PROJECTS defaults to `drover-opencode-test-projects'."
               (should-not drover-session-keys-mode)
               (should-not drover-session-at-point-function)
               (should-not drover-toggle-subagents-function))
-            (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "p")))
-            (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "1")))
-            (should (transient-get-suffix 'drover-dispatch "3"))
+            (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "S")))
+            (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "p")) :command)
+                        'drover-select-project))
             (with-temp-buffer
               (opencode-session-mode)
               (should-not drover-prompt-actions))
@@ -780,13 +783,13 @@ PROJECTS defaults to `drover-opencode-test-projects'."
             (with-current-buffer list-buffer
               (should drover-session-keys-mode))
             (should (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
-            (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch "p")) :command)
-                           'opencode-select-project))
+            (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch "S")) :command)
+                           'opencode-consult-sessions))
             ;; Installing twice adds nothing twice.
             (drover-opencode--install)
             (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                                    (aref (transient-get-suffix 'drover-dispatch '(0 1)) 2))
-                           '("p" "S" "1" "2" "3" "4" "5"))))
+                           '("l" "L" "p" "S"))))
         (kill-buffer session-buffer)
         (kill-buffer list-buffer)
         (drover-opencode--install)))))
