@@ -468,5 +468,60 @@ what it received."
       (should-error (drover-select) :type 'user-error))
     (should-not drover-test-calls)))
 
+;;;; Catching up
+
+(defmacro drover-attention-test-answering (answer &rest body)
+  "Run BODY answering ANSWER to every `y-or-n-p', whose prompts it returns."
+  (declare (indent 1) (debug t))
+  `(let ((prompts nil))
+     (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt prompts) ,answer)))
+       ,@body)
+     (nreverse prompts)))
+
+(defun drover-attention-test-marked ()
+  "Return the identifiers of the sessions marked seen, in order."
+  (mapcar #'cadr (seq-filter (lambda (call) (eq (car call) :mark-seen)) (reverse drover-test-calls))))
+
+(ert-deftest drover-attention-test-mark-all-seen ()
+  (drover-attention-test-with (list (drover-test-session "done" :status 'done :since 10.0)
+                                    (drover-test-session "failed" :status 'failed :since 20.0)
+                                    (drover-test-session "waiting" :status 'waiting :since 5.0)
+                                    (drover-test-session "working" :status 'working)
+                                    (drover-test-session "idle"))
+    (let (messages)
+      (should (equal (drover-attention-test-answering t
+                       (setq messages (drover-attention-test-messages (drover-mark-all-seen))))
+                     '("Mark 2 sessions seen? ")))
+      (should (equal (sort (drover-attention-test-marked) #'string<) '("done" "failed")))
+      (should (equal messages '("Marked 2 sessions seen"))))))
+
+(ert-deftest drover-attention-test-mark-all-seen-declined ()
+  (drover-attention-test-with (list (drover-test-session "done" :status 'done))
+    (drover-attention-test-answering nil (drover-mark-all-seen))
+    (should-not (drover-attention-test-marked))))
+
+(ert-deftest drover-attention-test-mark-all-seen-older-than ()
+  (drover-attention-test-with (list (drover-test-session "old" :status 'done :since (- (float-time) (* 5 3600)))
+                                    (drover-test-session "new" :status 'done :since (- (float-time) 60))
+                                    (drover-test-session "unknown" :status 'done))
+    (should (equal (drover-attention-test-answering t (drover-mark-all-seen 2))
+                   '("Mark 1 session seen (ended 2 hours ago or more)? ")))
+    (should (equal (drover-attention-test-marked) '("old")))))
+
+(ert-deftest drover-attention-test-mark-all-seen-nothing ()
+  (drover-attention-test-with (list (drover-test-session "working" :status 'working))
+    (should (equal (drover-attention-test-messages
+                     (should-not (drover-attention-test-answering t (drover-mark-all-seen))))
+                   '("No session to mark seen")))))
+
+(ert-deftest drover-attention-test-mark-all-seen-needs-support ()
+  (drover-attention-test-with (list (drover-test-session "done" :status 'done))
+    (drover-register-backend 'bare :label "Bare"
+                             :sessions (lambda () (list (drover-session-create :backend 'bare :id "b"
+                                                                               :status 'done))))
+    (should (equal (drover-attention-test-answering t (drover-mark-all-seen))
+                   '("Mark 1 session seen? ")))
+    (should (equal (drover-attention-test-marked) '("done")))))
+
 (provide 'drover-attention-test)
 ;;; drover-attention-test.el ends here

@@ -41,6 +41,7 @@ The first three need you (=drover-attention-statuses=). Sessions are ranked by =
 
 - =drover-next= visits the most urgent session. Pressed again at once, it moves to the next one in the order of the first press, so a session changing status meanwhile does not reshuffle the round.
 - =drover-select= picks any session with completion, grouped by status and annotated with its project, branch, age and what it waits for. With a prefix argument it opens the session in another window.
+- =drover-mark-all-seen= marks every Done and Failed session seen after confirming how many (=drover-catch-up-statuses=); with a numeric prefix argument, only those that ended at least that many hours ago. Useful to start from a clean slate, or after a day away.
 
 * Dashboards
 

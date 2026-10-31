@@ -300,6 +300,40 @@ another window."
       (user-error "No sessions"))
     (drover-open (drover-read-session "Session: " sessions) other-window)))
 
+;;;; Catching up
+
+(defcustom drover-catch-up-statuses '(done failed)
+  "Statuses of the sessions `drover-mark-all-seen' marks seen."
+  :type '(repeat symbol)
+  :group 'drover)
+
+;;;###autoload
+(defun drover-mark-all-seen (&optional older-than)
+  "Mark seen every session whose turn ended unseen, after confirmation.
+Those are the sessions with a status in `drover-catch-up-statuses' whose
+backend can mark them seen.  With a numeric prefix argument OLDER-THAN,
+only sessions whose status began at least that many hours ago."
+  (interactive "P")
+  (let* ((hours (and older-than (prefix-numeric-value older-than)))
+         (limit (and hours (- (float-time) (* hours 3600))))
+         (sessions (seq-filter
+                    (lambda (session)
+                      (and (memq (drover-session-status session) drover-catch-up-statuses)
+                           (drover-supports-p session :mark-seen)
+                           (or (null limit)
+                               (let ((since (drover-session-since session)))
+                                 (and since (<= since limit))))))
+                    (drover-sessions))))
+    (cond
+     ((null sessions) (message "No session to mark seen"))
+     ((y-or-n-p (format "Mark %d session%s seen%s? "
+                        (length sessions) (if (cdr sessions) "s" "")
+                        (if hours (format " (ended %d hour%s ago or more)" hours (if (= hours 1) "" "s")) "")))
+      (dolist (session sessions)
+        (with-demoted-errors "Drover mark seen: %S"
+          (drover-mark-seen session)))
+      (message "Marked %d session%s seen" (length sessions) (if (cdr sessions) "s" ""))))))
+
 (defun drover-attention-unload-function ()
   "Disable `drover-attention-mode' before unloading."
   (drover-attention-mode -1)
