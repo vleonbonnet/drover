@@ -198,7 +198,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (should (equal (drover-backend-label 'opencode) "OpenCode"))
     (let ((session (drover-session-create :backend 'opencode :id "ses_1")))
       (dolist (operation '(:start :sessions :open :respond :interrupt :archive :mark-seen :preview :new
-                                  :buffer :rename :delete :fork :compact))
+                                  :buffer :rename :delete :fork :compact :history))
         (should (drover-supports-p session operation))))))
 
 ;;;; Mapping
@@ -230,6 +230,10 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                        (:kind question :summary "Which branch?"))))
       (should (eql (drover-session-since session) 100.5))
       (should (eql (drover-session-updated session) 120.25))
+      (should (eql (drover-session-created session) 10.0))
+      ;; The registry knows nothing of prompt caches yet.
+      (should-not (drover-session-cache-expires session))
+      (should-not (drover-session-cache-ttl session))
       (should (equal (drover-session-agent session) "build"))
       (should (equal (drover-session-model session) "claude-opus in /work/drover/"))
       (should-not (drover-session-detail session))
@@ -618,7 +622,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 ;;;; Session buffers
 
 (defvar drover-opencode-test-prompt-actions
-  '(send attach slash mention revert revert-cancel copy-block agent model effort directory
+  '(send clear attach slash mention revert revert-cancel copy-block agent model effort directory
          compact fork last-answer open-link)
   "The prompt actions OpenCode session buffers define.")
 
@@ -694,6 +698,124 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       ;; Actions others defined stay, even over the backend's.
       (should (equal drover-prompt-actions '((send . ignore) (schedule . ignore))))
       (should-not drover-session-at-point-function))))
+
+;;;; Clearing the prompt
+
+(ert-deftest drover-opencode-test-clear-input ()
+  "Clearing erases what follows the process mark, undoably."
+  (drover-opencode-test-with nil
+    (let* ((buffer (generate-new-buffer "*drover-opencode-test-clear*"))
+           (process nil))
+      (unwind-protect
+          (with-current-buffer buffer
+            (opencode-session-mode)
+            (setq process (make-pipe-process :name "drover-test-prompt" :buffer buffer :noquery t))
+            (let ((inhibit-read-only t))
+              (insert "Earlier answer\n"))
+            (set-marker (process-mark process) (point))
+            (insert "A prompt being written")
+            (buffer-enable-undo)
+            (undo-boundary)
+            (should (eq (alist-get 'clear drover-prompt-actions) #'drover-opencode--clear-input))
+            (call-interactively #'drover-prompt-clear)
+            (should (equal (buffer-string) "Earlier answer\n"))
+            (primitive-undo 1 buffer-undo-list)
+            (should (equal (buffer-string) "Earlier answer\nA prompt being written"))
+            ;; Nothing written: nothing to erase.
+            (delete-region (process-mark process) (point-max))
+            (call-interactively #'drover-prompt-clear)
+            (should (equal (buffer-string) "Earlier answer\n")))
+        (when (process-live-p process)
+          (delete-process process))
+        (kill-buffer buffer)))
+    (with-temp-buffer
+      (drover-opencode--setup-session-buffer)
+      (should-error (call-interactively #'drover-prompt-clear) :type 'user-error))))
+
+;;;; Older sessions
+
+(defvar drover-opencode-test-history-fetch nil
+  "Arguments of the last stubbed `opencode-fetch-sessions', as a plist.")
+
+(defmacro drover-opencode-test-with-history (&rest body)
+  "Run BODY with `opencode-fetch-sessions' stubbed, its call recorded."
+  (declare (indent 0) (debug t))
+  `(let ((drover-opencode-test-history-fetch nil))
+     (cl-letf (((symbol-function 'opencode-fetch-sessions)
+                (lambda (query callback &optional else)
+                  (setq drover-opencode-test-history-fetch
+                        (list :query query :callback callback :else else
+                              :directory default-directory)))))
+       ,@body)))
+
+(ert-deftest drover-opencode-test-history ()
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_live" :running t :title "Live"))
+    (drover-opencode-test-with-history
+      (drover-start)
+      (drover-opencode-test-answer-projects)
+      (let ((received :none))
+        (funcall (drover-backend-property 'opencode :history)
+                 (lambda (sessions) (setq received sessions)))
+        ;; Every unarchived session of every project.
+        (should (equal (plist-get drover-opencode-test-history-fetch :query) '((archived . "false"))))
+        (should (equal (plist-get drover-opencode-test-history-fetch :directory) (expand-file-name "~/")))
+        (funcall (plist-get drover-opencode-test-history-fetch :callback)
+                 '(((id . "ses_old") (title . "An old one") (projectID . "prj_drover")
+                    (location (directory . "/work/drover/")) (agent . "build")
+                    (model (id . "claude")) (parentID . "ses_parent")
+                    (time (created . 1000000) (updated . 2000000) (idle . 2000000) (viewed . 2000000)))
+                   ((id . "ses_unseen") (title . "Ended unseen") (outcome . "failed")
+                    (location (directory . "/work/opencode/"))
+                    (time (created . 3000000) (updated . 4000000) (idle . 4000000) (viewed . 1000)))
+                   ((id . "ses_bare"))))
+        (should (equal (mapcar #'drover-session-id received) '("ses_old" "ses_unseen" "ses_bare")))
+        (let ((old (nth 0 received))
+              (unseen (nth 1 received))
+              (bare (nth 2 received)))
+          (should (eq (drover-session-backend old) 'opencode))
+          (should (equal (drover-session-title old) "An old one"))
+          (should (equal (drover-session-directory old) "/work/drover/"))
+          (should (equal (drover-session-project old) "Drover"))
+          (should (equal (drover-session-branch old) "main"))
+          (should (equal (drover-session-parent old) "ses_parent"))
+          (should (equal (drover-session-agent old) "build"))
+          (should (equal (drover-session-model old) "claude in /work/drover/"))
+          (should (eql (drover-session-created old) 1000.0))
+          (should (eql (drover-session-updated old) 2000.0))
+          ;; Statuses are what the service tells: seen is idle.
+          (should (eq (drover-session-status old) 'idle))
+          (should (eq (drover-session-status unseen) 'failed))
+          (should (eql (drover-session-since unseen) 4000.0))
+          (should (equal (drover-session-project unseen) "opencode"))
+          (should (eq (drover-session-status bare) 'idle))
+          (should-not (drover-session-directory bare)))))))
+
+(ert-deftest drover-opencode-test-history-in-lists ()
+  "Older sessions join the live ones, which win."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_live" :running t :title "Live"))
+    (drover-opencode-test-with-history
+      (let ((drover-show-history nil)
+            (drover--history nil))
+        (drover-set-show-history t)
+        (funcall (plist-get drover-opencode-test-history-fetch :callback)
+                 '(((id . "ses_live") (title . "Stale"))
+                   ((id . "ses_old") (title . "Old"))))
+        (should (equal (mapcar #'drover-session-title (drover-known-sessions)) '("Live" "Old")))
+        (should (equal (drover-session-title (drover-find 'opencode "ses_old")) "Old"))
+        (drover-set-show-history nil)))))
+
+(ert-deftest drover-opencode-test-history-failure ()
+  (drover-opencode-test-with nil
+    (drover-opencode-test-with-history
+      (let ((called nil)
+            (messages nil))
+        (funcall (drover-backend-property 'opencode :history) (lambda (_) (setq called t)))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format &rest arguments) (push (apply #'format format arguments) messages))))
+          (funcall (plist-get drover-opencode-test-history-fetch :else)
+                   (opencode-error--make :status 500 :method 'get :path "/api/session" :message "Down")))
+        (should-not called)
+        (should (string-match-p "older OpenCode sessions.*Down" (car messages)))))))
 
 ;;;; Session lists
 

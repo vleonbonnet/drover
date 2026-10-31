@@ -35,6 +35,9 @@
 ;; (`drover-session-keys-mode').  The menu `drover-dispatch' gains
 ;; opencode.el's session search.
 ;;
+;; Older sessions, beyond those of the registry, come from the service
+;; on demand (:history): every unarchived session, of every project.
+;;
 ;; `drover' loads this file once opencode.el is loaded.
 
 ;;; Code:
@@ -46,6 +49,7 @@
 (require 'subr-x)
 
 ;; Recent additions to opencode.el.
+(declare-function opencode-fetch-sessions "opencode-sessions" (query callback &optional else cursor accumulated))
 (declare-function opencode-session-delete "opencode-session" (id))
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
@@ -148,6 +152,7 @@ changes missed while disconnected are fetched like the registry is."
                        (plist-get entry :requests))
      :since (opencode-state-since entry)
      :updated (plist-get entry :updated)
+     :created (plist-get entry :created)
      :agent (plist-get entry :agent)
      :model (drover-opencode--model entry)
      :detail (drover-opencode--detail entry status))))
@@ -155,6 +160,44 @@ changes missed while disconnected are fetched like the registry is."
 (defun drover-opencode--sessions ()
   "Return the sessions of the `opencode-state' registry."
   (mapcar #'drover-opencode--session (opencode-state-sessions)))
+
+;;;; Older sessions
+
+(defun drover-opencode--info-entry (info)
+  "Return a registry entry made from session INFO, as the service describes it.
+The entry has what INFO tells, as `opencode-state-get' describes
+entries: no running execution, request or retry, which only the
+registry follows."
+  (let-alist info
+    (list :id .id :title .title
+          :directory (and .location.directory (opencode-normalize-directory .location.directory))
+          :project-id .projectID :parent-id .parentID :agent .agent :model .model
+          :running nil :retry nil :requests nil
+          :outcome (and (stringp .outcome) (intern .outcome)) :error nil
+          :idle (opencode-time-seconds .time.idle)
+          :viewed (opencode-time-seconds .time.viewed)
+          :archived (opencode-time-seconds .time.archived)
+          :created (opencode-time-seconds .time.created)
+          :updated (opencode-time-seconds .time.updated)
+          :started nil)))
+
+(defun drover-opencode--history (callback)
+  "Fetch every unarchived session of every project, and call CALLBACK with them.
+CALLBACK receives `drover-session' records, mapped as registry entries
+are; their status is what the service tells of them, idle unless a
+turn ended unseen.  A failure is reported, and CALLBACK not called."
+  ;; Listed from the home directory, as `opencode-list-all-sessions'
+  ;; does: no project scopes the list.
+  (let ((default-directory (expand-file-name "~/")))
+    (opencode-fetch-sessions
+     '((archived . "false"))
+     (lambda (infos)
+       (funcall callback (mapcar (lambda (info)
+                                   (drover-opencode--session (drover-opencode--info-entry info)))
+                                 infos)))
+     (lambda (error)
+       (message "Drover: cannot fetch older OpenCode sessions: %s"
+                (opencode-error-describe error))))))
 
 ;;;; Changes
 
@@ -253,7 +296,8 @@ back if the user moved on meanwhile."
    :rename #'drover-opencode--rename
    :delete #'drover-opencode--delete
    :fork #'drover-opencode--fork
-   :compact #'drover-opencode--compact))
+   :compact #'drover-opencode--compact
+   :history #'drover-opencode--history))
 
 (drover-opencode--register)
 
@@ -282,6 +326,17 @@ directory."
   (interactive)
   (call-interactively #'cd))
 
+(defun drover-opencode--clear-input ()
+  "Erase the input being written at the prompt of this session buffer.
+Everything after the process mark goes; \\[undo] brings it back."
+  (interactive)
+  (let ((process (get-buffer-process (current-buffer))))
+    (unless process
+      (user-error "No prompt in this buffer"))
+    (let ((start (marker-position (process-mark process))))
+      (when (< start (point-max))
+        (delete-region start (point-max))))))
+
 (defun drover-opencode--compact-session ()
   "Compact the conversation of this session."
   (interactive)
@@ -291,6 +346,7 @@ directory."
 
 (defconst drover-opencode--prompt-actions
   '((send . opencode-send-input)
+    (clear . drover-opencode--clear-input)
     (attach . opencode-attach)
     (slash . opencode-insert-slash-command)
     (mention . opencode-mention-subagent)
