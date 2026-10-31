@@ -36,8 +36,10 @@
   "A fixed current time for tests.")
 
 (defun drover-test-session (id &rest properties)
-  "Return a fake session ID with PROPERTIES, keyword arguments of `drover-session-create'."
-  (apply #'drover-session-create :backend 'fake :id id :title (concat "Session " id) properties))
+  "Return a fake session ID with PROPERTIES, keyword arguments of `drover-session-create'.
+The title defaults to \"Session ID\"."
+  (apply #'drover-session-create
+         (append properties (list :backend 'fake :id id :title (concat "Session " id)))))
 
 (defun drover-test--recorder (operation)
   "Return a fake backend function recording OPERATION."
@@ -65,6 +67,7 @@
   (declare (indent 1) (debug t))
   `(let ((drover--backends nil)
          (drover--started nil)
+         (drover--running nil)
          (drover--change-timer nil)
          (drover-changed-hook nil)
          (drover-show-children nil)

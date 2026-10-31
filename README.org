@@ -1,0 +1,92 @@
+#+TITLE: drover
+#+OPTIONS: toc:nil
+
+Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session in a dashboard from which you can open, answer, interrupt, archive or preview any of them.
+
+Agent front ends plug in as backends. The first is [[https://github.com/vleonbonnet/opencode.el][opencode.el]], for [[https://opencode.ai/][OpenCode]] 2.
+
+* Requirements
+
+- Emacs 30.1, and [[https://github.com/magit/magit][magit-section]] for =drover-dashboard=.
+- For OpenCode sessions, opencode.el with its =opencode-state= session registry.
+
+* Installation
+
+With elpaca or straight:
+
+#+begin_src emacs-lisp
+  (use-package drover
+    :ensure (:host github :repo "vleonbonnet/drover")
+    :hook (elpaca-after-init . drover-attention-mode))
+#+end_src
+
+The OpenCode backend loads with opencode.el. Its sessions come from opencode.el's registry, which follows the shared OpenCode service whether or not a session has a buffer; drover opens the service's event stream when it starts.
+
+* Statuses
+
+| Glyph | Status     | Meaning                                                     |
+|-------+------------+-------------------------------------------------------------|
+| ⚑     | Needs you  | A permission request or question waits for you              |
+| ✗     | Failed     | A turn failed while you were not looking at the session     |
+| ✓     | Done       | A turn ended while you were not looking at the session      |
+| ↻     | Retrying   | The running turn waits to retry a failed request            |
+| ◐     | Working    | A turn runs                                                 |
+| ·     | Idle       | Nothing to do                                               |
+
+The first three need you (=drover-attention-statuses=). Sessions are ranked by =drover-status-order=, and among those that need you the longest wait comes first. Whether you saw a finished turn is the backend's to know: OpenCode records it in the service, so a turn read in any client, the TUI, the desktop app or Emacs, is no longer Done. Subagent sessions are hidden unless they need you or =drover-show-children= is set.
+
+* Attention
+
+=drover-attention-mode= shows one count per status that needs you in the mode line, such as =⚑2 ✓1=, and nothing when no session needs you. Its tooltip lists the sessions; clicking it runs =drover-next=, the right button =drover-select=.
+
+- =drover-next= visits the most urgent session. Pressed again at once, it moves to the next one in the order of the first press, so a session changing status meanwhile does not reshuffle the round.
+- =drover-select= picks any session with completion, grouped by status and annotated with its project, branch, age and what it waits for. With a prefix argument it opens the session in another window.
+
+* Dashboards
+
+Three prototypes list every session; they share the keys below, and differ in layout.
+
+| Key              | Action                                   |
+|------------------+------------------------------------------|
+| =RET=            | open the session                         |
+| =o=              | open it in another window                |
+| =a=, =C-c C-q=   | answer its oldest request                |
+| =k=              | interrupt its turn                       |
+| =A=              | archive it                               |
+| =s=              | mark its ended turn seen                 |
+| =SPC=            | preview where it stands, without opening |
+| =g=              | refresh                                  |
+| =c=              | show or hide subagent sessions           |
+| =q=              | quit                                     |
+
+** =drover-dashboard=
+
+A Magit-style buffer of collapsible sections, grouped by status (=G= switches to projects). =TAB= on a session shows its directory, agent and model, and every request it waits on. The Idle group starts collapsed (=drover-dashboard-collapsed-statuses=); what you collapse or expand survives refreshes.
+
+** =drover-table=
+
+One table with a column each for status, title, project, branch, age and what the session waits for. =S= sorts by the column at point and the sort survives refreshes; ={= and =}= narrow and widen a column; === returns to urgency order.
+
+** =drover-sidebar=
+
+A narrow side window that stays beside your work (=drover-sidebar-side=, =drover-sidebar-width=), toggled by =drover-sidebar=; =drover-sidebar-select= moves between it and your work. =n= and =p= move between sessions, =M-n= and =M-p= between groups, =TAB= folds a group. =RET= opens the session in the main window, =C-o= shows it there and stays in the sidebar, and =C-c C-f= previews each session as point reaches it. The session shown in the main window is highlighted.
+
+Every view redraws when sessions change while it is displayed; a hidden one waits until it is shown again, and costs nothing meanwhile.
+
+* Backends
+
+A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them, and reports changes with =drover-backend-changed=. See =doc/design.org=.
+
+* Development
+
+| Command        | Runs                                                |
+|----------------+-----------------------------------------------------|
+| =make test=    | every ERT test in a batch =emacs -Q=                |
+| =make compile= | byte compilation with warnings as errors            |
+| =make lint=    | checkdoc                                            |
+
+=DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL= the opencode.el checkout the OpenCode backend is built and tested against. Tests use a fake backend, or stub opencode.el; they never touch a running Emacs or OpenCode service.
+
+* License
+
+GPL-3.0-or-later. Copyright Valentin Leon.

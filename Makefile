@@ -1,14 +1,16 @@
 # Build and test drover in a separate batch Emacs.
 #
 # DEPS is a directory holding the dependency packages, one subdirectory
-# each, such as elpaca's builds directory.  The OpenCode backend also
-# compiles and tests against opencode.el, plz and transient from there.
+# each, such as elpaca's builds directory.  OPENCODE_EL is the
+# opencode.el checkout the OpenCode backend compiles and tests against:
+# its sources, since a build directory lags behind new modules.
 
 EMACS ?= emacs
 DEPS ?= $(HOME)/.emacs.d/elpaca/builds
+OPENCODE_EL ?= $(HOME)/.emacs.d/elpaca/sources/opencode
 LOAD_PATH = -L . -L test \
   -L $(DEPS)/magit-section -L $(DEPS)/compat -L $(DEPS)/cond-let -L $(DEPS)/llama \
-  -L $(DEPS)/opencode -L $(DEPS)/plz -L $(DEPS)/transient
+  -L $(OPENCODE_EL) -L $(DEPS)/plz -L $(DEPS)/transient
 # Stale byte code must never shadow an edited source, in builds or tests.
 PREFER_NEWER = --eval '(setq load-prefer-newer t)'
 BATCH = $(EMACS) -Q --batch $(LOAD_PATH) $(PREFER_NEWER)

@@ -87,10 +87,16 @@
   "Return the display name of STATUS."
   (or (alist-get status drover-status-labels) (capitalize (symbol-name status))))
 
+(defun drover-face (string face)
+  "Return STRING shown in FACE, whether or not font lock runs in its buffer.
+Font lock replaces `face' properties with its own in buffers where it
+runs, such as `magit-section-mode' ones, and keeps `font-lock-face'."
+  (propertize string 'face face 'font-lock-face face))
+
 (defun drover-status-glyph (status)
   "Return the glyph of STATUS in its face."
-  (propertize (or (alist-get status drover-status-glyphs) "?")
-              'face (drover-status-face status)))
+  (drover-face (or (alist-get status drover-status-glyphs) "?")
+               (drover-status-face status)))
 
 (defun drover-format-age (time &optional now)
   "Return the age of TIME, a float time, as \"42s\", \"5m\", \"3h\" or \"2d\".

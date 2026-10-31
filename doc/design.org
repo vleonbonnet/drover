@@ -35,4 +35,8 @@ The first three need the user (=drover-attention-statuses=).  Among them, the se
 
 * Actions go through the backend
 
-Every action takes a session and calls the matching function its backend registered; an action the backend lacks is a =user-error=, and views can test =drover-supports-p= to hide it.
+Every action takes a session and calls the matching function its backend registered; an action the backend lacks is a =user-error=, and views can test =drover-supports-p= to hide it.  A backend may also tell which buffer shows a session (=:buffer=, read through =drover-session-buffer=), so views can mark the session the user is looking at.
+
+* Starting backends
+
+=drover-start= runs each backend's =:start= once, and from then on starts every backend as it registers: a front end loaded after drover started, such as opencode.el loaded lazily, joins without another call.  Views and the attention mode call it when they open, so the first view opened starts everything.

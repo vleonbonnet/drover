@@ -153,6 +153,9 @@ before another when its most urgent session does."
 (defvar drover--started nil
   "Names of the backends whose :start function ran.")
 
+(defvar drover--running nil
+  "Non-nil once `drover-start' ran; later backends start as they register.")
+
 (defun drover-register-backend (name &rest properties)
   "Register backend NAME, a symbol, with PROPERTIES.
 PROPERTIES is a plist of:
@@ -170,13 +173,27 @@ PROPERTIES is a plist of:
  :preview    Function of a session and a CALLBACK, which it calls with
              a string showing where the session stands, or nil.
  :new        Function of a directory starting a session there.
+ :buffer     Function of a session returning the live buffer showing
+             it, or nil.
 
 Only :label and :sessions are required.  Registering NAME again
-replaces its properties."
+replaces its properties.  A backend registered after `drover-start'
+ran is started at once."
   (unless (functionp (plist-get properties :sessions))
     (error "Backend %s has no :sessions function" name))
   (setf (alist-get name drover--backends) properties)
+  (when drover--running
+    (drover--start-backend name))
   (drover-backend-changed name))
+
+(defun drover-session-buffer (session)
+  "Return the live buffer showing SESSION, or nil.
+Backends without a :buffer function never report one."
+  (when-let* ((function (drover-backend-property session :buffer))
+              ((functionp function))
+              (buffer (with-demoted-errors "Drover backend buffer: %S"
+                        (funcall function session))))
+    (and (bufferp buffer) (buffer-live-p buffer) buffer)))
 
 (defun drover-unregister-backend (name)
   "Forget backend NAME."
@@ -212,14 +229,18 @@ Signal a `user-error' when the backend does not implement it."
                   (drover-backend-label session) (substring (symbol-name operation) 1)))
     (apply function session arguments)))
 
+(defun drover--start-backend (name)
+  "Run the :start function of backend NAME unless it ran already."
+  (unless (memq name drover--started)
+    (push name drover--started)
+    (when-let* ((start (plist-get (alist-get name drover--backends) :start)))
+      (with-demoted-errors "Drover backend start: %S"
+        (funcall start)))))
+
 (defun drover-start ()
-  "Prepare every registered backend not yet prepared."
-  (pcase-dolist (`(,name . ,properties) drover--backends)
-    (unless (memq name drover--started)
-      (push name drover--started)
-      (when-let* ((start (plist-get properties :start)))
-        (with-demoted-errors "Drover backend start: %S"
-          (funcall start))))))
+  "Prepare every registered backend, and those registered from now on."
+  (setq drover--running t)
+  (mapc #'drover--start-backend (drover-backends)))
 
 (defun drover-sessions ()
   "Return the sessions of every registered backend, unsorted.
