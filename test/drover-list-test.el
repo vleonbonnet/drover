@@ -918,7 +918,10 @@ titles take 25 pixels, and each field its :min characters and a gap of
   (drover-list-test-with (append (drover-list-test-family)
                                  (list (drover-test-session "ask" :status 'waiting
                                                             :since (drover-list-test-ago 180)
-                                                            :requests '((:kind question :summary "Which branch?")))))
+                                                            :requests '((:kind question :summary "Which branch?")))
+                                       (drover-test-session "busy" :status 'working
+                                                            :updated (drover-list-test-ago 40)
+                                                            :detail "Thinking hard")))
     (drover-list-test-shown
       (save-window-excursion
         (let ((window (split-window-right -30)))
@@ -937,7 +940,8 @@ titles take 25 pixels, and each field its :min characters and a gap of
               (should (equal (drover-list-test-entry "sub") (flush "    ! Session sub" "1m")))
               ;; Only sessions that need you say why, and only on their
               ;; second line.
-              (should (equal (drover-list-test-entry "deep") (flush "      ✓ Session deep" "30s"))))
+              (should (equal (drover-list-test-entry "deep") (flush "      ✓ Session deep" "30s")))
+              (should (equal (drover-list-test-entry "busy") (flush "  ◐ Session busy" "40s"))))
             ;; The second line belongs to its session.
             (drover-list-test-goto "ask")
             (forward-line 1)

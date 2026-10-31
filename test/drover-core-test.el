@@ -893,6 +893,9 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
                (trees (drover-tree
                        (list (drover-test-session "old" :updated (- now (* 30 86400)))
                              (drover-test-session "never")
+                             ;; The most urgent tree, yet its group comes after newer ones.
+                             (drover-test-session "asking" :status 'waiting :since 1.0
+                                                  :updated (- now (* 40 86400)))
                              (drover-test-session "today" :updated (- now 60))
                              (drover-test-session "parent" :updated (- now (* 3 86400)))
                              ;; A subagent active today brings its tree with it.
@@ -901,7 +904,8 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
           (set-time-zone-rule "UTC")
           (should (equal (mapcar (lambda (group) (cons (car group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
                                  (drover-group-trees trees 'updated now))
-                         '((today "today" "parent") (week "week") (older "old") (nil "never")))))
+                         '((today "today" "parent") (week "week") (older "asking" "old")
+                           (nil "never")))))
       (set-time-zone-rule zone))))
 
 (ert-deftest drover-test-view-groups ()
