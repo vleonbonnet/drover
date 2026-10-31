@@ -1,0 +1,1124 @@
+;;; drover-agent-shell-test.el --- Tests of the agent-shell backend  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026  Valentin Leon
+
+;; This program is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; Shells are real `agent-shell-mode' buffers with agent-shell's own
+;; state and event dispatch, but no agent process: tests set the state
+;; an agent would report and emit the events it would cause.  Requests
+;; to agents (`agent-shell--start', the option setters, inserting and
+;; queueing prompts) are stubbed.
+;;
+;; Loading agent-shell loads the backend, which registers itself and
+;; follows shells globally; this file undoes that at once, so that the
+;; tests loaded after it see no trace of it, and every test installs
+;; what it needs within its own extent.
+
+;;; Code:
+
+(require 'drover-test-helpers)
+;; agent-shell first: drover loads the backend once agent-shell is loaded.
+(require 'agent-shell)
+(require 'drover-agent-shell)
+
+(drover-agent-shell-unload-function)
+
+(defvar drover-agent-shell-test--buffers nil
+  "Buffers the running test made, killed when it ends.")
+
+(defvar drover-agent-shell-test--calls nil
+  "Calls of stubbed agent-shell functions, newest first, as (FUNCTION . ARGUMENTS).")
+
+(defvar drover-agent-shell-test--warnings nil
+  "Messages of `drover-warn', newest first.")
+
+(defmacro drover-agent-shell-test-with (&rest body)
+  "Run BODY with the agent-shell backend alone registered, in isolation.
+Engines, model sources and the change timer are isolated, `drover-warn'
+collects its messages in `drover-agent-shell-test--warnings', and the
+buffers BODY makes with `drover-agent-shell-test-shell' are killed."
+  (declare (indent 0) (debug t))
+  `(let ((drover--backends nil)
+         (drover--started nil)
+         (drover--running nil)
+         (drover--change-timer nil)
+         (drover-changed-hook nil)
+         (drover-show-history nil)
+         (drover--history nil)
+         (drover--engines nil)
+         (drover--model-sources nil)
+         (drover-agent-shell--gemini-registered nil)
+         (drover-agent-shell-test--buffers nil)
+         (drover-agent-shell-test--calls nil)
+         (drover-agent-shell-test--warnings nil)
+         ;; Busy test shells must not ask the system to stay awake.
+         (agent-shell-inhibit-system-sleep nil))
+     (unwind-protect
+         (cl-letf (((symbol-function 'drover-warn)
+                    (lambda (format-string &rest args)
+                      (push (apply #'format-message format-string args)
+                            drover-agent-shell-test--warnings))))
+           (drover-agent-shell--register)
+           ,@body)
+       (dolist (buffer drover-agent-shell-test--buffers)
+         (when (buffer-live-p buffer)
+           (kill-buffer buffer)))
+       (when (timerp drover--change-timer)
+         (cancel-timer drover--change-timer)))))
+
+(defun drover-agent-shell-test--recorder (function &optional value)
+  "Return a stub of FUNCTION recording its arguments and returning VALUE."
+  (lambda (&rest arguments)
+    (push (cons function arguments) drover-agent-shell-test--calls)
+    value))
+
+(defun drover-agent-shell-test--calls-of (function)
+  "Return the arguments of the recorded calls of FUNCTION, oldest first."
+  (nreverse (mapcar #'cdr (seq-filter (lambda (call) (eq (car call) function))
+                                      drover-agent-shell-test--calls))))
+
+(defun drover-agent-shell-test-shell (engine &optional name)
+  "Return a new shell of ENGINE, named NAME, as agent-shell would make it.
+It has agent-shell's state and buffer-local shell configuration but no
+agent; drover does not follow it yet (see `drover-agent-shell--setup')."
+  (let ((buffer (generate-new-buffer (or name (format "%s shell" engine)))))
+    (push buffer drover-agent-shell-test--buffers)
+    (with-current-buffer buffer
+      ;; agent-shell runs its mode hook itself once the state exists.
+      (let ((agent-shell-mode-hook nil))
+        (agent-shell-mode))
+      (setq default-directory (file-name-as-directory temporary-file-directory))
+      (setq-local shell-maker--config (agent-shell--make-shell-maker-config
+                                       :prompt "> " :prompt-regexp "^> "))
+      (setq-local agent-shell--state (agent-shell--make-state
+                                      :agent-config `((:identifier . ,engine))
+                                      :buffer buffer)))
+    buffer))
+
+(defun drover-agent-shell-test-initialize (buffer &optional session-id)
+  "Make the shell of BUFFER initialized, with ACP SESSION-ID."
+  (with-current-buffer buffer
+    (map-put! (map-elt agent-shell--state :session) :id (or session-id "acp-session"))
+    (map-put! agent-shell--state :init-finished t)))
+
+(defun drover-agent-shell-test-options (buffer &rest options)
+  "Give the shell of BUFFER config OPTIONS, each (ID CATEGORY CURRENT VALUES...).
+VALUES are strings, named by themselves capitalized."
+  (with-current-buffer buffer
+    (map-put! (map-elt agent-shell--state :session) :config-options
+              (mapcar (pcase-lambda (`(,id ,category ,current . ,values))
+                        `((:id . ,id) (:category . ,category) (:current-value . ,current)
+                          (:options . ,(mapcar (lambda (value)
+                                                 `((:value . ,value) (:name . ,(capitalize value))))
+                                               values))))
+                      options))))
+
+(defun drover-agent-shell-test-emit (buffer event &rest data)
+  "Emit EVENT in the shell of BUFFER with DATA, a plist turned into an alist."
+  (with-current-buffer buffer
+    (let (alist)
+      (while data
+        (push (cons (pop data) (pop data)) alist))
+      (agent-shell--emit-event :event event :data (nreverse alist)))))
+
+(defun drover-agent-shell-test-session (buffer)
+  "Return the session the backend lists for the shell of BUFFER."
+  (seq-find (lambda (session) (eq (drover-session-buffer session) buffer))
+            (drover-agent-shell--sessions)))
+
+(defun drover-agent-shell-test-subscriptions (buffer)
+  "Return the event subscriptions of the shell of BUFFER."
+  (with-current-buffer buffer
+    (map-elt agent-shell--state :event-subscriptions)))
+
+;;;; Loading
+
+(ert-deftest drover-agent-shell-test-upstream-api ()
+  "What the backend uses of agent-shell, private parts included, exists."
+  (dolist (function '(agent-shell-buffers agent-shell-get-config agent-shell-initialized-p
+                      agent-shell-status agent-shell-last-activity-time agent-shell-subscribe-to
+                      agent-shell-unsubscribe agent-shell-insert agent-shell-prompt-queue
+                      agent-shell-interrupt agent-shell-get-model-name
+                      agent-shell-jump-to-latest-permission-button-row
+                      agent-shell--start agent-shell--display-buffer agent-shell--state
+                      agent-shell--config-option-set-mode-id agent-shell--config-option-set-model-id
+                      agent-shell--config-option-set-thought-level-id
+                      agent-shell--config-option-by-category agent-shell--current-model-id
+                      agent-shell--current-mode-id agent-shell--current-thought-level-id
+                      agent-shell--get-available-models agent-shell--get-available-thought-levels
+                      agent-shell--project-name agent-shell--stop-reason-description
+                      agent-shell-viewport--buffer agent-shell-viewport--shell-buffer
+                      shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output))
+    (should (fboundp function)))
+  (dolist (variable '(agent-shell--state agent-shell-viewport--suffix agent-shell-mode-hook))
+    (should (boundp variable)))
+  (let ((usage (car (help-split-fundoc (documentation 'agent-shell--start t) 'agent-shell--start))))
+    (dolist (key '("CONFIG" "NO-FOCUS" "NEW-SESSION" "SESSION-STRATEGY"))
+      (should (string-match-p (concat "&key .*\\_<" key "\\_>") usage))))
+  ;; The start effort relies on default config options, applied after the model.
+  (should (assq :default-config-options (agent-shell-make-agent-config)))
+  (dolist (maker (mapcar #'cdr drover-agent-shell-configs))
+    (should (fboundp maker))))
+
+(ert-deftest drover-agent-shell-test-registered-on-load ()
+  "Loading the backend registers it and follows the shells already there."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'codex)))
+      (with-temp-buffer
+        (let ((drover--backends nil)
+              (drover--engines nil)
+              (drover--model-sources nil)
+              (drover-agent-shell--gemini-registered nil)
+              (agent-shell-mode-hook nil)
+              (window-selection-change-functions nil)
+              (window-buffer-change-functions nil)
+              (after-focus-change-function #'ignore))
+          (load "drover-agent-shell" nil t)
+          (should (equal (drover-backends) '(agent-shell)))
+          (should (equal (drover-backend-label 'agent-shell) "agent-shell"))
+          (let ((session (drover-session-create :backend 'agent-shell :id "shell-0")))
+            (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :new :buffer
+                                           :rename :create :apply-options :send :options :settable))
+              (should (drover-supports-p session operation)))
+            (dolist (operation '(:archive :delete :fork :compact :check :history))
+              (should-not (drover-supports-p session operation))))
+          (should (equal (drover-backend-engines 'agent-shell) '(opencode claude-code codex)))
+          (should (equal (drover-engine-label 'gemini-cli) "Gemini CLI"))
+          (should (equal (sort (mapcar (lambda (source) (cons (car source) (nth 1 source)))
+                                       drover--model-sources)
+                               (lambda (a b) (string< (car a) (car b))))
+                         '((claude-code . -10) (codex . 0) (gemini-cli . 0) (opencode . 10))))
+          (should (memq #'drover-agent-shell--setup agent-shell-mode-hook))
+          (should (memq #'drover-agent-shell--window-changed window-selection-change-functions))
+          (should (memq #'drover-agent-shell--window-changed window-buffer-change-functions))
+          (should (advice-function-member-p #'drover-agent-shell--window-changed
+                                            after-focus-change-function))
+          (should (eq (buffer-local-value 'drover-session-at-point-function shell)
+                      #'drover-agent-shell--buffer-session))
+          (should (= (length (drover-agent-shell-test-subscriptions shell)) 1))
+          ;; A shell that ran before drover followed it has no known age.
+          (should-not (buffer-local-value 'drover-agent-shell--created shell))
+          (drover-agent-shell-unload-function)
+          (should-not (drover-agent-shell-test-subscriptions shell))
+          (should-not (buffer-local-value 'drover-session-at-point-function shell))
+          (should-not (drover-backends))
+          (should-not drover--engines)
+          (should-not drover--model-sources)
+          (should-not agent-shell-mode-hook)
+          (should-not window-selection-change-functions)
+          (should-not window-buffer-change-functions)
+          (should-not (advice-function-member-p #'drover-agent-shell--window-changed
+                                                after-focus-change-function)))))))
+
+(ert-deftest drover-agent-shell-test-leaves-no-global-state ()
+  "Loading agent-shell in the tests leaves nothing of the backend behind."
+  (should-not (assq 'agent-shell (default-value 'drover--backends)))
+  (should-not (seq-find (lambda (source) (memq (nth 2 source) (mapcar #'caddr drover-agent-shell--model-sources)))
+                        (default-value 'drover--model-sources)))
+  (should-not (memq #'drover-agent-shell--setup (default-value 'agent-shell-mode-hook)))
+  (should-not (memq #'drover-agent-shell--window-changed
+                    (default-value 'window-selection-change-functions)))
+  (should-not (memq #'drover-agent-shell--window-changed
+                    (default-value 'window-buffer-change-functions)))
+  (should-not (advice-function-member-p #'drover-agent-shell--window-changed
+                                        (default-value 'after-focus-change-function))))
+
+(ert-deftest drover-agent-shell-test-keeps-another-gemini-engine ()
+  "A `gemini-cli' engine registered by another package is neither replaced nor removed."
+  (let ((drover--engines nil)
+        (drover--model-sources nil)
+        (drover--backends nil)
+        (drover--started nil)
+        (drover--running nil)
+        (drover--change-timer nil)
+        (drover-agent-shell--gemini-registered nil))
+    (unwind-protect
+        (progn
+          (drover-register-engine 'gemini-cli :label "Gemini" :last-used #'ignore)
+          (drover-agent-shell--register)
+          (should (eq (drover-engine-property 'gemini-cli :last-used) #'ignore))
+          (drover-agent-shell--unregister)
+          (should (equal (drover-engine-label 'gemini-cli) "Gemini")))
+      (when (timerp drover--change-timer)
+        (cancel-timer drover--change-timer)))))
+
+;;;; Starting shells
+
+(defun drover-agent-shell-test--config (engine)
+  "Return a fresh agent-shell configuration of ENGINE with every start key."
+  (copy-tree `((:identifier . ,engine)
+               (:default-model-id)
+               (:default-session-mode-id)
+               (:session-meta (claudeCode (options (effort . "high")))))))
+
+(ert-deftest drover-agent-shell-test-start-config-agents ()
+  "A new shell takes plan and build as session modes and other agents as session meta."
+  (let* ((base (drover-agent-shell-test--config 'claude-code))
+         (plan (drover-agent-shell-start-config base nil "plan"))
+         (build (drover-agent-shell-start-config base nil "build"))
+         (reviewer (drover-agent-shell-start-config base "opus" "reviewer")))
+    (should (equal (funcall (map-elt plan :default-session-mode-id)) "plan"))
+    (should (equal (funcall (map-elt build :default-session-mode-id)) "auto"))
+    (should-not (map-nested-elt plan '(:session-meta claudeCode options agent)))
+    (should-not (map-elt reviewer :default-session-mode-id))
+    (should (equal (funcall (map-elt reviewer :default-model-id)) "opus"))
+    (should (equal (map-nested-elt reviewer '(:session-meta claudeCode options agent)) "reviewer"))
+    (should (equal (map-nested-elt reviewer '(:session-meta claudeCode options effort)) "high"))
+    (should (equal base (drover-agent-shell-test--config 'claude-code))))
+  (let ((opencode (drover-agent-shell-start-config (drover-agent-shell-test--config 'opencode)
+                                                   "anthropic/claude-opus" "plan")))
+    (should (equal (funcall (map-elt opencode :default-session-mode-id)) "plan"))
+    (should (equal (funcall (map-elt opencode :default-model-id)) "anthropic/claude-opus")))
+  (let ((codex (drover-agent-shell-test--config 'codex)))
+    (should (eq (drover-agent-shell-start-config codex "" "plan") codex))
+    (should (eq (drover-agent-shell-start-config codex nil "") codex))))
+
+(ert-deftest drover-agent-shell-test-start-config-missing-keys ()
+  "A configuration without the start keys gains them."
+  (let* ((base '((:identifier . claude-code)))
+         (config (drover-agent-shell-start-config base "sonnet" "reviewer")))
+    (should (equal (funcall (map-elt config :default-model-id)) "sonnet"))
+    (should (equal (map-nested-elt config '(:session-meta claudeCode options agent)) "reviewer"))
+    (should (equal base '((:identifier . claude-code))))))
+
+(ert-deftest drover-agent-shell-test-start-effort ()
+  "The start effort is matched against the levels the shell offers when it asks."
+  (drover-agent-shell-test-with
+    (let* ((base '((:identifier . claude-code)
+                   (:default-config-options . (lambda () '(("fast" . "on"))))))
+           (config (drover-agent-shell--with-start-effort base '("xhigh" "high")))
+           (options (map-elt config :default-config-options))
+           (shell (drover-agent-shell-test-shell 'claude-code)))
+      (should (eq (drover-agent-shell--with-start-effort base nil) base))
+      (should (equal (map-elt base :default-config-options) '(lambda () '(("fast" . "on")))))
+      (should (equal (funcall options) '(("fast" . "on"))))
+      (with-current-buffer shell
+        (should (equal (funcall options) '(("fast" . "on"))))
+        (drover-agent-shell-test-options shell '("effort" "thought_level" "low" "low" "high"))
+        (should (equal (funcall options) '(("fast" . "on") ("thought_level" . "high"))))
+        (drover-agent-shell-test-options shell '("effort" "thought_level" "low" "low" "xhigh" "high"))
+        (should (equal (funcall options) '(("fast" . "on") ("thought_level" . "xhigh")))))
+      (should (equal (funcall (map-elt (drover-agent-shell--with-start-effort
+                                        '((:identifier . codex)) '("high"))
+                                       :default-config-options))
+                     nil)))))
+
+(defmacro drover-agent-shell-test-with-start (&rest body)
+  "Run BODY with shells started as test shells, and test configurations.
+`agent-shell--start' returns a new test shell, recording its arguments
+and `default-directory'; `agent-shell--display-buffer' records its
+argument."
+  (declare (indent 0) (debug t))
+  `(let ((drover-agent-shell-configs
+          (mapcar (lambda (engine)
+                    (cons engine (lambda () (drover-agent-shell-test--config engine))))
+                  '(claude-code opencode codex)))
+         (drover-agent-shell-engines '(opencode claude-code codex gemini-cli)))
+     (cl-letf (((symbol-function 'agent-shell--start)
+                (lambda (&rest arguments)
+                  (push (cons 'agent-shell--start (cons default-directory arguments))
+                        drover-agent-shell-test--calls)
+                  (drover-agent-shell-test-shell
+                   (map-elt (plist-get arguments :config) :identifier))))
+               ((symbol-function 'agent-shell--display-buffer)
+                (drover-agent-shell-test--recorder 'agent-shell--display-buffer)))
+       ,@body)))
+
+(defun drover-agent-shell-test--started-config ()
+  "Return the configuration of the shell started last."
+  (plist-get (cdar (last (drover-agent-shell-test--calls-of 'agent-shell--start))) :config))
+
+(defun drover-agent-shell-test--create (directory engine options)
+  "Start a shell of ENGINE in DIRECTORY with OPTIONS, and return (RESULT . CONFIG).
+RESULT is (then SESSION) or (else MESSAGE); CONFIG is the configuration
+the shell started with."
+  (let (result)
+    (drover-agent-shell--create directory engine options
+                                (lambda (session) (setq result (list 'then session)))
+                                (lambda (message) (setq result (list 'else message))))
+    (cons result (drover-agent-shell-test--started-config))))
+
+(ert-deftest drover-agent-shell-test-create ()
+  "A new shell starts on the explicit model, agent and effort, displayed."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let* ((model (drover-model-create :id "opus" :engines '(claude-code)
+                                         :variants '((high) (max))))
+             (created (drover-agent-shell-test--create
+                       "/work/drover" 'claude-code
+                       (list :agent "plan" :model model :variant 'max :title "Fix the build")))
+             (session (cadr (car created)))
+             (config (cdr created))
+             (start (car (drover-agent-shell-test--calls-of 'agent-shell--start)))
+             (shell (drover-session-buffer session)))
+        (should (eq (caar created) 'then))
+        (should (equal (car start) "/work/drover/"))
+        (should (equal (cdr start) (list :config config :no-focus t :new-session t
+                                         :session-strategy 'new)))
+        (should (equal (drover-agent-shell-test--calls-of 'agent-shell--display-buffer)
+                       (list (list shell))))
+        (should (equal (funcall (map-elt config :default-model-id)) "opus"))
+        (should (equal (funcall (map-elt config :default-session-mode-id)) "plan"))
+        (drover-agent-shell-test-options shell '("effort" "thought_level" "high" "high" "max"))
+        (with-current-buffer shell
+          (should (equal (funcall (map-elt config :default-config-options))
+                         '(("thought_level" . "max")))))
+        (should (eq (drover-session-backend session) 'agent-shell))
+        (should (eq (drover-session-engine session) 'claude-code))
+        (should (equal (drover-session-title session) "Fix the build"))
+        (should (equal (buffer-name shell) "Fix the build"))
+        (should-not drover-agent-shell-test--warnings)))))
+
+(ert-deftest drover-agent-shell-test-create-opencode-inherits ()
+  "A new OpenCode shell without a model starts on what the engine resolves."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let* ((pin (drover-model-create :provider-id "anthropic" :id "claude-opus"
+                                       :engines '(opencode claude-code)
+                                       :variants '((high :effort "high") (max :effort "max"))
+                                       :default-variant 'high))
+             (resolved nil))
+        (drover-register-engine 'opencode
+                                :resolve (lambda (defaults agent model variant)
+                                           (push (list defaults agent model variant) resolved)
+                                           (list :agent (or agent "build")
+                                                 :model (plist-get defaults :model)
+                                                 :variant (or variant (plist-get defaults :variant)))))
+        (let* ((created (drover-agent-shell-test--create
+                         "/work" 'opencode (list :agent "plan" :defaults '(:model nil))))
+               (config (cdr created)))
+          (should (eq (caar created) 'then))
+          (should (equal resolved '(((:model nil) "plan" nil nil))))
+          (should-not (map-elt config :default-model-id))
+          (should-not (map-elt config :default-config-options)))
+        (setq drover-agent-shell-test--calls nil)
+        ;; The inherited model with its inherited variant.
+        (let ((config (cdr (drover-agent-shell-test--create
+                            "/work" 'opencode (list :defaults (list :model pin :variant 'max))))))
+          (should (equal (funcall (map-elt config :default-model-id)) "anthropic/claude-opus"))
+          (with-current-buffer (drover-agent-shell-test-shell 'opencode)
+            (drover-agent-shell-test-options (current-buffer)
+                                             '("variant" "thought_level" "high" "high" "max"))
+            (should (equal (funcall (map-elt config :default-config-options))
+                           '(("thought_level" . "max"))))))
+        (setq drover-agent-shell-test--calls nil)
+        ;; An explicit model without a variant starts on its default variant.
+        (let ((config (cdr (drover-agent-shell-test--create
+                            "/work" 'opencode (list :model pin :defaults '(:variant max))))))
+          (should (equal (funcall (map-elt config :default-model-id)) "anthropic/claude-opus"))
+          (with-current-buffer (drover-agent-shell-test-shell 'opencode)
+            (drover-agent-shell-test-options (current-buffer)
+                                             '("variant" "thought_level" "max" "high" "max"))
+            (should (equal (funcall (map-elt config :default-config-options))
+                           '(("thought_level" . "high"))))))))))
+
+(ert-deftest drover-agent-shell-test-create-incompatible-model ()
+  "A model the engine cannot run is reported and left out."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let ((config (cdr (drover-agent-shell-test--create
+                          "/work" 'codex (list :model (drover-model-create :id "opus" :name "Opus"
+                                                                           :engines '(claude-code)))))))
+        (should-not (map-elt config :default-model-id))
+        (should (equal drover-agent-shell-test--warnings
+                       '("codex cannot run Opus; starting on its default model")))))))
+
+(ert-deftest drover-agent-shell-test-create-failures ()
+  "A shell that cannot start calls ELSE with why, never THEN."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let ((created (drover-agent-shell-test--create "/work" 'gemini-cli nil)))
+        (should (equal (car created) '(else "No agent-shell configuration for Gemini CLI"))))
+      (cl-letf (((symbol-function 'agent-shell--start)
+                 (lambda (&rest _) (error "Not an existing directory: /nowhere"))))
+        (should (equal (car (drover-agent-shell-test--create "/nowhere" 'codex nil))
+                       '(else "Not an existing directory: /nowhere"))))
+      (should-not (drover-agent-shell-test--calls-of 'agent-shell--display-buffer)))))
+
+(ert-deftest drover-agent-shell-test-new ()
+  "A shell started from a list asks for its engine among those that can start."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let ((drover-agent-shell-engines '(codex gemini-cli)))
+        (should (equal (drover-agent-shell--engines) '(codex)))
+        (drover-agent-shell--new "/work/")
+        (should (eq (map-elt (drover-agent-shell-test--started-config) :identifier) 'codex)))
+      (setq drover-agent-shell-test--calls nil)
+      (drover-register-engine 'claude-code :label "Claude Code")
+      (let (offered)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt candidates &rest _)
+                     (setq offered (mapcar #'car candidates))
+                     "Claude Code")))
+          (drover-agent-shell--new "/work/"))
+        (should (equal offered '("opencode" "Claude Code" "codex")))
+        (should (eq (map-elt (drover-agent-shell-test--started-config) :identifier) 'claude-code)))
+      (let ((drover-agent-shell-engines nil))
+        (should-error (drover-agent-shell--new "/work/") :type 'user-error)))))
+
+;;;; Sending
+
+(defmacro drover-agent-shell-test-with-submit (&rest body)
+  "Run BODY with the prompt queue and insertion recorded."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'agent-shell-prompt-queue)
+              (lambda (text)
+                (push (list 'agent-shell-prompt-queue (current-buffer) text)
+                      drover-agent-shell-test--calls)))
+             ((symbol-function 'agent-shell-insert)
+              (drover-agent-shell-test--recorder 'agent-shell-insert)))
+     ,@body))
+
+(ert-deftest drover-agent-shell-test-send-waits-for-initialization ()
+  "A prompt waits for the shell to start, then is queued while busy or submitted."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (dolist (busy '(nil t))
+        (dolist (initialized '(nil t))
+          (setq drover-agent-shell-test--calls nil)
+          (let ((shell (drover-agent-shell-test-shell 'claude-code)))
+            (with-current-buffer shell
+              (setq-local shell-maker--busy busy))
+            (when initialized
+              (drover-agent-shell-test-initialize shell))
+            (drover-agent-shell-send-text shell "hello")
+            (unless initialized
+              (should-not drover-agent-shell-test--calls)
+              (should (= (length (drover-agent-shell-test-subscriptions shell)) 1))
+              ;; Not before the default model and mode are set.
+              (drover-agent-shell-test-emit shell 'prompt-ready)
+              (should-not drover-agent-shell-test--calls)
+              (drover-agent-shell-test-initialize shell)
+              (drover-agent-shell-test-emit shell 'init-finished)
+              (should-not (drover-agent-shell-test-subscriptions shell))
+              ;; Once only.
+              (drover-agent-shell-test-emit shell 'init-finished))
+            (should (equal drover-agent-shell-test--calls
+                           (if busy
+                               (list (list 'agent-shell-prompt-queue shell "hello"))
+                             (list (list 'agent-shell-insert :shell-buffer shell :text "hello"
+                                         :submit t :no-focus t)))))
+            (should-not drover-agent-shell-test--warnings)))))))
+
+(ert-deftest drover-agent-shell-test-send-failures ()
+  "A prompt a shell cannot take is reported as in the kill ring."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let ((failing (drover-agent-shell-test-shell 'codex "failing"))
+            (closed (drover-agent-shell-test-shell 'codex "closed"))
+            (dead (drover-agent-shell-test-shell 'codex "dead")))
+        (drover-agent-shell-send-text failing "hello")
+        (drover-agent-shell-test-emit failing 'error :code -32603 :message "Authentication required")
+        (should-not (drover-agent-shell-test-subscriptions failing))
+        (drover-agent-shell-send-text closed "hello")
+        (drover-agent-shell-test-emit closed 'clean-up)
+        (kill-buffer dead)
+        (drover-agent-shell-send-text dead "hello")
+        (should-not drover-agent-shell-test--calls)
+        (should (equal (reverse drover-agent-shell-test--warnings)
+                       '("failing did not take the prompt (Authentication required); it is in the kill ring"
+                         "closed did not take the prompt (it was closed); it is in the kill ring"
+                         "The agent shell did not take the prompt (its buffer is gone); it is in the kill ring")))))))
+
+(ert-deftest drover-agent-shell-test-send-after-start-failure ()
+  "A prompt for a shell whose start failed is reported at once."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let ((shell (drover-agent-shell-test-shell 'codex "failed")))
+        (with-current-buffer shell
+          (drover-agent-shell--setup))
+        (drover-agent-shell-test-emit shell 'error :message "No codex-acp")
+        (drover-agent-shell-send-text shell "hello")
+        (should (equal drover-agent-shell-test--warnings
+                       '("failed did not take the prompt (No codex-acp); it is in the kill ring")))
+        ;; Only the shell's own subscription is left.
+        (should (= (length (drover-agent-shell-test-subscriptions shell)) 1))))))
+
+(ert-deftest drover-agent-shell-test-send-operation ()
+  "The backend's :send submits to the session's shell, and reports a gone one."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let* ((shell (drover-agent-shell-test-shell 'codex "sending"))
+             (session (progn (drover-agent-shell-test-initialize shell)
+                             (drover-agent-shell-test-session shell))))
+        (drover-backend-call session :send "hello" nil)
+        (should (equal (drover-agent-shell-test--calls-of 'agent-shell-insert)
+                       (list (list :shell-buffer shell :text "hello" :submit t :no-focus t))))
+        (kill-buffer shell)
+        (drover-backend-call session :send "again" nil)
+        (should (equal drover-agent-shell-test--warnings
+                       '("sending is gone; the prompt is in the kill ring")))))))
+
+;;;; Options of running shells
+
+(defmacro drover-agent-shell-test-with-setters (&rest body)
+  "Run BODY with agent-shell's option setters recorded and succeeding.
+Each records (SETTER VALUE) and calls its :on-success, unless the value
+is in `drover-agent-shell-test--refused', when it calls :on-failure."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'agent-shell--config-option-set-mode-id)
+              (lambda (&rest args) (drover-agent-shell-test--set 'mode (plist-get args :mode-id) args)))
+             ((symbol-function 'agent-shell--config-option-set-model-id)
+              (lambda (&rest args) (drover-agent-shell-test--set 'model (plist-get args :model-id) args)))
+             ((symbol-function 'agent-shell--config-option-set-thought-level-id)
+              (lambda (&rest args)
+                (drover-agent-shell-test--set 'thought-level (plist-get args :thought-level-id) args))))
+     ,@body))
+
+(defvar drover-agent-shell-test--refused nil
+  "Values the stubbed option setters refuse.")
+
+(defvar drover-agent-shell-test--on-model nil
+  "Function the stubbed model setter calls before succeeding, or nil.")
+
+(defun drover-agent-shell-test--set (setter value args)
+  "Record SETTER setting VALUE in the current buffer, then settle as ARGS say."
+  (push (list setter (current-buffer) value) drover-agent-shell-test--calls)
+  (if (member value drover-agent-shell-test--refused)
+      (funcall (plist-get args :on-failure) '((code . -32602) (message . "Unknown value")) nil)
+    (when (and (eq setter 'model) drover-agent-shell-test--on-model)
+      (funcall drover-agent-shell-test--on-model))
+    (funcall (plist-get args :on-success))))
+
+(ert-deftest drover-agent-shell-test-option-steps-agents ()
+  "A running Claude Code shell switches to plan or auto mode; other agents are reported."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-setters
+      (let ((shell (drover-agent-shell-test-shell 'claude-code "claude")) done)
+        (let ((steps (drover-agent-shell--option-steps shell 'claude-code "plan" nil nil nil nil)))
+          (should (equal (mapcar #'car steps) '("agent plan")))
+          (funcall (cdar steps) (lambda () (setq done t)))
+          (should done))
+        (let ((steps (drover-agent-shell--option-steps shell 'claude-code "build" nil nil nil nil)))
+          (should (equal (mapcar #'car steps) '("agent build")))
+          (funcall (cdar steps) #'ignore))
+        (should (equal (drover-agent-shell-test--calls-of 'mode) `((,shell "plan") (,shell "auto"))))
+        (should-not drover-agent-shell-test--warnings)
+        (should-not (drover-agent-shell--option-steps shell 'claude-code "reviewer" nil nil nil nil))
+        (should-not (drover-agent-shell--option-steps shell 'codex "plan" nil nil nil nil))
+        (should (equal (reverse drover-agent-shell-test--warnings)
+                       '("claude takes its agent at session start; keeping its current agent instead of reviewer"
+                         "claude takes its agent at session start; keeping its current agent instead of plan")))
+        (let ((steps (drover-agent-shell--option-steps shell 'opencode "review" nil nil nil nil)))
+          (funcall (cdar steps) #'ignore)
+          (should (equal (car (last (drover-agent-shell-test--calls-of 'mode))) (list shell "review"))))))))
+
+(ert-deftest drover-agent-shell-test-apply-options-in-order ()
+  "A running shell takes the agent, then the model, then the effort its model offers."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-setters
+      (let* ((shell (drover-agent-shell-test-shell 'opencode "opencode"))
+             (model (drover-model-create :provider-id "anthropic" :id "claude-opus"
+                                         :engines '(opencode)
+                                         :variants '((high :effort "high") (max :effort "max"))
+                                         :default-variant 'max))
+             (drover-agent-shell-test--on-model
+              (lambda ()
+                (drover-agent-shell-test-options
+                 shell '("variant" "thought_level" "high" "high" "max"))))
+             session sent)
+        (drover-agent-shell-test-initialize shell "ses_1")
+        (drover-agent-shell-test-options shell '("variant" "thought_level" "low" "low"))
+        (setq session (drover-agent-shell-test-session shell))
+        (drover-agent-shell--apply-options session (list :agent "plan" :model model)
+                                           (lambda () (push 'sent sent)))
+        (should (equal sent '(sent)))
+        ;; The OpenCode adapter would pick the first effort: the default is set.
+        (should (equal (reverse (mapcar (lambda (call) (list (car call) (nth 2 call)))
+                                        drover-agent-shell-test--calls))
+                       '((mode "plan") (model "anthropic/claude-opus") (thought-level "max"))))
+        (should-not drover-agent-shell-test--warnings)))))
+
+(ert-deftest drover-agent-shell-test-apply-options-variant-and-refusals ()
+  "A lone variant sets the effort; refusals and missing levels are reported."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-setters
+      (let* ((shell (drover-agent-shell-test-shell 'claude-code "claude"))
+             (model (drover-model-create :id "opus" :engines '(claude-code)))
+             (drover-agent-shell-test--refused '("opus"))
+             session sent)
+        (drover-agent-shell-test-initialize shell)
+        (drover-agent-shell-test-options shell '("effort" "thought_level" "high" "low" "high"))
+        (setq session (drover-agent-shell-test-session shell))
+        ;; The current level is not set again.
+        (drover-agent-shell--apply-options session '(:variant high) (lambda () (push 1 sent)))
+        (should-not drover-agent-shell-test--calls)
+        (drover-agent-shell--apply-options session '(:variant low) (lambda () (push 2 sent)))
+        (should (equal (drover-agent-shell-test--calls-of 'thought-level) `((,shell "low"))))
+        (drover-agent-shell--apply-options session '(:variant max) (lambda () (push 3 sent)))
+        (drover-agent-shell--apply-options session (list :model model) (lambda () (push 4 sent)))
+        (should (equal sent '(4 3 2 1)))
+        (should (equal (reverse drover-agent-shell-test--warnings)
+                       '("claude offers no thought level for max; keeping its current effort"
+                         "claude refused model opus: Unknown value; sending the prompt anyway")))
+        ;; Nothing to apply.
+        (drover-agent-shell--apply-options session nil (lambda () (push 5 sent)))
+        (should (equal (car sent) 5))))))
+
+(ert-deftest drover-agent-shell-test-apply-options-waits-for-initialization ()
+  "Options go to a starting shell once its ACP session is initialized."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-setters
+      (let* ((shell (drover-agent-shell-test-shell 'claude-code "starting"))
+             (session (drover-agent-shell-test-session shell))
+             (failing (drover-agent-shell-test-shell 'claude-code "failing"))
+             sent)
+        (drover-agent-shell--apply-options session '(:agent "plan") (lambda () (push 'sent sent)))
+        (should-not drover-agent-shell-test--calls)
+        (should-not sent)
+        (drover-agent-shell-test-initialize shell)
+        (drover-agent-shell-test-emit shell 'init-finished)
+        (should (equal (drover-agent-shell-test--calls-of 'mode) `((,shell "plan"))))
+        (should (equal sent '(sent)))
+        ;; A shell that does not start still lets the prompt go to :send.
+        (drover-agent-shell--apply-options (drover-agent-shell-test-session failing) '(:agent "plan")
+                                           (lambda () (push 'failed sent)))
+        (drover-agent-shell-test-emit failing 'error :message "No agent")
+        (should (equal sent '(failed sent)))
+        (should (= (length (drover-agent-shell-test--calls-of 'mode)) 1))))))
+
+(ert-deftest drover-agent-shell-test-options-and-settable ()
+  "A shell tells the model and variant it runs, and what it can change."
+  (drover-agent-shell-test-with
+    (let ((claude (drover-agent-shell-test-shell 'claude-code "claude"))
+          (opencode (drover-agent-shell-test-shell 'opencode "opencode"))
+          (codex (drover-agent-shell-test-shell 'codex "codex")))
+      (drover-agent-shell-test-initialize claude)
+      (drover-agent-shell-test-initialize opencode "ses_1")
+      (drover-agent-shell-test-options claude
+                                       '("model" "model" "opus" "opus" "sonnet")
+                                       '("effort" "thought_level" "high" "low" "high"))
+      (drover-agent-shell-test-options opencode '("model" "model" "anthropic/claude-opus" "anthropic/claude-opus"))
+      (let ((options (drover-agent-shell--options (drover-agent-shell-test-session claude))))
+        (should (eq (plist-get options :variant) 'high))
+        (should (equal (plist-get options :model)
+                       (drover-model-create :id "opus" :name "Opus" :variants '((low) (high))
+                                            :engines '(claude-code)))))
+      (let ((options (drover-agent-shell--options (drover-agent-shell-test-session opencode))))
+        (should-not (plist-get options :variant))
+        (should (equal (plist-get options :model)
+                       (drover-model-create :provider-id "anthropic" :id "claude-opus"
+                                            :name "Anthropic/Claude-Opus"
+                                            :engines '(opencode claude-code)))))
+      (should-not (drover-agent-shell--options (drover-agent-shell-test-session codex)))
+      (should (equal (drover-agent-shell--settable (drover-agent-shell-test-session claude))
+                     '(:agent :model :variant)))
+      (should (equal (drover-agent-shell--settable (drover-agent-shell-test-session opencode))
+                     '(:agent :model)))
+      (drover-agent-shell-test-initialize codex)
+      (drover-agent-shell-test-options codex '("effort" "thought_level" "low" "low"))
+      (should (equal (drover-agent-shell--settable (drover-agent-shell-test-session codex))
+                     '(:model :variant))))))
+
+;;;; Models of live shells
+
+(ert-deftest drover-agent-shell-test-live-models ()
+  "Live shells offer the models of their engine, thought levels as variants."
+  (drover-agent-shell-test-with
+    (let ((claude (drover-agent-shell-test-shell 'claude-code))
+          (other (drover-agent-shell-test-shell 'claude-code))
+          (opencode (drover-agent-shell-test-shell 'opencode)))
+      (drover-agent-shell-test-options claude
+                                       '("model" "model" "opus" "opus" "sonnet")
+                                       '("effort" "thought_level" "high" "low" "high"))
+      (drover-agent-shell-test-options other '("model" "model" "opus" "opus" "haiku"))
+      (drover-agent-shell-test-options opencode
+                                       '("model" "model" "openai/gpt-6" "openai/gpt-6" "local/llama"))
+      (let ((models (drover-agent-shell--live-models 'claude-code)))
+        (should (equal (mapcar #'drover-model-id models) '("opus" "sonnet" "haiku")))
+        (should (equal (drover-model-variants (car models)) '((low) (high))))
+        (should (equal (drover-model-engines (car models)) '(claude-code))))
+      (let ((models (drover-agent-shell--opencode-models "/work")))
+        (should (equal (mapcar #'drover-model-provider-id models) '("openai" "local")))
+        (should (equal (mapcar #'drover-model-id models) '("gpt-6" "llama")))
+        (should (equal (drover-model-engines (car models)) '(opencode codex)))
+        (should (equal (drover-model-engines (cadr models)) '(opencode))))
+      (should-not (drover-agent-shell--codex-models "/work"))
+      (should-not (drover-agent-shell--gemini-cli-models "/work")))))
+
+(ert-deftest drover-agent-shell-test-model-source-depths ()
+  "A Claude shell answers before other sources; an OpenCode shell after them."
+  (drover-agent-shell-test-with
+    (let ((claude (drover-agent-shell-test-shell 'claude-code))
+          (opencode (drover-agent-shell-test-shell 'opencode)))
+      (drover-agent-shell-test-options claude '("model" "model" "opus" "opus"))
+      (drover-agent-shell-test-options opencode '("model" "model" "openai/gpt-6" "openai/gpt-6"))
+      (drover-register-model-source 'claude-code (lambda (_) (list (drover-model-create :id "claude-api"))))
+      (drover-register-model-source 'opencode (lambda (_) (list (drover-model-create :provider-id "x" :id "catalog"))))
+      (should (equal (mapcar #'drover-model-id (drover-models "/work")) '("opus" "catalog")))
+      (drover-agent-shell--unregister)
+      (should (equal (mapcar #'drover-model-id (drover-models "/work")) '("claude-api" "catalog"))))))
+
+;;;; Sessions
+
+(ert-deftest drover-agent-shell-test-session-fields ()
+  "A shell's session tells its engine, ACP session, title, place, agent and model."
+  (drover-agent-shell-test-with
+    (let* ((directory (file-name-as-directory (make-temp-file "drover-shell" t)))
+           (shell (drover-agent-shell-test-shell 'opencode "OpenCode @ drover")))
+      (unwind-protect
+          (progn
+            (make-directory (expand-file-name ".git" directory))
+            (with-temp-file (expand-file-name ".git/HEAD" directory)
+              (insert "ref: refs/heads/feature\n"))
+            (with-current-buffer shell
+              (setq default-directory directory))
+            (let ((session (drover-agent-shell-test-session shell)))
+              (should (equal (drover-session-title session) "OpenCode @ drover"))
+              (should (eq (drover-session-engine session) 'opencode))
+              (should-not (drover-session-engine-id session))
+              (should (equal (drover-session-directory session) directory))
+              (should (equal (drover-session-branch session) "feature"))
+              (should (equal (drover-session-project session)
+                             (file-name-nondirectory (directory-file-name directory)))))
+            (drover-agent-shell-test-initialize shell "ses_abc")
+            (drover-agent-shell-test-options shell
+                                             '("mode" "mode" "plan" "build" "plan")
+                                             '("model" "model" "anthropic/claude-opus" "anthropic/claude-opus"))
+            (with-current-buffer shell
+              (map-put! (map-elt agent-shell--state :session) :title "Fix\n  the build")
+              (map-put! agent-shell--state :last-activity-time (seconds-to-time 1000)))
+            (let ((session (drover-agent-shell-test-session shell)))
+              (should (equal (drover-session-engine-id session) "ses_abc"))
+              (should (equal (drover-session-engine-key session) '(opencode . "ses_abc")))
+              (should (equal (drover-session-title session) "Fix the build"))
+              (should (equal (drover-session-agent session) "plan"))
+              (should (equal (drover-session-model session) "Anthropic/Claude-Opus"))
+              (should (= (drover-session-updated session) 1000.0))
+              ;; The identifier is a token of the buffer, stable while it lives.
+              (should (equal (drover-session-id session)
+                             (drover-session-id (drover-agent-shell-test-session shell))))
+              (should (eq (drover-session-buffer session) shell))
+              (should (eq (drover-backend-call session :buffer) shell))))
+        (delete-directory directory t)))))
+
+(ert-deftest drover-agent-shell-test-project-cached ()
+  "A shell looks its project up once per directory."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'codex))
+          (lookups 0))
+      (cl-letf (((symbol-function 'agent-shell--project-name)
+                 (lambda () (cl-incf lookups) (concat "project of " default-directory))))
+        (drover-agent-shell--sessions)
+        (drover-agent-shell--sessions)
+        (should (= lookups 1))
+        (with-current-buffer shell
+          (setq default-directory "/"))
+        (should (equal (drover-session-project (drover-agent-shell-test-session shell)) "project of /"))
+        (should (= lookups 2))))))
+
+(ert-deftest drover-agent-shell-test-duplicate-opencode-session ()
+  "A shell showing an OpenCode session the OpenCode backend lists is listed once."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'opencode)))
+      (drover-agent-shell-test-initialize shell "ses_1")
+      (drover-test-register-simple
+       'opencode (list (drover-session-create :backend 'opencode :id "ses_1"
+                                              :engine 'opencode :engine-id "ses_1")
+                       (drover-session-create :backend 'opencode :id "ses_2"
+                                              :engine 'opencode :engine-id "ses_2")))
+      (let ((sessions (drover-sessions)))
+        (should (seq-set-equal-p (mapcar #'drover-session-key sessions)
+                                 (list (cons 'agent-shell (buffer-local-value 'drover-agent-shell--id shell))
+                                       '(opencode . "ses_2"))))
+        (should (eq (drover-session-backend (drover-find-engine-session 'opencode "ses_1"))
+                    'agent-shell))))))
+
+(ert-deftest drover-agent-shell-test-session-at-point ()
+  "A followed shell tells its session; a shell no longer followed does not."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'codex)))
+      (with-current-buffer shell
+        (should-not (drover-session-at-point t))
+        (drover-agent-shell--setup)
+        (let ((session (drover-session-at-point)))
+          (should (eq (drover-session-backend session) 'agent-shell))
+          (should (equal (drover-session-key session)
+                         (drover-session-key (drover-agent-shell-test-session shell))))
+          (should (equal (drover-session-key (drover-buffer-session shell))
+                         (drover-session-key session))))
+        (drover-agent-shell--teardown)
+        (should-not (drover-session-at-point t))
+        (should-not (drover-agent-shell-test-subscriptions shell))))))
+
+;;;; Statuses
+
+(defun drover-agent-shell-test-status (buffer)
+  "Return (STATUS DETAIL REQUESTS) of the session of the shell of BUFFER."
+  (let ((session (drover-agent-shell-test-session buffer)))
+    (list (drover-session-status session)
+          (drover-session-detail session)
+          (drover-session-requests session))))
+
+(defun drover-agent-shell-test-followed (engine &optional name)
+  "Return an initialized shell of ENGINE named NAME that drover follows."
+  (let ((shell (drover-agent-shell-test-shell engine name)))
+    (drover-agent-shell-test-initialize shell)
+    (with-current-buffer shell
+      (drover-agent-shell--setup))
+    shell))
+
+(ert-deftest drover-agent-shell-test-status-starting ()
+  "A shell still starting works; one whose start failed says why."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'codex)))
+      (with-current-buffer shell
+        (drover-agent-shell--setup))
+      (should (equal (drover-agent-shell-test-status shell) '(working "starting" nil)))
+      (should (drover-session-since (drover-agent-shell-test-session shell)))
+      (drover-agent-shell-test-emit shell 'error :message "No codex-acp")
+      (should (equal (drover-agent-shell-test-status shell) '(failed "failed to start: No codex-acp" nil)))
+      (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+      (should (equal (drover-agent-shell-test-status shell) '(idle "failed to start: No codex-acp" nil)))
+      ;; Initialization going on means it had not failed for good.
+      (drover-agent-shell-test-emit shell 'init-handshake)
+      (should (equal (drover-agent-shell-test-status shell) '(working "starting" nil))))))
+
+(ert-deftest drover-agent-shell-test-status-working ()
+  "A busy shell works since its prompt was submitted."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code)))
+      (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))
+      (with-current-buffer shell
+        (setq-local shell-maker--busy t))
+      (drover-agent-shell-test-emit shell 'input-submitted :prompt "hello")
+      (should (equal (drover-agent-shell-test-status shell) '(working nil nil)))
+      (should (equal (drover-session-since (drover-agent-shell-test-session shell))
+                     (buffer-local-value 'drover-agent-shell--turn-start shell))))))
+
+(ert-deftest drover-agent-shell-test-status-waiting ()
+  "A shell whose agent waits for a permission or an answer waits, oldest first."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code)))
+      (with-current-buffer shell
+        (setq-local shell-maker--busy t)
+        (map-put! agent-shell--state :tool-calls
+                  (list (cons "tc1" (list (cons :title "Run ls") (cons :permission-request-id 7)))
+                        (cons "tc2" (list (cons :title "Read the docs")))
+                        (cons "tc3" (list (cons :title "Ask the user")))))
+        (map-put! agent-shell--state :elicitations
+                  (list (cons 9 (list (cons :id 9) (cons :message "Which branch?") (cons :status 'pending)))
+                        (cons 10 (list (cons :id 10) (cons :tool-call-id "tc3") (cons :status 'pending)))
+                        (cons 11 (list (cons :id 11) (cons :message "Done") (cons :status 'accepted))))))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 100.0)))
+        (drover-agent-shell-test-emit shell 'elicitation-request :request-id 9 :message "Which branch?"))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 200.0)))
+        (drover-agent-shell-test-emit shell 'permission-request :request-id 7))
+      (should (equal (drover-agent-shell-test-status shell)
+                     '(waiting nil ((:kind question :summary "Which branch?")
+                                    (:kind permission :summary "Run ls")
+                                    (:kind question :summary "Ask the user")))))
+      (should (= (drover-session-since (drover-agent-shell-test-session shell)) 100.0))
+      ;; Answered: the agent clears its own request.
+      (with-current-buffer shell
+        (map-put! agent-shell--state :tool-calls nil)
+        (map-put! agent-shell--state :elicitations nil))
+      (drover-agent-shell-test-emit shell 'permission-response :request-id 7)
+      (drover-agent-shell-test-emit shell 'elicitation-response :request-id 9)
+      (should-not (buffer-local-value 'drover-agent-shell--request-times shell))
+      (should (equal (drover-agent-shell-test-status shell) '(working nil nil))))))
+
+(ert-deftest drover-agent-shell-test-status-ended-turns ()
+  "A turn ending unseen is done or failed until seen; a cancelled one is not."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code)))
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+      (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
+      (should (drover-session-since (drover-agent-shell-test-session shell)))
+      (drover-agent-shell-test-emit shell 'input-submitted :prompt "again")
+      (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "max_tokens")
+      (should (equal (drover-agent-shell-test-status shell) '(failed "Max token limit reached" nil)))
+      (drover-agent-shell-test-emit shell 'input-submitted :prompt "again")
+      (drover-agent-shell-test-emit shell 'error :code -32603 :message "Overloaded")
+      (should (equal (drover-agent-shell-test-status shell) '(failed "Overloaded" nil)))
+      ;; A failure is not hidden by a later success it was not seen before.
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+      (should (equal (drover-agent-shell-test-status shell) '(failed "Overloaded" nil)))
+      (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+      (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "cancelled")
+      (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+      (drover-agent-shell-test-emit shell 'session-selected)
+      (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))))
+
+(defmacro drover-agent-shell-test-with-focus (buffer &rest body)
+  "Run BODY with BUFFER in the selected window of a frame with the focus."
+  (declare (indent 1) (debug t))
+  `(save-window-excursion
+     (set-window-buffer (selected-window) ,buffer)
+     (cl-letf (((symbol-function 'frame-focus-state) (lambda (&optional _) t)))
+       ,@body)))
+
+(ert-deftest drover-agent-shell-test-status-seen-in-front ()
+  "A turn ending in front of the user is seen; looking at a shell sees its turn."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code "front"))
+          (viewport (generate-new-buffer "front [viewport]")))
+      (push viewport drover-agent-shell-test--buffers)
+      (drover-agent-shell-test-with-focus shell
+        (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+        (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))
+      ;; Shown, but in a frame without the focus.
+      (save-window-excursion
+        (set-window-buffer (selected-window) shell)
+        (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+        (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
+        (drover-agent-shell--window-changed)
+        (should (equal (drover-agent-shell-test-status shell) '(done nil nil))))
+      (drover-agent-shell-test-with-focus shell
+        (drover-agent-shell--window-changed (selected-frame))
+        (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))
+      ;; Its viewport is the shell too.
+      (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+      (with-current-buffer viewport
+        (setq major-mode 'agent-shell-viewport-edit-mode))
+      (drover-agent-shell-test-with-focus viewport
+        (should (drover-agent-shell--focused-p shell))
+        (drover-agent-shell--window-changed)
+        (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))))))
+
+(ert-deftest drover-agent-shell-test-changes-reported ()
+  "A shell reports its events to drover, but not those streaming within a turn."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'codex))
+          (changes 0))
+      (cl-letf (((symbol-function 'drover-backend-changed)
+                 (lambda (backend &optional _id)
+                   (should (eq backend 'agent-shell))
+                   (cl-incf changes))))
+        (drover-agent-shell-test-emit shell 'input-submitted :prompt "hi")
+        (should (= changes 1))
+        (dolist (event '(agent-message-chunk tool-call-update usage-update file-write idle))
+          (drover-agent-shell-test-emit shell event))
+        (should (= changes 1))
+        (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+        (should (= changes 2))
+        (drover-agent-shell-test-emit shell 'config-option-update)
+        (should (= changes 3))
+        (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+        (should (= changes 4))
+        ;; Nothing to mark seen: no change.
+        (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+        (should (= changes 4))
+        (kill-buffer shell)
+        (should (= changes 5))))))
+
+(ert-deftest drover-agent-shell-test-setup-replaces-subscription ()
+  "Following a shell again keeps one subscription; new shells are followed from the hook."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'codex)))
+      (with-current-buffer shell
+        (drover-agent-shell--setup)
+        (drover-agent-shell--setup))
+      (should (= (length (drover-agent-shell-test-subscriptions shell)) 1))
+      (should (buffer-local-value 'drover-agent-shell--created shell))
+      (let ((agent-shell-mode-hook nil)
+            (window-selection-change-functions nil)
+            (window-buffer-change-functions nil)
+            (after-focus-change-function #'ignore)
+            new)
+        (drover-agent-shell--install)
+        (setq new (drover-agent-shell-test-shell 'codex))
+        (should-not (drover-agent-shell-test-subscriptions new))
+        (with-current-buffer new
+          (run-hooks 'agent-shell-mode-hook))
+        (should (= (length (drover-agent-shell-test-subscriptions new)) 1))
+        (should (eq (buffer-local-value 'drover-session-at-point-function new)
+                    #'drover-agent-shell--buffer-session))
+        (drover-agent-shell--uninstall)
+        (should-not (drover-agent-shell-test-subscriptions new))
+        (should-not (drover-agent-shell-test-subscriptions shell))))))
+
+;;;; Actions
+
+(ert-deftest drover-agent-shell-test-actions ()
+  "Opening, answering, interrupting and previewing act on the session's shell."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "acting"))
+           (session (drover-agent-shell-test-session shell)))
+      (save-window-excursion
+        (cl-letf (((symbol-function 'agent-shell-jump-to-latest-permission-button-row)
+                   (lambda () (push (list 'jump (current-buffer)) drover-agent-shell-test--calls)))
+                  ((symbol-function 'agent-shell-interrupt)
+                   (lambda (&optional force)
+                     (push (list 'interrupt (current-buffer) force) drover-agent-shell-test--calls)))
+                  ((symbol-function 'shell-maker-last-output)
+                   (lambda () (propertize (concat "\n" (make-string 5000 ?x) "end\n") 'face 'bold))))
+          (drover-open session)
+          (should (eq (window-buffer (selected-window)) shell))
+          (switch-to-buffer "*scratch*")
+          (drover-respond session)
+          (should (eq (window-buffer (selected-window)) shell))
+          (drover-backend-call session :interrupt)
+          (should (equal (reverse drover-agent-shell-test--calls)
+                         `((jump ,shell) (interrupt ,shell t))))
+          (let (preview)
+            (drover-preview session (lambda (text) (setq preview text)))
+            (should (= (length preview) (1+ drover-agent-shell--preview-limit)))
+            (should (string-prefix-p "…" preview))
+            (should (string-suffix-p "xend" preview))
+            (should-not (text-properties-at 1 preview))))
+        (cl-letf (((symbol-function 'shell-maker-last-output) (lambda () "  \n")))
+          (drover-preview session (lambda (text) (should-not text))))
+        (kill-buffer shell)
+        (should-error (drover-open session) :type 'user-error)
+        (drover-preview session (lambda (text) (should-not text)))))))
+
+(ert-deftest drover-agent-shell-test-respond-from-side-list ()
+  "Answering from a list in a side window shows the shell where the user works."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "asking"))
+           (session (drover-agent-shell-test-session shell))
+           (list (generate-new-buffer "list")))
+      (push list drover-agent-shell-test--buffers)
+      (save-window-excursion
+        (delete-other-windows)
+        (let* ((main (selected-window))
+               (side (split-window)))
+          (set-window-buffer side list)
+          (select-window side)
+          (cl-letf (((symbol-function 'agent-shell-jump-to-latest-permission-button-row) #'ignore))
+            (with-current-buffer list
+              (setq-local drover-main-window-function (lambda () main))
+              (drover-respond session)))
+          (should (eq (window-buffer main) shell))
+          (should (eq (window-buffer side) list))
+          (should (eq (selected-window) main)))))))
+
+(ert-deftest drover-agent-shell-test-rename ()
+  "Renaming names the shell, its viewport and its session."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'codex "old name"))
+           (viewport (generate-new-buffer "old name [viewport]"))
+           (session (drover-agent-shell-test-session shell)))
+      (push viewport drover-agent-shell-test--buffers)
+      (with-current-buffer shell
+        (map-put! (map-elt agent-shell--state :session) :title "The agent's title"))
+      (should (equal (drover-session-title (drover-agent-shell-test-session shell)) "The agent's title"))
+      (drover-rename session "Fix the build")
+      (should (equal (buffer-name shell) "Fix the build"))
+      (should (equal (buffer-name viewport) "Fix the build [viewport]"))
+      (should (eq (agent-shell-viewport--shell-buffer viewport) shell))
+      (let ((renamed (drover-agent-shell-test-session shell)))
+        (should (equal (drover-session-id renamed) (drover-session-id session)))
+        (should (equal (drover-session-title renamed) "Fix the build"))))))
+
+(provide 'drover-agent-shell-test)
+;;; drover-agent-shell-test.el ends here
