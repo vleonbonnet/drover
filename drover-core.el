@@ -230,6 +230,22 @@ the others most recently updated first."
                          :since (unless (eql since most-positive-fixnum) since)
                          :updated updated)))
 
+(defun drover--parent-key (session by-key by-engine)
+  "Return the key of the parent of SESSION among the sessions listed, or nil.
+BY-KEY maps the keys of the sessions listed to them, BY-ENGINE their
+engine keys.  A parent another backend shows, its own record merged
+away (see `drover-sessions'), is found through the engine of SESSION,
+when SESSION's backend names sessions by their engine identifiers, as
+the OpenCode backend does; otherwise the parent is that of SESSION's
+backend, listed or not."
+  (when-let* ((parent (drover-session-parent session)))
+    (let ((own (cons (drover-session-backend session) parent)))
+      (if (gethash own by-key)
+          own
+        (let ((shown (and (drover-session-engine session)
+                          (gethash (cons (drover-session-engine session) parent) by-engine))))
+          (if shown (drover-session-key shown) own))))))
+
 (defun drover-tree (sessions)
   "Return SESSIONS as trees, each subagent under its parent, most urgent first.
 A tree ranks by the most urgent status within it, so a parent whose
@@ -237,13 +253,15 @@ subagent waits for the user comes with the sessions that need the user.
 A subagent whose parent is not among SESSIONS is a tree of its own.
 Trees and siblings that rank alike keep the order of SESSIONS."
   (let ((by-key (make-hash-table :test #'equal))
+        (by-engine (make-hash-table :test #'equal))
         (children (make-hash-table :test #'equal))
         (roots nil))
     (dolist (session sessions)
-      (puthash (drover-session-key session) session by-key))
+      (puthash (drover-session-key session) session by-key)
+      (when-let* ((engine-key (drover-session-engine-key session)))
+        (puthash engine-key session by-engine)))
     (dolist (session sessions)
-      (let ((parent (and (drover-session-parent session)
-                         (cons (drover-session-backend session) (drover-session-parent session)))))
+      (let ((parent (drover--parent-key session by-key by-engine)))
         (if (and parent (gethash parent by-key)
                  (not (equal parent (drover-session-key session))))
             (push session (gethash parent children))
@@ -664,17 +682,20 @@ Signal a `user-error' when the backend does not implement it."
 (defun drover--preferred-backend (records)
   "Return the backend that keeps the session RECORDS describe.
 RECORDS are records of one conversation by several backends.  It is
-the backend with a live buffer for its record, else the one registered
-first; among several with a buffer, the one registered first too."
-  (let ((backends (sort (delete-dups (mapcar #'drover-session-backend records))
-                        (lambda (a b) (< (drover--registration-rank a) (drover--registration-rank b))))))
-    (or (seq-find (lambda (backend)
-                    (seq-some (lambda (record)
-                                (and (eq (drover-session-backend record) backend)
-                                     (drover-session-buffer record)))
-                              records))
-                  backends)
-        (car backends))))
+the backend whose buffer for its record the user selected last, else,
+without any buffer, the one registered first."
+  (let ((buffers (buffer-list))
+        (best nil)
+        (best-rank nil))
+    (dolist (record records)
+      (when-let* ((buffer (drover-session-buffer record))
+                  (rank (seq-position buffers buffer)))
+        (when (or (null best-rank) (< rank best-rank))
+          (setq best (drover-session-backend record)
+                best-rank rank))))
+    (or best
+        (car (sort (delete-dups (mapcar #'drover-session-backend records))
+                   (lambda (a b) (< (drover--registration-rank a) (drover--registration-rank b))))))))
 
 (defun drover--merge-duplicates (sessions)
   "Return SESSIONS with each conversation shown by one backend only.
@@ -708,8 +729,8 @@ Two front ends may show one conversation of an engine, such as an
 OpenCode session both opencode.el and agent-shell show: records of
 different backends with the same engine and engine identifier (see
 `drover-session-engine-key') are one session, listed once.  The record
-kept is that of the backend with a live buffer for it, else that of the
-backend registered first."
+kept is that of the backend whose buffer for it the user selected last,
+else that of the backend registered first."
   (drover--merge-duplicates
    (mapcan (lambda (entry) (drover--backend-sessions (cdr entry)))
            drover--backends)))

@@ -1070,8 +1070,9 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
                               (fake . "a") (fake . "b") (fake . "c") (fake . "d")))))))
 
 (ert-deftest drover-test-duplicate-sessions-prefer-a-buffer ()
-  "The backend with a live buffer for the conversation keeps it."
-  (let ((buffer (generate-new-buffer " other")))
+  "The backend whose buffer for the conversation was selected last keeps it."
+  (let ((buffer (generate-new-buffer " other"))
+        (own (generate-new-buffer " fake")))
     (unwind-protect
         (drover-test-with-backend (list (drover-test-session "a" :engine 'opencode :engine-id "ses_1"))
           (drover-test-register-simple
@@ -1082,15 +1083,41 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
           (should (equal (mapcar #'drover-session-key (drover-sessions))
                          '((other . "x") (other . "x2"))))
           (should (eq (drover-session-backend (drover-find-engine-session 'opencode "ses_1")) 'other))
-          ;; Both with a buffer: the first registered.
+          ;; Both with a buffer: the one selected last.
           (setf (alist-get 'fake drover--backends)
-                (append (list :buffer (lambda (_) buffer)) (alist-get 'fake drover--backends)))
+                (append (list :buffer (lambda (_) own)) (alist-get 'fake drover--backends)))
+          (bury-buffer buffer)
+          (switch-to-buffer own)
           (should (equal (mapcar #'drover-session-key (drover-sessions)) '((fake . "a"))))
-          ;; No buffer any more: the first registered still.
+          (switch-to-buffer buffer)
+          (should (equal (mapcar #'drover-session-key (drover-sessions))
+                         '((other . "x") (other . "x2"))))
+          ;; No buffer any more: the first registered.
           (kill-buffer buffer)
+          (kill-buffer own)
           (should (equal (mapcar #'drover-session-key (drover-sessions)) '((fake . "a")))))
-      (when (buffer-live-p buffer)
-        (kill-buffer buffer)))))
+      (dolist (b (list buffer own))
+        (when (buffer-live-p b)
+          (kill-buffer b))))))
+
+(ert-deftest drover-test-tree-parent-shown-by-another-backend ()
+  "A subagent stays under its parent when another backend shows the parent."
+  (let ((buffer (generate-new-buffer " other")))
+    (unwind-protect
+        (drover-test-with-backend (list (drover-test-session "ses_1" :engine 'opencode :engine-id "ses_1")
+                                        (drover-test-session "ses_2" :parent "ses_1"
+                                                             :engine 'opencode :engine-id "ses_2"))
+          (drover-test-register-simple
+           'other (list (drover-test-other "tok" :engine 'opencode :engine-id "ses_1"))
+           :buffer (lambda (_) buffer))
+          (switch-to-buffer buffer)
+          (let ((nodes (drover-tree (drover-sessions))))
+            (should (= (length nodes) 1))
+            (should (equal (drover-session-key (drover-node-session (car nodes))) '(other . "tok")))
+            (should (equal (mapcar (lambda (node) (drover-session-key (drover-node-session node)))
+                                   (drover-node-children (car nodes)))
+                           '((fake . "ses_2"))))))
+      (kill-buffer buffer))))
 
 (ert-deftest drover-test-duplicate-sessions-in-history ()
   "An older record of a conversation a backend follows live is not listed."
