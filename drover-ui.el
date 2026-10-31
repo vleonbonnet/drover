@@ -20,7 +20,7 @@
 
 ;;; Commentary:
 
-;; Every view of sessions (dashboards, sidebar, completion) draws them
+;; Every view of sessions (the list, completion) draws them
 ;; with the same glyphs, faces and labels, measures text the same way,
 ;; and describes the filter in force the same way.  The commands and
 ;; keys every view shares are in `drover-keys'.
@@ -67,6 +67,21 @@
   "Face of secondary details, such as directories and ages."
   :group 'drover-faces)
 
+(defface drover-cache-bar
+  '((((class color) (min-colors 88) (background light)) :background "#e4ecf5")
+    (((class color) (min-colors 88) (background dark)) :background "#26323f")
+    (((class color)) :background "blue")
+    (t :underline t))
+  "Face of the part of a prompt cache's lifetime still left.
+Session lists draw it as the background of a session's line, or as a
+short bar, so it stays subtle: only a background."
+  :group 'drover-faces)
+
+(defface drover-cache-trough '((t :inherit drover-dim :underline t))
+  "Face of the part of a prompt cache's lifetime already gone, in short bars.
+It shows how long the bar would be, without drawing attention."
+  :group 'drover-faces)
+
 (defcustom drover-status-glyphs
   '((waiting . "\U000F02D7")            ; nf-md-help_circle
     (failed . "\uf057")                 ; nf-fa-times_circle
@@ -104,16 +119,36 @@ runs, such as `magit-section-mode' ones, and keeps `font-lock-face'."
   (drover-face (or (alist-get status drover-status-glyphs) "?")
                (drover-status-face status)))
 
+(defun drover-format-duration (seconds)
+  "Return SECONDS as \"42s\", \"5m\", \"3h\" or \"2d\", rounded down.
+A negative duration counts as none."
+  (let ((seconds (max 0 seconds)))
+    (cond ((< seconds 60) (format "%ds" seconds))
+          ((< seconds 3600) (format "%dm" (/ seconds 60)))
+          ((< seconds 86400) (format "%dh" (/ seconds 3600)))
+          (t (format "%dd" (/ seconds 86400))))))
+
 (defun drover-format-age (time &optional now)
   "Return the age of TIME, a float time, as \"42s\", \"5m\", \"3h\" or \"2d\".
 NOW defaults to the current time.  Return \"\" for a nil TIME."
   (if (null time)
       ""
-    (let ((seconds (max 0 (- (or now (float-time)) time))))
-      (cond ((< seconds 60) (format "%ds" seconds))
-            ((< seconds 3600) (format "%dm" (/ seconds 60)))
-            ((< seconds 86400) (format "%dh" (/ seconds 3600)))
-            (t (format "%dd" (/ seconds 86400)))))))
+    (drover-format-duration (- (or now (float-time)) time))))
+
+(defconst drover-activity-labels
+  '((today . "Today") (yesterday . "Yesterday") (week . "This week") (older . "Older"))
+  "Display name of each bucket of last activity, from `drover-activity-buckets'.")
+
+(defun drover-group-label (grouping value)
+  "Return the display name of the group of VALUE when grouping by GROUPING.
+GROUPING is one of `drover-groupings'; groups without a value, nil, are
+named after what they lack."
+  (pcase grouping
+    ('status (drover-status-label value))
+    ('updated (or (alist-get value drover-activity-labels) "No activity"))
+    (_ (if value
+           (replace-regexp-in-string "[\n\r\t]+" " " (format "%s" value))
+         (format "No %s" grouping)))))
 
 (defun drover-session-location (session)
   "Return the project and branch of SESSION as one string, or nil."
@@ -187,12 +222,6 @@ result is empty."
 
 ;;;; Filters
 
-(defun drover--start-of-day (&optional time)
-  "Return the float time at which the day of TIME began, today by default."
-  (pcase-let ((`(,_ ,_ ,_ ,day ,month ,year) (decode-time time)))
-    ;; Midnight may fall on the other side of a daylight saving change.
-    (float-time (encode-time (list 0 0 0 day month year nil -1 nil)))))
-
 (defun drover-filter-since-label (since &optional now)
   "Return how a filter on activity since SINCE, a float time, reads.
 It is \"today\" for the start of the day of NOW, the current time by
@@ -209,18 +238,22 @@ default, and otherwise the age of SINCE, such as \"2d\"."
 (defun drover-filter-description (&optional filter now)
   "Return FILTER, `drover-filter' by default, described for headers, or nil.
 The description lists each member set, such as
-\"project drover, needs you, since 2d, \"auth\"\".  Ages count up to
+\"project drover, needs you, agent build, since 2d, \"auth\"\".  Ages count up to
 NOW, the current time by default.  Return nil when FILTER lists every
 session."
   (let ((filter (or filter drover-filter)))
     (when (drover-filter-active-p filter)
       (let ((project (drover--filter-value filter :project))
             (statuses (drover--filter-value filter :statuses))
+            (agent (drover--filter-value filter :agent))
+            (model (drover--filter-value filter :model))
             (since (drover--filter-value filter :since))
             (search (drover--filter-value filter :search)))
         (mapconcat #'identity
                    (delq nil (list (and project (concat "project " project))
                                    (and statuses (drover-filter-statuses-label statuses))
+                                   (and agent (concat "agent " agent))
+                                   (and model (concat "model " model))
                                    (and since (drover-filter-since-label since now))
                                    (and search (format "\"%s\"" search))))
                    ", ")))))

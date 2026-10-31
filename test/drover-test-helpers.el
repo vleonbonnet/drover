@@ -19,7 +19,8 @@
 
 ;; A fake backend, `fake', serves `drover-test-sessions' and records
 ;; every action in `drover-test-calls'.  `drover-test-with-backend'
-;; isolates the registry, the change hook and its timer.
+;; isolates the registry, the change hook and its timer, and the view
+;; settings.
 
 ;;; Code:
 
@@ -78,6 +79,10 @@ The title defaults to \"Session ID\"."
          (drover-show-children nil)
          (drover-filter nil)
          (drover-group-by 'status)
+         (drover-sort-by 'urgency)
+         (drover-sort-descending nil)
+         (drover-show-history nil)
+         (drover--history nil)
          (drover-test-sessions ,sessions)
          (drover-test-calls nil))
      (unwind-protect

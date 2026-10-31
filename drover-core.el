@@ -34,9 +34,11 @@
 ;; `drover-sort' puts the most urgent first, the longest wait first
 ;; within a status.
 ;;
-;; Views draw `drover-view-trees': the sessions as trees, filtered by
-;; `drover-filter', grouped as `drover-group-by' says.  Those settings
-;; are global, so every view shows the same sessions.
+;; Views draw `drover-view-groups': the sessions as trees, filtered by
+;; `drover-filter', grouped as `drover-group-by' says and sorted as
+;; `drover-sort-by' says.  Those settings are global, so every view
+;; shows the same sessions.  With `drover-show-history', views also
+;; list the older sessions backends keep (`drover-known-sessions').
 ;;
 ;; Commands act on the session at point, which every list of sessions
 ;; and every prompt buffer tells through
@@ -94,9 +96,15 @@ A child that needs the user is always shown."
 Each is a plist with :kind, `permission' or `question', and :summary.")
   (since nil :documentation "Time, as a float, at which STATUS began, or nil.")
   (updated nil :documentation "Time, as a float, of the last activity, or nil.")
+  (created nil :documentation "Time, as a float, at which the session was created, or nil.")
   (agent nil :documentation "Agent name, or nil.")
   (model nil :documentation "Model name, or nil.")
-  (detail nil :documentation "One line on the status, such as an error, or nil."))
+  (detail nil :documentation "One line on the status, such as an error, or nil.")
+  (cache-expires nil :documentation "Time, as a float, at which the prompt cache expires, or nil.
+The prompt cache is the provider's: until it expires, the next turn
+reuses the conversation already sent.  Nil when unknown.")
+  (cache-ttl nil :documentation "Lifetime of the prompt cache, in seconds, or nil.
+It is the time from the last cache write to CACHE-EXPIRES."))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -117,6 +125,25 @@ A waiting session shows its oldest request, another its detail."
       (concat (if (eq (plist-get request :kind) 'question) "asks: " "permit: ")
               (plist-get request :summary))
     (drover-session-detail session)))
+
+(defun drover-session-cache-remaining (session &optional now)
+  "Return the seconds left before the prompt cache of SESSION expires, or nil.
+It is nil when the expiry is unknown or past at NOW, the current time
+by default."
+  (when-let* ((expires (drover-session-cache-expires session))
+              ((numberp expires))
+              (remaining (- expires (or now (float-time))))
+              ((> remaining 0)))
+    remaining))
+
+(defun drover-session-cache-fraction (session &optional now)
+  "Return the fraction of its lifetime the prompt cache of SESSION has left.
+The value is in (0, 1] at NOW, the current time by default, or nil when
+the cache is expired or its expiry or lifetime is unknown."
+  (when-let* ((remaining (drover-session-cache-remaining session now))
+              (ttl (drover-session-cache-ttl session))
+              ((and (numberp ttl) (> ttl 0))))
+    (min 1.0 (/ remaining (float ttl)))))
 
 (defun drover-status-rank (status)
   "Return the rank of STATUS in `drover-status-order', lowest most urgent."
@@ -272,20 +299,167 @@ so that no tree goes unlisted."
     (append (delq nil (mapcar (lambda (status) (assq status groups)) drover-status-order))
             (seq-remove (lambda (group) (memq (car group) drover-status-order)) groups))))
 
+(defun drover--group-trees-by (nodes key)
+  "Return trees NODES grouped as an alist (VALUE . NODES).
+VALUE is what KEY, a function of a tree, returns for the trees of the
+group.  Groups come in the order their first tree has in NODES."
+  (let (groups)
+    (dolist (node nodes)
+      (let* ((value (funcall key node))
+             (group (assoc value groups)))
+        (if group
+            (setcdr group (cons node (cdr group)))
+          (push (list value node) groups))))
+    (mapcar (lambda (group) (cons (car group) (nreverse (cdr group))))
+            (nreverse groups))))
+
 (defun drover-group-trees-by-project (nodes)
   "Return trees NODES grouped as an alist (PROJECT . NODES).
 A tree goes with the project of its root session; PROJECT is nil for
 sessions without one.  A project comes before another when its most
 urgent tree does."
-  (let (groups)
-    (dolist (node nodes)
-      (let* ((project (drover-session-project (drover-node-session node)))
-             (group (assoc project groups)))
-        (if group
-            (setcdr group (cons node (cdr group)))
-          (push (list project node) groups))))
-    (mapcar (lambda (group) (cons (car group) (nreverse (cdr group))))
-            (nreverse groups))))
+  (drover--group-trees-by nodes (lambda (node) (drover-session-project (drover-node-session node)))))
+
+(defun drover--start-of-day (&optional time)
+  "Return the float time at which the day of TIME began, today by default."
+  (pcase-let ((`(,_ ,_ ,_ ,day ,month ,year) (decode-time time)))
+    ;; Midnight may fall on the other side of a daylight saving change.
+    (float-time (encode-time (list 0 0 0 day month year nil -1 nil)))))
+
+(defconst drover-activity-buckets '(today yesterday week older nil)
+  "Buckets of last activity, newest first; nil holds unknown activity.")
+
+(defun drover-activity-bucket (time &optional now)
+  "Return the bucket of `drover-activity-buckets' TIME, a float time, falls in.
+It is `today' or `yesterday' for those days of NOW, the current time
+by default; `week' for the five days before yesterday, completing a
+week; `older' before; nil when TIME is nil."
+  (when time
+    (let ((today (drover--start-of-day now)))
+      (cond ((>= time today) 'today)
+            ((>= time (drover--start-of-day (- today 1))) 'yesterday)
+            ;; Six days back from the start of today: a week with today.
+            ((>= time (drover--start-of-day (- today (* 5.5 86400)))) 'week)
+            (t 'older)))))
+
+(defconst drover-groupings '(status project branch agent model updated nil)
+  "The values `drover-group-by' may take.")
+
+(defun drover-group-trees (nodes grouping &optional now)
+  "Return trees NODES grouped by GROUPING, as an alist (VALUE . NODES).
+GROUPING is one of `drover-groupings':
+
+ status   VALUE is the most urgent status of the tree, in the order of
+          `drover-group-trees-by-status'.
+ project, branch, agent, model
+          VALUE is that of the root session, or nil; a group comes
+          before another when its most urgent tree does.
+ updated  VALUE is the bucket of the tree's last activity at NOW (see
+          `drover-activity-bucket'), newest first.
+ nil      One group, of VALUE nil, holding every tree; none without
+          trees.
+
+Within a group, trees keep their order in NODES."
+  (pcase grouping
+    ('status (drover-group-trees-by-status nodes))
+    ('project (drover-group-trees-by-project nodes))
+    ((or 'branch 'agent 'model)
+     (let ((field (pcase grouping
+                    ('branch #'drover-session-branch)
+                    ('agent #'drover-session-agent)
+                    (_ #'drover-session-model))))
+       (drover--group-trees-by nodes (lambda (node) (funcall field (drover-node-session node))))))
+    ('updated
+     (let ((groups (drover--group-trees-by
+                    nodes (lambda (node) (drover-activity-bucket (drover-node-updated node) now)))))
+       (delq nil (mapcar (lambda (bucket) (assq bucket groups)) drover-activity-buckets))))
+    ('nil (and nodes (list (cons nil nodes))))
+    (_ (error "Unknown grouping %S" grouping))))
+
+;;;; Sorting trees
+
+(defconst drover-sort-fields '(urgency title project branch agent model updated created)
+  "The values `drover-sort-by' may take.")
+
+(defcustom drover-sort-by 'urgency
+  "What session views sort sessions by, within each group.
+The value is one of `drover-sort-fields': `urgency', the most urgent
+first; `title', `project', `branch', `agent' or `model', in
+alphabetical order; `updated', the last activity, or `created', the
+time of creation, oldest first.  `drover-sort-descending' reverses the
+order.  Subagents stay under their parent whatever the order."
+  :type '(choice (const :tag "Urgency" urgency)
+                 (const :tag "Title" title)
+                 (const :tag "Project" project)
+                 (const :tag "Branch" branch)
+                 (const :tag "Agent" agent)
+                 (const :tag "Model" model)
+                 (const :tag "Last activity" updated)
+                 (const :tag "Creation" created))
+  :group 'drover)
+
+(defcustom drover-sort-descending nil
+  "Whether session views sort sessions in descending order of `drover-sort-by'."
+  :type 'boolean
+  :group 'drover)
+
+(defun drover--sort-key (field node index)
+  "Return the value tree NODE sorts by on FIELD, or nil when it has none.
+INDEX is the position of NODE in the order of urgency.  Strings are
+compared ignoring case; times are those of the root session, but for
+`updated', the latest activity in the tree."
+  (let ((session (drover-node-session node)))
+    (pcase field
+      ('urgency index)
+      ('updated (drover-node-updated node))
+      ('created (drover-session-created session))
+      (_ (when-let* ((value (pcase field
+                              ('title (drover-session-display-title session))
+                              ('project (drover-session-project session))
+                              ('branch (drover-session-branch session))
+                              ('agent (drover-session-agent session))
+                              ('model (drover-session-model session))
+                              (_ (error "Unknown sort field %S" field))))
+                     (text (format "%s" value))
+                     ((not (string-empty-p text))))
+           (downcase text))))))
+
+(defun drover--sort-key-less-p (a b descending)
+  "Return non-nil when sort key A comes before B, DESCENDING or not.
+Keys are numbers, strings or nil; nil comes last either way."
+  (cond ((null b) (and a t))
+        ((null a) nil)
+        (descending (if (numberp a) (> a b) (string< b a)))
+        (t (if (numberp a) (< a b) (string< a b)))))
+
+(defun drover-sort-trees (nodes &optional field descending)
+  "Return trees NODES sorted by FIELD, DESCENDING when non-nil.
+FIELD is one of `drover-sort-fields'; it defaults to `drover-sort-by',
+and DESCENDING to `drover-sort-descending' when FIELD is nil too.
+NODES must come most urgent first, as `drover-tree' returns them.  A
+subagent never leaves its parent: the roots are sorted, then the
+subagents of each session among themselves.  Sessions without a value
+for FIELD come last, and ties keep the order of urgency."
+  (let ((descending (if field descending drover-sort-descending))
+        (field (or field drover-sort-by)))
+    (if (and (eq field 'urgency) (not descending))
+        nodes
+      (cl-labels ((arrange (nodes)
+                    (let ((keyed (seq-map-indexed
+                                  (lambda (node index)
+                                    (cons (drover--sort-key field node index)
+                                          (drover-node--create
+                                           :session (drover-node-session node)
+                                           :children (arrange (drover-node-children node))
+                                           :status (drover-node-status node)
+                                           :since (drover-node-since node)
+                                           :updated (drover-node-updated node))))
+                                  nodes)))
+                      ;; `sort' is stable: ties keep the order of urgency.
+                      (mapcar #'cdr (sort keyed (lambda (a b)
+                                                  (drover--sort-key-less-p (car a) (car b)
+                                                                           descending)))))))
+        (arrange nodes)))))
 
 ;;;; Backends
 
@@ -297,6 +471,10 @@ urgent tree does."
 
 (defvar drover--running nil
   "Non-nil once `drover-start' ran; later backends start as they register.")
+
+(defvar drover--history nil
+  "Older sessions of the backends, as an alist (BACKEND . SESSIONS).
+Filled by `drover-history-fetch' while `drover-show-history' is set.")
 
 (defun drover-register-backend (name &rest properties)
   "Register backend NAME, a symbol, with PROPERTIES.
@@ -323,6 +501,12 @@ PROPERTIES is a plist of:
  :fork       Function of a session copying it whole into a new session,
              and displaying the copy.
  :compact    Function of a session compacting its conversation.
+ :history    Function of a CALLBACK fetching the backend's older
+             sessions, those :sessions does not report, and calling
+             CALLBACK with them as `drover-session' records, as soon
+             as they arrive; it may never call it, when they cannot be
+             fetched.  Their statuses are what the backend reports of
+             them, idle as a rule.  See `drover-show-history'.
 
 A session's parent and subagents need no operation: drover finds them
 among the sessions through `drover-session-parent'.
@@ -349,7 +533,8 @@ Backends without a :buffer function never report one."
 (defun drover-unregister-backend (name)
   "Forget backend NAME."
   (setq drover--backends (assq-delete-all name drover--backends)
-        drover--started (delq name drover--started))
+        drover--started (delq name drover--started)
+        drover--history (assq-delete-all name drover--history))
   (drover-backend-changed name))
 
 (defun drover-backends ()
@@ -395,11 +580,45 @@ Signal a `user-error' when the backend does not implement it."
 
 (defun drover-sessions ()
   "Return the sessions of every registered backend, unsorted.
-A backend whose :sessions function fails contributes nothing."
+A backend whose :sessions function fails contributes nothing.  These
+are the sessions backends follow live; see `drover-known-sessions' for
+those lists show."
   (mapcan (lambda (entry)
             (with-demoted-errors "Drover backend sessions: %S"
               (copy-sequence (funcall (plist-get (cdr entry) :sessions)))))
           drover--backends))
+
+(defvar drover-show-history nil
+  "Non-nil when session lists show older sessions too.
+Older sessions are those backends keep beyond the ones they follow, as
+their :history function fetches them.  Change it with
+`drover-set-show-history', which fetches them.")
+
+(defun drover--history-sessions ()
+  "Return the older sessions fetched, of the backends still registered."
+  (mapcan (lambda (entry)
+            (and (assq (car entry) drover--backends)
+                 (copy-sequence (cdr entry))))
+          drover--history))
+
+(defun drover-known-sessions (&optional live)
+  "Return the sessions lists show, unsorted.
+They are LIVE, the sessions `drover-sessions' returns by default, and
+while `drover-show-history' is set, the older sessions fetched from the
+backends; a live session wins over an older record of the same
+session, and the first of several older records wins."
+  (let ((live (or live (drover-sessions))))
+    (if (not drover-show-history)
+        live
+      (let ((seen (make-hash-table :test #'equal)))
+        (dolist (session live)
+          (puthash (drover-session-key session) t seen))
+        (append live
+                (seq-remove (lambda (session)
+                              (let ((key (drover-session-key session)))
+                                (prog1 (gethash key seen)
+                                  (puthash key t seen))))
+                            (drover--history-sessions)))))))
 
 (defun drover-visible-sessions (&optional sessions)
   "Return SESSIONS, or every session, without hidden subagents.
@@ -416,11 +635,17 @@ need the user."
   (drover-sort (seq-filter #'drover-session-attention-p (drover-sessions))))
 
 (defun drover-find (backend id)
-  "Return the session ID of BACKEND, or nil."
-  (seq-find (lambda (session)
-              (and (eq (drover-session-backend session) backend)
-                   (equal (drover-session-id session) id)))
-            (drover-sessions)))
+  "Return the session ID of BACKEND, or nil.
+A live session is preferred; while `drover-show-history' is set, an
+older session fetched from BACKEND is found too."
+  (cl-flet ((find (sessions)
+              (seq-find (lambda (session)
+                          (and (eq (drover-session-backend session) backend)
+                               (equal (drover-session-id session) id)))
+                        sessions)))
+    (or (find (drover-sessions))
+        (and drover-show-history
+             (find (cdr (assq backend drover--history)))))))
 
 (defun drover-parent (session)
   "Return the parent session of SESSION, a subagent, or nil.
@@ -430,14 +655,15 @@ It is nil too when the parent is not among the sessions."
 
 (defun drover-subagents (session &optional sessions)
   "Return the sessions of the subagents of SESSION, most urgent first.
-They are taken from SESSIONS, every session by default."
+They are taken from SESSIONS, by default those lists show (see
+`drover-known-sessions')."
   (let ((backend (drover-session-backend session))
         (id (drover-session-id session)))
     (drover-sort (seq-filter (lambda (candidate)
                                (and (eq (drover-session-backend candidate) backend)
                                     (equal (drover-session-parent candidate) id)
                                     (not (equal (drover-session-id candidate) id))))
-                             (or sessions (drover-sessions))))))
+                             (or sessions (drover-known-sessions))))))
 
 ;;;; Changes
 
@@ -474,9 +700,16 @@ seconds without another change."
 
 (defcustom drover-group-by 'status
   "How session views group sessions.
-The value is `status', `project', or nil for no groups."
+The value is one of `drover-groupings': `status', the most urgent
+first; `project', `branch', `agent' or `model', of the session at the
+top of each tree; `updated', the last activity, as today, yesterday,
+this week and older; or nil for no groups.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
+                 (const :tag "By branch" branch)
+                 (const :tag "By agent" agent)
+                 (const :tag "By model" model)
+                 (const :tag "By last activity" updated)
                  (const :tag "No groups" nil))
   :group 'drover)
 
@@ -486,6 +719,8 @@ Its members are:
 
  :project   A project name, as `drover-session-project' returns it.
  :statuses  A list of statuses: sessions with one of them.
+ :agent     An agent name, as `drover-session-agent' returns it.
+ :model     A model name, as `drover-session-model' returns it.
  :since     A float time: sessions last updated then or later.
  :search    A string found, ignoring case, in the title, summary,
             project or branch of the session.
@@ -495,9 +730,9 @@ session.  Change it with `drover-set-filter' so that views follow.")
 
 (defvar-local drover-view-p nil
   "Non-nil in the buffers of drover's own session views.
-Those follow `drover-filter' and `drover-group-by'.")
+Those follow `drover-filter', `drover-group-by' and `drover-sort-by'.")
 
-(defconst drover--filter-keys '(:project :statuses :since :search)
+(defconst drover--filter-keys '(:project :statuses :agent :model :since :search)
   "The members of `drover-filter', in the order they are described.")
 
 (defun drover--filter-value (filter key)
@@ -517,10 +752,14 @@ SESSION must satisfy every member of FILTER that is set."
   (let* ((filter (or filter drover-filter))
          (project (drover--filter-value filter :project))
          (statuses (drover--filter-value filter :statuses))
+         (agent (drover--filter-value filter :agent))
+         (model (drover--filter-value filter :model))
          (since (drover--filter-value filter :since))
          (search (drover--filter-value filter :search)))
     (and (or (null project) (equal (drover-session-project session) project))
          (or (null statuses) (memq (drover-session-status session) statuses))
+         (or (null agent) (equal (drover-session-agent session) agent))
+         (or (null model) (equal (drover-session-model session) model))
          (or (null since)
              (let ((updated (drover-session-updated session)))
                (and updated (>= updated since))))
@@ -576,20 +815,35 @@ leaves, VISIBLE the same without the subagents to hide."
 
 (defun drover-view-trees (&optional sessions)
   "Return the trees a session view draws, most urgent first.
-They are the trees of SESSIONS, or of every session when nil, cut down
-to `drover-filter' (see `drover-filter-trees'), without the subagents
-to hide (see `drover-tree-visible').  While a filter is set, a subagent
-that matches it shows even when subagents are hidden, unless a session
-above it matches too: the view then explains why each tree is listed
-without listing every subagent of a matching session."
-  (car (drover--view-trees (or sessions (drover-sessions)))))
+They are the trees of SESSIONS, by default of the sessions lists show,
+those of `drover-known-sessions', cut down to `drover-filter' (see
+`drover-filter-trees'), without the subagents to hide (see
+`drover-tree-visible').  While a filter is set, a subagent that matches
+it shows even when subagents are hidden, unless a session above it
+matches too: the view then explains why each tree is listed without
+listing every subagent of a matching session."
+  (car (drover--view-trees (or sessions (drover-known-sessions)))))
 
 (defun drover-view-hidden-count (&optional sessions)
   "Return how many subagents of SESSIONS a view hides.
-SESSIONS defaults to every session.  They are the subagents of the
-trees `drover-filter' leaves that `drover-view-trees' leaves out."
-  (pcase-let ((`(,visible . ,kept) (drover--view-trees (or sessions (drover-sessions)))))
+SESSIONS defaults to the sessions lists show.  They are the subagents
+of the trees `drover-filter' leaves that `drover-view-trees' leaves
+out."
+  (pcase-let ((`(,visible . ,kept) (drover--view-trees (or sessions (drover-known-sessions)))))
     (- (length (drover-tree-sessions kept)) (length (drover-tree-sessions visible)))))
+
+(defun drover-view-groups (&optional sessions now)
+  "Return the groups of trees a session view draws, in order.
+The trees are those of `drover-view-trees' for SESSIONS, grouped as
+`drover-group-by' says, at NOW for groups of last activity (see
+`drover-group-trees'), and sorted within each group as `drover-sort-by'
+and `drover-sort-descending' say (see `drover-sort-trees').  The value
+is a list of (GROUP . TREES): GROUP is (GROUPING . VALUE), or nil when
+sessions are not grouped.  It is nil when no tree is drawn."
+  (mapcar (pcase-lambda (`(,value . ,nodes))
+            (cons (and drover-group-by (cons drover-group-by value))
+                  (drover-sort-trees nodes)))
+          (drover-group-trees (drover-view-trees sessions) drover-group-by now)))
 
 (defun drover-view-settings-changed ()
   "Redraw every session view at once, after view settings changed.
@@ -601,7 +855,7 @@ Views redraw from `drover-changed-hook', which runs now."
 
 (defun drover-set-filter (key value)
   "Set member KEY of `drover-filter' to VALUE, nil removing it, and redraw views.
-KEY is one of :project, :statuses, :since and :search."
+KEY is one of :project, :statuses, :agent, :model, :since and :search."
   (unless (memq key drover--filter-keys)
     (error "Unknown filter member %S" key))
   (let ((filter (copy-sequence drover-filter)))
@@ -613,10 +867,57 @@ KEY is one of :project, :statuses, :since and :search."
 
 (defun drover-set-group-by (grouping)
   "Group sessions in every view by GROUPING, and redraw views.
-GROUPING is `status', `project' or nil."
-  (unless (memq grouping '(status project nil))
+GROUPING is one of `drover-groupings'."
+  (unless (memq grouping drover-groupings)
     (error "Unknown grouping %S" grouping))
   (setq drover-group-by grouping)
+  (drover-view-settings-changed))
+
+(defun drover-set-sort (field &optional descending)
+  "Sort sessions in every view by FIELD, DESCENDING when non-nil, and redraw.
+FIELD is one of `drover-sort-fields'."
+  (unless (memq field drover-sort-fields)
+    (error "Unknown sort field %S" field))
+  (setq drover-sort-by field
+        drover-sort-descending (and descending t))
+  (drover-view-settings-changed))
+
+;;;; Older sessions
+
+(defvar drover--history-generation 0
+  "Count of the fetches of older sessions; answers to an earlier one are dropped.")
+
+(defun drover-history-available-p ()
+  "Return non-nil when a registered backend fetches older sessions."
+  (seq-some (lambda (backend) (functionp (drover-backend-property backend :history)))
+            (drover-backends)))
+
+(defun drover-history-fetch ()
+  "Fetch the older sessions of every backend that keeps them.
+Each backend's answer replaces what it answered before and redraws the
+views, as long as `drover-show-history' stays set and no later fetch
+started meanwhile."
+  (let ((generation (cl-incf drover--history-generation)))
+    (dolist (backend (drover-backends))
+      (when-let* ((function (drover-backend-property backend :history))
+                  ((functionp function)))
+        (with-demoted-errors "Drover backend history: %S"
+          (funcall function
+                   (lambda (sessions)
+                     (when (and drover-show-history (= generation drover--history-generation))
+                       (setf (alist-get backend drover--history) (copy-sequence sessions))
+                       (drover-backend-changed backend)))))))))
+
+(defun drover-set-show-history (show)
+  "Show older sessions in every view when SHOW is non-nil, else hide them.
+Showing them fetches them (see `drover-history-fetch'); hiding them
+forgets them.  Views redraw at once, and again as older sessions
+arrive."
+  (setq drover-show-history (and show t))
+  (if drover-show-history
+      (drover-history-fetch)
+    (cl-incf drover--history-generation)
+    (setq drover--history nil))
   (drover-view-settings-changed))
 
 ;;;; The session at point
@@ -662,6 +963,7 @@ actions with `drover-prompt-define'.  The actions drover knows are:
 
  send          Send the prompt.
  schedule      Schedule the prompt.
+ clear         Erase the prompt being written.
  attach        Attach the region, or a file or buffer.
  slash         Insert a slash command.
  mention       Mention a subagent.
@@ -803,8 +1105,8 @@ session at point."
 
 (defvar-local drover-main-window-function nil
   "Function of no argument returning the window to show sessions in, or nil.
-A list in a side window, such as the sidebar, sets it to the window
-where the user works: `drover-open' displays sessions there, and
+A list in a side window, such as `drover-list-side', sets it to the
+window where the user works: `drover-open' displays sessions there, and
 `drover-follow-mode' shows them there.")
 
 (defun drover-open (session &optional other-window)

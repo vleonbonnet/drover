@@ -622,6 +622,15 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
     (should (equal (drover-test-filtered '(:statuses (waiting done)) sessions) '("w" "d")))
     (should (equal (drover-test-filtered '(:statuses (working)) sessions) nil))))
 
+(ert-deftest drover-test-filter-agent-and-model ()
+  (let ((sessions (list (drover-test-session "a" :agent "build" :model "opus")
+                        (drover-test-session "b" :agent "plan" :model "opus")
+                        (drover-test-session "c"))))
+    (should (equal (drover-test-filtered '(:agent "build") sessions) '("a")))
+    (should (equal (drover-test-filtered '(:model "opus") sessions) '("a" "b")))
+    (should (equal (drover-test-filtered '(:model "opus" :agent "plan") sessions) '("b")))
+    (should (drover-filter-active-p '(:agent "build")))))
+
 (ert-deftest drover-test-filter-since ()
   (let ((sessions (list (drover-test-session "old" :updated 99.0)
                         (drover-test-session "edge" :updated 100.0)
@@ -737,13 +746,275 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (drover-set-filter :project nil)
       (drover-set-filter :search "")
       (should (equal drover-filter '(:statuses (done))))
+      (drover-set-filter :agent "build")
+      (should (equal drover-filter '(:statuses (done) :agent "build")))
+      (drover-set-filter :agent nil)
       (drover-set-group-by 'project)
       (should (eq drover-group-by 'project))
-      (drover-set-group-by nil)
-      (should-not drover-group-by)
-      (should (= runs 7))
+      (dolist (grouping '(branch agent model updated nil))
+        (drover-set-group-by grouping)
+        (should (eq drover-group-by grouping)))
+      (should (= runs 13))
       (should-error (drover-set-filter :colour "red"))
       (should-error (drover-set-group-by 'colour)))))
+
+;;;; Prompt caches
+
+(ert-deftest drover-test-cache-fraction ()
+  (let ((now drover-test-now))
+    (cl-flet ((session (&rest properties) (apply #'drover-test-session "s" properties)))
+      ;; Four minutes left of five.
+      (let ((live (session :cache-expires (+ now 240) :cache-ttl 300)))
+        (should (= (drover-session-cache-remaining live now) 240))
+        (should (= (drover-session-cache-fraction live now) 0.8))
+        ;; It shrinks as time passes.
+        (should (= (drover-session-cache-fraction live (+ now 90)) 0.5))
+        (should (< (drover-session-cache-fraction live (+ now 200))
+                   (drover-session-cache-fraction live (+ now 100))))
+        ;; Expired, at its expiry or after.
+        (should-not (drover-session-cache-fraction live (+ now 240)))
+        (should-not (drover-session-cache-remaining live (+ now 300))))
+      ;; Unknown expiry or lifetime.
+      (should-not (drover-session-cache-fraction (session) now))
+      (should-not (drover-session-cache-remaining (session :cache-ttl 300) now))
+      (should-not (drover-session-cache-fraction (session :cache-expires (+ now 60)) now))
+      (should (= (drover-session-cache-remaining (session :cache-expires (+ now 60)) now) 60))
+      (should-not (drover-session-cache-fraction (session :cache-expires (+ now 60) :cache-ttl 0) now))
+      ;; More left than a lifetime, as clocks disagree: full.
+      (should (= (drover-session-cache-fraction (session :cache-expires (+ now 400) :cache-ttl 300) now)
+                 1.0)))))
+
+;;;; Sorting
+
+(defun drover-test-sortable ()
+  "Return trees to sort: three roots, one with three subagents."
+  (drover-tree
+   (list (drover-test-session "b" :title "Bravo" :status 'waiting :since 1.0 :agent "plan"
+                              :created 30.0 :updated 5.0)
+         (drover-test-session "b2" :parent "b" :title "zulu" :status 'idle :created 3.0 :updated 50.0)
+         (drover-test-session "b1" :parent "b" :title "Alpha" :status 'idle :created 2.0 :updated 40.0)
+         (drover-test-session "b3" :parent "b" :title "mike" :status 'working :created 1.0 :updated 45.0)
+         (drover-test-session "c" :title "charlie" :status 'working :agent "build" :created 10.0
+                              :updated 20.0)
+         (drover-test-session "a" :title "alpha" :status 'idle :created 20.0 :updated 10.0))))
+
+(ert-deftest drover-test-sort-trees-by-urgency ()
+  (let ((trees (drover-test-sortable)))
+    (should (equal (drover-test-tree-shape trees) '(("b" ("b3") ("b2") ("b1")) ("c") ("a"))))
+    ;; The default order is that of the trees, untouched.
+    (should (eq (drover-sort-trees trees 'urgency) trees))
+    (let ((drover-sort-by 'urgency) (drover-sort-descending nil))
+      (should (eq (drover-sort-trees trees) trees)))
+    ;; Reversed: least urgent first, subagents still under their parent.
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'urgency t))
+                   '(("a") ("c") ("b" ("b1") ("b2") ("b3")))))))
+
+(ert-deftest drover-test-sort-trees-keeps-subagents-under-parent ()
+  (let ((trees (drover-test-sortable)))
+    ;; Roots sorted, and siblings among themselves, ignoring case.
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'title))
+                   '(("a") ("b" ("b1") ("b3") ("b2")) ("c"))))
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'title t))
+                   '(("c") ("b" ("b2") ("b3") ("b1")) ("a"))))
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'created))
+                   '(("c") ("a") ("b" ("b3") ("b1") ("b2")))))
+    ;; The last activity of a tree is its latest.
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'updated t))
+                   '(("b" ("b2") ("b3") ("b1")) ("c") ("a"))))
+    ;; The trees keep their ranks.
+    (should (eq (drover-node-status (car (drover-sort-trees trees 'title t))) 'working))
+    (should (equal (drover-test-tree-shape trees) '(("b" ("b3") ("b2") ("b1")) ("c") ("a"))))))
+
+(ert-deftest drover-test-sort-trees-missing-values-last ()
+  "Sessions without a value come last, both ways; ties keep urgency order."
+  (let ((trees (drover-test-sortable)))
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'agent)))
+                   '("c" "b" "a")))
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'agent t)))
+                   '("b" "c" "a")))
+    ;; No project anywhere: the order of urgency stands.
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'project t)))
+                   '("b" "c" "a")))
+    (should-error (drover-sort-trees trees 'colour))))
+
+(ert-deftest drover-test-set-sort ()
+  (drover-test-with-backend nil
+    (let ((runs 0))
+      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+      (drover-set-sort 'title t)
+      (should (eq drover-sort-by 'title))
+      (should (eq drover-sort-descending t))
+      (drover-set-sort 'created)
+      (should-not drover-sort-descending)
+      (should (= runs 2))
+      (should-error (drover-set-sort 'colour)))))
+
+;;;; Grouping
+
+(ert-deftest drover-test-group-trees-by-fields ()
+  (let ((trees (drover-tree
+                (list (drover-test-session "a" :branch "main" :agent "build" :model "opus"
+                                           :status 'idle)
+                      (drover-test-session "b" :branch "dev" :agent "plan" :status 'waiting :since 1.0)
+                      (drover-test-session "kid" :parent "a" :branch "dev" :agent "plan" :status 'done)
+                      (drover-test-session "c" :branch "main" :model "opus" :status 'working)))))
+    ;; By the root of each tree; a group comes with its most urgent tree.
+    (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
+                           (drover-group-trees trees 'branch))
+                   '(("dev" ("b")) ("main" ("a" ("kid")) ("c")))))
+    (should (equal (mapcar #'car (drover-group-trees trees 'agent)) '("plan" "build" nil)))
+    (should (equal (mapcar #'car (drover-group-trees trees 'model)) '(nil "opus")))
+    (should (equal (mapcar #'car (drover-group-trees trees 'status)) '(waiting done working)))
+    (should (equal (mapcar #'car (drover-group-trees trees 'project)) '(nil)))
+    (should (equal (drover-group-trees trees nil) (list (cons nil trees))))
+    (should-not (drover-group-trees nil nil))
+    (should-error (drover-group-trees trees 'colour))))
+
+(ert-deftest drover-test-activity-buckets ()
+  (let ((zone (getenv "TZ")))
+    (unwind-protect
+        (let ((now drover-test-now)
+              (hour 3600.0))
+          (set-time-zone-rule "UTC")
+          ;; drover-test-now is 08:00 UTC.
+          (should (eq (drover-activity-bucket now now) 'today))
+          (should (eq (drover-activity-bucket (- now (* 8 hour)) now) 'today))
+          (should (eq (drover-activity-bucket (- now (* 8 hour) 1) now) 'yesterday))
+          (should (eq (drover-activity-bucket (- now (* 32 hour)) now) 'yesterday))
+          (should (eq (drover-activity-bucket (- now (* 32 hour) 1) now) 'week))
+          ;; A week, today included: five days before yesterday.
+          (should (eq (drover-activity-bucket (- now (* 8 hour) (* 6 24 hour)) now) 'week))
+          (should (eq (drover-activity-bucket (- now (* 8 hour) (* 6 24 hour) 1) now) 'older))
+          (should-not (drover-activity-bucket nil now)))
+      (set-time-zone-rule zone))))
+
+(ert-deftest drover-test-group-trees-by-activity ()
+  (let ((zone (getenv "TZ")))
+    (unwind-protect
+        (let* ((now drover-test-now)
+               (trees (drover-tree
+                       (list (drover-test-session "old" :updated (- now (* 30 86400)))
+                             (drover-test-session "never")
+                             (drover-test-session "today" :updated (- now 60))
+                             (drover-test-session "parent" :updated (- now (* 3 86400)))
+                             ;; A subagent active today brings its tree with it.
+                             (drover-test-session "kid" :parent "parent" :updated (- now 120))
+                             (drover-test-session "week" :updated (- now (* 4 86400)))))))
+          (set-time-zone-rule "UTC")
+          (should (equal (mapcar (lambda (group) (cons (car group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                                 (drover-group-trees trees 'updated now))
+                         '((today "today" "parent") (week "week") (older "old") (nil "never")))))
+      (set-time-zone-rule zone))))
+
+(ert-deftest drover-test-view-groups ()
+  "Groups keep their order; trees sort within each group."
+  (drover-test-with-backend (list (drover-test-session "w2" :title "Zed" :status 'waiting :since 1.0)
+                                  (drover-test-session "w1" :title "Ann" :status 'waiting :since 2.0)
+                                  (drover-test-session "i" :title "Bob" :status 'idle))
+    (should (equal (mapcar (lambda (group) (cons (car group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                           (drover-view-groups))
+                   '(((status . waiting) "w2" "w1") ((status . idle) "i"))))
+    (setq drover-sort-by 'title)
+    (should (equal (mapcar (lambda (group) (cons (car group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                           (drover-view-groups))
+                   '(((status . waiting) "w1" "w2") ((status . idle) "i"))))
+    (setq drover-group-by nil)
+    (should (equal (mapcar (lambda (group) (cons (car group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                           (drover-view-groups))
+                   '((nil "w1" "i" "w2"))))
+    (setq drover-test-sessions nil)
+    (should-not (drover-view-groups))))
+
+;;;; Older sessions
+
+(defvar drover-test-history-calls nil
+  "Callbacks the fake backend's :history received, newest first.")
+
+(defun drover-test-register-history ()
+  "Give the fake backend a :history function recording its callbacks."
+  (setf (alist-get 'fake drover--backends)
+        (append (list :history (lambda (callback) (push callback drover-test-history-calls)))
+                (alist-get 'fake drover--backends))))
+
+(ert-deftest drover-test-history-merges-older-sessions ()
+  (drover-test-with-backend (list (drover-test-session "live" :status 'working :title "Live"))
+    (let ((drover-test-history-calls nil)
+          (runs 0))
+      (should-not (drover-history-available-p))
+      (drover-test-register-history)
+      (should (drover-history-available-p))
+      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+      (drover-set-show-history t)
+      (should drover-show-history)
+      (should (= (length drover-test-history-calls) 1))
+      (should (= runs 1))
+      ;; Nothing yet: the live sessions alone.
+      (should (equal (drover-test-ids (drover-known-sessions)) '("live")))
+      (funcall (car drover-test-history-calls)
+               (list (drover-test-session "live" :status 'idle :title "Stale record")
+                     (drover-test-session "old" :status 'idle :updated 1.0)
+                     (drover-test-session "old" :status 'idle :title "Duplicate")
+                     (drover-test-session "old-kid" :parent "old")))
+      (drover-changed-now)
+      (should (= runs 2))
+      ;; The live record wins; older ones follow, once each.
+      (let ((known (drover-known-sessions)))
+        (should (equal (drover-test-ids known) '("live" "old" "old-kid")))
+        (should (equal (drover-session-title (car known)) "Live")))
+      ;; Older sessions are found, listed, and have subagents.
+      (should (equal (drover-session-title (drover-find 'fake "old")) "Session old"))
+      (should (equal (drover-session-title (drover-find 'fake "live")) "Live"))
+      (should (equal (drover-test-ids (drover-subagents (drover-find 'fake "old"))) '("old-kid")))
+      (should (equal (drover-test-tree-shape (drover-view-trees)) '(("live") ("old"))))
+      ;; The live sessions stay the backends' own.
+      (should (equal (drover-test-ids (drover-sessions)) '("live")))
+      (should (equal (drover-test-ids (drover-attention-sessions)) nil))
+      ;; Hidden, they are forgotten.
+      (drover-set-show-history nil)
+      (should-not drover--history)
+      (should (equal (drover-test-ids (drover-known-sessions)) '("live")))
+      (should-not (drover-find 'fake "old"))
+      (should (= runs 3)))))
+
+(ert-deftest drover-test-history-drops-late-answers ()
+  (drover-test-with-backend nil
+    (let ((drover-test-history-calls nil))
+      (drover-test-register-history)
+      (drover-set-show-history t)
+      (let ((first (car drover-test-history-calls)))
+        ;; Fetched again, as a refresh does: only the last answer counts.
+        (drover-history-fetch)
+        (funcall first (list (drover-test-session "first")))
+        (should-not drover--history)
+        (funcall (car drover-test-history-calls) (list (drover-test-session "second")))
+        (should (equal (drover-test-ids (drover-known-sessions)) '("second")))
+        ;; An answer arriving once hidden is dropped.
+        (drover-history-fetch)
+        (drover-set-show-history nil)
+        (funcall (car drover-test-history-calls) (list (drover-test-session "late")))
+        (should-not drover--history)
+        (should-not (drover-known-sessions))))))
+
+(ert-deftest drover-test-history-of-unregistered-backend ()
+  (drover-test-with-backend nil
+    (let ((drover-test-history-calls nil))
+      (drover-test-register-history)
+      (drover-set-show-history t)
+      (funcall (car drover-test-history-calls) (list (drover-test-session "old")))
+      (should (drover-known-sessions))
+      (drover-unregister-backend 'fake)
+      (should-not drover--history)
+      (should-not (drover-known-sessions)))))
+
+(ert-deftest drover-test-history-failing-backend ()
+  "A backend whose :history fails leaves the others fetching."
+  (drover-test-with-backend nil
+    (let ((drover-test-history-calls nil))
+      (drover-register-backend 'broken :label "Broken" :sessions #'ignore
+                               :history (lambda (_) (error "No service")))
+      (drover-test-register-history)
+      (drover-set-show-history t)
+      (should (= (length drover-test-history-calls) 1)))))
 
 (provide 'drover-core-test)
 ;;; drover-core-test.el ends here
