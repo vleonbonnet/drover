@@ -395,6 +395,24 @@ They follow \"p\", the last of drover's commands listing sessions."
   (dolist (suffix drover-opencode--dispatch-suffixes)
     (transient-remove-suffix 'drover-dispatch (nth 2 suffix))))
 
+;;;; Key hints
+
+(defconst drover-opencode--commands
+  '((opencode-respond . drover-respond)
+    (opencode-revert-clear . drover-prompt-revert-cancel)
+    (opencode-interrupt . drover-interrupt))
+  "Commands of opencode.el that its hints name, and drover's commands for them.")
+
+(defun drover-opencode--command-keys (command)
+  "Return the keys of `drover-dispatch' running opencode.el COMMAND, or nil.
+They are the global key of the menu followed by the key of the entry,
+such as \"C-\\=' A\".  For `opencode-command-keys-function'."
+  (when-let* ((drover (alist-get command drover-opencode--commands))
+              (menu (where-is-internal #'drover-dispatch nil t))
+              (key (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-dispatch drover)))
+                              :key)))
+    (concat (key-description menu) " " key)))
+
 ;;;; Installing
 
 (defun drover-opencode--buffers (mode)
@@ -407,7 +425,10 @@ They follow \"p\", the last of drover's commands listing sessions."
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
       (drover-opencode--setup-session-buffer)))
-  (drover-opencode--add-to-dispatch))
+  (drover-opencode--add-to-dispatch)
+  ;; A user's own function stays.
+  (unless opencode-command-keys-function
+    (setq opencode-command-keys-function #'drover-opencode--command-keys)))
 
 (defun drover-opencode--uninstall ()
   "Undo `drover-opencode--install'."
@@ -415,7 +436,9 @@ They follow \"p\", the last of drover's commands listing sessions."
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
       (drover-opencode--teardown-session-buffer)))
-  (drover-opencode--remove-from-dispatch))
+  (drover-opencode--remove-from-dispatch)
+  (when (eq opencode-command-keys-function #'drover-opencode--command-keys)
+    (setq opencode-command-keys-function nil)))
 
 (drover-opencode--install)
 

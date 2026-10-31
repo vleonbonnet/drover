@@ -21,7 +21,7 @@ With elpaca or straight:
     :bind ("C-'" . drover-dispatch))
 #+end_src
 
-The OpenCode backend loads with opencode.el. Its sessions come from opencode.el's registry, which follows the shared OpenCode service whether or not a session has a buffer; drover opens the service's event stream when it starts.
+The OpenCode backend loads with opencode.el. Its sessions come from opencode.el's registry, which follows the shared OpenCode service whether or not a session has a buffer; drover opens the service's event stream when it starts. opencode.el's hints then name drover's keys, such as "C-' A answers it" for a pending question, through =opencode-command-keys-function=, unless you set that option yourself.
 
 * Statuses
 

@@ -833,6 +833,31 @@ PROJECTS defaults to `drover-opencode-test-projects'."
   (dolist (key '("1" "2" "3"))
     (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
 
+(ert-deftest drover-opencode-test-command-keys ()
+  "opencode.el's hints name the keys of drover's menu."
+  (let ((map (make-sparse-keymap)))
+    (keymap-set map "C-'" #'drover-dispatch)
+    (let ((global-map map)
+          (opencode-command-keys-function #'drover-opencode--command-keys))
+      (with-temp-buffer
+        (use-global-map map)
+        (unwind-protect
+            (progn
+              (should (equal (drover-opencode--command-keys 'opencode-respond) "C-' A"))
+              (should (equal (drover-opencode--command-keys 'opencode-interrupt) "C-' K"))
+              (should (equal (drover-opencode--command-keys 'opencode-revert-clear) "C-' T"))
+              (should-not (drover-opencode--command-keys 'opencode-new-worktree))
+              (should (equal (substring-no-properties (opencode-command-keys 'opencode-respond)) "C-' A")))
+          (use-global-map global-map)))))
+  ;; Without a key for the menu, opencode.el falls back on its own keymaps.
+  (let ((map (make-sparse-keymap)))
+    (with-temp-buffer
+      (let ((global-map map))
+        (use-global-map map)
+        (unwind-protect
+            (should-not (drover-opencode--command-keys 'opencode-respond))
+          (use-global-map global-map))))))
+
 ;;;; Installing and unloading
 
 (ert-deftest drover-opencode-test-uninstall-and-install ()
@@ -844,6 +869,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
               (opencode-session-mode)
               (drover-prompt-define 'schedule #'ignore))
             (drover-opencode--uninstall)
+            (should-not opencode-command-keys-function)
             (should-not (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
             (with-current-buffer session-buffer
               (should-not drover-session-at-point-function)
@@ -861,6 +887,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
               (should (assq 'send drover-prompt-actions))
               (should (assq 'schedule drover-prompt-actions)))
             (should (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
+            (should (eq opencode-command-keys-function #'drover-opencode--command-keys))
             (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch "S")) :command)
                            'opencode-consult-sessions))
             ;; Installing twice adds nothing twice.
