@@ -127,9 +127,8 @@ Return \"\" for a nil TEXT."
   (drover-table--text-width "x"))
 
 (defun drover-table--status-text (status)
-  "Return the glyph and label of STATUS, in its face."
-  (concat (drover-status-glyph status) " "
-          (propertize (drover-status-label status) 'face (drover-status-face status))))
+  "Return the glyph of STATUS in its face, its tooltip naming it."
+  (propertize (drover-status-glyph status) 'help-echo (drover-status-label status)))
 
 (defun drover-table--title (session)
   "Return the title of SESSION, marked when it is a subagent."
@@ -158,8 +157,9 @@ unknown."
 (defun drover-table--columns (statuses now)
   "Return the columns of a table of sessions at time NOW.
 STATUSES is a vector of every status shown, most urgent first; the
-Status column holds the index of a session's status in it, so that it
-sorts by urgency.  Each column is a plist of:
+status column, unnamed to stay as narrow as its glyphs, holds the index
+of a session's status in it, so that it sorts by urgency.  Each column
+is a plist of:
 
  :name     Its header.
  :value    Function of a session returning the value it sorts by.
@@ -170,7 +170,7 @@ sorts by urgency.  Each column is a plist of:
            a column as wide as its content.
  :samples  Texts the column fits even when no row shows them."
   (list
-   (list :name "Status" :align 'left
+   (list :name "" :align 'left
          :value (lambda (session) (seq-position statuses (drover-session-status session)))
          :text (lambda (index) (drover-table--status-text (aref statuses index)))
          :samples (mapcar #'drover-table--status-text statuses))

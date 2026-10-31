@@ -142,22 +142,22 @@ restored afterwards."
               (drover-test-session "child" :status 'done :parent "quiet" :project "drover")
               (drover-session-create :backend 'fake :id "untitled" :status 'working))
       (should (equal (cdr (assoc "asking" (drover-table-test--rows)))
-                     '("⚑ Needs you" "Session asking" "drover" "main" "5m" "asks: Which branch?")))
+                     '("⚑" "Session asking" "drover" "main" "5m" "asks: Which branch?")))
       (should (equal (cdr (assoc "broken" (drover-table-test--rows)))
-                     '("✗ Failed" "Session broken" "" "" "2h" "Rate limited")))
+                     '("✗" "Session broken" "" "" "2h" "Rate limited")))
       (should (equal (cdr (assoc "quiet" (drover-table-test--rows)))
-                     '("· Idle" "Session quiet" "" "" "1d" "")))
+                     '("·" "Session quiet" "" "" "1d" "")))
       ;; A subagent that needs the user is shown, marked as such; its age is unknown.
       (should (equal (cdr (assoc "child" (drover-table-test--rows)))
-                     '("✓ Done" "↳ Session child" "drover" "" "" "")))
+                     '("✓" "↳ Session child" "drover" "" "" "")))
       (should (equal (drover-table-test--cell "untitled" "Title") "untitled"))
-      (should (equal (drover-table-test--cell "untitled" "Status") "◐ Working")))))
+      (should (equal (drover-table-test--cell "untitled" "Status") "◐")))))
 
 (ert-deftest drover-table-test-column-headers ()
   (drover-table-test-with-table (list (drover-test-session "s"))
     (goto-char (point-min))
     (should (equal (drover-table-test--cells)
-                   '("Status" "Title" "Project" "Branch" "Age" "Summary")))
+                   '("" "Title" "Project" "Branch" "Age" "Summary")))
     (should (memq 'header-line (ensure-list (get-text-property (point) 'face))))))
 
 (ert-deftest drover-table-test-cells-on-one-line ()
@@ -172,7 +172,17 @@ restored afterwards."
       (list (drover-test-session "odd" :status 'mystery)
             (drover-test-session "idle" :status 'idle))
     (should (equal (drover-table-test--ids) '("idle" "odd")))
-    (should (equal (drover-table-test--cell "odd" "Status") "? Mystery"))))
+    (should (equal (drover-table-test--cell "odd" "Status") "?"))))
+
+(ert-deftest drover-table-test-status-tooltip ()
+  (drover-table-test-with-table
+      (list (drover-test-session "asking" :status 'waiting)
+            (drover-test-session "odd" :status 'mystery))
+    (dolist (case '(("asking" . "Needs you") ("odd" . "Mystery")))
+      (goto-char (point-min))
+      (should (vtable-goto-object (drover-find 'fake (car case))))
+      (should (vtable-goto-column 0))
+      (should (equal (get-text-property (point) 'help-echo) (cdr case))))))
 
 (ert-deftest drover-table-test-status-faces ()
   (drover-table-test-with-table
