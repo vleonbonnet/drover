@@ -488,7 +488,10 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                        "RET" "S-<return>" "i" "/" "@" "y" "t" "T"))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-from-list ()
-  "In a list, prompt commands act on the session's buffer when it has them."
+  "In a list, the session's settings apply to its buffer, its prompt does not.
+Agent, model, effort, directory and the last answer act on the buffer
+of the session at point; the prompt keys work on what a prompt buffer
+shows, so they apply only there."
   (drover-keys-test-with (list (drover-test-session "s"))
     (let ((session-buffer (generate-new-buffer " session")))
       (unwind-protect
@@ -501,12 +504,14 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
               (drover-prompt-define 'fork (drover-keys-test-action 'fork)))
             (drover-keys-test-in 'view "s"
               (let ((apt (drover-keys-test-apt 'drover-dispatch)))
-                (dolist (key '("t" "a" "f"))
+                (dolist (key '("a" "f"))
                   (should (member key apt)))
-                (dolist (key '("RET" "T" "m"))
+                (dolist (key '("RET" "t" "T" "m"))
                   (should-not (member key apt))))
-              (call-interactively #'drover-prompt-revert)
-              (should (equal drover-keys-test-actions (list (list 'revert session-buffer))))
+              (should-error (call-interactively #'drover-prompt-revert) :type 'user-error)
+              (should-not drover-keys-test-actions)
+              (call-interactively #'drover-prompt-agent)
+              (should (equal drover-keys-test-actions (list (list 'agent session-buffer))))
               ;; Forking in a list forks the whole session.
               (call-interactively #'drover-fork)
               (should (equal drover-test-calls '((:fork "s"))))))

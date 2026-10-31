@@ -487,18 +487,21 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
   (drover-test-with-buffers (list (drover-test-session "s"))
       (list (cons "s" (generate-new-buffer " s")))
     (with-current-buffer (cdr (assoc "s" buffers))
+      (drover-prompt-define 'agent (drover-test-action 'agent))
       (drover-prompt-define 'revert (drover-test-action 'revert))
       (drover-prompt-define 'fork (drover-test-action 'fork)))
     (drover-test-at-point "s"
       ;; Outside a list, the session's buffer does not count.
-      (should-not (drover-prompt-target 'revert))
+      (should-not (drover-prompt-target 'agent))
       (setq-local drover-view-p t)
-      (should (eq (drover-prompt-target 'revert) (cdr (assoc "s" buffers))))
+      (should (eq (drover-prompt-target 'agent) (cdr (assoc "s" buffers))))
+      ;; Editing a prompt needs the prompt in sight: never from a list.
+      (should-not (drover-prompt-target 'revert))
       (should-not (drover-prompt-target 'send))
       ;; In a list, forking acts on the whole session through its backend.
       (should-not (drover-prompt-target 'fork))
-      (drover-prompt-run 'revert)
-      (should (equal (car (car drover-test-actions)) 'revert))
+      (drover-prompt-run 'agent)
+      (should (equal (car (car drover-test-actions)) 'agent))
       (should (eq (nth 1 (car drover-test-actions)) (cdr (assoc "s" buffers)))))))
 
 (ert-deftest drover-test-prompt-target-default-buffer ()
@@ -559,15 +562,15 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (list (cons "s" (generate-new-buffer " s")))
     (let ((target (cdr (assoc "s" buffers))))
       (with-current-buffer target
-        (drover-prompt-define 'copy-block (drover-test-action 'copy-block)))
+        (drover-prompt-define 'model (drover-test-action 'model)))
       (save-window-excursion
         (let ((window (split-window)))
           (set-window-buffer window target)
           (drover-test-at-point "s"
             (setq-local drover-view-p t)
             (let ((origin (selected-window)))
-              (drover-prompt-run 'copy-block)
-              (should (equal (car drover-test-actions) (list 'copy-block target window)))
+              (drover-prompt-run 'model)
+              (should (equal (car drover-test-actions) (list 'model target window)))
               (should (eq (selected-window) origin)))))))))
 
 (ert-deftest drover-test-prompt-run-without-target ()

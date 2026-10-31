@@ -693,6 +693,11 @@ actions apply only check that it is set."
 (defconst drover--backend-prompt-actions '((compact . :compact) (fork . :fork))
   "Prompt actions that, in a list, are backend operations on the session.")
 
+(defconst drover--list-prompt-actions '(agent model effort directory last-answer)
+  "Prompt actions that, in a list, apply to the buffer of the session at point.
+The others edit or read what the user sees in a prompt buffer, the input
+or the text at point, and so apply only there.")
+
 (defun drover-prompt-define (action function)
   "Make FUNCTION perform prompt ACTION in the current buffer.
 FUNCTION is a command, called with no argument; nil removes ACTION.
@@ -716,7 +721,7 @@ symbol `default'."
   (cond
    ((drover-prompt-defines-p (current-buffer) action) (current-buffer))
    ((and list (assq action drover--backend-prompt-actions)) nil)
-   ((and list session
+   ((and list session (memq action drover--list-prompt-actions)
          (let ((buffer (drover-session-buffer session)))
            (and (drover-prompt-defines-p buffer action) buffer))))
    ((memq action drover--default-prompt-actions)
@@ -734,9 +739,10 @@ symbol `default'."
 It is, in order:
 
  1. the current buffer, when it defines ACTION;
- 2. in a list of sessions, the live buffer of the session at point,
-    when it defines ACTION; for `compact' and `fork' there is none, as
-    the backend operates on the session instead;
+ 2. in a list of sessions, for `agent', `model', `effort', `directory'
+    and `last-answer', the live buffer of the session at point, when it
+    defines ACTION; for `compact' and `fork' there is none, as the
+    backend operates on the session instead;
  3. for `agent', `model', `effort' and `directory', the buffer
     `drover-default-prompt-buffer-function' returns, when it defines
     ACTION;

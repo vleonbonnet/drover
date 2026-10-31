@@ -123,7 +123,7 @@ Everywhere, through the menu.
 | =.= | =drover-prompt-last-answer=  | show the start of the last answer                              |
 | =O= | =drover-prompt-open-link=    | open the link at point                                         |
 
-The OpenCode entries come with the OpenCode backend. =a=, =m=, =e= and =d= act on the current prompt buffer, or on the one =drover-default-prompt-buffer-function= returns; =.= on the prompt buffer you visited last.
+The OpenCode entries come with the OpenCode backend. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
 
 ** Adding to the menu
 
