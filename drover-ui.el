@@ -21,9 +21,9 @@
 ;;; Commentary:
 
 ;; Every view of sessions (dashboards, sidebar, completion) draws them
-;; with the same glyphs, faces and labels, and acts on them with the same
-;; commands and keys.  A view sets `drover-session-at-point-function' in
-;; its buffer and uses `drover-session-map' as the parent of its keymap.
+;; with the same glyphs, faces and labels, measures text the same way,
+;; and describes the filter in force the same way.  The commands and
+;; keys every view shares are in `drover-keys'.
 
 ;;; Code:
 
@@ -115,18 +115,6 @@ NOW defaults to the current time.  Return \"\" for a nil TIME."
             ((< seconds 86400) (format "%dh" (/ seconds 3600)))
             (t (format "%dd" (/ seconds 86400)))))))
 
-(defun drover-session-display-title (session)
-  "Return the title of SESSION, or its identifier."
-  (or (drover-session-title session) (drover-session-id session)))
-
-(defun drover-session-summary (session)
-  "Return one line on why SESSION has its status, or nil.
-A waiting session shows its oldest request, another its detail."
-  (if-let* ((request (car (drover-session-requests session))))
-      (concat (if (eq (plist-get request :kind) 'question) "asks: " "permit: ")
-              (plist-get request :summary))
-    (drover-session-detail session)))
-
 (defun drover-session-location (session)
   "Return the project and branch of SESSION as one string, or nil."
   (let ((project (drover-session-project session))
@@ -197,84 +185,45 @@ result is empty."
               (setq high (1- middle)))))
         (funcall cut low)))))
 
-;;;; The session at point
+;;;; Filters
 
-(defvar-local drover-session-at-point-function nil
-  "Function of no argument returning the session at point, or nil.
-Every view of sessions sets it in its buffer.")
+(defun drover--start-of-day (&optional time)
+  "Return the float time at which the day of TIME began, today by default."
+  (pcase-let ((`(,_ ,_ ,_ ,day ,month ,year) (decode-time time)))
+    ;; Midnight may fall on the other side of a daylight saving change.
+    (float-time (encode-time (list 0 0 0 day month year nil -1 nil)))))
 
-(defun drover-session-at-point ()
-  "Return the session at point, or signal a `user-error'."
-  (or (and drover-session-at-point-function
-           (funcall drover-session-at-point-function))
-      (user-error "No session at point")))
+(defun drover-filter-since-label (since &optional now)
+  "Return how a filter on activity since SINCE, a float time, reads.
+It is \"today\" for the start of the day of NOW, the current time by
+default, and otherwise the age of SINCE, such as \"2d\"."
+  (if (= since (drover--start-of-day now))
+      "today"
+    (concat "since " (drover-format-age since now))))
 
-(defun drover-open-at-point (&optional other-window)
-  "Display the session at point; with OTHER-WINDOW, in another window."
-  (interactive "P")
-  (drover-open (drover-session-at-point) other-window))
+(defun drover-filter-statuses-label (statuses)
+  "Return the display names of STATUSES as one string, such as \"done or failed\"."
+  (mapconcat (lambda (status) (downcase (drover-status-label status)))
+             statuses " or "))
 
-(defun drover-open-other-window-at-point ()
-  "Display the session at point in another window."
-  (interactive)
-  (drover-open (drover-session-at-point) t))
-
-(defun drover-respond-at-point ()
-  "Answer the oldest request of the session at point."
-  (interactive)
-  (drover-respond (drover-session-at-point)))
-
-(defun drover-interrupt-at-point ()
-  "Stop the running turn of the session at point."
-  (interactive)
-  (let ((session (drover-session-at-point)))
-    (when (y-or-n-p (format "Interrupt %s? " (drover-session-display-title session)))
-      (drover-interrupt session))))
-
-(defun drover-archive-at-point ()
-  "Archive the session at point."
-  (interactive)
-  (let ((session (drover-session-at-point)))
-    (when (y-or-n-p (format "Archive %s? " (drover-session-display-title session)))
-      (drover-archive session))))
-
-(defun drover-mark-seen-at-point ()
-  "Mark the ended turn of the session at point seen."
-  (interactive)
-  (drover-mark-seen (drover-session-at-point)))
-
-(defconst drover-peek-buffer "*drover peek*"
-  "Name of the buffer showing a session's preview.")
-
-(defun drover-peek-at-point ()
-  "Show where the session at point stands, without visiting it."
-  (interactive)
-  (let ((session (drover-session-at-point)))
-    (drover-preview
-     session
-     (lambda (text)
-       (with-current-buffer (get-buffer-create drover-peek-buffer)
-         (let ((inhibit-read-only t))
-           (erase-buffer)
-           (insert (propertize (drover-session-display-title session) 'face 'drover-heading)
-                   "\n\n"
-                   (or text "Nothing to show."))
-           (goto-char (point-min))
-           (special-mode)))
-       (display-buffer drover-peek-buffer
-                       '((display-buffer-reuse-window display-buffer-below-selected)
-                         (window-height . 0.3)))))))
-
-(defvar-keymap drover-session-map
-  :doc "Keys acting on the session at point, shared by every view."
-  "RET" #'drover-open-at-point
-  "o" #'drover-open-other-window-at-point
-  "a" #'drover-respond-at-point
-  "C-c C-q" #'drover-respond-at-point
-  "k" #'drover-interrupt-at-point
-  "A" #'drover-archive-at-point
-  "s" #'drover-mark-seen-at-point
-  "SPC" #'drover-peek-at-point)
+(defun drover-filter-description (&optional filter now)
+  "Return FILTER, `drover-filter' by default, described for headers, or nil.
+The description lists each member set, such as
+\"project drover, needs you, since 2d, \"auth\"\".  Ages count up to
+NOW, the current time by default.  Return nil when FILTER lists every
+session."
+  (let ((filter (or filter drover-filter)))
+    (when (drover-filter-active-p filter)
+      (let ((project (drover--filter-value filter :project))
+            (statuses (drover--filter-value filter :statuses))
+            (since (drover--filter-value filter :since))
+            (search (drover--filter-value filter :search)))
+        (mapconcat #'identity
+                   (delq nil (list (and project (concat "project " project))
+                                   (and statuses (drover-filter-statuses-label statuses))
+                                   (and since (drover-filter-since-label since now))
+                                   (and search (format "\"%s\"" search))))
+                   ", ")))))
 
 (provide 'drover-ui)
 ;;; drover-ui.el ends here

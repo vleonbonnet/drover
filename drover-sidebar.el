@@ -21,15 +21,20 @@
 ;;; Commentary:
 
 ;; `drover-sidebar' lists every session in a narrow side window, beside
-;; the user's work: one line per session under status headings, the
-;; sessions needing the user first, with what they wait for on a second
-;; line.  `drover-sidebar-select' moves there and back.
+;; the user's work: one line per session, the sessions needing the user
+;; first, with what they wait for on a second line.  Like every drover
+;; view, it lists the trees of `drover-view-trees', filtered by
+;; `drover-filter' and grouped as `drover-group-by' says: under status
+;; headings, the idle group last, under project headings, or without
+;; headings.  Headings fold.  `drover-sidebar-select' moves there and
+;; back.
 ;;
 ;; Subagents follow their parent, indented one level deeper, so that
-;; each status glyph sits under the title above it.  A parent goes in
-;; the group of the most urgent status in its tree: a parent whose
-;; subagent asks something shows under "Needs you", the subagent below
-;; it.  A subagent whose parent is not listed starts with an arrow.
+;; each status glyph sits under the title above it.  Grouped by status,
+;; a parent goes in the group of the most urgent status in its tree: a
+;; parent whose subagent asks something shows under "Needs you", the
+;; subagent below it.  A subagent whose parent is not listed starts
+;; with an arrow.
 ;;
 ;; The text uses the face `drover-sidebar', variable pitch by default,
 ;; for listings more compact than in a fixed-width font.  Lines are
@@ -38,10 +43,11 @@
 ;;
 ;; The sidebar acts on the "main window": the most recently used window
 ;; of its frame outside side windows, which is where the user worked
-;; last.  RET opens the session at point there and selects it, C-o
-;; shows it there and stays in the sidebar, and o shows it in yet
-;; another window.  With `drover-sidebar-preview', moving between
-;; sessions shows each in the main window as point reaches it.
+;; last.  It is the sidebar's `drover-main-window-function', so
+;; `drover-follow-mode' shows each session there as point reaches it;
+;; C-o shows the session at point there once, the sidebar staying
+;; selected.  Every other key acting on sessions is drover's own, from
+;; `drover-session-map'.
 ;;
 ;; The sidebar redraws on `drover-changed-hook' while a window shows
 ;; it, and once shown again after changes it missed.  When a backend
@@ -77,15 +83,9 @@ See `display-buffer-in-side-window'."
   :type 'integer
   :group 'drover-sidebar)
 
-(defcustom drover-sidebar-preview nil
-  "Whether moving to a session shows it in the main window.
-The sidebar stays selected.  \\<drover-sidebar-mode-map>\
-\\[drover-sidebar-toggle-preview] toggles it in the sidebar."
-  :type 'boolean
-  :group 'drover-sidebar)
-
 (defcustom drover-sidebar-folded-statuses nil
-  "Statuses whose group is folded when the sidebar is created."
+  "Statuses whose group is folded when the sidebar is created.
+They apply while `drover-group-by' groups sessions by status."
   :type '(repeat symbol)
   :group 'drover-sidebar)
 
@@ -116,8 +116,17 @@ or `fixed-pitch' instead to list sessions in a fixed-width font."
 Deeper subagents line up with that level, so that titles keep room in a
 narrow window.")
 
+(defvar-keymap drover-sidebar-heading-map
+  :doc "Keys on the group headings of the sidebar.
+They take precedence over `drover-sidebar-mode-map' there."
+  "RET" #'drover-sidebar-toggle-group)
+
+(defvar drover-sidebar-mode-map)
+
 (defvar-local drover-sidebar--folded nil
-  "Statuses whose group is folded.")
+  "Groups that are folded, each as (GROUPING . NAME).
+GROUPING is the value of `drover-group-by' making the group, and NAME
+its status, or its project name or nil.")
 
 (defvar-local drover-sidebar--stale t
   "Non-nil when sessions changed since the sidebar was last drawn.")
@@ -151,6 +160,7 @@ properties, to their widths in pixels.")
   (width nil :documentation "Width lines fill without being truncated.")
   (space nil :documentation "Width of a space.")
   (margin nil :documentation "Indentation of the top level, putting glyphs under group labels.")
+  (margin-columns nil :documentation "Spaces of text the top level is indented by.")
   (widths nil :documentation "Table of the widths of texts measured for this drawing.")
   (known nil :documentation "Table of the widths of the previous drawing, or nil.")
   (glyphs nil :documentation "Widths of the status glyphs, as an alist (STATUS . WIDTH)."))
@@ -194,11 +204,12 @@ Without WINDOW, return the width of a new sidebar in the selected frame."
           (- pixels column)
         pixels))))
 
-(defun drover-sidebar--layout (width window)
+(defun drover-sidebar--layout (width window &optional flat)
   "Return the measures of the current buffer drawn WIDTH pixels wide.
 Text is measured with the fonts of WINDOW, or of the selected window
-when WINDOW is nil.  The widths measured become those the next layout
-of the buffer may reuse."
+when WINDOW is nil.  FLAT non-nil means no group headings: the top
+level is not indented.  The widths measured become those the next
+layout of the buffer may reuse."
   (let* ((context (list (copy-tree face-remapping-alist) (window-frame window)))
          (widths (make-hash-table :test 'drover-sidebar--text))
          (layout (drover-sidebar--layout-create
@@ -217,7 +228,8 @@ of the buffer may reuse."
          (fold (drover-face (car drover-sidebar--fold-glyphs) 'drover-heading)))
     (setf (drover-sidebar--layout-space layout) space
           (drover-sidebar--layout-glyphs layout) glyphs
-          (drover-sidebar--layout-margin layout) (drover-sidebar--pixels layout fold))
+          (drover-sidebar--layout-margin layout) (if flat 0 (drover-sidebar--pixels layout fold))
+          (drover-sidebar--layout-margin-columns layout) (if flat 0 2))
     (setq drover-sidebar--widths (cons context widths))
     layout))
 
@@ -232,19 +244,36 @@ The spaces keep the buffer text readable, and the display gives the
 width, since spaces of a proportional font are narrow."
   (propertize (make-string columns ?\s) 'display `(space :width (,pixels))))
 
-(defun drover-sidebar--indent-columns (depth)
-  "Return the spaces of text indenting sessions at DEPTH in trees."
-  (* 2 (1+ (min depth drover-sidebar--max-depth))))
+(defun drover-sidebar--indent-columns (layout depth)
+  "Return the spaces of text indenting sessions at DEPTH in trees, per LAYOUT."
+  (+ (drover-sidebar--layout-margin-columns layout)
+     (* 2 (min depth drover-sidebar--max-depth))))
 
 ;;;; Drawing
 
 (defun drover-sidebar--groups (nodes)
-  "Return trees NODES grouped by status, with the idle group last."
-  (let* ((groups (drover-group-trees-by-status nodes))
-         (idle (assq 'idle groups)))
-    (if idle
-        (append (remq idle groups) (list idle))
-      groups)))
+  "Return trees NODES grouped as `drover-group-by' says.
+The value is a list of (GROUP . NODES).  GROUP is (GROUPING . NAME),
+GROUPING being the value of `drover-group-by' and NAME a status, the
+idle group last, or a project name or nil, in the order of
+`drover-group-trees-by-project'.  Without grouping, GROUP is nil and
+holds every tree; without trees, the value is nil."
+  (pcase drover-group-by
+    ('status
+     (let* ((groups (drover-group-trees-by-status nodes))
+            (idle (assq 'idle groups)))
+       (mapcar (lambda (group) (cons (cons 'status (car group)) (cdr group)))
+               (if idle (append (remq idle groups) (list idle)) groups))))
+    ('project
+     (mapcar (lambda (group) (cons (cons 'project (car group)) (cdr group)))
+             (drover-group-trees-by-project nodes)))
+    (_ (and nodes (list (cons nil nodes))))))
+
+(defun drover-sidebar--group-label (group)
+  "Return the display name of GROUP, a (GROUPING . NAME) pair."
+  (pcase group
+    (`(status . ,status) (drover-status-label status))
+    (`(project . ,project) (if project (drover-sidebar--one-line project) "No project"))))
 
 (defun drover-sidebar--one-line (string)
   "Return STRING with its line breaks and tabs replaced by spaces."
@@ -271,8 +300,9 @@ from their last activity, matching the order of `drover-sort'."
                      (drover-sidebar--one-line summary))))
    "\n"))
 
-(defun drover-sidebar--heading-line (status count folded layout)
-  "Return the heading of the group of COUNT trees of STATUS.
+(defun drover-sidebar--heading-line (group count folded layout)
+  "Return the heading of GROUP, of COUNT trees.
+GROUP is (GROUPING . NAME), as `drover-sidebar--groups' makes it.
 FOLDED non-nil marks the group folded; the line fits the width of
 LAYOUT."
   (drover-sidebar--truncate
@@ -280,7 +310,7 @@ LAYOUT."
    (concat (drover-face (concat (if folded
                                     (cdr drover-sidebar--fold-glyphs)
                                   (car drover-sidebar--fold-glyphs))
-                                (drover-status-label status))
+                                (drover-sidebar--group-label group))
                         'drover-heading)
            " "
            (drover-face (number-to-string count) 'drover-dim))
@@ -310,7 +340,7 @@ arrow before its title."
                             (drover-face "↳ " 'drover-dim)
                           "")
                         (if (eq status 'idle) (drover-face title 'drover-dim) title))))
-    (concat (drover-sidebar--blank (drover-sidebar--indent-columns depth) indent)
+    (concat (drover-sidebar--blank (drover-sidebar--indent-columns layout depth) indent)
             (drover-status-glyph status)
             " "
             (drover-sidebar--truncate
@@ -332,7 +362,7 @@ the width of LAYOUT."
   (when-let* (((drover-session-attention-p session))
               (summary (drover-session-summary session)))
     (let ((start (drover-sidebar--title-start layout session indent)))
-      (concat (drover-sidebar--blank (+ 2 (drover-sidebar--indent-columns depth)) start)
+      (concat (drover-sidebar--blank (+ 2 (drover-sidebar--indent-columns layout depth)) start)
               (drover-sidebar--truncate
                layout (drover-face (drover-sidebar--one-line summary) 'drover-dim)
                (- (drover-sidebar--layout-width layout) start))))))
@@ -347,8 +377,7 @@ the width of LAYOUT."
   "Insert the lines of SESSION, at DEPTH in its tree, with ages as of NOW.
 Its line is indented INDENT pixels.  PATH lists the keys of SESSION and
 of the sessions above it, nearest first.  LAYOUT gives the measures."
-  (let ((status (drover-session-status session))
-        (start (point)))
+  (let ((start (point)))
     (drover-sidebar--insert-line (drover-sidebar--session-line session depth indent layout now)
                                  'drover-sidebar-line 'session
                                  'mouse-face 'highlight
@@ -362,8 +391,7 @@ of the sessions above it, nearest first.  LAYOUT gives the measures."
     ;; `next-single-property-change' finds where the session ends.
     (add-text-properties start (point) (list 'drover-sidebar-key (car path)
                                              'drover-sidebar-path path
-                                             'drover-sidebar-session session
-                                             'drover-sidebar-status status))))
+                                             'drover-sidebar-session session))))
 
 (defun drover-sidebar--insert-tree (node depth indent path layout now)
   "Insert the lines of tree NODE, at DEPTH, with ages as of NOW.
@@ -387,42 +415,81 @@ glyph sits under the title above it."
                              (drover-sidebar--layout-width layout))
    'drover-sidebar-line type))
 
+(defun drover-sidebar--insert-filter (description layout)
+  "Insert the line telling the filter in force, DESCRIPTION, per LAYOUT."
+  (drover-sidebar--insert-line
+   (drover-sidebar--truncate layout
+                             (concat (drover-face "Filter: " 'drover-dim) description)
+                             (drover-sidebar--layout-width layout))
+   'drover-sidebar-line 'filter
+   'help-echo (format "Filter: %s\n%s" description (drover-filter-clear-hint drover-sidebar-mode-map))))
+
+(defun drover-sidebar--heading-map-properties ()
+  "Return the text properties giving a heading line its keys.
+They make the keymap hold from the start of the line to its end, and
+not past it."
+  (list 'keymap drover-sidebar-heading-map
+        'front-sticky '(keymap)
+        'rear-nonsticky '(keymap)))
+
+(defun drover-sidebar--insert-group (group members layout now)
+  "Insert GROUP of trees MEMBERS, with ages as of NOW, per LAYOUT.
+GROUP is (GROUPING . NAME) under a heading, or nil for trees without
+one.  Every line of the group tells GROUP."
+  (let ((start (point))
+        (folded (and group (member group drover-sidebar--folded))))
+    (when group
+      (apply #'drover-sidebar--insert-line
+             (drover-sidebar--heading-line group (length members) folded layout)
+             'drover-sidebar-line 'heading
+             'mouse-face 'highlight
+             'follow-link t
+             'help-echo (if folded "Show this group" "Fold this group")
+             (drover-sidebar--heading-map-properties))
+      (remove-text-properties (1- (point)) (point) '(mouse-face nil)))
+    (unless folded
+      (dolist (node members)
+        (drover-sidebar--insert-tree node 0 (drover-sidebar--layout-margin layout)
+                                     nil layout now)))
+    (when group
+      (put-text-property start (point) 'drover-sidebar-group group))))
+
 (defun drover-sidebar--render (width &optional now window)
-  "Draw every session in the current buffer, WIDTH pixels wide.
-Ages count up to NOW, a float time defaulting to the current time.
-Text is measured with the fonts of WINDOW, or of the selected window.
-Point lands at the start of the buffer."
+  "Draw the sessions of `drover-view-trees' in the current buffer.
+Lines are WIDTH pixels wide; ages count up to NOW, a float time
+defaulting to the current time.  Text is measured with the fonts of
+WINDOW, or of the selected window.  Point lands at the start of the
+buffer."
   (let* ((inhibit-read-only t)
          (now (or now (float-time)))
-         (trees (drover-tree (drover-sessions)))
-         (groups (drover-sidebar--groups (drover-tree-visible trees)))
-         (hidden (drover-tree-hidden-count trees))
-         (layout (drover-sidebar--layout width window)))
+         (sessions (drover-sessions))
+         (trees (drover-view-trees sessions))
+         (hidden (drover-view-hidden-count sessions))
+         (groups (drover-sidebar--groups trees))
+         (filter (drover-filter-description nil now))
+         (headings (and (car (car groups)) t))
+         (layout (drover-sidebar--layout width window (not headings))))
     (erase-buffer)
     (setq drover-sidebar--width width)
-    (unless groups
-      (drover-sidebar--insert-note "No sessions." 'empty layout))
-    (pcase-dolist (`(,status . ,members) groups)
-      (let ((folded (memq status drover-sidebar--folded)))
-        (drover-sidebar--insert-line
-         (drover-sidebar--heading-line status (length members) folded layout)
-         'drover-sidebar-line 'heading
-         'drover-sidebar-status status
-         'mouse-face 'highlight
-         'follow-link t
-         'help-echo (if folded "Show this group" "Fold this group"))
-        (remove-text-properties (1- (point)) (point) '(mouse-face nil))
-        (unless folded
-          (dolist (node members)
-            (drover-sidebar--insert-tree node 0 (drover-sidebar--layout-margin layout)
-                                         nil layout now)))))
+    (when filter
+      (drover-sidebar--insert-filter filter layout))
+    (cond
+     (groups
+      (pcase-dolist (`(,group . ,members) groups)
+        (drover-sidebar--insert-group group members layout now)))
+     ((and filter sessions)
+      (drover-sidebar--insert-note "No session matches." 'empty layout)
+      (drover-sidebar--insert-note (drover-filter-clear-hint drover-sidebar-mode-map)
+                                   'hint layout))
+     (t (drover-sidebar--insert-note "No sessions." 'empty layout)))
     ;; Every tree shows its root, so hidden subagents never leave the
     ;; list empty: the hint at them closes the list instead.
     (when (> hidden 0)
       (drover-sidebar--insert-note
        (substitute-command-keys
-        (format "\\<drover-sidebar-mode-map>\\[drover-sidebar-toggle-children] shows %d subagent%s."
-                hidden (if (= hidden 1) "" "s")))
+        (format "\\<drover-sidebar-mode-map>\\[drover-toggle-subagents] shows %d subagent%s."
+                hidden (if (= hidden 1) "" "s"))
+        t)
        'hint layout))
     (goto-char (point-min))
     (drover-sidebar--update-current)))
@@ -431,8 +498,8 @@ Point lands at the start of the buffer."
 
 (defun drover-sidebar--line-type (&optional position)
   "Return the kind of the line at POSITION or point.
-It is `heading', `session', `summary', `empty', `hint', or nil past the
-end."
+It is `filter', `heading', `session', `summary', `empty', `hint', or nil
+past the end."
   (get-text-property (save-excursion
                        (when position (goto-char position))
                        (line-beginning-position))
@@ -478,7 +545,7 @@ PREDICATE is called with the start of the line."
   "Return what the line at POSITION shows, to find it again after a redraw.
 The value is (TYPE ID LINE): TYPE is `session', with ID the keys of the
 session and of the sessions above it in its tree, nearest first, or
-`heading', with ID its status, or nil; LINE is the line number."
+`heading', with ID its group, or nil; LINE is the line number."
   (when (> (buffer-size) 0)
     (save-excursion
       (goto-char position)
@@ -487,7 +554,7 @@ session and of the sessions above it in its tree, nearest first, or
         (cond
          (path (list 'session path line))
          ((eq (drover-sidebar--line-type) 'heading)
-          (list 'heading (get-text-property (line-beginning-position) 'drover-sidebar-status) line))
+          (list 'heading (get-text-property (line-beginning-position) 'drover-sidebar-group) line))
          (t (list nil nil line)))))))
 
 (defun drover-sidebar--first-session ()
@@ -523,7 +590,7 @@ session."
                      id))
           ('heading (drover-sidebar--find-line
                      'heading (lambda (start)
-                                (eq (get-text-property start 'drover-sidebar-status) id)))))
+                                (equal (get-text-property start 'drover-sidebar-group) id)))))
         (and line (drover-sidebar--line-position line))
         (drover-sidebar--first-session)
         (point-min))))
@@ -750,14 +817,6 @@ Text is measured anew, as after changing the face `drover-sidebar'."
       (drover-open session t)))
   (drover-sidebar--update-current))
 
-(defun drover-sidebar--preview ()
-  "Show the session at point in the main window, if previews are on."
-  (when-let* ((drover-sidebar-preview)
-              (session (drover-sidebar--session-at-point))
-              ((drover-supports-p session :open)))
-    (with-demoted-errors "Drover preview: %S"
-      (drover-sidebar--display session))))
-
 (defun drover-sidebar--move (count types)
   "Move to the COUNTth line of TYPES after point, before when negative.
 Return non-nil when point moved."
@@ -768,18 +827,14 @@ Return non-nil when point moved."
     nil))
 
 (defun drover-sidebar-next (&optional count)
-  "Move to the next session, or COUNT sessions forward.
-Show it in the main window when `drover-sidebar-preview' is non-nil."
+  "Move to the next session, or COUNT sessions forward."
   (interactive "p" drover-sidebar-mode)
-  (when (drover-sidebar--move (or count 1) '(session))
-    (drover-sidebar--preview)))
+  (drover-sidebar--move (or count 1) '(session)))
 
 (defun drover-sidebar-previous (&optional count)
-  "Move to the previous session, or COUNT sessions back.
-Show it in the main window when `drover-sidebar-preview' is non-nil."
+  "Move to the previous session, or COUNT sessions back."
   (interactive "p" drover-sidebar-mode)
-  (when (drover-sidebar--move (- (or count 1)) '(session))
-    (drover-sidebar--preview)))
+  (drover-sidebar--move (- (or count 1)) '(session)))
 
 (defun drover-sidebar-next-group (&optional count)
   "Move to the next group heading, or COUNT headings forward."
@@ -793,23 +848,28 @@ Show it in the main window when `drover-sidebar-preview' is non-nil."
 
 (defun drover-sidebar-toggle-group ()
   "Fold or unfold the group at point.
-Point moves to the group's heading."
+Point moves to the group's heading.  The fold lasts while sessions are
+grouped the same way, and comes back with that grouping."
   (interactive nil drover-sidebar-mode)
-  (let ((status (get-text-property (line-beginning-position) 'drover-sidebar-status)))
-    (unless status
+  (let ((group (get-text-property (line-beginning-position) 'drover-sidebar-group)))
+    (unless group
       (user-error "No group at point"))
-    (setq drover-sidebar--folded (if (memq status drover-sidebar--folded)
-                                     (delq status drover-sidebar--folded)
-                                   (cons status drover-sidebar--folded)))
-    (drover-sidebar--redraw (list 'heading status nil))))
+    (setq drover-sidebar--folded (if (member group drover-sidebar--folded)
+                                     (remove group drover-sidebar--folded)
+                                   (cons group drover-sidebar--folded)))
+    (drover-sidebar--redraw (list 'heading group nil))))
 
 (defun drover-sidebar-toggle-all-groups ()
-  "Fold every group, or unfold them all when all are folded."
+  "Fold every group shown, or unfold them all when all are folded."
   (interactive nil drover-sidebar-mode)
-  (let* ((shown (delq nil (mapcar (lambda (start) (get-text-property start 'drover-sidebar-status))
-                                  (drover-sidebar--heading-starts))))
-         (all-folded (seq-every-p (lambda (status) (memq status drover-sidebar--folded)) shown)))
-    (setq drover-sidebar--folded (if all-folded nil (copy-sequence drover-status-order)))
+  (let* ((shown (mapcar (lambda (start) (get-text-property start 'drover-sidebar-group))
+                        (drover-sidebar--heading-starts)))
+         (all-folded (seq-every-p (lambda (group) (member group drover-sidebar--folded)) shown)))
+    (unless shown
+      (user-error "No groups to fold"))
+    (setq drover-sidebar--folded (if all-folded
+                                     (seq-difference drover-sidebar--folded shown)
+                                   (seq-union drover-sidebar--folded shown)))
     (drover-sidebar--redraw)))
 
 (defun drover-sidebar--heading-starts ()
@@ -823,105 +883,71 @@ Point moves to the group's heading."
         (forward-line 1))
       (nreverse starts))))
 
-(defun drover-sidebar-open ()
-  "Open the session at point in the main window and select it.
-On a group heading, fold or unfold the group."
-  (interactive nil drover-sidebar-mode)
-  (if (eq (drover-sidebar--line-type) 'heading)
-      (drover-sidebar-toggle-group)
-    (let ((session (drover-session-at-point))
-          (main (drover-sidebar--main-window)))
-      (unless (drover-supports-p session :open)
-        (user-error "%s sessions cannot be opened" (drover-backend-label session)))
-      (if main
-          (progn (select-window main)
-                 (drover-open session))
-        (drover-open session t)))))
-
-(defun drover-sidebar-open-other-window ()
-  "Open the session at point in a window other than the main window.
-The sidebar stays selected."
-  (interactive nil drover-sidebar-mode)
-  (let ((session (drover-session-at-point)))
-    (if-let* ((main (drover-sidebar--main-window)))
-        (with-selected-window main
-          (drover-open session t))
-      (save-selected-window
-        (drover-open session t)))
-    (drover-sidebar--update-current)))
-
 (defun drover-sidebar-display ()
   "Show the session at point in the main window, staying in the sidebar."
   (interactive nil drover-sidebar-mode)
   (drover-sidebar--display (drover-session-at-point)))
 
 (defun drover-sidebar-mouse-open (event)
-  "Open the session clicked in EVENT, or fold or unfold the group clicked."
+  "Open the session clicked in EVENT, or fold or unfold the group clicked.
+A session opens as \\<drover-sidebar-mode-map>\\[drover-open-at-point] opens it."
   (interactive "e" drover-sidebar-mode)
   (let ((position (event-end event)))
     (select-window (posn-window position))
     (goto-char (posn-point position))
-    (drover-sidebar-open)))
-
-(defun drover-sidebar-toggle-preview ()
-  "Toggle showing sessions in the main window while moving between them.
-The change is local to the sidebar."
-  (interactive nil drover-sidebar-mode)
-  (setq-local drover-sidebar-preview (not drover-sidebar-preview))
-  (force-mode-line-update)
-  (drover-sidebar--preview)
-  (message "Sidebar previews %s" (if drover-sidebar-preview "on" "off")))
-
-(defun drover-sidebar-toggle-children ()
-  "Toggle listing the sessions of subagents in the sidebar.
-Each shows under its parent.  A subagent needing the user, and those
-above it, always show.  Point on a subagent now hidden moves to the
-nearest session above it."
-  (interactive nil drover-sidebar-mode)
-  (setq-local drover-show-children (not drover-show-children))
-  (force-mode-line-update)
-  (drover-sidebar--redraw)
-  (message "%s subagent sessions" (if drover-show-children "Showing" "Hiding")))
+    (if (eq (drover-sidebar--line-type) 'heading)
+        (drover-sidebar-toggle-group)
+      (call-interactively #'drover-open-at-point))))
 
 ;;;; Mode
 
 (defun drover-sidebar--mode-line-flags ()
-  "Return the mode line flags of the local sidebar settings."
+  "Return the mode line flags of the settings the sidebar follows."
   (concat (and drover-show-children " +sub")
-          (and drover-sidebar-preview " preview")))
+          (and drover-follow-mode " Follow")))
 
 (defvar-keymap drover-sidebar-mode-map
-  :doc "Keymap of `drover-sidebar-mode'."
-  :parent drover-session-map
+  :doc "Keymap of `drover-sidebar-mode'.
+Its parent combines `drover-session-map', whose keys act on the session
+at point, and `special-mode-map'.  On a group heading,
+`drover-sidebar-heading-map' takes precedence."
+  :parent (make-composed-keymap drover-session-map special-mode-map)
+  "RET" #'drover-open-at-point
+  "C-o" #'drover-sidebar-display
   "n" #'drover-sidebar-next
   "p" #'drover-sidebar-previous
   "M-n" #'drover-sidebar-next-group
   "M-p" #'drover-sidebar-previous-group
   "TAB" #'drover-sidebar-toggle-group
   "<backtab>" #'drover-sidebar-toggle-all-groups
-  "RET" #'drover-sidebar-open
-  "o" #'drover-sidebar-open-other-window
-  "C-o" #'drover-sidebar-display
-  "C-c C-f" #'drover-sidebar-toggle-preview
-  "c" #'drover-sidebar-toggle-children
-  "g" #'drover-sidebar-refresh
   "q" #'drover-sidebar-hide
-  "?" #'describe-mode
-  "h" #'describe-mode
-  "<" #'beginning-of-buffer
-  ">" #'end-of-buffer
   "<mouse-2>" #'drover-sidebar-mouse-open)
 
 (define-derived-mode drover-sidebar-mode special-mode "Drover"
-  "Major mode of the drover sidebar, listing sessions by status.
+  "Major mode of the drover sidebar, listing sessions of coding agents.
+Like every drover view, it lists the sessions `drover-filter' keeps,
+grouped as `drover-group-by' says.\\<drover-sidebar-mode-map>
+\\[drover-group] groups and \\[drover-filter] filters sessions in every
+view, and \\[drover-toggle-subagents] shows or hides subagents.
+\\[drover-sidebar-toggle-group] folds the group at point, as \\`RET'
+does on its heading.
+
+The keys of `drover-session-map' act on the session at point.  The
+sidebar shows sessions in the main window, where the user works:
+\\[drover-sidebar-display] shows the session at point there, the
+sidebar staying selected, and \\[drover-follow-mode] shows each session
+there as point reaches it.
 
 \\{drover-sidebar-mode-map}"
   :interactive nil
-  (setq-local drover-session-at-point-function #'drover-sidebar--session-at-point
+  (setq-local drover-view-p t
+              drover-session-at-point-function #'drover-sidebar--session-at-point
+              drover-main-window-function #'drover-sidebar--main-window
               revert-buffer-function (lambda (&rest _)
                                        (setq drover-sidebar--widths nil)
                                        (drover-sidebar--redraw))
-              drover-sidebar--folded (copy-sequence drover-sidebar-folded-statuses)
+              drover-sidebar--folded (mapcar (lambda (status) (cons 'status status))
+                                             drover-sidebar-folded-statuses)
               truncate-lines t
               buffer-undo-list t
               cursor-in-non-selected-windows nil

@@ -3,33 +3,34 @@
 
 * Modules
 
-| Module              | Responsibility                                                                                     |
-|---------------------+----------------------------------------------------------------------------------------------------|
-| =drover.el=         | Entry point: loads the core and the interface, and each backend once its front end is loaded       |
-| =drover-core.el=    | The session record, backend registry, status ranking and grouping, change coalescing, actions      |
-| =drover-ui.el=      | Faces, glyphs, labels and ages; the session at point; commands and keys shared by every view       |
-| =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions |
-| =drover-opencode.el= | The opencode.el backend, built on =opencode-state=                                                |
-| =drover-dashboard.el= | Dashboard prototype: collapsible =magit-section= groups, proportional font                        |
-| =drover-table.el=   | Dashboard prototype: one =vtable=, trees kept together whatever the sort                           |
-| =drover-sidebar.el= | Dashboard prototype: a narrow side window, proportional font                                       |
+| Module                | Responsibility                                                                                                                                                      |
+|-----------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =drover.el=           | Entry point: loads the core and the interface, and each backend once its front end is loaded                                                                        |
+| =drover-core.el=      | The session record, backend registry, status ranking and grouping, change coalescing, actions; view settings and filtering; the session at point and prompt actions |
+| =drover-ui.el=        | Faces, glyphs, labels, ages and filter descriptions; measuring text in pixels                                                                                       |
+| =drover-keys.el=      | Commands on the session at point and the prompt, the shared keymap, follow mode, the menus =drover-dispatch=, =drover-group= and =drover-filter=                    |
+| =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions                                                                    |
+| =drover-opencode.el=  | The opencode.el backend, built on =opencode-state=                                                                                                                  |
+| =drover-dashboard.el= | Dashboard prototype: collapsible =magit-section= groups, proportional font                                                                                          |
+| =drover-table.el=     | Dashboard prototype: one =vtable=, trees kept together whatever the sort                                                                                            |
+| =drover-sidebar.el=   | Dashboard prototype: a narrow side window, proportional font                                                                                                        |
 
 * Backends describe, drover arranges
 
-A backend owns its sessions and their state; drover asks it for =drover-session= records whenever it draws, and never caches them beyond one redraw.  The record is a snapshot with one status, so every view ranks and groups sessions the same way, through =drover-sort=, =drover-group-by-status= and =drover-group-by-project=.
+A backend owns its sessions and their state; drover asks it for =drover-session= records whenever it draws, and never caches them beyond one redraw.  The record is a snapshot with one status, so every view ranks and groups sessions the same way, through =drover-sort=, =drover-tree=, =drover-group-trees-by-status= and =drover-group-trees-by-project=.
 
 Backends report changes with =drover-backend-changed=.  A turn streams many events, so changes are coalesced: =drover-changed-hook= runs once the backends have been quiet for =drover-refresh-delay= seconds, and views redraw from it.
 
 * One status per session
 
-| Status     | Meaning                                                      |
-|------------+--------------------------------------------------------------|
-| =waiting=  | A permission request or question waits for the user          |
-| =failed=   | A turn failed while the user was not looking at the session  |
-| =done=     | A turn ended while the user was not looking at the session   |
-| =retrying= | The running turn waits to retry a failed request             |
-| =working=  | A turn runs                                                  |
-| =idle=     | Nothing to do                                                |
+| Status     | Meaning                                                     |
+|------------+-------------------------------------------------------------|
+| =waiting=  | A permission request or question waits for the user         |
+| =failed=   | A turn failed while the user was not looking at the session |
+| =done=     | A turn ended while the user was not looking at the session  |
+| =retrying= | The running turn waits to retry a failed request            |
+| =working=  | A turn runs                                                 |
+| =idle=     | Nothing to do                                               |
 
 The first three need the user (=drover-attention-statuses=).  Among them, the session waiting longest comes first: =since= is when the status began.  Seen and unseen are the backend's to track: for OpenCode, the service records when a client viewed a session, so a turn read in any client is no longer =done=.
 
@@ -48,3 +49,29 @@ Every action takes a session and calls the matching function its backend registe
 * Measuring in pixels
 
 Lists read better in a proportional font, so the views lay text out in pixels: columns align with =(space :align-to (X))=, and long text is cut by =drover-truncate-to-pixels=.  =drover-text-pixel-width= lays text out in a buffer of its own with the view's face remapping and the fonts of the view's window, because =string-pixel-width= ignores face remapping before Emacs 31.  On a text terminal a pixel is a character cell, so the same layout holds there and in batch tests.
+
+* Keys: three sets in one menu
+
+Every key belongs to one of three sets, and no key to two: session keys act on the session at point, prompt keys on the prompt the user writes, global keys anywhere.  Because they never collide, one menu, =drover-dispatch=, holds all three, and a key means the same everywhere.  Lists of sessions bind the session keys directly (=drover-session-map=, inherited by drover's views and added to other lists by =drover-session-keys-mode=); everything else goes through the menu, which the user binds to one global key.
+
+The menu shows every entry wherever it is invoked, greying out those that do not apply, so its layout never moves and keys are learnt by position.  What applies is computed once, when the menu opens (its scope, from =drover--context=), since finding the session at point may ask the backends for every session.
+
+Other packages add their global commands to the menu relative to drover's keys, as Magit extensions do: the OpenCode backend inserts its session lists before =3=.
+
+* The session at point, in lists and prompt buffers
+
+Commands on a session take it as an argument and read it, interactively, from =drover-session-at-point-function=.  Lists set it to the row at point; a buffer belonging to one session, such as an OpenCode session buffer or an Org buffer where prompts are written, sets it to that session.  So the same command works from a list and from the conversation, and backends need no command of their own.
+
+Parents and subagents need no backend operation: they are found among the sessions through =drover-session-parent=.  A parent the backend no longer lists is still opened by its identifier.
+
+* Prompt actions
+
+Prompt buffers differ (a Comint buffer for OpenCode, an Org buffer in the user's configuration), but the user's gestures are the same: send, attach, revert, choose the model.  A prompt buffer declares the actions it implements in =drover-prompt-actions=, each a command; drover's prompt commands look for the buffer an action applies to (=drover-prompt-target=): the current one, in a list the session's buffer, for the agent, model, effort and directory a default prompt buffer, and for the last answer the prompt buffer visited last.  An action applying to a buffer shown in a window runs in that window, so that it sees the point the user sees.
+
+Compacting and forking exist both ways: in a prompt buffer they are prompt actions (forking at point), in a list backend operations on the whole session.
+
+* View settings
+
+Grouping (=drover-group-by=), filtering (=drover-filter=) and whether subagents show (=drover-show-children=) are global: every view lists the same sessions the same way, and changing a setting redraws them all at once through =drover-changed-hook=.  Views draw =drover-view-trees=.
+
+A filter keeps a tree when a session in it matches, with the sessions above each match, so a matching subagent shows under its parent.  Hidden subagents stay hidden unless they explain why their tree is listed: a matching subagent shows when no session above it matches.  Filtering a project thus lists its sessions without every one of their subagents, while filtering on a status or a text shows the subagent that has it.

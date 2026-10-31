@@ -30,6 +30,9 @@
 
 (require 'drover-test-helpers)
 (require 'drover-sidebar)
+;; Loaded before tests stub its functions, which loading would undo.
+(require 'drover-attention)
+(require 'ol)
 
 (defmacro drover-sidebar-test-with (sessions &rest body)
   "Run BODY with the fake backend serving SESSIONS and default settings.
@@ -37,12 +40,12 @@ Kill the sidebar and the session buffers, and restore one window, after."
   (declare (indent 1) (debug t))
   `(drover-test-with-backend ,sessions
      (let ((drover-sidebar-age-interval nil)
-           (drover-sidebar-preview nil)
            (drover-sidebar-folded-statuses nil)
            (drover-sidebar-side 'left)
            (drover-sidebar-width 36)
            (drover-sidebar-slot 0)
            (drover-status-order '(waiting failed done retrying working idle))
+           (drover-store-link-functions nil)
            ;; Readable glyphs, whatever the defaults.
            (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
                                    (retrying . "↻") (working . "◐") (idle . "·"))))
@@ -52,6 +55,9 @@ Kill the sidebar and the session buffers, and restore one window, after."
 
 (defun drover-sidebar-test--cleanup ()
   "Kill the buffers the tests made and leave one window."
+  ;; A test failing within a menu leaves it open, holding the keys.
+  (when (bound-and-true-p transient--prefix)
+    (ignore-errors (execute-kbd-macro (kbd "C-g"))))
   (dolist (buffer (buffer-list))
     ;; Killing the sidebar kills its measuring buffer too.
     (when (and (buffer-live-p buffer)
@@ -62,6 +68,11 @@ Kill the sidebar and the session buffers, and restore one window, after."
                                     (window-list nil 'nomini))))
   (set-window-dedicated-p (selected-window) nil)
   (switch-to-buffer "*scratch*"))
+
+(defun drover-sidebar-test--type (keys)
+  "Type KEYS, a key description, in the selected window.
+They run through the command loop, as the user's keys do."
+  (execute-kbd-macro (kbd keys)))
 
 (defun drover-sidebar-test--render (&optional width)
   "Draw the sidebar buffer WIDTH columns wide, at `drover-test-now'; return it."
@@ -84,6 +95,12 @@ Kill the sidebar and the session buffers, and restore one window, after."
 (defun drover-sidebar-test--key ()
   "Return the identifier of the session at point in the current buffer, or nil."
   (cdr (get-text-property (line-beginning-position) 'drover-sidebar-key)))
+
+(defun drover-sidebar-test--key-at (position)
+  "Return the identifier of the session at POSITION in the current buffer, or nil."
+  (save-excursion
+    (goto-char position)
+    (drover-sidebar-test--key)))
 
 (defun drover-sidebar-test--session-buffer-name (session)
   "Return the name of the buffer of SESSION."
@@ -332,9 +349,9 @@ Each shows its own buffer."
       (drover-sidebar-test--goto "done")
       (drover-sidebar-next-group)
       (should (eq (drover-sidebar--line-type) 'heading))
-      (should (eq (get-text-property (point) 'drover-sidebar-status) 'working))
+      (should (equal (get-text-property (point) 'drover-sidebar-group) '(status . working)))
       (drover-sidebar-previous-group 2)
-      (should (eq (get-text-property (point) 'drover-sidebar-status) 'failed)))))
+      (should (equal (get-text-property (point) 'drover-sidebar-group) '(status . failed))))))
 
 (ert-deftest drover-sidebar-test-session-at-point-is-fresh ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)
@@ -388,6 +405,36 @@ Each shows its own buffer."
       (should (equal (buffer-substring-no-properties (point) (line-end-position)) "▸ Needs you 1"))
       (call-interactively (key-binding (kbd "TAB")))
       (should (equal (buffer-substring-no-properties (point) (line-end-position)) "▾ Needs you 1")))))
+
+(ert-deftest drover-sidebar-test-ret-folds-only-on-headings ()
+  "RET folds a group on its heading, and opens the session anywhere else."
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (with-current-buffer (drover-sidebar-test--render)
+      (dolist (heading (drover-sidebar--heading-starts))
+        (goto-char heading)
+        (should (eq (key-binding (kbd "RET")) #'drover-sidebar-toggle-group))
+        (end-of-line)
+        (should (eq (key-binding (kbd "RET")) #'drover-sidebar-toggle-group))
+        ;; The line after a heading is a session's, from its start.
+        (forward-line 1)
+        (should (eq (drover-sidebar--line-type) 'session))
+        (should (eq (key-binding (kbd "RET")) #'drover-open-at-point)))
+      ;; A session's summary line opens it too.
+      (drover-sidebar-test--goto "ask")
+      (forward-line 1)
+      (should (eq (key-binding (kbd "RET")) #'drover-open-at-point))
+      (call-interactively (key-binding (kbd "RET")))
+      (should (equal drover-test-calls '((:open "ask" nil)))))))
+
+(ert-deftest drover-sidebar-test-fold-from-rolled-up-parent ()
+  "Folding from a session folds the group it is listed in, not its status's."
+  (drover-sidebar-test-with (drover-sidebar-test--asking-child)
+    (with-current-buffer (drover-sidebar-test--render)
+      ;; The parent is done, but listed under "Needs you" for its subagent.
+      (drover-sidebar-test--goto "parent")
+      (drover-sidebar-toggle-group)
+      (should (equal (buffer-substring-no-properties (point) (line-end-position)) "▸ Needs you 2"))
+      (should-not (string-search "Done" (buffer-string))))))
 
 (ert-deftest drover-sidebar-test-fold-all ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)
@@ -523,34 +570,37 @@ Each shows its own buffer."
       (should (eq (get-text-property (+ (point) 4) 'face) 'drover-dim))
       (should-not (text-property-any (point-min) (point-max) 'drover-sidebar-line 'hint)))))
 
-(ert-deftest drover-sidebar-test-toggle-children ()
+(ert-deftest drover-sidebar-test-toggle-subagents ()
   (drover-sidebar-test-with (list (drover-test-session "root" :status 'idle)
                                   (drover-test-session "quiet" :parent "root" :status 'idle)
                                   (drover-test-session "asking" :parent "root" :status 'waiting))
-    (with-current-buffer (drover-sidebar-test--render)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
       ;; A subagent needing the user shows under its parent; the others
-      ;; are counted by the hint closing the list.
+      ;; are counted by the hint closing the list, which names the key.
       (should (equal (drover-sidebar-test--lines)
                      '("▾ Needs you 1" "  · Session root" "    ⚑ Session asking"
-                       "c shows 1 subagent.")))
+                       "U shows 1 subagent.")))
       (goto-char (point-max))
       (forward-line -1)
       (should (eq (drover-sidebar--line-type) 'hint))
       (should (eq (get-text-property (point) 'face) 'drover-dim))
-      (drover-sidebar-toggle-children)
-      (should (local-variable-p 'drover-show-children))
-      (should drover-show-children)
-      (should-not (default-value 'drover-show-children))
+      (drover-sidebar-test--goto "asking")
+      (drover-sidebar-test--type "U")
+      ;; Every view follows: the setting is global.
+      (should (default-value 'drover-show-children))
+      (should-not (local-variable-p 'drover-show-children))
       (should (equal (drover-sidebar-test--lines)
                      '("▾ Needs you 1" "  · Session root" "    ⚑ Session asking"
                        "    · Session quiet")))
+      (should (equal (drover-sidebar-test--key) "asking"))
       (should (equal (drover-sidebar--mode-line-flags) " +sub"))
       ;; Point on a subagent the toggle hides moves to its parent.
       (drover-sidebar-test--goto "quiet")
-      (call-interactively (key-binding (kbd "c")))
+      (drover-sidebar-test--type "U")
       (should-not drover-show-children)
       (should-not (string-search "Session quiet" (buffer-string)))
-      (should (equal (drover-sidebar-test--key) "root")))))
+      (should (equal (drover-sidebar-test--key) "root"))
+      (should (equal (drover-sidebar-test--key-at (window-point (selected-window))) "root")))))
 
 (ert-deftest drover-sidebar-test-hint-counts-hidden-subagents ()
   (drover-sidebar-test-with (append (list (drover-test-session "a" :parent "root")
@@ -558,7 +608,7 @@ Each shows its own buffer."
                                     (drover-sidebar-test--family))
     (with-current-buffer (drover-sidebar-test--render)
       ;; child, grand, a and b, all below root, none needing the user.
-      (should (equal (car (last (drover-sidebar-test--lines))) "c shows 4 subagents."))
+      (should (equal (car (last (drover-sidebar-test--lines))) "U shows 4 subagents."))
       ;; Moving never lands on the hint.
       (goto-char (point-min))
       (let ((moves 0))
@@ -589,7 +639,7 @@ Each shows its own buffer."
 (ert-deftest drover-sidebar-test-point-stays-on-nested-session ()
   (drover-sidebar-test-with (drover-sidebar-test--asking-child)
     (with-current-buffer (drover-sidebar-test--render)
-      (setq-local drover-show-children t)
+      (setq drover-show-children t)
       (drover-sidebar--redraw)
       (drover-sidebar-test--goto "asking")
       ;; The subagent stops waiting: its tree moves to the parent's group.
@@ -597,12 +647,13 @@ Each shows its own buffer."
             (drover-session-requests (drover-find 'fake "asking")) nil)
       (drover-sidebar--redraw)
       (should (equal (drover-sidebar-test--key) "asking"))
-      (should (eq (get-text-property (point) 'drover-sidebar-status) 'working))
+      (should (eq (drover-session-status (get-text-property (point) 'drover-sidebar-session)) 'working))
       (should (equal (drover-sidebar--search -1 '(heading))
                      (drover-sidebar--find-line
-                      'heading (lambda (start) (eq (get-text-property start 'drover-sidebar-status) 'done)))))
+                      'heading (lambda (start)
+                                 (equal (get-text-property start 'drover-sidebar-group) '(status . done))))))
       ;; Hidden once subagents are, it leaves point on its parent.
-      (setq-local drover-show-children nil)
+      (setq drover-show-children nil)
       (drover-sidebar--redraw)
       (should (equal (drover-sidebar-test--key) "parent")))))
 
@@ -615,6 +666,204 @@ Each shows its own buffer."
       (goto-char (point-min))
       (drover-sidebar-next)
       (should (equal (drover-sidebar-test--key) "busy")))))
+
+;;;; Grouping and filtering
+
+(defun drover-sidebar-test--projects ()
+  "Return sessions of two projects and of none, with a hidden subagent."
+  (list (drover-test-session "a-idle" :project "alpha" :status 'idle :updated (- drover-test-now 500))
+        (drover-test-session "b-work" :project "beta" :status 'working :updated (- drover-test-now 60))
+        (drover-test-session "a-ask" :project "alpha" :status 'waiting :since (- drover-test-now 100)
+                             :requests '((:kind question :summary "Which?")))
+        (drover-test-session "none" :status 'done :since (- drover-test-now 50))
+        (drover-test-session "b-kid" :parent "b-work" :project "beta" :status 'idle)))
+
+(defun drover-sidebar-test--headings ()
+  "Return the heading lines of the current buffer, without properties."
+  (mapcar (lambda (start)
+            (buffer-substring-no-properties start (save-excursion (goto-char start) (line-end-position))))
+          (drover-sidebar--heading-starts)))
+
+(defun drover-sidebar-test--order ()
+  "Return the identifiers of the sessions listed in the current buffer, in order."
+  (save-excursion
+    (goto-char (point-min))
+    (let (ids)
+      (while (not (eobp))
+        (when (eq (drover-sidebar--line-type) 'session)
+          (push (drover-sidebar-test--key) ids))
+        (forward-line 1))
+      (nreverse ids))))
+
+(defun drover-sidebar-test--line ()
+  "Return the line at point, without properties."
+  (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+
+(defun drover-sidebar-test--on (id)
+  "Return non-nil when point, and the selected window's, are on session ID."
+  (and (equal (drover-sidebar-test--key) id)
+       (equal (drover-sidebar-test--key-at (window-point (selected-window))) id)))
+
+(ert-deftest drover-sidebar-test-group-by-project ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (should (equal (drover-sidebar-test--headings)
+                     '("▾ Needs you 1" "▾ Done 1" "▾ Working 1" "▾ Idle 1")))
+      (drover-sidebar-test--goto "b-work")
+      (drover-set-group-by 'project)
+      ;; Projects come in the order of their most urgent tree.
+      (should (equal (drover-sidebar-test--headings) '("▾ alpha 2" "▾ No project 1" "▾ beta 1")))
+      (should (equal (drover-sidebar-test--order) '("a-ask" "a-idle" "none" "b-work")))
+      (should (equal (car (last (drover-sidebar-test--lines))) "U shows 1 subagent."))
+      (should (drover-sidebar-test--on "b-work"))
+      (goto-char (point-min))
+      (should (equal (drover-sidebar-test--line) "▾ alpha 2"))
+      (should (eq (get-text-property (point) 'face) 'drover-heading))
+      (drover-sidebar-test--goto "a-ask")
+      (should (string-prefix-p "  ⚑ Session a-ask" (drover-sidebar-test--line)))
+      ;; Moving between sessions crosses groups; between groups too.
+      (drover-sidebar-test--type "n")
+      (should (drover-sidebar-test--on "a-idle"))
+      (drover-sidebar-test--type "n")
+      (should (drover-sidebar-test--on "none"))
+      (drover-sidebar-test--type "M-n")
+      (should (equal (drover-sidebar-test--line) "▾ beta 1"))
+      (drover-sidebar-test--type "p")
+      (should (drover-sidebar-test--on "none"))
+      ;; Folding a project, from one of its sessions or its heading.
+      (drover-sidebar-test--goto "a-idle")
+      (drover-sidebar-test--type "TAB")
+      (should (equal (drover-sidebar-test--line) "▸ alpha 2"))
+      (should (equal (drover-sidebar-test--order) '("none" "b-work")))
+      (drover-sidebar-test--type "n")
+      (should (drover-sidebar-test--on "none"))
+      (drover-sidebar-test--type "M-p")
+      (drover-sidebar-test--type "M-p")
+      (should (equal (drover-sidebar-test--line) "▸ alpha 2"))
+      (drover-sidebar-test--type "RET")
+      (should (equal (drover-sidebar-test--line) "▾ alpha 2"))
+      (drover-sidebar-test--type "<backtab>")
+      (should (equal (drover-sidebar-test--headings) '("▸ alpha 2" "▸ No project 1" "▸ beta 1")))
+      (drover-sidebar-test--type "<backtab>")
+      (should (equal (drover-sidebar-test--headings) '("▾ alpha 2" "▾ No project 1" "▾ beta 1"))))))
+
+(ert-deftest drover-sidebar-test-folds-belong-to-their-grouping ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (drover-sidebar-test--goto "a-idle")
+      (drover-sidebar-test--type "TAB")
+      (should (equal (drover-sidebar-test--line) "▸ Idle 1"))
+      (drover-sidebar-test--goto "a-ask")
+      (drover-set-group-by 'project)
+      (should (equal (drover-sidebar-test--headings) '("▾ alpha 2" "▾ No project 1" "▾ beta 1")))
+      (should (drover-sidebar-test--on "a-ask"))
+      (drover-sidebar-test--type "TAB")
+      (drover-sidebar-test--goto "none")
+      (drover-set-group-by 'status)
+      (should (equal (drover-sidebar-test--headings)
+                     '("▾ Needs you 1" "▾ Done 1" "▾ Working 1" "▸ Idle 1")))
+      (should (drover-sidebar-test--on "none"))
+      (drover-set-group-by 'project)
+      (should (equal (drover-sidebar-test--headings) '("▸ alpha 2" "▾ No project 1" "▾ beta 1")))
+      (should (drover-sidebar-test--on "none")))))
+
+(ert-deftest drover-sidebar-test-no-grouping ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (drover-sidebar-test--goto "b-work")
+      (drover-set-group-by nil)
+      (should-not (drover-sidebar-test--headings))
+      ;; Trees most urgent first, the top level against the edge.
+      (should (equal (drover-sidebar-test--order) '("a-ask" "none" "b-work" "a-idle")))
+      (should (drover-sidebar-test--on "b-work"))
+      (should (equal (mapcar (lambda (line) (replace-regexp-in-string " [0-9]+[smhd]\\'" "" line))
+                             (drover-sidebar-test--lines))
+                     '("⚑ Session a-ask" "  asks: Which?" "✓ Session none"
+                       "◐ Session b-work" "· Session a-idle" "U shows 1 subagent.")))
+      (goto-char (point-min))
+      (should (eq (key-binding (kbd "RET")) #'drover-open-at-point))
+      (should-error (drover-sidebar-test--type "TAB") :type 'user-error)
+      (should-error (drover-sidebar-test--type "<backtab>") :type 'user-error)
+      (drover-sidebar-test--type "n")
+      (should (drover-sidebar-test--on "none"))
+      (drover-sidebar-test--type "n")
+      (drover-sidebar-test--type "n")
+      (should (drover-sidebar-test--on "a-idle"))
+      (should-not (drover-sidebar-next))
+      (drover-sidebar-test--type "p")
+      (should (drover-sidebar-test--on "b-work"))
+      ;; A subagent still starts under its parent's title.
+      (drover-sidebar-test--type "U")
+      (should (drover-sidebar-test--on "b-work"))
+      (drover-sidebar-test--goto "b-kid")
+      (should (equal (drover-sidebar-test--line) "  · Session b-kid"))
+      (should (= (drover-sidebar-test--indent) 2))
+      (drover-set-group-by 'status)
+      (should (drover-sidebar-test--on "b-kid"))
+      (should (equal (drover-sidebar-test--line) "    · Session b-kid")))))
+
+(ert-deftest drover-sidebar-test-filter-line ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (let ((drover-filter '(:project "alpha")))
+      (with-current-buffer (drover-sidebar-test--render)
+        (should (equal (car (drover-sidebar-test--lines)) "Filter: project alpha"))
+        (goto-char (point-min))
+        (should (eq (drover-sidebar--line-type) 'filter))
+        (should (eq (get-text-property (point) 'face) 'drover-dim))
+        (should (string-search "F c clears the filter." (get-text-property (point) 'help-echo)))
+        (should (equal (drover-sidebar-test--headings) '("▾ Needs you 1" "▾ Idle 1")))
+        (should (equal (drover-sidebar-test--order) '("a-ask" "a-idle")))
+        ;; Moving skips it, and no session is there.
+        (should-error (drover-session-at-point) :type 'user-error)
+        (drover-sidebar-next)
+        (should (equal (drover-sidebar-test--key) "a-ask"))
+        (should-not (drover-sidebar-previous))
+        (should (equal (drover-sidebar-test--key) "a-ask"))))))
+
+(ert-deftest drover-sidebar-test-filter-shows-matching-subagent ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (let ((drover-filter '(:search "b-kid")))
+      (with-current-buffer (drover-sidebar-test--render)
+        (should (equal (drover-sidebar-test--lines)
+                       '("Filter: \"b-kid\"" "▾ Working 1" "  ◐ Session b-work 1m"
+                         "    · Session b-kid")))))))
+
+(ert-deftest drover-sidebar-test-filter-matches-nothing ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (let ((drover-filter '(:project "gamma" :statuses (failed))))
+      (with-current-buffer (drover-sidebar-test--render)
+        (should (equal (drover-sidebar-test--lines)
+                       '("Filter: project gamma, failed" "No session matches."
+                         "F c clears the filter.")))
+        (forward-line 1)
+        (should (eq (drover-sidebar--line-type) 'empty))
+        (should (eq (get-text-property (point) 'face) 'drover-dim))
+        (forward-line 1)
+        (should (eq (drover-sidebar--line-type) 'hint))
+        (should-not (drover-sidebar-next))
+        (should-error (drover-session-at-point) :type 'user-error)))
+    ;; Without sessions at all, the filter is not to blame.
+    (setq drover-test-sessions nil)
+    (let ((drover-filter '(:project "gamma")))
+      (with-current-buffer (drover-sidebar-test--render)
+        (should (equal (drover-sidebar-test--lines) '("Filter: project gamma" "No sessions.")))))))
+
+(ert-deftest drover-sidebar-test-filter-redraws ()
+  (drover-sidebar-test-with (drover-sidebar-test--projects)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (drover-sidebar-test--goto "a-idle")
+      (drover-set-filter :project "alpha")
+      (should (equal (car (drover-sidebar-test--lines)) "Filter: project alpha"))
+      (should (drover-sidebar-test--on "a-idle"))
+      (drover-set-filter :search "a-")
+      (should (equal (car (drover-sidebar-test--lines)) "Filter: project alpha, \"a-\""))
+      (should (drover-sidebar-test--on "a-idle"))
+      (drover-set-filter :statuses '(failed))
+      (should (equal (cdr (drover-sidebar-test--lines)) '("No session matches." "F c clears the filter.")))
+      (drover-sidebar-test--type "F c C-g")
+      (should-not drover-filter)
+      (should-not (string-search "Filter" (buffer-string)))
+      (should (equal (drover-sidebar-test--order) '("a-ask" "none" "b-work" "a-idle"))))))
 
 ;;;; Proportional text
 
@@ -768,55 +1017,181 @@ Each measure records its buffer's face remapping and its window in
             (should (equal (buffer-substring-no-properties (+ glyph 2) (+ glyph 10 (length id)))
                            (concat "Session " id)))))))))
 
-;;;; Keys reaching the backend
+;;;; Keys
 
-(ert-deftest drover-sidebar-test-keymap ()
-  (should (eq (keymap-parent drover-sidebar-mode-map) drover-session-map))
+(defun drover-sidebar-test--own-bindings (map)
+  "Return the bindings MAP makes itself, not through its parent.
+The value is a list of (KEY . COMMAND), KEY a key description."
+  (let (bindings)
+    (cl-labels ((walk (map prefix)
+                  (map-keymap-internal
+                   (lambda (event binding)
+                     (let ((key (vconcat prefix (vector event))))
+                       (if (keymapp binding)
+                           (walk binding key)
+                         (push (cons (key-description key) binding) bindings))))
+                   map)))
+      (walk map []))
+    (sort bindings (lambda (a b) (string< (car a) (car b))))))
+
+(defun drover-sidebar-test--session-bindings ()
+  "Return the bindings of `drover-session-map' as (KEY . COMMAND), sorted by key."
+  (let (bindings)
+    (map-keymap (lambda (event command) (push (cons (key-description (vector event)) command) bindings))
+                drover-session-map)
+    (sort bindings (lambda (a b) (string< (car a) (car b))))))
+
+(ert-deftest drover-sidebar-test-view ()
+  "The sidebar is one of drover's views, so grouping and filtering apply."
   (with-temp-buffer
     (drover-sidebar-mode)
+    (should drover-view-p)
+    (should (drover-session-list-p))
+    (should (plist-get (drover--context) :view))
     (should (eq drover-session-at-point-function #'drover-sidebar--session-at-point))
+    (should (eq drover-main-window-function #'drover-sidebar--main-window))
+    (should-not (local-variable-p 'drover-show-children))
     (should truncate-lines)
     (should buffer-read-only)
-    (should (memq #'drover-sidebar--size-changed window-size-change-functions))
-    (dolist (binding '(("n" . drover-sidebar-next) ("p" . drover-sidebar-previous)
-                       ("RET" . drover-sidebar-open) ("o" . drover-sidebar-open-other-window)
-                       ("C-o" . drover-sidebar-display) ("g" . drover-sidebar-refresh)
-                       ("q" . drover-sidebar-hide) ("c" . drover-sidebar-toggle-children)
-                       ("TAB" . drover-sidebar-toggle-group)
-                       ("a" . drover-respond-at-point) ("k" . drover-interrupt-at-point)
-                       ("A" . drover-archive-at-point) ("s" . drover-mark-seen-at-point)
-                       ("SPC" . drover-peek-at-point)))
+    (should (memq #'drover-sidebar--size-changed window-size-change-functions))))
+
+(ert-deftest drover-sidebar-test-keymap ()
+  "The sidebar binds the session keys, and only standard keys of its own."
+  (should (memq drover-session-map (keymap-parent drover-sidebar-mode-map)))
+  (should (equal (drover-sidebar-test--own-bindings drover-sidebar-mode-map)
+                 '(("<backtab>" . drover-sidebar-toggle-all-groups)
+                   ("<mouse-2>" . drover-sidebar-mouse-open)
+                   ("C-o" . drover-sidebar-display)
+                   ("M-n" . drover-sidebar-next-group)
+                   ("M-p" . drover-sidebar-previous-group)
+                   ("RET" . drover-open-at-point)
+                   ("TAB" . drover-sidebar-toggle-group)
+                   ("n" . drover-sidebar-next)
+                   ("p" . drover-sidebar-previous)
+                   ("q" . drover-sidebar-hide))))
+  (should (equal (drover-sidebar-test--own-bindings drover-sidebar-heading-map)
+                 '(("RET" . drover-sidebar-toggle-group))))
+  (with-temp-buffer
+    (drover-sidebar-mode)
+    ;; No key of its own shadows a session key.
+    (pcase-dolist (`(,key . ,command) (drover-sidebar-test--session-bindings))
+      (should (eq (key-binding (kbd key)) command)))
+    ;; The keys of `special-mode' stay, but where the sidebar has its own.
+    (dolist (binding '(("SPC" . scroll-up-command) ("DEL" . scroll-down-command)
+                       ("?" . describe-mode) ("h" . describe-mode)
+                       ("<" . beginning-of-buffer) (">" . end-of-buffer)
+                       ("q" . drover-sidebar-hide) ("g" . drover-refresh)))
       (should (eq (key-binding (kbd (car binding))) (cdr binding))))))
 
-(ert-deftest drover-sidebar-test-shared-actions ()
-  (drover-sidebar-test-with (drover-sidebar-test--sample)
-    (with-current-buffer (drover-sidebar-test--render)
-      (drover-sidebar-test--goto "work")
-      (cl-letf (((symbol-function 'y-or-n-p) #'always))
-        (dolist (key '("a" "C-c C-q" "k" "A" "s"))
-          (call-interactively (key-binding (kbd key)))))
-      (cl-letf (((symbol-function 'y-or-n-p) #'ignore))
-        (call-interactively (key-binding (kbd "k")))
-        (call-interactively (key-binding (kbd "A"))))
-      (should (equal (reverse drover-test-calls)
-                     '((:respond "work") (:respond "work") (:interrupt "work")
-                       (:archive "work") (:mark-seen "work")))))))
+(ert-deftest drover-sidebar-test-session-keys ()
+  "Every key of `drover-session-map' reaches its command from the sidebar.
+Keys go through the command loop, with the sidebar selected, as the
+user types them; the sidebar is selected again after keys opening a
+session, which may select the window showing it."
+  (drover-sidebar-test-with (list (drover-test-session "root" :status 'working :directory "/work/root/"
+                                                       :updated (- drover-test-now 60))
+                                  (drover-test-session "kid" :parent "root" :status 'waiting
+                                                       :since (- drover-test-now 30)
+                                                       :requests '((:kind question :summary "Go?")))
+                                  (drover-test-session "quiet" :parent "root" :status 'idle))
+    (let* ((org-stored-links nil)
+           (commands (mapcar #'cdr (drover-sidebar-test--session-bindings)))
+           (ran nil)
+           (record (lambda ()
+                     (when (memq this-command commands)
+                       (push (cons (key-description (this-command-keys-vector)) this-command) ran)))))
+      (add-hook 'drover-store-link-functions
+                (lambda (session) (list (concat "drover:" (drover-session-id session)) "Link")))
+      (drover-sidebar-test--main)
+      (add-hook 'post-command-hook record)
+      (unwind-protect
+          (let ((sidebar (drover-sidebar-select)))
+            (cl-flet ((type (keys)
+                        (drover-sidebar-test--type keys)
+                        (select-window sidebar)
+                        (set-buffer (window-buffer sidebar))))
+              (setq drover-test-calls nil)
+              (drover-sidebar-test--goto "root")
+              (cl-letf (((symbol-function 'y-or-n-p) #'always)
+                        ((symbol-function 'yes-or-no-p) #'always)
+                        ((symbol-function 'read-string) (lambda (&rest _) "Renamed"))
+                        ((symbol-function 'drover-read-session)
+                         (lambda (_prompt sessions)
+                           (seq-find (lambda (session) (equal (drover-session-id session) "quiet"))
+                                     sessions))))
+                (dolist (key '("A" "k" "s" "c" "o" "r" "x" "z" "l" "+" "v"))
+                  (type key)
+                  (should (drover-sidebar-test--on "root"))))
+              (drover-sidebar-test--goto "kid")
+              (type "u")
+              (should (equal (mapcar (lambda (call) (seq-take call 2)) (reverse drover-test-calls))
+                             '((:respond "root") (:interrupt "root") (:mark-seen "root")
+                               (:open "quiet") (:open "root") (:rename "root") (:delete "root")
+                               (:archive "root") (:new "/work/root/") (:preview "root")
+                               (:open "root"))))
+              (should (member '(:rename "root" "Renamed") drover-test-calls))
+              (should (equal org-stored-links '(("drover:root" "Link"))))
+              (should (with-current-buffer drover-peek-buffer
+                        (string-search "Preview of root" (buffer-string))))
+              (setq drover-test-calls nil)
+              ;; g redraws from what the backend reports, point staying put.
+              (push (drover-test-session "fresh" :status 'working) drover-test-sessions)
+              (type "g")
+              (should (string-search "Session fresh" (buffer-string)))
+              (should (drover-sidebar-test--on "kid"))
+              (type "U")
+              (should drover-show-children)
+              (should (string-search "Session quiet" (buffer-string)))
+              (should (drover-sidebar-test--on "kid"))
+              (type "V")
+              (should drover-follow-mode)
+              (should (equal drover-test-calls '((:open "kid" nil))))
+              (type "V")
+              (should-not drover-follow-mode)
+              (type "G p C-g")
+              (should (eq drover-group-by 'project))
+              (should (drover-sidebar-test--on "kid"))
+              (drover-set-filter :search "kid")
+              (should (string-prefix-p "Filter: " (car (drover-sidebar-test--lines))))
+              (type "F c C-g")
+              (should-not drover-filter)
+              (should (string-search "Session fresh" (buffer-string)))
+              (should (drover-sidebar-test--on "kid"))
+              (should-not (bound-and-true-p transient--prefix))))
+        (remove-hook 'post-command-hook record))
+      (should (equal (sort (delete-dups ran) (lambda (a b) (string< (car a) (car b))))
+                     (drover-sidebar-test--session-bindings))))))
 
-(ert-deftest drover-sidebar-test-peek ()
+(ert-deftest drover-sidebar-test-declined-confirmations ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)
-    (with-current-buffer (drover-sidebar-test--render)
-      (drover-sidebar-test--goto "done")
-      (call-interactively (key-binding (kbd "SPC")))
-      (should (equal drover-test-calls '((:preview "done"))))
-      (with-current-buffer drover-peek-buffer
-        (should (string-search "Preview of done" (buffer-string)))))))
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (setq drover-test-calls nil)
+      (drover-sidebar-test--goto "work")
+      (cl-letf (((symbol-function 'y-or-n-p) #'ignore)
+                ((symbol-function 'yes-or-no-p) #'ignore))
+        (dolist (key '("k" "x" "z"))
+          (should (equal (should-error (drover-sidebar-test--type key) :type 'user-error)
+                         '(user-error "Abort")))))
+      (should-not drover-test-calls))))
 
 (ert-deftest drover-sidebar-test-action-off-session ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)
-    (with-current-buffer (drover-sidebar-test--render)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (setq drover-test-calls nil)
       (goto-char (point-min))
-      (should-error (call-interactively (key-binding (kbd "a"))) :type 'user-error)
+      (should (eq (drover-sidebar--line-type) 'heading))
+      (should-error (drover-sidebar-test--type "A") :type 'user-error)
       (should-not drover-test-calls))))
+
+(ert-deftest drover-sidebar-test-peek ()
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (with-current-buffer (window-buffer (drover-sidebar-select))
+      (setq drover-test-calls nil)
+      (drover-sidebar-test--goto "done")
+      (drover-sidebar-test--type "v")
+      (should (equal drover-test-calls '((:preview "done"))))
+      (with-current-buffer drover-peek-buffer
+        (should (string-search "Preview of done" (buffer-string)))))))
 
 ;;;; Showing and hiding
 
@@ -928,32 +1303,65 @@ Each measure records its buffer's face remapping and its window in
       (should (eq (drover-sidebar--main-window) first))
       (set-window-dedicated-p second nil))))
 
+;; Opening a session from the sidebar, with RET, o or a click, must not
+;; replace the sidebar in its dedicated side window: `drover-open' opens
+;; sessions in the window `drover-main-window-function' returns, the
+;; main window.
+
 (ert-deftest drover-sidebar-test-ret-opens-in-main-window ()
+  "RET opens the session at point in the main window, and selects it."
   (drover-sidebar-test-with (drover-sidebar-test--sample)
     (drover-sidebar-test--register-buffers)
     (pcase-let ((`(,first ,second) (drover-sidebar-test--main)))
       (let ((sidebar (drover-sidebar-select)))
         (drover-sidebar-test--goto "done")
-        (call-interactively (key-binding (kbd "RET")))
+        (drover-sidebar-test--type "RET")
         (should (equal (car drover-test-calls) (list :open "done" nil first)))
         (should (eq (selected-window) first))
         (should (equal (buffer-name (window-buffer first)) "*session done*"))
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
         (should (equal (buffer-name (window-buffer sidebar)) drover-sidebar-buffer-name))))))
 
-(ert-deftest drover-sidebar-test-o-opens-in-other-window ()
+(ert-deftest drover-sidebar-test-o-opens-in-main-window ()
+  "In the sidebar, the other window o opens a session in is the main window."
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (drover-sidebar-test--register-buffers)
+    (pcase-let ((`(,first ,second) (drover-sidebar-test--main)))
+      (let ((sidebar (drover-sidebar-select)))
+        (drover-sidebar-test--goto "done")
+        (drover-sidebar-test--type "o")
+        (should (equal (car drover-test-calls) (list :open "done" nil first)))
+        (should (eq (selected-window) first))
+        (should (equal (buffer-name (window-buffer first)) "*session done*"))
+        (should (equal (buffer-name (window-buffer second)) "*other 2*"))
+        (should (equal (buffer-name (window-buffer sidebar)) drover-sidebar-buffer-name))
+        (should (= (length (window-list nil 'nomini)) 3))))))
+
+(ert-deftest drover-sidebar-test-mouse-opens-in-main-window ()
+  "Clicking a session opens it as RET does."
   (drover-sidebar-test-with (drover-sidebar-test--sample)
     (drover-sidebar-test--register-buffers)
     (pcase-let ((`(,first ,_second) (drover-sidebar-test--main)))
-      (let ((sidebar (drover-sidebar-select)))
-        (drover-sidebar-test--goto "done")
-        (call-interactively (key-binding (kbd "o")))
-        (should (equal (car drover-test-calls) (list :open "done" t first)))
-        (should (eq (selected-window) sidebar))
-        (should (equal (buffer-name (window-buffer first)) "*other 1*"))
-        (let ((shown (get-buffer-window "*session done*")))
-          (should shown)
-          (should-not (memq shown (list first sidebar))))))))
+      (let* ((sidebar (drover-sidebar--show))
+             (position (with-current-buffer (window-buffer sidebar)
+                         (drover-sidebar-test--goto "ask")
+                         (point))))
+        (drover-sidebar-mouse-open
+         `(mouse-2 (,sidebar ,position (0 . 0) 0 nil ,position (0 . 0) nil (0 . 0) (1 . 1))))
+        (should (eq (selected-window) first))
+        (should (equal (buffer-name (window-buffer first)) "*session ask*"))))))
+
+(ert-deftest drover-sidebar-test-mouse-folds-group ()
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (drover-sidebar-test--main)
+    (let* ((sidebar (drover-sidebar--show))
+           (position (with-current-buffer (window-buffer sidebar)
+                       (drover-sidebar--find-line 'heading #'always))))
+      (drover-sidebar-mouse-open
+       `(mouse-2 (,sidebar ,position (0 . 0) 0 nil ,position (0 . 0) nil (0 . 0) (1 . 1))))
+      (should (eq (selected-window) sidebar))
+      (should (equal (car (drover-sidebar-test--lines)) "▸ Needs you 1"))
+      (should-not (assq :open drover-test-calls)))))
 
 (ert-deftest drover-sidebar-test-display-keeps-sidebar-selected ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)
@@ -961,7 +1369,7 @@ Each measure records its buffer's face remapping and its window in
     (pcase-let ((`(,first ,second) (drover-sidebar-test--main)))
       (let ((sidebar (drover-sidebar-select)))
         (drover-sidebar-test--goto "work")
-        (call-interactively (key-binding (kbd "C-o")))
+        (drover-sidebar-test--type "C-o")
         (should (equal (car drover-test-calls) (list :open "work" nil first)))
         (should (eq (selected-window) sidebar))
         (should (eq (current-buffer) (window-buffer sidebar)))
@@ -975,43 +1383,56 @@ Each measure records its buffer's face remapping and its window in
     (drover-sidebar-test--main)
     (let ((sidebar (drover-sidebar-select)))
       (drover-sidebar-next)
-      (should-error (drover-sidebar-open) :type 'user-error)
+      (should (eq (drover-sidebar--line-type) 'session))
+      (should-error (drover-sidebar-test--type "RET") :type 'user-error)
+      (should-error (drover-sidebar-test--type "C-o") :type 'user-error)
       (should (eq (selected-window) sidebar)))))
 
-(ert-deftest drover-sidebar-test-preview ()
+(ert-deftest drover-sidebar-test-follow-mode ()
+  "Follow mode shows the session at point in the main window as point moves."
   (drover-sidebar-test-with (drover-sidebar-test--sample)
     (drover-sidebar-test--register-buffers)
-    (pcase-let ((`(,first ,_second) (drover-sidebar-test--main)))
-      (let ((sidebar (drover-sidebar-select)))
-        (drover-sidebar-next)
-        (should-not (assq :open drover-test-calls))
-        (should (equal (buffer-name (window-buffer first)) "*other 1*"))
-        (call-interactively (key-binding (kbd "C-c C-f")))
-        (should (local-variable-p 'drover-sidebar-preview))
-        (should (equal (drover-sidebar--mode-line-flags) " preview"))
-        ;; Turning previews on shows the session at point at once.
-        (should (equal (buffer-name (window-buffer first)) "*session fail*"))
-        (drover-sidebar-next)
-        (should (equal (car drover-test-calls) (list :open "done" nil first)))
-        (should (equal (buffer-name (window-buffer first)) "*session done*"))
-        (drover-sidebar-previous)
-        (should (equal (buffer-name (window-buffer first)) "*session fail*"))
+    (pcase-let ((`(,first ,second) (drover-sidebar-test--main)))
+      (let ((sidebar (drover-sidebar-select))
+            (shown (lambda () (buffer-name (window-buffer first))))
+            (opened (lambda () (length (seq-filter (lambda (call) (eq (car call) :open))
+                                                   drover-test-calls)))))
+        (should (equal (drover-sidebar-test--key) "ask"))
+        (drover-sidebar-test--type "n")
+        (should (equal (funcall shown) "*other 1*"))
+        (drover-sidebar-test--type "p")
+        ;; Turning it on shows the session at point at once.
+        (drover-sidebar-test--type "V")
+        (should drover-follow-mode)
+        (should (equal (drover-sidebar--mode-line-flags) " Follow"))
+        (should (equal (car drover-test-calls) (list :open "ask" nil first)))
+        (should (equal (funcall shown) "*session ask*"))
+        (drover-sidebar-test--type "n")
+        (should (equal (funcall shown) "*session fail*"))
+        ;; Any motion counts; within a session, nothing is shown again.
+        (drover-sidebar-test--type "C-n")
+        (should (eq (drover-sidebar--line-type) 'summary))
+        (should (= (funcall opened) 2))
+        ;; A heading shows nothing.
+        (drover-sidebar-test--type "C-n")
+        (should (eq (drover-sidebar--line-type) 'heading))
+        (should (= (funcall opened) 2))
+        (drover-sidebar-test--type "C-n")
+        (should (equal (funcall shown) "*session done*"))
+        (drover-sidebar-test--type "p")
+        (should (equal (funcall shown) "*session fail*"))
         (should (eq (selected-window) sidebar))
-        ;; The main window stays the same while previewing.
-        (should (eq (drover-sidebar--main-window) first))))))
-
-(ert-deftest drover-sidebar-test-mouse-open ()
-  (drover-sidebar-test-with (drover-sidebar-test--sample)
-    (drover-sidebar-test--register-buffers)
-    (pcase-let ((`(,first ,_second) (drover-sidebar-test--main)))
-      (let* ((sidebar (drover-sidebar--show))
-             (position (with-current-buffer (window-buffer sidebar)
-                         (drover-sidebar-test--goto "ask")
-                         (point))))
-        (drover-sidebar-mouse-open
-         `(mouse-2 (,sidebar ,position (0 . 0) 0 nil ,position (0 . 0) nil (0 . 0) (1 . 1))))
-        (should (eq (selected-window) first))
-        (should (equal (buffer-name (window-buffer first)) "*session ask*"))))))
+        (should (equal (buffer-name (window-buffer second)) "*other 2*"))
+        ;; The main window stays the same, and its session is highlighted.
+        (should (eq (drover-sidebar--main-window) first))
+        (drover-sidebar--windows-changed)
+        (should (equal (drover-sidebar-test--key-at (overlay-start (car drover-sidebar--current-overlays)))
+                       "fail"))
+        (drover-sidebar-test--type "V")
+        (should-not drover-follow-mode)
+        (should (equal (drover-sidebar--mode-line-flags) ""))
+        (drover-sidebar-test--type "n")
+        (should (equal (funcall shown) "*session fail*"))))))
 
 ;;;; The current session
 
@@ -1095,7 +1516,7 @@ Each measure records its buffer's face remapping and its window in
           (should (string-search "Session new" (buffer-string)))
           (goto-char (window-point sidebar))
           (should (equal (drover-sidebar-test--key) "work"))
-          (should (eq (get-text-property (point) 'drover-sidebar-status) 'done)))
+          (should (equal (get-text-property (point) 'drover-sidebar-group) '(status . done))))
         (should (= (window-point first) 5))
         (should (eq (selected-window) first))))))
 

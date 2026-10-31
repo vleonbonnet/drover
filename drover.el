@@ -6,7 +6,7 @@
 ;; Maintainer: Valentin Leon <valentin@leon.click>
 ;; Keywords: tools, llm, convenience
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "30.1") (magit-section "4.0"))
+;; Package-Requires: ((emacs "30.1") (magit-section "4.0") (transient "0.13"))
 ;; URL: https://github.com/vleonbonnet/drover
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -30,12 +30,17 @@
 ;; first is opencode.el, loaded with it.  `drover-attention-mode' shows
 ;; how many sessions need you in the mode line and `drover-next' visits
 ;; the most urgent; `drover-dashboard', `drover-table' and
-;; `drover-sidebar' list every session.
+;; `drover-sidebar' list every session.  `drover-dispatch' is a menu of
+;; every command, on sessions and on the prompt you write to an agent;
+;; bind it globally, for instance:
+;;
+;;   (keymap-global-set "C-'" #'drover-dispatch)
 
 ;;; Code:
 
 (require 'drover-core)
 (require 'drover-ui)
+(require 'drover-keys)
 
 (with-eval-after-load 'opencode
   (require 'drover-opencode))

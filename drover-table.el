@@ -20,17 +20,25 @@
 
 ;;; Commentary:
 
-;; `drover-table' lists every session in one `vtable', with its title,
-;; project, branch, age and why it has its status.  The title cell
+;; `drover-table' lists sessions in one `vtable', with their title,
+;; project, branch, age and why they have their status.  The title cell
 ;; starts with the glyph of the session's status.  The header line
-;; counts the sessions that need you.
+;; counts the sessions that need you, and names the filter in force.
 ;;
-;; Sessions come as trees, most urgent first: each subagent follows its
-;; parent, its title indented by its depth, and a tree ranks by the most
-;; urgent status within it, so a parent whose subagent waits for you
-;; comes with the sessions that wait for you.  Subagents are hidden
-;; unless `drover-show-children' is non-nil or they need you; c toggles
-;; it in the table.
+;; Like every drover view, the table draws `drover-view-trees': the
+;; sessions `drover-filter' lists, as trees, most urgent first.  Each
+;; subagent follows its parent, its title indented by its depth, and a
+;; tree ranks by the most urgent status within it, so a parent whose
+;; subagent waits for you comes with the sessions that wait for you.
+;; Subagents are hidden unless `drover-show-children' is non-nil or they
+;; need you; U toggles it in every view.
+;;
+;; Trees are grouped as `drover-group-by' says, by status or project.
+;; A vtable holds rows and nothing else, so each group starts with a
+;; row of its own, its heading, naming the status or project and
+;; counting its sessions.  One table per group would repeat the column
+;; header and split the sort, and a column naming the group would take
+;; room on every row.
 ;;
 ;; The table follows the backends: it is drawn again whenever
 ;; `drover-changed-hook' runs while it is shown, and when it is next
@@ -39,12 +47,13 @@
 ;; Point stays on its session across redraws.
 ;;
 ;; Vtable's own commands sort the table by a column: S on a column, or a
-;; click on its header.  The sort orders the trees by the value of their
-;; root, and the subagents of a session among themselves, never parting
-;; a subagent from its parent; ties keep the order of urgency.  The
-;; Title column sorts by the title alone, not the status before it.  The
-;; sort holds across redraws, as do widths changed with { and }; =
-;; restores the order of urgency and the default widths.
+;; click on its header.  The sort orders the trees of each group by the
+;; value of their root, and the subagents of a session among themselves,
+;; never parting a subagent from its parent; ties keep the order of
+;; urgency, and groups keep their order.  The Title column sorts by the
+;; title alone, not the status before it.  The sort holds across
+;; redraws, as do widths changed with { and }; = restores the order of
+;; urgency and the default widths.
 
 ;;; Code:
 
@@ -274,6 +283,52 @@ when non-nil, ties keeping the order of urgency."
                         (funcall predicate (drover-node-session a) (drover-node-session b))))
               nodes))))
 
+;;;; Groups
+
+(cl-defstruct (drover-table--group (:constructor drover-table--group-create)
+                                   (:copier nil))
+  "The heading row of a group of sessions."
+  (grouping nil :documentation "What the group shares: `status' or `project'.")
+  (value nil :documentation "The status, or the project name, or nil for no project.")
+  (count 0 :documentation "How many sessions the group lists."))
+
+(defun drover-table--grouped-rows (nodes predicate)
+  "Return the rows of the trees NODES, grouped as `drover-group-by' says.
+Each group begins with the row (GROUP) of its heading, GROUP a
+`drover-table--group', followed by the rows of its trees, from
+`drover-table--rows' with PREDICATE.  Groups come in the order of
+`drover-group-trees-by-status' or `drover-group-trees-by-project',
+whatever PREDICATE.  Without groups, the rows are those of NODES."
+  (pcase drover-group-by
+    ((and grouping (or 'status 'project))
+     (mapcan (pcase-lambda (`(,value . ,members))
+               (let ((rows (drover-table--rows members predicate)))
+                 (cons (list (drover-table--group-create :grouping grouping :value value
+                                                         :count (length rows)))
+                       rows)))
+             (if (eq grouping 'status)
+                 (drover-group-trees-by-status nodes)
+               (drover-group-trees-by-project nodes))))
+    (_ (drover-table--rows nodes predicate))))
+
+(defun drover-table--group-text (group)
+  "Return the heading of GROUP, its name and how many sessions it lists."
+  (let ((value (drover-table--group-value group)))
+    (concat (if (eq (drover-table--group-grouping group) 'status)
+                (drover-face (drover-status-label value)
+                             (list (drover-status-face value) 'drover-heading))
+              (drover-face (or value "No project")
+                           (if value 'drover-heading '(italic drover-heading))))
+            (drover-face (format " (%d)" (drover-table--group-count group)) 'drover-dim))))
+
+(defun drover-table--key (object)
+  "Return the key of OBJECT, the object of a row, or nil.
+That of a session is `drover-session-key'; that of a group heading, a
+list (group GROUPING VALUE)."
+  (cond ((drover-session-p object) (drover-session-key object))
+        ((drover-table--group-p object)
+         (list 'group (drover-table--group-grouping object) (drover-table--group-value object)))))
+
 ;;;; Widths
 
 (defun drover-table--natural-width (column texts char-width)
@@ -364,6 +419,8 @@ where a character is one pixel wide."
 
 ;;;; Drawing
 
+(defvar drover-table-mode-map)
+
 ;; Vtable sorts the rows itself, by the values of a column, whenever it
 ;; draws: it would part subagents from their parents.  So every cell's
 ;; value is the rank of its row in the order the table computed, and a
@@ -383,22 +440,29 @@ It maps each session to a vector of its keys, one per column."
                keys))
     keys))
 
+(defun drover-table--row-cells (columns row)
+  "Return the texts of ROW in COLUMNS, one per column.
+ROW is (SESSION . DEPTH), or (GROUP) for the heading of a group, whose
+text takes the first column."
+  (let ((object (car row)))
+    (if (drover-table--group-p object)
+        (cons (drover-table--group-text object) (make-list (1- (length columns)) ""))
+      (mapcar (lambda (column) (funcall (plist-get column :text) object (cdr row)))
+              columns))))
+
 (defun drover-table--insert (nodes sort-by width)
   "Insert a table of the trees NODES, sorted by SORT-BY, WIDTH pixels wide.
-NODES come most urgent first.  SORT-BY is a list of vtable sort keys,
-or nil for the order of urgency.  Return the vtable."
+NODES come most urgent first, and are grouped as `drover-group-by'
+says.  SORT-BY is a list of vtable sort keys, or nil for the order of
+urgency.  Return the vtable."
   (let* ((now (float-time))
          (sessions (drover-tree-sessions nodes))
          (columns (drover-table--columns now (drover-table--glyph-widths sessions)))
          ;; Keys left by a former version of the table, with more columns.
          (sort-by (seq-filter (lambda (key) (< (car key) (length columns))) sort-by))
-         (rows (drover-table--rows
+         (rows (drover-table--grouped-rows
                 nodes (drover-table--predicate sort-by (drover-table--keys columns sessions))))
-         (cells (mapcar (lambda (row)
-                          (mapcar (lambda (column)
-                                    (funcall (plist-get column :text) (car row) (cdr row)))
-                                  columns))
-                        rows))
+         (cells (mapcar (lambda (row) (drover-table--row-cells columns row)) rows))
          (widths (drover-table--column-widths columns cells width))
          (count (length rows))
          (descending (eq (cdar (last sort-by)) 'descend))
@@ -421,7 +485,7 @@ or nil for the order of urgency.  Return the vtable."
                                  (list :name (plist-get column :name)
                                        :width (drover-table--width-spec width)
                                        :align (plist-get column :align)
-                                       :getter (lambda (session _table) (gethash session ranks))
+                                       :getter (lambda (object _table) (gethash object ranks))
                                        ;; Vtable styles the text of its values, not
                                        ;; formatted text.
                                        :formatter (lambda (rank)
@@ -433,13 +497,27 @@ or nil for the order of urgency.  Return the vtable."
      :separator-width drover-table--separator-width
      :sort-by (copy-tree sort-by))))
 
-(defun drover-table--empty-text ()
-  "Return the line shown when no session is listed."
-  (if (drover-backends) "No agent sessions." "No agent backend is loaded."))
+(defun drover-table--dim (text)
+  "Return TEXT dimmed, after the faces it has, such as those of keys."
+  (let ((text (copy-sequence text)))
+    (add-face-text-property 0 (length text) 'drover-dim t text)
+    text))
+
+(defun drover-table--empty-text (sessions)
+  "Return the text shown when the table lists no session.
+SESSIONS are the sessions of every backend: when there are some, the
+filter left them all out, and the text tells how to clear it."
+  (cond ((null (drover-backends)) "No agent backend is loaded.")
+        ((and sessions (drover-filter-active-p))
+         (concat (format "No session matches the filter: %s." (drover-filter-description))
+                 "\n"
+                 (drover-filter-clear-hint drover-table-mode-map)))
+        (t "No agent sessions.")))
 
 (defun drover-table--header-line (sessions hidden)
   "Return the header line counting SESSIONS that need the user.
-HIDDEN is the number of subagent sessions left out."
+HIDDEN is the number of subagent sessions left out.  The line ends with
+the description of the filter in force, if any."
   (let ((counts
          (delq nil
                (mapcar (lambda (status)
@@ -450,7 +528,8 @@ HIDDEN is the number of subagent sessions left out."
                              (concat (drover-status-glyph status) " "
                                      (propertize (format "%d %s" count (drover-status-label status))
                                                  'face (drover-status-face status))))))
-                       (seq-sort-by #'drover-status-rank #'< drover-attention-statuses)))))
+                       (seq-sort-by #'drover-status-rank #'< drover-attention-statuses))))
+        (filter (drover-filter-description)))
     (string-replace
      "%" "%%"
      (concat " "
@@ -462,47 +541,56 @@ HIDDEN is the number of subagent sessions left out."
                                  (when (> hidden 0)
                                    (format ", %d subagent%s hidden" hidden
                                            (if (= hidden 1) "" "s"))))
-                         'face 'drover-dim)))))
+                         'face 'drover-dim)
+             (when filter
+               (concat (propertize "   Filter: " 'face 'drover-dim) filter))))))
 
 (defun drover-table--position (position)
   "Return where POSITION stands, as a list (KEY LINE COLUMN).
-KEY is the key of the session on its line, or nil; COLUMN the index of
-its column, or nil."
+KEY is the key of the row on its line, from `drover-table--key', or nil;
+COLUMN the index of its column, or nil."
   (save-excursion
     (goto-char position)
-    (list (when-let* ((session (vtable-current-object)))
-            (drover-session-key session))
+    (list (drover-table--key (vtable-current-object))
           (line-number-at-pos)
           (vtable-current-column))))
 
-(defun drover-table--first-row ()
-  "Move to the first row of the table, if any."
+(defun drover-table--goto-row (predicate)
+  "Move to the first row whose object satisfies PREDICATE; return nil if none."
   (goto-char (point-min))
   (when-let* ((match (text-property-search-forward
-                      'vtable-object nil (lambda (_ session) session))))
+                      'vtable-object nil
+                      (lambda (_ object) (and object (funcall predicate object))))))
     (goto-char (prop-match-beginning match))))
 
-(defun drover-table--goto-session (key)
-  "Move to the row of the session whose key is KEY; return nil if none."
-  (goto-char (point-min))
-  (when-let* ((match (text-property-search-forward
-                      'vtable-object key
-                      (lambda (key session)
-                        (and session (equal key (drover-session-key session)))))))
-    (goto-char (prop-match-beginning match))))
+(defun drover-table--first-row ()
+  "Move to the first row of a session, if any."
+  (drover-table--goto-row #'drover-session-p))
+
+(defun drover-table--goto-key (key)
+  "Move to the row whose key is KEY; return nil if none."
+  (drover-table--goto-row (lambda (object) (equal key (drover-table--key object)))))
+
+(defun drover-table--off-heading ()
+  "Move from a group heading to the first session of its group.
+A group lists at least one session, on the row after its heading."
+  (when (drover-table--group-p (vtable-current-object))
+    (forward-line 1)))
 
 (defun drover-table--locate (position)
   "Return the buffer position matching POSITION, from `drover-table--position'.
-That is the row of the same session, else the same line, else the
-last row.  A nil POSITION is the first row."
+That is the row of the same session or group heading, else the same
+line, else the last row; a group heading on that line gives way to the
+first session after it.  A nil POSITION is the first row of a session."
   (save-excursion
     (pcase-let ((`(,key ,line ,column) position))
       (cond ((null position) (drover-table--first-row))
-            ((and key (drover-table--goto-session key)))
+            ((and key (drover-table--goto-key key)))
             (t (goto-char (point-min))
                (forward-line (1- line))
                (when (and (eobp) (not (bobp)))
-                 (forward-line -1))))
+                 (forward-line -1))
+               (drover-table--off-heading)))
       (when (and column (vtable-current-object))
         (vtable-goto-column column))
       (point))))
@@ -520,8 +608,8 @@ WINDOW, when non-nil, shows this buffer and is selected."
                                      (drover-table--position (window-point view)))
                                 (line-number-at-pos (window-start view))))
                         (get-buffer-window-list nil nil t)))
-         (trees (drover-tree (drover-sessions)))
-         (nodes (drover-tree-visible trees))
+         (all (drover-sessions))
+         (nodes (drover-view-trees all))
          (sessions (drover-tree-sessions nodes))
          (inhibit-read-only t))
     ;; A vtable sort command may have changed the keys since the last draw.
@@ -531,9 +619,9 @@ WINDOW, when non-nil, shows this buffer and is selected."
     (setq drover-table--table (and nodes (drover-table--insert nodes drover-table--sort-by width)))
     (if drover-table--table
         (setq drover-table--sort-by (copy-tree (vtable-sort-by drover-table--table)))
-      (insert (propertize (drover-table--empty-text) 'face 'drover-dim) "\n"))
+      (insert (drover-table--dim (drover-table--empty-text all)) "\n"))
     (setq header-line-format
-          (drover-table--header-line sessions (drover-tree-hidden-count trees))
+          (drover-table--header-line sessions (drover-view-hidden-count all))
           drover-table--window-width (and window width)
           drover-table--drawn-at (float-time)
           drover-table--stale nil)
@@ -663,8 +751,10 @@ window of a mouse click, which need not be selected."
     (drover-table--stop-age-timer)))
 
 (defun drover-table--session-at-point ()
-  "Return the current record of the session on this line, or nil."
-  (when-let* ((session (vtable-current-object)))
+  "Return the current record of the session on this line, or nil.
+A group heading has none."
+  (when-let* ((session (vtable-current-object))
+              ((drover-session-p session)))
     (drover-find (drover-session-backend session) (drover-session-id session))))
 
 ;;;; Commands
@@ -675,24 +765,14 @@ window of a mouse click, which need not be selected."
     (user-error "Not in a drover table")))
 
 (defun drover-table-refresh ()
-  "Draw the sessions again, keeping point on its session."
-  (interactive)
+  "Draw the sessions of this table again, keeping point on its row.
+\\<drover-table-mode-map>\\[drover-refresh] does it, through `revert-buffer'."
   (drover-table--check-mode)
   (drover-table--redraw (current-buffer)))
 
 (defun drover-table--revert (&rest _)
   "Draw the sessions again, for `revert-buffer'."
   (drover-table-refresh))
-
-(defun drover-table-toggle-children ()
-  "Show or hide the sessions of subagents in this table.
-Subagents that need the user, and the sessions above them, show either
-way."
-  (interactive)
-  (drover-table--check-mode)
-  (setq-local drover-show-children (not drover-show-children))
-  (drover-table-refresh)
-  (message (if drover-show-children "Showing subagent sessions" "Hiding subagent sessions")))
 
 (defun drover-table-reset ()
   "Sort the sessions by urgency again, and restore the column widths."
@@ -727,46 +807,39 @@ The width holds across redraws, until `drover-table-reset'."
 
 (defvar-keymap drover-table-mode-map
   :doc "Keymap of `drover-table-mode'.
-Its parent is `drover-session-map'.  It binds the keys of
-`special-mode-map' itself, but for \\`SPC', which peeks at a session.
-Rows and the column header also carry vtable's keymap, whose commands
-are remapped here when the table must handle them itself."
-  :parent drover-session-map
-  "g" #'drover-table-refresh
-  "q" #'quit-window
-  "c" #'drover-table-toggle-children
-  "=" #'drover-table-reset
+Its parents are `drover-session-map', whose keys act on the session at
+point as in every list of sessions, and `special-mode-map'.  Rows and
+the column header also carry vtable's keymap, `vtable-map': the
+commands of it the table handles itself are remapped here, among them
+that of \\`g', which refreshes the sessions as `drover-session-map' says."
+  :parent (make-composed-keymap (list drover-session-map special-mode-map))
+  "RET" #'drover-open-at-point
   "n" #'next-line
   "p" #'previous-line
-  "<" #'beginning-of-buffer
-  ">" #'end-of-buffer
-  "h" #'describe-mode
-  "?" #'describe-mode
-  "DEL" #'scroll-down-command
-  "S-SPC" #'scroll-down-command
-  "-" #'negative-argument
-  "0" #'digit-argument "1" #'digit-argument "2" #'digit-argument
-  "3" #'digit-argument "4" #'digit-argument "5" #'digit-argument
-  "6" #'digit-argument "7" #'digit-argument "8" #'digit-argument
-  "9" #'digit-argument
-  "<remap> <self-insert-command>" #'undefined
-  "<remap> <vtable-revert-command>" #'drover-table-refresh
+  "=" #'drover-table-reset
+  "<remap> <vtable-revert-command>" #'drover-refresh
   "<remap> <vtable-narrow-current-column>" #'drover-table-narrow-column
   "<remap> <vtable-widen-current-column>" #'drover-table-widen-column)
 
 (define-derived-mode drover-table-mode special-mode "Drover Table"
   "Major mode listing the sessions of every agent in one table.
 \\<drover-table-mode-map>Sessions come as trees, each subagent under its
-parent, the tree with the most urgent session first.  \\`S' on a column
-sorts the trees by the value of their root, and the subagents of each
-session among themselves; the Title column sorts by title.  \\`{' and
-\\`}' narrow and widen a column, and \\[drover-table-reset] restores the
-order of urgency and the default widths.
-\\[drover-table-toggle-children] shows or hides the subagents that do
-not need you.
+parent, the tree with the most urgent session first.  They are those
+`drover-filter' lists (\\[drover-filter]), grouped as `drover-group-by'
+says (\\[drover-group]), each group under a heading row;
+\\[drover-toggle-subagents] shows or hides the subagents that do not
+need you.
+
+\\[drover-open-at-point] opens the session at point, and the other keys of
+`drover-session-map' act on it.  \\`S' on a column sorts the trees of
+each group by the value of their root, and the subagents of each session
+among themselves; the Title column sorts by title.  \\`{' and \\`}'
+narrow and widen a column, and \\[drover-table-reset] restores the order
+of urgency and the default widths.
 
 \\{drover-table-mode-map}"
   :group 'drover-table
+  (setq-local drover-view-p t)
   (setq-local drover-session-at-point-function #'drover-table--session-at-point)
   (setq-local revert-buffer-function #'drover-table--revert)
   (setq-local truncate-lines t)

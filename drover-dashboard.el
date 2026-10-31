@@ -21,10 +21,13 @@
 ;;; Commentary:
 
 ;; `drover-dashboard' lists every agent session in a Magit-like buffer.
-;; Sessions are grouped by status, most urgent first, or by project
-;; (\\`G'); each group is a section that \\`TAB' collapses, and each
-;; session a section whose body holds its details.  The keys of
-;; `drover-session-map' act on the session at point.
+;; Like every drover view, it lists the sessions `drover-filter' keeps,
+;; grouped as `drover-group-by' says: by status, most urgent first, by
+;; project, or not at all.  Each group is a section that \\`TAB'
+;; collapses, and each session a section whose body holds its details.
+;; The keys of `drover-session-map' act on the session at point; among
+;; them \\`G' groups, \\`F' filters and \\`U' shows or hides subagents,
+;; in every view at once.
 ;;
 ;; A subagent is listed under its parent, indented one step deeper, and
 ;; a parent and its subagents stay together: they go in the group of the
@@ -33,7 +36,8 @@
 ;; are sections of the group, like their parent, rather than sections
 ;; inside their parent's: Magit hides the whole body of a section, and
 ;; showing a parent's details must neither hide nor reveal its
-;; subagents.  \\`c' lists every subagent or only those needing the user.
+;; subagents.  Without groups, sessions are sections of the buffer's
+;; root section, in the same way.
 ;;
 ;; Text is drawn in the face `drover-dashboard', variable pitch by
 ;; default.  Columns are aligned in pixels, measured in that face and
@@ -79,16 +83,10 @@ See `display-buffer' for the form of an action."
   :type 'sexp
   :group 'drover-dashboard)
 
-(defcustom drover-dashboard-grouping 'status
-  "How a new dashboard groups sessions: by `status' or by `project'.
-\\<drover-dashboard-mode-map>\\[drover-dashboard-toggle-grouping] switches the grouping of one dashboard."
-  :type '(choice (const :tag "By status" status)
-                 (const :tag "By project" project))
-  :group 'drover-dashboard)
-
 (defcustom drover-dashboard-collapsed-statuses '(idle)
   "Statuses whose group is collapsed until expanded.
-Once a group is expanded or collapsed, the dashboard remembers it."
+They apply when sessions are grouped by status.  Once a group is
+expanded or collapsed, the dashboard remembers it."
   :type '(repeat symbol)
   :group 'drover-dashboard)
 
@@ -160,19 +158,44 @@ Its subagents follow it in its group, as sections of their own.")
        (seq-filter (lambda (section) (object-of-class-p section 'drover-dashboard-group-section))
                    (oref magit-root-section children))))
 
+(defun drover-dashboard--containers ()
+  "Return the sections holding the sessions of the current dashboard.
+They are its groups, or its root section when sessions are not grouped."
+  (and magit-root-section
+       (or (drover-dashboard--groups) (list magit-root-section))))
+
+(defun drover-dashboard--session-sections (container)
+  "Return the session sections CONTAINER holds, a group or the root section."
+  (seq-filter (lambda (section) (object-of-class-p section 'drover-dashboard-session-section))
+              (oref container children)))
+
+(defun drover-dashboard--container-id (container)
+  "Return what identifies CONTAINER, a group or the root section, in a redraw.
+It is `root' for the root section, else (CLASS . VALUE)."
+  (if (eq container magit-root-section)
+      'root
+    (cons (eieio-object-class container) (oref container value))))
+
+(defun drover-dashboard--find-container (id)
+  "Return the section holding sessions identified by ID, or nil.
+ID is a value of `drover-dashboard--container-id'.  The root section
+holds sessions only while they are not grouped."
+  (if (eq id 'root)
+      (and magit-root-section
+           (null (drover-dashboard--groups))
+           (drover-dashboard--session-sections magit-root-section)
+           magit-root-section)
+    (seq-find (lambda (section)
+                (and (eq (eieio-object-class section) (car id))
+                     (equal (oref section value) (cdr id))))
+              (drover-dashboard--groups))))
+
 (defun drover-dashboard--find-session (key)
   "Return the section showing the session whose key is KEY, or nil."
-  (seq-some (lambda (group)
+  (seq-some (lambda (container)
               (seq-find (lambda (section) (equal (oref section value) key))
-                        (oref group children)))
-            (drover-dashboard--groups)))
-
-(defun drover-dashboard--find-group (class value)
-  "Return the group section of CLASS whose value is VALUE, or nil."
-  (seq-find (lambda (section)
-              (and (eq (eieio-object-class section) class)
-                   (equal (oref section value) value)))
-            (drover-dashboard--groups)))
+                        (drover-dashboard--session-sections container)))
+            (drover-dashboard--containers)))
 
 (defun drover-dashboard--session-at-point ()
   "Return the current record of the session at point, or nil.
@@ -271,8 +294,7 @@ when not even the ellipsis fits."
 
 ;;;; Drawing
 
-(defvar-local drover-dashboard--grouping nil
-  "How the dashboard groups sessions: `status' or `project'.")
+(defvar drover-dashboard-mode-map)
 
 (defvar-local drover-dashboard--stale nil
   "Non-nil when sessions changed since the hidden dashboard was drawn.")
@@ -525,18 +547,35 @@ project, so a session of that project shows only its branch."
                     nil)))
           (drover-group-trees-by-project nodes)))
 
+(defun drover-dashboard--arrange (nodes metrics)
+  "Return trees NODES grouped as `drover-group-by' says, measured with METRICS.
+Each group is a list (CLASS VALUE HEADING ROWS HIDE), as
+`drover-dashboard--insert-group' takes.  Without grouping, the one
+group has no CLASS: its rows are drawn without a heading."
+  (pcase drover-group-by
+    ('status (drover-dashboard--groups-by-status nodes metrics))
+    ('project (drover-dashboard--groups-by-project nodes metrics))
+    (_ (list (list nil nil nil
+                   (drover-dashboard--tree-rows nodes #'drover-session-location metrics)
+                   nil)))))
+
 (defun drover-dashboard--insert-group (class value heading rows layout hide)
   "Insert a group section of CLASS and VALUE holding ROWS.
 HEADING is its heading line and LAYOUT the columns of its rows.
-When HIDE is non-nil, the group starts collapsed."
-  (magit-insert-section ((eval class) value hide)
-    (magit-insert-heading heading)
-    (dolist (row rows)
-      (drover-dashboard--insert-session row layout))
-    (insert "\n")))
+When HIDE is non-nil, the group starts collapsed.  When CLASS is nil,
+insert the rows alone, in the current section."
+  (if (null class)
+      (dolist (row rows)
+        (drover-dashboard--insert-session row layout))
+    (magit-insert-section ((eval class) value hide)
+      (magit-insert-heading heading)
+      (dolist (row rows)
+        (drover-dashboard--insert-session row layout))
+      (insert "\n"))))
 
 (defun drover-dashboard--insert-header (sessions hidden)
-  "Insert the summary of SESSIONS, of which HIDDEN subagents are not shown."
+  "Insert the summary of SESSIONS, of which HIDDEN subagents are not shown.
+When `drover-filter' is set, a second line describes it."
   (magit-insert-section (drover-dashboard-header)
     (let ((counts (mapcar (lambda (status)
                             (cons status (seq-count (lambda (session)
@@ -560,36 +599,44 @@ When HIDE is non-nil, the group starts collapsed."
                 (and (> hidden 0)
                      (format ", %d subagent%s hidden" hidden (if (= hidden 1) "" "s"))))
         'drover-dim)
-       "\n\n"))))
+       "\n")
+      (when-let* ((filter (drover-filter-description)))
+        (insert (drover-face "Filter: " 'drover-dim) filter
+                "   " (drover-filter-clear-keys drover-dashboard-mode-map) (drover-face " clears it" 'drover-dim)
+                "\n"))
+      (insert "\n"))))
 
-(defun drover-dashboard--insert-empty ()
-  "Insert why the dashboard lists no session."
+(defun drover-dashboard--insert-empty (sessions)
+  "Insert why the dashboard lists none of SESSIONS, every session.
+When there are SESSIONS, `drover-filter' left them all out: name the
+filter and how to clear it."
   (magit-insert-section (drover-dashboard-empty)
-    (insert
-     (if (null (drover-backends))
-         "No agent backend is registered.\nLoad an agent front end, such as opencode.el, to see its sessions.\n"
-       "No sessions.\n"))))
+    (cond
+     ((null (drover-backends))
+      (insert "No agent backend is registered.\nLoad an agent front end, such as opencode.el, to see its sessions.\n"))
+     ((and sessions (drover-filter-active-p))
+      (insert "No session matches the filter: " (drover-filter-description) ".\n"
+              (drover-filter-clear-hint drover-dashboard-mode-map) "\n"))
+     (t (insert "No sessions.\n")))))
 
 (defun drover-dashboard--insert ()
   "Insert every section of the dashboard at point."
   (let* ((all (drover-sessions))
-         (trees (drover-tree all))
-         (nodes (drover-tree-visible trees))
+         (nodes (and all (drover-view-trees all)))
          (sessions (drover-tree-sessions nodes))
          (metrics (drover-dashboard--metrics (float-time)))
-         (groups (if (eq drover-dashboard--grouping 'project)
-                     (drover-dashboard--groups-by-project nodes metrics)
-                   (drover-dashboard--groups-by-status nodes metrics)))
+         (groups (drover-dashboard--arrange nodes metrics))
          ;; Columns line up across groups.
          (layout (drover-dashboard--layout (mapcan (lambda (group) (copy-sequence (nth 3 group)))
                                                    groups)
                                            metrics drover-dashboard--width)))
     (drover-dashboard--forget-visibility all)
     (magit-insert-section (drover-dashboard)
-      ;; Every tree has a root shown, so no session shown means none at all.
+      ;; Every tree the filter keeps has its root shown, so no session
+      ;; shown means none at all, or none the filter keeps.
       (if (null sessions)
-          (drover-dashboard--insert-empty)
-        (drover-dashboard--insert-header sessions (drover-tree-hidden-count trees))
+          (drover-dashboard--insert-empty all)
+        (drover-dashboard--insert-header sessions (drover-view-hidden-count all))
         (pcase-dolist (`(,class ,value ,heading ,rows ,hide) groups)
           (drover-dashboard--insert-group class value heading rows layout hide))))))
 
@@ -598,20 +645,25 @@ When HIDE is non-nil, the group starts collapsed."
 (defun drover-dashboard--anchor (position)
   "Return what is at POSITION, to find it again after a redraw.
 The value is a plist of :key, the key of the session there, :offset,
-the line within its section, :group, the class and value of the group
-there, :index, the position of the session in the group, :line, the
-line number, and :char, the position within the line.  Positions in a
-line count characters, not columns: with variable pitch and aligned
-cells, columns say little."
+the line within its section, :container, the identifier of the group
+there or of the root section holding the session (see
+`drover-dashboard--container-id'), :index, the position of the session
+among the sessions of its container, :line, the line number, and
+:char, the position within the line.  Positions in a line count
+characters, not columns: with variable pitch and aligned cells, columns
+say little."
   (save-excursion
     (goto-char position)
     (let* ((section (magit-section-at))
            (session (drover-dashboard--session-section section))
-           (group (drover-dashboard--group-section section)))
+           (container (if session
+                          (oref session parent)
+                        (drover-dashboard--group-section section))))
       (list :key (and session (oref session value))
             :offset (and session (- (line-number-at-pos) (line-number-at-pos (oref session start))))
-            :group (and group (cons (eieio-object-class group) (oref group value)))
-            :index (and session group (seq-position (oref group children) session))
+            :container (and container (drover-dashboard--container-id container))
+            :index (and session
+                        (seq-position (drover-dashboard--session-sections container) session))
             :line (line-number-at-pos)
             :char (- (point) (line-beginning-position))))))
 
@@ -630,14 +682,15 @@ cells, columns say little."
 
 (defun drover-dashboard--resolve (anchor)
   "Return the position of ANCHOR, a value of `drover-dashboard--anchor'.
-Prefer the same session, wherever it moved, then the same group, then
-the same line."
+Prefer the same session, wherever it moved, then the session that took
+its place in its group, or in the list when sessions are not grouped,
+then the same line."
   (save-excursion
     (let* ((key (plist-get anchor :key))
            (session (and key (drover-dashboard--find-session key)))
-           (group-id (plist-get anchor :group))
-           (group (and (not session) group-id
-                       (drover-dashboard--find-group (car group-id) (cdr group-id)))))
+           (container-id (plist-get anchor :container))
+           (container (and (not session) container-id
+                           (drover-dashboard--find-container container-id))))
       (cond
        (session
         (let ((start (drover-dashboard--visible-start session)))
@@ -650,13 +703,13 @@ the same line."
                            (eq (drover-dashboard--session-section (magit-section-at)) session))
                 (goto-char start)))
             (drover-dashboard--move-in-line (plist-get anchor :char)))))
-       (group
-        (let ((children (oref group children))
+       (container
+        (let ((sessions (drover-dashboard--session-sections container))
               (index (plist-get anchor :index)))
           (goto-char (drover-dashboard--visible-start
-                      (if (and index children)
-                          (nth (min index (1- (length children))) children)
-                        group)))))
+                      (if (and index sessions)
+                          (nth (min index (1- (length sessions))) sessions)
+                        container)))))
        (t
         (goto-char (point-min))
         (forward-line (1- (plist-get anchor :line)))
@@ -783,74 +836,56 @@ For `kill-buffer-hook'."
   "Redraw the dashboard, for `revert-buffer-function'."
   (drover-dashboard--render))
 
-;;;; Commands
-
-(defun drover-dashboard--check-mode ()
-  "Signal a `user-error' unless the current buffer is a dashboard."
-  (unless (derived-mode-p 'drover-dashboard-mode)
-    (user-error "Not in a drover dashboard")))
-
-(defun drover-dashboard-refresh ()
-  "Redraw the dashboard from what backends report now."
-  (interactive nil drover-dashboard-mode)
-  (drover-dashboard--check-mode)
-  (drover-dashboard--render))
-
-(defun drover-dashboard-toggle-grouping ()
-  "Group the sessions of the dashboard by project, or back by status."
-  (interactive nil drover-dashboard-mode)
-  (drover-dashboard--check-mode)
-  (setq drover-dashboard--grouping (if (eq drover-dashboard--grouping 'project) 'status 'project))
-  (drover-dashboard--render)
-  (message "Sessions grouped by %s" drover-dashboard--grouping))
-
-(defun drover-dashboard-toggle-children ()
-  "Show or hide the sessions of subagents in the dashboard.
-A subagent that needs the user, or whose own subagents do, is always
-shown."
-  (interactive nil drover-dashboard-mode)
-  (drover-dashboard--check-mode)
-  (setq-local drover-show-children (not drover-show-children))
-  (drover-dashboard--render)
-  (message (if drover-show-children "Showing subagents" "Hiding subagents")))
+;;;; The mode
 
 (defun drover-dashboard--goto-first-session ()
   "Move point to the first session shown, if any."
-  (when-let* ((group (car (drover-dashboard--groups))))
-    (goto-char (drover-dashboard--visible-start (or (car (oref group children)) group)))))
+  (when-let* ((container (car (drover-dashboard--containers)))
+              (target (or (car (drover-dashboard--session-sections container))
+                          (and (not (eq container magit-root-section)) container))))
+    (goto-char (drover-dashboard--visible-start target))))
 
 (defun drover-dashboard--mode-line-process ()
-  "Return the grouping and subagent display of the dashboard, for the mode line."
-  (concat " by " (symbol-name drover-dashboard--grouping)
-          (and drover-show-children " +subagents")))
+  "Return how the dashboard lists sessions, for the mode line.
+It tells the grouping, whether subagents show, and whether a filter
+leaves sessions out."
+  (concat (pcase drover-group-by
+            ('status " by status")
+            ('project " by project")
+            (_ " ungrouped"))
+          (and drover-show-children " +subagents")
+          (and (drover-filter-active-p) " filtered")))
 
-;; Precedence, highest first: these bindings, `drover-session-map', then
-;; `magit-section-mode-map' and its parent `special-mode-map'.  The only
-;; key two of them bind differently is SPC, which peeks at the session
-;; (drover) rather than scrolling (special-mode): acting on sessions is
-;; what the dashboard is for, and C-v still scrolls.  `g' and `q' are
-;; bound here so they do not depend on special-mode.  RET on a group
-;; heading toggles it, through the group sections' own keymap, so RET
-;; stays the shared command on sessions even when users rebind it.
+;; The keys of `drover-session-map' come first, so they win over those
+;; of `magit-section-mode-map' and its parent `special-mode-map'.  The
+;; only one they share is g, which refreshes either way: `drover-refresh'
+;; reverts the buffer, as `revert-buffer' would.  RET on a group heading
+;; toggles it, through the group sections' own keymap.
 (defvar-keymap drover-dashboard-mode-map
   :doc "Keymap of `drover-dashboard-mode'."
   :parent (make-composed-keymap (list drover-session-map magit-section-mode-map))
-  "g" #'drover-dashboard-refresh
-  "q" #'quit-window
-  "G" #'drover-dashboard-toggle-grouping
-  "c" #'drover-dashboard-toggle-children)
+  "RET" #'drover-open-at-point)
 
 (define-derived-mode drover-dashboard-mode magit-section-mode "Drover"
   "Major mode of the dashboard of agent sessions.
-Sessions are grouped by status or by project, each subagent under its
-parent; \\[magit-section-toggle] collapses a group or shows the details
-of a session.  The keys of `drover-session-map' act on the session at
-point.  Text is drawn in the face `drover-dashboard'.
+\\<drover-dashboard-mode-map>
+Like every drover view, the dashboard lists the sessions the filter
+keeps, each subagent under its parent, grouped by status, by project
+or not at all.  \\[magit-section-toggle] collapses a group or shows
+the details of a session, and \\[drover-open-at-point] opens the
+session at point.
+
+The keys of `drover-session-map' act on the session at point; among
+them, \\[drover-group] chooses the grouping (`drover-group-by'),
+\\[drover-filter] the filter (`drover-filter') and
+\\[drover-toggle-subagents] whether subagents show, in every view.
+\\[drover-refresh] redraws the dashboard.  Text is drawn in the face
+`drover-dashboard'.
 
 \\{drover-dashboard-mode-map}"
   :group 'drover-dashboard
   :interactive nil
-  (setq-local drover-dashboard--grouping drover-dashboard-grouping)
+  (setq-local drover-view-p t)
   (setq-local drover-dashboard--visibility (make-hash-table :test #'equal))
   (setq-local drover-session-at-point-function #'drover-dashboard--session-at-point)
   (setq-local revert-buffer-function #'drover-dashboard--revert)
@@ -879,8 +914,9 @@ point.  Text is drawn in the face `drover-dashboard'.
 ;;;###autoload
 (defun drover-dashboard ()
   "Show the dashboard of every agent session and select it.
-Sessions are grouped by status, those needing you first, or by
-project; see `drover-dashboard-mode' for the keys."
+It lists the sessions `drover-filter' keeps, grouped as
+`drover-group-by' says, those needing you first; see
+`drover-dashboard-mode' for the keys."
   (interactive)
   (drover-start)
   (let* ((buffer (drover-dashboard--buffer))

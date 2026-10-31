@@ -19,6 +19,7 @@
 
 (require 'drover-test-helpers)
 (require 'drover-table)
+(require 'ol)
 
 (defmacro drover-table-test-with-table (sessions &rest body)
   "Run BODY in a drawn table buffer, the fake backend serving SESSIONS.
@@ -62,15 +63,32 @@ defaults: in batch, \"⚑\" is two columns wide and the others one."
       (nreverse cells))))
 
 (defun drover-table-test--rows ()
-  "Return the rows of the table, as lists (ID . CELLS)."
+  "Return the rows of the sessions of the table, as lists (ID . CELLS)."
   (save-excursion
     (goto-char (point-min))
     (let (rows)
       (while (not (eobp))
-        (when-let* ((session (get-text-property (point) 'vtable-object)))
+        (when-let* ((session (get-text-property (point) 'vtable-object))
+                    ((drover-session-p session)))
           (push (cons (drover-session-id session) (drover-table-test--cells)) rows))
         (forward-line 1))
       (nreverse rows))))
+
+(defun drover-table-test--lines ()
+  "Return the rows of the table in order, sessions and group headings.
+A session is its identifier, a group heading the list (group TITLE),
+TITLE the text of its first cell."
+  (save-excursion
+    (goto-char (point-min))
+    (let (lines)
+      (while (not (eobp))
+        (when-let* ((object (get-text-property (point) 'vtable-object)))
+          (push (if (drover-session-p object)
+                    (drover-session-id object)
+                  (list 'group (car (drover-table-test--cells))))
+                lines))
+        (forward-line 1))
+      (nreverse lines))))
 
 (defun drover-table-test--ids ()
   "Return the identifiers of the sessions in the table, in order."
@@ -93,8 +111,32 @@ defaults: in batch, \"⚑\" is two columns wide and the others one."
 
 (defun drover-table-test--id-at-point ()
   "Return the identifier of the session on this line, or nil."
-  (when-let* ((session (vtable-current-object)))
+  (when-let* ((session (vtable-current-object))
+              ((drover-session-p session)))
     (drover-session-id session)))
+
+(defun drover-table-test--goto-group (title)
+  "Move to the heading of the group whose first cell reads TITLE."
+  (goto-char (point-min))
+  (while (not (and (drover-table--group-p (vtable-current-object))
+                   (equal (car (drover-table-test--cells)) title)))
+    (when (eobp)
+      (error "No group %s" title))
+    (forward-line 1)))
+
+(defun drover-table-test--show ()
+  "Show the table in the selected window, its window point at point.
+Keys run through the command loop act there, and view settings redraw
+only shown tables."
+  (let ((position (point)))
+    (set-window-buffer (selected-window) (current-buffer))
+    (set-window-point (selected-window) position)
+    (goto-char position)))
+
+(defun drover-table-test--group-by (grouping)
+  "Group the sessions by GROUPING, and draw the table again."
+  (drover-set-group-by grouping)
+  (drover-table-refresh))
 
 (defun drover-table-test--faces (id column)
   "Return the faces at the start of COLUMN, an index, in the row of ID."
@@ -200,13 +242,17 @@ The hook runs as the command loop would run it."
       (list (drover-table-test--titled "s" "Two\nlines" :status 'failed :detail "Error:\n  boom\tnow"))
     (should (equal (drover-table-test--cell "s" "Title") "✗ Two lines"))
     (should (equal (drover-table-test--cell "s" "Summary") "Error: boom now"))
-    (should (= (count-lines (point-min) (point-max)) 2))))
+    ;; The column header, the heading of the group, and the row.
+    (should (= (count-lines (point-min) (point-max)) 3))))
 
 (ert-deftest drover-table-test-unknown-status ()
   (drover-table-test-with-table
       (list (drover-test-session "odd" :status 'mystery)
             (drover-test-session "idle" :status 'idle))
     (should (equal (drover-table-test--ids) '("idle" "odd")))
+    ;; A status `drover-status-order' lacks has a group of its own, last.
+    (should (equal (drover-table-test--lines)
+                   '((group "Idle (1)") "idle" (group "Mystery (1)") "odd")))
     (should (equal (drover-table-test--cell "odd" "Title") "? Session odd"))))
 
 (ert-deftest drover-table-test-title-cell ()
@@ -287,7 +333,7 @@ The hook runs as the command loop would run it."
             (drover-test-session "quiet" :parent "root" :status 'idle :updated 4.0)
             (drover-test-session "root" :status 'working :updated 5.0)
             (drover-test-session "busy" :parent "root" :status 'working :updated 6.0))
-    (setq-local drover-show-children t)
+    (setq drover-show-children t)
     (drover-table-refresh)
     ;; Siblings come most urgent first, each before its own subagents.
     (should (equal (drover-table-test--ids) '("root" "busy" "quiet" "grandchild" "other")))
@@ -318,11 +364,13 @@ The hook runs as the command loop would run it."
     (should (equal (drover-table-test--ids) '("root" "orphan")))
     (should (= (drover-table-test--indent "orphan") 0))
     (should (string-match-p "2 sessions, 1 subagent hidden" header-line-format))
-    (drover-table-test--press "c")
+    (drover-table-test--show)
+    (execute-kbd-macro (kbd "U"))
     (should (equal (drover-table-test--ids) '("root" "orphan" "child")))
     (should (> (drover-table-test--indent "child") 0))))
 
-(ert-deftest drover-table-test-toggle-children ()
+(ert-deftest drover-table-test-toggle-subagents ()
+  "\\`U' shows subagents in every view, and the shown table follows at once."
   (drover-table-test-with-table
       (list (drover-test-session "root" :updated 2.0)
             (drover-test-session "child" :parent "root" :updated 1.0)
@@ -331,24 +379,32 @@ The hook runs as the command loop would run it."
     (should (equal (drover-table-test--ids) '("root" "asking" "other")))
     (should (string-match-p "3 sessions, 1 subagent hidden" header-line-format))
     (drover-table-test--goto "other" 1)
-    (drover-table-test--press "c")
+    (drover-table-test--show)
+    (should (eq (drover-table-test--binding "U") #'drover-toggle-subagents))
+    (execute-kbd-macro (kbd "U"))
     (should (equal (drover-table-test--ids) '("root" "asking" "child" "other")))
     (should (equal (drover-table-test--cell "child" "Title") "· Session child"))
     (should (= (drover-table-test--indent "child") (drover-table-test--indent "asking")))
+    ;; Point stays on its session and column.
     (should (equal (drover-table-test--id-at-point) "other"))
-    (should (local-variable-p 'drover-show-children))
-    (should-not (default-value 'drover-show-children))
+    (should (eql (vtable-current-column) 1))
+    ;; The setting is every view's, not the table's.
+    (should-not (local-variable-p 'drover-show-children))
+    (should drover-show-children)
     (should-not (string-match-p "hidden" header-line-format))
-    (drover-table-toggle-children)
-    (should (equal (drover-table-test--ids) '("root" "asking" "other")))))
+    (execute-kbd-macro (kbd "U"))
+    (should-not drover-show-children)
+    (should (equal (drover-table-test--ids) '("root" "asking" "other")))
+    (should (equal (drover-table-test--id-at-point) "other"))))
 
 (ert-deftest drover-table-test-refresh-keeps-nested-session ()
   (drover-table-test-with-table
       (list (drover-test-session "first" :status 'working :updated 5.0)
             (drover-test-session "root" :status 'idle :updated 2.0)
             (drover-test-session "child" :parent "root" :status 'idle :updated 1.0))
-    (setq-local drover-show-children t)
-    (drover-table-refresh)
+    ;; Sorting crosses status groups.
+    (setq drover-show-children t)
+    (drover-table-test--group-by nil)
     (should (equal (drover-table-test--ids) '("first" "root" "child")))
     (drover-table-test--goto "child" 2)
     ;; The child's tree moves up and gains a sibling before the child.
@@ -371,7 +427,159 @@ The hook runs as the command loop would run it."
     (should (equal (drover-table-test--id-at-point) "child"))
     (should (eql (vtable-current-column) 0))))
 
-;;;; Widths
+;;;; Groups
+
+(ert-deftest drover-table-test-group-by-status ()
+  (drover-table-test-with-table
+      (list (drover-test-session "i1" :status 'idle :updated 2.0)
+            (drover-test-session "w1" :status 'waiting :since 2.0)
+            (drover-test-session "d" :status 'done :since 1.0)
+            (drover-test-session "i2" :status 'idle :updated 1.0)
+            (drover-test-session "parent" :status 'idle :updated 3.0)
+            (drover-test-session "kid" :parent "parent" :status 'waiting :since 1.0))
+    (should (eq drover-group-by 'status))
+    ;; A tree goes with its most urgent status; a group counts its rows.
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (3)") "parent" "kid" "w1"
+                     (group "Done (1)") "d"
+                     (group "Idle (2)") "i1" "i2")))
+    ;; Headings are not sessions, and the header counts sessions only.
+    (should (string-match-p "  6 sessions\\'" (substring-no-properties header-line-format)))
+    (drover-table-test--goto-group "Needs you (3)")
+    (let ((faces (ensure-list (get-text-property (point) 'face))))
+      (should (memq 'drover-heading faces))
+      (should (memq 'drover-waiting faces))
+      (should (memq 'drover-table faces)))
+    (search-forward "(3)")
+    (should (memq 'drover-dim (ensure-list (get-text-property (1- (point)) 'face))))
+    (should-not (drover-session-at-point t))
+    (should-error (drover-table-test--press "RET") :type 'user-error)
+    (should-error (drover-table-test--press "A") :type 'user-error)))
+
+(ert-deftest drover-table-test-group-by-project ()
+  "Grouping follows `drover-set-group-by' at once, point staying on its session."
+  (drover-table-test-with-table
+      (list (drover-test-session "a1" :project "alpha" :status 'idle :updated 1.0)
+            (drover-test-session "b1" :project "beta" :status 'waiting :since 1.0)
+            (drover-test-session "n1" :status 'done :since 1.0)
+            (drover-test-session "a2" :project "alpha" :status 'working :updated 2.0))
+    (drover-table-test--goto "a1" 2)
+    (drover-table-test--show)
+    (drover-set-group-by 'project)
+    ;; A project comes where its most urgent tree would.
+    (should (equal (drover-table-test--lines)
+                   '((group "beta (1)") "b1"
+                     (group "No project (1)") "n1"
+                     (group "alpha (2)") "a2" "a1")))
+    (should (equal (drover-table-test--id-at-point) "a1"))
+    (should (eql (vtable-current-column) 2))
+    (save-excursion
+      (drover-table-test--goto-group "No project (1)")
+      (should (memq 'italic (ensure-list (get-text-property (point) 'face)))))
+    (drover-set-group-by nil)
+    (should (equal (drover-table-test--lines) '("b1" "n1" "a2" "a1")))
+    (should (equal (drover-table-test--id-at-point) "a1"))
+    (should (eql (vtable-current-column) 2))
+    (drover-set-group-by 'status)
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (1)") "b1" (group "Done (1)") "n1"
+                     (group "Working (1)") "a2" (group "Idle (1)") "a1")))
+    (should (equal (drover-table-test--id-at-point) "a1"))))
+
+(ert-deftest drover-table-test-sort-within-groups ()
+  "A sort orders the trees of each group; the groups keep their order."
+  (drover-table-test-with-table
+      (list (drover-table-test--titled "w-b" "Bravo" :status 'waiting :since 1.0)
+            (drover-table-test--titled "w-a" "Alpha" :status 'waiting :since 2.0)
+            (drover-table-test--titled "i-z" "Zulu" :status 'idle :updated 2.0)
+            (drover-table-test--titled "i-c" "Charlie" :status 'idle :updated 1.0)
+            (drover-table-test--titled "i-c1" "Able" :parent "i-c" :status 'idle))
+    (setq drover-show-children t)
+    (drover-table-refresh)
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (2)") "w-b" "w-a" (group "Idle (3)") "i-z" "i-c" "i-c1")))
+    (drover-table-test--sort 0)
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (2)") "w-a" "w-b" (group "Idle (3)") "i-c" "i-c1" "i-z")))
+    (drover-table-test--sort 0)
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (2)") "w-b" "w-a" (group "Idle (3)") "i-z" "i-c" "i-c1")))
+    ;; Sorted from a heading, by its column.
+    (drover-table-test--goto-group "Idle (3)")
+    (vtable-goto-column 0)
+    (drover-table-test--press "S")
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (2)") "w-a" "w-b" (group "Idle (3)") "i-c" "i-c1" "i-z")))
+    (should (equal (car (drover-table-test--cells)) "Idle (3)"))
+    (drover-table-test--press "=")
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (2)") "w-b" "w-a" (group "Idle (3)") "i-z" "i-c" "i-c1")))))
+
+(ert-deftest drover-table-test-point-near-headings ()
+  (drover-table-test-with-table
+      (list (drover-test-session "w1" :status 'waiting :since 1.0)
+            (drover-test-session "w2" :status 'waiting :since 2.0)
+            (drover-test-session "d" :status 'done :since 1.0)
+            (drover-test-session "i" :status 'idle :updated 1.0))
+    ;; A heading keeps point across redraws.
+    (drover-table-test--goto-group "Done (1)")
+    (drover-table-refresh)
+    (should (equal (car (drover-table-test--cells)) "Done (1)"))
+    ;; A session leaves, and a heading takes its line: point goes to the
+    ;; first session of that group, not to the heading.
+    (drover-table-test--goto "w2")
+    (setq drover-test-sessions (list (drover-test-session "w1" :status 'waiting :since 1.0)
+                                     (drover-test-session "d" :status 'done :since 1.0)
+                                     (drover-test-session "i" :status 'idle :updated 1.0)))
+    (drover-table-refresh)
+    (should (equal (drover-table-test--lines)
+                   '((group "Needs you (1)") "w1" (group "Done (1)") "d" (group "Idle (1)") "i")))
+    (should (equal (drover-table-test--id-at-point) "d"))
+    ;; A heading leaves, the last line with it: point goes to the last row.
+    (drover-table-test--goto-group "Idle (1)")
+    (setq drover-test-sessions (list (drover-test-session "w1" :status 'waiting :since 1.0)
+                                     (drover-test-session "d" :status 'done :since 1.0)))
+    (drover-table-refresh)
+    (should (equal (drover-table-test--id-at-point) "d"))))
+
+;;;; Filters
+
+(ert-deftest drover-table-test-filter ()
+  "The table lists what `drover-filter' keeps, and says which filter is set."
+  (drover-table-test-with-table
+      (list (drover-test-session "a" :project "drover" :status 'working :updated 3.0)
+            (drover-test-session "b" :project "other" :status 'idle :updated 2.0)
+            (drover-table-test--titled "kid" "Needle" :parent "b" :status 'idle)
+            (drover-test-session "kid2" :parent "b" :status 'idle))
+    (should-not (string-match-p "Filter" header-line-format))
+    (drover-table-test--goto "b" 1)
+    (drover-table-test--show)
+    ;; A matching subagent shows under its parent, subagents hidden.
+    (drover-set-filter :search "needle")
+    (should (equal (drover-table-test--lines) '((group "Idle (2)") "b" "kid")))
+    (should (equal (drover-table-test--id-at-point) "b"))
+    (should (eql (vtable-current-column) 1))
+    (should (equal (substring-no-properties header-line-format)
+                   " Nothing needs you   2 sessions   Filter: \"needle\""))
+    (drover-set-filter :search nil)
+    (drover-set-filter :project "drover")
+    (should (equal (drover-table-test--ids) '("a")))
+    (should (string-suffix-p "Filter: project drover" header-line-format))
+    ;; Nothing matches: the table says which filter, and how to clear it.
+    (drover-set-filter :search "50%")
+    (should (equal (buffer-string)
+                   (concat "No session matches the filter: project drover, \"50%\".\n"
+                           "F c clears the filter.\n")))
+    (should (string-search "0 sessions   Filter: project drover, \"50%%\"" header-line-format))
+    (should-error (drover-session-at-point) :type 'user-error)
+    (goto-char (point-min))
+    (should (memq 'drover-dim (ensure-list (get-text-property (point) 'face))))
+    (search-forward "F c")
+    (should (memq 'help-key-binding (ensure-list (get-text-property (- (point) 3) 'face))))
+    (drover-filter-clear)
+    (should (equal (drover-table-test--ids) '("a" "b")))
+    (should (equal (drover-table-test--id-at-point) "a"))
+    (should-not (string-match-p "Filter" header-line-format))))
 
 (ert-deftest drover-table-test-share ()
   (should (equal (drover-table--share '(10 50 10 100) '(3 1 1 3) 100 6)
@@ -483,16 +691,33 @@ The hook runs as the command loop would run it."
 
 ;;;; Keys
 
+(defun drover-table-test--session-keys ()
+  "Return the bindings of `drover-session-map', as a list (KEY . COMMAND)."
+  (let ((bindings nil))
+    (map-keymap (lambda (event command)
+                  (push (cons (key-description (vector event)) command) bindings))
+                drover-session-map)
+    bindings))
+
+(ert-deftest drover-table-test-view ()
+  "The table is one of drover's views, where \\`G' and \\`F' apply."
+  (drover-table-test-with-table (list (drover-test-session "a"))
+    (should drover-view-p)
+    (should (drover-session-list-p))
+    (should (plist-get (drover--context) :view))
+    (drover-table-test--goto "a")
+    (should (equal (drover-session-id (drover-session-at-point)) "a"))))
+
 (ert-deftest drover-table-test-keys-reach-backend ()
   (drover-table-test-with-table (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (drover-table-test--goto "b" 2)
     (setq drover-test-calls nil)
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t)))
-      (dolist (key '("RET" "o" "a" "C-c C-q" "k" "A" "s" "SPC"))
+      (dolist (key '("RET" "o" "A" "k" "s" "v"))
         (drover-table-test--press key)))
     (should (equal (reverse drover-test-calls)
-                   '((:open "b" nil) (:open "b" t) (:respond "b") (:respond "b")
-                     (:interrupt "b") (:archive "b") (:mark-seen "b") (:preview "b"))))
+                   '((:open "b" nil) (:open "b" t) (:respond "b") (:interrupt "b")
+                     (:mark-seen "b") (:preview "b"))))
     (should (string-match-p "Preview of b" (with-current-buffer drover-peek-buffer
                                              (buffer-string))))))
 
@@ -500,40 +725,107 @@ The hook runs as the command loop would run it."
   (drover-table-test-with-table (list (drover-test-session "a"))
     (drover-table-test--goto "a")
     (setq drover-test-calls nil)
-    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil)))
-      (drover-table-test--press "k")
-      (drover-table-test--press "A"))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) nil))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) nil)))
+      (dolist (key '("k" "x" "z"))
+        (should (equal (should-error (drover-table-test--press key) :type 'user-error)
+                       '(user-error "Abort")))))
     (should-not drover-test-calls)))
 
 (ert-deftest drover-table-test-keys-through-command-loop ()
   (drover-table-test-with-table (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
-    (set-window-buffer (selected-window) (current-buffer))
-    (drover-table-test--goto "b")
-    (set-window-point (selected-window) (point))
+    (drover-table-test--goto "b" 1)
+    (drover-table-test--show)
     (setq drover-test-calls nil)
-    (execute-kbd-macro (kbd "a"))
-    (should (equal drover-test-calls '((:respond "b"))))))
+    (execute-kbd-macro (kbd "RET"))
+    (execute-kbd-macro (kbd "A"))
+    (should (equal (reverse drover-test-calls) '((:open "b" nil) (:respond "b"))))))
+
+(ert-deftest drover-table-test-session-keys-through-command-loop ()
+  "Every key of `drover-session-map' runs its command on a row of the table.
+Each runs through the command loop, under vtable's keymap of the row."
+  (drover-table-test-with-table
+      (list (drover-test-session "p" :status 'working :updated 2.0 :directory "/work/p/")
+            (drover-test-session "kid" :parent "p" :status 'waiting :since 1.0))
+    (let ((commands nil)
+          (menus nil)
+          (org-stored-links nil)
+          (drover-store-link-functions
+           (list (lambda (session) (list (concat "fake:" (drover-session-id session)) "Fake")))))
+      (add-hook 'post-command-hook (lambda () (push this-command commands)) nil t)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t))
+                ((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+                ((symbol-function 'read-string) (lambda (&rest _) "Renamed"))
+                ((symbol-function 'transient-setup) (lambda (name &rest _) (push name menus))))
+        (drover-table-test--goto "p" 1)
+        (drover-table-test--show)
+        (setq drover-test-calls nil)
+        (let ((keys '("o" "A" "k" "s" "c" "r" "x" "z" "l" "+" "v" "G" "F" "U" "g" "V")))
+          ;; The keys pressed here, and u below, are every key of the map.
+          (should (equal (sort (cons "u" (copy-sequence keys)) #'string<)
+                         (sort (mapcar #'car (drover-table-test--session-keys)) #'string<)))
+          (dolist (key keys)
+            ;; A session only a refresh can show.
+            (when (equal key "g")
+              (setq drover-test-sessions (append drover-test-sessions
+                                                 (list (drover-test-session "new" :updated 0.5))))
+              (should-not (member "new" (drover-table-test--ids))))
+            (execute-kbd-macro (kbd key))
+            (should (eq (car commands) (keymap-lookup drover-session-map key)))
+            ;; Every command leaves point on its row.
+            (should (equal (drover-table-test--id-at-point) "p")))
+          (should (equal (reverse drover-test-calls)
+                         '((:open "p" t) (:respond "p") (:interrupt "p") (:mark-seen "p")
+                           (:open "kid" nil) (:rename "p" "Renamed") (:delete "p") (:archive "p")
+                           (:new "/work/p/") (:preview "p")
+                           ;; Follow mode shows the session at point at once.
+                           (:open "p" nil))))
+          (should (equal (car org-stored-links) '("fake:p" "Fake")))
+          (should (equal menus '(drover-filter drover-group)))
+          (should drover-show-children)
+          ;; g refreshed the sessions, not only the rows drawn.
+          (should (member "new" (drover-table-test--ids)))
+          (should drover-follow-mode)
+          (execute-kbd-macro (kbd "V"))
+          (should-not drover-follow-mode))
+        ;; u, on a subagent, opens its parent.
+        (drover-table-test--goto "kid" 1)
+        (set-window-point (selected-window) (point))
+        (setq drover-test-calls nil)
+        (execute-kbd-macro (kbd "u"))
+        (should (eq (car commands) #'drover-open-parent))
+        (should (equal drover-test-calls '((:open "p" nil))))))))
 
 (ert-deftest drover-table-test-key-conflicts ()
-  (drover-table-test-with-table (list (drover-test-session "a"))
-    (should (eq (keymap-parent drover-table-mode-map) drover-session-map))
-    ;; On a row, vtable's keymap is active as well; on the header, its
-    ;; header keymap.  Both must leave the shared keys alone.
+  "Vtable's keymaps of rows and of the column header shadow no shared key."
+  (drover-table-test-with-table
+      (list (drover-test-session "a" :status 'waiting) (drover-test-session "b"))
+    (should (eq (keymap-lookup drover-table-mode-map "F") #'drover-filter))
     (dolist (where (list (lambda () (drover-table-test--goto "a" 1))
+                         (lambda () (drover-table-test--goto-group "Idle (1)"))
                          (lambda () (goto-char (point-min)))))
       (funcall where)
-      (should (eq (drover-table-test--binding "g") #'drover-table-refresh))
-      (should (eq (drover-table-test--binding "q") #'quit-window))
-      (should (eq (drover-table-test--binding "c") #'drover-table-toggle-children))
-      (should (eq (drover-table-test--binding "=") #'drover-table-reset))
+      ;; vtable's map is there, with its own commands.
+      (should (get-text-property (point) 'keymap))
       (should (eq (drover-table-test--binding "S") #'vtable-sort-by-current-column))
-      (should (eq (drover-table-test--binding "SPC") #'drover-peek-at-point))
+      (should (eq (drover-table-test--binding "{") #'drover-table-narrow-column))
+      (should (eq (drover-table-test--binding "}") #'drover-table-widen-column))
+      (should (eq (drover-table-test--binding "M-<right>") #'vtable-next-column))
+      (pcase-dolist (`(,key . ,command) (drover-table-test--session-keys))
+        (should (eq (drover-table-test--binding key) command)))
+      (should (eq (drover-table-test--binding "v") #'drover-peek))
+      (should (eq (drover-table-test--binding "g") #'drover-refresh))
       (should (eq (drover-table-test--binding "RET") #'drover-open-at-point))
-      (should (eq (drover-table-test--binding "a") #'drover-respond-at-point))
-      (should (eq (drover-table-test--binding "s") #'drover-mark-seen-at-point))
+      (should (eq (drover-table-test--binding "=") #'drover-table-reset))
+      (should (eq (drover-table-test--binding "n") #'next-line))
+      (should (eq (drover-table-test--binding "p") #'previous-line))
+      (should (eq (drover-table-test--binding "q") #'quit-window))
+      (should (eq (drover-table-test--binding "SPC") #'scroll-up-command))
       (should (eq (drover-table-test--binding "DEL") #'scroll-down-command))
-      (should (eq (drover-table-test--binding "x") #'undefined))
-      (should (eq (drover-table-test--binding "h") #'describe-mode)))))
+      (should (eq (drover-table-test--binding "h") #'describe-mode))
+      ;; No key of another set of `drover-dispatch'.
+      (dolist (key '("w" "i" "t" "y" "j" "b" "a" "m" "e" "d" "C" "f" "O"))
+        (should (eq (drover-table-test--binding key) #'undefined))))))
 
 (ert-deftest drover-table-test-revert-buffer ()
   (drover-table-test-with-table (list (drover-test-session "a"))
@@ -544,7 +836,8 @@ The hook runs as the command loop would run it."
 (ert-deftest drover-table-test-commands-outside-table ()
   (with-temp-buffer
     (should-error (drover-table-refresh) :type 'user-error)
-    (should-error (drover-table-toggle-children) :type 'user-error)))
+    (should-error (drover-table-reset) :type 'user-error)
+    (should-error (drover-table-narrow-column) :type 'user-error)))
 
 ;;;; Refreshing
 
@@ -611,6 +904,7 @@ The hook runs as the command loop would run it."
       (list (drover-test-session "b" :status 'waiting :since 1.0)
             (drover-test-session "c" :status 'idle :updated 1.0)
             (drover-test-session "a" :status 'done :since 1.0))
+    (drover-table-test--group-by nil)
     (should (equal (drover-table-test--ids) '("b" "a" "c")))
     (drover-table-test--goto "b" 0)
     (drover-table-test--press "S")
@@ -647,8 +941,8 @@ The hook runs as the command loop would run it."
             (drover-table-test--titled "a2" "alpha" :parent "a" :status 'waiting :since 1.0)
             (drover-table-test--titled "b" "Alpha" :status 'working :updated 2.0)
             (drover-table-test--titled "b1" "Mike" :parent "b" :status 'idle))
-    (setq-local drover-show-children t)
-    (drover-table-refresh)
+    (setq drover-show-children t)
+    (drover-table-test--group-by nil)
     (should (equal (drover-table-test--ids) '("a" "a2" "a1" "b" "b1")))
     ;; The trees go by the title of their root, the siblings by their
     ;; own, ignoring case and the glyphs; a plain sort of the rows would
@@ -673,6 +967,7 @@ The hook runs as the command loop would run it."
       (list (drover-test-session "x" :project "p" :status 'idle :updated 1.0)
             (drover-test-session "y" :project "p" :status 'waiting :since 5.0)
             (drover-test-session "z" :project "a" :status 'idle :updated 2.0))
+    (drover-table-test--group-by nil)
     (should (equal (drover-table-test--ids) '("y" "z" "x")))
     ;; Equal projects keep the order of urgency.
     (drover-table-test--sort 1)
@@ -691,6 +986,7 @@ The hook runs as the command loop would run it."
               (drover-test-session "seconds" :status 'working :updated (- now 50))
               (drover-test-session "minutes" :status 'waiting :since (- now 330))
               (drover-test-session "unknown" :status 'done))
+      (drover-table-test--group-by nil)
       (drover-table-test--goto "hour" 3)
       (drover-table-test--press "S")
       ;; Youngest first; a string sort would put "1h" first.
@@ -705,6 +1001,7 @@ The hook runs as the command loop would run it."
       (list (drover-table-test--titled "a" "Beta" :status 'waiting :since 1.0)
             (drover-table-test--titled "a1" "Alpha" :parent "a" :status 'done :since 2.0)
             (drover-table-test--titled "b" "Gamma" :status 'idle))
+    (drover-table-test--group-by nil)
     (set-window-buffer (selected-window) (current-buffer))
     (drover-table-test--goto "a1" 0)
     (set-window-point (selected-window) (point))
@@ -721,6 +1018,7 @@ The hook runs as the command loop would run it."
       (list (drover-table-test--titled "a" "Beta" :status 'waiting :since 1.0)
             (drover-table-test--titled "a1" "Alpha" :parent "a" :status 'done :since 2.0)
             (drover-table-test--titled "b" "Alpha" :status 'idle))
+    (drover-table-test--group-by nil)
     (let ((table (current-buffer))
           (other (get-buffer-create "*drover table test other*")))
       (unwind-protect

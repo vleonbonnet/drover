@@ -150,7 +150,11 @@ This follows the `opencode-state' contract."
                 (lambda (id callback &rest arguments)
                   (push (append (list 'opencode-session-last-reply id) arguments) drover-opencode-test-calls)
                   (funcall callback (concat "Last reply of " id))))
-               ((symbol-function 'opencode-session-create) (drover-opencode-test--recorder 'opencode-session-create)))
+               ((symbol-function 'opencode-session-create) (drover-opencode-test--recorder 'opencode-session-create))
+               ((symbol-function 'opencode-rename-session) (drover-opencode-test--recorder 'opencode-rename-session))
+               ((symbol-function 'opencode-session-delete) (drover-opencode-test--recorder 'opencode-session-delete))
+               ((symbol-function 'opencode-session-fork) (drover-opencode-test--recorder 'opencode-session-fork))
+               ((symbol-function 'opencode-session-compact) (drover-opencode-test--recorder 'opencode-session-compact)))
        (unwind-protect
            (progn (drover-opencode--register) ,@body)
          (when (timerp drover--change-timer)
@@ -193,7 +197,8 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (should (equal (drover-backends) '(opencode)))
     (should (equal (drover-backend-label 'opencode) "OpenCode"))
     (let ((session (drover-session-create :backend 'opencode :id "ses_1")))
-      (dolist (operation '(:start :sessions :open :respond :interrupt :archive :mark-seen :preview :new))
+      (dolist (operation '(:start :sessions :open :respond :interrupt :archive :mark-seen :preview :new
+                                  :buffer :rename :delete :fork :compact))
         (should (drover-supports-p session operation))))))
 
 ;;;; Mapping
@@ -503,7 +508,10 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 (ert-deftest drover-opencode-test-unload ()
   (drover-opencode-test-with nil
     (drover-start)
-    (should-not (drover-opencode-unload-function))
+    (unwind-protect
+        (should-not (drover-opencode-unload-function))
+      ;; The tests that follow need what unloading undid.
+      (drover-opencode--install))
     (should-not (drover-backends))
     (should-not (memq #'drover-opencode--updated opencode-state-updated-functions))
     (should (member '(opencode-events-unregister "project.updated" drover-opencode--projects-changed)
@@ -591,6 +599,197 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (funcall (drover-backend-property 'opencode :new) "/work/drover/")
     (should (equal drover-opencode-test-calls
                    '((opencode-session-create :directory "/work/drover/"))))))
+
+;;;; New operations
+
+(ert-deftest drover-opencode-test-new-operations ()
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((session (drover-opencode-test-session "ses_1")))
+      (drover-rename session "Renamed")
+      (drover-delete session)
+      (drover-fork session)
+      (drover-compact session)
+      (should (equal (reverse drover-opencode-test-calls)
+                     '((opencode-rename-session "ses_1" "Renamed")
+                       (opencode-session-delete "ses_1")
+                       (opencode-session-fork "ses_1")
+                       (opencode-session-compact "ses_1")))))))
+
+;;;; Session buffers
+
+(defvar drover-opencode-test-prompt-actions
+  '(send attach slash mention revert revert-cancel copy-block agent model effort directory
+         compact fork last-answer open-link)
+  "The prompt actions OpenCode session buffers define.")
+
+(ert-deftest drover-opencode-test-session-buffer ()
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (with-temp-buffer
+      (opencode-session-mode)
+      (should (eq drover-session-at-point-function #'drover-opencode--buffer-session))
+      (should (equal (sort (mapcar #'car drover-prompt-actions) #'string<)
+                     (sort (copy-sequence drover-opencode-test-prompt-actions) #'string<)))
+      (should (eq (alist-get 'send drover-prompt-actions) #'opencode-send-input))
+      (should (eq (alist-get 'effort drover-prompt-actions) #'opencode-select-variant))
+      (dolist (entry drover-prompt-actions)
+        (should (symbolp (cdr entry))))
+      ;; Before the session is known, there is none.
+      (should-not (drover-session-at-point t))
+      (setq opencode-session-id "ses_1")
+      (should (equal (drover-session-at-point) (drover-opencode-test-session "ses_1")))
+      (should-not (drover-session-list-p)))))
+
+(ert-deftest drover-opencode-test-session-buffer-outside-registry ()
+  "A session the registry does not hold is described by its buffer."
+  (drover-opencode-test-with nil
+    (with-temp-buffer
+      (opencode-session-mode)
+      (setq opencode-session-id "ses_old"
+            opencode-session-info '((id . "ses_old") (title . "Old one") (parentID . "ses_0"))
+            default-directory "/work/drover/")
+      (let ((session (drover-session-at-point)))
+        (should (eq (drover-session-backend session) 'opencode))
+        (should (equal (drover-session-id session) "ses_old"))
+        (should (equal (drover-session-title session) "Old one"))
+        (should (equal (drover-session-directory session) "/work/drover/"))
+        (should (equal (drover-session-parent session) "ses_0"))
+        (should (eq (drover-session-status session) 'idle))
+        (drover-rename session "New")
+        (should (equal (car drover-opencode-test-calls) '(opencode-rename-session "ses_old" "New")))))))
+
+(ert-deftest drover-opencode-test-prompt-actions-run ()
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (with-temp-buffer
+      (opencode-session-mode)
+      (setq opencode-session-id "ses_1")
+      (let ((ran nil))
+        (cl-letf (((symbol-function 'opencode-revert-to-point) (lambda () (interactive) (push 'revert ran)))
+                  ((symbol-function 'opencode-select-model) (lambda () (interactive) (push 'model ran))))
+          (call-interactively #'drover-prompt-revert)
+          (call-interactively #'drover-prompt-model))
+        (should (equal ran '(model revert))))
+      ;; Compacting goes through the service function.
+      (call-interactively #'drover-compact)
+      (should (equal (car drover-opencode-test-calls) '(opencode-session-compact "ses_1"))))))
+
+(ert-deftest drover-opencode-test-directory-action ()
+  "Moving a session is `cd' in its buffer, which opencode.el forwards."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((target (file-name-as-directory (make-temp-file "drover-cd" t))))
+      (unwind-protect
+          (with-temp-buffer
+            (drover-opencode--setup-session-buffer)
+            (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) target)))
+              (call-interactively #'drover-prompt-directory))
+            (should (equal default-directory target)))
+        (delete-directory target t)))))
+
+(ert-deftest drover-opencode-test-teardown-keeps-other-actions ()
+  (drover-opencode-test-with nil
+    (with-temp-buffer
+      (opencode-session-mode)
+      (drover-prompt-define 'schedule #'ignore)
+      (drover-prompt-define 'send #'ignore)
+      (drover-opencode--teardown-session-buffer)
+      ;; Actions others defined stay, even over the backend's.
+      (should (equal drover-prompt-actions '((send . ignore) (schedule . ignore))))
+      (should-not drover-session-at-point-function))))
+
+;;;; Session lists
+
+(ert-deftest drover-opencode-test-session-list ()
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((row "ses_1"))
+      (cl-letf (((symbol-function 'opencode-session-list-id-at-point) (lambda () row)))
+        (with-temp-buffer
+          (opencode-session-list-mode)
+          (should drover-session-keys-mode)
+          (should (drover-session-list-p))
+          (should (eq (key-binding (kbd "x")) #'drover-delete))
+          (should (eq drover-toggle-subagents-function #'opencode-session-list-toggle-subagents))
+          (should (equal (drover-session-at-point) (drover-opencode-test-session "ses_1")))
+          ;; A session the registry does not hold still has its ID.
+          (setq row "ses_old")
+          (should (equal (drover-session-id (drover-session-at-point)) "ses_old"))
+          (setq row nil)
+          (should-not (drover-session-at-point t))
+          (setq row "ses_1")
+          (cl-letf (((symbol-function 'y-or-n-p) #'always))
+            (call-interactively #'drover-archive))
+          (should (equal (car drover-opencode-test-calls) '(opencode-session-archive "ses_1"))))))))
+
+(ert-deftest drover-opencode-test-session-list-toggle ()
+  (drover-opencode-test-with nil
+    (with-temp-buffer
+      (opencode-session-list-mode)
+      (let ((toggled 0))
+        (cl-letf (((symbol-function 'opencode-session-list-toggle-subagents)
+                   (lambda () (interactive) (cl-incf toggled))))
+          (call-interactively #'drover-toggle-subagents))
+        (should (= toggled 1))
+        (should-not drover-show-children)))))
+
+;;;; The dispatch menu
+
+(ert-deftest drover-opencode-test-dispatch ()
+  (let ((keys (mapcar (lambda (key)
+                        (plist-get (cdr (transient-get-suffix 'drover-dispatch key)) :command))
+                      '("p" "S" "1" "2" "3"))))
+    (should (equal keys '(opencode-select-project opencode-consult-sessions opencode
+                                                  opencode-list-all-sessions drover-dashboard))))
+  ;; Before drover's views, in their column.
+  (should (eq (car (transient-get-suffix 'drover-dispatch '(0 1 0))) 'transient-suffix))
+  (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch '(0 1 0))) :key) "p"))
+  (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch '(0 1 4))) :key) "3")))
+
+;;;; Installing and unloading
+
+(ert-deftest drover-opencode-test-uninstall-and-install ()
+  (drover-opencode-test-with nil
+    (let ((session-buffer (generate-new-buffer " session"))
+          (list-buffer (generate-new-buffer " list")))
+      (unwind-protect
+          (progn
+            (with-current-buffer session-buffer
+              (opencode-session-mode)
+              (drover-prompt-define 'schedule #'ignore))
+            (with-current-buffer list-buffer
+              (opencode-session-list-mode))
+            (drover-opencode--uninstall)
+            (should-not (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
+            (should-not (memq #'drover-opencode--setup-list opencode-session-list-mode-hook))
+            (with-current-buffer session-buffer
+              (should-not drover-session-at-point-function)
+              (should (equal drover-prompt-actions '((schedule . ignore)))))
+            (with-current-buffer list-buffer
+              (should-not drover-session-keys-mode)
+              (should-not drover-session-at-point-function)
+              (should-not drover-toggle-subagents-function))
+            (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "p")))
+            (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "1")))
+            (should (transient-get-suffix 'drover-dispatch "3"))
+            (with-temp-buffer
+              (opencode-session-mode)
+              (should-not drover-prompt-actions))
+            ;; Installing again sets up the buffers that exist.
+            (drover-opencode--install)
+            (with-current-buffer session-buffer
+              (should (eq drover-session-at-point-function #'drover-opencode--buffer-session))
+              (should (assq 'send drover-prompt-actions))
+              (should (assq 'schedule drover-prompt-actions)))
+            (with-current-buffer list-buffer
+              (should drover-session-keys-mode))
+            (should (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
+            (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch "p")) :command)
+                           'opencode-select-project))
+            ;; Installing twice adds nothing twice.
+            (drover-opencode--install)
+            (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
+                                   (aref (transient-get-suffix 'drover-dispatch '(0 1)) 2))
+                           '("p" "S" "1" "2" "3" "4" "5"))))
+        (kill-buffer session-buffer)
+        (kill-buffer list-buffer)
+        (drover-opencode--install)))))
 
 (provide 'drover-opencode-test)
 ;;; drover-opencode-test.el ends here
