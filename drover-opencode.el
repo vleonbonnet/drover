@@ -43,6 +43,7 @@
 
 (require 'drover-core)
 (require 'drover-keys)
+(require 'drover-model)
 (require 'opencode)
 (require 'seq)
 (require 'subr-x)
@@ -52,6 +53,38 @@
 (declare-function opencode-session-delete "opencode-session" (id))
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
+
+;;;; The OpenCode engine
+
+(defcustom drover-opencode-timeout 20
+  "Seconds drover waits for an OpenCode catalog before going without it."
+  :type 'number
+  :group 'drover)
+
+(defcustom drover-opencode-database
+  (expand-file-name "opencode/opencode.db" (or (getenv "XDG_DATA_HOME") "~/.local/share"))
+  "OpenCode's session database, which every OpenCode front end writes.
+The engine reads when a session last changed there."
+  :type 'file
+  :group 'drover)
+
+(defun drover-opencode-model (info providers)
+  "Return the `drover-model' of INFO, an entry of OpenCode's model catalog.
+PROVIDERS is the provider catalog, naming the provider and giving the
+default variant (see `opencode-model-default-variant').  Each variant
+is (SYMBOL :effort EFFORT), EFFORT the effort it sends as
+`opencode-request-effort' reads it, or (SYMBOL) without one; the
+engines are those of `drover-model-engines-for'."
+  (ignore info providers)
+  (error "Not implemented"))
+
+(defun drover-opencode-model-ref (model &optional variant)
+  "Return MODEL, a `drover-model', as an OpenCode model reference.
+The reference is ((id . ID) (providerID . PROVIDER)), followed by
+\(variant . NAME) when VARIANT, a symbol, is non-nil; nil when MODEL
+has no provider."
+  (ignore model variant)
+  (error "Not implemented"))
 
 ;;;; Projects
 

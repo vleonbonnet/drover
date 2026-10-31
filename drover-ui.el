@@ -82,6 +82,16 @@ short bar, so it stays subtle: only a background."
 It shows how long the bar would be, without drawing attention."
   :group 'drover-faces)
 
+(defface drover-prompt-picked '((t :inherit success))
+  "Face of a prompt setting the user chose, such as the model.
+The prompt's header and pickers show settings in it or in
+`drover-prompt-inherited'."
+  :group 'drover-faces)
+
+(defface drover-prompt-inherited '((t :inherit shadow))
+  "Face of a prompt setting a new session would inherit, not chosen."
+  :group 'drover-faces)
+
 (defcustom drover-status-glyphs
   '((waiting . "\U000F02D7")            ; nf-md-help_circle
     (failed . "\uf057")                 ; nf-fa-times_circle

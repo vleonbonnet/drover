@@ -26,11 +26,14 @@
 
 ;; Drover gathers the sessions of every coding agent front end into one
 ;; place: which ones need you, which run, which finished while you were
-;; elsewhere.  Front ends plug in as backends (see `drover-core'); the
-;; first is opencode.el, loaded with it.  `drover-attention-mode' shows
-;; how many sessions need you in the mode line and `drover-next' visits
-;; the most urgent; `drover-list' lists every session in a window, and
-;; `drover-list-side' beside your work, laid out for the window's width.
+;; elsewhere.  Front ends plug in as backends (see `drover-core'):
+;; opencode.el, agent-shell and claude-code-ide, each loaded with its
+;; package.  `drover-attention-mode' shows how many sessions need you in
+;; the mode line and `drover-next' visits the most urgent; `drover-list'
+;; lists every session in a window, and `drover-list-side' beside your
+;; work, laid out for the window's width.
+;; `drover-prompt-dwim' writes a prompt with context from where you work,
+;; for any session or a new one of any engine (see `drover-model').
 ;; `drover-dispatch' is a menu of every command, on sessions and on the
 ;; prompt you write to an agent; bind it globally, for instance:
 ;;
@@ -44,6 +47,12 @@
 
 (with-eval-after-load 'opencode
   (require 'drover-opencode))
+
+(with-eval-after-load 'agent-shell
+  (require 'drover-agent-shell))
+
+(with-eval-after-load 'claude-code-ide
+  (require 'drover-claude-code-ide))
 
 (provide 'drover)
 ;;; drover.el ends here

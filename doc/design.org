@@ -3,15 +3,21 @@
 
 * Modules
 
-| Module                | Responsibility                                                                                                                                                                               |
-|-----------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| =drover.el=           | Entry point: loads the core and the interface, and each backend once its front end is loaded                                                                                                 |
-| =drover-core.el=      | The session record, backend registry, status ranking, sorting and grouping, change coalescing, actions; view settings, filtering and older sessions; the session at point and prompt actions |
-| =drover-ui.el=        | Faces, glyphs, labels, ages and filter descriptions; measuring text in pixels                                                                                                                |
-| =drover-keys.el=      | Commands on the session at point and the prompt, the shared keymap, follow mode, the menus =drover-dispatch= and =drover-view=                                                               |
-| =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions                                                                                             |
-| =drover-list.el=      | The list of sessions: collapsible =magit-section= groups, proportional font, a layout chosen by width, in an ordinary or a side window                                                       |
-| =drover-opencode.el=  | The opencode.el backend, built on =opencode-state=                                                                                                                                           |
+| Module                      | Responsibility                                                                                                                                                                                                                           |
+|-----------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =drover.el=                 | Entry point: loads the core and the interface, and each backend once its front end is loaded                                                                                                                                             |
+| =drover-core.el=            | The session record, backend registry, status ranking, sorting and grouping, change coalescing, actions; view settings, filtering and older sessions; the session at point and prompt actions; warnings, asynchronous steps, Git branches |
+| =drover-model.el=           | Engines and their registry, models and model sources, the pickers of model, variant and agent; the helpers engines read local state with                                                                                                 |
+| =drover-ui.el=              | Faces, glyphs, labels, ages and filter descriptions; measuring text in pixels                                                                                                                                                            |
+| =drover-keys.el=            | Commands on the session at point and the prompt, the shared keymap, follow mode, the menus =drover-dispatch= and =drover-view=                                                                                                           |
+| =drover-attention.el=       | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions                                                                                                                                         |
+| =drover-list.el=            | The list of sessions: collapsible =magit-section= groups, proportional font, a layout chosen by width, in an ordinary or a side window                                                                                                   |
+| =drover-prompt.el=          | The prompt, =*drover*=: context from where the user works, the choice of agent, model, effort and directory, the target picker, sending                                                                                                  |
+| =drover-opencode.el=        | The opencode.el backend, built on =opencode-state=, and the =opencode= engine                                                                                                                                                            |
+| =drover-claude-code.el=     | The =claude-code= engine: startup defaults from the CLI's local state, models, transcripts and session identifiers                                                                                                                       |
+| =drover-codex.el=           | The =codex= engine: startup defaults from =config.toml= and the models cache                                                                                                                                                             |
+| =drover-claude-code-ide.el= | The claude-code-ide.el backend: Claude Code terminals, their Ghostel statuses, starting and resuming                                                                                                                                     |
+| =drover-agent-shell.el=     | The agent-shell backend: shells of any engine over ACP, their statuses from events, live model sources; the =gemini-cli= engine                                                                                                          |
 
 * Backends describe, drover arranges
 
@@ -54,7 +60,7 @@ Every key belongs to one of three sets, and no key to two: session keys act on t
 
 The menu shows every entry wherever it is invoked, greying out those that do not apply, so its layout never moves and keys are learnt by position.  What applies is computed once, when the menu opens (its scope, from =drover--context=), since finding the session at point may ask the backends for every session.
 
-Other packages add their global commands to the menu relative to drover's keys, as Magit extensions do: the OpenCode backend appends its session search after =p=, the last of drover's lists; the user's configuration chains its prompt pickers after =b=.  These places are kept stable on purpose.
+Other packages add their global commands to the menu relative to drover's keys, as Magit extensions do: the OpenCode backend appends its session search after =p=, the last of drover's lists; more ways to pick a session or prompt go after ='=, the last of drover's (the prompt's ="= and ='= follow =b=), where the user's configuration appends its scheduled prompts as =#=.  These places are kept stable on purpose; =b= stays one too, for what should come before the prompt.
 
 The settings of the list have a menu of their own, the View menu, rather than keys of the session set: sorting, grouping, filtering and what shows take many values each, which one key per value would spread over the whole keyboard.  Its entries are infixes showing their current value, as Magit's do, and changing one redraws the list while the menu stays open.
 
@@ -66,7 +72,7 @@ Parents and subagents need no backend operation: they are found among the sessio
 
 * Prompt actions
 
-Prompt buffers differ (a Comint buffer for OpenCode, an Org buffer in the user's configuration), but the user's gestures are the same: send, attach, revert, choose the model.  A prompt buffer declares the actions it implements in =drover-prompt-actions=, each a command; drover's prompt commands look for the buffer an action applies to (=drover-prompt-target=): the current one; in a list, for the agent, model, effort, directory and last answer, the session's buffer; for the agent, model, effort and directory a default prompt buffer; and for the last answer the prompt buffer visited last.  The actions editing or reading the prompt itself (send, schedule, attach, slash, mention, revert, copy the block or open the link at point) apply only in the prompt buffer, since from a list the user sees neither its input nor its point.  An action applying to a buffer shown in a window runs in that window, so that it sees the point the user sees.
+Prompt buffers differ (a Comint buffer for OpenCode, drover's own Org buffer, =*drover*=), but the user's gestures are the same: send, attach, revert, choose the model.  A prompt buffer declares the actions it implements in =drover-prompt-actions=, each a command; drover's prompt commands look for the buffer an action applies to (=drover-prompt-target=): the current one; in a list, for the agent, model, effort, directory and last answer, the session's buffer; for the agent, model, effort and directory a default prompt buffer; and for the last answer the prompt buffer visited last.  The actions editing or reading the prompt itself (send, schedule, attach, slash, mention, revert, copy the block or open the link at point) apply only in the prompt buffer, since from a list the user sees neither its input nor its point.  An action applying to a buffer shown in a window runs in that window, so that it sees the point the user sees.
 
 Compacting and forking exist both ways: in a prompt buffer they are prompt actions (forking at point), in a list backend operations on the whole session.
 
@@ -92,3 +98,88 @@ A record may tell when the provider's prompt cache of the session expires and ho
 
 A backend follows some sessions live, its newest; older ones it may fetch on demand (=:history=).  =drover-set-show-history= fetches them from every backend that can, and forgets them when hidden; =g= in the list fetches them again.  =drover-known-sessions= merges them with the live sessions, a live record winning over an older one of the same session; lists, =drover-find= and the subagents of a session see them, while the attention count and =drover-next= keep to the live sessions.  An answer arriving after a later fetch started, or after they were hidden, is dropped.
 
+
+* Engines
+
+A backend is a front end showing sessions (opencode.el, agent-shell, claude-code-ide); an engine is the agent program a session runs (=opencode=, =claude-code=, =codex=, =gemini-cli=, the names agent-shell gives its configurations and the =agent-session:= Org links use).  The two are independent: agent-shell runs any engine, and an OpenCode conversation may show in opencode.el and in agent-shell at once.  Engines own what a new session would run, so the prompt asks them, not the backends: their models, their startup defaults, their agents, and when they last took a prompt.
+
+** Sessions know their engine
+
+A =drover-session= record carries =engine= and =engine-id=, the engine's own identifier of the conversation, nil while unknown.  The OpenCode backend's =id= is the engine's; agent-shell and claude-code-ide use a token of the buffer as =id=, stable while it lives, and put the engine's identifier in =engine-id= once known.  Org links, scheduling and model compatibility read these two slots instead of looking at major modes.
+
+Records of different backends with the same non-nil =(engine . engine-id)= (=drover-session-engine-key=) are one session.  Wherever drover gathers sessions, =drover-sessions= and =drover-known-sessions=, it keeps the records of one backend: the one with a live buffer for the conversation, else the one registered first; the others are dropped, silently.  A live record wins over an older one of any backend.  Records of one backend stay distinct sessions whatever their keys, since a front end may well show one conversation twice.  =drover-find= still returns a backend's own record, from that backend alone, so a buffer can always tell its session; =drover-find-engine-session= finds the one drover lists.  Registration order is the order of =drover--backends= reversed, as a backend registered again keeps its place.
+
+** The registry
+
+=drover-register-engine= takes a =:label=, =:defaults= (a function of a directory and a callback delivering the engine's defaults data, at most once), =:volatile= (the defaults are cheap local state, read again whenever the prompt gains context or a picker opens; otherwise they are read when the prompt starts or changes directory), =:resolve= (from the defaults and the explicit agent, model and variant to what a new session runs), =:agents=, =:last-used= and =:model-resets-variant=.  Every property is optional: an engine without =:resolve= runs the choices as they are.  =drover-engines= lists them in =drover-engine-order= (OpenCode, Claude Code, Codex, Gemini), others after; =drover-last-used-engine= is the engine whose =:last-used= is latest, a failure counting as unused.  =drover-agent-names= is the union of the engines' agents in that order, so OpenCode's come first and Claude Code's plan and build are offered without OpenCode.
+
+| Engine        | File                    | Defaults (=:defaults=)                                                                      | =:resolve=                                                                                                                                               |
+|---------------+-------------------------+---------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =opencode=    | =drover-opencode.el=    | asynchronous: the directory's agent, model and provider catalogs and default model, bounded | agent or the default agent; model explicit, else the agent's pin, else the last pick, else the default model; variant likewise, else the model's default |
+| =claude-code= | =drover-claude-code.el= | volatile: =drover-claude-code-defaults= (settings layers, flags, environment, catalog)      | model explicit or the startup model; agent explicit or the one standing for the starting permission mode; variant explicit or the effort of the model    |
+| =codex=       | =drover-codex.el=       | volatile: =drover-codex-defaults= (=config.toml=, models cache)                             | agent as given; model explicit or config's; variant explicit or the effort for the model                                                                 |
+| =gemini-cli=  | =drover-agent-shell.el= | none                                                                                        | none: the choices                                                                                                                                        |
+
+What an OpenCode model runs without a variant is opencode.el's to know (=opencode-model-default-variant=, =opencode-request-effort=); drover calls it.
+
+** Models
+
+A =drover-model= names its provider (when provider-qualified), its identifier and display name, its variants as =(SYMBOL . PLIST)= (=:effort=, the effort the variant sends, when known), its default variant and the engines able to run it.  Engines of =drover-model-qualified-engines= (OpenCode) run any provider-qualified model as =PROVIDER/ID=; each entry of =drover-model-families= runs the models of one family by bare identifier, matched on the provider or the model (=drover-model-engines-for=).  =drover-model-id-for= gives the identifier an engine takes, nil when it cannot run the model.  The prompt uses this to drop a picked model a running session cannot run, and to hide new-session targets that could not.
+
+Models come from sources registered per engine with a depth (=drover-register-model-source=).  =drover-models= asks each engine, in =drover-model-engine-order= (Claude Code, Codex, Gemini, OpenCode), its sources from the lowest depth until one answers, then keeps the first report of each provider and identifier.  One source per engine answers because two sources of one engine name the same models differently (a live shell's aliases, the API's full identifiers).
+
+| Engine                | Source                                                                                     | Depth | File                    |
+|-----------------------+--------------------------------------------------------------------------------------------+-------+-------------------------|
+| =claude-code=         | live agent-shell Claude shells: their =model= option, thought levels as variants           | -10   | =drover-agent-shell.el= |
+| =claude-code=         | Anthropic's model list with the CLI's OAuth token, when =drover-claude-code-oauth-catalog= | 0     | =drover-claude-code.el= |
+| =codex=, =gemini-cli= | live agent-shell shells of that engine                                                     | 0     | =drover-agent-shell.el= |
+| =opencode=            | the directory's model and provider catalogs, through opencode.el's cache                   | 0     | =drover-opencode.el=    |
+| =opencode=            | live agent-shell OpenCode shells, =provider/model= split                                   | 10    | =drover-agent-shell.el= |
+
+The pickers, =drover-read-model=, =drover-read-variant= and =drover-read-agent=, use =completing-read= with completion metadata (category, annotation, no sorting), so they work with any completion UI and need neither Consult nor Marginalia; their first candidate, "Default", returns nil and names what a new session would inherit.
+
+** Options
+
+The prompt passes options as plists, described in =drover-model='s commentary: /options/ =(:agent :model :variant)= are the user's explicit choices, each nil when not made; /start options/, given to a backend's =:create=, add =:title= and =:defaults= (the engine's defaults data the prompt holds); /resolved/ options are what a new session runs; /display/ options add whether each was chosen and the directory; /entry/ options label picker candidates.  Only explicit choices are ever applied to a running session: a session keeps what it runs unless the user chose otherwise.
+
+** Local state
+
+Engines read their local state with the helpers of =drover-model=: =drover-read-json= and =drover-read-json-cached= (kept until the file changes), =drover-merge-settings=, =drover-json-object-p=, =drover-file-mtime=, =drover-getenv=, =drover-model-anthropic-key=.  opencode.el has the same for its own use, privately; the Claude Code engine must work without opencode.el.  =drover-git-branch= reads a directory's branch from =HEAD= without running Git, kept =drover-branch-ttl= seconds, for backends listing sessions often; the OpenCode backend keeps opencode.el's own =opencode-git-branch=, whose cache its pickers share.
+
+* The prompt
+
+=drover-prompt.el= is the prompt: one Org buffer, =*drover*= (=drover-prompt-buffer-name=), in =drover-prompt-mode=, shown in a bottom side window.  =drover-prompt-dwim= (menu key ="=) opens it from where the user works, with a link to the line at point and the region quoted in a code block, or adds such context to it; on an Org heading it starts a prompt for that task.  =drover-prompt-toggle= (='=) shows or hides it.  It is drover's default prompt buffer (=drover-default-prompt-buffer-function=), so the agent, model, effort and directory keys choose what the next prompt runs from any buffer.  Its mode defines the prompt actions =send=, =clear=, =attach=, =copy-block=, =open-link=, =agent=, =model=, =effort= and =directory=; others, such as the configuration's =schedule=, are added from =drover-prompt-mode-hook=.  =clear= erases the text, region or not, and keeps the buffer, its window and the choices made.
+
+The prompt knows no backend and no engine by name.  It sends through optional backend operations and resolves what a new session runs through the engines.
+
+** Backend operations
+
+| Operation        | Arguments                                  | Contract                                                                                                                         |
+|------------------+--------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------|
+| =:engines=       | none (a list, or a function returning one) | the engines =:create= starts (=drover-backend-engines=)                                                                          |
+| =:create=        | DIRECTORY ENGINE START-OPTIONS THEN ELSE   | start and display a session; THEN gets the new record as soon as =:send= may be given it, =:send= waiting for it to be ready     |
+| =:check=         | SESSION TEXT OPTIONS                       | synchronous checks that may ask the user, from the command, before anything asynchronous; return =cancel= or a token for =:send= |
+| =:apply-options= | SESSION OPTIONS THEN                       | apply explicit options, filtered for SESSION; call THEN exactly once whatever happened, warning of what could not be applied     |
+| =:send=          | SESSION TEXT TOKEN                         | submit TEXT once SESSION is ready; a failure warns that the prompt is in the kill ring                                           |
+| =:options=       | SESSION                                    | =(:model MODEL :variant VARIANT)= it runs now, cheaply, for picker labels                                                        |
+| =:settable=      | SESSION                                    | which of =:agent :model :variant= it can change mid-session; absent means all three                                              |
+
+Callbacks are called at most once, possibly before the operation returns; THEN gets the value, ELSE a message.  Nothing signals from a process filter or a timer: what goes wrong out of a command is reported with =drover-warn=, a warning of type =drover=.  =drover-run-steps= runs a backend's option changes one after the other, each given =drover-step-timeout= seconds; one failing or late is reported and skipped, so the prompt still goes out, and a late reply is ignored.
+
+| Backend           | =:create=                                                                                                                  | =:check=                         | =:apply-options=                                                         | =:send=                                            | =:settable= |
+|-------------------+----------------------------------------------------------------------------------------------------------------------------+----------------------------------+--------------------------------------------------------------------------+----------------------------------------------------+-------------|
+| =opencode=        | asynchronous: agent catalog, then =opencode-session-create= with title, agent, model                                       | opencode.el's typed-input checks | steps: agent (with model), else model, else variant on the current model | =opencode-session-send=, with the check's metadata | all         |
+| =claude-code-ide= | flags from the options (=--permission-mode= or =--agent=, =--name=, =--model=, =--effort=), =drover-claude-code-ide-start= | none                             | =/model= typed in the terminal; agents and lone variants warned about    | bracketed paste once the interface reads input     | =:model=    |
+| =agent-shell=     | the engine's configuration set to start on the model and agent; OpenCode inherits the prompt's model                       | none                             | ACP steps: session mode, model, thought level                            | queued while busy, after initialization            | all         |
+
+** Sending
+
+=drover-prompt-submit= sends the region when active, else the whole buffer (=drover-prompt-content=), after putting the Org text in the kill ring.  The target, read by =drover-prompt-read-target=, is a running session with a live buffer, or a new session of =drover-prompt-new-targets= whose feature is installed and whose engine can run the chosen model.  To a running session: the explicit options filtered for its engine (=drover-prompt-options-for=, warning of a model it cannot run), its =:check=, then =:apply-options= and =:send=.  To a new one: the feature is required, the backend must be registered and run the engine, then =:create= with the start options and =:send= in THEN, a failure warned about.  The text sent leaves the prompt (=drover-prompt-consume=): a region is deleted, a whole prompt killed with its window.  A send that sends nothing, a check cancelled, keeps the prompt and its region untouched.
+
+** Defaults
+
+The prompt holds each engine's defaults data for its directory (=drover-prompt--defaults=).  Non-volatile engines are asked when the prompt starts or changes directory, a generation per engine dropping stale answers and answers for another directory; volatile ones whenever the prompt gains context or the picker opens, after the command.  The header shows what a new session of the last used engine would run (=drover-prompt-effective-options=), or of the first engine able to run a chosen model it cannot; chosen settings in =drover-prompt-picked=, inherited ones in =drover-prompt-inherited=.
+
+** For the configuration
+
+Scheduling, Org links and maintenance stay in the user's configuration and use the prompt through =drover-prompt-content=, =drover-prompt-consume=, =drover-prompt-read-target= (=:existing-only=, =:options-menu=), =drover-prompt-explicit-options=, =drover-prompt-options-for=, =drover-prompt-apply-options=, and the sessions through =drover-buffer-session=, =drover-find-engine-session=, =drover-session-engine= and =drover-session-engine-id=.

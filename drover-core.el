@@ -27,6 +27,11 @@
 ;; backend calls `drover-backend-changed' whenever its sessions change,
 ;; and drover runs `drover-changed-hook' once the burst is over.
 ;;
+;; A session runs an engine, the agent program such as Claude Code,
+;; which `drover-model' registers with its models and defaults; a
+;; backend is the front end showing it.  Two backends may show one
+;; conversation of an engine: drover lists it once.
+;;
 ;; Every session has one status.  `waiting' means a permission request
 ;; or question waits for the user; `failed' and `done' are turns that
 ;; ended while the user was not looking; `retrying' and `working' run;
@@ -100,6 +105,12 @@ Each is a plist with :kind, `permission' or `question', and :summary.")
   (agent nil :documentation "Agent name, or nil.")
   (model nil :documentation "Model name, or nil.")
   (detail nil :documentation "One line on the status, such as an error, or nil.")
+  (engine nil :documentation "Symbol of the engine running the session, such as `claude-code', or nil.
+Engines are the agent programs, registered with `drover-register-engine';
+a backend is the front end showing the session.")
+  (engine-id nil :documentation "The engine's own identifier of the conversation, or nil while unknown.
+Two records of different backends with the same ENGINE and ENGINE-ID
+are one session (see `drover-sessions').")
   (cache-expires nil :documentation "Time, as a float, at which the prompt cache expires, or nil.
 The prompt cache is the provider's: until it expires, the next turn
 reuses the conversation already sent.  Nil when unknown.")
@@ -109,6 +120,14 @@ It is the time from the last cache write to CACHE-EXPIRES."))
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
   (cons (drover-session-backend session) (drover-session-id session)))
+
+(defun drover-session-engine-key (session)
+  "Return (ENGINE . ENGINE-ID) of SESSION, or nil unless both are known.
+It names the conversation across backends: two front ends may show the
+same conversation of one engine."
+  (let ((engine (drover-session-engine session))
+        (id (drover-session-engine-id session)))
+    (and engine id (cons engine id))))
 
 (defun drover-session-attention-p (session)
   "Return non-nil when SESSION needs the user."
@@ -508,12 +527,56 @@ PROPERTIES is a plist of:
              fetched.  Their statuses are what the backend reports of
              them, idle as a rule.  See `drover-show-history'.
 
+The prompt (`drover-prompt') sends to sessions and starts them through
+the following operations, all optional.  Callbacks are called at most
+once, possibly before the operation returns; THEN receives the value,
+ELSE a string describing the failure; nothing signals from a process
+filter or a timer, but reports with `drover-warn'.  Options are plists
+as `drover-model' describes them: explicit choices (:agent :model
+:variant), the model a `drover-model' record, the variant a symbol.
+
+ :engines    The engines whose sessions :create starts, as a list of
+             symbols or a function of no argument returning one.  See
+             `drover-backend-engines'.
+ :create     Function of DIRECTORY, ENGINE, OPTIONS, THEN and ELSE
+             starting and displaying a session of ENGINE in DIRECTORY.
+             OPTIONS is a start-options plist: the explicit :agent,
+             :model and :variant, unfiltered, the session's :title or
+             nil, and the :defaults the prompt holds for ENGINE (see
+             `drover-register-engine'), or nil.  It calls THEN with
+             the new `drover-session' as soon as :send may be given
+             it, :send waiting for the session to be ready, or ELSE.
+ :check      Function of a SESSION, the TEXT about to be sent and the
+             explicit OPTIONS about to be applied to it, already
+             filtered for SESSION, running the checks that may ask the
+             user before anything is sent.  It runs synchronously, from
+             the command.  It returns the symbol `cancel' to send
+             nothing, else a token handed to :send.
+ :apply-options
+             Function of a SESSION, explicit OPTIONS filtered for it and
+             THEN, applying OPTIONS to the running SESSION and calling
+             THEN exactly once, whatever happened.  What cannot be
+             applied is reported with `drover-warn', the prompt being
+             sent anyway.
+ :send       Function of a SESSION, a TEXT and the TOKEN :check returned
+             (nil without :check, or for a new session), submitting TEXT
+             as a prompt once SESSION is ready.  A failure is reported
+             with `drover-warn', saying the prompt is in the kill ring.
+ :options    Function of a SESSION returning what it runs now, as a
+             plist (:model MODEL :variant VARIANT), or nil.  It is
+             called for every session a picker offers, so it must be
+             cheap.
+ :settable   Function of a SESSION returning which of :agent, :model
+             and :variant the running SESSION can change; without it,
+             all three.
+
 A session's parent and subagents need no operation: drover finds them
 among the sessions through `drover-session-parent'.
 
 Only :label and :sessions are required.  Registering NAME again
-replaces its properties.  A backend registered after `drover-start'
-ran is started at once."
+replaces its properties and keeps its place: backends registered first
+win over later ones showing the same session (see `drover-sessions').
+A backend registered after `drover-start' ran is started at once."
   (unless (functionp (plist-get properties :sessions))
     (error "Backend %s has no :sessions function" name))
   (setf (alist-get name drover--backends) properties)
@@ -551,6 +614,16 @@ Backends without a :buffer function never report one."
   (or (drover-backend-property backend :label)
       (symbol-name (if (drover-session-p backend) (drover-session-backend backend) backend))))
 
+(defun drover-backend-engines (backend)
+  "Return the engines whose sessions BACKEND, a name or a session, starts.
+They are its :engines, a list or what the function there returns; nil
+when it has none, or when the function fails."
+  (let ((engines (drover-backend-property backend :engines)))
+    (if (functionp engines)
+        (with-demoted-errors "Drover backend engines: %S"
+          (funcall engines))
+      engines)))
+
 (defun drover-supports-p (session operation)
   "Return non-nil when the backend of SESSION implements OPERATION.
 OPERATION is a keyword such as :respond."
@@ -578,15 +651,68 @@ Signal a `user-error' when the backend does not implement it."
   (setq drover--running t)
   (mapc #'drover--start-backend (drover-backends)))
 
+(defun drover--backend-sessions (properties)
+  "Return the sessions of the backend of PROPERTIES, or nil when they fail."
+  (with-demoted-errors "Drover backend sessions: %S"
+    (copy-sequence (funcall (plist-get properties :sessions)))))
+
+(defun drover--registration-rank (backend)
+  "Return how many of the registered backends were registered before BACKEND."
+  (or (seq-position (reverse (drover-backends)) backend)
+      (length drover--backends)))
+
+(defun drover--preferred-backend (records)
+  "Return the backend that keeps the session RECORDS describe.
+RECORDS are records of one conversation by several backends.  It is
+the backend with a live buffer for its record, else the one registered
+first; among several with a buffer, the one registered first too."
+  (let ((backends (sort (delete-dups (mapcar #'drover-session-backend records))
+                        (lambda (a b) (< (drover--registration-rank a) (drover--registration-rank b))))))
+    (or (seq-find (lambda (backend)
+                    (seq-some (lambda (record)
+                                (and (eq (drover-session-backend record) backend)
+                                     (drover-session-buffer record)))
+                              records))
+                  backends)
+        (car backends))))
+
+(defun drover--merge-duplicates (sessions)
+  "Return SESSIONS with each conversation shown by one backend only.
+Records of different backends with the same `drover-session-engine-key'
+are one session: the records of the backend `drover--preferred-backend'
+chooses stay, in their place, and the others go.  Records of one
+backend are distinct sessions whatever their keys."
+  (let ((groups (make-hash-table :test #'equal))
+        (keepers (make-hash-table :test #'equal)))
+    (dolist (session sessions)
+      (when-let* ((key (drover-session-engine-key session)))
+        (push session (gethash key groups))))
+    (maphash (lambda (key records)
+               (when (cdr (delete-dups (mapcar #'drover-session-backend records)))
+                 (puthash key (drover--preferred-backend (reverse records)) keepers)))
+             groups)
+    (if (zerop (hash-table-count keepers))
+        sessions
+      (seq-filter (lambda (session)
+                    (let ((keeper (gethash (drover-session-engine-key session) keepers)))
+                      (or (null keeper) (eq keeper (drover-session-backend session)))))
+                  sessions))))
+
 (defun drover-sessions ()
   "Return the sessions of every registered backend, unsorted.
 A backend whose :sessions function fails contributes nothing.  These
 are the sessions backends follow live; see `drover-known-sessions' for
-those lists show."
-  (mapcan (lambda (entry)
-            (with-demoted-errors "Drover backend sessions: %S"
-              (copy-sequence (funcall (plist-get (cdr entry) :sessions)))))
-          drover--backends))
+those lists show.
+
+Two front ends may show one conversation of an engine, such as an
+OpenCode session both opencode.el and agent-shell show: records of
+different backends with the same engine and engine identifier (see
+`drover-session-engine-key') are one session, listed once.  The record
+kept is that of the backend with a live buffer for it, else that of the
+backend registered first."
+  (drover--merge-duplicates
+   (mapcan (lambda (entry) (drover--backend-sessions (cdr entry)))
+           drover--backends)))
 
 (defvar drover-show-history nil
   "Non-nil when session lists show older sessions too.
@@ -606,19 +732,27 @@ their :history function fetches them.  Change it with
 They are LIVE, the sessions `drover-sessions' returns by default, and
 while `drover-show-history' is set, the older sessions fetched from the
 backends; a live session wins over an older record of the same
-session, and the first of several older records wins."
+session, whether of its own backend or of another one with the same
+engine and engine identifier, and the first of several older records
+of one backend wins.  Older records of different backends showing one
+conversation are merged as `drover-sessions' merges live ones."
   (let ((live (or live (drover-sessions))))
     (if (not drover-show-history)
         live
       (let ((seen (make-hash-table :test #'equal)))
         (dolist (session live)
-          (puthash (drover-session-key session) t seen))
+          (puthash (drover-session-key session) t seen)
+          (when-let* ((key (drover-session-engine-key session)))
+            (puthash (cons 'engine key) t seen)))
         (append live
-                (seq-remove (lambda (session)
-                              (let ((key (drover-session-key session)))
-                                (prog1 (gethash key seen)
-                                  (puthash key t seen))))
-                            (drover--history-sessions)))))))
+                (drover--merge-duplicates
+                 (seq-remove (lambda (session)
+                               (let ((key (drover-session-key session))
+                                     (engine-key (drover-session-engine-key session)))
+                                 (prog1 (or (gethash key seen)
+                                            (and engine-key (gethash (cons 'engine engine-key) seen)))
+                                   (puthash key t seen))))
+                             (drover--history-sessions))))))))
 
 (defun drover-visible-sessions (&optional sessions)
   "Return SESSIONS, or every session, without hidden subagents.
@@ -637,15 +771,38 @@ need the user."
 (defun drover-find (backend id)
   "Return the session ID of BACKEND, or nil.
 A live session is preferred; while `drover-show-history' is set, an
-older session fetched from BACKEND is found too."
+older session fetched from BACKEND is found too.  The record is
+BACKEND's own, even when `drover-sessions' lists the session through
+another backend showing the same conversation."
   (cl-flet ((find (sessions)
               (seq-find (lambda (session)
                           (and (eq (drover-session-backend session) backend)
                                (equal (drover-session-id session) id)))
                         sessions)))
-    (or (find (drover-sessions))
+    (or (when-let* ((properties (alist-get backend drover--backends)))
+          (find (drover--backend-sessions properties)))
         (and drover-show-history
              (find (cdr (assq backend drover--history)))))))
+
+(defun drover-find-engine-session (engine engine-id)
+  "Return a session of ENGINE whose engine identifier is ENGINE-ID, or nil.
+It may be of any backend: the one `drover-sessions' lists, which is
+that of a backend with a live buffer for it when there is one.  While
+`drover-show-history' is set, an older session is found too, after
+the live ones."
+  (when (and engine engine-id)
+    (let ((key (cons engine engine-id)))
+      (seq-find (lambda (session) (equal (drover-session-engine-key session) key))
+                (drover-known-sessions)))))
+
+(defun drover-buffer-session (buffer)
+  "Return the session BUFFER belongs to, or nil.
+It is the session at point in BUFFER (see
+`drover-session-at-point-function'), nil for a dead buffer or one that
+tells no session."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (drover-session-at-point t))))
 
 (defun drover-parent (session)
   "Return the parent session of SESSION, a subagent, or nil.
@@ -920,6 +1077,100 @@ arrive."
     (setq drover--history nil))
   (drover-view-settings-changed))
 
+;;;; Warnings and asynchronous steps
+
+(defcustom drover-step-timeout 15
+  "Seconds a step of `drover-run-steps' may take before the next one runs.
+Steps are requests to a running session, such as switching its model
+before a prompt is sent; one that takes longer is reported and given
+up, so the prompt still goes out."
+  :type 'number
+  :group 'drover)
+
+(defun drover-warn (format-string &rest args)
+  "Report something that went wrong on its own, out of a command.
+Such as an option a session refused, or a prompt it did not take.  The
+message is a warning of type `drover', FORMAT-STRING and ARGS as for
+`format-message'."
+  (display-warning 'drover (apply #'format-message format-string args) :warning))
+
+(defun drover-run-steps (steps then)
+  "Run asynchronous STEPS in order, then call THEN with no argument.
+STEPS is a list of (LABEL . FUNCTION): FUNCTION is called with NEXT, a
+function of no argument it calls once its request settled, whichever
+way.  A step that signals, or that has not called NEXT after
+`drover-step-timeout' seconds, is reported with `drover-warn', naming
+LABEL, and the next step runs; NEXT called late, or twice, does
+nothing.  THEN is called exactly once."
+  (if (null steps)
+      (funcall then)
+    (let* ((label (caar steps))
+           (settled nil)
+           (timer nil)
+           (next (lambda ()
+                   (unless settled
+                     (setq settled t)
+                     (when timer (cancel-timer timer))
+                     (drover-run-steps (cdr steps) then)))))
+      (setq timer (run-at-time drover-step-timeout nil
+                               (lambda ()
+                                 (unless settled
+                                   (drover-warn "Timed out setting %s; sending the prompt anyway" label)
+                                   (funcall next)))))
+      (condition-case err
+          (funcall (cdar steps) next)
+        (error
+         (unless settled
+           (drover-warn "Could not set %s: %s; sending the prompt anyway"
+                        label (error-message-string err))
+           (funcall next)))))))
+
+;;;; Git branches
+
+(defcustom drover-branch-ttl 30
+  "Seconds `drover-git-branch' keeps the branch of a directory it read."
+  :type 'natnum
+  :group 'drover)
+
+(defvar drover--branches (make-hash-table :test #'equal)
+  "Directories mapped to (BRANCH . TIME), as `drover-git-branch' read them.")
+
+(defun drover--read-git-branch (directory)
+  "Return the branch checked out in the worktree of DIRECTORY, or a short commit.
+Return nil outside Git.  HEAD is read directly, without running Git."
+  (when-let* ((root (locate-dominating-file directory ".git"))
+              (dotgit (expand-file-name ".git" root))
+              (gitdir (if (file-directory-p dotgit)
+                          dotgit
+                        ;; A linked worktree's .git file names its Git directory.
+                        (with-temp-buffer
+                          (insert-file-contents dotgit)
+                          (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
+                            (expand-file-name (match-string 1) root)))))
+              (head (expand-file-name "HEAD" gitdir))
+              ((file-readable-p head)))
+    (with-temp-buffer
+      (insert-file-contents head)
+      (cond ((looking-at "ref: refs/heads/\\(.+?\\) *$") (match-string 1))
+            ((looking-at "[0-9a-f]\\{7\\}") (match-string 0))))))
+
+(defun drover-git-branch (directory)
+  "Return the Git branch of DIRECTORY, or a short commit when detached, or nil.
+It is read from HEAD without running Git, so backends may call it for
+every session they list: a directory's branch is kept for
+`drover-branch-ttl' seconds.  Nil outside Git and for a missing
+directory."
+  (when directory
+    (let* ((directory (file-name-as-directory (expand-file-name directory)))
+           (entry (gethash directory drover--branches))
+           (now (float-time)))
+      (if (and entry (< (- now (cdr entry)) drover-branch-ttl))
+          (car entry)
+        (let ((branch (and (file-directory-p directory)
+                           (ignore-errors (drover--read-git-branch directory)))))
+          (puthash directory (cons branch now) drover--branches)
+          branch)))))
+
 ;;;; The session at point
 
 (defvar-local drover-session-at-point-function nil
@@ -979,13 +1230,17 @@ actions with `drover-prompt-define'.  The actions drover knows are:
  last-answer   Show the start of the last answer.
  open-link     Open the link at point.")
 
-(defcustom drover-default-prompt-buffer-function nil
+(autoload 'drover-prompt-default-buffer "drover-prompt")
+
+(defcustom drover-default-prompt-buffer-function #'drover-prompt-default-buffer
   "Function of no argument returning the default prompt buffer, or nil.
 The prompt actions `agent', `model', `effort' and `directory' apply to
-that buffer when the current one has none of its own, such as an Org
-buffer where prompts are written.  It is called only when one of these
-actions runs, so it may create the buffer; menus deciding whether the
-actions apply only check that it is set."
+that buffer when the current one has none of its own.  It is called
+only when one of these actions runs, so it may create the buffer; menus
+deciding whether the actions apply only check that it is set.  The
+default is drover's own prompt, the buffer of `drover-prompt-dwim',
+created on demand, so those actions choose what the next prompt runs
+from anywhere; nil keeps them to prompt buffers and lists."
   :type '(choice (const :tag "None" nil) function)
   :group 'drover)
 

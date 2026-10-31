@@ -35,8 +35,10 @@
 ;; Bind `drover-dispatch' globally, for instance to C-'; drover binds no
 ;; global key.  Other packages add their own global commands to the menu
 ;; with `transient-append-suffix' and `transient-insert-suffix', placed
-;; relative to drover's keys: `drover-opencode' appends its session
-;; search after "p".
+;; relative to drover's keys: more ways to pick a session or prompt
+;; after "'", the last of drover's (the prompt's " and '); more lists of
+;; sessions after "p", where `drover-opencode' appends its session
+;; search; more prompt commands after "O".
 ;;
 ;; `drover-view', the View menu, chooses how drover's list sorts, groups
 ;; and filters sessions, and what it shows.
@@ -55,6 +57,10 @@
 (autoload 'drover-select "drover-attention" nil t)
 (autoload 'drover-list "drover-list" nil t)
 (autoload 'drover-list-side "drover-list" nil t)
+(autoload 'drover-prompt-dwim "drover-prompt" nil t)
+(autoload 'drover-prompt-toggle "drover-prompt" nil t)
+
+(defvar drover-prompt-mode)
 
 (declare-function drover-read-session "drover-attention" (prompt sessions))
 
@@ -381,11 +387,13 @@ buffers also set `drover-session-at-point-function'.
 (defun drover--context ()
   "Return what the dispatch menu depends on in the current buffer, as a plist.
 :session is the session at point or nil, :list non-nil in a list of
-sessions, :view non-nil in one of drover's views."
+sessions, :view non-nil in one of drover's views, :prompt non-nil in
+drover's own prompt buffer (see `drover-prompt-mode')."
   (list :session (with-demoted-errors "Drover session at point: %S"
                    (drover-session-at-point t))
         :list (and (drover-session-list-p) t)
-        :view (and drover-view-p t)))
+        :view (and drover-view-p t)
+        :prompt (and (bound-and-true-p drover-prompt-mode) t)))
 
 (defun drover--scope ()
   "Return the context of the dispatch menu being set up, else of this buffer."
@@ -410,6 +418,10 @@ PREDICATE, a function of the session, returns nil for it."
 (defun drover-dispatch-view-p ()
   "Return non-nil when the dispatch menu acts on one of drover's views."
   (plist-get (drover--scope) :view))
+
+(defun drover-dispatch-in-prompt-p ()
+  "Return non-nil when the dispatch menu acts on drover's own prompt buffer."
+  (plist-get (drover--scope) :prompt))
 
 (defun drover-dispatch-prompt-p (action)
   "Return non-nil when prompt ACTION applies from where the dispatch menu acts.
@@ -457,7 +469,9 @@ prompt actions of the current buffer.  Commands that do not apply here
 are shown, greyed out."
   ["Global"
    [("j" "Next" drover-next)
-    ("b" "Select" drover-select)]
+    ("b" "Select" drover-select)
+    ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
+    ("'" "Show prompt" drover-prompt-toggle)]
    [("l" "List" drover-list)
     ("L" "Side list" drover-list-side)
     ("p" "Project" drover-select-project)]

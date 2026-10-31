@@ -60,10 +60,10 @@ or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in thre
 
 #+begin_example
   Global
-   j Next     l List              a Agent       C Compact
-   b Select   L Side list         m Model       f Fork
-              p Project           e Effort      . Last answer
-              S Search sessions   d Directory   O Open link
+   j Next          l List              a Agent       C Compact
+   b Select        L Side list         m Model       f Fork
+   " Prompt        p Project           e Effort      . Last answer
+   ' Show prompt   S Search sessions   d Directory   O Open link
 
   Session
    o Other window   A Answer        r Rename    U Subagents
@@ -128,6 +128,8 @@ Everywhere, through the menu.
 |-----+-----------------------------+----------------------------------------------------------------|
 | =j= | =drover-next=               | visit the most urgent session                                  |
 | =b= | =drover-select=             | choose a session                                               |
+| ="= | =drover-prompt-dwim=        | write a prompt, with the context at point                      |
+| ='= | =drover-prompt-toggle=      | show or hide the prompt                                        |
 | =l= | =drover-list=               | the list of sessions, in a window                              |
 | =L= | =drover-list-side=          | the list of sessions beside your work, shown or hidden         |
 | =p= | =drover-select-project=     | the list of the sessions of a project                          |
@@ -141,19 +143,19 @@ Everywhere, through the menu.
 | =.= | =drover-prompt-last-answer= | show the start of the last answer                              |
 | =O= | =drover-prompt-open-link=   | open the link at point                                         |
 
-=S= comes with the OpenCode backend. =p= offers the projects of the sessions drover knows, and lists those of the one you choose, through the filter. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
+=S= comes with the OpenCode backend. ="= is greyed out in the prompt itself. =p= offers the projects of the sessions drover knows, and lists those of the one you choose, through the filter. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns, drover's prompt by default; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
 
 ** Adding to the menu
 
 Add your own commands with =transient-append-suffix= and =transient-insert-suffix=, placed relative to a key of the menu. These places stay put:
 
-- after =b=, more ways to pick a session or prompt, chained one after the other: ="= after =b=, then ='= after ="=, and so on;
+- after ='=, the last of drover's ways to pick a session or prompt, more of them, chained one after the other: =#= after ='=, and so on (after =b= too, before the prompt's);
 - after =p=, more lists of sessions: the OpenCode backend appends =S= there;
 - after =O=, more prompt commands.
 
 #+begin_src emacs-lisp
-  (transient-append-suffix 'drover-dispatch "b"
-    '("\"" "Prompt" my-prompt-command))
+  (transient-append-suffix 'drover-dispatch "'"
+    '("#" "Scheduled prompts" my-scheduled-prompts))
 #+end_src
 
 =drover-dispatch-session=, =drover-dispatch-list-p=, =drover-dispatch-view-p= and =drover-dispatch-prompt-p= are predicates for the =:inapt-if-not= of such entries.
@@ -221,7 +223,7 @@ A front end also fits its buffers into the keys. A list of sessions sets =drover
 | =make compile= | byte compilation with warnings as errors |
 | =make lint=    | checkdoc                                 |
 
-=DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL= the opencode.el checkout the OpenCode backend is built and tested against. Tests use a fake backend, or stub opencode.el; they never touch a running Emacs or OpenCode service.
+=DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL=, =AGENT_SHELL_EL= and =CLAUDE_CODE_IDE_EL= the checkouts of opencode.el, agent-shell and claude-code-ide the backends are built and tested against. Tests use a fake backend and fake engines, or stub the front ends; they never touch a running Emacs or OpenCode service, nor read the agents' own configuration.
 
 * License
 

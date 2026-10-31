@@ -1018,5 +1018,230 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (drover-set-show-history t)
       (should (= (length drover-test-history-calls) 1)))))
 
+;;;; Engines of sessions
+
+(ert-deftest drover-test-session-engine-key ()
+  (should-not (drover-session-engine-key (drover-test-session "s")))
+  (should-not (drover-session-engine-key (drover-test-session "s" :engine 'opencode)))
+  (should-not (drover-session-engine-key (drover-test-session "s" :engine-id "ses_1")))
+  (should (equal (drover-session-engine-key (drover-test-session "s" :engine 'opencode :engine-id "ses_1"))
+                 '(opencode . "ses_1"))))
+
+(ert-deftest drover-test-backend-engines ()
+  (drover-test-with-backend nil
+    (should (equal (drover-backend-engines 'fake) '(fake)))
+    (let ((drover-test-backend-engines '(opencode codex)))
+      (should (equal (drover-backend-engines (drover-test-session "s")) '(opencode codex))))
+    (drover-test-register-simple 'listed nil :engines '(claude-code))
+    (drover-test-register-simple 'broken nil :engines (lambda () (error "Boom")))
+    (drover-test-register-simple 'none nil)
+    (should (equal (drover-backend-engines 'listed) '(claude-code)))
+    (should-not (drover-backend-engines 'broken))
+    (should-not (drover-backend-engines 'none))))
+
+(defun drover-test-other (id &rest properties)
+  "Return a session ID of the backend `other', with PROPERTIES."
+  (apply #'drover-session-create :backend 'other :id id properties))
+
+(ert-deftest drover-test-duplicate-sessions-merge ()
+  "Two backends showing one conversation list it once, the first registered's."
+  (drover-test-with-backend (list (drover-test-session "a" :engine 'opencode :engine-id "ses_1")
+                                  (drover-test-session "b" :engine 'opencode :engine-id "ses_2")
+                                  (drover-test-session "c" :engine 'opencode)
+                                  (drover-test-session "d"))
+    (drover-test-register-simple
+     'other (list (drover-test-other "x" :engine 'opencode :engine-id "ses_1")
+                  (drover-test-other "y" :engine 'codex :engine-id "ses_2")
+                  (drover-test-other "z" :engine 'opencode)
+                  (drover-test-other "w")))
+    (cl-flet ((keys () (mapcar #'drover-session-key (drover-sessions))))
+      ;; An unknown engine or identifier is no evidence.
+      (should (equal (keys) '((other . "y") (other . "z") (other . "w")
+                              (fake . "a") (fake . "b") (fake . "c") (fake . "d"))))
+      ;; Each backend still finds its own record.
+      (should (drover-find 'other "x"))
+      (should (eq (drover-session-backend (drover-find-engine-session 'opencode "ses_1")) 'fake))
+      (should (eq (drover-session-backend (drover-find-engine-session 'codex "ses_2")) 'other))
+      (should-not (drover-find-engine-session 'opencode "ses_3"))
+      (should-not (drover-find-engine-session 'opencode nil))
+      ;; Registering again keeps the order of registration.
+      (drover-test-register)
+      (should (equal (keys) '((other . "y") (other . "z") (other . "w")
+                              (fake . "a") (fake . "b") (fake . "c") (fake . "d")))))))
+
+(ert-deftest drover-test-duplicate-sessions-prefer-a-buffer ()
+  "The backend with a live buffer for the conversation keeps it."
+  (let ((buffer (generate-new-buffer " other")))
+    (unwind-protect
+        (drover-test-with-backend (list (drover-test-session "a" :engine 'opencode :engine-id "ses_1"))
+          (drover-test-register-simple
+           'other (list (drover-test-other "x" :engine 'opencode :engine-id "ses_1")
+                        (drover-test-other "x2" :engine 'opencode :engine-id "ses_1"))
+           :buffer (lambda (session) (and (equal (drover-session-id session) "x2") buffer)))
+          ;; Records of one backend stay distinct sessions.
+          (should (equal (mapcar #'drover-session-key (drover-sessions))
+                         '((other . "x") (other . "x2"))))
+          (should (eq (drover-session-backend (drover-find-engine-session 'opencode "ses_1")) 'other))
+          ;; Both with a buffer: the first registered.
+          (setf (alist-get 'fake drover--backends)
+                (append (list :buffer (lambda (_) buffer)) (alist-get 'fake drover--backends)))
+          (should (equal (mapcar #'drover-session-key (drover-sessions)) '((fake . "a"))))
+          ;; No buffer any more: the first registered still.
+          (kill-buffer buffer)
+          (should (equal (mapcar #'drover-session-key (drover-sessions)) '((fake . "a")))))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
+(ert-deftest drover-test-duplicate-sessions-in-history ()
+  "An older record of a conversation a backend follows live is not listed."
+  (drover-test-with-backend (list (drover-test-session "a" :engine 'opencode :engine-id "ses_1"))
+    (let ((drover-test-history-calls nil)
+          (answer nil))
+      (drover-test-register-simple
+       'other nil :history (lambda (callback) (setq answer callback)))
+      (drover-test-register-history)
+      (drover-set-show-history t)
+      (funcall answer (list (drover-test-other "x" :engine 'opencode :engine-id "ses_1")
+                            (drover-test-other "y" :engine 'opencode :engine-id "ses_2")))
+      (funcall (car drover-test-history-calls)
+               (list (drover-test-session "b" :engine 'opencode :engine-id "ses_2")
+                     (drover-test-session "c" :engine 'opencode :engine-id "ses_3")))
+      ;; The live record wins over an older one of another backend; older
+      ;; records of one conversation merge, the first registered winning.
+      (should (equal (mapcar #'drover-session-key (drover-known-sessions))
+                     '((fake . "a") (fake . "b") (fake . "c"))))
+      (should (eq (drover-session-backend (drover-find-engine-session 'opencode "ses_2")) 'fake)))))
+
+(ert-deftest drover-test-buffer-session ()
+  (drover-test-with-backend (list (drover-test-session "s"))
+    (let ((buffer (generate-new-buffer " session")))
+      (should-not (drover-buffer-session buffer))
+      (with-current-buffer buffer
+        (setq-local drover-session-at-point-function (lambda () (drover-find 'fake "s"))))
+      (should (equal (drover-session-id (drover-buffer-session buffer)) "s"))
+      (kill-buffer buffer)
+      (should-not (drover-buffer-session buffer))
+      (should-not (drover-buffer-session nil)))))
+
+;;;; Warnings and steps
+
+(defmacro drover-test-with-warnings (&rest body)
+  "Run BODY collecting the messages of `display-warning' in `warnings'.
+They are newest first, as (TYPE MESSAGE LEVEL)."
+  (declare (indent 0) (debug t))
+  `(let ((warnings nil))
+     (cl-letf (((symbol-function 'display-warning)
+                (lambda (type message &optional level _buffer)
+                  (push (list type message level) warnings))))
+       ,@body)))
+
+(ert-deftest drover-test-warn ()
+  (drover-test-with-warnings
+    (drover-warn "%s refused %s" "Session" "plan")
+    (should (equal warnings '((drover "Session refused plan" :warning))))))
+
+(ert-deftest drover-test-run-steps-in-order ()
+  (drover-test-with-warnings
+    (let ((ran nil)
+          (done 0)
+          (pending nil))
+      (drover-run-steps (list (cons "agent" (lambda (next) (push 'agent ran) (funcall next)))
+                              (cons "model" (lambda (next) (push 'model ran) (setq pending next)))
+                              (cons "effort" (lambda (next) (push 'effort ran) (funcall next))))
+                        (lambda () (cl-incf done)))
+      ;; A step waits for its request to settle.
+      (should (equal ran '(model agent)))
+      (should (= done 0))
+      (funcall pending)
+      (should (equal ran '(effort model agent)))
+      (should (= done 1))
+      ;; A second call does nothing.
+      (funcall pending)
+      (should (= done 1))
+      (should-not warnings)
+      (drover-run-steps nil (lambda () (cl-incf done)))
+      (should (= done 2)))))
+
+(ert-deftest drover-test-run-steps-signal ()
+  "A step that signals is reported, and the next one runs."
+  (drover-test-with-warnings
+    (let ((ran nil)
+          (done 0))
+      (drover-run-steps (list (cons "model" (lambda (_next) (error "No such model")))
+                              (cons "effort" (lambda (next) (push 'effort ran) (funcall next))))
+                        (lambda () (cl-incf done)))
+      (should (equal ran '(effort)))
+      (should (= done 1))
+      (should (equal warnings
+                     '((drover "Could not set model: No such model; sending the prompt anyway"
+                               :warning))))
+      ;; Signalling once settled warns nothing more.
+      (setq warnings nil)
+      (drover-run-steps (list (cons "model" (lambda (next) (funcall next) (error "Late"))))
+                        (lambda () (cl-incf done)))
+      (should (= done 2))
+      (should-not warnings))))
+
+(ert-deftest drover-test-run-steps-timeout ()
+  "A step not settled in time is reported, and its late reply ignored."
+  (drover-test-with-warnings
+    (let ((drover-step-timeout 0.01)
+          (done 0)
+          (late nil))
+      (drover-run-steps (list (cons "agent" (lambda (next) (setq late next))))
+                        (lambda () (cl-incf done)))
+      (should (= done 0))
+      (with-timeout (5 (error "The step never timed out"))
+        (while (zerop done)
+          (accept-process-output nil 0.01)))
+      (should (= done 1))
+      (should (equal warnings
+                     '((drover "Timed out setting agent; sending the prompt anyway" :warning))))
+      (funcall late)
+      (should (= done 1)))))
+
+;;;; Git branches
+
+(ert-deftest drover-test-git-branch ()
+  (let* ((root (file-name-as-directory (make-temp-file "drover-git" t)))
+         (main (expand-file-name "main/" root))
+         (linked (expand-file-name "linked/" root))
+         (plain (expand-file-name "plain/" root))
+         (drover--branches (make-hash-table :test #'equal)))
+    (unwind-protect
+        (cl-flet ((write (file content)
+                    (make-directory (file-name-directory file) t)
+                    (with-temp-file file (insert content))))
+          (write (expand-file-name ".git/HEAD" main) "ref: refs/heads/feature/x\n")
+          (make-directory (expand-file-name "src" main) t)
+          (write (expand-file-name ".git/worktrees/linked/HEAD" main) "ref: refs/heads/side\n")
+          (write (expand-file-name ".git" linked)
+                 (concat "gitdir: " (expand-file-name ".git/worktrees/linked" main) "\n"))
+          (make-directory plain t)
+          ;; Read without Git, from a subdirectory too.
+          (should (equal (drover-git-branch (expand-file-name "src" main)) "feature/x"))
+          (should (equal (drover-git-branch linked) "side"))
+          (should-not (drover-git-branch plain))
+          (should-not (drover-git-branch (expand-file-name "missing/" root)))
+          (should-not (drover-git-branch nil))
+          ;; Kept for `drover-branch-ttl' seconds.
+          (write (expand-file-name ".git/worktrees/linked/HEAD" main) "ref: refs/heads/renamed\n")
+          (should (equal (drover-git-branch (directory-file-name linked)) "side"))
+          (let ((drover-branch-ttl 0))
+            (should (equal (drover-git-branch linked) "renamed")))
+          ;; Detached: a short commit.
+          (write (expand-file-name ".git/HEAD" main) "0123456789abcdef\n")
+          (let ((drover-branch-ttl 0))
+            (should (equal (drover-git-branch main) "0123456"))))
+      (delete-directory root t))))
+
+;;;; The default prompt buffer
+
+(ert-deftest drover-test-default-prompt-buffer-function ()
+  "Drover's own prompt is the default prompt buffer, loaded on demand."
+  (should (eq (eval (car (get 'drover-default-prompt-buffer-function 'standard-value)) t)
+              #'drover-prompt-default-buffer))
+  (should (fboundp 'drover-prompt-default-buffer)))
+
 (provide 'drover-core-test)
 ;;; drover-core-test.el ends here
