@@ -20,7 +20,10 @@
 ;; Every opencode.el function the backend calls is stubbed: the registry
 ;; serves `drover-opencode-test-entries', the status functions follow
 ;; the `opencode-state' contract, and actions are recorded in
-;; `drover-opencode-test-calls'.  No request reaches a service.
+;; `drover-opencode-test-calls'.  No request reaches a service.  The
+;; engine's tests answer from the catalogs of `drover-opencode-fixtures';
+;; those of the prompt operations go through opencode.el's own switches
+;; and send checks, with `opencode-request' stubbed.
 
 ;;; Code:
 
@@ -28,6 +31,7 @@
 ;; opencode first: drover loads the backend once opencode is loaded.
 (require 'opencode)
 (require 'drover-opencode)
+(require 'drover-opencode-fixtures)
 
 (defvar opencode-state-updated-functions)
 
@@ -201,10 +205,14 @@ PROJECTS defaults to `drover-opencode-test-projects'."
   (drover-opencode-test-with nil
     (should (equal (drover-backends) '(opencode)))
     (should (equal (drover-backend-label 'opencode) "OpenCode"))
+    (should (equal (drover-backend-engines 'opencode) '(opencode)))
     (let ((session (drover-session-create :backend 'opencode :id "ses_1")))
       (dolist (operation '(:start :sessions :open :respond :interrupt :archive :mark-seen :preview :new
-                                  :buffer :rename :delete :fork :compact :history))
-        (should (drover-supports-p session operation))))))
+                                  :buffer :rename :delete :fork :compact :history
+                                  :create :check :apply-options :send :options))
+        (should (drover-supports-p session operation)))
+      ;; A running session can change all three.
+      (should-not (drover-supports-p session :settable)))))
 
 ;;;; Mapping
 
@@ -224,6 +232,9 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should (drover-session-p session))
       (should (eq (drover-session-backend session) 'opencode))
       (should (equal (drover-session-id session) "ses_1"))
+      ;; The backend's identifiers are the engine's.
+      (should (eq (drover-session-engine session) 'opencode))
+      (should (equal (drover-session-engine-id session) "ses_1"))
       (should (equal (drover-session-title session) "Fix the build"))
       (should (equal (drover-session-directory session) "/work/drover/"))
       (should (equal (drover-session-project session) "Drover"))
@@ -515,18 +526,22 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should (= runs 1)))))
 
 (ert-deftest drover-opencode-test-unload ()
-  (drover-opencode-test-with nil
-    (drover-start)
-    (unwind-protect
-        (should-not (drover-opencode-unload-function))
-      ;; The tests that follow need what unloading undid.
-      (drover-opencode--install))
-    (should-not (drover-backends))
-    (should-not (memq #'drover-opencode--updated opencode-state-updated-functions))
-    (should (member '(opencode-events-unregister "project.updated" drover-opencode--projects-changed)
-                    drover-opencode-test-calls))
-    (should (member '(opencode-events-unregister "server.connected" drover-opencode--projects-changed)
-                    drover-opencode-test-calls))))
+  (drover-test-with-engines
+    (drover-opencode--register-engine)
+    (drover-opencode-test-with nil
+      (drover-start)
+      (unwind-protect
+          (should-not (drover-opencode-unload-function))
+        ;; The tests that follow need what unloading undid.
+        (drover-opencode--install))
+      (should-not (drover-backends))
+      (should-not (drover-engines))
+      (should-not drover--model-sources)
+      (should-not (memq #'drover-opencode--updated opencode-state-updated-functions))
+      (should (member '(opencode-events-unregister "project.updated" drover-opencode--projects-changed)
+                      drover-opencode-test-calls))
+      (should (member '(opencode-events-unregister "server.connected" drover-opencode--projects-changed)
+                      drover-opencode-test-calls)))))
 
 ;;;; Actions
 
@@ -670,6 +685,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (let ((session (drover-session-at-point)))
         (should (eq (drover-session-backend session) 'opencode))
         (should (equal (drover-session-id session) "ses_old"))
+        (should (equal (drover-session-engine-key session) '(opencode . "ses_old")))
         (should (equal (drover-session-title session) "Old one"))
         (should (equal (drover-session-directory session) "/work/drover/"))
         (should (equal (drover-session-parent session) "ses_0"))
@@ -789,6 +805,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
               (unseen (nth 1 received))
               (bare (nth 2 received)))
           (should (eq (drover-session-backend old) 'opencode))
+          (should (equal (drover-session-engine-key old) '(opencode . "ses_old")))
           (should (equal (drover-session-title old) "An old one"))
           (should (equal (drover-session-directory old) "/work/drover/"))
           (should (equal (drover-session-project old) "Drover"))
@@ -913,6 +930,972 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                            '("l" "L" "p" "S"))))
         (kill-buffer session-buffer)
         (drover-opencode--install)))))
+
+;;;; The engine: models
+
+(ert-deftest drover-opencode-test-default-variant ()
+  "A model's default variant sends the effort a request without one sends."
+  (cl-flet ((default (provider id &optional settings)
+              (drover-model-default-variant (drover-opencode-fixtures-model provider id settings))))
+    ;; OpenCode gives GPT-5 medium effort, GPT-6 nothing.
+    (should (eq (default "openai" "gpt-5.5") 'medium))
+    (should-not (default "openai" "gpt-6.1-sol-fast"))
+    (should (eq (default "openai" "gpt-6.1-sol-fast" '((reasoningEffort . "high"))) 'high))
+    ;; A model without variants has none to name.
+    (should-not (default "opencode" "big-pickle" '((reasoningEffort . "high"))))
+    ;; Claude 5.5 runs adaptive thinking at the API's default effort.
+    (should (eq (default "anthropic" "claude-opus-5-5") 'medium))
+    (should (eq (default "anthropic" "claude-sonnet-5-5") 'high))
+    (should (eq (default "anthropic" "claude-sonnet-5-5" '((output_config (effort . "low")))) 'low))
+    (should-not (default "anthropic" "claude-opus-5-5" '((thinking (type . "disabled")))))
+    ;; Opus 4.6 thinks only when configured to.
+    (should-not (default "anthropic" "claude-opus-4-6"))
+    (should (eq (default "anthropic" "claude-opus-4-6" '((thinking (type . "adaptive")) (effort . "max")))
+                'max))
+    ;; Copilot decides Claude's effort unless it is configured.
+    (should-not (default "github-copilot" "claude-opus-5.5"))
+    (should (eq (default "github-copilot" "claude-opus-5.5" '((effort . "high"))) 'high))
+    ;; Bedrock carries Claude's thinking in the request body; Converse ignores an effort setting.
+    (should (eq (default "amazon-bedrock" "claude-opus-5-5") 'medium))
+    (should (eq (default "amazon-bedrock" "claude-opus-5-5" '((effort . "low"))) 'medium)))
+  ;; Adaptive thinking comes from binding thinking blocks, which the catalog can turn off.
+  (let ((haiku `((id . "claude-haiku-5-5") (providerID . "anthropic")
+                 (package . "@opencode/ai/providers/anthropic")
+                 (settings (effort . "low"))
+                 (variants . ,(drover-opencode-fixtures-claude-variants "low" "high")))))
+    (should (eq (drover-model-default-variant (drover-opencode-model haiku nil)) 'low))
+    (should-not (drover-model-default-variant
+                 (drover-opencode-model (cons '(compatibility (supportsThinkingBlockBinding)) haiku)
+                                        nil)))))
+
+(ert-deftest drover-opencode-test-model ()
+  "A catalog entry becomes a model naming its provider, variants and engines."
+  (let ((gpt (drover-opencode-fixtures-model "openai" "gpt-5.5"))
+        (opus (drover-opencode-fixtures-model "anthropic" "claude-opus-5-5"))
+        (bedrock (drover-opencode-fixtures-model "amazon-bedrock" "claude-opus-5-5"))
+        (pickle (drover-opencode-fixtures-model "opencode" "big-pickle")))
+    (should (drover-model-p gpt))
+    (should (equal (drover-model-provider-id gpt) "openai"))
+    (should (equal (drover-model-provider-name gpt) "OpenAI"))
+    (should (equal (drover-model-id gpt) "gpt-5.5"))
+    (should (equal (drover-model-name gpt) "GPT-5.5"))
+    (should (equal (drover-model-label gpt) "OpenAI: GPT-5.5"))
+    ;; Each variant tells the effort it sends.
+    (should (equal (drover-model-variants gpt)
+                   '((none :effort "none") (low :effort "low") (medium :effort "medium")
+                     (high :effort "high") (xhigh :effort "xhigh"))))
+    (should (equal (cdr (assq 'max (drover-model-variants opus))) '(:effort "max")))
+    (should (equal (cdr (assq 'low (drover-model-variants bedrock))) '(:effort "low")))
+    ;; OpenCode runs any provider's model; the families' engines their own.
+    (should (equal (drover-model-engines gpt) '(opencode codex)))
+    (should (equal (drover-model-engines opus) '(opencode claude-code)))
+    (should (equal (drover-model-engines pickle) '(opencode)))
+    (should (equal (drover-model-id-for gpt 'opencode) "openai/gpt-5.5"))
+    (should-not (drover-model-variants pickle))
+    (should-not (drover-model-default-variant pickle)))
+  ;; A variant sending no effort the paths know is a bare symbol.
+  (let ((model (drover-opencode-model '((id . "m") (providerID . "p")
+                                        (variants ((id . "fast") (body (service_tier . "priority")))))
+                                      nil)))
+    (should (equal (drover-model-variants model) '((fast))))
+    (should-not (drover-model-provider-name model))))
+
+(ert-deftest drover-opencode-test-variant-effort-candidates ()
+  "An OpenCode variant offers the effort it sends, then its name."
+  (let* ((defaults (drover-opencode-fixtures-defaults))
+         (gpt (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5"))
+         (bedrock (drover-opencode-fixtures-catalog-model defaults "amazon-bedrock" "claude-opus-5-5")))
+    (should (equal (drover-model-effort-candidates gpt 'high) '("high" "high")))
+    (should (equal (drover-model-effort-candidates bedrock 'low) '("low" "low")))
+    (should (equal (drover-model-effort-candidates nil 'max) '("max")))))
+
+(ert-deftest drover-opencode-test-model-ref ()
+  "A model is referred to by provider and identifier, with the variant named."
+  (let ((gpt (drover-opencode-fixtures-model "openai" "gpt-5.5")))
+    (should (equal (drover-opencode-model-ref gpt) '((id . "gpt-5.5") (providerID . "openai"))))
+    (should (equal (drover-opencode-model-ref gpt 'high)
+                   '((id . "gpt-5.5") (providerID . "openai") (variant . "high"))))
+    (should-not (drover-opencode-model-ref (drover-model-create :id "sonnet" :engines '(claude-code))))
+    (should-not (drover-opencode-model-ref (drover-model-create :id "sonnet") 'high))))
+
+(ert-deftest drover-opencode-test-ref-variants ()
+  (should (eq (drover-opencode--ref-variant '((id . "m") (providerID . "p") (variant . "low"))) 'low))
+  (should-not (drover-opencode--ref-variant '((id . "m") (providerID . "p") (variant . "default"))))
+  (should-not (drover-opencode--ref-variant '((id . "m") (providerID . "p") (variant . ""))))
+  (should-not (drover-opencode--ref-variant '((id . "m") (providerID . "p"))))
+  (let ((ref '((id . "m") (providerID . "p") (variant . "low"))))
+    (should (equal (drover-opencode--ref-with-variant ref 'high)
+                   '((id . "m") (providerID . "p") (variant . "high"))))
+    ;; The reference given is left alone.
+    (should (equal ref '((id . "m") (providerID . "p") (variant . "low"))))
+    (should (eq (drover-opencode--ref-with-variant ref nil) ref))))
+
+(ert-deftest drover-opencode-test-ref-model ()
+  "A reference resolves to the catalog's model, else to a bare one."
+  (let* ((defaults (drover-opencode-fixtures-defaults))
+         (catalog (plist-get defaults :catalog))
+         (gpt (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5")))
+    (should (eq (drover-opencode--ref-model '((id . "gpt-5.5") (providerID . "openai") (variant . "low"))
+                                            catalog)
+                gpt))
+    (let ((retired (drover-opencode--ref-model '((id . "gpt-4") (providerID . "openai")) catalog)))
+      (should (equal (drover-model-id retired) "gpt-4"))
+      (should (equal (drover-model-provider-id retired) "openai"))
+      (should (equal (drover-model-engines retired) '(opencode codex)))
+      (should-not (drover-model-variants retired)))
+    (should-not (drover-opencode--ref-model '((id . "gpt-5.5")) catalog))
+    (should-not (drover-opencode--ref-model nil catalog))))
+
+(ert-deftest drover-opencode-test-default-options ()
+  "The catalogs give the default agent, each agent's pin and the default model."
+  (should (equal (plist-get (drover-opencode-fixtures-defaults "plan") :agent) "plan"))
+  ;; The default agent is the first the service lists that a session can run.
+  (should (equal (plist-get (drover-opencode-fixtures-defaults "general") :agent) "build"))
+  (should (equal (plist-get (drover-opencode-fixtures-defaults "compaction") :agent) "build"))
+  (should (equal (plist-get (drover-opencode-fixtures-defaults) :agent) "build"))
+  (should (equal (plist-get (drover-opencode--defaults-from
+                             (seq-remove (lambda (agent) (equal (alist-get 'id agent) "build"))
+                                         drover-opencode-fixtures-agents)
+                             nil nil nil)
+                            :agent)
+                 "plan"))
+  (let* ((defaults (drover-opencode-fixtures-defaults "plan"))
+         (pin (cdr (assoc "plan" (plist-get defaults :agents)))))
+    (should (eq (car pin) (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-6.1-sol-fast")))
+    (should (eq (cdr pin) 'high))
+    (should-not (assoc "build" (plist-get defaults :agents)))
+    (should (eq (plist-get defaults :default-model)
+                (drover-opencode-fixtures-catalog-model defaults "opencode" "big-pickle")))
+    (should (equal (drover-model-label (plist-get defaults :default-model)) "OpenCode: Big Pickle"))
+    (should (equal (mapcar #'car (drover-model-variants
+                                  (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5")))
+                   '(none low medium high xhigh))))
+  ;; A default model missing from the catalog is still a full model.
+  (let ((defaults (drover-opencode--defaults-from
+                   nil nil drover-opencode-fixtures-providers
+                   (drover-opencode-fixtures-model-info "openai" "gpt-5.5"))))
+    (should-not (plist-get defaults :catalog))
+    (should (equal (drover-model-label (plist-get defaults :default-model)) "OpenAI: GPT-5.5"))
+    (should (eq (drover-model-default-variant (plist-get defaults :default-model)) 'medium))))
+
+(ert-deftest drover-opencode-test-recorded-catalogs ()
+  "The recorded catalogs resolve: build is the default agent and GPT-5 runs medium."
+  (let ((defaults (drover-opencode--defaults-from
+                   (alist-get 'data (drover-opencode-fixtures-recorded "agent.json"))
+                   (alist-get 'data (drover-opencode-fixtures-recorded "model.json"))
+                   (alist-get 'data (drover-opencode-fixtures-recorded "provider.json"))
+                   nil)))
+    (should (equal (plist-get defaults :agent) "build"))
+    (should-not (plist-get defaults :agents))
+    (let ((gpt5 (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5"))
+          (gpt6 (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-6.1-sol"))
+          (pickle (drover-opencode-fixtures-catalog-model defaults "opencode" "big-pickle")))
+      (should (equal (drover-model-label gpt5) "OpenAI: GPT-5.5"))
+      (should (eq (drover-model-default-variant gpt5) 'medium))
+      (should (memq 'opencode (drover-model-engines gpt5)))
+      (should (assq 'xhigh (drover-model-variants gpt6)))
+      (should-not (drover-model-default-variant gpt6))
+      (should-not (drover-model-variants pickle)))))
+
+;;;; The engine: defaults
+
+(ert-deftest drover-opencode-test-precedence ()
+  "A pick wins, then the agent's pin, then the last opencode.el pick, then the default model."
+  (let* ((defaults (drover-opencode-fixtures-defaults "build"))
+         (gpt5 (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5"))
+         (sol (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-6.1-sol-fast"))
+         (pickle (drover-opencode-fixtures-catalog-model defaults "opencode" "big-pickle"))
+         (opencode-last-model nil))
+    (should (equal (drover-opencode--resolve defaults nil nil nil)
+                   (list :agent "build" :model pickle :variant nil)))
+    (setq opencode-last-model '((id . "gpt-5.5") (providerID . "openai") (variant . "low")))
+    (should (equal (drover-opencode--resolve defaults nil nil nil)
+                   (list :agent "build" :model gpt5 :variant 'low)))
+    ;; A variant the catalog proves the model lacks gives way to its default.
+    (setq opencode-last-model '((id . "gpt-5.5") (providerID . "openai") (variant . "max")))
+    (should (eq (plist-get (drover-opencode--resolve defaults nil nil nil) :variant) 'medium))
+    ;; The plan agent's pin outranks the last pick.
+    (should (equal (drover-opencode--resolve defaults "plan" nil nil)
+                   (list :agent "plan" :model sol :variant 'high)))
+    ;; A picked model runs its own default variant; a picked variant wins.
+    (should (equal (drover-opencode--resolve defaults "plan" gpt5 nil)
+                   (list :agent "plan" :model gpt5 :variant 'medium)))
+    (should (eq (plist-get (drover-opencode--resolve defaults "plan" nil 'low) :variant) 'low))
+    ;; Through the engine registry, as the prompt resolves.
+    (should (equal (drover-engine-resolve 'opencode defaults "plan" nil nil)
+                   (list :agent "plan" :model sol :variant 'high)))))
+
+(ert-deftest drover-opencode-test-precedence-without-defaults ()
+  "Before the defaults arrive, the last pick and the choices still resolve."
+  (let ((opencode-last-model '((id . "gpt-5.5") (providerID . "openai") (variant . "max"))))
+    (let ((resolved (drover-opencode--resolve nil nil nil nil)))
+      (should-not (plist-get resolved :agent))
+      (should (equal (drover-model-id (plist-get resolved :model)) "gpt-5.5"))
+      ;; Without a catalog nothing proves the variant missing.
+      (should (eq (plist-get resolved :variant) 'max))))
+  (let ((opencode-last-model nil))
+    (should (equal (drover-opencode--resolve nil "plan" nil 'low) '(:agent "plan" :model nil :variant low)))))
+
+(defmacro drover-opencode-test-with-service (&rest body)
+  "Run BODY with every OpenCode catalog fetch and request recorded, never sent.
+`fetches' collects (KIND CALLBACK DIRECTORY ELSE) and `requests' (METHOD
+PATH . KEYS), newest first; `warnings' the warnings of drover."
+  (declare (indent 0) (debug t))
+  `(let (fetches requests warnings)
+     (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                (lambda (kind callback &optional directory else)
+                  (push (list kind callback directory else) fetches)))
+               ((symbol-function 'opencode-request)
+                (lambda (method path &rest keys) (push (cons method (cons path keys)) requests)))
+               ((symbol-function 'opencode-request-sync)
+                (lambda (&rest _) (ert-fail "Unexpected synchronous request")))
+               ((symbol-function 'drover-warn)
+                (lambda (format-string &rest args)
+                  (push (apply #'format format-string args) warnings))))
+       ,@body)))
+
+(ert-deftest drover-opencode-test-fetch-defaults ()
+  "Defaults arrive once every answer did, in either order; a failed default model is unset."
+  (dolist (reverse-order '(nil t))
+    (drover-opencode-test-with-service
+      (let ((delivered nil)
+            (directory "/work/drover/"))
+        (drover-opencode--fetch-defaults directory (lambda (defaults) (push defaults delivered)))
+        (should (equal (sort (mapcar #'car fetches) #'string<) '(agent model provider)))
+        (should (equal (mapcar #'cadr requests) '("/api/model/default")))
+        ;; Every request is scoped to the directory, so its configuration applies.
+        (dolist (fetch fetches)
+          (should (equal (nth 2 fetch) directory)))
+        (dolist (request requests)
+          (should (equal (plist-get (cddr request) :directory) directory))
+          (should (plist-member (cddr request) :buffer))
+          (should-not (plist-get (cddr request) :buffer)))
+        (let ((answers
+               (append
+                (mapcar (lambda (fetch)
+                          (lambda ()
+                            (funcall (nth 1 fetch)
+                                     (pcase (car fetch)
+                                       ('agent drover-opencode-fixtures-agents)
+                                       ('model drover-opencode-fixtures-models)
+                                       ('provider drover-opencode-fixtures-providers)))))
+                        fetches)
+                (mapcar (lambda (request)
+                          (lambda ()
+                            (funcall (plist-get (cddr request) (if reverse-order :else :then))
+                                     (if reverse-order
+                                         'failure
+                                       `((data . ,(drover-opencode-fixtures-model-info
+                                                   "openai" "gpt-5.5")))))))
+                        requests))))
+          (dolist (answer (if reverse-order (reverse answers) answers))
+            (should-not delivered)
+            (funcall answer))
+          (should (= (length delivered) 1))
+          (let ((defaults (car delivered)))
+            (should (equal (plist-get defaults :agent) "build"))
+            (should (equal (length (plist-get defaults :catalog))
+                           (length drover-opencode-fixtures-models)))
+            (if reverse-order
+                (should-not (plist-get defaults :default-model))
+              (should (equal (drover-model-id (plist-get defaults :default-model)) "gpt-5.5")))))
+        (should-not warnings)))))
+
+(ert-deftest drover-opencode-test-fetch-defaults-failures ()
+  "A catalog that never arrives delivers nothing; nothing signals."
+  (drover-opencode-test-with-service
+    (let ((delivered nil))
+      (drover-opencode--fetch-defaults "/work/" (lambda (defaults) (push defaults delivered)))
+      ;; The model catalog failed: opencode.el reports it, and never calls back.
+      (dolist (fetch fetches)
+        (unless (eq (car fetch) 'model)
+          (funcall (nth 1 fetch) nil)))
+      (funcall (plist-get (cddr (car requests)) :else) 'failure)
+      (should-not delivered)))
+  (drover-opencode-test-with-service
+    (cl-letf (((symbol-function 'opencode-catalog-fetch) (lambda (&rest _) (error "No service"))))
+      (drover-opencode--fetch-defaults "/work/" (lambda (_) (ert-fail "Delivered")))
+      (should (string-match-p "defaults of /work/: No service" (car warnings)))))
+  ;; Data the defaults cannot be made of is reported, from the process filter.
+  (drover-opencode-test-with-service
+    (let ((delivered nil))
+      (drover-opencode--fetch-defaults "/work/" (lambda (defaults) (push defaults delivered)))
+      (dolist (fetch fetches)
+        (funcall (nth 1 fetch) (if (eq (car fetch) 'model) '(((id . 1) (variants ((id . 2))))) nil)))
+      (funcall (plist-get (cddr (car requests)) :else) 'failure)
+      (should-not delivered)
+      (should (string-match-p "Could not read the OpenCode defaults of /work/" (car warnings))))))
+
+(ert-deftest drover-opencode-test-last-used ()
+  "OpenCode was last used when a session last changed in its database."
+  (drover-test-with-homes
+    (should-not (drover-opencode--last-used))
+    (make-directory (file-name-directory drover-opencode-database) t)
+    (if (not (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+        (progn
+          (drover-test-write drover-opencode-database "")
+          (set-file-times drover-opencode-database (seconds-to-time 2500000))
+          (should (= (drover-opencode--last-used) 2500000.0)))
+      (let ((db (sqlite-open drover-opencode-database)))
+        (sqlite-execute db "create table session (id text, time_updated integer)")
+        (sqlite-execute db "insert into session values ('a', 9000000000)")
+        (sqlite-close db))
+      ;; An OpenCode 1 database has no session_v2 table yet: its files' times stand in.
+      (set-file-times drover-opencode-database (seconds-to-time 2500000))
+      (should (= (drover-opencode--last-used) 2500000.0))
+      (drover-test-write (concat drover-opencode-database "-wal") "")
+      (set-file-times (concat drover-opencode-database "-wal") (seconds-to-time 2600000))
+      (should (= (drover-opencode--last-used) 2600000.0))
+      (let ((db (sqlite-open drover-opencode-database)))
+        (sqlite-execute db (concat "create table session_v2 (id text primary key, project_id text,"
+                                   " parent_id text, directory text, title text, agent text,"
+                                   " model text, time_created integer, time_updated integer)"))
+        (sqlite-close db))
+      ;; An empty table tells nothing either.
+      (set-file-times drover-opencode-database (seconds-to-time 2500000))
+      (should (= (drover-opencode--last-used) 2600000.0))
+      (let ((db (sqlite-open drover-opencode-database)))
+        (sqlite-execute db (concat "insert into session_v2 values"
+                                   " ('ses_a', 'p', null, '/a', 'A', 'build', null, 1000, 4000000000),"
+                                   " ('ses_b', 'p', 'ses_a', '/a', 'B', 'plan', null, 500, 1000)"))
+        (sqlite-close db))
+      (should (= (drover-opencode--last-used) 4000000.0)))))
+
+;;;; The engine: registration, catalogs and agents
+
+(ert-deftest drover-opencode-test-engine-registered ()
+  "Loading the backend registers the engine and its catalog source."
+  (let ((engine (alist-get 'opencode (default-value 'drover--engines))))
+    (should (equal (plist-get engine :label) "OpenCode"))
+    (should (eq (plist-get engine :defaults) #'drover-opencode--fetch-defaults))
+    (should (eq (plist-get engine :resolve) #'drover-opencode--resolve))
+    (should (eq (plist-get engine :agents) #'drover-opencode--agents))
+    (should (eq (plist-get engine :last-used) #'drover-opencode--last-used))
+    (should (plist-get engine :model-resets-variant))
+    ;; Its defaults are fetched, not read from local files.
+    (should-not (plist-get engine :volatile)))
+  (should (member '(opencode 0 drover-opencode--catalog-source)
+                  (default-value 'drover--model-sources)))
+  (drover-test-with-engines
+    (drover-opencode--register-engine)
+    (should (equal (drover-engines) '(opencode)))
+    (should (equal (drover-engine-label 'opencode) "OpenCode"))
+    (should (equal drover--model-sources '((opencode 0 drover-opencode--catalog-source))))))
+
+(ert-deftest drover-opencode-test-engine-unregistered ()
+  "Unregistering keeps the sources other front ends give the engine."
+  (drover-test-with-engines
+    (let ((shells (lambda (_directory) nil)))
+      (drover-opencode--register-engine)
+      (drover-register-model-source 'opencode shells 10)
+      (drover-opencode--unregister-engine)
+      (should (equal (drover-engines) '(opencode)))
+      (should (equal (drover-engine-label 'opencode) "OpenCode"))
+      (should-not (drover-engine-property 'opencode :defaults))
+      (should (equal drover--model-sources (list (list 'opencode 10 shells))))
+      ;; Without them, the engine goes.
+      (drover-unregister-model-source 'opencode shells)
+      (drover-opencode--register-engine)
+      (drover-opencode--unregister-engine)
+      (should-not (drover-engines))
+      (should-not drover--model-sources))))
+
+(defmacro drover-opencode-test-with-catalogs (catalogs &rest body)
+  "Run BODY with opencode.el's catalogs answering from CATALOGS, at once.
+CATALOGS is an alist (KIND . CATALOG); a kind missing from it never
+answers.  `fetches' collects (KIND DIRECTORY), newest first, and
+`reports' the errors reported."
+  (declare (indent 1) (debug t))
+  `(let ((catalogs ,catalogs)
+         fetches reports)
+     (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                (lambda (kind callback &optional directory _else)
+                  (push (list kind directory) fetches)
+                  (when-let* ((entry (assq kind catalogs)))
+                    (funcall callback (cdr entry)))))
+               ((symbol-function 'opencode-primary-agents) #'drover-opencode-fixtures-primary-agents)
+               ((symbol-function 'opencode-report-error) (lambda (text) (push text reports))))
+       ,@body)))
+
+(ert-deftest drover-opencode-test-model-source ()
+  "The catalogs of a directory are the engine's models."
+  (drover-test-with-engines
+    (drover-opencode--register-engine)
+    (drover-opencode-test-with-catalogs `((model . ,drover-opencode-fixtures-models)
+                                         (provider . ,drover-opencode-fixtures-providers))
+      (let ((models (drover-models "/work/drover/")))
+        (should (equal (mapcar #'drover-model-label models)
+                       '("OpenAI: GPT-5.5" "OpenAI: GPT-6.1 Sol Fast" "OpenCode: Big Pickle"
+                         "Anthropic: Claude Opus 5.5" "Anthropic: Claude Sonnet 5.5"
+                         "Anthropic: Claude Opus 4.6" "GitHub Copilot: Claude Opus 5.5"
+                         "Amazon Bedrock: Claude Opus 5.5")))
+        (should (eq (drover-model-default-variant (car models)) 'medium))
+        (should (equal (sort (mapcar #'car fetches) #'string<) '(model provider)))
+        (dolist (fetch fetches)
+          (should (equal (cadr fetch) "/work/drover/")))))
+    ;; Without a model catalog, the source does not answer, so another may.
+    (let ((drover-opencode-timeout 0.05))
+      (drover-opencode-test-with-catalogs nil
+        (should-not (drover-models "/work/drover/"))))))
+
+(ert-deftest drover-opencode-test-catalog-wait ()
+  "Waiting for a catalog is bounded, and a failure is reported."
+  (let ((drover-opencode-timeout 0.1))
+    (drover-opencode-test-with-catalogs nil
+      (let ((start (float-time)))
+        (should-not (drover-opencode--catalog-wait 'agent "/work/"))
+        (should (< (- (float-time) start) 1.5))))
+    (drover-opencode-test-with-catalogs '((agent))
+      ;; An empty catalog is no catalog.
+      (should-not (drover-opencode--catalog-wait 'agent "/work/")))
+    (let (reports)
+      (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                 (lambda (_kind _callback &optional _directory else)
+                   (funcall else (opencode-error--make :method 'get :path "/api/agent" :message "Down"))))
+                ((symbol-function 'opencode-report-error) (lambda (text) (push text reports))))
+        (should-not (drover-opencode--catalog-wait 'agent "/work/"))
+        (should (string-match-p "/api/agent failed: Down" (car reports)))))
+    (drover-opencode-test-with-catalogs `((agent . ,drover-opencode-fixtures-agents))
+      (should (equal (drover-opencode--catalog-wait 'agent "/work/") drover-opencode-fixtures-agents)))))
+
+(ert-deftest drover-opencode-test-catalog-fetch-once ()
+  "A catalog fetched without waiting calls back once, with nil on timeout."
+  (let ((drover-opencode-timeout 0.05)
+        (pending nil)
+        (answers nil))
+    (cl-letf (((symbol-function 'opencode-catalog-fetch)
+               (lambda (_kind callback &optional _directory _else) (setq pending callback))))
+      (drover-opencode--catalog-fetch 'agent "/work/" (lambda (catalog) (push catalog answers)))
+      (should-not answers)
+      (let ((deadline (+ (float-time) 2)))
+        (while (and (not answers) (< (float-time) deadline))
+          (accept-process-output nil 0.02)))
+      (should (equal answers '(nil)))
+      ;; A late answer is ignored.
+      (funcall pending drover-opencode-fixtures-agents)
+      (should (equal answers '(nil)))
+      ;; An answer in time cancels the timeout.
+      (setq answers nil)
+      (drover-opencode--catalog-fetch 'agent "/work/" (lambda (catalog) (push catalog answers)))
+      (funcall pending '(((id . "build"))))
+      (sleep-for 0.1)
+      (should (equal answers '((((id . "build"))))))))
+  ;; A fetch that signals leaves no timer behind to call back later.
+  (let ((drover-opencode-timeout 0.05)
+        (answers nil))
+    (cl-letf (((symbol-function 'opencode-catalog-fetch) (lambda (&rest _) (error "No service"))))
+      (should-error (drover-opencode--catalog-fetch 'agent "/work/" (lambda (c) (push c answers))))
+      (sleep-for 0.1)
+      (should-not answers))))
+
+(ert-deftest drover-opencode-test-agents ()
+  "The engine offers the agents a session of the directory can run."
+  (drover-opencode-test-with-catalogs `((agent . ,drover-opencode-fixtures-agents))
+    (should (equal (drover-opencode--agents "/work/drover/") '("build" "plan")))
+    (should (equal fetches '((agent "/work/drover/")))))
+  (let ((drover-opencode-timeout 0.05))
+    (drover-opencode-test-with-catalogs nil
+      (should-not (drover-opencode--agents "/work/drover/")))))
+
+;;;; Prompt operations: running sessions
+
+(defmacro drover-opencode-test-with-session (&rest body)
+  "Run BODY with `session' a running OpenCode session on build and GPT-5.5.
+`buffer' is its buffer.  The stubbed service answers each request once
+`answer' is called, in the buffer that made it, as `opencode-request'
+does; `posts' collects (PATH . BODY), oldest first, `pending' the
+requests not answered yet, and `warnings' the warnings of drover,
+newest first."
+  (declare (indent 0) (debug t))
+  `(drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+     (let ((buffer (generate-new-buffer " *opencode session*"))
+           (opencode-last-model nil)
+           posts pending warnings)
+       (unwind-protect
+           (cl-flet ((answer ()
+                       (let ((request (pop pending)))
+                         (with-current-buffer (plist-get (cdr request) :requested-in)
+                           (funcall (plist-get (cdr request) :then) nil)))))
+             (with-current-buffer buffer
+               (setq-local opencode-session-id "ses_1"
+                           opencode-session-agent "build"
+                           opencode-session-model '((id . "gpt-5.5") (providerID . "openai"))))
+             (puthash "ses_1" buffer opencode-session-buffers)
+             (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                        (lambda (_kind callback &optional _directory _else)
+                          (funcall callback drover-opencode-fixtures-agents)))
+                       ((symbol-function 'opencode-primary-agents)
+                        #'drover-opencode-fixtures-primary-agents)
+                       ((symbol-function 'opencode-request)
+                        (lambda (method path &rest keys)
+                          (should (eq method 'post))
+                          (setq posts (append posts (list (cons path (plist-get keys :body))))
+                                pending (append pending
+                                                (list (cons path (append keys (list :requested-in
+                                                                                    (current-buffer)))))))))
+                       ((symbol-function 'drover-warn)
+                        (lambda (format-string &rest args)
+                          (push (apply #'format format-string args) warnings))))
+               (let ((session (drover-opencode-test-session "ses_1")))
+                 ,@body)))
+         (kill-buffer buffer)))))
+
+(defun drover-opencode-test-apply (session options)
+  "Apply OPTIONS to SESSION through the backend.
+Return a function telling how many times the backend called back."
+  (let ((done nil))
+    (drover-backend-call session :apply-options options (lambda () (setq done (1+ (or done 0)))))
+    (lambda () done)))
+
+(ert-deftest drover-opencode-test-session-takes-options-in-order ()
+  "A running session switches agent, then model, and only then takes the prompt."
+  (let ((defaults (drover-opencode-fixtures-defaults "build")))
+    (drover-opencode-test-with-session
+      ;; The plan agent's pin follows the switch.
+      (let ((done (drover-opencode-test-apply session '(:agent "plan" :model nil :variant nil))))
+        (should (equal posts '(("/api/session/ses_1/agent" (agent . "plan")))))
+        (answer)
+        (should-not (funcall done))
+        (should (equal (cdr (car (last posts)))
+                       '((model (id . "gpt-6.1-sol-fast") (providerID . "openai") (variant . "high")))))
+        (answer)
+        (should (eql (funcall done) 1)))
+      (should (equal (buffer-local-value 'opencode-session-model buffer)
+                     '((id . "gpt-6.1-sol-fast") (providerID . "openai") (variant . "high"))))
+      (should (equal opencode-last-model
+                     '((id . "gpt-6.1-sol-fast") (providerID . "openai") (variant . "high"))))
+      ;; An explicit model and variant replace the pin.
+      (setq posts nil)
+      (with-current-buffer buffer
+        (setq opencode-session-agent "build"))
+      (let ((done (drover-opencode-test-apply
+                   session (list :agent "plan"
+                                 :model (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5")
+                                 :variant 'xhigh))))
+        (answer)
+        (answer)
+        (should (eql (funcall done) 1)))
+      (should (equal (mapcar #'cdr posts)
+                     '(((agent . "plan"))
+                       ((model (id . "gpt-5.5") (providerID . "openai") (variant . "xhigh"))))))
+      ;; A model alone.
+      (setq posts nil)
+      (let ((done (drover-opencode-test-apply
+                   session (list :model (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5")))))
+        (answer)
+        (should (eql (funcall done) 1)))
+      (should (equal (mapcar #'cdr posts) '(((model (id . "gpt-5.5") (providerID . "openai"))))))
+      (should-not warnings))))
+
+(ert-deftest drover-opencode-test-session-variant-and-refusals ()
+  "A lone variant keeps the model; unknown agents and refused switches still send."
+  (drover-opencode-test-with-session
+    (let ((done (drover-opencode-test-apply session '(:variant low))))
+      (should (equal posts '(("/api/session/ses_1/model"
+                              (model (id . "gpt-5.5") (providerID . "openai") (variant . "low"))))))
+      (answer)
+      (should (eql (funcall done) 1)))
+    ;; An agent the directory lacks is reported; the current agent switches nothing.
+    (setq posts nil)
+    (let ((done (drover-opencode-test-apply session '(:agent "missing"))))
+      (should (eql (funcall done) 1))
+      (should-not posts)
+      (should (string-match-p "refused agent missing (.*cannot run as agent missing); sending the prompt anyway"
+                              (car warnings))))
+    (let ((done (drover-opencode-test-apply session '(:agent "build"))))
+      (should (eql (funcall done) 1))
+      (should-not posts))
+    ;; A refused switch is reported and the prompt still goes out.
+    (let ((done (drover-opencode-test-apply session '(:variant high))))
+      (funcall (plist-get (cdr (pop pending)) :else) "HTTP 400")
+      (should (eql (funcall done) 1))
+      (should (string-match-p "refused variant high (HTTP 400)" (car warnings)))
+      (should (equal (alist-get 'variant (buffer-local-value 'opencode-session-model buffer)) "low")))
+    ;; A variant with no model to run on.
+    (with-current-buffer buffer
+      (setq opencode-session-model nil))
+    (let ((done (drover-opencode-test-apply session '(:variant high))))
+      (should (eql (funcall done) 1))
+      (should (string-match-p "names no model to run variant high on; keeping its default"
+                              (car warnings))))
+    ;; Nothing chosen, nothing asked.
+    (setq posts nil)
+    (should (eql (funcall (drover-opencode-test-apply session '(:agent nil :model nil :variant nil))) 1))
+    (should-not posts)))
+
+(ert-deftest drover-opencode-test-session-step-timeout ()
+  "A switch the service never answers is given up, and the prompt goes out."
+  (drover-opencode-test-with-session
+    (let* ((drover-step-timeout 0.05)
+           (done (drover-opencode-test-apply session '(:variant low)))
+           (deadline (+ (float-time) 2)))
+      (while (and (not (funcall done)) (< (float-time) deadline))
+        (accept-process-output nil 0.02))
+      (should (eql (funcall done) 1))
+      (should (string-match-p "Timed out setting variant low" (car warnings)))
+      ;; The late answer changes nothing more.
+      (answer)
+      (should (eql (funcall done) 1)))))
+
+(ert-deftest drover-opencode-test-session-then-reported ()
+  "An error of what follows the options is reported, not signaled from a callback."
+  (drover-opencode-test-with-session
+    (let ((calls 0))
+      (drover-backend-call session :apply-options '(:variant low)
+                           (lambda () (cl-incf calls) (error "Broken continuation")))
+      (answer)
+      (should (= calls 1))
+      (should (string-match-p "Broken continuation" (car warnings))))))
+
+(ert-deftest drover-opencode-test-session-opened-unseen ()
+  "A session without a buffer is opened, undisplayed, to take options and prompts."
+  (drover-opencode-test-with-session
+    (remhash "ses_1" opencode-session-buffers)
+    (let ((opened nil)
+          (sent nil))
+      (cl-letf (((symbol-function 'opencode-session-open-by-id)
+                 (lambda (id &rest keys)
+                   (push (cons id keys) opened)
+                   (with-current-buffer buffer
+                     (funcall (plist-get keys :callback) '((id . "ses_1"))))))
+                ((symbol-function 'opencode-session-send)
+                 (lambda (text &rest keys) (push (list (current-buffer) text keys) sent))))
+        ;; Nothing to apply opens nothing.
+        (should (eql (funcall (drover-opencode-test-apply session nil)) 1))
+        (should-not opened)
+        (let ((done (drover-opencode-test-apply session '(:variant low))))
+          (should (equal (caar opened) "ses_1"))
+          (should (plist-get (cdar opened) :no-display))
+          (answer)
+          (should (eql (funcall done) 1)))
+        (drover-backend-call session :send "go" nil)
+        (should (eq (car (car sent)) buffer))
+        (should (equal (cadr (car sent)) "go"))
+        (should (= (length opened) 2))
+        ;; Opened later, from a process filter, a send that signals is reported.
+        (let ((open-callback nil))
+          (cl-letf (((symbol-function 'opencode-session-open-by-id)
+                     (lambda (_id &rest keys) (setq open-callback (plist-get keys :callback))))
+                    ((symbol-function 'opencode-session-send) (lambda (&rest _) (error "No service"))))
+            (drover-backend-call session :send "go" nil)
+            (with-current-buffer buffer
+              (funcall open-callback '((id . "ses_1"))))
+            (should (string-match-p "Title ses_1 did not take the prompt: No service" (car warnings)))))
+        ;; A session that cannot be opened is reported, and the prompt still goes.
+        (cl-letf (((symbol-function 'opencode-session-open-by-id)
+                   (lambda (_id &rest keys)
+                     (funcall (plist-get keys :else)
+                              (opencode-error--make :method 'get :path "/api/session/ses_1"
+                                                    :message "Gone")))))
+          (should (eql (funcall (drover-opencode-test-apply session '(:variant low))) 1))
+          (should (string-match-p "Could not open Title ses_1: .*Gone; sending the prompt anyway"
+                                  (car warnings)))
+          (drover-backend-call session :send "go" nil)
+          (should (string-match-p "Title ses_1 did not take the prompt: .*Gone; it is in the kill ring"
+                                  (car warnings))))))))
+
+(ert-deftest drover-opencode-test-check-and-send ()
+  "A prompt runs the session's send checks and goes out literally with their metadata."
+  (drover-opencode-test-with-session
+    (let (checked sent)
+      (cl-letf (((symbol-function 'opencode-check-send)
+                 (lambda (request) (push (cons (current-buffer) request) checked)
+                   '((thinkingLoss . "accept"))))
+                ((symbol-function 'opencode-session-send)
+                 (lambda (text &rest keys) (setq sent (list (current-buffer) text keys)))))
+        (let ((token (drover-backend-call session :check "/not a command" nil)))
+          (should (equal checked `((,buffer :kind prompt :text "/not a command"))))
+          (should (equal token '((thinkingLoss . "accept"))))
+          (drover-backend-call session :send "/not a command" token))
+        (should (eq (car sent) buffer))
+        (should (equal (cadr sent) "/not a command"))
+        (should (plist-get (nth 2 sent) :show))
+        (should (equal (plist-get (nth 2 sent) :metadata) '((thinkingLoss . "accept"))))
+        ;; A token that is no metadata sends none.
+        (drover-backend-call session :send "go" nil)
+        (should-not (plist-get (nth 2 sent) :metadata))
+        (drover-backend-call session :send "go" 'fake-token)
+        (should-not (plist-get (nth 2 sent) :metadata))
+        ;; A failure is reported, the prompt being in the kill ring.
+        (funcall (plist-get (nth 2 sent) :else)
+                 (opencode-error--make :status 409 :method 'post :path "/api/session/ses_1/prompt"
+                                       :message "Busy"))
+        (should (string-match-p "\\*opencode session\\* did not take the prompt: .*Busy; it is in the kill ring"
+                                (car warnings)))
+        ;; A send that signals is reported too.
+        (cl-letf (((symbol-function 'opencode-session-send) (lambda (&rest _) (error "No service"))))
+          (drover-backend-call session :send "go" nil)
+          (should (string-match-p "did not take the prompt: No service" (car warnings))))
+        ;; Cancelled checks cancel.
+        (cl-letf (((symbol-function 'opencode-check-send) (lambda (_) 'cancel)))
+          (should (eq (drover-backend-call session :check "go" nil) 'cancel)))
+        ;; Without a buffer, no check runs.
+        (remhash "ses_1" opencode-session-buffers)
+        (setq checked nil)
+        (should-not (drover-backend-call session :check "go" nil))
+        (should-not checked)))))
+
+(ert-deftest drover-opencode-test-checks-the-switched-turn ()
+  "A running session's checks run before any switch, for the agent and model it switches to."
+  (drover-opencode-test-with-session
+    (let (checked)
+      (cl-letf (((symbol-function 'opencode-check-send)
+                 (lambda (request) (push request checked) nil)))
+        (cl-flet ((check (options)
+                    (drover-backend-call session :check "go" options)
+                    (pop checked)))
+          ;; Nothing chosen: the turn as it stands.
+          (should (equal (check nil) '(:kind prompt :text "go")))
+          ;; The plan agent brings its pin, and a picked variant applies to it.
+          (should (equal (check '(:agent "plan"))
+                         '(:kind prompt :text "go" :agent "plan"
+                                 :model ((id . "gpt-6.1-sol-fast") (providerID . "openai")
+                                         (variant . "high")))))
+          (should (equal (plist-get (check '(:agent "plan" :variant low)) :model)
+                         '((id . "gpt-6.1-sol-fast") (providerID . "openai") (variant . "low"))))
+          ;; The current agent is no switch; a variant alone applies to the session's model.
+          (should (equal (check '(:agent "build" :variant low))
+                         '(:kind prompt :text "go"
+                                 :model ((id . "gpt-5.5") (providerID . "openai") (variant . "low")))))
+          ;; A model chosen is the model checked.
+          (should (equal (check (list :model (drover-opencode-fixtures-model "anthropic" "claude-opus-5-5")))
+                         '(:kind prompt :text "go"
+                                 :model ((id . "claude-opus-5-5") (providerID . "anthropic")))))
+          ;; The model it runs already is no switch.
+          (should (equal (check (list :model (drover-opencode-fixtures-model "openai" "gpt-5.5")))
+                         '(:kind prompt :text "go")))
+          ;; Neither is an agent the session cannot run.
+          (should (equal (check '(:agent "general")) '(:kind prompt :text "go")))
+          (should-not posts))))))
+
+(ert-deftest drover-opencode-test-session-current-options ()
+  "A running session shows its model, and its variant or the model's default."
+  (drover-opencode-test-with-session
+    (cl-letf (((symbol-function 'opencode-model-info)
+               (lambda (ref &optional _directory)
+                 (drover-opencode-fixtures-model-info (alist-get 'providerID ref) (alist-get 'id ref))))
+              ((symbol-function 'opencode-catalog)
+               (lambda (kind &optional _directory)
+                 (and (eq kind 'provider) drover-opencode-fixtures-providers)))
+              ((symbol-function 'opencode-state-get)
+               (lambda (id)
+                 (seq-find (lambda (entry) (equal (plist-get entry :id) id))
+                           drover-opencode-test-entries))))
+      (let ((options (drover-backend-call session :options)))
+        (should (equal (drover-model-label (plist-get options :model)) "OpenAI: GPT-5.5"))
+        (should (eq (plist-get options :variant) 'medium)))
+      (with-current-buffer buffer
+        (setq opencode-session-model '((id . "gpt-5.5") (providerID . "openai") (variant . "xhigh"))))
+      (should (eq (plist-get (drover-backend-call session :options) :variant) 'xhigh))
+      (with-current-buffer buffer
+        (setq opencode-session-model '((id . "retired") (providerID . "openai"))))
+      (let ((options (drover-backend-call session :options)))
+        (should (equal (drover-model-id (plist-get options :model)) "retired"))
+        (should-not (plist-get options :variant)))
+      (with-current-buffer buffer
+        (setq opencode-session-model nil))
+      (should-not (drover-backend-call session :options))
+      ;; Without a buffer, the registry tells.
+      (remhash "ses_1" opencode-session-buffers)
+      (should-not (drover-backend-call session :options))
+      (setq drover-opencode-test-entries
+            (list (drover-opencode-test-entry "ses_1" :model '((id . "claude-opus-5-5")
+                                                              (providerID . "anthropic")))))
+      (let ((options (drover-backend-call session :options)))
+        (should (equal (drover-model-label (plist-get options :model)) "Anthropic: Claude Opus 5.5"))
+        (should (eq (plist-get options :variant) 'medium))))))
+
+;;;; Prompt operations: new sessions
+
+(defmacro drover-opencode-test-with-creation (&rest body)
+  "Run BODY with new sessions created in `new-buffer', recorded in `created'.
+`opencode-session-create' records its keys in `created', then calls back
+in `new-buffer', a session buffer of ses_new; `warnings' collects the
+warnings of drover, newest first, `results' what THEN and ELSE got, as
+\(then SESSION) and (else MESSAGE)."
+  (declare (indent 0) (debug t))
+  `(drover-opencode-test-with nil
+     (let ((new-buffer (generate-new-buffer " *new opencode session*"))
+           (opencode-last-model nil)
+           created warnings results)
+       (unwind-protect
+           (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                      (lambda (_kind callback &optional _directory _else)
+                        (funcall callback drover-opencode-fixtures-agents)))
+                     ((symbol-function 'opencode-primary-agents)
+                      #'drover-opencode-fixtures-primary-agents)
+                     ((symbol-function 'opencode-default-agent)
+                      (lambda (&optional _directory) "build"))
+                     ((symbol-function 'opencode-session-create)
+                      (lambda (&rest keys)
+                        (setq created keys)
+                        (with-current-buffer new-buffer
+                          (setq-local opencode-session-id "ses_new"
+                                      default-directory (plist-get keys :directory))
+                          (funcall (plist-get keys :callback)
+                                   `((id . "ses_new") (title . ,(plist-get keys :title)))))))
+                     ((symbol-function 'drover-warn)
+                      (lambda (format-string &rest args)
+                        (push (apply #'format format-string args) warnings))))
+             (cl-flet ((create (options &optional directory)
+                         (setq created nil)
+                         (funcall (drover-backend-property 'opencode :create)
+                                  (or directory temporary-file-directory) 'opencode options
+                                  (lambda (session) (push (list 'then session) results))
+                                  (lambda (message) (push (list 'else message) results)))))
+               ,@body))
+         (kill-buffer new-buffer)))))
+
+(ert-deftest drover-opencode-test-new-session-starts-on-pin ()
+  "A new session starts as the chosen agent; opencode.el picks the model it pins."
+  (drover-opencode-test-with-creation
+    (let ((defaults (drover-opencode-fixtures-defaults "build")))
+      (create (list :agent "plan" :title "Task" :defaults defaults))
+      (should (equal (plist-get created :directory) temporary-file-directory))
+      (should (equal (plist-get created :title) "Task"))
+      (should (equal (plist-get created :agent) "plan"))
+      ;; `opencode-session-create' starts on the agent's pin itself.
+      (should-not (plist-get created :model))
+      ;; THEN gets the new session, as soon as its buffer exists.
+      (let ((session (cadr (car results))))
+        (should (eq (car (car results)) 'then))
+        (should (eq (drover-session-backend session) 'opencode))
+        (should (equal (drover-session-id session) "ses_new"))
+        (should (equal (drover-session-engine-key session) '(opencode . "ses_new")))
+        (should (equal (drover-session-title session) "Task"))
+        (should (equal (drover-session-directory session) temporary-file-directory))
+        (puthash "ses_new" new-buffer opencode-session-buffers)
+        (should (eq (drover-session-buffer session) new-buffer)))
+      ;; A picked variant applies to the pin.
+      (create (list :agent "plan" :variant 'low :defaults defaults))
+      (should (equal (plist-get created :model)
+                     '((id . "gpt-6.1-sol-fast") (providerID . "openai") (variant . "low"))))
+      ;; A picked model leaves the variant to its provider unless one is picked.
+      (create (list :agent "plan" :defaults defaults
+                    :model (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5")))
+      (should (equal (plist-get created :model) '((id . "gpt-5.5") (providerID . "openai"))))
+      (create (list :defaults defaults :variant 'high
+                    :model (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5")))
+      (should (equal (plist-get created :model)
+                     '((id . "gpt-5.5") (providerID . "openai") (variant . "high"))))
+      ;; An unknown agent is reported and the default one, pinning nothing, starts,
+      ;; named so that its reminder is stored before the first prompt.
+      (create (list :agent "missing" :defaults defaults))
+      (should (equal (plist-get created :agent) "build"))
+      (should-not (plist-get created :model))
+      (should (string-match-p "no primary OpenCode agent missing; starting its default one"
+                              (car warnings)))
+      ;; An empty agent or title is none.
+      (setq warnings nil)
+      (create (list :agent "" :title "" :defaults defaults))
+      (should (equal (plist-get created :agent) "build"))
+      (should-not (plist-get created :title))
+      (should-not warnings)
+      ;; A variant alone, without a pin, applies to the model the defaults resolve.
+      (create (list :variant 'low :defaults defaults))
+      (should (equal (plist-get created :model)
+                     '((id . "big-pickle") (providerID . "opencode") (variant . "low"))))
+      ;; Before the defaults arrive, a variant alone has no model to apply to.
+      (create (list :variant 'low))
+      (should-not (plist-get created :model)))
+    ;; A picked variant applies to the pin of the default agent too.
+    (cl-letf (((symbol-function 'opencode-default-agent) (lambda (&optional _directory) "plan")))
+      (create (list :variant 'low :defaults (drover-opencode-fixtures-defaults "plan"))))
+    (should (equal (plist-get created :agent) "plan"))
+    (should (equal (plist-get created :model)
+                   '((id . "gpt-6.1-sol-fast") (providerID . "openai") (variant . "low"))))
+    (should (cl-every (lambda (result) (eq (car result) 'then)) results))))
+
+(ert-deftest drover-opencode-test-new-session-failures ()
+  "A creation refused, signaling or too long goes to ELSE, once."
+  (drover-opencode-test-with-creation
+    (cl-letf (((symbol-function 'opencode-session-create)
+               (lambda (&rest keys)
+                 (funcall (plist-get keys :else)
+                          (opencode-error--make :status 500 :method 'post :path "/api/session"
+                                                :message "refused")))))
+      (create nil)
+      (should (equal (car results) '(else "POST /api/session failed (HTTP 500): refused"))))
+    (cl-letf (((symbol-function 'opencode-session-create) (lambda (&rest _) (error "No service"))))
+      (setq results nil)
+      (create nil)
+      (should (equal results '((else "No service")))))
+    (cl-letf (((symbol-function 'opencode-catalog-fetch) (lambda (&rest _) (error "No service"))))
+      (setq results nil)
+      (create nil)
+      (should (equal results '((else "No service")))))
+    ;; Nor does it signal once the catalog arrives, from a process filter.
+    (let ((catalog-callback nil))
+      (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                 (lambda (_kind callback &optional _directory _else) (setq catalog-callback callback)))
+                ((symbol-function 'opencode-session-create) (lambda (&rest _) (error "No service"))))
+        (setq results nil)
+        (create nil)
+        (should-not results)
+        (funcall catalog-callback drover-opencode-fixtures-agents)
+        (should (equal results '((else "No service"))))))
+    ;; A session that never comes times out; coming late, it is ignored.
+    (let ((drover-opencode-timeout 0.05)
+          (late nil))
+      (cl-letf (((symbol-function 'opencode-session-create)
+                 (lambda (&rest keys) (setq late (plist-get keys :callback)))))
+        (setq results nil)
+        (create nil)
+        (should-not results)
+        (let ((deadline (+ (float-time) 2)))
+          (while (and (not results) (< (float-time) deadline))
+            (accept-process-output nil 0.02)))
+        (should (equal results '((else "Timed out waiting for the new OpenCode session"))))
+        (with-current-buffer new-buffer
+          (setq-local opencode-session-id "ses_new")
+          (funcall late '((id . "ses_new"))))
+        (should (= (length results) 1))))
+    ;; An error of THEN is reported, not signaled from the callback.
+    (setq warnings nil)
+    (funcall (drover-backend-property 'opencode :create) temporary-file-directory 'opencode nil
+             (lambda (_) (error "Broken continuation"))
+             (lambda (_) (ert-fail "ELSE called")))
+    (should (string-match-p "Broken continuation" (car warnings)))
+    ;; The backend starts OpenCode sessions only.
+    (setq results nil created nil)
+    (funcall (drover-backend-property 'opencode :create) temporary-file-directory 'codex nil
+             (lambda (session) (push (list 'then session) results))
+             (lambda (message) (push (list 'else message) results)))
+    (should (equal results '((else "OpenCode sessions run OpenCode, not codex"))))
+    (should-not created)))
+
+(ert-deftest drover-opencode-test-new-session-does-not-wait ()
+  "Creating a session waits for nothing: the agent catalog arrives later."
+  (drover-opencode-test-with-creation
+    (let ((catalog-callback nil))
+      (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                 (lambda (_kind callback &optional _directory _else) (setq catalog-callback callback))))
+        (create '(:agent "plan"))
+        (should catalog-callback)
+        (should-not created)
+        (should-not results)
+        (funcall catalog-callback drover-opencode-fixtures-agents)
+        (should (equal (plist-get created :agent) "plan"))
+        (should (eq (car (car results)) 'then))))
+    ;; An agent catalog that never comes leaves the agent unchecked.
+    (let ((drover-opencode-timeout 0.05))
+      (cl-letf (((symbol-function 'opencode-catalog-fetch) #'ignore))
+        (setq results nil)
+        (create '(:agent "missing"))
+        (should-not created)
+        (let ((deadline (+ (float-time) 2)))
+          (while (and (not created) (< (float-time) deadline))
+            (accept-process-output nil 0.02)))
+        (should (equal (plist-get created :agent) "missing"))
+        (should (eq (car (car results)) 'then))
+        (should-not warnings)))
+    ;; Without a catalog, no agent is named: opencode.el chooses.
+    (let ((drover-opencode-timeout 0.05))
+      (cl-letf (((symbol-function 'opencode-catalog-fetch)
+                 (lambda (_kind callback &optional _directory _else) (funcall callback nil))))
+        (create nil)
+        (should (plist-member created :agent))
+        (should-not (plist-get created :agent))))))
 
 (provide 'drover-opencode-test)
 ;;; drover-opencode-test.el ends here

@@ -37,10 +37,21 @@
 ;; Older sessions, beyond those of the registry, come from the service
 ;; on demand (:history): every unarchived session, of every project.
 ;;
+;; The file also registers the `opencode' engine (see `drover-model'):
+;; what a new OpenCode session would run, from the service's catalogs of
+;; its directory, which opencode.el caches; the catalog's models, as a
+;; model source; when OpenCode last took a prompt, from its database.
+;; What a model runs without a variant is opencode.el's to know
+;; (`opencode-model-default-variant').  The prompt (`drover-prompt')
+;; starts sessions and sends to them through the backend's prompt
+;; operations, which go through opencode.el's own: its session creation,
+;; its send checks, its agent and model switches.
+;;
 ;; `drover' loads this file once opencode.el is loaded.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'drover-core)
 (require 'drover-keys)
 (require 'drover-model)
@@ -57,7 +68,7 @@
 ;;;; The OpenCode engine
 
 (defcustom drover-opencode-timeout 20
-  "Seconds drover waits for an OpenCode catalog before going without it."
+  "Seconds drover waits for an OpenCode catalog, or a new session, before going on."
   :type 'number
   :group 'drover)
 
@@ -75,16 +86,256 @@ default variant (see `opencode-model-default-variant').  Each variant
 is (SYMBOL :effort EFFORT), EFFORT the effort it sends as
 `opencode-request-effort' reads it, or (SYMBOL) without one; the
 engines are those of `drover-model-engines-for'."
-  (ignore info providers)
-  (error "Not implemented"))
+  (let* ((provider-id (alist-get 'providerID info))
+         (provider (seq-find (lambda (entry) (equal (alist-get 'id entry) provider-id))
+                             providers))
+         (id (alist-get 'id info)))
+    (drover-model-create
+     :provider-id provider-id
+     :provider-name (alist-get 'name provider)
+     :id id
+     :name (alist-get 'name info)
+     :variants (mapcar (lambda (variant)
+                         (cons (intern (alist-get 'id variant))
+                               (when-let* ((effort (opencode-request-effort
+                                                    (alist-get 'settings variant)
+                                                    (alist-get 'body variant))))
+                                 (list :effort effort))))
+                       (alist-get 'variants info))
+     :default-variant (opencode-model-default-variant provider info)
+     :engines (drover-model-engines-for provider-id id))))
 
 (defun drover-opencode-model-ref (model &optional variant)
   "Return MODEL, a `drover-model', as an OpenCode model reference.
 The reference is ((id . ID) (providerID . PROVIDER)), followed by
 \(variant . NAME) when VARIANT, a symbol, is non-nil; nil when MODEL
 has no provider."
-  (ignore model variant)
-  (error "Not implemented"))
+  (when-let* ((provider (drover-model-provider-id model)))
+    `((id . ,(drover-model-id model)) (providerID . ,provider)
+      ,@(when variant `((variant . ,(format "%s" variant)))))))
+
+(defun drover-opencode--ref-variant (ref)
+  "Return the variant model reference REF names, as a symbol, or nil for none."
+  (when-let* ((variant (alist-get 'variant ref))
+              (name (format "%s" variant))
+              ((not (member name '("" "default")))))
+    (intern name)))
+
+(defun drover-opencode--ref-with-variant (ref variant)
+  "Return model reference REF naming VARIANT instead, or REF when VARIANT is nil."
+  (if variant
+      `(,@(assq-delete-all 'variant (copy-alist ref)) (variant . ,(format "%s" variant)))
+    ref))
+
+(defun drover-opencode--catalog-models (models providers)
+  "Return the `drover-model' records of the MODELS and PROVIDERS catalogs."
+  (mapcar (lambda (info) (drover-opencode-model info providers)) models))
+
+(defun drover-opencode--ref-model (ref &optional catalog)
+  "Return the `drover-model' named by REF, an OpenCode model reference.
+It is the model of CATALOG, a list of `drover-model' records, when
+CATALOG has it, else a model carrying only its identifiers and engines,
+since a session still runs a model the catalog lost.  Nil when REF
+names no model."
+  (let-alist ref
+    (when (and (stringp .id) (stringp .providerID))
+      (or (seq-find (lambda (model)
+                      (and (equal (drover-model-provider-id model) .providerID)
+                           (equal (drover-model-id model) .id)))
+                    catalog)
+          (drover-model-create :provider-id .providerID :id .id
+                               :engines (drover-model-engines-for .providerID .id))))))
+
+;;;;; Catalogs
+
+(defun drover-opencode--catalog-fetch (kind directory callback)
+  "Call CALLBACK with the KIND catalog of DIRECTORY, or with nil.
+The catalog comes through opencode.el's cache, which session buffers
+share.  CALLBACK gets nil when the catalog does not arrive within
+`drover-opencode-timeout' seconds, or when the fetch fails, which is
+reported.  It is called once, possibly at once."
+  (let ((done nil)
+        (timer nil))
+    (cl-flet ((finish (catalog)
+                (unless done
+                  (setq done t)
+                  (when timer (cancel-timer timer))
+                  (funcall callback catalog))))
+      (setq timer (run-at-time drover-opencode-timeout nil #'finish nil))
+      (condition-case err
+          (opencode-catalog-fetch kind #'finish directory
+                                  (lambda (error)
+                                    (opencode-report-error (opencode-error-describe error))
+                                    (finish nil)))
+        (error (setq done t)
+               (cancel-timer timer)
+               (signal (car err) (cdr err)))))))
+
+(defun drover-opencode--catalog-wait (kind directory)
+  "Return the KIND catalog of DIRECTORY, waiting for it when not cached.
+Unlike `opencode-catalog-wait', a catalog that does not arrive within
+`drover-opencode-timeout' seconds, or that fails, is nil: the failure
+is reported, and the caller goes on without it.  Only commands may wait."
+  (let ((result :pending)
+        ;; The timer of the fetch ends the wait; this is a safety net.
+        (deadline (+ (float-time) drover-opencode-timeout 1)))
+    (drover-opencode--catalog-fetch kind directory (lambda (catalog) (setq result catalog)))
+    (while (and (eq result :pending) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (unless (eq result :pending) result)))
+
+(defun drover-opencode--catalog-source (directory)
+  "Return the models of the OpenCode catalogs of DIRECTORY, or nil.
+The model and provider catalogs give names, variants and default
+variants.  Nil when the model catalog does not arrive in time."
+  (when-let* ((models (drover-opencode--catalog-wait 'model directory)))
+    (drover-opencode--catalog-models models (drover-opencode--catalog-wait 'provider directory))))
+
+(defun drover-opencode--agents (directory)
+  "Return the names of the agents a session in DIRECTORY can run, or nil.
+The agent catalog is waited for, as `drover-opencode--catalog-wait' does."
+  (when (drover-opencode--catalog-wait 'agent directory)
+    (mapcar (lambda (agent) (alist-get 'id agent)) (opencode-primary-agents directory))))
+
+;;;;; Defaults
+
+(defun drover-opencode--last-pick (&optional catalog)
+  "Return (MODEL . VARIANT), the model and variant picked last in opencode.el.
+New opencode.el sessions start from `opencode-last-model', which is
+read live, so that a pick made since the defaults were fetched counts.
+MODEL is resolved against CATALOG as `drover-opencode--ref-model' does.
+VARIANT is a symbol, nil for the model's default; it is dropped only
+when CATALOG proves MODEL lacks it.  Nil when no model was picked."
+  (when-let* ((ref opencode-last-model)
+              (model (drover-opencode--ref-model ref catalog)))
+    (let ((variant (drover-opencode--ref-variant ref)))
+      (cons model
+            (and variant
+                 (or (not (memq model catalog))
+                     (assq variant (drover-model-variants model)))
+                 variant)))))
+
+(defun drover-opencode--defaults-from (agents models providers default-model)
+  "Return the defaults data the catalogs of one directory give.
+AGENTS, MODELS and PROVIDERS are its agent, model and provider
+catalogs, and DEFAULT-MODEL the model info a session without a model
+runs, or nil.  The plist holds :agent, the agent a session without one
+runs, which the service lists first among those a session can run;
+:agents, an alist mapping each agent pinning a model to (MODEL
+. VARIANT); :default-model; and :catalog, the models as `drover-model'
+records, against which the last pick is resolved."
+  (let ((catalog (drover-opencode--catalog-models models providers)))
+    (list :agent (alist-get 'id (seq-find #'opencode-agent-selectable-p agents))
+          :agents (delq nil
+                        (mapcar (lambda (agent)
+                                  (when-let* ((ref (alist-get 'model agent))
+                                              (model (drover-opencode--ref-model ref catalog)))
+                                    (cons (alist-get 'id agent)
+                                          (cons model (drover-opencode--ref-variant ref)))))
+                                agents))
+          :default-model (when default-model
+                           (let ((model (drover-opencode--ref-model default-model catalog)))
+                             (if (memq model catalog)
+                                 model
+                               (drover-opencode-model default-model providers))))
+          :catalog catalog)))
+
+(defun drover-opencode--fetch-defaults (directory callback)
+  "Call CALLBACK with the defaults data of new OpenCode sessions in DIRECTORY.
+The data is what `drover-opencode--defaults-from' makes of the agent,
+model and provider catalogs and of the default model, all asked for
+DIRECTORY at once.  A default model that cannot be fetched counts as
+unset; a catalog that cannot be fetched is reported by opencode.el, and
+CALLBACK is then never called.  The engine's :defaults."
+  (condition-case err
+      (let ((pending 4) agents models providers default-model)
+        (cl-flet ((deliver ()
+                    (when (zerop (cl-decf pending))
+                      ;; Called from a process filter: report rather than signal.
+                      (condition-case err
+                          (funcall callback (drover-opencode--defaults-from
+                                             agents models providers default-model))
+                        (error (drover-warn "Could not read the OpenCode defaults of %s: %s"
+                                            (abbreviate-file-name directory)
+                                            (error-message-string err)))))))
+          (opencode-catalog-fetch 'agent (lambda (data) (setq agents data) (deliver)) directory)
+          (opencode-catalog-fetch 'model (lambda (data) (setq models data) (deliver)) directory)
+          (opencode-catalog-fetch 'provider (lambda (data) (setq providers data) (deliver)) directory)
+          (opencode-request 'get "/api/model/default"
+                            :directory directory :buffer nil
+                            :then (lambda (response)
+                                    (setq default-model (opencode-request-data response))
+                                    (deliver))
+                            :else (lambda (_error) (deliver)))))
+    (error (drover-warn "Could not ask OpenCode for the defaults of %s: %s"
+                        (abbreviate-file-name directory) (error-message-string err)))))
+
+(defun drover-opencode--resolve (defaults agent model variant)
+  "Return the agent, model and variant a new OpenCode session would run.
+DEFAULTS is the data of `drover-opencode--fetch-defaults', or nil while
+it is fetched; AGENT, MODEL and VARIANT are the explicit choices, nil
+when not made.  This is what a new opencode.el session does with them:
+the agent chosen, else the default one; the model chosen, else the one
+the agent pins, else the last pick (`drover-opencode--last-pick'), else
+the service's default model.  The variant chosen wins; else a model
+chosen runs its own default variant, since the variant an agent pins
+belongs to the agent's model; else a pinned model runs its pinned
+variant, the last pick its own; else the model's default.  The engine's
+:resolve."
+  (let* ((agent (or agent (plist-get defaults :agent)))
+         (pin (cdr (assoc agent (plist-get defaults :agents))))
+         (pin-model (car pin))
+         (last-pick (and (not model) (not pin-model)
+                         (drover-opencode--last-pick (plist-get defaults :catalog))))
+         (effective (or model pin-model (car last-pick) (plist-get defaults :default-model)))
+         (variant (or variant
+                      (and (not model) pin-model (cdr pin))
+                      (and (not model) (cdr last-pick))
+                      (and effective (drover-model-default-variant effective)))))
+    (list :agent agent :model effective :variant variant)))
+
+(defun drover-opencode--last-used ()
+  "Return when an OpenCode session last changed, as a float time, or nil.
+It is read from `drover-opencode-database', which every OpenCode front
+end writes: OpenCode 2 keeps sessions in its `session_v2' table.
+Without SQLite support, or before that table exists, the modification
+times of the database files stand in.  The engine's :last-used."
+  (or (and (fboundp 'sqlite-available-p) (sqlite-available-p)
+           (file-readable-p drover-opencode-database)
+           (ignore-errors
+             (let ((db (sqlite-open drover-opencode-database t)))
+               (unwind-protect
+                   (when-let* ((ms (caar (sqlite-select
+                                          db "select max(time_updated) from session_v2")))
+                               ((numberp ms)))
+                     (/ ms 1000.0))
+                 (sqlite-close db)))))
+      (when-let* ((times (delq nil (mapcar #'drover-file-mtime
+                                           (list drover-opencode-database
+                                                 (concat drover-opencode-database "-wal"))))))
+        (apply #'max times))))
+
+(defun drover-opencode--register-engine ()
+  "Register the `opencode' engine and its catalog as a model source."
+  (drover-register-engine 'opencode
+                          :label "OpenCode"
+                          :defaults #'drover-opencode--fetch-defaults
+                          :resolve #'drover-opencode--resolve
+                          :agents #'drover-opencode--agents
+                          :last-used #'drover-opencode--last-used
+                          :model-resets-variant t)
+  (drover-register-model-source 'opencode #'drover-opencode--catalog-source 0))
+
+(drover-opencode--register-engine)
+
+(defun drover-opencode--unregister-engine ()
+  "Undo `drover-opencode--register-engine'.
+Other front ends may run the engine too, such as agent-shell, whose
+model sources then stay, with the engine's label alone."
+  (drover-unregister-model-source 'opencode #'drover-opencode--catalog-source)
+  (if (seq-some (lambda (source) (eq (car source) 'opencode)) drover--model-sources)
+      (drover-register-engine 'opencode :label "OpenCode")
+    (drover-unregister-engine 'opencode)))
 
 ;;;; Projects
 
@@ -172,6 +423,8 @@ changes missed while disconnected are fetched like the registry is."
     (drover-session-create
      :backend 'opencode
      :id (plist-get entry :id)
+     :engine 'opencode
+     :engine-id (plist-get entry :id)
      :title (plist-get entry :title)
      :directory directory
      :project (drover-opencode--project-name (plist-get entry :project-id) directory)
@@ -312,6 +565,266 @@ back if the user moved on meanwhile."
   "Compact the conversation of SESSION."
   (opencode-session-compact (drover-session-id session)))
 
+;;;; Prompt operations
+
+(defun drover-opencode--once (function)
+  "Return a function calling FUNCTION with its arguments, the first time only.
+An error FUNCTION signals is reported with `drover-warn': such callbacks
+may run from a process filter or a timer, where no error may escape."
+  (let ((called nil))
+    (lambda (&rest arguments)
+      (unless called
+        (setq called t)
+        (condition-case err
+            (apply function arguments)
+          (error (drover-warn "OpenCode: %s" (error-message-string err))))))))
+
+(defun drover-opencode--in-buffer (session function else)
+  "Call FUNCTION with no argument in the buffer of SESSION.
+A session without a buffer is opened first, without displaying it,
+FUNCTION then running once its transcript is loaded.  ELSE receives a
+message when the session cannot be opened, or when FUNCTION signals."
+  (condition-case err
+      (if-let* ((buffer (drover-opencode--buffer session)))
+          (with-current-buffer buffer
+            (funcall function))
+        (opencode-session-open-by-id
+         (drover-session-id session)
+         :no-display t
+         :callback (lambda (_info)
+                     (condition-case err
+                         (funcall function)
+                       (error (funcall else (error-message-string err)))))
+         :else (lambda (error) (funcall else (opencode-error-describe error)))))
+    (error (funcall else (error-message-string err)))))
+
+(defun drover-opencode--switch-failure (buffer label next)
+  "Return a switch's failure handler reporting LABEL of BUFFER, then calling NEXT.
+The prompt still goes out.  The handler takes an `opencode-error', or
+opencode.el's message for an agent the session cannot run."
+  (lambda (error)
+    (drover-warn "%s refused %s (%s); sending the prompt anyway"
+                 (buffer-name buffer) label (opencode-error-describe error))
+    (funcall next)))
+
+(defun drover-opencode--variant-ref (variant)
+  "Return the model reference this session buffer runs, naming VARIANT, or nil."
+  (and opencode-session-model
+       (drover-opencode--ref-with-variant opencode-session-model variant)))
+
+(defun drover-opencode--option-steps (buffer agent model variant)
+  "Return the steps applying explicit options to the session of BUFFER.
+They are steps of `drover-run-steps'.  AGENT switches through
+`opencode-switch-agent', which selects the model the agent pins, or
+MODEL with VARIANT when MODEL is chosen; without AGENT, MODEL is
+selected alone.  A VARIANT alone applies to the model the session runs
+once the agent switched.  Each step settles before the next, since the
+service applies every switch to the turns that follow."
+  (let ((explicit (and model (drover-opencode-model-ref model variant))))
+    (cl-flet ((in-buffer (function)
+                (lambda (next)
+                  (if (buffer-live-p buffer)
+                      (with-current-buffer buffer (funcall function next))
+                    (funcall next)))))
+      (delq nil
+            (list
+             (when agent
+               (let ((label (format "agent %s" agent)))
+                 (cons label
+                       (in-buffer
+                        (lambda (next)
+                          (opencode-switch-agent
+                           agent :model explicit :then next
+                           :else (drover-opencode--switch-failure buffer label next)))))))
+             (when (or (and explicit (not agent)) (and variant (not explicit)))
+               (let ((label (if explicit
+                                (format "model %s" (drover-model-label model))
+                              (format "variant %s" variant))))
+                 (cons label
+                       (in-buffer
+                        (lambda (next)
+                          (if-let* ((ref (or explicit (drover-opencode--variant-ref variant))))
+                              (opencode-switch-model
+                               ref :then next
+                               :else (drover-opencode--switch-failure buffer label next))
+                            (drover-warn "%s names no model to run variant %s on; keeping its default"
+                                         (buffer-name buffer) variant)
+                            (funcall next))))))))))))
+
+(defun drover-opencode--switch-target (buffer agent model variant)
+  "Return what the session of BUFFER runs once AGENT, MODEL and VARIANT applied.
+The value is a plist of :agent and :model, a model reference, for
+`opencode-check-send', naming only what the steps of
+`drover-opencode--option-steps' change; an agent the session cannot
+run, which the switch refuses, is left out.  The agent catalog is
+waited for, as its pins decide the model."
+  (with-current-buffer buffer
+    (let* ((info (and agent
+                      (drover-opencode--catalog-wait 'agent default-directory)
+                      (seq-find (lambda (entry) (equal (alist-get 'id entry) agent))
+                                (opencode-primary-agents))))
+           (ref (cond
+                 (model (drover-opencode-model-ref model variant))
+                 (variant (drover-opencode--ref-with-variant
+                           (or (alist-get 'model info) opencode-session-model) variant))
+                 (t (alist-get 'model info)))))
+      `(,@(when (and info (not (equal agent opencode-session-agent))) (list :agent agent))
+        ,@(when (and ref (not (opencode-same-model-p ref opencode-session-model)))
+            (list :model ref))))))
+
+(defun drover-opencode--check (session text options)
+  "Run the send checks of SESSION on TEXT, as for input typed in its buffer.
+OPTIONS are the explicit options about to be applied, so the checks
+consider the turn they lead to (see `drover-opencode--switch-target').
+Return what `opencode-check-send' returns: `cancel', or the metadata to
+send with.  The checks may ask, such as the prompt cache guard before
+an idle session sends its context uncached, so they run from the
+command.  They read the session's buffer: a session without one is
+checked by nothing.  The backend's :check."
+  (when-let* ((buffer (drover-opencode--buffer session)))
+    (with-current-buffer buffer
+      (opencode-check-send
+       (append (list :kind 'prompt :text text)
+               (drover-opencode--switch-target buffer (plist-get options :agent)
+                                               (plist-get options :model)
+                                               (plist-get options :variant)))))))
+
+(defun drover-opencode--apply-options (session options then)
+  "Apply the explicit OPTIONS to the running SESSION, then call THEN.
+OPTIONS are already filtered for SESSION.  Each option is a request to
+the service, chained by `drover-opencode--option-steps': the agent
+first, keeping the current model and variant unless it pins its own or
+OPTIONS name one, then a lone variant on the model the session runs.
+THEN runs once they all settled, whatever happened.  The backend's
+:apply-options."
+  (let ((agent (plist-get options :agent))
+        (model (plist-get options :model))
+        (variant (plist-get options :variant))
+        (then (drover-opencode--once then)))
+    (if (not (or agent model variant))
+        (funcall then)
+      (drover-opencode--in-buffer
+       session
+       (lambda ()
+         (drover-run-steps (drover-opencode--option-steps (current-buffer) agent model variant)
+                           then))
+       (lambda (message)
+         (drover-warn "Could not open %s: %s; sending the prompt anyway"
+                      (drover-session-display-title session) message)
+         (funcall then))))))
+
+(defun drover-opencode--send (session text token)
+  "Send TEXT as a prompt of SESSION, with the metadata TOKEN holds.
+TOKEN is what `drover-opencode--check' returned.  The prompt goes
+straight to the service, past any input half typed in the buffer; the
+transcript shows it once the service delivered it.  The service queues
+or steers a prompt sent while a turn runs, so the session needs not be
+idle.  The backend's :send."
+  (drover-opencode--in-buffer
+   session
+   (lambda ()
+     (let ((buffer (current-buffer)))
+       (opencode-session-send
+        text :show t :metadata (and (consp token) token)
+        :else (lambda (error)
+                (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
+                             (buffer-name buffer) (opencode-error-describe error))))))
+   (lambda (message)
+     (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
+                  (drover-session-display-title session) message))))
+
+(defun drover-opencode--new-session-model (defaults agent model variant)
+  "Return the model reference a new session starts on, or nil.
+Nil lets `opencode-session-create' choose: the model AGENT pins, AGENT
+nil standing for the default agent, else the last pick.  MODEL, when
+chosen, runs VARIANT; a VARIANT alone applies to the model
+`drover-opencode--resolve' finds in DEFAULTS, the data of
+`drover-opencode--fetch-defaults' or nil: the pin, else the last pick,
+else the default model."
+  (cond
+   (model (drover-opencode-model-ref model variant))
+   ((null variant) nil)
+   (t (when-let* ((resolved (plist-get (drover-opencode--resolve defaults agent nil nil) :model)))
+        (drover-opencode-model-ref resolved variant)))))
+
+(defun drover-opencode--create (directory engine options then else)
+  "Start an OpenCode session in DIRECTORY with start OPTIONS, and display it.
+ENGINE must be `opencode', the one engine the backend starts.  The
+session runs the agent of OPTIONS when DIRECTORY has it as an agent
+a session can run, else the default agent, named so that the agent's
+reminder is stored before the first prompt; and the model of
+`drover-opencode--new-session-model'.  The agent catalog is waited for
+at most `drover-opencode-timeout' seconds, and so is the session, both
+asynchronously.  THEN receives the new `drover-session' once its buffer
+exists, ELSE a message.  The backend's :create."
+  (let* ((agent (plist-get options :agent))
+         (agent (and agent (not (string-empty-p agent)) agent))
+         (title (plist-get options :title))
+         (title (and title (not (string-empty-p title)) title))
+         (timer nil)
+         (settle (drover-opencode--once
+                  (lambda (function value)
+                    (when timer (cancel-timer timer))
+                    (funcall function value)))))
+    (cl-flet ((fail (message) (funcall settle else message)))
+      (if (not (eq engine 'opencode))
+          (fail (format "OpenCode sessions run OpenCode, not %s" (drover-engine-label engine)))
+        (condition-case err
+            (drover-opencode--catalog-fetch
+             'agent directory
+             (lambda (catalog)
+               (condition-case err
+                   (progn
+                     ;; A catalog that did not arrive proves nothing about the agent.
+                     (when (and agent catalog
+                                (not (seq-find (lambda (entry) (equal (alist-get 'id entry) agent))
+                                               (opencode-primary-agents directory))))
+                       (drover-warn "%s has no primary OpenCode agent %s; starting its default one"
+                                    (abbreviate-file-name directory) agent)
+                       (setq agent nil))
+                     ;; A session created without an agent runs the default one but
+                     ;; stores none, so that agent's reminder would be stored only
+                     ;; after the first step, whose thinking then no longer matches
+                     ;; the next request.
+                     (when (and (not agent) catalog)
+                       (setq agent (opencode-default-agent directory)))
+                     (setq timer (run-at-time drover-opencode-timeout nil
+                                              #'fail "Timed out waiting for the new OpenCode session"))
+                     (opencode-session-create
+                      :directory directory :title title :agent agent
+                      :model (drover-opencode--new-session-model
+                              (plist-get options :defaults) agent
+                              (plist-get options :model) (plist-get options :variant))
+                      :callback (lambda (info)
+                                  (funcall settle then
+                                           (drover-opencode--session-of
+                                            opencode-session-id (or (alist-get 'title info) title)
+                                            default-directory)))
+                      :else (lambda (error) (fail (opencode-error-describe error)))))
+                 (error (fail (error-message-string err))))))
+          (error (fail (error-message-string err))))))))
+
+(defun drover-opencode--options (session)
+  "Return the model and variant SESSION runs, as (:model MODEL :variant VARIANT).
+They are read from its buffer, else from the registry, and the cached
+catalogs of its directory, never fetched: a model the catalog lacks
+carries its identifiers only.  The variant is the one the model
+reference names, else the model's default.  Nil when the model is
+unknown.  The backend's :options."
+  (let* ((buffer (drover-opencode--buffer session))
+         (ref (if buffer
+                  (buffer-local-value 'opencode-session-model buffer)
+                (plist-get (opencode-state-get (drover-session-id session)) :model)))
+         (directory (if buffer
+                        (buffer-local-value 'default-directory buffer)
+                      (or (drover-session-directory session) default-directory))))
+    (when-let* ((ref)
+                (model (if-let* ((info (opencode-model-info ref directory)))
+                           (drover-opencode-model info (opencode-catalog 'provider directory))
+                         (drover-opencode--ref-model ref))))
+      (list :model model
+            :variant (or (drover-opencode--ref-variant ref) (drover-model-default-variant model))))))
+
 (defun drover-opencode--register ()
   "Register the `opencode' backend."
   (drover-register-backend
@@ -331,7 +844,13 @@ back if the user moved on meanwhile."
    :delete #'drover-opencode--delete
    :fork #'drover-opencode--fork
    :compact #'drover-opencode--compact
-   :history #'drover-opencode--history))
+   :history #'drover-opencode--history
+   :engines '(opencode)
+   :create #'drover-opencode--create
+   :check #'drover-opencode--check
+   :apply-options #'drover-opencode--apply-options
+   :send #'drover-opencode--send
+   :options #'drover-opencode--options))
 
 (drover-opencode--register)
 
@@ -342,8 +861,8 @@ back if the user moved on meanwhile."
 A session the registry does not hold, such as an old one, is described
 by TITLE, DIRECTORY and PARENT, its parent's ID, as an idle session."
   (or (drover-find 'opencode id)
-      (drover-session-create :backend 'opencode :id id :title title
-                             :directory directory :parent parent)))
+      (drover-session-create :backend 'opencode :id id :engine 'opencode :engine-id id
+                             :title title :directory directory :parent parent)))
 
 (defun drover-opencode--buffer-session ()
   "Return the session of the current OpenCode session buffer, or nil."
@@ -487,6 +1006,7 @@ commands of opencode.el."
   (opencode-events-unregister "server.connected" #'drover-opencode--projects-changed)
   (drover-opencode--uninstall)
   (drover-unregister-backend 'opencode)
+  (drover-opencode--unregister-engine)
   nil)
 
 (provide 'drover-opencode)
