@@ -67,8 +67,13 @@
   :group 'drover-faces)
 
 (defcustom drover-status-glyphs
-  '((waiting . "⚑") (failed . "✗") (done . "✓") (retrying . "↻") (working . "◐") (idle . "·"))
-  "Glyph of each session status."
+  '((waiting . "\U000F02D7")            ; nf-md-help_circle
+    (failed . "\uf057")                 ; nf-fa-times_circle
+    (done . "\U000F05E0")               ; nf-md-check_circle
+    (retrying . "\uf021")               ; nf-fa-refresh
+    (working . "\U000F051F")            ; nf-md-timer_sand
+    (idle . "\uf10c"))                  ; nf-fa-circle_o
+  "Glyph of each session status, Nerd Font icons by default."
   :type '(alist :key-type symbol :value-type string)
   :group 'drover)
 
@@ -128,6 +133,59 @@ A waiting session shows its oldest request, another its detail."
     (cond ((and project branch) (format "%s:%s" project branch))
           (project project)
           (branch branch))))
+
+;;;; Measuring text
+
+(defconst drover--measure-buffer " *drover measure*"
+  "Name of the buffer in which text is laid out to be measured.")
+
+(defun drover-text-pixel-width (string &optional remapping window)
+  "Return the width in pixels of STRING as a session view draws it.
+REMAPPING is the face remapping of the view's buffer, such as its
+variable pitch, and WINDOW the window whose frame's fonts draw it, the
+selected one by default.  The faces of STRING count.  On a text
+terminal, a pixel is a character cell."
+  (if (zerop (length string))
+      0
+    ;; `string-pixel-width' ignores face remapping before Emacs 31.
+    (with-current-buffer (get-buffer-create drover--measure-buffer)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (setq-local face-remapping-alist remapping
+                    buffer-undo-list t
+                    truncate-lines t
+                    line-prefix nil
+                    wrap-prefix nil
+                    display-line-numbers nil)
+        (insert string)
+        (car (buffer-text-pixel-size nil (and (window-live-p window) window) t))))))
+
+(defun drover-truncate-to-pixels (string pixels measure)
+  "Return STRING cut to fit PIXELS wide, as MEASURE measures it.
+MEASURE is a function of a string returning its width in pixels.  A
+cut string loses its trailing blanks and ends in an ellipsis in the
+properties of the text before it; when not even the ellipsis fits, the
+result is empty."
+  (if (or (zerop (length string)) (<= (funcall measure string) pixels))
+      string
+    (let* ((ellipsis (truncate-string-ellipsis))
+           (cut (lambda (length)
+                  (concat (string-trim-right (substring string 0 length))
+                          (apply #'propertize ellipsis
+                                 (text-properties-at (max 0 (1- length)) string)))))
+           (fits (lambda (length) (<= (funcall measure (funcall cut length)) pixels)))
+           (low 0)
+           (high (1- (length string))))
+      (if (not (funcall fits 0))
+          ""
+        ;; Characters differ in width, so the longest prefix that fits is
+        ;; found by bisection, laying out each candidate.
+        (while (< low high)
+          (let ((middle (/ (+ low high 1) 2)))
+            (if (funcall fits middle)
+                (setq low middle)
+              (setq high (1- middle)))))
+        (funcall cut low)))))
 
 ;;;; The session at point
 

@@ -20,9 +20,17 @@
 
 ;;; Commentary:
 
-;; `drover-table' lists every session in one `vtable', most urgent
-;; first, with its status, title, project, branch, age and why it has
-;; its status.  The header line counts the sessions that need you.
+;; `drover-table' lists every session in one `vtable', with its title,
+;; project, branch, age and why it has its status.  The title cell
+;; starts with the glyph of the session's status.  The header line
+;; counts the sessions that need you.
+;;
+;; Sessions come as trees, most urgent first: each subagent follows its
+;; parent, its title indented by its depth, and a tree ranks by the most
+;; urgent status within it, so a parent whose subagent waits for you
+;; comes with the sessions that wait for you.  Subagents are hidden
+;; unless `drover-show-children' is non-nil or they need you; c toggles
+;; it in the table.
 ;;
 ;; The table follows the backends: it is drawn again whenever
 ;; `drover-changed-hook' runs while it is shown, and when it is next
@@ -30,9 +38,13 @@
 ;; sized to its window, and drawn again when the window's width changes.
 ;; Point stays on its session across redraws.
 ;;
-;; Sorting a column with vtable's own commands (S on a column, or a
-;; click on its header) holds across redraws, as do widths changed with
-;; { and }; = restores the order of urgency and the default widths.
+;; Vtable's own commands sort the table by a column: S on a column, or a
+;; click on its header.  The sort orders the trees by the value of their
+;; root, and the subagents of a session among themselves, never parting
+;; a subagent from its parent; ties keep the order of urgency.  The
+;; Title column sorts by the title alone, not the status before it.  The
+;; sort holds across redraws, as do widths changed with { and }; =
+;; restores the order of urgency and the default widths.
 
 ;;; Code:
 
@@ -81,7 +93,9 @@ Nil redraws only when sessions change."
   "The vtable of this buffer, or nil when no session is shown.")
 
 (defvar-local drover-table--sort-by nil
-  "Sort keys of the table, as vtable's `sort-by', kept across redraws.")
+  "Sort keys of the table, as vtable's `sort-by', kept across redraws.
+A list of (INDEX . DIRECTION), the last key sorting first.  While a
+table is shown, it holds the keys the table was drawn in the order of.")
 
 (defvar-local drover-table--width-overrides nil
   "Widths set by the user, as an alist (COLUMN-NAME . CHARACTERS).")
@@ -120,22 +134,49 @@ Return \"\" for a nil TEXT."
 
 (defun drover-table--text-width (text)
   "Return the width in pixels of TEXT drawn in the table."
-  (string-pixel-width (drover-table--styled text) (current-buffer)))
+  (drover-text-pixel-width (drover-table--styled text) face-remapping-alist
+                           (get-buffer-window nil 0)))
 
 (defun drover-table--char-width ()
   "Return the width in pixels of a character of the table."
   (drover-table--text-width "x"))
 
+;; A subagent is indented, not marked: each level of depth is a stretch
+;; of space exactly as wide as a glyph and the space after it, so that
+;; its glyph stands under the title of its parent, whatever the font.
+;; A marker such as "↳ " would add a second symbol before the glyph,
+;; and its width, like that of spaces, varies with a variable pitch font.
+
+(defun drover-table--space (pixels)
+  "Return one space drawn PIXELS wide."
+  (propertize " " 'display `(space :width (,pixels))))
+
 (defun drover-table--status-text (status)
   "Return the glyph of STATUS in its face, its tooltip naming it."
   (propertize (drover-status-glyph status) 'help-echo (drover-status-label status)))
 
-(defun drover-table--title (session)
-  "Return the title of SESSION, marked when it is a subagent."
-  (let ((title (drover-table--one-line (drover-session-display-title session))))
-    (if (drover-session-parent session)
-        (concat (propertize "↳ " 'face 'drover-dim) title)
-      title)))
+(defun drover-table--glyph-widths (sessions)
+  "Return the pixel widths of the glyphs of SESSIONS, as an alist.
+Its entries are (STATUS . WIDTH), one for each status of SESSIONS."
+  (mapcar (lambda (status)
+            (cons status (drover-table--text-width (drover-table--status-text status))))
+          (seq-uniq (mapcar #'drover-session-status sessions))))
+
+(defun drover-table--title-text (session depth glyph-widths)
+  "Return the glyph of SESSION's status, one space and its title.
+The text is indented by DEPTH, the depth of SESSION in its tree.
+GLYPH-WIDTHS is an alist (STATUS . WIDTH) of the glyphs shown, from
+`drover-table--glyph-widths'.  The space after a glyph narrower than
+the widest is as much wider, so that the titles at one depth line up."
+  (let* ((status (drover-session-status session))
+         (widest (apply #'max (mapcar #'cdr glyph-widths)))
+         (space (drover-table--text-width " "))
+         (pad (- widest (alist-get status glyph-widths))))
+    (concat (when (> depth 0)
+              (drover-table--space (* depth (+ widest space))))
+            (drover-table--status-text status)
+            (if (> pad 0) (drover-table--space (+ space pad)) " ")
+            (drover-table--one-line (drover-session-display-title session)))))
 
 (defun drover-table--age (session now)
   "Return the age in seconds of SESSION at time NOW.
@@ -154,59 +195,96 @@ unknown."
       ""
     (propertize (drover-format-age (- now age) now) 'face 'drover-dim)))
 
-(defun drover-table--columns (statuses now)
+(defun drover-table--text-column (name weight field &optional face)
+  "Return a column NAME of WEIGHT showing FIELD of a session, in FACE.
+FIELD is a function of a session returning a string or nil.  The
+column sorts by that string, ignoring case."
+  (list :name name :align 'left :weight weight
+        :key (lambda (session) (downcase (drover-table--one-line (funcall field session))))
+        :text (lambda (session _depth) (drover-table--one-line (funcall field session) face))))
+
+(defun drover-table--columns (now glyph-widths)
   "Return the columns of a table of sessions at time NOW.
-STATUSES is a vector of every status shown, most urgent first; the
-status column, unnamed to stay as narrow as its glyphs, holds the index
-of a session's status in it, so that it sorts by urgency.  Each column
-is a plist of:
+GLYPH-WIDTHS is an alist (STATUS . WIDTH) of the glyphs of the statuses
+shown.  The Title column shows the glyph of a session's status before
+its title, but sorts by the title alone.  Each column is a plist of:
 
- :name     Its header.
- :value    Function of a session returning the value it sorts by.
- :text     Function of a value returning the text shown, when the
-           value is not that text.
- :align    `left' or `right'.
- :weight   Share of the room left that the column may take, or nil for
-           a column as wide as its content.
- :samples  Texts the column fits even when no row shows them."
+ :name    Its header.
+ :key     Function of a session returning the value it sorts by, a
+          string or a number.
+ :text    Function of a session and its depth in its tree returning
+          the text shown.
+ :align   `left' or `right'.
+ :weight  Share of the room left that the column may take, or nil for
+          a column as wide as its content."
   (list
-   (list :name "" :align 'left
-         :value (lambda (session) (seq-position statuses (drover-session-status session)))
-         :text (lambda (index) (drover-table--status-text (aref statuses index)))
-         :samples (mapcar #'drover-table--status-text statuses))
-   (list :name "Title" :align 'left :weight 3 :value #'drover-table--title)
-   (list :name "Project" :align 'left :weight 1
-         :value (lambda (session) (drover-table--one-line (drover-session-project session))))
-   (list :name "Branch" :align 'left :weight 1
-         :value (lambda (session)
-                  (drover-table--one-line (drover-session-branch session) 'drover-dim)))
+   (list :name "Title" :align 'left :weight 3
+         :key (lambda (session)
+                (downcase (drover-table--one-line (drover-session-display-title session))))
+         :text (lambda (session depth) (drover-table--title-text session depth glyph-widths)))
+   (drover-table--text-column "Project" 1 #'drover-session-project)
+   (drover-table--text-column "Branch" 1 #'drover-session-branch 'drover-dim)
    (list :name "Age" :align 'right
-         :value (lambda (session) (drover-table--age session now))
-         :text (lambda (age) (drover-table--age-text age now)))
-   (list :name "Summary" :align 'left :weight 3
-         :value (lambda (session) (drover-table--one-line (drover-session-summary session))))))
+         :key (lambda (session) (drover-table--age session now))
+         :text (lambda (session _depth) (drover-table--age-text (drover-table--age session now) now)))
+   (drover-table--text-column "Summary" 3 #'drover-session-summary)))
 
-(defun drover-table--cell-text (column session)
-  "Return the text COLUMN shows for SESSION."
-  (let ((value (funcall (plist-get column :value) session)))
-    (if-let* ((text (plist-get column :text)))
-        (funcall text value)
-      value)))
+;;;; Order
+
+(defun drover-table--key-less-p (a b)
+  "Return non-nil when the sort key A comes before B.
+Keys are numbers or strings."
+  (if (numberp a) (< a b) (string< a b)))
+
+(defun drover-table--predicate (sort-by keys)
+  "Return a predicate ordering sessions by the columns of SORT-BY, or nil.
+SORT-BY is a list of (INDEX . DIRECTION) as vtable keeps it, its last
+key sorting first and the others breaking ties.  KEYS is a hash table
+mapping a session to the vector of its sort keys, one per column.
+Return nil for an empty SORT-BY."
+  (when sort-by
+    (let ((sort-by (reverse sort-by)))
+      (lambda (a b)
+        (let ((keys-a (gethash a keys))
+              (keys-b (gethash b keys)))
+          (catch 'order
+            (pcase-dolist (`(,index . ,direction) sort-by)
+              (let ((key-a (aref keys-a index))
+                    (key-b (aref keys-b index)))
+                (unless (equal key-a key-b)
+                  (throw 'order (if (eq direction 'descend)
+                                    (drover-table--key-less-p key-b key-a)
+                                  (drover-table--key-less-p key-a key-b))))))
+            nil))))))
+
+(defun drover-table--rows (nodes predicate &optional depth)
+  "Return the rows of the trees NODES, each session before its subagents.
+A row is a cons (SESSION . DEPTH), DEPTH being 0 for the roots of NODES,
+or DEPTH when non-nil.  NODES and their children come most urgent
+first; PREDICATE, a function of two sessions, orders each level instead
+when non-nil, ties keeping the order of urgency."
+  (let ((depth (or depth 0)))
+    (mapcan (lambda (node)
+              (cons (cons (drover-node-session node) depth)
+                    (drover-table--rows (drover-node-children node) predicate (1+ depth))))
+            (if predicate
+                ;; `sort' is stable, which keeps ties in order of urgency.
+                (sort (copy-sequence nodes)
+                      (lambda (a b)
+                        (funcall predicate (drover-node-session a) (drover-node-session b))))
+              nodes))))
 
 ;;;; Widths
 
-(defun drover-table--natural-width (column sessions char-width)
-  "Return the pixel width COLUMN needs to show SESSIONS in full.
+(defun drover-table--natural-width (column texts char-width)
+  "Return the pixel width COLUMN needs to show its cell TEXTS in full.
 The header needs room for vtable's sort indicator, and CHAR-WIDTH
 more."
   (apply #'max
          (+ (drover-table--text-width (plist-get column :name))
             (drover-table--text-width "▼")
             char-width)
-         (mapcar #'drover-table--text-width
-                 (append (plist-get column :samples)
-                         (mapcar (lambda (session) (drover-table--cell-text column session))
-                                 sessions)))))
+         (mapcar #'drover-table--text-width texts)))
 
 (defun drover-table--share (naturals weights room minimum)
   "Return widths sharing ROOM between columns, by WEIGHTS.
@@ -241,14 +319,17 @@ than MINIMUM or what it needs, whichever is smaller."
             (aset widths last (+ (aref widths last) left))))))
     (append widths nil)))
 
-(defun drover-table--column-widths (columns sessions width)
-  "Return the pixel widths of COLUMNS showing SESSIONS in WIDTH pixels.
-Columns without a weight are as wide as their content; the user's
-widths hold; the weighted columns share the room left."
+(defun drover-table--column-widths (columns cells width)
+  "Return the pixel widths of COLUMNS showing CELLS in WIDTH pixels.
+CELLS holds the texts of each row, a list with one per column.  Columns
+without a weight are as wide as their content; the user's widths hold;
+the weighted columns share the room left."
   (let* ((char-width (drover-table--char-width))
-         (naturals (mapcar (lambda (column)
-                             (drover-table--natural-width column sessions char-width))
-                           columns))
+         (naturals (seq-map-indexed
+                    (lambda (column index)
+                      (drover-table--natural-width
+                       column (mapcar (lambda (texts) (nth index texts)) cells) char-width))
+                    columns))
          (overrides (mapcar (lambda (column)
                               (when-let* ((characters (alist-get (plist-get column :name)
                                                                  drover-table--width-overrides
@@ -283,44 +364,78 @@ where a character is one pixel wide."
 
 ;;;; Drawing
 
-(defun drover-table--insert (sessions width)
-  "Insert a table of SESSIONS, in this order, WIDTH pixels wide.
-Return the vtable."
+;; Vtable sorts the rows itself, by the values of a column, whenever it
+;; draws: it would part subagents from their parents.  So every cell's
+;; value is the rank of its row in the order the table computed, and a
+;; formatter shows the text: sorting by the ranks, in the direction of
+;; the last sort key, keeps that order.  Vtable's sort commands still
+;; change the keys, and `drover-table--follow-sort' draws the table again
+;; in the order they name.
+
+(defun drover-table--keys (columns sessions)
+  "Return the sort keys of SESSIONS in COLUMNS, as a hash table.
+It maps each session to a vector of its keys, one per column."
+  (let ((keys (make-hash-table :test #'eq)))
+    (dolist (session sessions)
+      (puthash session
+               (vconcat (mapcar (lambda (column) (funcall (plist-get column :key) session))
+                                columns))
+               keys))
+    keys))
+
+(defun drover-table--insert (nodes sort-by width)
+  "Insert a table of the trees NODES, sorted by SORT-BY, WIDTH pixels wide.
+NODES come most urgent first.  SORT-BY is a list of vtable sort keys,
+or nil for the order of urgency.  Return the vtable."
   (let* ((now (float-time))
-         (statuses (vconcat drover-status-order
-                            (seq-difference (seq-uniq (mapcar #'drover-session-status sessions))
-                                            drover-status-order)))
-         (columns (drover-table--columns statuses now))
-         (widths (drover-table--column-widths columns sessions width)))
+         (sessions (drover-tree-sessions nodes))
+         (columns (drover-table--columns now (drover-table--glyph-widths sessions)))
+         ;; Keys left by a former version of the table, with more columns.
+         (sort-by (seq-filter (lambda (key) (< (car key) (length columns))) sort-by))
+         (rows (drover-table--rows
+                nodes (drover-table--predicate sort-by (drover-table--keys columns sessions))))
+         (cells (mapcar (lambda (row)
+                          (mapcar (lambda (column)
+                                    (funcall (plist-get column :text) (car row) (cdr row)))
+                                  columns))
+                        rows))
+         (widths (drover-table--column-widths columns cells width))
+         (count (length rows))
+         (descending (eq (cdar (last sort-by)) 'descend))
+         (ranks (make-hash-table :test #'eq))
+         (texts (make-vector count nil)))
+    (cl-loop for row in rows
+             for row-cells in cells
+             for position from 0
+             for rank = (if descending (- count position 1) position)
+             do (puthash (car row) rank ranks)
+             do (aset texts rank row-cells))
     (setq drover-table--widths (vconcat widths))
     (make-vtable
-     :columns (cl-mapcar
-               (lambda (column width)
-                 (let ((value (plist-get column :value))
-                       (text (plist-get column :text)))
-                   (list :name (plist-get column :name)
-                         :width (drover-table--width-spec width)
-                         :align (plist-get column :align)
-                         :getter (lambda (session _table) (funcall value session))
-                         ;; Vtable styles the text of its values, not formatted text.
-                         :formatter (and text (lambda (value)
-                                                (drover-table--styled (funcall text value)))))))
-               columns widths)
-     :objects sessions
+     :columns (cl-loop for column in columns
+                       for width in widths
+                       for index from 0
+                       ;; `cl-loop' steps INDEX in place, which every
+                       ;; formatter would share.
+                       collect (let ((index index))
+                                 (list :name (plist-get column :name)
+                                       :width (drover-table--width-spec width)
+                                       :align (plist-get column :align)
+                                       :getter (lambda (session _table) (gethash session ranks))
+                                       ;; Vtable styles the text of its values, not
+                                       ;; formatted text.
+                                       :formatter (lambda (rank)
+                                                    (drover-table--styled
+                                                     (nth index (aref texts rank)))))))
+     :objects (mapcar #'car rows)
      :face 'drover-table
      :use-header-line nil
      :separator-width drover-table--separator-width
-     :sort-by (copy-tree drover-table--sort-by))))
+     :sort-by (copy-tree sort-by))))
 
-(defun drover-table--empty-text (sessions)
-  "Return the line shown when no session is listed, SESSIONS being hidden."
-  (substitute-command-keys
-   (cond
-    ((null (drover-backends)) "No agent backend is loaded.")
-    ((null sessions) "No agent sessions.")
-    (t (format "No agent sessions; %d subagent %s hidden, \
-\\<drover-table-mode-map>\\[drover-table-toggle-children] shows them."
-               (length sessions) (if (cdr sessions) "sessions are" "session is"))))))
+(defun drover-table--empty-text ()
+  "Return the line shown when no session is listed."
+  (if (drover-backends) "No agent sessions." "No agent backend is loaded."))
 
 (defun drover-table--header-line (sessions hidden)
   "Return the header line counting SESSIONS that need the user.
@@ -405,17 +520,20 @@ WINDOW, when non-nil, shows this buffer and is selected."
                                      (drover-table--position (window-point view)))
                                 (line-number-at-pos (window-start view))))
                         (get-buffer-window-list nil nil t)))
-         (all (drover-sessions))
-         (sessions (drover-sort (and all (drover-visible-sessions all))))
+         (trees (drover-tree (drover-sessions)))
+         (nodes (drover-tree-visible trees))
+         (sessions (drover-tree-sessions nodes))
          (inhibit-read-only t))
+    ;; A vtable sort command may have changed the keys since the last draw.
     (when drover-table--table
       (setq drover-table--sort-by (vtable-sort-by drover-table--table)))
     (erase-buffer)
-    (setq drover-table--table (and sessions (drover-table--insert sessions width)))
-    (unless sessions
-      (insert (propertize (drover-table--empty-text all) 'face 'drover-dim) "\n"))
+    (setq drover-table--table (and nodes (drover-table--insert nodes drover-table--sort-by width)))
+    (if drover-table--table
+        (setq drover-table--sort-by (copy-tree (vtable-sort-by drover-table--table)))
+      (insert (propertize (drover-table--empty-text) 'face 'drover-dim) "\n"))
     (setq header-line-format
-          (drover-table--header-line sessions (- (length all) (length sessions)))
+          (drover-table--header-line sessions (drover-tree-hidden-count trees))
           drover-table--window-width (and window width)
           drover-table--drawn-at (float-time)
           drover-table--stale nil)
@@ -489,6 +607,29 @@ Run when WINDOW starts showing the table or changes size."
         (with-demoted-errors "Drover table: %S"
           (drover-table--redraw buffer))))))
 
+(defun drover-table--event-buffer ()
+  "Return the buffer of the window the last command's mouse event is in.
+Return nil when that command was not run by a mouse event in a window."
+  (when-let* (((mouse-event-p last-command-event))
+              (window (posn-window (event-start last-command-event)))
+              ((window-live-p window)))
+    (window-buffer window)))
+
+(defun drover-table--follow-sort ()
+  "Draw again a table that the last command sorted.
+Vtable's sort commands, S on a column or a click on its header, change
+the sort keys of a table and sort its rows by themselves, which would
+part subagents from their parents; the table is drawn again in its own
+order for the new keys.  The table is in the current buffer, or in the
+window of a mouse click, which need not be selected."
+  (dolist (buffer (seq-uniq (delq nil (list (current-buffer) (drover-table--event-buffer)))))
+    (with-current-buffer buffer
+      (when (and (derived-mode-p 'drover-table-mode)
+                 drover-table--table
+                 (not (equal (vtable-sort-by drover-table--table) drover-table--sort-by)))
+        (with-demoted-errors "Drover table: %S"
+          (drover-table--redraw buffer))))))
+
 (defun drover-table--tick ()
   "Draw the shown tables again; stop when none is shown."
   (let ((shown nil))
@@ -518,6 +659,7 @@ Run when WINDOW starts showing the table or changes size."
   "Stop following the backends when the last table goes."
   (unless (delq (current-buffer) (drover-table--buffers))
     (remove-hook 'drover-changed-hook #'drover-table--changed)
+    (remove-hook 'post-command-hook #'drover-table--follow-sort)
     (drover-table--stop-age-timer)))
 
 (defun drover-table--session-at-point ()
@@ -543,7 +685,9 @@ Run when WINDOW starts showing the table or changes size."
   (drover-table-refresh))
 
 (defun drover-table-toggle-children ()
-  "Show or hide the sessions of subagents in this table."
+  "Show or hide the sessions of subagents in this table.
+Subagents that need the user, and the sessions above them, show either
+way."
   (interactive)
   (drover-table--check-mode)
   (setq-local drover-show-children (not drover-show-children))
@@ -612,10 +756,14 @@ are remapped here when the table must handle them itself."
 
 (define-derived-mode drover-table-mode special-mode "Drover Table"
   "Major mode listing the sessions of every agent in one table.
-\\<drover-table-mode-map>Sessions come most urgent first.  \\`S' on a
-column sorts by it, \\`{' and \\`}' narrow and widen it, and
-\\[drover-table-reset] restores the order of urgency and the default
-widths.
+\\<drover-table-mode-map>Sessions come as trees, each subagent under its
+parent, the tree with the most urgent session first.  \\`S' on a column
+sorts the trees by the value of their root, and the subagents of each
+session among themselves; the Title column sorts by title.  \\`{' and
+\\`}' narrow and widen a column, and \\[drover-table-reset] restores the
+order of urgency and the default widths.
+\\[drover-table-toggle-children] shows or hides the subagents that do
+not need you.
 
 \\{drover-table-mode-map}"
   :group 'drover-table
@@ -626,7 +774,8 @@ widths.
   (add-hook 'window-buffer-change-functions #'drover-table--window-changed nil t)
   (add-hook 'window-size-change-functions #'drover-table--window-changed nil t)
   (add-hook 'kill-buffer-hook #'drover-table--killed nil t)
-  (add-hook 'drover-changed-hook #'drover-table--changed))
+  (add-hook 'drover-changed-hook #'drover-table--changed)
+  (add-hook 'post-command-hook #'drover-table--follow-sort))
 
 ;;;###autoload
 (defun drover-table ()

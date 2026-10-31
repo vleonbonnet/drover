@@ -24,19 +24,22 @@
   "Run BODY with the fake backend serving SESSIONS and the mode's state isolated."
   (declare (indent 1) (debug t))
   `(drover-test-with-backend ,sessions
-     (let ((global-mode-string nil)
-           (drover-attention-mode nil)
-           (drover-attention-mode-line nil)
-           (drover-attention--mode-string-origin nil)
-           (drover-attention--cycle nil)
-           (drover-attention--position 0)
-           (drover-attention-statuses '(waiting failed done))
-           (drover-attention-echo t)
-           (last-command nil))
-       (unwind-protect
-           (progn ,@body)
-         (when drover-attention-mode
-           (drover-attention-mode -1))))))
+                             (let ((global-mode-string nil)
+                                   ;; Readable glyphs, whatever the defaults.
+                                   (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
+                                                           (retrying . "↻") (working . "◐") (idle . "·")))
+                                   (drover-attention-mode nil)
+                                   (drover-attention-mode-line nil)
+                                   (drover-attention--mode-string-origin nil)
+                                   (drover-attention--cycle nil)
+                                   (drover-attention--position 0)
+                                   (drover-attention-statuses '(waiting failed done))
+                                   (drover-attention-echo t)
+                                   (last-command nil))
+                               (unwind-protect
+                                   (progn ,@body)
+                                 (when drover-attention-mode
+                                   (drover-attention-mode -1))))))
 
 (defmacro drover-attention-test-messages (&rest body)
   "Run BODY and return the messages it showed, oldest first."

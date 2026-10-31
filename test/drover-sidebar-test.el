@@ -21,6 +21,10 @@
 ;; and time; windows are tested on the single frame of batch Emacs,
 ;; where side windows work but redisplay, and so the window change
 ;; functions, never runs: the tests call those functions themselves.
+;;
+;; Batch Emacs measures text as a terminal does, one pixel per column,
+;; so most tests read widths as columns.  Tests of proportional text
+;; measure it with a fake font instead (`drover-sidebar-test-proportional').
 
 ;;; Code:
 
@@ -38,7 +42,10 @@ Kill the sidebar and the session buffers, and restore one window, after."
            (drover-sidebar-side 'left)
            (drover-sidebar-width 36)
            (drover-sidebar-slot 0)
-           (drover-status-order '(waiting failed done retrying working idle)))
+           (drover-status-order '(waiting failed done retrying working idle))
+           ;; Readable glyphs, whatever the defaults.
+           (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
+                                   (retrying . "↻") (working . "◐") (idle . "·"))))
        (unwind-protect
            (progn ,@body)
          (drover-sidebar-test--cleanup)))))
@@ -46,7 +53,9 @@ Kill the sidebar and the session buffers, and restore one window, after."
 (defun drover-sidebar-test--cleanup ()
   "Kill the buffers the tests made and leave one window."
   (dolist (buffer (buffer-list))
-    (when (string-match-p "\\`\\*\\(drover \\|session \\|other\\)" (buffer-name buffer))
+    ;; Killing the sidebar kills its measuring buffer too.
+    (when (and (buffer-live-p buffer)
+               (string-match-p "\\`\\*\\(drover \\|session \\|other\\)" (buffer-name buffer)))
       (kill-buffer buffer)))
   (let ((ignore-window-parameters t))
     (delete-other-windows (seq-find (lambda (window) (not (window-parameter window 'window-side)))
@@ -164,11 +173,15 @@ Each shows its own buffer."
       (drover-sidebar-test--goto "a")
       (let ((line (buffer-substring (point) (line-end-position))))
         (should (equal (substring-no-properties line) "  ◐ Session a 3m"))
+        ;; The indentation is one blank, as wide as the heading's fold glyph.
+        (should (equal (get-text-property 0 'display line) '(space :width (2))))
+        (should (eq (next-single-property-change 0 'display line) 2))
         (should (eq (get-text-property 2 'face line) 'drover-working))
         (should (null (get-text-property 4 'face line)))
-        ;; The age sits flush right, aligned by display.
-        (should (equal (get-text-property 13 'display line) '(space :align-to 28)))
+        ;; The age sits flush right, aligned by display, in pixels.
+        (should (equal (get-text-property 13 'display line) '(space :align-to (28))))
         (should (eq (get-text-property 14 'face line) 'drover-dim))
+        (should (eq (get-text-property 14 'font-lock-face line) 'drover-dim))
         (should (equal (get-text-property 0 'help-echo line) "Session a"))
         (should (eq (get-text-property 0 'mouse-face line) 'highlight))))))
 
@@ -241,13 +254,19 @@ Each shows its own buffer."
   (drover-sidebar-test-with
       (list (drover-test-session "a" :status 'waiting
                                  :requests '((:kind permission
-                                              :summary "bash: make test && make lint\nand much more"))))
+                                                    :summary "bash: make test && make lint\nand much more"))))
     (with-current-buffer (drover-sidebar-test--render 30)
       (drover-sidebar-test--goto "a")
       (forward-line 1)
-      (let ((line (buffer-substring-no-properties (point) (line-end-position))))
-        (should (equal line "    permit: bash: make test &…"))
-        (should (= (string-width line) 30))))))
+      (let ((line (buffer-substring (point) (line-end-position))))
+        ;; Batch Emacs draws the flag two columns wide: the summary
+        ;; starts under the title, past the glyph and one space.
+        (should (equal (get-text-property 0 'display line) '(space :width (5))))
+        (should (equal (substring-no-properties line) "    permit: bash: make test…"))
+        ;; The cut drops the blank before the ellipsis, so the line may
+        ;; end a column short of the width.
+        (should (<= (+ 5 (string-width (substring line 4))) 30))
+        (should (eq (get-text-property (1- (length line)) 'face line) 'drover-dim))))))
 
 (ert-deftest drover-sidebar-test-help-echo ()
   (drover-sidebar-test-with (list (drover-test-session "a" :status 'waiting :project "drover"
@@ -268,10 +287,10 @@ Each shows its own buffer."
       (should-not (drover-sidebar-next))
       (should (= (point) (point-min))))))
 
-(ert-deftest drover-sidebar-test-empty-state-hints-at-subagents ()
-  (drover-sidebar-test-with (list (drover-test-session "child" :parent "gone"))
+(ert-deftest drover-sidebar-test-empty-state-without-hint ()
+  (drover-sidebar-test-with nil
     (with-current-buffer (drover-sidebar-test--render)
-      (should (equal (drover-sidebar-test--lines) '("No sessions." "c shows 1 subagent."))))))
+      (should-not (text-property-any (point-min) (point-max) 'drover-sidebar-line 'hint)))))
 
 ;;;; Navigation and the session at point
 
@@ -392,24 +411,362 @@ Each shows its own buffer."
 
 ;;;; Subagents
 
+(defun drover-sidebar-test--next ()
+  "Move to the next session; return non-nil when point moved."
+  (let ((before (point)))
+    (drover-sidebar-next)
+    (/= before (point))))
+
+(defun drover-sidebar-test--indent ()
+  "Return the width, in pixels, of the indentation of the line at point."
+  (pcase (get-text-property (line-beginning-position) 'display)
+    (`(space :width (,pixels)) pixels)))
+
+(defun drover-sidebar-test--family ()
+  "Return three generations of working or idle sessions, and a stranger."
+  (list (drover-test-session "grand" :parent "child" :status 'idle :updated (- drover-test-now 300))
+        (drover-test-session "root" :status 'working :updated (- drover-test-now 60))
+        (drover-test-session "other" :status 'working :updated (- drover-test-now 30))
+        (drover-test-session "child" :parent "root" :status 'working :updated (- drover-test-now 120))))
+
+(defun drover-sidebar-test--asking-child ()
+  "Return a parent done, its subagent asking, and two other sessions."
+  (list (drover-test-session "busy" :status 'working)
+        (drover-test-session "parent" :status 'done :since (- drover-test-now 50))
+        (drover-test-session "asking" :parent "parent" :status 'waiting :since (- drover-test-now 30)
+                             :requests '((:kind question :summary "Which file?")))
+        (drover-test-session "plain" :status 'waiting :since (- drover-test-now 40))))
+
+(ert-deftest drover-sidebar-test-subagents-under-parent ()
+  (drover-sidebar-test-with (drover-sidebar-test--family)
+    (let ((drover-show-children t))
+      (with-current-buffer (drover-sidebar-test--render)
+        (should (equal (drover-sidebar-test--lines)
+                       '("▾ Working 2"
+                         "  ◐ Session other 30s"
+                         "  ◐ Session root 1m"
+                         "    ◐ Session child 2m"
+                         "      · Session grand 5m")))
+        ;; Each glyph sits under the title above it: past the glyph above
+        ;; and one space.
+        (should (equal (mapcar (lambda (id)
+                                 (drover-sidebar-test--goto id)
+                                 (drover-sidebar-test--indent))
+                               '("other" "root" "child" "grand"))
+                       '(2 2 4 6)))
+        ;; Every session keeps its own glyph and age.
+        (drover-sidebar-test--goto "grand")
+        (should (eq (get-text-property (+ (point) 6) 'face) 'drover-idle))
+        (should (eq (get-text-property (+ (point) 8) 'face) 'drover-dim))))))
+
+(ert-deftest drover-sidebar-test-subagent-under-wide-glyph ()
+  "A subagent starts under its parent's title, however wide its glyph."
+  (drover-sidebar-test-with (list (drover-test-session "parent" :status 'waiting)
+                                  (drover-test-session "child" :parent "parent" :status 'idle))
+    (let ((drover-show-children t))
+      (with-current-buffer (drover-sidebar-test--render)
+        (drover-sidebar-test--goto "child")
+        ;; Batch Emacs draws the flag two columns wide.
+        (should (= (drover-sidebar-test--indent) 5))
+        (should (equal (buffer-substring-no-properties (point) (line-end-position))
+                       "    · Session child"))))))
+
+(ert-deftest drover-sidebar-test-nesting-depth-capped ()
+  (drover-sidebar-test-with
+      (cons (drover-test-session "d0" :status 'idle)
+            (mapcar (lambda (depth)
+                      (drover-test-session (format "d%d" depth) :status 'idle
+                                           :parent (format "d%d" (1- depth))))
+                    (number-sequence 1 5)))
+    (let ((drover-show-children t))
+      (with-current-buffer (drover-sidebar-test--render)
+        (should (equal (mapcar (lambda (depth)
+                                 (drover-sidebar-test--goto (format "d%d" depth))
+                                 (list (drover-sidebar-test--indent)
+                                       (string-search "·" (buffer-substring-no-properties
+                                                           (point) (line-end-position)))))
+                               (number-sequence 0 5))
+                       '((2 2) (4 4) (6 6) (8 8) (8 8) (8 8))))))))
+
+(ert-deftest drover-sidebar-test-parent-rolls-up ()
+  "A parent whose subagent asks shows with the sessions needing the user."
+  (drover-sidebar-test-with (drover-sidebar-test--asking-child)
+    (with-current-buffer (drover-sidebar-test--render)
+      (should (equal (drover-sidebar-test--lines)
+                     '("▾ Needs you 2"
+                       "  ⚑ Session plain 40s"
+                       "  ✓ Session parent 50s"
+                       "    ⚑ Session asking 30s"
+                       "      asks: Which file?"
+                       "▾ Working 1"
+                       "  ◐ Session busy")))
+      ;; The parent keeps its own glyph; the subagent's summary starts
+      ;; under its title.
+      (drover-sidebar-test--goto "parent")
+      (should (eq (get-text-property (+ (point) 2) 'face) 'drover-done))
+      (drover-sidebar-test--goto "asking")
+      (forward-line 1)
+      (should (eq (drover-sidebar--line-type) 'summary))
+      (should (= (drover-sidebar-test--indent) (+ 4 2 1)))
+      (should (equal (drover-sidebar-test--key) "asking")))))
+
+(ert-deftest drover-sidebar-test-orphan-subagent ()
+  (drover-sidebar-test-with (list (drover-test-session "orphan" :parent "gone" :status 'idle
+                                                       :updated (- drover-test-now 60))
+                                  (drover-test-session "root" :status 'idle :updated (- drover-test-now 30)))
+    (with-current-buffer (drover-sidebar-test--render)
+      ;; Its parent is not listed: it shows at the top level, marked.
+      (should (equal (drover-sidebar-test--lines)
+                     '("▾ Idle 2" "  · Session root 30s" "  · ↳ Session orphan 1m")))
+      (drover-sidebar-test--goto "orphan")
+      (should (= (drover-sidebar-test--indent) 2))
+      (should (eq (get-text-property (+ (point) 4) 'face) 'drover-dim))
+      (should-not (text-property-any (point-min) (point-max) 'drover-sidebar-line 'hint)))))
+
 (ert-deftest drover-sidebar-test-toggle-children ()
   (drover-sidebar-test-with (list (drover-test-session "root" :status 'idle)
-                                  (drover-test-session "child" :parent "root" :status 'idle)
+                                  (drover-test-session "quiet" :parent "root" :status 'idle)
                                   (drover-test-session "asking" :parent "root" :status 'waiting))
     (with-current-buffer (drover-sidebar-test--render)
-      (should (string-search "Session asking" (buffer-string)))
-      (should-not (string-search "Session child" (buffer-string)))
+      ;; A subagent needing the user shows under its parent; the others
+      ;; are counted by the hint closing the list.
+      (should (equal (drover-sidebar-test--lines)
+                     '("▾ Needs you 1" "  · Session root" "    ⚑ Session asking"
+                       "c shows 1 subagent.")))
+      (goto-char (point-max))
+      (forward-line -1)
+      (should (eq (drover-sidebar--line-type) 'hint))
+      (should (eq (get-text-property (point) 'face) 'drover-dim))
       (drover-sidebar-toggle-children)
       (should (local-variable-p 'drover-show-children))
       (should drover-show-children)
       (should-not (default-value 'drover-show-children))
-      (drover-sidebar-test--goto "child")
-      (should (equal (buffer-substring-no-properties (point) (line-end-position))
-                     "  · ↳ Session child"))
+      (should (equal (drover-sidebar-test--lines)
+                     '("▾ Needs you 1" "  · Session root" "    ⚑ Session asking"
+                       "    · Session quiet")))
       (should (equal (drover-sidebar--mode-line-flags) " +sub"))
+      ;; Point on a subagent the toggle hides moves to its parent.
+      (drover-sidebar-test--goto "quiet")
       (call-interactively (key-binding (kbd "c")))
       (should-not drover-show-children)
-      (should-not (string-search "Session child" (buffer-string))))))
+      (should-not (string-search "Session quiet" (buffer-string)))
+      (should (equal (drover-sidebar-test--key) "root")))))
+
+(ert-deftest drover-sidebar-test-hint-counts-hidden-subagents ()
+  (drover-sidebar-test-with (append (list (drover-test-session "a" :parent "root")
+                                          (drover-test-session "b" :parent "a"))
+                                    (drover-sidebar-test--family))
+    (with-current-buffer (drover-sidebar-test--render)
+      ;; child, grand, a and b, all below root, none needing the user.
+      (should (equal (car (last (drover-sidebar-test--lines))) "c shows 4 subagents."))
+      ;; Moving never lands on the hint.
+      (goto-char (point-min))
+      (let ((moves 0))
+        (while (drover-sidebar-test--next)
+          (setq moves (1+ moves))
+          (should (eq (drover-sidebar--line-type) 'session)))
+        (should (= moves 2)))
+      (should (equal (drover-sidebar-test--key) "root")))))
+
+(ert-deftest drover-sidebar-test-navigation-over-nested-lines ()
+  (drover-sidebar-test-with (drover-sidebar-test--asking-child)
+    (with-current-buffer (drover-sidebar-test--render)
+      (goto-char (point-min))
+      (let ((visited nil))
+        (while (drover-sidebar-test--next)
+          (should (= (point) (line-beginning-position)))
+          (push (drover-sidebar-test--key) visited))
+        (should (equal (nreverse visited) '("plain" "parent" "asking" "busy"))))
+      ;; From a subagent's summary, back to the subagent, then its parent.
+      (drover-sidebar-test--goto "asking")
+      (forward-line 1)
+      (drover-sidebar-previous)
+      (should (equal (drover-sidebar-test--key) "asking"))
+      (drover-sidebar-previous)
+      (should (equal (drover-sidebar-test--key) "parent"))
+      (should (equal (drover-session-id (drover-session-at-point)) "parent")))))
+
+(ert-deftest drover-sidebar-test-point-stays-on-nested-session ()
+  (drover-sidebar-test-with (drover-sidebar-test--asking-child)
+    (with-current-buffer (drover-sidebar-test--render)
+      (setq-local drover-show-children t)
+      (drover-sidebar--redraw)
+      (drover-sidebar-test--goto "asking")
+      ;; The subagent stops waiting: its tree moves to the parent's group.
+      (setf (drover-session-status (drover-find 'fake "asking")) 'working
+            (drover-session-requests (drover-find 'fake "asking")) nil)
+      (drover-sidebar--redraw)
+      (should (equal (drover-sidebar-test--key) "asking"))
+      (should (eq (get-text-property (point) 'drover-sidebar-status) 'working))
+      (should (equal (drover-sidebar--search -1 '(heading))
+                     (drover-sidebar--find-line
+                      'heading (lambda (start) (eq (get-text-property start 'drover-sidebar-status) 'done)))))
+      ;; Hidden once subagents are, it leaves point on its parent.
+      (setq-local drover-show-children nil)
+      (drover-sidebar--redraw)
+      (should (equal (drover-sidebar-test--key) "parent")))))
+
+(ert-deftest drover-sidebar-test-fold-hides-subagents ()
+  (drover-sidebar-test-with (drover-sidebar-test--asking-child)
+    (with-current-buffer (drover-sidebar-test--render)
+      (goto-char (point-min))
+      (drover-sidebar-toggle-group)
+      (should (equal (drover-sidebar-test--lines) '("▸ Needs you 2" "▾ Working 1" "  ◐ Session busy")))
+      (goto-char (point-min))
+      (drover-sidebar-next)
+      (should (equal (drover-sidebar-test--key) "busy")))))
+
+;;;; Proportional text
+
+(defun drover-sidebar-test--fake-width (char)
+  "Return the width of CHAR, in pixels, in a fake proportional font."
+  (cond ((memq char '(?i ?l ?\s ?. ?: ?…)) 2)
+        ((memq char '(?m ?w)) 8)
+        ((<= ?A char ?Z) 7)
+        ((< char 128) 5)
+        (t 6)))
+
+(defun drover-sidebar-test--fake-pixels (string)
+  "Return the width of STRING, in pixels, in the fake proportional font."
+  (apply #'+ (mapcar #'drover-sidebar-test--fake-width string)))
+
+(defvar drover-sidebar-test--measured nil
+  "Face remappings and windows text was measured with, newest first.")
+
+(defmacro drover-sidebar-test-proportional (&rest body)
+  "Run BODY measuring text in a fake proportional font.
+Each measure records its buffer's face remapping and its window in
+`drover-sidebar-test--measured'."
+  (declare (indent 0) (debug t))
+  `(let ((drover-sidebar-test--measured nil))
+     (cl-letf (((symbol-function 'buffer-text-pixel-size)
+                (lambda (&optional _buffer window &rest _)
+                  (push (list face-remapping-alist window) drover-sidebar-test--measured)
+                  (cons (drover-sidebar-test--fake-pixels (buffer-string)) 1))))
+       ,@body)))
+
+(ert-deftest drover-sidebar-test-variable-pitch ()
+  (should (eq (face-attribute 'drover-sidebar :inherit) 'variable-pitch))
+  (with-temp-buffer
+    (drover-sidebar-mode)
+    (should (memq 'drover-sidebar (assq 'default face-remapping-alist)))
+    (should (memq #'drover-sidebar--text-scaled text-scale-mode-hook))))
+
+(ert-deftest drover-sidebar-test-measures-with-sidebar-faces ()
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (drover-sidebar-test-proportional
+      (drover-sidebar-test--render 200)
+      (should drover-sidebar-test--measured)
+      (dolist (measure drover-sidebar-test--measured)
+        (should (memq 'drover-sidebar (assq 'default (car measure))))))))
+
+(ert-deftest drover-sidebar-test-measures-in-sidebar-window ()
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (drover-sidebar-test--main)
+    (let ((sidebar (drover-sidebar--show)))
+      (drover-sidebar-test-proportional
+        (drover-sidebar-refresh)
+        (should drover-sidebar-test--measured)
+        (dolist (measure drover-sidebar-test--measured)
+          (should (eq (cadr measure) sidebar)))))))
+
+(ert-deftest drover-sidebar-test-proportional-truncation ()
+  (let ((title "Session with a title much too wide for the window"))
+    (drover-sidebar-test-with (list (drover-session-create :backend 'fake :id "long" :title title
+                                                           :status 'done :since (- drover-test-now 7200))
+                                    (drover-session-create :backend 'fake :id "kid" :parent "long"
+                                                           :title title :status 'waiting
+                                                           :requests '((:kind question
+                                                                        :summary "Which of the many files should I edit before the tests run?"))))
+      (drover-sidebar-test-proportional
+        (with-current-buffer (drover-sidebar-test--render 150)
+          ;; Fold glyph and space are 6 + 2 pixels, glyphs 6, spaces 2.
+          (drover-sidebar-test--goto "long")
+          (let* ((start (point))
+                 (age-blank (text-property-search-forward 'display nil
+                                                          (lambda (_ value)
+                                                            (eq (car-safe (cdr-safe value)) :align-to))))
+                 (shown (buffer-substring-no-properties (+ start 4) (prop-match-beginning age-blank))))
+            (goto-char start)
+            (should (= (drover-sidebar-test--indent) 8))
+            (should (equal (buffer-substring-no-properties (+ start 2) (+ start 4)) "✓ "))
+            ;; The age, "2h", is 10 pixels: flush right at 150.
+            (should (equal (prop-match-value age-blank) '(space :align-to (140))))
+            (should (equal (buffer-substring-no-properties (prop-match-end age-blank) (line-end-position))
+                           "2h"))
+            ;; The title ends in an ellipsis before the age, with a space
+            ;; to spare, and one more character would not fit.
+            (should (string-suffix-p "…" shown))
+            (let ((room (- 140 (+ 8 6 2) 2))
+                  (kept (substring shown 0 -1)))
+              (should (<= (drover-sidebar-test--fake-pixels shown) room))
+              (should (> (drover-sidebar-test--fake-pixels
+                          (concat (substring title 0 (1+ (length kept))) "…"))
+                         room))
+              (should (string-prefix-p kept title))))
+          ;; The subagent starts under the title, and so does its summary
+          ;; under its own title.
+          (drover-sidebar-test--goto "kid")
+          (should (= (drover-sidebar-test--indent) (+ 8 6 2)))
+          (forward-line 1)
+          (should (= (drover-sidebar-test--indent) (+ 8 6 2 6 2)))
+          (let ((summary (buffer-substring-no-properties
+                          (next-single-property-change (point) 'display) (line-end-position))))
+            (should (string-suffix-p "…" summary))
+            (should (<= (drover-sidebar-test--fake-pixels summary) (- 150 24)))))))))
+
+(ert-deftest drover-sidebar-test-truncate ()
+  (drover-sidebar-test-with nil
+    (drover-sidebar-test-proportional
+      (with-temp-buffer
+        (let ((layout (drover-sidebar--layout 100 nil))
+              (text (concat "Wide" (propertize " dim tail" 'face 'drover-dim))))
+          ;; "Wide dim tail" is 7+2+5+5 + 2 + 5+2+8 + 2 + 5+5+2+2 = 52 pixels.
+          (should (eq (drover-sidebar--truncate layout text 52) text))
+          (let ((cut (drover-sidebar--truncate layout text 30)))
+            (should (equal (substring-no-properties cut) "Wide di…"))
+            (should (eq (get-text-property (1- (length cut)) 'face cut) 'drover-dim)))
+          (should (equal (drover-sidebar--truncate layout text 2) "…"))
+          (should (equal (drover-sidebar--truncate layout text 1) "")))))))
+
+(ert-deftest drover-sidebar-test-reuses-widths ()
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (drover-sidebar-test-proportional
+      (with-current-buffer (drover-sidebar-test--render 120)
+        (should drover-sidebar-test--measured)
+        (let ((lines (buffer-string)))
+          ;; Nothing changed: the second drawing measures nothing.
+          (setq drover-sidebar-test--measured nil)
+          (drover-sidebar-test--render 120)
+          (should-not drover-sidebar-test--measured)
+          (should (equal-including-properties (buffer-string) lines))
+          ;; A new width reuses widths but truncates anew.
+          (drover-sidebar-test--render 60)
+          (should-not (equal (buffer-string) lines))
+          ;; Text of another size, or a refresh, measures again.
+          (setq drover-sidebar-test--measured nil)
+          (face-remap-add-relative 'default :height 2.0)
+          (drover-sidebar-test--render 60)
+          (should drover-sidebar-test--measured)
+          (setq drover-sidebar-test--measured nil)
+          (revert-buffer)
+          (should drover-sidebar-test--measured))))))
+
+(ert-deftest drover-sidebar-test-one-space-after-glyph ()
+  (drover-sidebar-test-with (append (drover-sidebar-test--sample)
+                                    (list (drover-test-session "kid" :parent "work" :status 'retrying)))
+    (let ((drover-show-children t))
+      (with-current-buffer (drover-sidebar-test--render)
+        (dolist (id '("idle" "work" "ask" "done" "fail" "kid"))
+          (drover-sidebar-test--goto id)
+          (let ((glyph (next-single-property-change (point) 'display)))
+            (should (equal (string (char-after glyph))
+                           (alist-get (drover-session-status (drover-find 'fake id)) drover-status-glyphs)))
+            ;; One plain space, then the title.
+            (should (eq (char-after (1+ glyph)) ?\s))
+            (should-not (get-text-property (1+ glyph) 'display))
+            (should (equal (buffer-substring-no-properties (+ glyph 2) (+ glyph 10 (length id)))
+                           (concat "Session " id)))))))))
 
 ;;;; Keys reaching the backend
 
@@ -690,6 +1047,26 @@ Each shows its own buffer."
           (drover-sidebar--windows-changed)
           (should-not drover-sidebar--current-overlays))))))
 
+(ert-deftest drover-sidebar-test-highlights-nested-session ()
+  (drover-sidebar-test-with (drover-sidebar-test--asking-child)
+    (drover-sidebar-test--register-buffers)
+    (pcase-let ((`(,first ,_second) (drover-sidebar-test--main)))
+      (with-current-buffer (window-buffer (drover-sidebar--show))
+        (let ((line-start (lambda (id) (save-excursion (drover-sidebar-test--goto id) (point)))))
+          ;; The parent alone, not the subagent below it.
+          (set-window-buffer first (get-buffer-create "*session parent*"))
+          (drover-sidebar--windows-changed)
+          (let ((overlay (car drover-sidebar--current-overlays)))
+            (should (= (overlay-start overlay) (funcall line-start "parent")))
+            (should (= (overlay-end overlay) (funcall line-start "asking"))))
+          ;; The subagent with its summary.
+          (set-window-buffer first (get-buffer-create "*session asking*"))
+          (drover-sidebar--windows-changed)
+          (let ((overlay (car drover-sidebar--current-overlays)))
+            (should (= (overlay-start overlay) (funcall line-start "asking")))
+            (should (= (overlay-end overlay)
+                       (save-excursion (goto-char (overlay-start overlay)) (forward-line 2) (point))))))))))
+
 (ert-deftest drover-sidebar-test-no-highlight-without-buffers ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)
     (drover-sidebar-test--main)
@@ -795,7 +1172,21 @@ Each shows its own buffer."
         (should (= drover-sidebar--width (+ before 6)))
         (drover-sidebar-test--goto "a")
         (should (equal (get-text-property (- (line-end-position) 3) 'display)
-                       `(space :align-to ,(+ before 4))))))))
+                       `(space :align-to (,(+ before 4)))))))))
+
+(ert-deftest drover-sidebar-test-redraw-on-text-scale ()
+  (drover-sidebar-test-with (drover-sidebar-test--sample)
+    (drover-sidebar)
+    (with-current-buffer drover-sidebar-buffer-name
+      (setq drover-sidebar--stale t)
+      (text-scale-increase 1)
+      (should-not drover-sidebar--stale)
+      (should (string-search "Session ask" (buffer-string))))
+    ;; A hidden sidebar redraws once shown.
+    (drover-sidebar)
+    (with-current-buffer drover-sidebar-buffer-name
+      (text-scale-increase 1)
+      (should drover-sidebar--stale))))
 
 (ert-deftest drover-sidebar-test-revert-buffer ()
   (drover-sidebar-test-with (drover-sidebar-test--sample)

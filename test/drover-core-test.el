@@ -181,5 +181,102 @@
       (setq drover-session-at-point-function (lambda () session))
       (should (eq (drover-session-at-point) session)))))
 
+;;;; Trees
+
+(defun drover-test-tree-shape (nodes)
+  "Return trees NODES as nested lists of session identifiers."
+  (mapcar (lambda (node)
+            (cons (drover-session-id (drover-node-session node))
+                  (drover-test-tree-shape (drover-node-children node))))
+          nodes))
+
+(ert-deftest drover-test-tree-nests-subagents ()
+  (let ((nodes (drover-tree
+                (list (drover-test-session "child" :parent "root" :status 'working :updated 5.0)
+                      (drover-test-session "root" :status 'idle :updated 1.0)
+                      (drover-test-session "grandchild" :parent "child" :status 'idle)
+                      (drover-test-session "other" :status 'working :updated 3.0)))))
+    (should (equal (drover-test-tree-shape nodes)
+                   '(("root" ("child" ("grandchild"))) ("other"))))
+    (should (eq (drover-node-status (car nodes)) 'working))
+    (should (= (drover-node-updated (car nodes)) 5.0))))
+
+(ert-deftest drover-test-tree-rolls-up-attention ()
+  "A parent whose subagent waits for the user ranks with the waiting sessions."
+  (let ((nodes (drover-tree
+                (list (drover-test-session "busy" :status 'working)
+                      (drover-test-session "parent" :status 'done :since 50.0)
+                      (drover-test-session "asking" :parent "parent" :status 'waiting :since 30.0)
+                      (drover-test-session "waiting" :status 'waiting :since 40.0)))))
+    (should (equal (drover-test-tree-shape nodes)
+                   '(("parent" ("asking")) ("waiting") ("busy"))))
+    (should (eq (drover-node-status (car nodes)) 'waiting))
+    (should (= (drover-node-since (car nodes)) 30.0))
+    (should (equal (mapcar #'car (drover-group-trees-by-status nodes)) '(waiting working)))))
+
+(ert-deftest drover-test-tree-orphans-and-cycles ()
+  (let ((nodes (drover-tree
+                (list (drover-test-session "orphan" :parent "gone")
+                      (drover-test-session "self" :parent "self")
+                      (drover-test-session "a" :parent "b")
+                      (drover-test-session "b" :parent "a")))))
+    ;; An orphan and a self-parent are trees of their own, and so is a cycle.
+    (should (equal (sort (mapcar #'car (drover-test-tree-shape nodes)) #'string<)
+                   '("a" "orphan" "self")))
+    (should (equal (length (drover-tree-sessions nodes)) 4))))
+
+(ert-deftest drover-test-tree-other-backend-is-not-a-parent ()
+  (let ((nodes (drover-tree
+                (list (drover-test-session "root")
+                      (drover-session-create :backend 'other :id "child" :parent "root")))))
+    (should (= (length nodes) 2))))
+
+(ert-deftest drover-test-tree-visible ()
+  (let* ((nodes (drover-tree
+                 (list (drover-test-session "root")
+                       (drover-test-session "quiet" :parent "root" :status 'idle)
+                       (drover-test-session "asking" :parent "root" :status 'waiting)
+                       (drover-test-session "deep" :parent "quiet" :status 'done)))))
+    (let ((drover-show-children nil))
+      ;; A quiet subagent stays when a session under it needs the user.
+      (should (equal (drover-test-tree-shape (drover-tree-visible nodes))
+                     '(("root" ("asking") ("quiet" ("deep"))))))
+      (should (= (drover-tree-hidden-count nodes) 0)))
+    (let ((drover-show-children nil)
+          (nodes (drover-tree (list (drover-test-session "root")
+                                    (drover-test-session "quiet" :parent "root")))))
+      (should (equal (drover-test-tree-shape (drover-tree-visible nodes)) '(("root"))))
+      (should (= (drover-tree-hidden-count nodes) 1)))
+    (let ((drover-show-children t))
+      (should (equal (drover-tree-sessions (drover-tree-visible nodes))
+                     (drover-tree-sessions nodes))))))
+
+(ert-deftest drover-test-tree-keeps-order-of-ties ()
+  "Trees and siblings that rank alike keep the backend's order, as `drover-sort' does."
+  (let ((nodes (drover-tree (list (drover-test-session "a")
+                                  (drover-test-session "b")
+                                  (drover-test-session "a1" :parent "a")
+                                  (drover-test-session "a2" :parent "a")
+                                  (drover-test-session "c")))))
+    (should (equal (drover-test-tree-shape nodes) '(("a" ("a1") ("a2")) ("b") ("c"))))))
+
+(ert-deftest drover-test-tree-visible-ranks-by-what-shows ()
+  "A hidden subagent does not place its parent in the subagent's group."
+  (let* ((drover-show-children nil)
+         (nodes (drover-tree (list (drover-test-session "parent" :status 'idle)
+                                   (drover-test-session "busy" :parent "parent" :status 'working)))))
+    (should (eq (drover-node-status (car nodes)) 'working))
+    (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'idle))
+    (let ((drover-show-children t))
+      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'working)))))
+
+(ert-deftest drover-test-group-trees-by-project ()
+  (let ((groups (drover-group-trees-by-project
+                 (drover-tree (list (drover-test-session "a1" :project "a" :status 'idle)
+                                    (drover-test-session "b1" :project "b" :status 'waiting :since 1.0)
+                                    (drover-test-session "child" :parent "a1" :project "b" :status 'done))))))
+    (should (equal (mapcar #'car groups) '("b" "a")))
+    (should (equal (drover-test-tree-shape (cdr (assoc "a" groups))) '(("a1" ("child")))))))
+
 (provide 'drover-core-test)
 ;;; drover-core-test.el ends here

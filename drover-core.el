@@ -103,21 +103,28 @@ Each is a plist with :kind, `permission' or `question', and :summary.")
   "Return TIME, or a time later than any for nil."
   (or time most-positive-fixnum))
 
+(defun drover--before-p (status-a since-a updated-a status-b since-b updated-b)
+  "Return non-nil when a session or tree A comes before another, B.
+STATUS-A, SINCE-A and UPDATED-A describe A: its status, the time it
+began and the time A was last updated; STATUS-B, SINCE-B and UPDATED-B
+describe B.  The more urgent status comes first; within a status needing
+the user, the longest wait; within another, the latest update."
+  (let ((rank-a (drover-status-rank status-a))
+        (rank-b (drover-status-rank status-b)))
+    (cond
+     ((/= rank-a rank-b) (< rank-a rank-b))
+     ((memq status-a drover-attention-statuses)
+      (< (drover--time since-a) (drover--time since-b)))
+     (t (> (or updated-a 0) (or updated-b 0))))))
+
 (defun drover-sort (sessions)
   "Return SESSIONS, most urgent first.
 Within a status, sessions that need the user come longest wait first;
 the others most recently updated first."
   (sort (copy-sequence sessions)
         (lambda (a b)
-          (let ((rank-a (drover-status-rank (drover-session-status a)))
-                (rank-b (drover-status-rank (drover-session-status b))))
-            (cond
-             ((/= rank-a rank-b) (< rank-a rank-b))
-             ((drover-session-attention-p a)
-              (< (drover--time (drover-session-since a))
-                 (drover--time (drover-session-since b))))
-             (t (> (or (drover-session-updated a) 0)
-                   (or (drover-session-updated b) 0))))))))
+          (drover--before-p (drover-session-status a) (drover-session-since a) (drover-session-updated a)
+                            (drover-session-status b) (drover-session-since b) (drover-session-updated b)))))
 
 (defun drover-group-by-status (sessions)
   "Return SESSIONS sorted and grouped as an alist (STATUS . SESSIONS).
@@ -142,6 +149,134 @@ before another when its most urgent session does."
         (if group
             (setcdr group (cons session (cdr group)))
           (push (list project session) groups))))
+    (mapcar (lambda (group) (cons (car group) (nreverse (cdr group))))
+            (nreverse groups))))
+
+;;;; Trees
+
+(cl-defstruct (drover-node (:constructor drover-node--create)
+                           (:copier nil))
+  "A session with the sessions of its subagents, nested."
+  (session nil :documentation "The `drover-session' at the root of the tree.")
+  (children nil :documentation "Trees of the session's subagents, most urgent first.")
+  (status nil :documentation "The most urgent status in the tree.")
+  (since nil :documentation "When the oldest wait of that status began, or nil.")
+  (updated nil :documentation "The latest activity in the tree, or nil."))
+
+(defun drover--node-before-p (a b)
+  "Return non-nil when tree A comes before tree B."
+  (drover--before-p (drover-node-status a) (drover-node-since a) (drover-node-updated a)
+                    (drover-node-status b) (drover-node-since b) (drover-node-updated b)))
+
+(defun drover--node (session children)
+  "Return the tree of SESSION with CHILDREN, trees of its subagents."
+  (let* ((children (sort children #'drover--node-before-p))
+         (status (drover-session-status session))
+         (since (drover-session-since session))
+         (updated (drover-session-updated session)))
+    (dolist (child children)
+      (let ((rank (drover-status-rank (drover-node-status child))))
+        (cond ((< rank (drover-status-rank status))
+               (setq status (drover-node-status child)
+                     since (drover-node-since child)))
+              ((and (= rank (drover-status-rank status)) (drover-node-since child))
+               (setq since (min (drover--time since) (drover-node-since child))))))
+      (when (drover-node-updated child)
+        (setq updated (max (or updated 0) (drover-node-updated child)))))
+    (drover-node--create :session session :children children :status status
+                         :since (unless (eql since most-positive-fixnum) since)
+                         :updated updated)))
+
+(defun drover-tree (sessions)
+  "Return SESSIONS as trees, each subagent under its parent, most urgent first.
+A tree ranks by the most urgent status within it, so a parent whose
+subagent waits for the user comes with the sessions that need the user.
+A subagent whose parent is not among SESSIONS is a tree of its own.
+Trees and siblings that rank alike keep the order of SESSIONS."
+  (let ((by-key (make-hash-table :test #'equal))
+        (children (make-hash-table :test #'equal))
+        (roots nil))
+    (dolist (session sessions)
+      (puthash (drover-session-key session) session by-key))
+    (dolist (session sessions)
+      (let ((parent (and (drover-session-parent session)
+                         (cons (drover-session-backend session) (drover-session-parent session)))))
+        (if (and parent (gethash parent by-key)
+                 (not (equal parent (drover-session-key session))))
+            (push session (gethash parent children))
+          (push session roots))))
+    (setq roots (nreverse roots))
+    (let ((visiting (make-hash-table :test #'equal))
+          (nodes nil))
+      (cl-labels ((build (session)
+                    (let ((key (drover-session-key session)))
+                      ;; A cycle of parents would otherwise recurse forever.
+                      (puthash key t visiting)
+                      (drover--node session
+                                    (delq nil (mapcar (lambda (child)
+                                                        (unless (gethash (drover-session-key child) visiting)
+                                                          (build child)))
+                                                      (reverse (gethash key children))))))))
+        (setq nodes (mapcar #'build roots))
+        ;; Sessions whose parents form a cycle reach no root: each cycle
+        ;; becomes a tree of its own rather than disappearing.
+        (dolist (session sessions)
+          (unless (gethash (drover-session-key session) visiting)
+            (setq nodes (append nodes (list (build session))))))
+        (sort nodes #'drover--node-before-p)))))
+
+(defun drover-tree-sessions (nodes)
+  "Return the sessions of the trees NODES, each before its subagents."
+  (mapcan (lambda (node)
+            (cons (drover-node-session node) (drover-tree-sessions (drover-node-children node))))
+          nodes))
+
+(defun drover-tree-visible (nodes)
+  "Return trees NODES without the subtrees of subagents to hide.
+A subagent tree is kept when `drover-show-children' is non-nil or when
+some session in it needs the user.  Each tree ranks by what remains
+visible, so a hidden subagent never places its parent in a group its
+own status does not explain."
+  (sort (mapcar (lambda (node)
+                  (drover--node
+                   (drover-node-session node)
+                   (drover-tree-visible
+                    (seq-filter (lambda (child)
+                                  (or drover-show-children
+                                      (memq (drover-node-status child) drover-attention-statuses)))
+                                (drover-node-children node)))))
+                nodes)
+        #'drover--node-before-p))
+
+(defun drover-tree-hidden-count (nodes)
+  "Return how many subagent sessions of trees NODES are hidden.
+They are those `drover-tree-visible' leaves out."
+  (- (length (drover-tree-sessions nodes))
+     (length (drover-tree-sessions (drover-tree-visible nodes)))))
+
+(defun drover-group-trees-by-status (nodes)
+  "Return trees NODES grouped as an alist (STATUS . NODES).
+A tree goes in the group of its most urgent status; statuses come in
+`drover-status-order', and empty groups are left out."
+  (delq nil
+        (mapcar (lambda (status)
+                  (when-let* ((group (seq-filter (lambda (node) (eq (drover-node-status node) status))
+                                                 nodes)))
+                    (cons status group)))
+                drover-status-order)))
+
+(defun drover-group-trees-by-project (nodes)
+  "Return trees NODES grouped as an alist (PROJECT . NODES).
+A tree goes with the project of its root session; PROJECT is nil for
+sessions without one.  A project comes before another when its most
+urgent tree does."
+  (let (groups)
+    (dolist (node nodes)
+      (let* ((project (drover-session-project (drover-node-session node)))
+             (group (assoc project groups)))
+        (if group
+            (setcdr group (cons node (cdr group)))
+          (push (list project node) groups))))
     (mapcar (lambda (group) (cons (car group) (nreverse (cdr group))))
             (nreverse groups))))
 

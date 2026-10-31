@@ -19,6 +19,12 @@
 
 ;; The dashboard is drawn in its buffer without displaying it, except
 ;; where a test is about windows: visibility, window point and start.
+;;
+;; Tests run in batch, on a text terminal frame, where a pixel is a
+;; character cell: `drover-dashboard-test-displayed' turns each aligned
+;; space into the spaces a terminal draws for it, so lines read as the
+;; user sees them.  Alignment with proportional widths is tested with a
+;; fake measure, `drover-dashboard-test-with-proportional-font'.
 
 ;;; Code:
 
@@ -31,6 +37,10 @@
   `(drover-test-with-backend ,sessions
      (let ((drover-dashboard-age-refresh-interval nil)
            (drover-dashboard-buffer-name " *drover-test*")
+           ;; Readable glyphs, one column wide in every Emacs, whatever
+           ;; the defaults.
+           (drover-status-glyphs '((waiting . "!") (failed . "✗") (done . "✓")
+                                   (retrying . "↻") (working . "◐") (idle . "·")))
            (buffer nil))
        (unwind-protect
            (progn
@@ -40,6 +50,21 @@
                ,@body))
          (when (buffer-live-p buffer)
            (kill-buffer buffer))))))
+
+(defun drover-dashboard-test-fake-width (string)
+  "Return the width of STRING in a fake proportional font.
+An i is 3 pixels wide, an m 12, a space 4, and any other character 7."
+  (apply #'+ (mapcar (lambda (char)
+                       (pcase char (?i 3) (?m 12) (?\s 4) (_ 7)))
+                     string)))
+
+(defmacro drover-dashboard-test-with-proportional-font (&rest body)
+  "Run BODY with text measured in `drover-dashboard-test-fake-width'.
+Lines may take 1000 pixels."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'drover-dashboard--pixel-width) #'drover-dashboard-test-fake-width)
+             ((symbol-function 'drover-dashboard--line-width) (lambda () 1000)))
+     ,@body))
 
 (defun drover-dashboard-test-ago (seconds)
   "Return the float time SECONDS ago."
@@ -51,6 +76,10 @@
     (setf (drover-session-title session) title)
     session))
 
+(defun drover-dashboard-test-find (id)
+  "Return the fake session ID the backend serves."
+  (seq-find (lambda (session) (equal (drover-session-id session) id)) drover-test-sessions))
+
 (defun drover-dashboard-test-groups ()
   "Return the groups of the dashboard as a list of (VALUE . IDS)."
   (mapcar (lambda (group)
@@ -59,9 +88,13 @@
                           (oref group children))))
           (drover-dashboard--groups)))
 
+(defun drover-dashboard-test-section (id)
+  "Return the section of the session ID of the fake backend."
+  (drover-dashboard--find-session (cons 'fake id)))
+
 (defun drover-dashboard-test-goto (id)
   "Move point to the heading of the session ID of the fake backend."
-  (goto-char (oref (drover-dashboard--find-session (cons 'fake id)) start)))
+  (goto-char (oref (drover-dashboard-test-section id) start)))
 
 (defun drover-dashboard-test-goto-group (value)
   "Move point to the heading of the group whose value is VALUE."
@@ -69,15 +102,62 @@
                              (drover-dashboard--groups))
                    start)))
 
+(defun drover-dashboard-test-align-to (position &optional object)
+  "Return the pixel position the space at POSITION in OBJECT aligns to, or nil."
+  (pcase (get-text-property position 'display object)
+    (`(space :align-to (,x)) x)))
+
+(defun drover-dashboard-test-displayed (string)
+  "Return STRING as a text terminal draws it.
+Each space aligned to a pixel position becomes the spaces reaching it:
+on a terminal, a pixel is a character cell.  Aligned cells must not
+overlap."
+  (let ((column 0)
+        (chunks nil))
+    (dotimes (index (length string))
+      (let ((char (aref string index))
+            (x (drover-dashboard-test-align-to index string)))
+        (cond (x
+               (should (>= x column))
+               (push (make-string (- x column) ?\s) chunks)
+               (setq column x))
+              ((eq char ?\n)
+               (push "\n" chunks)
+               (setq column 0))
+              (t
+               (push (string char) chunks)
+               (setq column (+ column (char-width char)))))))
+    (apply #'concat (nreverse chunks))))
+
 (defun drover-dashboard-test-line ()
-  "Return the line at point, without properties."
-  (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+  "Return the line at point as a text terminal draws it."
+  (drover-dashboard-test-displayed (buffer-substring (line-beginning-position) (line-end-position))))
 
 (defun drover-dashboard-test-heading (id)
-  "Return the heading line of session ID."
+  "Return the heading line of session ID as a text terminal draws it."
   (save-excursion
     (drover-dashboard-test-goto id)
     (drover-dashboard-test-line)))
+
+(defun drover-dashboard-test-cells (id)
+  "Return the cells of the heading of session ID, as a list of (X . TEXT).
+X is the pixel position a cell is aligned to, TEXT what follows it up
+to the next cell, with its properties."
+  (save-excursion
+    (drover-dashboard-test-goto id)
+    (let ((line (buffer-substring (line-beginning-position) (line-end-position)))
+          (cells nil))
+      (should (drover-dashboard-test-align-to 0 line))
+      (dotimes (index (length line))
+        (if-let* ((x (drover-dashboard-test-align-to index line)))
+            (push (cons x "") cells)
+          (setcdr (car cells) (concat (cdar cells) (substring line index (1+ index))))))
+      (nreverse cells))))
+
+(defun drover-dashboard-test-cell-at (id text)
+  "Return the pixel position of the cell of session ID holding TEXT."
+  (car (seq-find (lambda (cell) (string-search text (cdr cell)))
+                 (drover-dashboard-test-cells id))))
 
 (defun drover-dashboard-test-id-at-point ()
   "Return the identifier of the session whose section holds point, or nil."
@@ -85,25 +165,29 @@
     (cdr (oref section value))))
 
 (defun drover-dashboard-test-visible-text ()
-  "Return the text of the dashboard that is not invisible."
+  "Return the text of the dashboard that is not invisible, as drawn."
   (let ((position (point-min))
         (chunks nil))
     (while (< position (point-max))
       (let ((next (next-single-char-property-change position 'invisible nil (point-max))))
         (unless (invisible-p position)
-          (push (buffer-substring-no-properties position next) chunks))
+          (push (buffer-substring position next) chunks))
         (setq position next)))
-    (apply #'concat (nreverse chunks))))
+    (drover-dashboard-test-displayed (apply #'concat (nreverse chunks)))))
 
 (defun drover-dashboard-test-section-hidden-p (id)
   "Return non-nil when the section of session ID is collapsed."
-  (oref (drover-dashboard--find-session (cons 'fake id)) hidden))
+  (oref (drover-dashboard-test-section id) hidden))
 
 (defun drover-dashboard-test-group-hidden-p (value)
   "Return non-nil when the group whose value is VALUE is collapsed."
   (oref (seq-find (lambda (group) (equal (oref group value) value))
                   (drover-dashboard--groups))
         hidden))
+
+(defun drover-dashboard-test-heading-visible-p (id)
+  "Return non-nil when the heading of session ID is visible."
+  (not (invisible-p (oref (drover-dashboard-test-section id) start))))
 
 (defun drover-dashboard-test-sample ()
   "Return a sample of sessions, one or more of each status."
@@ -112,6 +196,16 @@
         (drover-test-session "wait2" :status 'waiting :since (drover-dashboard-test-ago 60) :project "p")
         (drover-test-session "done" :status 'done :since (drover-dashboard-test-ago 30))
         (drover-test-session "wait1" :status 'waiting :since (drover-dashboard-test-ago 600) :project "q")))
+
+(defun drover-dashboard-test-family ()
+  "Return a parent with subagents two levels deep, and another tree.
+The parent works, its subagent waits for the user, and the subagent's
+own subagent is done; the other tree works and has a quiet subagent."
+  (list (drover-test-session "root" :status 'working :updated (drover-dashboard-test-ago 10))
+        (drover-test-session "sub" :parent "root" :status 'waiting :since (drover-dashboard-test-ago 60))
+        (drover-test-session "deep" :parent "sub" :status 'done :since (drover-dashboard-test-ago 30))
+        (drover-test-session "other" :status 'working :updated (drover-dashboard-test-ago 5))
+        (drover-test-session "quiet" :parent "other" :status 'idle)))
 
 ;;;; Grouping
 
@@ -144,10 +238,10 @@
     (should (seq-every-p (lambda (group) (object-of-class-p group 'drover-dashboard-project-section))
                          (drover-dashboard--groups)))
     (drover-dashboard-test-goto-group "p")
-    (should (equal (drover-dashboard-test-line) "p (3)  ⚑1 ✗1"))
+    (should (equal (drover-dashboard-test-line) "p (3)  !1 ✗1"))
     (drover-dashboard-test-goto-group nil)
     (should (equal (drover-dashboard-test-line) "No project (1)  ✓1"))
-    (should (string-prefix-p "  ⚑ Session wait2" (drover-dashboard-test-heading "wait2")))
+    (should (string-prefix-p "  ! Session wait2" (drover-dashboard-test-heading "wait2")))
     (should (string-prefix-p "  · Session idle" (drover-dashboard-test-heading "idle")))
     ;; The heading names the project: lines keep only the branch.
     (should (string-match-p "Session fail +main +5s" (drover-dashboard-test-heading "fail")))
@@ -167,13 +261,149 @@
                                             (drover-test-session "sub" :parent "work")))
     (goto-char (point-min))
     (should (equal (drover-dashboard-test-line)
-                   "⚑ 2 needs you   ✗ 1 failed   ✓ 1 done   6 sessions, 1 subagent hidden"))
+                   "! 2 needs you   ✗ 1 failed   ✓ 1 done   6 sessions, 1 subagent hidden"))
     (should (null (drover-dashboard-test-id-at-point)))))
 
 (ert-deftest drover-dashboard-test-header-nothing-needs-you ()
   (drover-dashboard-test-with (list (drover-test-session "w" :status 'working))
     (goto-char (point-min))
     (should (equal (drover-dashboard-test-line) "Nothing needs you   1 session"))))
+
+;;;; Subagents
+
+(ert-deftest drover-dashboard-test-subagents-under-parent ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    ;; The tree of root goes with its waiting subagent; quiet is hidden.
+    (should (equal (drover-dashboard-test-groups)
+                   '((waiting "root" "sub" "deep") (working "other"))))
+    ;; Each level is indented one step deeper, each with its own glyph;
+    ;; ages line up past the deepest title.
+    (should (equal (drover-dashboard-test-heading "root") "  ◐ Session root      10s"))
+    (should (equal (drover-dashboard-test-heading "sub") "    ! Session sub      1m"))
+    (should (equal (drover-dashboard-test-heading "deep") "      ✓ Session deep  30s"))
+    (should (equal (drover-dashboard-test-heading "other") "  ◐ Session other      5s"))
+    (let ((step (plist-get (drover-dashboard--metrics 0) :step))
+          (margin (car (car (drover-dashboard-test-cells "root")))))
+      (should (= margin (* drover-dashboard--margin (drover-dashboard--char-width))))
+      (should (= (car (car (drover-dashboard-test-cells "sub"))) (+ margin step)))
+      (should (= (car (car (drover-dashboard-test-cells "deep"))) (+ margin step step)))
+      (should (= (car (car (drover-dashboard-test-cells "other"))) margin)))
+    (should (eq (oref (drover-dashboard-test-section "sub") parent)
+                (oref (drover-dashboard-test-section "root") parent)))))
+
+(ert-deftest drover-dashboard-test-tree-in-group-of-urgent-subagent ()
+  (drover-dashboard-test-with
+      (list (drover-test-session "parent" :status 'done :since (drover-dashboard-test-ago 50))
+            (drover-test-session "asking" :parent "parent" :status 'waiting
+                                 :since (drover-dashboard-test-ago 30))
+            (drover-test-session "alone" :status 'waiting :since (drover-dashboard-test-ago 40)))
+    ;; Within the group, trees rank by their oldest wait.
+    (should (equal (drover-dashboard-test-groups) '((waiting "alone" "parent" "asking"))))
+    (drover-dashboard-test-goto-group 'waiting)
+    (should (equal (drover-dashboard-test-line) "Needs you (3)"))
+    ;; The header counts sessions, not trees.
+    (goto-char (point-min))
+    (should (equal (drover-dashboard-test-line) "! 2 needs you   ✓ 1 done   3 sessions"))
+    (should (string-prefix-p "  ✓ Session parent" (drover-dashboard-test-heading "parent")))))
+
+(ert-deftest drover-dashboard-test-orphan-subagent ()
+  (drover-dashboard-test-with (list (drover-test-session "child" :parent "gone" :status 'working))
+    (should (equal (drover-dashboard-test-groups) '((working "child"))))
+    (should (string-prefix-p "  ◐ Session child" (drover-dashboard-test-heading "child")))
+    (goto-char (point-min))
+    (should (equal (drover-dashboard-test-line) "Nothing needs you   1 session"))
+    (drover-dashboard-test-goto "child")
+    (magit-section-show (magit-current-section))
+    (should (string-match-p "^ +Subagent of +gone$" (drover-dashboard-test-visible-text)))))
+
+(ert-deftest drover-dashboard-test-children-toggle ()
+  (drover-dashboard-test-with (list (drover-test-session "root" :status 'working)
+                                    (drover-test-session "child" :parent "root" :status 'working)
+                                    (drover-test-session "asking" :parent "root" :status 'waiting))
+    (should (equal (drover-dashboard-test-groups) '((waiting "root" "asking"))))
+    (goto-char (point-min))
+    (should (string-suffix-p "2 sessions, 1 subagent hidden" (drover-dashboard-test-line)))
+    (drover-dashboard-test-press "c")
+    (should (local-variable-p 'drover-show-children))
+    (should drover-show-children)
+    (should (equal (drover-dashboard-test-groups) '((waiting "root" "asking" "child"))))
+    (goto-char (point-min))
+    (should (string-suffix-p "   3 sessions" (drover-dashboard-test-line)))
+    (should (string-prefix-p "    ◐ Session child" (drover-dashboard-test-heading "child")))
+    (with-temp-buffer
+      (should-not drover-show-children))
+    (drover-dashboard-test-press "c")
+    (should-not drover-show-children)
+    (should (equal (drover-dashboard-test-groups) '((waiting "root" "asking"))))))
+
+(ert-deftest drover-dashboard-test-parent-details-keep-subagents ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (drover-dashboard-test-goto "root")
+    (magit-section-toggle (magit-current-section))
+    (should-not (drover-dashboard-test-section-hidden-p "root"))
+    ;; The details come between the parent and its subagents.
+    (should (string-match-p "  ◐ Session root +10s\n    Status +Working for 10s\n\\(.*\n\\)*    ! Session sub"
+                            (drover-dashboard-test-visible-text)))
+    (should (< (oref (drover-dashboard-test-section "root") end)
+               (1+ (oref (drover-dashboard-test-section "sub") start))))
+    (drover-dashboard-test-goto "root")
+    (magit-section-toggle (magit-current-section))
+    (should (drover-dashboard-test-section-hidden-p "root"))
+    ;; Hiding them leaves the subagents in sight.
+    (should (drover-dashboard-test-heading-visible-p "sub"))
+    (should (drover-dashboard-test-heading-visible-p "deep"))
+    (should-not (string-match-p "Status" (drover-dashboard-test-visible-text)))))
+
+(ert-deftest drover-dashboard-test-nested-collapse-state-across-refresh ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (drover-dashboard-test-goto "sub")
+    (magit-section-show (magit-current-section))
+    ;; The tree moves from Needs you to Failed.
+    (setf (drover-session-status (drover-dashboard-test-find "sub")) 'failed)
+    (drover-dashboard-refresh)
+    (should (equal (drover-dashboard-test-groups)
+                   '((failed "root" "sub" "deep") (working "other"))))
+    (should-not (drover-dashboard-test-section-hidden-p "sub"))
+    (should (drover-dashboard-test-section-hidden-p "root"))
+    (should (drover-dashboard-test-section-hidden-p "deep"))
+    (should (string-match-p "^      Status +Failed for 1m$" (drover-dashboard-test-visible-text)))
+    ;; And when the parent's details open and close around it.
+    (drover-dashboard-test-goto "root")
+    (magit-section-show (magit-current-section))
+    (drover-dashboard-test-goto "root")
+    (magit-section-hide (magit-current-section))
+    (drover-dashboard-refresh)
+    (should-not (drover-dashboard-test-section-hidden-p "sub"))))
+
+(ert-deftest drover-dashboard-test-refresh-follows-nested-session ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (drover-dashboard-test-goto "deep")
+    (forward-char 3)
+    (let ((offset (- (point) (line-beginning-position))))
+      ;; A new tree above, and deep's tree moves to Failed.
+      (push (drover-test-session "new" :status 'waiting) drover-test-sessions)
+      (setf (drover-session-status (drover-dashboard-test-find "sub")) 'failed)
+      (drover-dashboard-refresh)
+      (should (equal (mapcar #'car (drover-dashboard-test-groups)) '(waiting failed working)))
+      (should (equal (drover-dashboard-test-id-at-point) "deep"))
+      (should (= (- (point) (line-beginning-position)) offset)))))
+
+(ert-deftest drover-dashboard-test-project-grouping-nests-subagents ()
+  (drover-dashboard-test-with
+      (list (drover-test-session "root" :project "p" :branch "main" :status 'working)
+            (drover-test-session "elsewhere" :parent "root" :project "q" :branch "dev"
+                                 :status 'waiting :since (drover-dashboard-test-ago 20))
+            (drover-test-session "here" :parent "root" :project "p" :branch "feat"
+                                 :status 'waiting :since (drover-dashboard-test-ago 10)))
+    (drover-dashboard-toggle-grouping)
+    ;; A subagent stays with its parent, whatever its own project.
+    (should (equal (drover-dashboard-test-groups) '(("p" "root" "elsewhere" "here"))))
+    (drover-dashboard-test-goto-group "p")
+    (should (equal (drover-dashboard-test-line) "p (3)  !2"))
+    (should (string-match-p "Session root +main\\'" (drover-dashboard-test-heading "root")))
+    (should (string-match-p "Session here +feat +10s\\'" (drover-dashboard-test-heading "here")))
+    ;; Another project than the group's is named.
+    (should (string-match-p "Session elsewhere +q:dev +20s\\'" (drover-dashboard-test-heading "elsewhere")))))
 
 ;;;; Lines
 
@@ -182,16 +412,35 @@
       (list (drover-test-session "s" :status 'waiting :since (drover-dashboard-test-ago 300)
                                  :project "drover" :branch "main"
                                  :requests '((:kind permission :summary "bash: make"))))
-    (let ((line (drover-dashboard-test-heading "s")))
-      (should (string-match-p "\\`  ⚑ Session s  drover:main  5m  permit: bash: make\\'" line)))
+    (should (equal (drover-dashboard-test-heading "s") "  ! Session s  drover:main  5m  permit: bash: make"))
     (drover-dashboard-test-goto "s")
-    (let ((glyph (+ (point) 2)))
-      (should (eq (get-text-property glyph 'font-lock-face) 'drover-waiting))
-      (should-not (get-text-property glyph 'face)))
+    (let ((glyph (1+ (point))))
+      (should (equal (buffer-substring-no-properties glyph (1+ glyph)) "!"))
+      (should (eq (get-text-property glyph 'font-lock-face) 'drover-waiting)))
     (search-forward "drover:main")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
     (search-forward "5m")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))))
+
+(ert-deftest drover-dashboard-test-wide-glyph-deepens-step ()
+  "A step of indentation is as wide as the widest glyph and a space."
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (setq-local drover-status-glyphs (cons '(waiting . "待") drover-status-glyphs))
+    (drover-dashboard-refresh)
+    (should (= (plist-get (drover-dashboard--metrics 0) :step) 3))
+    ;; A subagent's glyph never starts left of its parent's title.
+    (should (string-prefix-p "  ◐ Session root" (drover-dashboard-test-heading "root")))
+    (should (string-prefix-p "     待 Session sub" (drover-dashboard-test-heading "sub")))
+    (should (string-prefix-p "        ✓ Session deep" (drover-dashboard-test-heading "deep")))))
+
+(ert-deftest drover-dashboard-test-one-space-after-glyph ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (drover-dashboard-test-press "c")
+    (dolist (id '("root" "sub" "deep" "other" "quiet"))
+      (let ((status (cdr (car (drover-dashboard-test-cells id)))))
+        ;; The glyph, one plain space, then the title.
+        (should (string-match-p "\\`[!✓◐·] Session" status))
+        (should-not (get-text-property 1 'display status))))))
 
 (ert-deftest drover-dashboard-test-columns-align ()
   (drover-dashboard-test-with
@@ -208,6 +457,70 @@
       (should (string-suffix-p "5s" a))
       (should (string-suffix-p "2h  Thinking" b)))))
 
+(ert-deftest drover-dashboard-test-pixel-alignment ()
+  "Columns line up in pixels with characters of different widths."
+  (drover-dashboard-test-with-proportional-font
+    (drover-dashboard-test-with
+        (list (drover-dashboard-test-titled "a" "mmmm" :status 'working :project "iii"
+                                            :updated (drover-dashboard-test-ago 5) :detail "Busy")
+              (drover-dashboard-test-titled "b" "iiiiiiii" :status 'working :project "mm" :branch "x"
+                                            :updated (drover-dashboard-test-ago 7200))
+              (drover-dashboard-test-titled "c" "Sub" :parent "b" :status 'waiting :project "p"
+                                            :since (drover-dashboard-test-ago 30) :detail "Asks"))
+      (should (equal (drover-dashboard-test-groups) '((waiting "b" "c") (working "a"))))
+      (let* ((metrics (drover-dashboard--metrics 0))
+             (gap (plist-get metrics :gap))
+             (margin (plist-get metrics :margin))
+             (cells (mapcar (lambda (id) (cons id (drover-dashboard-test-cells id))) '("a" "b" "c")))
+             (title-ends (mapcar (lambda (entry)
+                                   (let ((cell (cadr entry)))
+                                     (+ (car cell) (drover-dashboard-test-fake-width (cdr cell)))))
+                                 cells))
+             (location (+ (apply #'max title-ends) gap)))
+        (should (= (drover-dashboard-test-fake-width "x") (plist-get metrics :char)))
+        ;; Status glyphs: roots at the margin, the subagent one step in.
+        (should (= (car (nth 1 (assoc "a" cells))) margin))
+        (should (= (car (nth 1 (assoc "b" cells))) margin))
+        (should (= (car (nth 1 (assoc "c" cells))) (+ margin (plist-get metrics :step))))
+        ;; Locations begin at one position, past the widest title.
+        (should (= (drover-dashboard-test-cell-at "a" "iii") location))
+        (should (= (drover-dashboard-test-cell-at "b" "mm:x") location))
+        (should (= (drover-dashboard-test-cell-at "c" "p") location))
+        ;; Ages end at one position.
+        (let ((ends (mapcar (lambda (entry)
+                              (let ((cell (seq-find (lambda (cell)
+                                                      (string-match-p "\\`[0-9]+[smhd]\\'" (cdr cell)))
+                                                    (cdr entry))))
+                                (+ (car cell) (drover-dashboard-test-fake-width (cdr cell)))))
+                            cells)))
+          (should (= (length (seq-uniq ends)) 1))
+          ;; Summaries begin at one position, past the ages.
+          (should (= (drover-dashboard-test-cell-at "a" "Busy") (+ (car ends) gap)))
+          (should (= (drover-dashboard-test-cell-at "c" "Asks") (+ (car ends) gap))))))))
+
+(ert-deftest drover-dashboard-test-truncate-in-pixels ()
+  (drover-dashboard-test-with-proportional-font
+    (let ((dim (drover-face "mmmmii" 'drover-dim)))
+      (should (eq (drover-dashboard--truncate dim 100) dim))
+      ;; m m and the ellipsis: 12 + 12 + 7.
+      (let ((cut (drover-dashboard--truncate dim 33)))
+        (should (equal cut "mm…"))
+        (should (<= (drover-dashboard-test-fake-width cut) 33))
+        (should (eq (get-text-property 2 'face cut) 'drover-dim)))
+      (should (equal (drover-dashboard--truncate "ab cd" 22) "ab…"))
+      (should (equal (drover-dashboard--truncate "abc" 5) ""))
+      (should (equal (drover-dashboard--truncate "" 0) "")))))
+
+(ert-deftest drover-dashboard-test-titles-truncated-in-pixels ()
+  (drover-dashboard-test-with-proportional-font
+    (let ((drover-dashboard-title-width 10))
+      (drover-dashboard-test-with (list (drover-dashboard-test-titled "s" (make-string 30 ?m)
+                                                                      :status 'working))
+        (let ((status (cdr (car (drover-dashboard-test-cells "s")))))
+          (should (string-suffix-p "…" status))
+          ;; Ten characters as wide as x, after the glyph and space.
+          (should (<= (drover-dashboard-test-fake-width (substring status 2)) 70)))))))
+
 (ert-deftest drover-dashboard-test-detail-summary ()
   (drover-dashboard-test-with (list (drover-test-session "s" :status 'failed :detail "Rate limited"))
     (should (string-match-p "Session s +Rate limited\\'" (drover-dashboard-test-heading "s")))))
@@ -217,14 +530,17 @@
       (list (drover-dashboard-test-titled "s" (make-string 60 ?t) :status 'waiting
                                           :project (make-string 50 ?p)))
     (should (equal (drover-dashboard-test-heading "s")
-                   (concat "  ⚑ " (make-string 39 ?t) "…  " (make-string 29 ?p) "…")))))
+                   (concat "  ! " (make-string 39 ?t) "…  " (make-string 29 ?p) "…")))))
 
 (ert-deftest drover-dashboard-test-summary-fits-window ()
   (drover-dashboard-test-with
       (list (drover-test-session "s" :status 'waiting :project "p"
                                  :requests `((:kind question :summary ,(make-string 200 ?q)))))
     (let ((line (drover-dashboard-test-heading "s")))
-      (should (= (string-width line) (1- (drover-dashboard--display-width))))
+      ;; In batch, the selected window is on a text terminal.
+      (should (= drover-dashboard--width (window-max-chars-per-line)))
+      ;; Magit's ellipsis takes the last column.
+      (should (= (string-width line) (1- drover-dashboard--width)))
       (should (string-match-p "  asks: q+…\\'" line)))))
 
 (ert-deftest drover-dashboard-test-narrow-window-drops-summary ()
@@ -246,11 +562,34 @@
                                           :requests '((:kind question :summary "First\n\nsecond"))))
     (should (string-match-p "Two lines.*asks: First second\\'" (drover-dashboard-test-heading "s")))))
 
-(ert-deftest drover-dashboard-test-child-marked ()
-  (drover-dashboard-test-with (list (drover-test-session "root")
-                                    (drover-test-session "child" :parent "root" :status 'waiting))
-    (should (string-prefix-p "  ⚑ ↳ Session child" (drover-dashboard-test-heading "child")))
-    (should (string-prefix-p "  · Session root" (drover-dashboard-test-heading "root")))))
+;;;; Faces
+
+(ert-deftest drover-dashboard-test-variable-pitch ()
+  (drover-dashboard-test-with (list (drover-test-session "s"))
+    (should (eq (face-attribute 'drover-dashboard :inherit) 'variable-pitch))
+    (should (memq 'drover-dashboard (flatten-tree (alist-get 'default face-remapping-alist))))))
+
+(ert-deftest drover-dashboard-test-measures-in-dashboard-faces ()
+  (drover-dashboard-test-with (list (drover-test-session "s"))
+    (let ((remapping face-remapping-alist)
+          (measured nil))
+      (cl-letf (((symbol-function 'buffer-text-pixel-size)
+                 (lambda (&optional _buffer window &rest _)
+                   (setq measured (list face-remapping-alist window (buffer-string)))
+                   '(42 . 1))))
+        (should (= (drover-dashboard--pixel-width "abc") 42)))
+      ;; The measuring buffer has the dashboard's remapping, and the
+      ;; window the dashboard is drawn for.
+      (should (equal measured (list remapping (selected-window) "abc"))))))
+
+(ert-deftest drover-dashboard-test-redraws-on-text-scale ()
+  (drover-dashboard-test-with (list (drover-test-session "s"))
+    (setq drover-dashboard--width 1)
+    (text-scale-set 1)
+    (should (= drover-dashboard--width (drover-dashboard--line-width)))
+    (setq drover-dashboard--width 1)
+    (text-scale-set 0)
+    (should (= drover-dashboard--width (drover-dashboard--line-width)))))
 
 ;;;; Details
 
@@ -267,17 +606,23 @@
     (magit-section-toggle (magit-current-section))
     (should-not (drover-dashboard-test-section-hidden-p "s"))
     (let ((text (drover-dashboard-test-visible-text)))
-      (dolist (line '("      Status      Needs you for 2m"
-                      "      Directory   ~/src/drover"
-                      "      Branch      main"
-                      "      Agent       build"
-                      "      Model       sonnet"
-                      "      Backend     Fake"
-                      "      Detail      Blocked"
-                      "      Permission  bash: make"
-                      "      Question    Which branch?"))
+      ;; Labels under the title, values past the widest label.
+      (dolist (line '("    Status      Needs you for 2m"
+                      "    Directory   ~/src/drover"
+                      "    Branch      main"
+                      "    Agent       build"
+                      "    Model       sonnet"
+                      "    Backend     Fake"
+                      "    Detail      Blocked"
+                      "    Permission  bash: make"
+                      "    Question    Which branch?"))
         (should (string-match-p (concat "^" (regexp-quote line) "$") text))))
+    (search-forward "Permission")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
+    (search-forward "bash: make")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-waiting))
     ;; Point in the details still designates the session.
+    (drover-dashboard-test-goto "s")
     (forward-line 3)
     (should (equal (drover-dashboard-test-id-at-point) "s"))
     (should (equal (drover-session-id (drover-session-at-point)) "s"))))
@@ -287,7 +632,8 @@
                                     (drover-test-session "child" :parent "root" :status 'waiting))
     (drover-dashboard-test-goto "child")
     (magit-section-show (magit-current-section))
-    (should (string-match-p "^      Subagent of Parent work$" (drover-dashboard-test-visible-text)))))
+    ;; Indented as deep as the subagent's title.
+    (should (string-match-p "^      Subagent of  Parent work$" (drover-dashboard-test-visible-text)))))
 
 ;;;; Session at point
 
@@ -307,6 +653,13 @@
     (drover-dashboard-test-goto-group 'working)
     (should-not (funcall drover-session-at-point-function))
     (should-error (drover-session-at-point) :type 'user-error)))
+
+(ert-deftest drover-dashboard-test-subagent-at-point ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (drover-dashboard-test-goto "sub")
+    (should (equal (drover-session-id (drover-session-at-point)) "sub"))
+    (drover-dashboard-test-goto "root")
+    (should (equal (drover-session-id (drover-session-at-point)) "root"))))
 
 ;;;; Keys
 
@@ -365,6 +718,18 @@
     (should-not (drover-dashboard-test-group-hidden-p 'working))
     (should-not drover-test-calls)))
 
+(ert-deftest drover-dashboard-test-moving-through-subagents ()
+  (drover-dashboard-test-with (drover-dashboard-test-family)
+    (drover-dashboard-test-goto "root")
+    (drover-dashboard-test-press "n")
+    (should (equal (drover-dashboard-test-id-at-point) "sub"))
+    (drover-dashboard-test-press "n")
+    (should (equal (drover-dashboard-test-id-at-point) "deep"))
+    (drover-dashboard-test-press "p")
+    (should (equal (drover-dashboard-test-id-at-point) "sub"))
+    (drover-dashboard-test-press "p")
+    (should (equal (drover-dashboard-test-id-at-point) "root"))))
+
 (ert-deftest drover-dashboard-test-g-refreshes ()
   (drover-dashboard-test-with (list (drover-test-session "s" :status 'working))
     (setq drover-test-sessions (list (drover-test-session "s" :status 'done)))
@@ -380,19 +745,15 @@
   (drover-dashboard-test-with (drover-dashboard-test-sample)
     (drover-dashboard-test-goto "work")
     (forward-char 4)
-    (let ((column (current-column)))
+    (let ((offset (- (point) (line-beginning-position))))
       ;; It moves from Working to the top of Needs you.
-      (setf (drover-session-status (seq-find (lambda (s) (equal (drover-session-id s) "work"))
-                                             drover-test-sessions))
-            'waiting)
-      (setf (drover-session-since (seq-find (lambda (s) (equal (drover-session-id s) "work"))
-                                            drover-test-sessions))
-            (drover-dashboard-test-ago 9999))
+      (setf (drover-session-status (drover-dashboard-test-find "work")) 'waiting)
+      (setf (drover-session-since (drover-dashboard-test-find "work")) (drover-dashboard-test-ago 9999))
       (drover-dashboard-refresh)
       (should (equal (drover-dashboard-test-groups)
                      '((waiting "work" "wait1" "wait2") (done "done") (idle "idle"))))
       (should (equal (drover-dashboard-test-id-at-point) "work"))
-      (should (= (current-column) column)))))
+      (should (= (- (point) (line-beginning-position)) offset)))))
 
 (ert-deftest drover-dashboard-test-refresh-keeps-line-in-details ()
   (drover-dashboard-test-with (drover-dashboard-test-sample)
@@ -424,7 +785,7 @@
 (ert-deftest drover-dashboard-test-refresh-into-collapsed-group ()
   (drover-dashboard-test-with (drover-dashboard-test-sample)
     (drover-dashboard-test-goto "work")
-    (setf (drover-session-status (cadr drover-test-sessions)) 'idle)
+    (setf (drover-session-status (drover-dashboard-test-find "work")) 'idle)
     (drover-dashboard-refresh)
     ;; Idle is collapsed: its heading stands for the session.
     (should (drover-dashboard-test-group-hidden-p 'idle))
@@ -470,8 +831,8 @@
     (drover-dashboard-test-goto "work")
     (magit-section-show (magit-current-section))
     ;; Reorder: done becomes idle, work becomes waiting.
-    (setf (drover-session-status (nth 3 drover-test-sessions)) 'idle)
-    (setf (drover-session-status (nth 1 drover-test-sessions)) 'waiting)
+    (setf (drover-session-status (drover-dashboard-test-find "done")) 'idle)
+    (setf (drover-session-status (drover-dashboard-test-find "work")) 'waiting)
     (drover-dashboard-refresh)
     (should-not (drover-dashboard-test-group-hidden-p 'idle))
     (should (drover-dashboard-test-group-hidden-p 'waiting))
@@ -556,22 +917,7 @@
       (set-window-buffer (selected-window) buffer)
       (setq drover-dashboard--width 20)
       (drover-dashboard--on-window-change (selected-window))
-      (should (= drover-dashboard--width (drover-dashboard--display-width))))))
-
-(ert-deftest drover-dashboard-test-children-toggle ()
-  (drover-dashboard-test-with (list (drover-test-session "root" :status 'working)
-                                    (drover-test-session "child" :parent "root" :status 'working)
-                                    (drover-test-session "asking" :parent "root" :status 'waiting))
-    (should (equal (drover-dashboard-test-groups) '((waiting "asking") (working "root"))))
-    (drover-dashboard-test-press "c")
-    (should (local-variable-p 'drover-show-children))
-    (should drover-show-children)
-    (should (equal (drover-dashboard-test-groups) '((waiting "asking") (working "root" "child"))))
-    (with-temp-buffer
-      (should-not drover-show-children))
-    (drover-dashboard-test-press "c")
-    (should-not drover-show-children)
-    (should (equal (drover-dashboard-test-groups) '((waiting "asking") (working "root"))))))
+      (should (= drover-dashboard--width (drover-dashboard--line-width))))))
 
 (ert-deftest drover-dashboard-test-mode-line ()
   (drover-dashboard-test-with nil
@@ -586,11 +932,6 @@
   (drover-dashboard-test-with nil
     (should (equal (buffer-string) "No sessions.\n"))
     (should-not (drover-dashboard--groups))))
-
-(ert-deftest drover-dashboard-test-empty-with-hidden-children ()
-  (drover-dashboard-test-with (list (drover-test-session "child" :parent "root"))
-    (should (string-match-p "\\`No sessions to show; 1 subagent hidden\\.\nPress c to show subagents\\.\n\\'"
-                            (buffer-string)))))
 
 (ert-deftest drover-dashboard-test-no-backend ()
   (drover-dashboard-test-with nil

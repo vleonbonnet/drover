@@ -23,11 +23,14 @@
 (defmacro drover-table-test-with-table (sessions &rest body)
   "Run BODY in a drawn table buffer, the fake backend serving SESSIONS.
 The table is not shown in a window unless BODY shows it; windows are
-restored afterwards."
+restored afterwards.  Status glyphs are readable ones, whatever the
+defaults: in batch, \"⚑\" is two columns wide and the others one."
   (declare (indent 1) (debug t))
   (let ((buffer (make-symbol "buffer")))
     `(drover-test-with-backend ,sessions
        (let ((drover-table-age-refresh-interval nil)
+             (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
+                                     (retrying . "↻") (working . "◐") (idle . "·")))
              (,buffer (generate-new-buffer "*drover table test*")))
          (unwind-protect
              (save-window-excursion
@@ -75,7 +78,7 @@ restored afterwards."
 
 (defun drover-table-test--cell (id column)
   "Return the text of COLUMN, a header, in the row of session ID."
-  (nth (seq-position '("Status" "Title" "Project" "Branch" "Age" "Summary") column)
+  (nth (seq-position '("Title" "Project" "Branch" "Age" "Summary") column)
        (cdr (assoc id (drover-table-test--rows)))))
 
 (defun drover-table-test--goto (id &optional column)
@@ -99,13 +102,47 @@ restored afterwards."
     (drover-table-test--goto id column)
     (ensure-list (get-text-property (point) 'face))))
 
+(defun drover-table-test--title (id)
+  "Return the title cell of session ID as drawn, without vtable's padding."
+  (save-excursion
+    (drover-table-test--goto id 0)
+    (buffer-substring (point) (1- (next-single-property-change
+                                   (point) 'vtable-column nil (line-end-position))))))
+
+(defun drover-table-test--width-at (string index)
+  "Return the width of the character at INDEX in STRING.
+That is the pixel width of its display space, or nil when it has none."
+  (pcase (get-text-property index 'display string)
+    (`(space :width (,pixels)) pixels)))
+
+(defun drover-table-test--indent (id)
+  "Return the pixel width the title of session ID is indented by."
+  (let ((title (drover-table-test--title id)))
+    (or (and (equal (substring-no-properties title 0 1) " ")
+             (drover-table-test--width-at title 0))
+        0)))
+
 (defun drover-table-test--binding (key)
   "Return the command KEY runs at point."
   (key-binding (kbd key) t nil (point)))
 
 (defun drover-table-test--press (key)
-  "Run the command KEY runs at point."
-  (call-interactively (drover-table-test--binding key)))
+  "Run the command KEY runs at point, then `post-command-hook'.
+The hook runs as the command loop would run it."
+  (call-interactively (drover-table-test--binding key))
+  (run-hooks 'post-command-hook))
+
+(defun drover-table-test--sort (column)
+  "Sort the table by COLUMN, an index, from its header, as a click does."
+  (goto-char (point-min))
+  (vtable-goto-column column)
+  (drover-table-test--press "S"))
+
+(defun drover-table-test--header ()
+  "Return the texts of the column headers."
+  (save-excursion
+    (goto-char (point-min))
+    (drover-table-test--cells)))
 
 (defun drover-table-test--total-width ()
   "Return the width in pixels of the columns and separators last drawn."
@@ -142,28 +179,26 @@ restored afterwards."
               (drover-test-session "child" :status 'done :parent "quiet" :project "drover")
               (drover-session-create :backend 'fake :id "untitled" :status 'working))
       (should (equal (cdr (assoc "asking" (drover-table-test--rows)))
-                     '("⚑" "Session asking" "drover" "main" "5m" "asks: Which branch?")))
+                     '("⚑ Session asking" "drover" "main" "5m" "asks: Which branch?")))
       (should (equal (cdr (assoc "broken" (drover-table-test--rows)))
-                     '("✗" "Session broken" "" "" "2h" "Rate limited")))
+                     '("✗ Session broken" "" "" "2h" "Rate limited")))
       (should (equal (cdr (assoc "quiet" (drover-table-test--rows)))
-                     '("·" "Session quiet" "" "" "1d" "")))
-      ;; A subagent that needs the user is shown, marked as such; its age is unknown.
+                     '("· Session quiet" "" "" "1d" "")))
+      ;; A subagent that needs the user is shown; its age is unknown.
       (should (equal (cdr (assoc "child" (drover-table-test--rows)))
-                     '("✓" "↳ Session child" "drover" "" "" "")))
-      (should (equal (drover-table-test--cell "untitled" "Title") "untitled"))
-      (should (equal (drover-table-test--cell "untitled" "Status") "◐")))))
+                     '("✓ Session child" "drover" "" "" "")))
+      (should (equal (drover-table-test--cell "untitled" "Title") "◐ untitled")))))
 
 (ert-deftest drover-table-test-column-headers ()
   (drover-table-test-with-table (list (drover-test-session "s"))
+    (should (equal (drover-table-test--header) '("Title" "Project" "Branch" "Age" "Summary")))
     (goto-char (point-min))
-    (should (equal (drover-table-test--cells)
-                   '("" "Title" "Project" "Branch" "Age" "Summary")))
     (should (memq 'header-line (ensure-list (get-text-property (point) 'face))))))
 
 (ert-deftest drover-table-test-cells-on-one-line ()
   (drover-table-test-with-table
       (list (drover-table-test--titled "s" "Two\nlines" :status 'failed :detail "Error:\n  boom\tnow"))
-    (should (equal (drover-table-test--cell "s" "Title") "Two lines"))
+    (should (equal (drover-table-test--cell "s" "Title") "✗ Two lines"))
     (should (equal (drover-table-test--cell "s" "Summary") "Error: boom now"))
     (should (= (count-lines (point-min) (point-max)) 2))))
 
@@ -172,28 +207,65 @@ restored afterwards."
       (list (drover-test-session "odd" :status 'mystery)
             (drover-test-session "idle" :status 'idle))
     (should (equal (drover-table-test--ids) '("idle" "odd")))
-    (should (equal (drover-table-test--cell "odd" "Status") "?"))))
+    (should (equal (drover-table-test--cell "odd" "Title") "? Session odd"))))
+
+(ert-deftest drover-table-test-title-cell ()
+  "The title cell is the glyph, exactly one space, then the title."
+  (drover-table-test-with-table
+      (list (drover-test-session "wide" :status 'waiting :since 1.0)
+            (drover-test-session "narrow" :status 'done :since 2.0)
+            (drover-test-session "child" :status 'failed :since 3.0 :parent "narrow")
+            (drover-test-session "grandchild" :status 'done :since 4.0 :parent "child"))
+    (should (equal (drover-table-test--ids) '("wide" "narrow" "child" "grandchild")))
+    (pcase-dolist (`(,id ,text) '(("wide" "⚑ Session wide") ("narrow" "✓ Session narrow")))
+      (should (equal (substring-no-properties (drover-table-test--title id)) text)))
+    (let ((wide (drover-table-test--title "wide"))
+          (narrow (drover-table-test--title "narrow")))
+      ;; The widest glyph is followed by a plain space; a narrower one by
+      ;; a space as much wider, so that the titles line up.
+      (should-not (get-text-property 1 'display wide))
+      (should (= (drover-table-test--width-at narrow 1)
+                 (+ (string-pixel-width " ")
+                    (- (string-pixel-width "⚑") (string-pixel-width "✓"))))))
+    ;; A subagent is indented by a glyph and a space for each level, so
+    ;; that its glyph stands under the title of its parent.
+    (let ((step (+ (string-pixel-width "⚑") (string-pixel-width " "))))
+      (pcase-dolist (`(,id ,depth ,text) '(("wide" 0 "⚑ Session wide")
+                                           ("child" 1 " ✗ Session child")
+                                           ("grandchild" 2 " ✓ Session grandchild")))
+        (should (= (drover-table-test--indent id) (* depth step)))
+        (should (equal (substring-no-properties (drover-table-test--title id)) text))))))
 
 (ert-deftest drover-table-test-status-tooltip ()
   (drover-table-test-with-table
       (list (drover-test-session "asking" :status 'waiting)
-            (drover-test-session "odd" :status 'mystery))
-    (dolist (case '(("asking" . "Needs you") ("odd" . "Mystery")))
-      (goto-char (point-min))
-      (should (vtable-goto-object (drover-find 'fake (car case))))
-      (should (vtable-goto-column 0))
-      (should (equal (get-text-property (point) 'help-echo) (cdr case))))))
+            (drover-test-session "odd" :status 'mystery)
+            (drover-test-session "child" :status 'done :parent "odd"))
+    (pcase-dolist (`(,id ,offset ,label) '(("asking" 0 "Needs you") ("odd" 0 "Mystery")
+                                           ("child" 1 "Done")))
+      (drover-table-test--goto id 0)
+      (forward-char offset)
+      (should (equal (get-text-property (point) 'help-echo) label))
+      ;; The title itself has no tooltip.
+      (forward-char 2)
+      (should-not (get-text-property (point) 'help-echo)))))
 
 (ert-deftest drover-table-test-status-faces ()
   (drover-table-test-with-table
       (mapcar (lambda (status)
-                (drover-test-session (symbol-name status) :status status :branch "main"))
+                (drover-test-session (symbol-name status) :status status
+                                     :project "drover" :branch "main"))
               drover-status-order)
     (dolist (status drover-status-order)
       (let ((faces (drover-table-test--faces (symbol-name status) 0)))
         (should (memq (drover-status-face status) faces))
-        (should (memq 'drover-table faces))))
-    (should (memq 'drover-dim (drover-table-test--faces "idle" 3)))
+        (should (memq 'drover-table faces)))
+      ;; The title after the glyph is in the face of the table alone.
+      (save-excursion
+        (drover-table-test--goto (symbol-name status) 0)
+        (forward-char 2)
+        (should (equal (ensure-list (get-text-property (point) 'face)) '(drover-table)))))
+    (should (memq 'drover-dim (drover-table-test--faces "idle" 2)))
     (should (memq 'drover-table (drover-table-test--faces "idle" 1)))))
 
 (ert-deftest drover-table-test-age-of-since-or-updated ()
@@ -205,6 +277,99 @@ restored afterwards."
       (should (equal (drover-table-test--cell "done" "Age") "2h"))
       (should (equal (drover-table-test--cell "working" "Age") "2h"))
       (should (equal (drover-table-test--cell "waiting" "Age") "")))))
+
+;;;; Trees
+
+(ert-deftest drover-table-test-subagents-under-parent ()
+  (drover-table-test-with-table
+      (list (drover-test-session "grandchild" :parent "quiet" :status 'idle :updated 1.0)
+            (drover-test-session "other" :status 'idle :updated 9.0)
+            (drover-test-session "quiet" :parent "root" :status 'idle :updated 4.0)
+            (drover-test-session "root" :status 'working :updated 5.0)
+            (drover-test-session "busy" :parent "root" :status 'working :updated 6.0))
+    (setq-local drover-show-children t)
+    (drover-table-refresh)
+    ;; Siblings come most urgent first, each before its own subagents.
+    (should (equal (drover-table-test--ids) '("root" "busy" "quiet" "grandchild" "other")))
+    (let ((step (+ (string-pixel-width "◐") (string-pixel-width " "))))
+      (should (equal (mapcar #'drover-table-test--indent (drover-table-test--ids))
+                     (list 0 step step (* 2 step) 0))))))
+
+(ert-deftest drover-table-test-rolled-up-status ()
+  "A parent whose subagent waits for the user sorts with the waiting sessions."
+  (drover-table-test-with-table
+      (list (drover-test-session "busy" :status 'working :updated 100.0)
+            (drover-test-session "parent" :status 'idle :updated 1.0)
+            (drover-test-session "quiet" :parent "parent" :status 'idle)
+            (drover-test-session "asking" :parent "parent" :status 'waiting :since 30.0)
+            (drover-test-session "waiting" :status 'waiting :since 40.0))
+    (should (equal (drover-table-test--ids) '("parent" "asking" "waiting" "busy")))
+    ;; The parent shows its own status, and the header counts sessions.
+    (should (equal (drover-table-test--cell "parent" "Title") "· Session parent"))
+    (should (equal (substring-no-properties header-line-format)
+                   " ⚑ 2 Needs you   4 sessions, 1 subagent hidden"))))
+
+(ert-deftest drover-table-test-orphan-is-own-tree ()
+  (drover-table-test-with-table
+      (list (drover-test-session "orphan" :parent "gone" :status 'idle :updated 2.0)
+            (drover-test-session "root" :status 'working :updated 1.0)
+            (drover-test-session "child" :parent "orphan" :status 'idle))
+    ;; Shown although subagents are hidden, as a root, without indentation.
+    (should (equal (drover-table-test--ids) '("root" "orphan")))
+    (should (= (drover-table-test--indent "orphan") 0))
+    (should (string-match-p "2 sessions, 1 subagent hidden" header-line-format))
+    (drover-table-test--press "c")
+    (should (equal (drover-table-test--ids) '("root" "orphan" "child")))
+    (should (> (drover-table-test--indent "child") 0))))
+
+(ert-deftest drover-table-test-toggle-children ()
+  (drover-table-test-with-table
+      (list (drover-test-session "root" :updated 2.0)
+            (drover-test-session "child" :parent "root" :updated 1.0)
+            (drover-test-session "asking" :parent "root" :status 'waiting :since 1.0)
+            (drover-test-session "other" :updated 3.0))
+    (should (equal (drover-table-test--ids) '("root" "asking" "other")))
+    (should (string-match-p "3 sessions, 1 subagent hidden" header-line-format))
+    (drover-table-test--goto "other" 1)
+    (drover-table-test--press "c")
+    (should (equal (drover-table-test--ids) '("root" "asking" "child" "other")))
+    (should (equal (drover-table-test--cell "child" "Title") "· Session child"))
+    (should (= (drover-table-test--indent "child") (drover-table-test--indent "asking")))
+    (should (equal (drover-table-test--id-at-point) "other"))
+    (should (local-variable-p 'drover-show-children))
+    (should-not (default-value 'drover-show-children))
+    (should-not (string-match-p "hidden" header-line-format))
+    (drover-table-toggle-children)
+    (should (equal (drover-table-test--ids) '("root" "asking" "other")))))
+
+(ert-deftest drover-table-test-refresh-keeps-nested-session ()
+  (drover-table-test-with-table
+      (list (drover-test-session "first" :status 'working :updated 5.0)
+            (drover-test-session "root" :status 'idle :updated 2.0)
+            (drover-test-session "child" :parent "root" :status 'idle :updated 1.0))
+    (setq-local drover-show-children t)
+    (drover-table-refresh)
+    (should (equal (drover-table-test--ids) '("first" "root" "child")))
+    (drover-table-test--goto "child" 2)
+    ;; The child's tree moves up and gains a sibling before the child.
+    (setq drover-test-sessions
+          (list (drover-test-session "first" :status 'working :updated 5.0)
+                (drover-test-session "root" :status 'idle :updated 2.0)
+                (drover-test-session "child" :parent "root" :status 'idle :updated 1.0)
+                (drover-test-session "asking" :parent "root" :status 'waiting :since 1.0)))
+    (drover-table-refresh)
+    (should (equal (drover-table-test--ids) '("root" "asking" "child" "first")))
+    (should (equal (drover-table-test--id-at-point) "child"))
+    (should (eql (vtable-current-column) 2))
+    (drover-table-test--goto "first")
+    (drover-table-test--sort 0)
+    (should (equal (drover-table-test--ids) '("first" "root" "asking" "child")))
+    ;; Sorted again, now descending, from the child's own row.
+    (drover-table-test--goto "child" 0)
+    (drover-table-test--press "S")
+    (should (equal (drover-table-test--ids) '("root" "child" "asking" "first")))
+    (should (equal (drover-table-test--id-at-point) "child"))
+    (should (eql (vtable-current-column) 0))))
 
 ;;;; Widths
 
@@ -229,9 +394,9 @@ restored afterwards."
   (drover-table-test-with-table (list (drover-test-session "s" :project "p"))
     (should (< (drover-table-test--total-width)
                (* drover-table--default-columns (drover-table--char-width))))
-    (should (equal (drover-table-test--cell "s" "Title") "Session s"))
+    (should (equal (drover-table-test--cell "s" "Title") "· Session s"))
     ;; The header of an empty column keeps room for its sort indicator.
-    (should (>= (aref drover-table--widths 5)
+    (should (>= (aref drover-table--widths 4)
                 (+ (string-pixel-width "Summary") (string-pixel-width "▼"))))))
 
 (ert-deftest drover-table-test-sized-to-window ()
@@ -280,30 +445,30 @@ restored afterwards."
   (drover-table-test-with-table
       (list (drover-table-test--titled "s" (make-string 40 ?t) :status 'failed
                                        :detail (make-string 200 ?x)))
-    (drover-table-test--goto "s" 1)
+    (drover-table-test--goto "s" 0)
     (let ((char-width (drover-table--char-width))
-          (title (aref drover-table--widths 1)))
+          (title (aref drover-table--widths 0)))
       (should (eq (drover-table-test--binding "{") #'drover-table-narrow-column))
       (should (eq (drover-table-test--binding "}") #'drover-table-widen-column))
       (drover-table-narrow-column 5)
-      (should (= (aref drover-table--widths 1) (- title (* 5 char-width))))
+      (should (= (aref drover-table--widths 0) (- title (* 5 char-width))))
       (should (string-suffix-p "…" (drover-table-test--cell "s" "Title")))
       (should (equal (drover-table-test--id-at-point) "s"))
-      (should (eql (vtable-current-column) 1))
+      (should (eql (vtable-current-column) 0))
       ;; The summary takes the room given up.
       (should (= (drover-table-test--total-width)
                  (* (1- drover-table--default-columns) char-width)))
       (drover-table-refresh)
-      (should (= (aref drover-table--widths 1) (- title (* 5 char-width))))
+      (should (= (aref drover-table--widths 0) (- title (* 5 char-width))))
       (drover-table-widen-column 2)
-      (should (= (aref drover-table--widths 1) (- title (* 3 char-width))))
+      (should (= (aref drover-table--widths 0) (- title (* 3 char-width))))
       (drover-table-reset)
-      (should (= (aref drover-table--widths 1) title)))))
+      (should (= (aref drover-table--widths 0) title)))))
 
 ;;;; The session at point
 
 (ert-deftest drover-table-test-session-at-point-is-fresh ()
-  (drover-table-test-with-table (list (drover-test-session "a") (drover-test-session "b"))
+  (drover-table-test-with-table (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (drover-table-test--goto "b")
     (let ((fresh (drover-table-test--titled "b" "Renamed")))
       (setq drover-test-sessions (list (drover-test-session "a") fresh))
@@ -319,7 +484,7 @@ restored afterwards."
 ;;;; Keys
 
 (ert-deftest drover-table-test-keys-reach-backend ()
-  (drover-table-test-with-table (list (drover-test-session "a") (drover-test-session "b"))
+  (drover-table-test-with-table (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (drover-table-test--goto "b" 2)
     (setq drover-test-calls nil)
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (_prompt) t)))
@@ -341,7 +506,7 @@ restored afterwards."
     (should-not drover-test-calls)))
 
 (ert-deftest drover-table-test-keys-through-command-loop ()
-  (drover-table-test-with-table (list (drover-test-session "a") (drover-test-session "b"))
+  (drover-table-test-with-table (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (set-window-buffer (selected-window) (current-buffer))
     (drover-table-test--goto "b")
     (set-window-point (selected-window) (point))
@@ -372,7 +537,7 @@ restored afterwards."
 
 (ert-deftest drover-table-test-revert-buffer ()
   (drover-table-test-with-table (list (drover-test-session "a"))
-    (setq drover-test-sessions (list (drover-test-session "a") (drover-test-session "b")))
+    (setq drover-test-sessions (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0)))
     (revert-buffer)
     (should (equal (drover-table-test--ids) '("a" "b")))))
 
@@ -435,20 +600,24 @@ restored afterwards."
 
 (ert-deftest drover-table-test-first-draw-on-first-row ()
   (drover-table-test-with-table nil
-    (drover-table-test--set-sessions (drover-test-session "a") (drover-test-session "b"))
+    (drover-table-test--set-sessions (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (drover-table-refresh)
     (should (equal (drover-table-test--id-at-point) "a"))))
+
+;;;; Sorting
 
 (ert-deftest drover-table-test-user-sort-holds ()
   (drover-table-test-with-table
       (list (drover-test-session "b" :status 'waiting :since 1.0)
-            (drover-test-session "c" :status 'idle)
+            (drover-test-session "c" :status 'idle :updated 1.0)
             (drover-test-session "a" :status 'done :since 1.0))
     (should (equal (drover-table-test--ids) '("b" "a" "c")))
-    (drover-table-test--goto "b" 1)
+    (drover-table-test--goto "b" 0)
     (drover-table-test--press "S")
     (should (equal (drover-table-test--ids) '("a" "b" "c")))
-    (setq drover-test-sessions (cons (drover-test-session "0" :status 'idle) drover-test-sessions))
+    (should (equal drover-table--sort-by '((0 . ascend))))
+    (setq drover-test-sessions (cons (drover-test-session "0" :status 'idle :updated 2.0)
+                                     drover-test-sessions))
     (drover-table-refresh)
     (should (equal (drover-table-test--ids) '("0" "a" "b" "c")))
     (should (equal (drover-table-test--id-at-point) "b"))
@@ -458,11 +627,12 @@ restored afterwards."
     (should (equal (drover-table-test--ids) '("c" "b" "a" "0")))
     (drover-table-reset)
     (should (equal (drover-table-test--ids) '("b" "a" "0" "c")))
+    (should-not drover-table--sort-by)
     (should (equal (drover-table-test--id-at-point) "b"))))
 
 (ert-deftest drover-table-test-user-sort-survives-empty-table ()
   (drover-table-test-with-table (list (drover-test-session "b") (drover-test-session "a"))
-    (drover-table-test--goto "b" 1)
+    (drover-table-test--goto "b" 0)
     (drover-table-test--press "S")
     (drover-table-test--set-sessions)
     (drover-table-refresh)
@@ -470,45 +640,118 @@ restored afterwards."
     (drover-table-refresh)
     (should (equal (drover-table-test--ids) '("a" "b")))))
 
-(ert-deftest drover-table-test-sort-status-and-age-numerically ()
+(ert-deftest drover-table-test-sort-keeps-trees-together ()
+  (drover-table-test-with-table
+      (list (drover-table-test--titled "a" "Beta" :status 'idle :updated 3.0)
+            (drover-table-test--titled "a1" "Zulu" :parent "a" :status 'idle)
+            (drover-table-test--titled "a2" "alpha" :parent "a" :status 'waiting :since 1.0)
+            (drover-table-test--titled "b" "Alpha" :status 'working :updated 2.0)
+            (drover-table-test--titled "b1" "Mike" :parent "b" :status 'idle))
+    (setq-local drover-show-children t)
+    (drover-table-refresh)
+    (should (equal (drover-table-test--ids) '("a" "a2" "a1" "b" "b1")))
+    ;; The trees go by the title of their root, the siblings by their
+    ;; own, ignoring case and the glyphs; a plain sort of the rows would
+    ;; give a2 b a b1 a1.
+    (drover-table-test--sort 0)
+    (should (equal (drover-table-test--ids) '("b" "b1" "a" "a2" "a1")))
+    (should (equal (car (drover-table-test--header)) "Title ▲"))
+    (drover-table-test--sort 0)
+    (should (equal (drover-table-test--ids) '("a" "a1" "a2" "b" "b1")))
+    (should (equal (car (drover-table-test--header)) "Title ▼"))
+    (should (equal (drover-table-test--indent "a1") (drover-table-test--indent "b1")))
+    (should (= (drover-table-test--indent "b") 0))
+    ;; A redraw keeps the order, and the subagents nested.
+    (drover-table-refresh)
+    (should (equal (drover-table-test--ids) '("a" "a1" "a2" "b" "b1")))
+    (drover-table-test--press "=")
+    (should (equal (drover-table-test--ids) '("a" "a2" "a1" "b" "b1")))
+    (should (equal (car (drover-table-test--header)) "Title"))))
+
+(ert-deftest drover-table-test-sort-ties-and-earlier-keys ()
+  (drover-table-test-with-table
+      (list (drover-test-session "x" :project "p" :status 'idle :updated 1.0)
+            (drover-test-session "y" :project "p" :status 'waiting :since 5.0)
+            (drover-test-session "z" :project "a" :status 'idle :updated 2.0))
+    (should (equal (drover-table-test--ids) '("y" "z" "x")))
+    ;; Equal projects keep the order of urgency.
+    (drover-table-test--sort 1)
+    (should (equal (drover-table-test--ids) '("z" "y" "x")))
+    ;; Sorted by title, then project: equal projects go by title.
+    (drover-table-reset)
+    (drover-table-test--sort 0)
+    (drover-table-test--sort 1)
+    (should (equal drover-table--sort-by '((0 . ascend) (1 . ascend))))
+    (should (equal (drover-table-test--ids) '("z" "x" "y")))))
+
+(ert-deftest drover-table-test-sort-age-numerically ()
   (let ((now (float-time)))
     (drover-table-test-with-table
         (list (drover-test-session "hour" :status 'idle :updated (- now 3700))
               (drover-test-session "seconds" :status 'working :updated (- now 50))
               (drover-test-session "minutes" :status 'waiting :since (- now 330))
               (drover-test-session "unknown" :status 'done))
-      (drover-table-test--goto "hour" 4)
+      (drover-table-test--goto "hour" 3)
       (drover-table-test--press "S")
       ;; Youngest first; a string sort would put "1h" first.
       (should (equal (drover-table-test--ids) '("seconds" "minutes" "hour" "unknown")))
-      (drover-table-test--goto "hour" 0)
       (drover-table-test--press "S")
-      (drover-table-test--press "S")
-      (should (equal (drover-table-test--ids) '("hour" "seconds" "unknown" "minutes"))))))
+      (should (equal (drover-table-test--ids) '("unknown" "hour" "minutes" "seconds")))
+      (drover-table-test--press "=")
+      (should (equal (drover-table-test--ids) '("minutes" "unknown" "seconds" "hour"))))))
 
-;;;; Subagents
-
-(ert-deftest drover-table-test-toggle-children ()
+(ert-deftest drover-table-test-sort-through-command-loop ()
   (drover-table-test-with-table
-      (list (drover-test-session "root" :updated 2.0)
-            (drover-test-session "child" :parent "root" :updated 1.0))
-    (should (equal (drover-table-test--ids) '("root")))
-    (should (string-match-p "1 subagent hidden" header-line-format))
-    (drover-table-test--press "c")
-    (should (equal (drover-table-test--ids) '("root" "child")))
-    (should (equal (drover-table-test--cell "child" "Title") "↳ Session child"))
-    (should (local-variable-p 'drover-show-children))
-    (should-not (default-value 'drover-show-children))
-    (should-not (string-match-p "hidden" header-line-format))
-    (drover-table-toggle-children)
-    (should (equal (drover-table-test--ids) '("root")))))
+      (list (drover-table-test--titled "a" "Beta" :status 'waiting :since 1.0)
+            (drover-table-test--titled "a1" "Alpha" :parent "a" :status 'done :since 2.0)
+            (drover-table-test--titled "b" "Gamma" :status 'idle))
+    (set-window-buffer (selected-window) (current-buffer))
+    (drover-table-test--goto "a1" 0)
+    (set-window-point (selected-window) (point))
+    (execute-kbd-macro (kbd "S"))
+    (should (equal (drover-table-test--ids) '("a" "a1" "b")))
+    (should (equal drover-table--sort-by '((0 . ascend))))
+    (should (equal (drover-table-test--id-at-point) "a1"))
+    (execute-kbd-macro (kbd "S"))
+    (should (equal (drover-table-test--ids) '("b" "a" "a1")))))
+
+(ert-deftest drover-table-test-sort-from-click-in-other-window ()
+  "A click on the header of a table in a window that is not selected."
+  (drover-table-test-with-table
+      (list (drover-table-test--titled "a" "Beta" :status 'waiting :since 1.0)
+            (drover-table-test--titled "a1" "Alpha" :parent "a" :status 'done :since 2.0)
+            (drover-table-test--titled "b" "Alpha" :status 'idle))
+    (let ((table (current-buffer))
+          (other (get-buffer-create "*drover table test other*")))
+      (unwind-protect
+          (progn
+            (set-window-buffer (selected-window) table)
+            (let ((window (selected-window)))
+              (select-window (split-window-below))
+              (set-window-buffer (selected-window) other)
+              (set-buffer other)
+              (let* ((header (with-current-buffer table
+                               (save-excursion (goto-char (point-min))
+                                               (vtable-goto-column 0)
+                                               (point))))
+                     ;; Batch Emacs does not lay windows out, which
+                     ;; `posn-at-point' needs.
+                     (event (list 'mouse-2 (list window header '(0 . 0) 0 nil header
+                                                 '(0 . 0) nil '(0 . 0) '(1 . 1)))))
+                (let ((last-command-event event))
+                  (vtable-header-line-sort event)
+                  (run-hooks 'post-command-hook))))
+            (with-current-buffer table
+              (should (equal drover-table--sort-by '((0 . ascend))))
+              (should (equal (drover-table-test--ids) '("b" "a" "a1")))))
+        (kill-buffer other)))))
 
 ;;;; Following the backends
 
 (ert-deftest drover-table-test-shown-table-follows-changes ()
   (drover-table-test-with-table (list (drover-test-session "a"))
     (set-window-buffer (selected-window) (current-buffer))
-    (drover-table-test--set-sessions (drover-test-session "a") (drover-test-session "b"))
+    (drover-table-test--set-sessions (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (should (equal (drover-table-test--ids) '("a" "b")))
     (should-not drover-table--stale)))
 
@@ -516,7 +759,7 @@ restored afterwards."
   (drover-table-test-with-table (list (drover-test-session "a"))
     (should-not (get-buffer-window (current-buffer) t))
     (let ((drawn drover-table--drawn-at))
-      (drover-table-test--set-sessions (drover-test-session "a") (drover-test-session "b"))
+      (drover-table-test--set-sessions (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
       (should drover-table--stale)
       (should (equal (drover-table-test--ids) '("a")))
       (should (eql drover-table--drawn-at drawn)))
@@ -550,7 +793,7 @@ restored afterwards."
             (set-window-buffer (selected-window) (current-buffer))
             (drover-table-refresh)
             (should (timerp drover-table--age-timer))
-            (setq drover-test-sessions (list (drover-test-session "a") (drover-test-session "b")))
+            (setq drover-test-sessions (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0)))
             (drover-table--tick)
             (should (equal (drover-table-test--ids) '("a" "b")))
             (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
@@ -566,10 +809,13 @@ restored afterwards."
       (with-current-buffer first (drover-table-mode))
       (with-current-buffer second (drover-table-mode))
       (should (memq #'drover-table--changed drover-changed-hook))
+      (should (memq #'drover-table--follow-sort (default-value 'post-command-hook)))
       (kill-buffer first)
       (should (memq #'drover-table--changed drover-changed-hook))
+      (should (memq #'drover-table--follow-sort (default-value 'post-command-hook)))
       (kill-buffer second)
-      (should-not (memq #'drover-table--changed drover-changed-hook)))))
+      (should-not (memq #'drover-table--changed drover-changed-hook))
+      (should-not (memq #'drover-table--follow-sort (default-value 'post-command-hook))))))
 
 ;;;; Empty state and header
 
@@ -580,12 +826,10 @@ restored afterwards."
     (should-error (drover-session-at-point) :type 'user-error)
     (should (string-match-p "Nothing needs you" header-line-format))
     (should (string-match-p "0 sessions" header-line-format))
-    (drover-table-test--set-sessions (drover-test-session "root")
-                                     (drover-test-session "child" :parent "root"))
+    ;; A subagent whose parent is gone is a tree of its own, so shown.
     (drover-table-test--set-sessions (drover-test-session "child" :parent "root"))
     (drover-table-refresh)
-    (should (equal (buffer-string)
-                   "No agent sessions; 1 subagent session is hidden, c shows them.\n"))
+    (should (equal (drover-table-test--ids) '("child")))
     (drover-unregister-backend 'fake)
     (drover-table-refresh)
     (should (equal (buffer-string) "No agent backend is loaded.\n"))))
@@ -612,7 +856,7 @@ restored afterwards."
 ;;;; The command
 
 (ert-deftest drover-table-test-command ()
-  (drover-test-with-backend (list (drover-test-session "a") (drover-test-session "b"))
+  (drover-test-with-backend (list (drover-test-session "a" :updated 2.0) (drover-test-session "b" :updated 1.0))
     (let ((drover-table-age-refresh-interval nil))
       (save-window-excursion
         (unwind-protect

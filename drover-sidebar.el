@@ -25,6 +25,17 @@
 ;; sessions needing the user first, with what they wait for on a second
 ;; line.  `drover-sidebar-select' moves there and back.
 ;;
+;; Subagents follow their parent, indented one level deeper, so that
+;; each status glyph sits under the title above it.  A parent goes in
+;; the group of the most urgent status in its tree: a parent whose
+;; subagent asks something shows under "Needs you", the subagent below
+;; it.  A subagent whose parent is not listed starts with an arrow.
+;;
+;; The text uses the face `drover-sidebar', variable pitch by default,
+;; for listings more compact than in a fixed-width font.  Lines are
+;; measured in pixels: titles and summaries end in an ellipsis where
+;; they would reach the age, aligned on the right edge by display.
+;;
 ;; The sidebar acts on the "main window": the most recently used window
 ;; of its frame outside side windows, which is where the user worked
 ;; last.  RET opens the session at point there and selects it, C-o
@@ -39,6 +50,8 @@
 
 ;;; Code:
 
+(require 'cl-lib)
+(require 'mule-util)
 (require 'seq)
 (require 'subr-x)
 (require 'drover)
@@ -82,6 +95,12 @@ Only a visible sidebar redraws; a hidden one redraws once shown."
   :type '(choice (const :tag "Never" nil) number)
   :group 'drover-sidebar)
 
+(defface drover-sidebar '((t :inherit variable-pitch))
+  "Face of the text of the sidebar.
+The sidebar remaps the default face to it.  Make it inherit `default'
+or `fixed-pitch' instead to list sessions in a fixed-width font."
+  :group 'drover-faces)
+
 (defface drover-sidebar-current '((t :inherit highlight :extend t))
   "Face of the session shown in the main window."
   :group 'drover-faces)
@@ -92,6 +111,11 @@ Only a visible sidebar redraws; a hidden one redraws once shown."
 (defconst drover-sidebar--fold-glyphs '("▾ " . "▸ ")
   "Prefixes of unfolded and folded group headings.")
 
+(defconst drover-sidebar--max-depth 3
+  "Deepest nesting level indented further than the one above it.
+Deeper subagents line up with that level, so that titles keep room in a
+narrow window.")
+
 (defvar-local drover-sidebar--folded nil
   "Statuses whose group is folded.")
 
@@ -99,7 +123,14 @@ Only a visible sidebar redraws; a hidden one redraws once shown."
   "Non-nil when sessions changed since the sidebar was last drawn.")
 
 (defvar-local drover-sidebar--width nil
-  "Width, in columns, the sidebar was last drawn for.")
+  "Width, in pixels, the sidebar was last drawn for.")
+
+(defvar-local drover-sidebar--widths nil
+  "Widths of the text of the last drawing, as (CONTEXT . TABLE).
+CONTEXT is what widths depend on besides the text: a copy of the face
+remapping of the sidebar, which `face-remap-add-relative' changes in
+place, and the frame measuring it.  TABLE maps texts, with their
+properties, to their widths in pixels.")
 
 (defvar-local drover-sidebar--current-overlays nil
   "Overlays highlighting the session shown in the main window.")
@@ -107,11 +138,109 @@ Only a visible sidebar redraws; a hidden one redraws once shown."
 (defvar drover-sidebar--timer nil
   "Timer redrawing the sidebar to keep ages current.")
 
+;;;; Measuring
+
+(define-hash-table-test 'drover-sidebar--text
+  #'equal-including-properties #'sxhash-equal-including-properties)
+
+(cl-defstruct (drover-sidebar--layout (:constructor drover-sidebar--layout-create)
+                                      (:copier nil))
+  "Measures of one drawing of the sidebar, in pixels."
+  (window nil :documentation "Window whose fonts measure text, or nil for the selected one.")
+  (remapping nil :documentation "Face remapping of the sidebar buffer.")
+  (width nil :documentation "Width lines fill without being truncated.")
+  (space nil :documentation "Width of a space.")
+  (margin nil :documentation "Indentation of the top level, putting glyphs under group labels.")
+  (widths nil :documentation "Table of the widths of texts measured for this drawing.")
+  (known nil :documentation "Table of the widths of the previous drawing, or nil.")
+  (glyphs nil :documentation "Widths of the status glyphs, as an alist (STATUS . WIDTH)."))
+
+(defun drover-sidebar--pixels (layout string)
+  "Return the width of STRING in pixels, as the sidebar of LAYOUT shows it.
+The faces of STRING count, and so do the face remapping of the sidebar
+buffer, such as its variable pitch, and the fonts of the frame of the
+window of LAYOUT.  Widths measured for the previous drawing are reused:
+laying text out costs more than the rest of a redraw."
+  (let ((widths (drover-sidebar--layout-widths layout))
+        (known (drover-sidebar--layout-known layout)))
+    (or (gethash string widths)
+        (puthash string
+                 (or (and known (gethash string known))
+                     (drover-sidebar--measure layout string))
+                 widths))))
+
+(defun drover-sidebar--measure (layout string)
+  "Return the width of STRING in pixels, laid out as LAYOUT says."
+  (drover-text-pixel-width string (drover-sidebar--layout-remapping layout)
+                           (drover-sidebar--layout-window layout)))
+
+(defun drover-sidebar--truncate (layout string pixels)
+  "Return STRING cut to fit PIXELS wide, as LAYOUT measures it.
+A cut string ends in an ellipsis, in the faces of the text before it;
+when not even the ellipsis fits, the result is empty."
+  (drover-truncate-to-pixels string pixels
+                             (lambda (text) (drover-sidebar--pixels layout text))))
+
+(defun drover-sidebar--window-pixels (window)
+  "Return the width, in pixels, lines of WINDOW fill without truncation.
+Without WINDOW, return the width of a new sidebar in the selected frame."
+  (if (not window)
+      (* (max 1 (1- drover-sidebar-width)) (frame-char-width))
+    (let ((pixels (window-body-width window t))
+          (column (window-font-width window)))
+      ;; As `window-max-chars-per-line' says, the last column holds the
+      ;; truncation glyph unless the fringes do.
+      (if (< (window-max-chars-per-line window) (/ pixels column))
+          (- pixels column)
+        pixels))))
+
+(defun drover-sidebar--layout (width window)
+  "Return the measures of the current buffer drawn WIDTH pixels wide.
+Text is measured with the fonts of WINDOW, or of the selected window
+when WINDOW is nil.  The widths measured become those the next layout
+of the buffer may reuse."
+  (let* ((context (list (copy-tree face-remapping-alist) (window-frame window)))
+         (widths (make-hash-table :test 'drover-sidebar--text))
+         (layout (drover-sidebar--layout-create
+                  :window window
+                  :remapping face-remapping-alist
+                  :width width
+                  :widths widths
+                  :known (and (equal (car drover-sidebar--widths) context)
+                              (cdr drover-sidebar--widths))))
+         (space (drover-sidebar--pixels layout " "))
+         (statuses (seq-uniq (append drover-status-order (mapcar #'car drover-status-glyphs))))
+         (glyphs (mapcar (lambda (status)
+                           (cons status
+                                 (drover-sidebar--pixels layout (drover-status-glyph status))))
+                         statuses))
+         (fold (drover-face (car drover-sidebar--fold-glyphs) 'drover-heading)))
+    (setf (drover-sidebar--layout-space layout) space
+          (drover-sidebar--layout-glyphs layout) glyphs
+          (drover-sidebar--layout-margin layout) (drover-sidebar--pixels layout fold))
+    (setq drover-sidebar--widths (cons context widths))
+    layout))
+
+(defun drover-sidebar--glyph-width (layout status)
+  "Return the width of the glyph of STATUS, in pixels, per LAYOUT."
+  (or (alist-get status (drover-sidebar--layout-glyphs layout))
+      (drover-sidebar--pixels layout (drover-status-glyph status))))
+
+(defun drover-sidebar--blank (columns pixels)
+  "Return COLUMNS spaces shown as one blank PIXELS wide.
+The spaces keep the buffer text readable, and the display gives the
+width, since spaces of a proportional font are narrow."
+  (propertize (make-string columns ?\s) 'display `(space :width (,pixels))))
+
+(defun drover-sidebar--indent-columns (depth)
+  "Return the spaces of text indenting sessions at DEPTH in trees."
+  (* 2 (1+ (min depth drover-sidebar--max-depth))))
+
 ;;;; Drawing
 
-(defun drover-sidebar--groups (sessions)
-  "Return SESSIONS grouped by status, with the idle group last."
-  (let* ((groups (drover-group-by-status sessions))
+(defun drover-sidebar--groups (nodes)
+  "Return trees NODES grouped by status, with the idle group last."
+  (let* ((groups (drover-group-trees-by-status nodes))
          (idle (assq 'idle groups)))
     (if idle
         (append (remq idle groups) (list idle))
@@ -142,52 +271,71 @@ from their last activity, matching the order of `drover-sort'."
                      (drover-sidebar--one-line summary))))
    "\n"))
 
-(defun drover-sidebar--heading-line (status count folded width)
-  "Return the heading of the group of COUNT sessions of STATUS.
-FOLDED non-nil marks the group folded; the line fits in WIDTH columns."
-  (truncate-string-to-width
-   (concat (propertize (concat (if folded
-                                   (cdr drover-sidebar--fold-glyphs)
-                                 (car drover-sidebar--fold-glyphs))
-                               (drover-status-label status))
-                       'face 'drover-heading)
+(defun drover-sidebar--heading-line (status count folded layout)
+  "Return the heading of the group of COUNT trees of STATUS.
+FOLDED non-nil marks the group folded; the line fits the width of
+LAYOUT."
+  (drover-sidebar--truncate
+   layout
+   (concat (drover-face (concat (if folded
+                                    (cdr drover-sidebar--fold-glyphs)
+                                  (car drover-sidebar--fold-glyphs))
+                                (drover-status-label status))
+                        'drover-heading)
            " "
-           (propertize (number-to-string count) 'face 'drover-dim))
-   width nil nil t))
+           (drover-face (number-to-string count) 'drover-dim))
+   (drover-sidebar--layout-width layout)))
 
-(defun drover-sidebar--session-line (session width now)
-  "Return the line of SESSION, WIDTH columns wide, with ages as of NOW.
-The line holds the status glyph, the title, truncated, and the age,
-flush right."
+(defun drover-sidebar--title-start (layout session indent)
+  "Return where the title of SESSION starts, in pixels, per LAYOUT.
+INDENT is the indentation of the line of SESSION, in pixels."
+  (+ indent
+     (drover-sidebar--glyph-width layout (drover-session-status session))
+     (drover-sidebar--layout-space layout)))
+
+(defun drover-sidebar--session-line (session depth indent layout now)
+  "Return the line of SESSION, at DEPTH in its tree, with ages as of NOW.
+The line holds INDENT pixels of indentation, the status glyph, one
+space, the title, truncated, and the age, flush right; LAYOUT gives the
+measures.  A subagent at the top level, its parent not listed, has an
+arrow before its title."
   (let* ((status (drover-session-status session))
-         (glyph (drover-status-glyph status))
-         (age (drover-format-age (drover-sidebar--age-time session) now))
-         (age-width (string-width age))
-         (title (concat (if (drover-session-parent session)
-                            (propertize "↳ " 'face 'drover-dim)
+         (width (drover-sidebar--layout-width layout))
+         (age (drover-face (drover-format-age (drover-sidebar--age-time session) now) 'drover-dim))
+         (age-start (if (string-empty-p age)
+                        width
+                      (- width (drover-sidebar--pixels layout age))))
+         (title (drover-sidebar--one-line (drover-session-display-title session)))
+         (title (concat (if (and (zerop depth) (drover-session-parent session))
+                            (drover-face "↳ " 'drover-dim)
                           "")
-                        (propertize (drover-sidebar--one-line
-                                     (drover-session-display-title session))
-                                    'face (and (eq status 'idle) 'drover-dim))))
-         (room (max 1 (- width 2 (string-width glyph) 1
-                         (if (zerop age-width) 0 (1+ age-width))))))
-    (concat "  " glyph " "
-            (truncate-string-to-width title room nil nil t)
-            (unless (zerop age-width)
-              ;; Aligned by display rather than by padding, since a glyph
-              ;; may be drawn narrower or wider than `string-width' says.
-              (concat (propertize " " 'display `(space :align-to ,(- width age-width)))
-                      (propertize age 'face 'drover-dim))))))
+                        (if (eq status 'idle) (drover-face title 'drover-dim) title))))
+    (concat (drover-sidebar--blank (drover-sidebar--indent-columns depth) indent)
+            (drover-status-glyph status)
+            " "
+            (drover-sidebar--truncate
+             layout title
+             (- age-start
+                (drover-sidebar--title-start layout session indent)
+                (if (string-empty-p age) 0 (drover-sidebar--layout-space layout))))
+            (unless (string-empty-p age)
+              ;; Aligned by display, in pixels, whatever the font draws
+              ;; before it.
+              (concat (propertize " " 'display `(space :align-to (,age-start)))
+                      age)))))
 
-(defun drover-sidebar--summary-line (session width)
-  "Return the second line of SESSION, WIDTH columns wide, or nil.
-Only a session needing the user and saying why has one."
+(defun drover-sidebar--summary-line (session depth indent layout)
+  "Return the second line of SESSION, at DEPTH in its tree, or nil.
+Only a session needing the user and saying why has one.  It starts
+under the title of the session's line, indented INDENT pixels, and fits
+the width of LAYOUT."
   (when-let* (((drover-session-attention-p session))
               (summary (drover-session-summary session)))
-    (concat "    "
-            (propertize (truncate-string-to-width
-                         (drover-sidebar--one-line summary) (max 1 (- width 4)) nil nil t)
-                        'face 'drover-dim))))
+    (let ((start (drover-sidebar--title-start layout session indent)))
+      (concat (drover-sidebar--blank (+ 2 (drover-sidebar--indent-columns depth)) start)
+              (drover-sidebar--truncate
+               layout (drover-face (drover-sidebar--one-line summary) 'drover-dim)
+               (- (drover-sidebar--layout-width layout) start))))))
 
 (defun drover-sidebar--insert-line (string &rest properties)
   "Insert STRING and a newline, both with text PROPERTIES."
@@ -195,68 +343,87 @@ Only a session needing the user and saying why has one."
     (insert string "\n")
     (add-text-properties start (point) properties)))
 
-(defun drover-sidebar--insert-session (session width now)
-  "Insert the lines of SESSION, WIDTH columns wide, with ages as of NOW."
-  (let ((key (drover-session-key session))
-        (status (drover-session-status session))
+(defun drover-sidebar--insert-session (session depth indent path layout now)
+  "Insert the lines of SESSION, at DEPTH in its tree, with ages as of NOW.
+Its line is indented INDENT pixels.  PATH lists the keys of SESSION and
+of the sessions above it, nearest first.  LAYOUT gives the measures."
+  (let ((status (drover-session-status session))
         (start (point)))
-    (drover-sidebar--insert-line (drover-sidebar--session-line session width now)
+    (drover-sidebar--insert-line (drover-sidebar--session-line session depth indent layout now)
                                  'drover-sidebar-line 'session
                                  'mouse-face 'highlight
                                  'follow-link t
                                  'help-echo (drover-sidebar--help session))
     ;; The newline would stretch the mouse highlight over the window's width.
     (remove-text-properties (1- (point)) (point) '(mouse-face nil))
-    (when-let* ((summary (drover-sidebar--summary-line session width)))
+    (when-let* ((summary (drover-sidebar--summary-line session depth indent layout)))
       (drover-sidebar--insert-line summary 'drover-sidebar-line 'summary))
     ;; One key object for every line of the session, so that
     ;; `next-single-property-change' finds where the session ends.
-    (add-text-properties start (point) (list 'drover-sidebar-key key
+    (add-text-properties start (point) (list 'drover-sidebar-key (car path)
+                                             'drover-sidebar-path path
                                              'drover-sidebar-session session
                                              'drover-sidebar-status status))))
 
-(defun drover-sidebar--insert-empty (sessions width)
-  "Insert the line saying no session shows, WIDTH columns wide.
-SESSIONS are every session, so as to hint at hidden subagents."
-  (drover-sidebar--insert-line (propertize (truncate-string-to-width "No sessions." width nil nil t)
-                                           'face 'drover-dim)
-                               'drover-sidebar-line 'empty)
-  (when sessions
-    (drover-sidebar--insert-line
-     (propertize (truncate-string-to-width
-                  (substitute-command-keys
-                   (format "\\<drover-sidebar-mode-map>\\[drover-sidebar-toggle-children] shows %d subagent%s."
-                           (length sessions) (if (cdr sessions) "s" "")))
-                  width nil nil t)
-                 'face 'drover-dim)
-     'drover-sidebar-line 'empty)))
+(defun drover-sidebar--insert-tree (node depth indent path layout now)
+  "Insert the lines of tree NODE, at DEPTH, with ages as of NOW.
+The line of its session is indented INDENT pixels.  PATH lists the keys
+of the sessions above NODE, nearest first.  LAYOUT gives the measures.
+Subagents start where the title of their parent does, so that each
+glyph sits under the title above it."
+  (let* ((session (drover-node-session node))
+         (path (cons (drover-session-key session) path))
+         (children-indent (if (< depth drover-sidebar--max-depth)
+                              (drover-sidebar--title-start layout session indent)
+                            indent)))
+    (drover-sidebar--insert-session session depth indent path layout now)
+    (dolist (child (drover-node-children node))
+      (drover-sidebar--insert-tree child (1+ depth) children-indent path layout now))))
 
-(defun drover-sidebar--render (width &optional now)
-  "Draw every session in the current buffer, WIDTH columns wide.
+(defun drover-sidebar--insert-note (text type layout)
+  "Insert a line of TYPE saying TEXT, dimmed, fitting the width of LAYOUT."
+  (drover-sidebar--insert-line
+   (drover-sidebar--truncate layout (drover-face text 'drover-dim)
+                             (drover-sidebar--layout-width layout))
+   'drover-sidebar-line type))
+
+(defun drover-sidebar--render (width &optional now window)
+  "Draw every session in the current buffer, WIDTH pixels wide.
 Ages count up to NOW, a float time defaulting to the current time.
+Text is measured with the fonts of WINDOW, or of the selected window.
 Point lands at the start of the buffer."
   (let* ((inhibit-read-only t)
          (now (or now (float-time)))
-         (sessions (drover-sessions))
-         (visible (and sessions (drover-visible-sessions sessions)))
-         (groups (drover-sidebar--groups visible)))
+         (trees (drover-tree (drover-sessions)))
+         (groups (drover-sidebar--groups (drover-tree-visible trees)))
+         (hidden (drover-tree-hidden-count trees))
+         (layout (drover-sidebar--layout width window)))
     (erase-buffer)
     (setq drover-sidebar--width width)
-    (if (null groups)
-        (drover-sidebar--insert-empty sessions width)
-      (pcase-dolist (`(,status . ,members) groups)
-        (let ((folded (memq status drover-sidebar--folded)))
-          (drover-sidebar--insert-line
-           (drover-sidebar--heading-line status (length members) folded width)
-           'drover-sidebar-line 'heading
-           'drover-sidebar-status status
-           'mouse-face 'highlight
-           'follow-link t
-           'help-echo (if folded "Show this group" "Fold this group"))
-          (remove-text-properties (1- (point)) (point) '(mouse-face nil))
-          (unless folded
-            (dolist (session members)
-              (drover-sidebar--insert-session session width now))))))
+    (unless groups
+      (drover-sidebar--insert-note "No sessions." 'empty layout))
+    (pcase-dolist (`(,status . ,members) groups)
+      (let ((folded (memq status drover-sidebar--folded)))
+        (drover-sidebar--insert-line
+         (drover-sidebar--heading-line status (length members) folded layout)
+         'drover-sidebar-line 'heading
+         'drover-sidebar-status status
+         'mouse-face 'highlight
+         'follow-link t
+         'help-echo (if folded "Show this group" "Fold this group"))
+        (remove-text-properties (1- (point)) (point) '(mouse-face nil))
+        (unless folded
+          (dolist (node members)
+            (drover-sidebar--insert-tree node 0 (drover-sidebar--layout-margin layout)
+                                         nil layout now)))))
+    ;; Every tree shows its root, so hidden subagents never leave the
+    ;; list empty: the hint at them closes the list instead.
+    (when (> hidden 0)
+      (drover-sidebar--insert-note
+       (substitute-command-keys
+        (format "\\<drover-sidebar-mode-map>\\[drover-sidebar-toggle-children] shows %d subagent%s."
+                hidden (if (= hidden 1) "" "s")))
+       'hint layout))
     (goto-char (point-min))
     (drover-sidebar--update-current)))
 
@@ -264,7 +431,8 @@ Point lands at the start of the buffer."
 
 (defun drover-sidebar--line-type (&optional position)
   "Return the kind of the line at POSITION or point.
-It is `heading', `session', `summary', `empty', or nil past the end."
+It is `heading', `session', `summary', `empty', `hint', or nil past the
+end."
   (get-text-property (save-excursion
                        (when position (goto-char position))
                        (line-beginning-position))
@@ -308,15 +476,16 @@ PREDICATE is called with the start of the line."
 
 (defun drover-sidebar--anchor (position)
   "Return what the line at POSITION shows, to find it again after a redraw.
-The value is (TYPE ID LINE): TYPE is `session', with ID its key, or
+The value is (TYPE ID LINE): TYPE is `session', with ID the keys of the
+session and of the sessions above it in its tree, nearest first, or
 `heading', with ID its status, or nil; LINE is the line number."
   (when (> (buffer-size) 0)
     (save-excursion
       (goto-char position)
       (let ((line (line-number-at-pos nil t))
-            (key (get-text-property (line-beginning-position) 'drover-sidebar-key)))
+            (path (get-text-property (line-beginning-position) 'drover-sidebar-path)))
         (cond
-         (key (list 'session key line))
+         (path (list 'session path line))
          ((eq (drover-sidebar--line-type) 'heading)
           (list 'heading (get-text-property (line-beginning-position) 'drover-sidebar-status) line))
          (t (list nil nil line)))))))
@@ -326,23 +495,32 @@ The value is (TYPE ID LINE): TYPE is `session', with ID its key, or
   (drover-sidebar--find-line 'session #'always))
 
 (defun drover-sidebar--line-position (line)
-  "Return the start of LINE, clamped to the last line of text."
+  "Return the start of LINE, clamped to the last line of text.
+On the hint closing the list, return the last session or heading."
   (save-excursion
     (goto-char (point-min))
     (forward-line (1- line))
     (when (and (eobp) (not (bobp)))
       (forward-line -1))
-    (or (drover-sidebar--entry-start (point)) (point))))
+    (or (drover-sidebar--entry-start (point))
+        (and (eq (drover-sidebar--line-type) 'hint)
+             (drover-sidebar--search -1 '(session heading)))
+        (point))))
 
 (defun drover-sidebar--anchor-position (anchor)
   "Return the position of what ANCHOR, from `drover-sidebar--anchor', shows.
-A session or heading no longer shown falls back to the same line; no
-ANCHOR falls back to the first session."
+A session no longer shown falls back to the nearest session above it in
+its tree, such as the parent of a subagent now hidden; a session without
+one, or a heading, to the same line.  No ANCHOR falls back to the first
+session."
   (pcase-let ((`(,type ,id ,line) anchor))
     (or (pcase type
-          ('session (drover-sidebar--find-line
-                     'session (lambda (start)
-                                (equal (get-text-property start 'drover-sidebar-key) id))))
+          ('session (seq-some
+                     (lambda (key)
+                       (drover-sidebar--find-line
+                        'session (lambda (start)
+                                   (equal (get-text-property start 'drover-sidebar-key) key))))
+                     id))
           ('heading (drover-sidebar--find-line
                      'heading (lambda (start)
                                 (eq (get-text-property start 'drover-sidebar-status) id)))))
@@ -385,16 +563,12 @@ one not dedicated to its buffer.  FRAME defaults to the selected frame."
     (window-parameters . ((no-delete-other-windows . t)
                           (no-other-window . t)))))
 
-(defun drover-sidebar--window-width (windows)
-  "Return the width to draw the sidebar for, in WINDOWS showing it.
-The window on the selected frame wins; without a window, the width
-follows `drover-sidebar-width'."
-  (let ((window (or (seq-find (lambda (window) (eq (window-frame window) (selected-frame)))
-                              windows)
-                    (car windows))))
-    (if window
-        (window-max-chars-per-line window)
-      (max 1 (1- drover-sidebar-width)))))
+(defun drover-sidebar--drawing-window (windows)
+  "Return the window of WINDOWS, showing the sidebar, to draw it for, or nil.
+The window on the selected frame wins."
+  (or (seq-find (lambda (window) (eq (window-frame window) (selected-frame)))
+                windows)
+      (car windows)))
 
 (defun drover-sidebar--entry-of-buffer (buffer)
   "Return the bounds (START . END) of the session shown by BUFFER, or nil."
@@ -429,8 +603,9 @@ and window starts stay on the same line."
                           (list window
                                 (or anchor (drover-sidebar--anchor (window-point window)))
                                 (line-number-at-pos (window-start window) t)))
-                        windows)))
-    (drover-sidebar--render (drover-sidebar--window-width windows))
+                        windows))
+         (window (drover-sidebar--drawing-window windows)))
+    (drover-sidebar--render (drover-sidebar--window-pixels window) nil window)
     (goto-char (drover-sidebar--anchor-position here))
     (pcase-dolist (`(,window ,window-anchor ,start-line) views)
       (set-window-point window (drover-sidebar--anchor-position window-anchor))
@@ -454,9 +629,15 @@ and window starts stay on the same line."
 (defun drover-sidebar--size-changed (window)
   "Redraw the sidebar when WINDOW, showing it, changed width."
   (when (and (window-live-p window)
-             (not (eql (window-max-chars-per-line window) drover-sidebar--width)))
+             (not (eql (drover-sidebar--window-pixels window) drover-sidebar--width)))
     (with-current-buffer (window-buffer window)
       (drover-sidebar--redraw))))
+
+(defun drover-sidebar--text-scaled ()
+  "Redraw the sidebar, whose text changed size, or mark it stale if hidden."
+  (if (get-buffer-window (current-buffer) t)
+      (drover-sidebar--redraw)
+    (setq drover-sidebar--stale t)))
 
 (defun drover-sidebar--windows-changed (&optional _frame)
   "Update the highlight of the main window's session."
@@ -545,10 +726,12 @@ back and forth."
   (drover-sidebar--hide))
 
 (defun drover-sidebar-refresh ()
-  "Redraw the sidebar from what the backends report."
+  "Redraw the sidebar from what the backends report.
+Text is measured anew, as after changing the face `drover-sidebar'."
   (interactive)
   (when-let* ((buffer (get-buffer drover-sidebar-buffer-name)))
     (with-current-buffer buffer
+      (setq drover-sidebar--widths nil)
       (drover-sidebar--redraw))))
 
 ;;;; Commands
@@ -691,7 +874,9 @@ The change is local to the sidebar."
 
 (defun drover-sidebar-toggle-children ()
   "Toggle listing the sessions of subagents in the sidebar.
-A subagent needing the user always shows."
+Each shows under its parent.  A subagent needing the user, and those
+above it, always show.  Point on a subagent now hidden moves to the
+nearest session above it."
   (interactive nil drover-sidebar-mode)
   (setq-local drover-show-children (not drover-show-children))
   (force-mode-line-update)
@@ -733,7 +918,9 @@ A subagent needing the user always shows."
 \\{drover-sidebar-mode-map}"
   :interactive nil
   (setq-local drover-session-at-point-function #'drover-sidebar--session-at-point
-              revert-buffer-function (lambda (&rest _) (drover-sidebar--redraw))
+              revert-buffer-function (lambda (&rest _)
+                                       (setq drover-sidebar--widths nil)
+                                       (drover-sidebar--redraw))
               drover-sidebar--folded (copy-sequence drover-sidebar-folded-statuses)
               truncate-lines t
               buffer-undo-list t
@@ -741,7 +928,9 @@ A subagent needing the user always shows."
               mode-line-format '(" " (:propertize "Drover" face mode-line-buffer-id)
                                  (:eval (drover-sidebar--mode-line-flags))))
   (add-hook 'window-size-change-functions #'drover-sidebar--size-changed nil t)
-  (add-hook 'kill-buffer-hook #'drover-sidebar--unwatch nil t))
+  (add-hook 'text-scale-mode-hook #'drover-sidebar--text-scaled nil t)
+  (add-hook 'kill-buffer-hook #'drover-sidebar--unwatch nil t)
+  (face-remap-add-relative 'default 'drover-sidebar))
 
 (provide 'drover-sidebar)
 ;;; drover-sidebar.el ends here

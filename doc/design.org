@@ -10,9 +10,9 @@
 | =drover-ui.el=      | Faces, glyphs, labels and ages; the session at point; commands and keys shared by every view       |
 | =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions |
 | =drover-opencode.el= | The opencode.el backend, built on =opencode-state=                                                |
-| =drover-dashboard.el= | Dashboard prototype: collapsible =magit-section= groups                                           |
-| =drover-table.el=   | Dashboard prototype: one =vtable=                                                                  |
-| =drover-sidebar.el= | Dashboard prototype: a narrow side window                                                          |
+| =drover-dashboard.el= | Dashboard prototype: collapsible =magit-section= groups, proportional font                        |
+| =drover-table.el=   | Dashboard prototype: one =vtable=, trees kept together whatever the sort                           |
+| =drover-sidebar.el= | Dashboard prototype: a narrow side window, proportional font                                       |
 
 * Backends describe, drover arranges
 
@@ -40,3 +40,11 @@ Every action takes a session and calls the matching function its backend registe
 * Starting backends
 
 =drover-start= runs each backend's =:start= once, and from then on starts every backend as it registers: a front end loaded after drover started, such as opencode.el loaded lazily, joins without another call.  Views and the attention mode call it when they open, so the first view opened starts everything.
+
+* Subagents under their parents
+
+=drover-tree= nests each subagent under its parent, and every view draws trees.  A tree ranks by the most urgent status within it, so a parent whose subagent waits for the user is listed with the sessions that need the user, its subagent beneath it.  =drover-tree-visible= drops the subtrees of subagents to hide and ranks each tree again by what remains, so a hidden subagent never places its parent in a group its own icon does not explain.  Subagents whose parent is not listed are trees of their own, and so is each cycle of parents, so no session disappears; trees and siblings that rank alike keep the backend's order.
+
+* Measuring in pixels
+
+Lists read better in a proportional font, so the views lay text out in pixels: columns align with =(space :align-to (X))=, and long text is cut by =drover-truncate-to-pixels=.  =drover-text-pixel-width= lays text out in a buffer of its own with the view's face remapping and the fonts of the view's window, because =string-pixel-width= ignores face remapping before Emacs 31.  On a text terminal a pixel is a character cell, so the same layout holds there and in batch tests.
