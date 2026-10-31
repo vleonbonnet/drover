@@ -817,40 +817,6 @@ PROJECTS defaults to `drover-opencode-test-projects'."
         (should-not called)
         (should (string-match-p "older OpenCode sessions.*Down" (car messages)))))))
 
-;;;; Session lists
-
-(ert-deftest drover-opencode-test-session-list ()
-  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
-    (let ((row "ses_1"))
-      (cl-letf (((symbol-function 'opencode-session-list-id-at-point) (lambda () row)))
-        (with-temp-buffer
-          (opencode-session-list-mode)
-          (should drover-session-keys-mode)
-          (should (drover-session-list-p))
-          (should (eq (key-binding (kbd "x")) #'drover-delete))
-          (should (eq drover-toggle-subagents-function #'opencode-session-list-toggle-subagents))
-          (should (equal (drover-session-at-point) (drover-opencode-test-session "ses_1")))
-          ;; A session the registry does not hold still has its ID.
-          (setq row "ses_old")
-          (should (equal (drover-session-id (drover-session-at-point)) "ses_old"))
-          (setq row nil)
-          (should-not (drover-session-at-point t))
-          (setq row "ses_1")
-          (cl-letf (((symbol-function 'y-or-n-p) #'always))
-            (call-interactively #'drover-archive))
-          (should (equal (car drover-opencode-test-calls) '(opencode-session-archive "ses_1"))))))))
-
-(ert-deftest drover-opencode-test-session-list-toggle ()
-  (drover-opencode-test-with nil
-    (with-temp-buffer
-      (opencode-session-list-mode)
-      (let ((toggled 0))
-        (cl-letf (((symbol-function 'opencode-session-list-toggle-subagents)
-                   (lambda () (interactive) (cl-incf toggled))))
-          (call-interactively #'drover-toggle-subagents))
-        (should (= toggled 1))
-        (should-not drover-show-children)))))
-
 ;;;; The dispatch menu
 
 (ert-deftest drover-opencode-test-dispatch ()
@@ -871,25 +837,17 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 
 (ert-deftest drover-opencode-test-uninstall-and-install ()
   (drover-opencode-test-with nil
-    (let ((session-buffer (generate-new-buffer " session"))
-          (list-buffer (generate-new-buffer " list")))
+    (let ((session-buffer (generate-new-buffer " session")))
       (unwind-protect
           (progn
             (with-current-buffer session-buffer
               (opencode-session-mode)
               (drover-prompt-define 'schedule #'ignore))
-            (with-current-buffer list-buffer
-              (opencode-session-list-mode))
             (drover-opencode--uninstall)
             (should-not (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
-            (should-not (memq #'drover-opencode--setup-list opencode-session-list-mode-hook))
             (with-current-buffer session-buffer
               (should-not drover-session-at-point-function)
               (should (equal drover-prompt-actions '((schedule . ignore)))))
-            (with-current-buffer list-buffer
-              (should-not drover-session-keys-mode)
-              (should-not drover-session-at-point-function)
-              (should-not drover-toggle-subagents-function))
             (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "S")))
             (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "p")) :command)
                         'drover-select-project))
@@ -902,8 +860,6 @@ PROJECTS defaults to `drover-opencode-test-projects'."
               (should (eq drover-session-at-point-function #'drover-opencode--buffer-session))
               (should (assq 'send drover-prompt-actions))
               (should (assq 'schedule drover-prompt-actions)))
-            (with-current-buffer list-buffer
-              (should drover-session-keys-mode))
             (should (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
             (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch "S")) :command)
                            'opencode-consult-sessions))
@@ -913,7 +869,6 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                                    (aref (transient-get-suffix 'drover-dispatch '(0 1)) 2))
                            '("l" "L" "p" "S"))))
         (kill-buffer session-buffer)
-        (kill-buffer list-buffer)
         (drover-opencode--install)))))
 
 (provide 'drover-opencode-test)

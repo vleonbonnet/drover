@@ -942,7 +942,7 @@ non-nil."
 (defun drover-session-list-p ()
   "Return non-nil when the current buffer lists sessions.
 Drover's views are lists, and so are the buffers where
-`drover-session-keys-mode' is on, such as opencode.el's session lists."
+`drover-session-keys-mode' is on, the lists of other front ends."
   (or drover-view-p (bound-and-true-p drover-session-keys-mode)))
 
 (defun drover--confirm (prompt session &optional strongly)

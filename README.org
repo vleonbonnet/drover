@@ -81,7 +81,7 @@ or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in thre
 
 ** Session keys
 
-In every list of sessions (drover's list, and opencode.el's session lists) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
+In every list of sessions (drover's list, and the lists of other front ends that turn on =drover-session-keys-mode=) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
 
 | Key | Command                    | Action                                           |
 |-----+----------------------------+--------------------------------------------------|
@@ -100,7 +100,7 @@ In every list of sessions (drover's list, and opencode.el's session lists) these
 | =U= | =drover-toggle-subagents=  | show or hide subagent sessions (lists)           |
 | =V= | =drover-view=              | the View menu (drover's list)                    |
 
-=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. In lists drover does not draw, =drover-session-keys-mode= adds these keys; the OpenCode backend turns it on in opencode.el's session lists.
+=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 
 To store an Org link to the session at point, use Org's own =org-store-link= (=C-c l=) with a link type of your own whose store function reads =drover-session-at-point=.
 

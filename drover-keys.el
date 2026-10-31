@@ -26,7 +26,7 @@
 ;; - Session keys act on the session at point.  `drover-session-map'
 ;;   binds them in every list of sessions: drover's views inherit it,
 ;;   and `drover-session-keys-mode' adds it to lists drover does not
-;;   draw, such as opencode.el's.  In a prompt buffer they act on the
+;;   draw, those of other front ends.  In a prompt buffer they act on the
 ;;   buffer's session, through the menu.
 ;; - Prompt keys perform the prompt actions of `drover-prompt-actions',
 ;;   through the menu.
@@ -189,8 +189,8 @@ window of the frame."
 
 (defvar-local drover-toggle-subagents-function nil
   "Command showing or hiding subagents in the current list, or nil.
-`drover-toggle-subagents' calls it in lists drover does not draw, such
-as opencode.el's.")
+`drover-toggle-subagents' calls it in lists drover does not draw, those
+of other front ends.")
 
 (defun drover-toggle-subagents ()
   "Show or hide the sessions of subagents.
@@ -369,8 +369,8 @@ other lists."
 
 (define-minor-mode drover-session-keys-mode
   "Bind the keys of `drover-session-map' in a list of sessions.
-For lists drover does not draw, such as opencode.el's, whose buffers
-also set `drover-session-at-point-function'.
+For lists drover does not draw, those of other front ends, whose
+buffers also set `drover-session-at-point-function'.
 
 \\{drover-session-map}"
   :keymap drover-session-map

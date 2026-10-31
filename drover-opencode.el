@@ -28,12 +28,11 @@
 ;; kept here, fetched when the backend starts and again whenever the
 ;; service reports a project change or the event stream reconnects.
 ;;
-;; The backend also fits opencode.el's buffers into drover's keys: a
-;; session buffer tells its session (`drover-session-at-point-function')
-;; and its prompt actions (`drover-prompt-define'); a session list tells
-;; the session at point and gets the session keys
-;; (`drover-session-keys-mode').  The menu `drover-dispatch' gains
-;; opencode.el's session search.
+;; The backend also fits opencode.el's session buffers into drover's
+;; keys: each tells its session (`drover-session-at-point-function') and
+;; its prompt actions (`drover-prompt-define').  opencode.el lists no
+;; sessions of its own: drover's list does.  The menu `drover-dispatch'
+;; gains opencode.el's session search.
 ;;
 ;; Older sessions, beyond those of the registry, come from the service
 ;; on demand (:history): every unarchived session, of every project.
@@ -53,7 +52,6 @@
 (declare-function opencode-session-delete "opencode-session" (id))
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
-(declare-function opencode-session-list-id-at-point "opencode-sessions" ())
 
 ;;;; Projects
 
@@ -378,27 +376,6 @@ Everything after the process mark goes; \\[undo] brings it back."
     (when (eq (alist-get action drover-prompt-actions) command)
       (drover-prompt-define action nil))))
 
-;;;; Session lists
-
-(defun drover-opencode--list-session ()
-  "Return the session of the row at point of an opencode.el session list, or nil."
-  (when-let* ((id (opencode-session-list-id-at-point)))
-    (drover-opencode--session-of id)))
-
-(defun drover-opencode--setup-list ()
-  "Give this opencode.el session list the session keys of drover."
-  (setq-local drover-session-at-point-function #'drover-opencode--list-session
-              drover-toggle-subagents-function #'opencode-session-list-toggle-subagents)
-  (drover-session-keys-mode))
-
-(defun drover-opencode--teardown-list ()
-  "Undo `drover-opencode--setup-list' in this buffer."
-  (when (eq drover-session-at-point-function #'drover-opencode--list-session)
-    (kill-local-variable 'drover-session-at-point-function))
-  (when (eq drover-toggle-subagents-function #'opencode-session-list-toggle-subagents)
-    (kill-local-variable 'drover-toggle-subagents-function))
-  (drover-session-keys-mode -1))
-
 ;;;; The dispatch menu
 
 (defconst drover-opencode--dispatch-suffixes
@@ -425,27 +402,19 @@ They follow \"p\", the last of drover's commands listing sessions."
   (match-buffers `(derived-mode . ,mode)))
 
 (defun drover-opencode--install ()
-  "Fit opencode.el's buffers, existing and future, into drover's keys."
+  "Fit opencode.el's session buffers, existing and future, into drover's keys."
   (add-hook 'opencode-session-mode-hook #'drover-opencode--setup-session-buffer)
-  (add-hook 'opencode-session-list-mode-hook #'drover-opencode--setup-list)
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
       (drover-opencode--setup-session-buffer)))
-  (dolist (buffer (drover-opencode--buffers 'opencode-session-list-mode))
-    (with-current-buffer buffer
-      (drover-opencode--setup-list)))
   (drover-opencode--add-to-dispatch))
 
 (defun drover-opencode--uninstall ()
   "Undo `drover-opencode--install'."
   (remove-hook 'opencode-session-mode-hook #'drover-opencode--setup-session-buffer)
-  (remove-hook 'opencode-session-list-mode-hook #'drover-opencode--setup-list)
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
       (drover-opencode--teardown-session-buffer)))
-  (dolist (buffer (drover-opencode--buffers 'opencode-session-list-mode))
-    (with-current-buffer buffer
-      (drover-opencode--teardown-list)))
   (drover-opencode--remove-from-dispatch))
 
 (drover-opencode--install)
