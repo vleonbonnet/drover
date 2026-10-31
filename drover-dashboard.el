@@ -858,7 +858,7 @@ point.  Text is drawn in the face `drover-dashboard'.
   ;; Magit's cache keys a session by its group too, and never forgets;
   ;; `drover-dashboard--visibility' replaces it.
   (setq-local magit-section-cache-visibility nil)
-  (face-remap-add-relative 'default 'drover-dashboard)
+  (drover-remap-default-face 'drover-dashboard)
   (add-hook 'magit-section-set-visibility-hook #'drover-dashboard--cached-visibility nil t)
   (add-hook 'window-buffer-change-functions #'drover-dashboard--on-window-change nil t)
   (add-hook 'window-size-change-functions #'drover-dashboard--on-window-change nil t)

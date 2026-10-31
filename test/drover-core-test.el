@@ -181,6 +181,32 @@
       (setq drover-session-at-point-function (lambda () session))
       (should (eq (drover-session-at-point) session)))))
 
+;;;; Face remapping
+
+(ert-deftest drover-test-remap-default-face-stays-local ()
+  "Remapping a view's default face never changes the global remapping.
+A global `face-remapping-alist', such as one setting a stipple, shares
+its list with every buffer-local value made from it."
+  (let ((face-remapping-alist (list (list 'default (list :stipple "alpha:65%")))))
+    (let ((global (copy-tree face-remapping-alist)))
+      (with-temp-buffer
+        (drover-remap-default-face 'bold)
+        (should (memq 'bold (flatten-tree (alist-get 'default face-remapping-alist)))))
+      (should (equal (default-value 'face-remapping-alist) global))
+      (with-temp-buffer
+        (should (equal face-remapping-alist global))))))
+
+(ert-deftest drover-test-views-keep-the-global-remapping ()
+  "Opening the dashboard and the sidebar leaves the global remapping alone."
+  (require 'drover-dashboard)
+  (require 'drover-sidebar)
+  (let ((face-remapping-alist (list (list 'default (list :stipple "alpha:65%")))))
+    (let ((global (copy-tree face-remapping-alist)))
+      (dolist (mode '(drover-dashboard-mode drover-sidebar-mode))
+        (with-temp-buffer
+          (funcall mode)))
+      (should (equal (default-value 'face-remapping-alist) global)))))
+
 ;;;; Trees
 
 (defun drover-test-tree-shape (nodes)

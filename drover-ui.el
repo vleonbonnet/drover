@@ -28,6 +28,7 @@
 ;;; Code:
 
 (require 'drover-core)
+(require 'face-remap)
 
 (defgroup drover-faces nil
   "Faces of drover."
@@ -135,6 +136,15 @@ A waiting session shows its oldest request, another its detail."
           (branch branch))))
 
 ;;;; Measuring text
+
+(defun drover-remap-default-face (face)
+  "Draw the text of the current buffer in FACE, over the default face.
+The remapping stays the buffer's own: `face-remap-add-relative' changes
+the list it finds in place, and a buffer-local value made from a global
+`face-remapping-alist' shares that list, so the buffer gets a copy
+first.  Without it, every buffer would take FACE."
+  (setq-local face-remapping-alist (copy-tree face-remapping-alist))
+  (face-remap-add-relative 'default face))
 
 (defconst drover--measure-buffer " *drover measure*"
   "Name of the buffer in which text is laid out to be measured.")

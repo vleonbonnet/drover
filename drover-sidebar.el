@@ -930,7 +930,7 @@ nearest session above it."
   (add-hook 'window-size-change-functions #'drover-sidebar--size-changed nil t)
   (add-hook 'text-scale-mode-hook #'drover-sidebar--text-scaled nil t)
   (add-hook 'kill-buffer-hook #'drover-sidebar--unwatch nil t)
-  (face-remap-add-relative 'default 'drover-sidebar))
+  (drover-remap-default-face 'drover-sidebar))
 
 (provide 'drover-sidebar)
 ;;; drover-sidebar.el ends here
