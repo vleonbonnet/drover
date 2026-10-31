@@ -3,21 +3,19 @@
 
 * Modules
 
-| Module                | Responsibility                                                                                                                                                      |
-|-----------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| =drover.el=           | Entry point: loads the core and the interface, and each backend once its front end is loaded                                                                        |
-| =drover-core.el=      | The session record, backend registry, status ranking and grouping, change coalescing, actions; view settings and filtering; the session at point and prompt actions |
-| =drover-ui.el=        | Faces, glyphs, labels, ages and filter descriptions; measuring text in pixels                                                                                       |
-| =drover-keys.el=      | Commands on the session at point and the prompt, the shared keymap, follow mode, the menus =drover-dispatch=, =drover-group= and =drover-filter=                    |
-| =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions                                                                    |
-| =drover-opencode.el=  | The opencode.el backend, built on =opencode-state=                                                                                                                  |
-| =drover-dashboard.el= | Dashboard prototype: collapsible =magit-section= groups, proportional font                                                                                          |
-| =drover-table.el=     | Dashboard prototype: one =vtable=, trees kept together whatever the sort                                                                                            |
-| =drover-sidebar.el=   | Dashboard prototype: a narrow side window, proportional font                                                                                                        |
+| Module                | Responsibility                                                                                                                                                                               |
+|-----------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =drover.el=           | Entry point: loads the core and the interface, and each backend once its front end is loaded                                                                                                 |
+| =drover-core.el=      | The session record, backend registry, status ranking, sorting and grouping, change coalescing, actions; view settings, filtering and older sessions; the session at point and prompt actions |
+| =drover-ui.el=        | Faces, glyphs, labels, ages and filter descriptions; measuring text in pixels                                                                                                                |
+| =drover-keys.el=      | Commands on the session at point and the prompt, the shared keymap, follow mode, the menus =drover-dispatch= and =drover-view=                                                               |
+| =drover-attention.el= | Mode-line count of sessions needing the user; visiting the most urgent; completion over sessions                                                                                             |
+| =drover-list.el=      | The list of sessions: collapsible =magit-section= groups, proportional font, a layout chosen by width, in an ordinary or a side window                                                       |
+| =drover-opencode.el=  | The opencode.el backend, built on =opencode-state=                                                                                                                                           |
 
 * Backends describe, drover arranges
 
-A backend owns its sessions and their state; drover asks it for =drover-session= records whenever it draws, and never caches them beyond one redraw.  The record is a snapshot with one status, so every view ranks and groups sessions the same way, through =drover-sort=, =drover-tree=, =drover-group-trees-by-status= and =drover-group-trees-by-project=.
+A backend owns its sessions and their state; drover asks it for =drover-session= records whenever it draws, and never caches them beyond one redraw.  The record is a snapshot with one status, so every view ranks, groups and sorts sessions the same way, through =drover-sort=, =drover-tree=, =drover-group-trees= and =drover-sort-trees=.  The only records drover keeps are older sessions a backend fetched on demand (see below), and only while they are shown.
 
 Backends report changes with =drover-backend-changed=.  A turn streams many events, so changes are coalesced: =drover-changed-hook= runs once the backends have been quiet for =drover-refresh-delay= seconds, and views redraw from it.
 
@@ -56,7 +54,9 @@ Every key belongs to one of three sets, and no key to two: session keys act on t
 
 The menu shows every entry wherever it is invoked, greying out those that do not apply, so its layout never moves and keys are learnt by position.  What applies is computed once, when the menu opens (its scope, from =drover--context=), since finding the session at point may ask the backends for every session.
 
-Other packages add their global commands to the menu relative to drover's keys, as Magit extensions do: the OpenCode backend inserts its session lists before =3=.
+Other packages add their global commands to the menu relative to drover's keys, as Magit extensions do: the OpenCode backend appends its session search after =p=, the last of drover's lists; the user's configuration chains its prompt pickers after =b=.  These places are kept stable on purpose.
+
+The settings of the list have a menu of their own, the View menu, rather than keys of the session set: sorting, grouping, filtering and what shows take many values each, which one key per value would spread over the whole keyboard.  Its entries are infixes showing their current value, as Magit's do, and changing one redraws the list while the menu stays open.
 
 * The session at point, in lists and prompt buffers
 
@@ -72,6 +72,23 @@ Compacting and forking exist both ways: in a prompt buffer they are prompt actio
 
 * View settings
 
-Grouping (=drover-group-by=), filtering (=drover-filter=) and whether subagents show (=drover-show-children=) are global: every view lists the same sessions the same way, and changing a setting redraws them all at once through =drover-changed-hook=.  Views draw =drover-view-trees=.
+Grouping (=drover-group-by=), sorting (=drover-sort-by=, =drover-sort-descending=), filtering (=drover-filter=), whether subagents show (=drover-show-children=) and whether older sessions do (=drover-show-history=) are global: every view lists the same sessions the same way, and changing a setting redraws them all at once through =drover-changed-hook=.  Views draw =drover-view-groups=: the trees of =drover-view-trees=, grouped, then sorted within each group, so that groups keep their own order (statuses by urgency, last activity newest first, other values as their most urgent tree) whatever the sort.
+
+Sorting never parts a subagent from its parent: the trees are sorted, then the subagents of each session among themselves.  Sessions without a value for the field come last either way, and ties keep the order of urgency, as =sort= is stable.
 
 A filter keeps a tree when a session in it matches, with the sessions above each match, so a matching subagent shows under its parent.  Hidden subagents stay hidden unless they explain why their tree is listed: a matching subagent shows when no session above it matches.  Filtering a project thus lists its sessions without every one of their subagents, while filtering on a status or a text shows the subagent that has it.
+
+* One list, laid out by width
+
+Drover has one view of sessions, =drover-list=: one buffer, shown in an ordinary window or, by =drover-list-side=, in a side window, and moved from one to the other rather than shown in both, so that it is drawn for one width.  From a side window, sessions open in the main window: the most recently used window outside side windows, which the list's =drover-main-window-function= returns only while the list is in a side window.
+
+What a line shows is one function of the width and of the fields that have something to show (=drover-list--choose=).  =drover-list-fields= is data: each field has a rank, the room it needs and the room it may take, and its place in the narrow layout.  Fields are taken by rank while their minimum widths fit; columns are used when they include every field the narrow layout places, else the narrow layout, two lines per session, which places them without needing room of its own: the title and age on the first line, the background of that line for the prompt cache, what the session waits for on the second.  Because fields of lower rank show only after those of higher rank, a wider window never shows less.  Column widths then follow the content up to each field's maximum; on a line too narrow for that, the fields without a maximum give up room first, then the others in proportion, down to their minimum.
+
+* Prompt caches
+
+A record may tell when the provider's prompt cache of the session expires and how long such a cache lasts (=cache-expires=, =cache-ttl=); =drover-session-cache-fraction= is what is left of its lifetime.  The list draws it without taking room in two lines: the background of the session's first line, filled from the left over that fraction.  Every space of such a line is two characters, the first a stretch of no width, so that the bar may end at any pixel of a space, or between two characters of text.  As the cache runs out, a timer changes only the display properties of those characters and the bar's overlay, not the text, so nothing is drawn anew; it runs while a shown list has a live cache, and stops otherwise.
+
+* Older sessions
+
+A backend follows some sessions live, its newest; older ones it may fetch on demand (=:history=).  =drover-set-show-history= fetches them from every backend that can, and forgets them when hidden; =g= in the list fetches them again.  =drover-known-sessions= merges them with the live sessions, a live record winning over an older one of the same session; lists, =drover-find= and the subagents of a session see them, while the attention count and =drover-next= keep to the live sessions.  An answer arriving after a later fetch started, or after they were hidden, is dropped.
+

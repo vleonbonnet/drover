@@ -29,10 +29,10 @@
 ;; elsewhere.  Front ends plug in as backends (see `drover-core'); the
 ;; first is opencode.el, loaded with it.  `drover-attention-mode' shows
 ;; how many sessions need you in the mode line and `drover-next' visits
-;; the most urgent; `drover-dashboard', `drover-table' and
-;; `drover-sidebar' list every session.  `drover-dispatch' is a menu of
-;; every command, on sessions and on the prompt you write to an agent;
-;; bind it globally, for instance:
+;; the most urgent; `drover-list' lists every session in a window, and
+;; `drover-list-side' beside your work, laid out for the window's width.
+;; `drover-dispatch' is a menu of every command, on sessions and on the
+;; prompt you write to an agent; bind it globally, for instance:
 ;;
 ;;   (keymap-global-set "C-'" #'drover-dispatch)
 

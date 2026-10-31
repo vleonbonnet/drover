@@ -20,7 +20,7 @@
 
 ;;; Commentary:
 
-;; Keeping up with sessions without a dashboard:
+;; Keeping up with sessions without opening their list:
 ;;
 ;; - `drover-attention-mode' counts the sessions that need you in the
 ;;   mode line, one count per status, such as "⚑2 ✓1".  mouse-1 on it

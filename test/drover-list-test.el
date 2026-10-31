@@ -1970,7 +1970,7 @@ Each shows its own buffer."
     (list first second)))
 
 (defun drover-list-test-side-sample ()
-  "Return sessions of every status, the clock-relative ones of the sidebar."
+  "Return sessions of every status, one needing the user with a second line."
   (list (drover-test-session "idle" :status 'idle :updated (drover-list-test-ago 86400))
         (drover-test-session "work" :status 'working :updated (drover-list-test-ago 60)
                              :since (drover-list-test-ago 600))

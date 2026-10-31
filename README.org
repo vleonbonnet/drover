@@ -1,13 +1,13 @@
 #+TITLE: drover
 #+OPTIONS: toc:nil
 
-Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session in a dashboard from which you can open, answer, interrupt, archive or preview any of them.
+Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session in one list, in a window or beside your work, from which you can open, answer, interrupt, archive or preview any of them.
 
 Agent front ends plug in as backends. The first is [[https://github.com/vleonbonnet/opencode.el][opencode.el]], for [[https://opencode.ai/][OpenCode]] 2.
 
 * Requirements
 
-- Emacs 30.1, a Nerd Font for the status icons, [[https://github.com/magit/transient][transient]] for the menus, and [[https://github.com/magit/magit][magit-section]] for =drover-dashboard=.
+- Emacs 30.1, a Nerd Font for the status icons, [[https://github.com/magit/transient][transient]] for the menus, and [[https://github.com/magit/magit][magit-section]] for the session list.
 - For OpenCode sessions, opencode.el with its =opencode-state= session registry.
 
 * Installation
@@ -56,33 +56,53 @@ Drover binds no global key. Its commands are gathered in one menu, =drover-dispa
   (keymap-global-set "C-'" #'drover-dispatch)
 #+end_src
 
-or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in three sets, and no key belongs to two, so the menu holds them all: the global keys everywhere, the session keys in lists of sessions and in prompt buffers, the prompt keys in prompt buffers. What does not apply where you are is greyed out rather than hidden, so the menu never changes shape.
+or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in three sets, and no key belongs to two, so the menu holds them all: the global keys everywhere, the session keys in lists of sessions and in prompt buffers, the prompt keys in prompt buffers. What does not apply where you are is greyed out rather than hidden, so the menu never changes shape. With the OpenCode backend, it reads:
+
+#+begin_example
+  Global
+   j Next     l List              a Agent       C Compact
+   b Select   L Side list         m Model       f Fork
+              p Project           e Effort      . Last answer
+              S Search sessions   d Directory   O Open link
+
+  Session
+   o Other window   A Answer        r Rename    U Subagents
+   u Parent         K Interrupt     x Delete    V View
+   c Subagent       s Mark seen     z Archive
+   v Peek           + New session
+                    g Refresh
+
+  Prompt
+   RET Send              / Slash command   t Revert here
+   S-<return> Schedule   @ Mention         T Cancel revert
+   i Attach              y Copy block
+   k Clear
+#+end_example
 
 ** Session keys
 
-In every list of sessions (=drover-dashboard=, =drover-table=, =drover-sidebar=, and opencode.el's session lists) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
+In every list of sessions (drover's list, and opencode.el's session lists) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
 
-| Key | Command                    | Action                                            |
-|-----+----------------------------+---------------------------------------------------|
-| =o= | =drover-open-other-window= | open it in another window                         |
-| =A= | =drover-respond=           | answer its question or permission request         |
-| =k= | =drover-interrupt=         | interrupt its turn, after confirmation            |
-| =s= | =drover-mark-seen=         | mark its ended turn seen                          |
-| =u= | =drover-open-parent=       | open its parent session                           |
-| =c= | =drover-open-subagent=     | pick one of its subagent sessions and open it     |
-| =r= | =drover-rename=            | rename it                                         |
-| =x= | =drover-delete=            | delete it for good, after confirmation            |
-| =z= | =drover-archive=           | archive it, after confirmation                    |
-| =g= | =drover-refresh=           | refresh the list, or reload the session's buffer  |
-| =l= | =drover-store-link=        | store an Org link to it                           |
-| =+= | =drover-new-session=       | start a session in its directory                  |
-| =v= | =drover-peek=              | preview where it stands, without opening (lists)  |
-| =V= | =drover-follow-mode=       | preview each session as point reaches it (lists)  |
-| =U= | =drover-toggle-subagents=  | show or hide subagent sessions (lists)            |
-| =G= | =drover-group=             | choose how sessions are grouped (drover's views)  |
-| =F= | =drover-filter=            | choose which sessions are listed (drover's views) |
+| Key | Command                    | Action                                           |
+|-----+----------------------------+--------------------------------------------------|
+| =o= | =drover-open-other-window= | open it in another window                        |
+| =A= | =drover-respond=           | answer its question or permission request        |
+| =K= | =drover-interrupt=         | interrupt its turn, after confirmation           |
+| =s= | =drover-mark-seen=         | mark its ended turn seen                         |
+| =u= | =drover-open-parent=       | open its parent session                          |
+| =c= | =drover-open-subagent=     | pick one of its subagent sessions and open it    |
+| =r= | =drover-rename=            | rename it                                        |
+| =x= | =drover-delete=            | delete it for good, after confirmation           |
+| =z= | =drover-archive=           | archive it, after confirmation                   |
+| =g= | =drover-refresh=           | refresh the list, or reload the session's buffer |
+| =+= | =drover-new-session=       | start a session in its directory                 |
+| =v= | =drover-peek=              | preview where it stands, without opening (lists) |
+| =U= | =drover-toggle-subagents=  | show or hide subagent sessions (lists)           |
+| =V= | =drover-view=              | the View menu (drover's list)                    |
 
 =RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. In lists drover does not draw, =drover-session-keys-mode= adds these keys; the OpenCode backend turns it on in opencode.el's session lists.
+
+To store an Org link to the session at point, use Org's own =org-store-link= (=C-c l=) with a link type of your own whose store function reads =drover-session-at-point=.
 
 ** Prompt keys
 
@@ -93,41 +113,43 @@ In a prompt buffer, where you write to an agent, through the menu.
 | =RET=   | =drover-prompt-send=          | send the prompt                        |
 | =S-RET= | =drover-prompt-schedule=      | schedule the prompt                    |
 | =i=     | =drover-prompt-attach=        | attach the region, or a file or buffer |
+| =k=     | =drover-prompt-clear=         | erase the prompt being written         |
 | =/=     | =drover-prompt-slash=         | insert a slash command                 |
 | =@=     | =drover-prompt-mention=       | mention a subagent                     |
+| =y=     | =drover-prompt-copy-block=    | copy the code block at point           |
 | =t=     | =drover-prompt-revert=        | stage a revert of what follows point   |
 | =T=     | =drover-prompt-revert-cancel= | cancel the staged revert               |
-| =y=     | =drover-prompt-copy-block=    | copy the code block at point           |
 
 ** Global keys
 
 Everywhere, through the menu.
 
-| Key | Command                      | Action                                                         |
-|-----+------------------------------+----------------------------------------------------------------|
-| =j= | =drover-next=                | visit the most urgent session                                  |
-| =b= | =drover-select=              | choose a session                                               |
-| =p= | =opencode-select-project=    | list the sessions of an OpenCode project                       |
-| =S= | =opencode-consult-sessions=  | search the OpenCode session buffers                            |
-| =1= | =opencode=                   | list the sessions of the current project                       |
-| =2= | =opencode-list-all-sessions= | list every OpenCode session                                    |
-| =3= | =drover-dashboard=           | the dashboard                                                  |
-| =4= | =drover-table=               | the table                                                      |
-| =5= | =drover-sidebar=             | the sidebar                                                    |
-| =a= | =drover-prompt-agent=        | choose the agent                                               |
-| =m= | =drover-prompt-model=        | choose the model                                               |
-| =e= | =drover-prompt-effort=       | choose the reasoning effort                                    |
-| =d= | =drover-prompt-directory=    | move the session to another directory                          |
-| =C= | =drover-compact=             | compact the conversation, or the session at point in a list    |
-| =f= | =drover-fork=                | fork the conversation at point, or the whole session in a list |
-| =.= | =drover-prompt-last-answer=  | show the start of the last answer                              |
-| =O= | =drover-prompt-open-link=    | open the link at point                                         |
+| Key | Command                     | Action                                                         |
+|-----+-----------------------------+----------------------------------------------------------------|
+| =j= | =drover-next=               | visit the most urgent session                                  |
+| =b= | =drover-select=             | choose a session                                               |
+| =l= | =drover-list=               | the list of sessions, in a window                              |
+| =L= | =drover-list-side=          | the list of sessions beside your work, shown or hidden         |
+| =p= | =drover-select-project=     | the list of the sessions of a project                          |
+| =S= | =opencode-consult-sessions= | search the OpenCode session buffers                            |
+| =a= | =drover-prompt-agent=       | choose the agent                                               |
+| =m= | =drover-prompt-model=       | choose the model                                               |
+| =e= | =drover-prompt-effort=      | choose the reasoning effort                                    |
+| =d= | =drover-prompt-directory=   | move the session to another directory                          |
+| =C= | =drover-compact=            | compact the conversation, or the session at point in a list    |
+| =f= | =drover-fork=               | fork the conversation at point, or the whole session in a list |
+| =.= | =drover-prompt-last-answer= | show the start of the last answer                              |
+| =O= | =drover-prompt-open-link=   | open the link at point                                         |
 
-The OpenCode entries come with the OpenCode backend. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
+=S= comes with the OpenCode backend. =p= offers the projects of the sessions drover knows, and lists those of the one you choose, through the filter. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
 
 ** Adding to the menu
 
-Add your own commands with =transient-append-suffix= and =transient-insert-suffix=, placed relative to a key of the menu. The OpenCode backend inserts its lists before =3=; other natural places are after =b= (session pickers), after =5= (more views) and after =O= (more prompt commands):
+Add your own commands with =transient-append-suffix= and =transient-insert-suffix=, placed relative to a key of the menu. These places stay put:
+
+- after =b=, more ways to pick a session or prompt, chained one after the other: ="= after =b=, then ='= after ="=, and so on;
+- after =p=, more lists of sessions: the OpenCode backend appends =S= there;
+- after =O=, more prompt commands.
 
 #+begin_src emacs-lisp
   (transient-append-suffix 'drover-dispatch "b"
@@ -136,33 +158,60 @@ Add your own commands with =transient-append-suffix= and =transient-insert-suffi
 
 =drover-dispatch-session=, =drover-dispatch-list-p=, =drover-dispatch-view-p= and =drover-dispatch-prompt-p= are predicates for the =:inapt-if-not= of such entries.
 
-* Views
+* The list
 
-Three prototypes list every session; they share the session keys, and differ in layout. Every view lists the same sessions, grouped the same way:
+=drover-list= shows every session in a Magit-style buffer, =*drover sessions*=, in an ordinary window; =drover-list-side= shows the same buffer in a side window beside your work (=drover-list-side-window-side=, =drover-list-side-window-width=), or hides it, and with a prefix argument moves between it and your work. Groups and sessions are sections: =TAB= folds a group, or shows the details of a session: its directory, agent, model, creation, prompt cache and every request it waits on. The Idle group starts collapsed (=drover-list-collapsed-groups=); what you collapse or expand survives refreshes.
 
-- =G= groups sessions by status, by project, or not at all (=drover-group-by=).
-- =F= filters them by project, by status, by last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=), and by a text found in their title, summary, project or branch. An empty answer removes a filter; =c= in the menu clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
-- =U= shows or hides subagents.
+From the side window, =RET= and =o= open the session at point in the window where you work, =C-o= shows it there and leaves you in the list, and follow mode shows each session there as point reaches it. Wherever the list is, the session shown in the window beside it is highlighted.
 
-** =drover-dashboard=
+** What a line shows
 
-A Magit-style buffer of collapsible sections, in a proportional font (the face =drover-dashboard=) with columns aligned in pixels. =TAB= on a session shows its directory, agent and model, and every request it waits on. The Idle group starts collapsed (=drover-dashboard-collapsed-statuses=); what you collapse or expand survives refreshes.
+The list is drawn in a proportional font (the face =drover-list=), laid out in pixels, and what a line shows depends on the width of its window. =drover-list-fields= ranks the fields a line may show and the room each needs:
 
-** =drover-table=
+| Field    | Shows                                      | Rank | In two lines          |
+|----------+--------------------------------------------+------+-----------------------|
+| title    | the status icon and the title, always      |    0 | first line            |
+| age      | how long it has been active, or needed you |    1 | first line, right     |
+| cache    | the prompt cache's lifetime left           |    2 | the line's background |
+| summary  | what it waits for                          |    3 | second line           |
+| location | project and branch                         |    4 |                       |
+| agent    | the agent                                  |    5 |                       |
+| model    | the model                                  |    6 |                       |
+| created  | how long ago it was created                |    7 |                       |
 
-One table with a column each for title, project, branch, age and what the session waits for; each title starts with its status icon. Subagents follow their parent, indented, whatever the sort. Each group starts with a heading row; =S= sorts the sessions within each group by the column at point, groups keep their order, and the sort survives refreshes; ={= and =}= narrow and widen a column; === returns to urgency order.
+The list shows the fields with something to show, by rank, as long as they fit, as aligned columns. When not even the summary fits beside the title, age and cache, each session takes two lines instead: its icon, title and age, and under them, for a session that needs you, what it waits for. The layout is computed again whenever the window's width changes.
 
-** =drover-sidebar=
+** Prompt caches
 
-A narrow side window that stays beside your work (=drover-sidebar-side=, =drover-sidebar-width=), in a proportional font (the face =drover-sidebar=), toggled by =drover-sidebar=; =drover-sidebar-select= moves between it and your work. =n= and =p= move between sessions, =M-n= and =M-p= between groups, =TAB= folds a group. =RET= and =o= open the session in the main window, =C-o= shows it there without leaving the sidebar, and =V= shows each session there as point reaches it. The session shown in the main window is highlighted.
+A session whose provider still holds its prompt cache shows how much of the cache's lifetime is left: in columns, as a short bar and the time left, such as =4m=; in two lines, as the background of its line (the face =drover-cache-bar=), filled from the left and shrinking as the cache runs out. An expired or unknown cache shows nothing. While the list is shown and a cache is live, a timer redraws the caches alone, every =drover-list-cache-interval= seconds.
 
-Every view redraws when sessions change while it is displayed; a hidden one waits until it is shown again, and costs nothing meanwhile.
+** The View menu
+
+=V= opens the View menu, which stays open as you change its settings and redraws the list at once:
+
+#+begin_example
+  Sort by                    Group by   Filter by       Toggles
+   o urgency                  g status   p project any   F follow [off|on]
+   r [ascending|descending]              s status any    U subagents [hidden|shown]
+                                         a agent any     O older [hidden|shown]
+                                         m model any
+                                         d updated any
+                                         f text any
+                                         c clear
+#+end_example
+
+- Sort by urgency, the most urgent first, by title, project, branch, agent, model, last activity or creation, either way. Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
+- Group by status, project, branch, agent, model, last activity (today, yesterday, this week, older), or nothing.
+- Filter by project, status, agent, model, last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. An empty answer removes a filter; =c= clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
+- Toggle follow mode, subagents, and older sessions: those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session. They are fetched when shown, and again by =g=.
+
+The list redraws when sessions change while it is displayed; hidden, it waits until it is shown again, and costs nothing meanwhile.
 
 * Backends
 
-A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, mark seen, preview, start, rename, delete, fork, compact), and reports changes with =drover-backend-changed=. See =doc/design.org=.
+A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, mark seen, preview, start, rename, delete, fork, compact), fetch its older sessions (=:history=), and reports changes with =drover-backend-changed=. A record may tell when the session's prompt cache expires and how long it lasts (=cache-expires=, =cache-ttl=). See =doc/design.org=.
 
-A front end also fits its buffers into the keys. A list of sessions sets =drover-session-at-point-function= and turns on =drover-session-keys-mode=; a prompt buffer sets =drover-session-at-point-function= to its own session and declares the prompt actions it implements with =drover-prompt-define=, such as =(drover-prompt-define 'send #'my-send)=. =drover-store-link-functions= lets a front end provide Org links to its sessions.
+A front end also fits its buffers into the keys. A list of sessions sets =drover-session-at-point-function= and turns on =drover-session-keys-mode=; a prompt buffer sets =drover-session-at-point-function= to its own session and declares the prompt actions it implements with =drover-prompt-define=, such as =(drover-prompt-define 'send #'my-send)=.
 
 * Development
 
