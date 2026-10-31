@@ -540,6 +540,34 @@ shows, so they apply only there."
                 (should (= calls 0)))))
         (kill-buffer default)))))
 
+(ert-deftest drover-keys-test-menus-keep-other-windows ()
+  "Menus open in a window of their own, closed by the key that opens them."
+  (let (setups)
+    (cl-letf (((symbol-function 'transient-setup)
+               (lambda (name &rest arguments) (push (cons name arguments) setups))))
+      (with-temp-buffer
+        (setq-local drover-view-p t)
+        (call-interactively #'drover-dispatch)
+        (call-interactively #'drover-group)
+        (call-interactively #'drover-filter)))
+    (should (= (length setups) 3))
+    (dolist (setup setups)
+      (should (equal (plist-get (nthcdr 3 setup) :display-action) drover-menu-display-action))))
+  (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "C-'")) :command)
+              'transient-quit-one))
+  ;; A bottom side window, such as the prompt's, stays shown with the menu.
+  (save-window-excursion
+    (delete-other-windows)
+    (let* ((prompt (generate-new-buffer " prompt"))
+           (menu (generate-new-buffer " menu")))
+      (unwind-protect
+          (progn
+            (display-buffer prompt '((display-buffer-in-side-window) (side . bottom) (slot . 0)))
+            (should (window-live-p (display-buffer menu drover-menu-display-action)))
+            (should (get-buffer-window prompt)))
+        (kill-buffer prompt)
+        (kill-buffer menu)))))
+
 (ert-deftest drover-keys-test-dispatch-extension-points ()
   "Others place their commands relative to drover's keys."
   (unwind-protect

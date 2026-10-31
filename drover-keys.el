@@ -442,6 +442,16 @@ operates on it counts."
   (drover-subagents session))
 
 ;;;###autoload(autoload 'drover-dispatch "drover-keys" nil t)
+(defcustom drover-menu-display-action
+  '(display-buffer-at-bottom (dedicated . t) (inhibit-same-window . t))
+  "How drover's menus are displayed, as an action of `display-buffer'.
+The default opens a window of its own at the bottom of the frame, rather
+than the bottom side window `transient-display-buffer-action' uses by
+default: that window may show a prompt buffer, which the menu would
+then hide from the commands it runs."
+  :type 'sexp
+  :group 'drover)
+
 (transient-define-prefix drover-dispatch ()
   "Act on sessions of coding agents, on the session at point, or on the prompt.
 Global commands work everywhere; session commands act on the session at
@@ -505,8 +515,12 @@ are shown, greyed out."
    [("t" "Revert here" drover-prompt-revert :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert)))
     ("T" "Cancel revert" drover-prompt-revert-cancel
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert-cancel)))]]
+  ;; The key opening the menu closes it, as users bind it globally.
+  [:hide always
+   ("C-'" "Close" transient-quit-one)]
   (interactive)
-  (transient-setup 'drover-dispatch nil nil :scope (drover--context)))
+  (transient-setup 'drover-dispatch nil nil :scope (drover--context)
+                   :display-action drover-menu-display-action))
 
 ;;;; Grouping
 
@@ -572,7 +586,7 @@ at once, and the menu stays open."
    ("n" drover-group--none)]
   (interactive)
   (drover--check-view)
-  (transient-setup 'drover-group))
+  (transient-setup 'drover-group nil nil :display-action drover-menu-display-action))
 
 ;;;; Filtering
 
@@ -716,7 +730,7 @@ at once, and the menu stays open.  An empty answer removes a filter."
   [("c" "Clear all" drover-filter-clear :transient t)]
   (interactive)
   (drover--check-view)
-  (transient-setup 'drover-filter))
+  (transient-setup 'drover-filter nil nil :display-action drover-menu-display-action))
 
 (defun drover-filter-clear-keys (&optional keymap)
   "Return the keys clearing the filter from KEYMAP, such as \"F c\".
