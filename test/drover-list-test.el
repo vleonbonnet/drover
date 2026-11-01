@@ -2914,6 +2914,11 @@ window of the code buffer, selected, `side' the list's, its point on
 (ert-deftest drover-list-test-dispatch-moves-with-follow ()
   "Moving from the menu shows each session, as moving in the list would."
   (drover-list-test-elsewhere
+    ;; Session buffers that tell their session, as an OpenCode buffer does.
+    (dolist (session drover-test-sessions)
+      (with-current-buffer (get-buffer-create (drover-list-test--session-buffer-name session))
+        (let ((id (drover-session-id session)))
+          (setq-local drover-session-at-point-function (lambda () (drover-find 'fake id))))))
     (with-selected-window side
       (drover-follow-mode))
     (should (equal (car drover-test-calls) (list :open "ask" nil first)))
@@ -2923,9 +2928,59 @@ window of the code buffer, selected, `side' the list's, its point on
     (should (equal (buffer-name (window-buffer first)) "*session fail*"))
     ;; The menu still acts on the list, whatever the main window shows.
     (should (equal (drover-list-test-menu-session) "fail"))
+    ;; Though the window where the menu opened now shows a session.
     (execute-kbd-macro (kbd "C-n"))
+    (should (equal (drover-list-test-at-side side) "done"))
     (should (equal (car drover-test-calls) (list :open "done" nil first)))
     (should (equal (drover-list-test-menu-session) "done"))))
+
+(ert-deftest drover-list-test-move-between-sessions ()
+  "Sessions and groups are stepped through in order, stopping at both ends."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (cl-flet ((at () (or (drover-list-test-id-at-point)
+                         (cdr (oref (drover-list--group-section (magit-current-section)) value)))))
+      ;; From the header, the first session either way.
+      (goto-char (point-min))
+      (drover-list-next-session)
+      (should (equal (at) "ask"))
+      (goto-char (point-min))
+      (drover-list-previous-session)
+      (should (equal (at) "ask"))
+      (drover-list-next-session 2)
+      (should (equal (at) "done"))
+      ;; From within a session's details, the next one.
+      (magit-section-show (magit-current-section))
+      (forward-line 2)
+      (should (equal (at) "done"))
+      (drover-list-next-session)
+      (should (equal (at) "work"))
+      ;; The collapsed idle group is passed over: work is the last.
+      (drover-list-next-session)
+      (should (equal (at) "work"))
+      (drover-list-previous-session 9)
+      (should (equal (at) "ask"))
+      (drover-list-last-session)
+      (should (equal (at) "work"))
+      (drover-list-first-session)
+      (should (equal (at) "ask"))
+      ;; Groups: their first session, the heading of a collapsed one.
+      (drover-list-next-group 3)
+      (should (equal (at) "work"))
+      (drover-list-next-group)
+      (should (equal (at) 'idle))
+      (should (oref (magit-current-section) hidden))
+      (drover-list-next-group)
+      (should (equal (at) 'idle))
+      (drover-list-previous-group)
+      (should (equal (at) "work"))
+      (drover-list-previous-group 9)
+      (should (equal (at) "ask"))
+      ;; Without groups, nothing to move between.
+      (setq drover-group-by nil)
+      (revert-buffer)
+      (should-error (drover-list-next-group) :type 'user-error)
+      (with-temp-buffer
+        (should-error (drover-list-next-session) :type 'user-error)))))
 
 (ert-deftest drover-list-test-dispatch-moves-in-list ()
   "In the list itself, the List group moves its point and RET opens there."
