@@ -755,7 +755,7 @@ a model are reported instead."
                            name agent)))
           (cond
            (model
-            (let ((id (drover-model-id-for model 'claude-code)))
+            (let ((id (drover-model-id-for model 'claude-code 'claude-code-ide)))
               (cond
                ((null id)
                 (drover-warn "%s cannot run %s; keeping its current model"
@@ -870,7 +870,7 @@ comes last as --effort, so that it wins over one in BASE."
          (mode (and agent (drover-claude-code-agent-mode agent)))
          (title (plist-get options :title))
          (model (plist-get options :model))
-         (model-id (and model (drover-model-id-for model 'claude-code)))
+         (model-id (and model (drover-model-id-for model 'claude-code 'claude-code-ide)))
          (variant (plist-get options :variant))
          (levels (mapcar #'symbol-name drover-claude-code-effort-levels))
          (effort (seq-find (lambda (candidate) (member candidate levels))

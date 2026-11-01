@@ -24,6 +24,9 @@
 ;; its config.toml and models cache, and when it last took a prompt,
 ;; from the rollouts it writes.  Its models come from live sessions
 ;; only (see `drover-agent-shell'): the CLI has no command listing them.
+;; Each model takes its name and reasoning levels from the models cache,
+;; and from the levels Codex's ACP agent lists for each model
+;; (`drover-codex-acp-models').
 
 ;;; Code:
 
@@ -84,24 +87,70 @@ Codex's models cache.  The effort is a symbol."
               ((stringp level)))
     (intern level)))
 
+(defun drover-codex-model (id &optional config name)
+  "Return the `drover-model' of Codex model ID.
+Codex's models cache names it and gives its reasoning levels as
+variants, unknown when the cache does not list it; its default variant
+is the effort a new session runs it at with CONFIG, Codex's settings
+\(see `drover-codex-effort').  NAME names a model the cache does not."
+  (let ((entry (drover-codex--catalog-model id))
+        (provider (cdr (assoc "model_provider" config))))
+    (drover-model-create
+     :provider-name (if (member provider '(nil "openai")) "OpenAI" provider)
+     :id id
+     :name (or (alist-get 'display_name entry) name)
+     :variants (mapcar (lambda (level) (list (intern (alist-get 'effort level))))
+                       (seq-filter (lambda (level) (stringp (alist-get 'effort level)))
+                                   (alist-get 'supported_reasoning_levels entry)))
+     :default-variant (drover-codex-effort id config)
+     :variants-known (and entry t)
+     :engines (delete-dups (cons 'codex (drover-model-engines-for nil id))))))
+
+(defun drover-codex-acp-model-efforts (values)
+  "Return the reasoning levels of each model VALUES name.
+The value is an alist (ID . LEVELS).  VALUES are the model identifiers
+Codex's ACP agent lists apart from its model option, one per model and
+level, as \"ID[LEVEL]\"; LEVELS are symbols, in order.  Other values
+are ignored."
+  (let ((efforts nil))
+    (dolist (value values)
+      (when (and (stringp value) (string-match "\\`\\([^[]+\\)\\[\\([^]]+\\)\\]\\'" value))
+        (let ((id (match-string 1 value))
+              (level (intern (match-string 2 value))))
+          (if-let* ((entry (assoc id efforts)))
+              (unless (memq level (cdr entry))
+                (setcdr entry (append (cdr entry) (list level))))
+            (push (list id level) efforts)))))
+    (nreverse efforts)))
+
+(defun drover-codex-acp-models (options current levels efforts &optional config)
+  "Return the models an ACP session of Codex lists.
+OPTIONS are the values of the session's model option, in order, as
+\(VALUE . NAME), each VALUE a model identifier.  The model the session
+runs, CURRENT, has the variants LEVELS, the reasoning levels the session
+offers, a list of symbols; the others those EFFORTS, as
+`drover-codex-acp-model-efforts' returns them, give, else Codex's
+models cache.  CONFIG is Codex's settings, by default those of its
+config.toml, which give default variants."
+  (let ((config (or config (drover-codex-config))))
+    (drover-model-merge-all
+     (mapcar (pcase-lambda (`(,value . ,name))
+               (let ((model (drover-codex-model value config name))
+                     (known (if (equal value current) levels (alist-get value efforts nil nil #'equal))))
+                 (when (or known (equal value current))
+                   (setf (drover-model-variants model) (mapcar #'list known)
+                         (drover-model-variants-known model) t))
+                 model))
+             options))))
+
 (defun drover-codex-defaults ()
   "Return what a new Codex session starts with, as a plist.
 :model is the `drover-model' of config.toml's model, nil when it names
 none; :config lets `drover-codex-effort' answer for another model.  This
 is the engine's :defaults data."
   (let* ((config (drover-codex-config))
-         (id (cdr (assoc "model" config)))
-         (provider (cdr (assoc "model_provider" config)))
-         (entry (and id (drover-codex--catalog-model id))))
-    (list :model (and id
-                      (drover-model-create
-                       :provider-name (if (member provider '(nil "openai")) "OpenAI" provider)
-                       :id id
-                       :name (alist-get 'display_name entry)
-                       :variants (mapcar (lambda (level) (list (intern (alist-get 'effort level))))
-                                         (alist-get 'supported_reasoning_levels entry))
-                       :default-variant (drover-codex-effort id config)
-                       :engines (delete-dups (cons 'codex (drover-model-engines-for nil id)))))
+         (id (cdr (assoc "model" config))))
+    (list :model (and id (drover-codex-model id config))
           :config config)))
 
 (defun drover-codex--fetch-defaults (_directory callback)

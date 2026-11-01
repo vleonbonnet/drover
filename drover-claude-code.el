@@ -46,6 +46,9 @@
 ;; session, the catalog that session's CLI caches
 ;; (`drover-claude-code-catalog-models', see `drover-claude-code-ide').
 ;; `drover-model' remembers what they reported for when none runs.
+;; Shells list aliases, which the catalog resolves to the model they
+;; stand for, so that a model is one whatever names it, each with the
+;; effort levels the catalog gives it (`drover-claude-code-acp-models').
 
 ;;; Code:
 
@@ -510,6 +513,28 @@ its `state' the default model and the default effort of each model."
   "Return model ID without a bracketed context suffix, such as [1m]."
   (replace-regexp-in-string "\\[[^]]*\\]\\'" "" id))
 
+(defun drover-claude-code--effort-levels (entry)
+  "Return the effort levels the CLI runs the model of catalog ENTRY at, as symbols.
+They are the levels of the entry's `runtime', which the CLI checks an
+effort against, else the options of its picker, which may leave some
+out, such as max.  Nil for a model without effort."
+  (mapcar (lambda (level) (intern (downcase (string-trim level))))
+          (seq-filter #'stringp
+                      (or (map-nested-elt entry '(runtime effort_levels))
+                          (mapcar (lambda (option) (alist-get 'id option))
+                                  (map-nested-elt entry '(thinking effort_options)))))))
+
+(defun drover-claude-code--provider-alias-target (family catalog)
+  "Return the model CATALOG names for the alias of FAMILY, or nil.
+FAMILY is a family alias, such as \"opus\".  Bedrock and Vertex, which
+Claude Code reaches when CLAUDE_CODE_USE_BEDROCK or
+CLAUDE_CODE_USE_VERTEX is set, may have targets of their own."
+  (let ((targets (alist-get (intern family) (map-nested-elt catalog '(config provider_alias_targets))))
+        (provider (cond ((drover-getenv "CLAUDE_CODE_USE_BEDROCK") 'bedrock)
+                        ((drover-getenv "CLAUDE_CODE_USE_VERTEX") 'vertex))))
+    (seq-find #'stringp (list (and provider (map-nested-elt targets (list 'per_provider provider)))
+                              (alist-get 'default targets)))))
+
 (defun drover-claude-code--catalog-model (catalog id)
   "Return CATALOG's entry for the model ID, matched exactly or by model key."
   (let ((models (map-nested-elt catalog '(config models)))
@@ -522,10 +547,10 @@ its `state' the default model and the default effort of each model."
 (defun drover-claude-code--resolve-model (name catalog)
   "Return the model identifier the model setting NAME selects.
 Full identifiers stay as they are.  An alias takes its
-ANTHROPIC_DEFAULT_FAMILY_MODEL environment variable, else CATALOG's
-model of that family, its main section first; `default' takes the
-default CATALOG serves.  A bracketed suffix such as [1m] is kept.
-NAME itself when nothing resolves it."
+ANTHROPIC_DEFAULT_FAMILY_MODEL environment variable, else the target
+CATALOG gives the alias, else CATALOG's model of that family, its main
+section first; `default' takes the default CATALOG serves.  A bracketed
+suffix such as [1m] is kept.  NAME itself when nothing resolves it."
   (if (or (null name) (string-match-p "claude-" name))
       name
     (let* ((base (drover-claude-code--base-id name))
@@ -537,12 +562,13 @@ NAME itself when nothing resolves it."
            (id (if (equal alias "default")
                    (map-nested-elt catalog '(state model))
                  (or (drover-getenv (format "ANTHROPIC_DEFAULT_%s_MODEL" (upcase family)))
+                     (drover-claude-code--provider-alias-target family catalog)
                      (alist-get 'id (or (seq-find (lambda (model)
                                                     (and (equal (alist-get 'section model) "main")
                                                          (funcall family-p model)))
                                                   models)
                                         (seq-find family-p models)))))))
-      (if id (concat id (substring name (length base))) name))))
+      (if (stringp id) (concat id (substring name (length base))) name))))
 
 (defun drover-claude-code-startup-model-id (layers catalog)
   "Return the identifier of the model a new session starts on, or nil.
@@ -603,15 +629,17 @@ settings: there only to the models of
 
 (defun drover-claude-code--default-effort (entry catalog)
   "Return the effort CATALOG serves as the default of its model ENTRY, or nil.
-It is the level CATALOG's state keeps for the model, else the option
-the CLI's picker recommends."
+It is the level CATALOG's state keeps for the model, else the default
+of the model's runtime, else the option the CLI's picker recommends."
   (let ((id (alist-get 'id entry)))
-    (or (map-nested-elt (seq-find (lambda (model) (equal (alist-get 'id model) id))
-                                  (map-nested-elt catalog '(state thinking_by_model)))
-                        '(thinking effort))
-        (alist-get 'id (seq-find (lambda (option)
-                                   (equal (map-nested-elt option '(badge message)) "Recommended"))
-                                 (map-nested-elt entry '(thinking effort_options)))))))
+    (seq-find #'stringp
+              (list (map-nested-elt (seq-find (lambda (model) (equal (alist-get 'id model) id))
+                                              (map-nested-elt catalog '(state thinking_by_model)))
+                                    '(thinking effort))
+                    (map-nested-elt entry '(runtime default_effort))
+                    (alist-get 'id (seq-find (lambda (option)
+                                               (equal (map-nested-elt option '(badge message)) "Recommended"))
+                                             (map-nested-elt entry '(thinking effort_options))))))))
 
 (defun drover-claude-code--clamp-effort (level supported cap)
   "Return LEVEL lowered to CAP, then to the highest SUPPORTED level below it.
@@ -637,14 +665,14 @@ Claude Code's precedence: CLAUDE_CODE_EFFORT_LEVEL (`auto' being the
 model's default), --effort in the start flags, the first of the
 settings LAYERS with a level for the model, then CATALOG's default for
 it.  The level is lowered to any `maxEffortLevel', and to one the model
-supports; a model without effort options runs none."
+supports; a model without effort levels runs none."
   (let* ((base (drover-claude-code--base-id id))
          (key (drover-claude-code--model-key base))
          (entry (drover-claude-code--catalog-model catalog base))
-         (options (map-nested-elt entry '(thinking effort_options)))
+         (supported (drover-claude-code--effort-levels entry))
          (env (drover-getenv "CLAUDE_CODE_EFFORT_LEVEL"))
          (level (cond
-                 ((and entry (null options)) nil)
+                 ((and entry (null supported)) nil)
                  ((and env (not (equal env "auto"))) env)
                  (env (drover-claude-code--default-effort entry catalog))
                  ((drover-claude-code--flag "effort"))
@@ -654,15 +682,17 @@ supports; a model without effort options runs none."
     (when (stringp level)
       (drover-claude-code--clamp-effort
        (intern level)
-       (mapcar (lambda (option) (intern (alist-get 'id option))) options)
+       supported
        (seq-some (lambda (layer) (alist-get 'maxEffortLevel (cdr layer))) layers)))))
 
 (defun drover-claude-code-model (id layers catalog)
   "Return the `drover-model' of Claude Code model ID.
-CATALOG names it and offers its effort options as variants; its default
-variant is the effort LAYERS and CATALOG give it.  Its engines are
-`claude-code', then the others of `drover-model-engines-for' for its
-identifier: Claude Code runs whatever model it names, an alias too."
+CATALOG names it and offers its effort levels as variants (see
+`drover-claude-code--effort-levels'); its default variant is the effort
+LAYERS and CATALOG give it.  A model CATALOG does not list has unknown
+variants.  Its engines are `claude-code', then the others of
+`drover-model-engines-for' for its identifier: Claude Code runs
+whatever model it names, an alias too."
   (let* ((base (drover-claude-code--base-id id))
          (entry (drover-claude-code--catalog-model catalog base)))
     (drover-model-create
@@ -670,22 +700,66 @@ identifier: Claude Code runs whatever model it names, an alias too."
      :id id
      :name (when-let* ((name (alist-get 'name entry)))
              (concat name (substring id (length base))))
-     :variants (mapcar (lambda (option) (list (intern (alist-get 'id option))))
-                       (map-nested-elt entry '(thinking effort_options)))
+     :variants (mapcar #'list (drover-claude-code--effort-levels entry))
      :default-variant (drover-claude-code-effort id layers catalog)
+     :variants-known (and entry t)
      :engines (delete-dups (cons 'claude-code (drover-model-engines-for nil id))))))
 
 (defun drover-claude-code-catalog-models (catalog &optional layers)
   "Return the `drover-model' of every model CATALOG lists, in its order.
 CATALOG is what `drover-claude-code-catalog' returns: the CLI's own
 list, main section and overflow alike, with each model's effort
-options; LAYERS, the settings layers giving default efforts, as for
+levels; LAYERS, the settings layers giving default efforts, as for
 `drover-claude-code-model'."
   (delq nil (mapcar (lambda (entry)
                       (when-let* ((id (and (drover-json-object-p entry) (alist-get 'id entry)))
                                   ((stringp id)))
                         (drover-claude-code-model id layers catalog)))
                     (map-nested-elt catalog '(config models)))))
+
+(defun drover-claude-code-acp-models (options current levels backend &optional catalog)
+  "Return the models an ACP session of Claude Code lists, each known once.
+OPTIONS are the values of the session's model option, in order, as
+\(VALUE . NAME): Claude Code's ACP agent lists aliases, such as
+\"opus\", \"opus[1m]\" and \"default\", and full identifiers when
+settings restrict the models.  Each VALUE is resolved through CATALOG,
+by default the one the CLI caches, to the identifier of its model, as
+the CLI resolves it (see `drover-claude-code-model'), so that a model
+is the same whichever source names it; VALUE becomes the name BACKEND
+takes for it (see `drover-model-aliases').  The model the session runs,
+CURRENT, a VALUE, has the variants LEVELS, the effort levels the session
+offers, a list of symbols; the others those CATALOG lists, unknown when
+it does not list them.
+
+\"default\" stands for whichever model is the default: a model it
+names another value names too is known by that value, which keeps
+naming it once the default changes, and \"default\" not resolved is
+left out, as drover's pickers offer the default already."
+  (let* ((catalog (or catalog (drover-claude-code-catalog)))
+         (default-p (lambda (value) (equal (downcase (drover-claude-code--base-id value)) "default")))
+         (entries (delq nil (mapcar (pcase-lambda (`(,value . ,name))
+                                      (let ((id (drover-claude-code--resolve-model value catalog)))
+                                        (unless (and (funcall default-p value) (equal id value))
+                                          (list value id name))))
+                                    options)))
+         (named (mapcar #'cadr (seq-remove (lambda (entry) (funcall default-p (car entry))) entries)))
+         (entries (seq-remove (lambda (entry)
+                                (and (funcall default-p (car entry)) (member (cadr entry) named)))
+                              entries))
+         (current-id (and current (drover-claude-code--resolve-model current catalog)))
+         (models (mapcar (pcase-lambda (`(,value ,id ,name))
+                           (let ((model (drover-claude-code-model id nil catalog)))
+                             (unless (drover-model-name model)
+                               (setf (drover-model-name model) name))
+                             (unless (equal value id)
+                               (setf (drover-model-aliases model)
+                                     (list (cons (cons 'claude-code backend) value))))
+                             (when (equal id current-id)
+                               (setf (drover-model-variants model) (mapcar #'list levels)
+                                     (drover-model-variants-known model) t))
+                             model))
+                         entries)))
+    (drover-model-merge-all models)))
 
 ;;;; Defaults
 

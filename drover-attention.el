@@ -24,7 +24,8 @@
 ;;
 ;; - `drover-attention-mode' counts the sessions that need you in the
 ;;   mode line, as one count after a robot (`drover-attention-glyph'),
-;;   in the face of the most urgent of them.  It counts what lists show
+;;   in the face of the most urgent of them, as other indicators of the
+;;   mode line show a count: a symbol, a space and the number.  It counts what lists show
 ;;   under `drover-show-subagents', and every subagent waiting for you.
 ;;   mouse-1 on it visits the most urgent, mouse-3 chooses one.
 ;; - `drover-next' visits the most urgent session that needs you;
@@ -107,12 +108,11 @@ out."
           "\n\nmouse-1: visit the most urgent\nmouse-3: choose a session"))
 
 (defvar drover-attention--pads (make-hash-table :test #'equal)
-  "Room around the glyph of the mode line, measured.
+  "Room the glyph of the mode line needs, measured.
 Keys are (GLYPH FACE FONT), FONT being `drover-attention--font-key';
-values are (LEFT . RIGHT), the pixels to leave before GLYPH and after
-its advance.  The count is computed whenever sessions change, so the
-glyph is measured once per font and face; a change of fonts empties
-the table.")
+values are (LEFT . GAP), as `drover-attention--measure' returns them.
+The count is computed whenever sessions change, so the glyph is
+measured once per font and face; a change of fonts empties the table.")
 
 (defun drover-attention--font-key ()
   "Return what the fonts of the mode line of the selected frame depend on.
@@ -121,30 +121,20 @@ fonts draw glyphs alike, and a frame deleted leaves nothing behind."
   (list (face-font 'mode-line) (frame-parameter nil 'font)))
 
 (defun drover-attention--measure (glyph face)
-  "Return the room GLYPH in FACE needs in the mode line, as (LEFT . RIGHT).
-LEFT is how far left of its start its ink reaches, RIGHT how far past
-its advance (see `drover-text-ink-extent'), drawn over the face
-`mode-line' in the fonts of the selected frame: the Nerd Fonts draw
-icons up to half a cell past their advance, onto the count after them."
+  "Return the room GLYPH in FACE needs in the mode line, as (LEFT . GAP).
+LEFT is how far left of its start its ink reaches, 0 when it does not;
+GAP the pixels from its advance to the count after it, when its ink
+reaches past its advance further than a space, else nil, a space being
+enough (see `drover-text-ink-extent').  Both are measured over the face
+`mode-line', in the fonts of the selected frame.  The Nerd Fonts but
+their Mono variants draw icons up to half a cell past their advance,
+which a space of the same font covers, but not always a space of a
+proportional one."
   (let* ((string (propertize glyph 'face (list face 'mode-line)))
          (extent (drover-text-ink-extent string))
-         (advance (drover-text-pixel-width string)))
-    (cons (max 0 (car extent)) (max 0 (- (cdr extent) advance)))))
-
-(defun drover-attention--space (pixels)
-  "Return a space PIXELS wide, or \"\" when PIXELS is not positive."
-  (if (> pixels 0)
-      (propertize " " 'display `(space :width (,pixels)))
-    ""))
-
-(defun drover-attention--glyph (face)
-  "Return `drover-attention-glyph' in FACE, with the room its ink takes.
-The room is measured once per font, see `drover-attention--pads'."
-  (let* ((glyph (propertize drover-attention-glyph 'face face))
-         (key (list (substring-no-properties glyph) face (drover-attention--font-key)))
-         (pads (or (gethash key drover-attention--pads)
-                   (puthash key (drover-attention--measure glyph face) drover-attention--pads))))
-    (concat (drover-attention--space (car pads)) glyph (drover-attention--space (cdr pads)))))
+         (overflow (- (cdr extent) (drover-text-pixel-width string)))
+         (space (drover-text-pixel-width (propertize " " 'face (list face 'mode-line)))))
+    (cons (max 0 (car extent)) (and (> overflow space) overflow))))
 
 (defvar drover-attention--sessions nil
   "The sessions that need the user, as a hash table by key, or nil.
@@ -167,22 +157,33 @@ every change."
 
 (defun drover-attention--format (sessions)
   "Return the mode line count of SESSIONS, the sessions that need the user.
-It is their number after `drover-attention-glyph', both in the face of
-the most urgent status among them, or nil when SESSIONS is empty.  The
-glyph takes the room its ink does, so that it is never drawn over the
-count; the tooltip lists the sessions needing the user by status, when
-shown (see `drover-attention--help-echo')."
+It is `drover-attention-glyph', a space and their number, in the face
+of the most urgent status among them, or nil when SESSIONS is empty.
+The space widens, and room is left before the glyph, only where the
+glyph's ink would reach the count or what comes before it (see
+`drover-attention--measure'); the tooltip lists the sessions needing
+the user by status, when shown (see `drover-attention--help-echo')."
   (when sessions
-    (let ((face (drover-status-face
-                 (car (seq-sort-by #'drover-status-rank #'<
-                                   (delete-dups (mapcar #'drover-session-status sessions)))))))
-      (concat " "
-              (propertize
-               (concat (drover-attention--glyph face)
-                       (propertize (number-to-string (length sessions)) 'face face))
-               'help-echo #'drover-attention--help-echo
-               'mouse-face 'mode-line-highlight
-               'local-map drover-attention-mode-line-map)))))
+    (let* ((face (drover-status-face
+                  (car (seq-sort-by #'drover-status-rank #'<
+                                    (delete-dups (mapcar #'drover-session-status sessions))))))
+           (glyph drover-attention-glyph)
+           (key (list glyph face (drover-attention--font-key)))
+           (room (or (gethash key drover-attention--pads)
+                     (puthash key (drover-attention--measure glyph face) drover-attention--pads))))
+      (propertize
+       (concat (if (> (car room) 0)
+                   (propertize " " 'display `(space :width (,(car room))))
+                 "")
+               glyph
+               (if (cdr room)
+                   (propertize " " 'display `(space :width (,(cdr room))))
+                 " ")
+               (number-to-string (length sessions)))
+       'face face
+       'help-echo #'drover-attention--help-echo
+       'mouse-face 'mode-line-highlight
+       'local-map drover-attention-mode-line-map))))
 
 (defun drover-attention--active-below-p (key)
   "Return non-nil when session KEY or a subagent below it is mid-turn.
@@ -283,8 +284,10 @@ For `after-setting-font-hook' and `enable-theme-functions'."
 (define-minor-mode drover-attention-mode
   "Show in the mode line how many sessions need you.
 The mode line holds one count of the sessions whose status is one of
-`drover-attention-statuses' after `drover-attention-glyph', in the face
-of the most urgent of them, and nothing when no session needs you.  It
+`drover-attention-statuses' after `drover-attention-glyph' and a space,
+in the face of the most urgent of them, and nothing when no session
+needs you.  It begins with the glyph: parting it from what comes before
+is the mode line's to do.  It
 counts the sessions lists show under `drover-show-subagents', and every
 subagent waiting for you, which blocks its parent (see
 `drover-surfaced-sessions').  Its tooltip lists them by status;

@@ -324,6 +324,114 @@ serves and a model without effort.")
                          catalog '((project (effortLevel . "high"))))))
                   'high)))))
 
+;;;; The catalog as the CLI caches it
+
+(ert-deftest drover-claude-code-test-recorded-catalog-levels ()
+  "Each model offers the effort levels the CLI runs it at, and its own default."
+  (drover-test-with-homes
+    (drover-test-write-claude-catalog)
+    (let* ((catalog (drover-claude-code-catalog))
+           (models (drover-claude-code-catalog-models catalog)))
+      (should (equal (mapcar #'drover-model-id models)
+                     '("claude-opus-5-5" "claude-opus-5" "claude-sonnet-5-5" "claude-haiku-4-5-20251001")))
+      ;; The runtime's levels, max included where the picker leaves it out.
+      (should (equal (mapcar (lambda (model) (mapcar #'car (drover-model-variants model))) models)
+                     '((low medium high xhigh max) (low medium high xhigh) (low medium high) nil)))
+      (should (equal (mapcar #'drover-model-default-variant models) '(medium high medium nil)))
+      (should (cl-every #'drover-model-variants-known models))
+      ;; The CLI takes max for Opus 5.5: a level asked for is kept.
+      (drover-claude-code-test-with-flags "--effort max"
+        (should (eq (drover-claude-code-effort "claude-opus-5-5" nil catalog) 'max))
+        (should (eq (drover-claude-code-effort "claude-opus-5" nil catalog) 'xhigh)))
+      ;; A model the catalog does not list has unknown variants, not none.
+      (let ((unlisted (drover-claude-code-model "claude-mythos-5-1" nil catalog)))
+        (should-not (drover-model-variants-known unlisted))
+        (should-not (drover-model-default-variant unlisted)))
+      ;; Without runtime levels, those of the picker.
+      (drover-claude-code-test-write-catalog)
+      (should (equal (mapcar #'car (drover-model-variants
+                                    (drover-claude-code-model "claude-opus-5" nil (drover-claude-code-catalog))))
+                     '(low high))))))
+
+(ert-deftest drover-claude-code-test-alias-targets ()
+  "Aliases resolve to the targets the catalog gives them, a cloud's its own."
+  (drover-test-with-homes
+    (drover-test-write-claude-catalog)
+    (let ((catalog (drover-claude-code-catalog)))
+      (should (equal (drover-claude-code--resolve-model "opus" catalog) "claude-opus-5-5"))
+      (should (equal (drover-claude-code--resolve-model "opus[1m]" catalog) "claude-opus-5-5[1m]"))
+      (should (equal (drover-claude-code--resolve-model "best" catalog) "claude-opus-5-5"))
+      (should (equal (drover-claude-code--resolve-model "haiku" catalog) "claude-haiku-4-5-20251001"))
+      (should (equal (drover-claude-code--resolve-model "default" catalog) "claude-sonnet-5-5"))
+      (should (equal (drover-claude-code--resolve-model "claude-opus-5" catalog) "claude-opus-5"))
+      (setenv "CLAUDE_CODE_USE_BEDROCK" "1")
+      (should (equal (drover-claude-code--resolve-model "opus" catalog) "claude-opus-5"))
+      ;; Bedrock has no target of its own for Sonnet: the default one.
+      (should (equal (drover-claude-code--resolve-model "sonnet" catalog) "claude-sonnet-5-5"))
+      (setenv "CLAUDE_CODE_USE_BEDROCK" nil)
+      ;; The environment's model for the family wins.
+      (setenv "ANTHROPIC_DEFAULT_OPUS_MODEL" "claude-opus-5")
+      (should (equal (drover-claude-code--resolve-model "opus" catalog) "claude-opus-5"))
+      (setenv "ANTHROPIC_DEFAULT_OPUS_MODEL" nil)
+      ;; An alias the catalog has no target for: its family's main model.
+      (should (equal (drover-claude-code--resolve-model "opus" (drover-claude-code-test-catalog-data))
+                     "claude-opus-5-5")))))
+
+(defun drover-claude-code-test-catalog-data ()
+  "Return `drover-claude-code-test-catalog', which has no alias targets, read."
+  (alist-get 'catalog (json-parse-string drover-claude-code-test-catalog
+                                         :object-type 'alist :array-type 'list
+                                         :null-object nil :false-object nil)))
+
+(ert-deftest drover-claude-code-test-acp-models ()
+  "The models an ACP session lists are the catalog's, each once, named as the session takes them."
+  (drover-test-with-homes
+    (drover-test-write-claude-catalog)
+    (let ((models (drover-claude-code-acp-models drover-test-claude-acp-models "default"
+                                                 '(low medium high) 'agent-shell)))
+      ;; "default" names Sonnet 5.5, which "sonnet" names too.
+      (should (equal (mapcar #'drover-model-id models)
+                     '("claude-opus-5-5" "claude-opus-5-5[1m]" "claude-sonnet-5-5"
+                       "claude-haiku-4-5-20251001")))
+      (should (equal (mapcar #'drover-model-label models)
+                     '("Anthropic: Opus 5.5" "Anthropic: Opus 5.5[1m]" "Anthropic: Sonnet 5.5"
+                       "Anthropic: Haiku 4.5")))
+      (should (equal (mapcar (lambda (model) (drover-model-id-for model 'claude-code 'agent-shell)) models)
+                     '("opus" "opus[1m]" "sonnet" "haiku")))
+      ;; Other front ends take the identifier.
+      (should (equal (drover-model-id-for (car models) 'claude-code 'claude-code-ide) "claude-opus-5-5"))
+      (should (equal (drover-model-id-for (car models) 'claude-code) "claude-opus-5-5"))
+      ;; Each model's own levels: the session's for the one it runs.
+      (should (equal (mapcar (lambda (model) (mapcar #'car (drover-model-variants model))) models)
+                     '((low medium high xhigh max) (low medium high xhigh max) (low medium high) nil)))
+      (should (equal (mapcar #'drover-model-default-variant models) '(medium medium medium nil)))
+      (should (cl-every #'drover-model-variants-known models))
+      ;; The same model as the catalog's own list gives it, but for its alias.
+      (let ((listed (car (drover-claude-code-catalog-models (drover-claude-code-catalog)))))
+        (should (equal (drover-model-key listed) (drover-model-key (car models))))
+        (setf (drover-model-aliases listed) (drover-model-aliases (car models)))
+        (should (equal listed (car models)))))
+    ;; The session runs Opus: it, and no other model, takes the session's levels.
+    (let ((models (drover-claude-code-acp-models drover-test-claude-acp-models "opus" '(low high)
+                                                 'agent-shell)))
+      (should (equal (mapcar (lambda (model) (mapcar #'car (drover-model-variants model))) models)
+                     '((low high) (low medium high xhigh max) (low medium high) nil))))))
+
+(ert-deftest drover-claude-code-test-acp-models-without-catalog ()
+  "Without the catalog, a session's aliases are its models, the one it runs alone known."
+  (drover-test-with-homes
+    (let ((models (drover-claude-code-acp-models drover-test-claude-acp-models "opus" '(low high)
+                                                 'agent-shell)))
+      ;; "default" names no model drover knows: the pickers' own default stands for it.
+      (should (equal (mapcar #'drover-model-id models) '("opus" "opus[1m]" "sonnet" "haiku")))
+      (should (equal (mapcar #'drover-model-name models)
+                     '("Opus 5.5" "Opus 5.5 (1M context)" "Sonnet 5.5" "Haiku 4.5")))
+      (should-not (cl-some #'drover-model-aliases models))
+      (should (equal (drover-model-id-for (car models) 'claude-code 'agent-shell) "opus"))
+      (should (equal (mapcar #'drover-model-variants-known models) '(t nil nil nil)))
+      (should (equal (drover-model-variants (car models)) '((low) (high))))
+      (should-not (drover-model-variants (nth 1 models))))))
+
 (ert-deftest drover-claude-code-test-defaults-start-directory ()
   "Project settings are read where a front end starts the session."
   (drover-test-with-homes

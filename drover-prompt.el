@@ -1277,6 +1277,8 @@ This is the prompt action `effort'."
                     (plist-get (drover-prompt-inherited-options buffer) :model))))
     (cond
      ((not model) (message "Choose a model first"))
+     ((not (drover-model-variants-known model))
+      (message "The efforts of %s are unknown until a session runs it" (drover-model-label model)))
      ((not (drover-model-variants model)) (message "No variants for %s" (drover-model-label model)))
      (t
       (let ((variant (drover-read-variant model)))

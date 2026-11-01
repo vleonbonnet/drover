@@ -312,6 +312,81 @@ default to (fake)."
 
 ;;;; Engine homes
 
+(defconst drover-test-claude-catalog
+  "{\"version\": 2, \"fetchedAt\": 1793029978843, \"staleAt\": 1793033473038,
+    \"catalog\": {\"surface\": \"cc\",
+     \"config\": {\"id\": \"cc\", \"models\": [
+       {\"id\": \"claude-opus-5-5\", \"name\": \"Opus 5.5\", \"short_name\": \"Opus\", \"section\": \"main\",
+        \"thinking\": {\"type\": \"effort\", \"effort_options\": [
+          {\"id\": \"low\", \"name\": \"Low\"},
+          {\"id\": \"medium\", \"name\": \"Medium\", \"badge\": {\"message\": \"Recommended\", \"variant\": \"neutral\"}},
+          {\"id\": \"high\", \"name\": \"High\"}, {\"id\": \"xhigh\", \"name\": \"Extra\"}]},
+        \"runtime\": {\"max_input_tokens\": 1000000, \"effort_levels\": [\"low\", \"medium\", \"high\", \"xhigh\", \"max\"],
+                    \"default_effort\": \"medium\", \"family\": \"opus\"}},
+       {\"id\": \"claude-opus-5\", \"name\": \"Opus 5\", \"short_name\": \"Opus\", \"section\": \"main\",
+        \"thinking\": {\"type\": \"effort\", \"effort_options\": [
+          {\"id\": \"low\", \"name\": \"Low\"}, {\"id\": \"medium\", \"name\": \"Medium\"},
+          {\"id\": \"high\", \"name\": \"High\", \"badge\": {\"message\": \"Recommended\", \"variant\": \"neutral\"}},
+          {\"id\": \"xhigh\", \"name\": \"Extra\"}]},
+        \"runtime\": {\"effort_levels\": [\"low\", \"medium\", \"high\", \"xhigh\"], \"default_effort\": \"high\",
+                    \"family\": \"opus\"}},
+       {\"id\": \"claude-sonnet-5-5\", \"name\": \"Sonnet 5.5\", \"short_name\": \"Sonnet\", \"section\": \"main\",
+        \"badge\": {\"message\": \"Org default\", \"variant\": \"neutral\"},
+        \"thinking\": {\"type\": \"effort\", \"effort_options\": [
+          {\"id\": \"low\", \"name\": \"Low\"},
+          {\"id\": \"medium\", \"name\": \"Medium\", \"admin_default\": true,
+           \"badge\": {\"message\": \"Default\", \"variant\": \"neutral\"}},
+          {\"id\": \"high\", \"name\": \"High\"}]},
+        \"runtime\": {\"effort_levels\": [\"low\", \"medium\", \"high\"], \"default_effort\": \"medium\",
+                    \"family\": \"sonnet\"}},
+       {\"id\": \"claude-haiku-4-5-20251001\", \"name\": \"Haiku 4.5\", \"short_name\": \"Haiku\", \"section\": \"main\",
+        \"auto_permission_mode\": \"unavailable\"}],
+      \"provider_alias_targets\": {
+        \"haiku\": {\"default\": \"claude-haiku-4-5-20251001\"},
+        \"opus\": {\"default\": \"claude-opus-5-5\",
+                 \"per_provider\": {\"bedrock\": \"claude-opus-5\", \"vertex\": \"claude-opus-5-5\"}},
+        \"sonnet\": {\"default\": \"claude-sonnet-5-5\"}},
+      \"settings_vocabulary\": {\"effort_level\": {\"high\": 3, \"low\": 1, \"max\": 5, \"medium\": 2, \"xhigh\": 4}}},
+     \"state\": {\"id\": \"cc\", \"model\": \"claude-sonnet-5-5\", \"selection_source\": \"org_configuration\",
+               \"thinking\": {\"type\": \"effort\", \"effort\": \"medium\"},
+               \"thinking_by_model\": [
+                 {\"id\": \"claude-opus-5-5\", \"thinking\": {\"type\": \"effort\", \"effort\": \"medium\"}},
+                 {\"id\": \"claude-opus-5\", \"thinking\": {\"type\": \"effort\", \"effort\": \"high\"}}]}}}"
+  "A model catalog as Claude Code 2.1.316 caches it, trimmed.
+Its models tell their effort levels twice: those of the picker,
+`thinking.effort_options', and those the CLI runs them at,
+`runtime.effort_levels', which hold max for Opus 5.5 where the picker
+does not.  `provider_alias_targets' maps aliases to identifiers, Bedrock
+to its own Opus; the state serves Sonnet 5.5 as the default.")
+
+(defun drover-test-write-claude-catalog (&optional content)
+  "Write CONTENT, by default `drover-test-claude-catalog', as Claude Code's catalog."
+  (drover-test-write (expand-file-name "cache/model-catalog/org-cc.json" drover-claude-code-home)
+                     (or content drover-test-claude-catalog)))
+
+(defconst drover-test-claude-acp-models
+  '(("default" . "Default (recommended)") ("opus" . "Opus 5.5")
+    ("opus[1m]" . "Opus 5.5 (1M context)") ("sonnet" . "Sonnet 5.5") ("haiku" . "Haiku 4.5"))
+  "The models Claude Code's ACP agent lists, as (VALUE . NAME).
+The values of its model option, as claude-agent-acp 0.81 builds it from
+the models the SDK supports: aliases, \"default\" first, names given
+their version.")
+
+(defconst drover-test-codex-models-cache
+  "{\"fetched_at\": \"2026-09-18T21:02:56.909415Z\", \"client_version\": \"0.155.0\",
+    \"models\": [
+     {\"slug\": \"gpt-5.5\", \"display_name\": \"GPT-5.5\", \"visibility\": \"list\",
+      \"default_reasoning_level\": \"xhigh\",
+      \"supported_reasoning_levels\": [{\"effort\": \"low\", \"description\": \"Fast\"},
+                                     {\"effort\": \"medium\"}, {\"effort\": \"high\"},
+                                     {\"effort\": \"xhigh\"}]},
+     {\"slug\": \"gpt-6-astra\", \"display_name\": \"GPT-6-Astra\", \"visibility\": \"list\",
+      \"default_reasoning_level\": \"low\",
+      \"supported_reasoning_levels\": [{\"effort\": \"low\"}, {\"effort\": \"medium\"},
+                                     {\"effort\": \"high\"}, {\"effort\": \"xhigh\"},
+                                     {\"effort\": \"max\"}, {\"effort\": \"ultra\"}]}]}"
+  "Codex's models cache, models_cache.json, as Codex 0.155 writes it, trimmed.")
+
 (defun drover-test-write (file content)
   "Write CONTENT to FILE, creating its directory."
   (make-directory (file-name-directory file) t)
@@ -341,7 +416,7 @@ registry reads nothing, and cached JSON is forgotten."
             (process-environment
              (seq-remove (lambda (entry)
                            (string-match-p
-                            "\\`\\(?:ANTHROPIC_\\|CLAUDE_CODE_EFFORT_LEVEL=\\|CLAUDE_CONFIG_DIR=\\|CODEX_HOME=\\|XDG_DATA_HOME=\\)"
+                            "\\`\\(?:ANTHROPIC_\\|CLAUDE_CODE_EFFORT_LEVEL=\\|CLAUDE_CODE_USE_\\|CLAUDE_CONFIG_DIR=\\|CODEX_HOME=\\|XDG_DATA_HOME=\\)"
                             entry))
                          process-environment)))
        (unwind-protect
