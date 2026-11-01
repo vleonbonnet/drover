@@ -1156,9 +1156,8 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
-    (should (eq (car (last slots)) 'context-estimated))
-    (should (equal (seq-take slots 4) '(backend id title directory)))
-    (should (< (seq-position slots 'agent-display) (seq-position slots 'context-estimated)))))
+    (should (equal (last slots 3) '(agent-display context-estimated archived)))
+    (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()
   (should (equal (mapcar #'drover-format-tokens
@@ -1447,6 +1446,294 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (should (= (length drover-test-history-calls) 1)))))
 
 ;;;; Engines of sessions
+
+(ert-deftest drover-test-supports ()
+  "A backend's :supports tells which of its operations apply to a session."
+  (drover-test-with-backend (list (drover-test-session "a") (drover-test-session "b"))
+    (setf (alist-get 'fake drover--backends)
+          (append (list :supports (lambda (session operation)
+                                    (not (and (eq operation :fork)
+                                              (equal (drover-session-id session) "b")))))
+                  (alist-get 'fake drover--backends)))
+    (let ((a (drover-find 'fake "a"))
+          (b (drover-find 'fake "b")))
+      (should (drover-supports-p a :fork))
+      (should-not (drover-supports-p b :fork))
+      (should (drover-supports-p b :compact))
+      ;; Not implemented, whatever :supports says.
+      (should-not (drover-supports-p a :unarchive))
+      (drover-fork a)
+      (should (equal drover-test-calls '((:fork "a"))))
+      (should-error (drover-fork b) :type 'user-error)
+      (should (equal drover-test-calls '((:fork "a")))))
+    ;; A failing :supports allows nothing, and is reported.
+    (setf (alist-get 'fake drover--backends)
+          (append (list :supports (lambda (_session _operation) (error "Boom")))
+                  (alist-get 'fake drover--backends)))
+    (should-not (drover-supports-p (drover-find 'fake "a") :fork))))
+
+(defvar drover-test-archived-calls nil
+  "Callbacks the fake backend's :archived received, newest first.")
+
+(defun drover-test-register-archived ()
+  "Give the fake backend :archived, recording its callbacks, and :unarchive."
+  (setf (alist-get 'fake drover--backends)
+        (append (list :archived (lambda (callback) (push callback drover-test-archived-calls))
+                      :unarchive (drover-test--recorder :unarchive))
+                (alist-get 'fake drover--backends))))
+
+(ert-deftest drover-test-archived-sessions-shown ()
+  "Archived sessions are fetched while shown, listed apart from the live ones."
+  (drover-test-with-backend (list (drover-test-session "live" :status 'done :title "Live"))
+    (let ((drover-test-archived-calls nil)
+          (runs 0))
+      (should-not (drover-archived-available-p))
+      (drover-test-register-archived)
+      (should (drover-archived-available-p))
+      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+      (drover-set-show-archived t)
+      (should (= (length drover-test-archived-calls) 1))
+      (should (= runs 1))
+      (funcall (car drover-test-archived-calls)
+               (list (drover-test-session "live" :archived 5.0 :title "Stale record")
+                     (drover-test-session "old" :status 'done :archived 7.0)
+                     (drover-test-session "unknown")
+                     (drover-test-session "old-kid" :parent "old" :archived 7.0)))
+      (drover-changed-now)
+      (should (= runs 2))
+      (let ((known (drover-known-sessions)))
+        (should (equal (drover-test-ids known) '("live" "old" "unknown" "old-kid")))
+        (should (equal (drover-session-title (car known)) "Live"))
+        ;; Every archived record says so.
+        (should (equal (mapcar #'drover-session-archived (cdr known)) '(7.0 t 7.0))))
+      ;; In a group of their own, last, never needing the user.
+      (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-ids (drover-tree-sessions (cdr group)))))
+                             (drover-group-trees (drover-view-trees) 'status))
+                     '((done "live") (archived "old" "unknown"))))
+      (should (equal (drover-test-ids (drover-sessions)) '("live")))
+      (should (equal (drover-test-ids (drover-attention-sessions)) '("live")))
+      (should (equal (drover-session-archived (drover-find 'fake "old")) 7.0))
+      ;; Fetched again, only the last answer counts; hidden, they go.
+      (drover-archived-fetch)
+      (let ((first (cadr drover-test-archived-calls)))
+        (funcall first (list (drover-test-session "first" :archived 1.0)))
+        (should-not (drover-find 'fake "first")))
+      (drover-set-show-archived nil)
+      (funcall (car drover-test-archived-calls) (list (drover-test-session "late" :archived 1.0)))
+      (should-not drover--archived)
+      (should (equal (drover-test-ids (drover-known-sessions)) '("live")))
+      (should-not (drover-find 'fake "old")))))
+
+(ert-deftest drover-test-archived-before-history ()
+  "An archived record wins over an older one; both give way to a live one."
+  (drover-test-with-backend (list (drover-test-session "live"))
+    (let ((drover-test-archived-calls nil)
+          (drover-test-history-calls nil))
+      (drover-test-register-archived)
+      (drover-test-register-history)
+      (drover-set-show-archived t)
+      (drover-set-show-history t)
+      (funcall (car drover-test-archived-calls)
+               (list (drover-test-session "s" :archived 1.0 :title "Archived")))
+      (funcall (car drover-test-history-calls)
+               (list (drover-test-session "s" :title "Older") (drover-test-session "live")
+                     (drover-test-session "t")))
+      (should (equal (mapcar #'drover-session-title (drover-known-sessions))
+                     '("Session live" "Archived" "Session t")))
+      ;; Each kind is fetched again from one backend alone.
+      (drover-history-fetch 'other)
+      (should (= (length drover-test-history-calls) 1))
+      (drover-archived-fetch 'fake)
+      (should (= (length drover-test-archived-calls) 2)))))
+
+(ert-deftest drover-test-unarchive ()
+  "Z restores the archived sessions selected, through their backend."
+  (drover-test-with-backend (list (drover-test-session "live"))
+    (let ((drover-test-archived-calls nil))
+      (drover-test-register-archived)
+      (drover-set-show-archived t)
+      (funcall (car drover-test-archived-calls)
+               (list (drover-test-session "a" :archived 1.0) (drover-test-session "b" :archived 2.0)))
+      (let ((live (drover-find 'fake "live"))
+            (a (drover-find 'fake "a")))
+        (should (drover-unarchivable-p a))
+        (should-not (drover-unarchivable-p live))
+        (should-not (drover-archivable-p a))
+        (should (drover-archivable-p live))
+        (should-error (drover-unarchive live) :type 'user-error)
+        (should-error (drover-archive a) :type 'user-error)
+        (drover-unarchive a)
+        (should (equal drover-test-calls '((:unarchive "a"))))
+        ;; Of a selection, those archived.
+        (setq drover-test-calls nil)
+        (let ((drover-selected-sessions-function
+               (lambda () (list live a (drover-find 'fake "b")))))
+          (call-interactively #'drover-unarchive))
+        (should (equal (reverse drover-test-calls) '((:unarchive "a") (:unarchive "b"))))))))
+
+(ert-deftest drover-test-deleted-sessions-forgotten ()
+  "A session deleted leaves the archived and older sessions fetched at once."
+  (drover-test-with-backend nil
+    (let ((drover-test-archived-calls nil)
+          (drover-test-history-calls nil))
+      (drover-test-register-archived)
+      (drover-test-register-history)
+      (drover-set-show-archived t)
+      (drover-set-show-history t)
+      (funcall (car drover-test-archived-calls) (list (drover-test-session "a" :archived 1.0)))
+      (funcall (car drover-test-history-calls) (list (drover-test-session "b")))
+      (drover-delete (list (drover-find 'fake "a") (drover-find 'fake "b")))
+      (should (equal (reverse drover-test-calls) '((:delete "a") (:delete "b"))))
+      (should-not (drover-known-sessions)))))
+
+;;;; Drover's own archive
+
+(defun drover-test-shown (id &rest properties)
+  "Return a session ID of the backend `shown', which has no archive, with PROPERTIES.
+Its engine is `claude-code', its engine identifier \"conv-ID\"."
+  (apply #'drover-session-create
+         (append properties (list :backend 'shown :id id :title (concat "Shown " id)
+                                  :engine 'claude-code :engine-id (concat "conv-" id)))))
+
+(defmacro drover-test-with-shown (sessions &rest body)
+  "Run BODY with the backend `shown' serving SESSIONS, a variable, and drover's state fresh.
+`shown' has no archive of its own, but deletes."
+  (declare (indent 1) (debug t))
+  `(drover-test-with-backend nil
+     (drover-test-with-state
+       (drover-test-register-simple 'shown (lambda () ,sessions)
+                                    :delete (drover-test--recorder :delete))
+       ,@body)))
+
+(ert-deftest drover-test-drover-archive ()
+  "Sessions of a backend without an archive drover archives itself, by conversation."
+  (let ((sessions (list (drover-test-shown "a" :status 'done :directory "/work/a/" :project "a"
+                                           :branch "dev" :agent "build" :model "Opus 5.5"
+                                           :effort "high" :created 10.0 :updated 20.0)
+                        (drover-test-shown "b")
+                        (drover-test-shown "unknown" :engine-id nil))))
+    (drover-test-with-shown sessions
+      (let ((a (drover-find 'shown "a")))
+        (should (drover-archivable-p a))
+        (should-not (drover-archivable-p (drover-find 'shown "unknown")))
+        (should-not (drover-unarchivable-p a))
+        (should-error (drover-archive-session (drover-find 'shown "unknown")) :type 'user-error)
+        (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 100.0)))
+          (drover-archive a))
+        ;; It leaves the live sessions, and what needs the user.
+        (should (equal (mapcar #'drover-session-id (drover-sessions)) '("b" "unknown")))
+        (should-not (drover-attention-sessions))
+        (should (drover-session-archived-p a))
+        (should-error (drover-archive-session a) :type 'user-error)
+        ;; Its own record is still found, telling it is archived.
+        (should (eql (drover-session-archived (drover-find 'shown "a")) 100.0))
+        (should (drover-unarchivable-p (drover-find 'shown "a")))
+        ;; Shown, it is its live record, archived.
+        (should (drover-archived-available-p))
+        (let ((drover-show-archived t))
+          (let ((archived (drover-archived-sessions)))
+            (should (equal (mapcar #'drover-session-key archived) '((shown . "a"))))
+            (should (eql (drover-session-archived (car archived)) 100.0))
+            (should (eq (drover-session-status (car archived)) 'done)))
+          (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("b" "unknown" "a")))
+          ;; Its buffer gone, the record drover kept stands for it.
+          (setq sessions (cdr sessions))
+          (let ((kept (car (drover-archived-sessions))))
+            (should (equal (drover-session-key kept) '(shown . "conv-a")))
+            (should (equal (drover-session-engine-key kept) '(claude-code . "conv-a")))
+            (should (equal (list (drover-session-title kept) (drover-session-directory kept)
+                                 (drover-session-project kept) (drover-session-branch kept)
+                                 (drover-session-agent kept) (drover-session-model kept)
+                                 (drover-session-effort kept) (drover-session-created kept)
+                                 (drover-session-updated kept) (drover-session-status kept)
+                                 (drover-session-archived kept))
+                           '("Shown a" "/work/a/" "a" "dev" "build" "Opus 5.5" "high" 10.0 20.0 idle 100.0)))
+            (should (equal (drover-session-title (drover-find 'shown "conv-a")) "Shown a"))
+            ;; Restored, it goes: nothing follows it.
+            (drover-unarchive kept)
+            (should-not (drover-archived-sessions))
+            (should-not (drover-archived-available-p))))))))
+
+(ert-deftest drover-test-drover-archive-file ()
+  "Drover keeps what it archived in its state directory, read anew when it changes."
+  (let ((sessions (list (drover-test-shown "a") (drover-test-shown "b"))))
+    (drover-test-with-shown sessions
+      (drover-archive (drover-find 'shown "a"))
+      (let ((file (drover-archive-file)))
+        (should (equal (file-name-nondirectory file) "archive.eld"))
+        (should (file-exists-p file))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (should (looking-at-p ";;; Sessions drover archived, written by drover"))
+          (let ((form (read (current-buffer))))
+            (should (eql (plist-get form :version) 1))
+            (should (equal (mapcar #'car (plist-get form :sessions)) '((claude-code . "conv-a"))))))
+        ;; Another Emacs archives b: it is read again.
+        (let ((drover--archive nil)
+              (drover--archive-stamp 'unread))
+          (drover-archive (drover-find 'shown "b")))
+        (set-file-times file (time-add nil 10))
+        (should (equal (mapcar #'drover-session-id (drover-sessions)) nil))
+        ;; Restoring rewrites it.
+        (drover-unarchive (drover-find 'shown "a"))
+        (should (equal (mapcar #'drover-session-id (drover-sessions)) '("a")))
+        (let ((drover--archive nil)
+              (drover--archive-stamp 'unread))
+          (should (equal (mapcar #'car (drover--archive)) '((claude-code . "conv-b")))))))))
+
+(ert-deftest drover-test-drover-archive-bad-file ()
+  "A file of another version or malformed is ignored, with one warning."
+  (drover-test-with-shown (list (drover-test-shown "a"))
+    (let ((warnings nil))
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (format &rest arguments) (push (apply #'format-message format arguments) warnings))))
+        (dolist (content '("(:version 2 :sessions nil)" "(:version 1 :sessions (((claude-code . 3) :time 1)))"
+                           "(:version 1 :sessions (((claude-code . \"x\") :title \"No time\")))" "(unbalanced"))
+          (drover-test-write (drover-archive-file) content)
+          (set-file-times (drover-archive-file) (time-add nil (length warnings)))
+          (setq drover--archive-stamp 'unread)
+          (should-not (drover--archive))
+          (should (equal (mapcar #'drover-session-id (drover-sessions)) '("a"))))
+        (should (= (length warnings) 1))
+        (should (string-match-p "Ignoring the sessions drover archived" (car warnings)))))))
+
+(ert-deftest drover-test-drover-archive-hides-every-front-end ()
+  "A conversation drover archived leaves every backend's list, the older sessions too."
+  (let ((sessions (list (drover-test-shown "a"))))
+    (drover-test-with-shown sessions
+      (drover-test-register-simple 'other (list (drover-test-other "x" :engine 'claude-code
+                                                                   :engine-id "conv-a")
+                                                (drover-test-other "y")))
+      (drover-archive (drover-find 'shown "a"))
+      (should (equal (mapcar #'drover-session-key (drover-sessions)) '((other . "y"))))
+      (let ((drover-show-history t)
+            (drover--history (list (cons 'other (list (drover-test-other "z" :engine 'claude-code
+                                                                         :engine-id "conv-a"))))))
+        (should (equal (mapcar #'drover-session-key (drover-known-sessions)) '((other . "y"))))))))
+
+(ert-deftest drover-test-drover-archive-deleted ()
+  "Deleting a session drover archived forgets it."
+  (let ((sessions (list (drover-test-shown "a"))))
+    (drover-test-with-shown sessions
+      (drover-archive (drover-find 'shown "a"))
+      (setq sessions nil)
+      (let ((drover-show-archived t))
+        (let ((kept (car (drover-archived-sessions))))
+          (drover-delete kept)
+          (should (equal drover-test-calls '((:delete "conv-a"))))
+          (should-not (drover-archived-sessions))
+          (should-not (drover--archive)))))))
+
+(ert-deftest drover-test-write-data ()
+  "State files are written whole, through a file renamed over them."
+  (drover-test-with-state
+    (let ((file (expand-file-name "sub/data.eld" drover-state-directory)))
+      (drover-write-data file "Things" 3 :things '((a . "é") (b 1 2)))
+      (should (equal (drover-read-data file 3 :things) '((a . "é") (b 1 2))))
+      (should (equal (directory-files (file-name-directory file) nil "\\`[^.]\\|\\`\\.[^.]")
+                     '("data.eld")))
+      (should-error (drover-read-data file 4 :things))
+      (should-not (drover-read-data (expand-file-name "missing.eld" drover-state-directory) 3 :things)))))
 
 (ert-deftest drover-test-session-engine-key ()
   (should-not (drover-session-engine-key (drover-test-session "s")))
@@ -1845,7 +2132,9 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
                    (lambda (format-string &rest arguments)
                      (push (apply #'format-message format-string arguments) messages))))
           (drover-archive (list (drover-find 'fake "a") bare)))
-        (should (equal messages '("Archived 1 session; failed for Bare x (Bare sessions do not support archive)")))
+        ;; Drover archives the sessions of a backend without an archive,
+        ;; by conversation: a session telling none cannot be.
+        (should (equal messages '("Archived 1 session; failed for Bare x (Bare x cannot be archived before its conversation is known)")))
         (should (equal drover-test-calls '((:archive "a"))))))))
 
 ;;;; The default prompt buffer

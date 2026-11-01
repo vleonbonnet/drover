@@ -2198,7 +2198,7 @@ Of their keys, only g is a session key, and it refreshes either way."
                           (should (eq theirs #'revert-buffer))
                         (should-not (commandp theirs)))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "K" "s" "u" "c" "r" "x" "z" "g" "+" "v" "U" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "U" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.
@@ -2366,6 +2366,83 @@ Redraws keep point on the session."
         ;; Hidden, g fetches nothing.
         (revert-buffer)
         (should (= (length fetches) 2))))))
+
+;;;; Archived sessions
+
+(ert-deftest drover-list-test-archived-sessions ()
+  "Archived sessions show while asked for, dimmed, marked, in a group of their own."
+  (drover-list-test-with (list (drover-test-session "live" :status 'working)
+                               (drover-test-session "seen" :status 'idle :archived t))
+    (let ((fetches nil)
+          (drover-archived-glyph "#"))
+      (setf (alist-get 'fake drover--backends)
+            (append (list :archived (lambda (callback) (push callback fetches))
+                          :unarchive (drover-test--recorder :unarchive))
+                    (alist-get 'fake drover--backends)))
+      (drover-list-test-shown
+        ;; A session the backend reports archived among its live ones
+        ;; shows only with the others, once asked for.
+        (should (equal (drover-list-test-groups) '((working "live"))))
+        (drover-set-show-archived t)
+        (should (= (length fetches) 1))
+        (should (equal (drover-list--mode-line-process) " by status +archived"))
+        (funcall (car fetches) (list (drover-test-session "old" :status 'done :archived (drover-list-test-ago 3600)
+                                                          :updated (drover-list-test-ago 7200))))
+        (drover-changed-now)
+        (revert-buffer)
+        ;; g fetched again.
+        (should (= (length fetches) 2))
+        (funcall (car fetches) (list (drover-test-session "old" :status 'done :archived (drover-list-test-ago 3600)
+                                                          :updated (drover-list-test-ago 7200))))
+        (drover-changed-now)
+        (should (equal (drover-list-test-groups) '((working "live") (archived "old" "seen"))))
+        (drover-list-test-goto-group 'archived)
+        (should (string-match-p "\\`Archived (2)" (string-trim (drover-list-test-line))))
+        ;; Archived, a session never needs the user: the header counts it apart.
+        (goto-char (point-min))
+        (should (string-match-p "Nothing needs you +3 sessions, 2 archived" (drover-list-test-line)))
+        (should (string-match-p "◐ +Session live" (drover-list-test-heading "live")))
+        (should (string-match-p "✓ # Session old" (drover-list-test-heading "old")))
+        (save-excursion
+          (drover-list-test-goto "old")
+          (search-forward "#")
+          (should (equal (get-text-property (1- (point)) 'help-echo) "Archived 1h ago"))
+          (search-forward "Session old")
+          (should (memq 'drover-dim (ensure-list (get-text-property (1- (point)) 'font-lock-face)))))
+        ;; Z restores it.
+        (drover-list-test-goto "old")
+        (drover-list-test-press "Z")
+        (should (equal drover-test-calls '((:unarchive "old"))))
+        (drover-set-show-archived nil)
+        (should (equal (drover-list-test-groups) '((working "live"))))
+        (should (equal (drover-list--mode-line-process) " by status"))
+        ;; Hidden, g fetches nothing.
+        (revert-buffer)
+        (should (= (length fetches) 2))))))
+
+(ert-deftest drover-list-test-archived-by-drover ()
+  "z archives in drover's own archive a session of a backend without one; Z restores it."
+  (drover-list-test-with nil
+    (drover-test-with-state
+      (let ((shown (list (drover-session-create :backend 'shown :id "t1" :title "Terminal" :status 'idle
+                                                :engine 'claude-code :engine-id "conv-1"))))
+        (drover-test-register-simple 'shown (lambda () shown))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should (equal (mapcar #'drover-session-key (drover-known-sessions)) '((shown . "t1"))))
+          (goto-char (oref (drover-list--find-session '(shown . "t1")) start))
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+            (drover-list-test-press "z"))
+          (drover-changed-now)
+          (should-not (drover-list--find-session '(shown . "t1")))
+          (drover-set-show-archived t)
+          (should (equal (mapcar #'car (drover-list-test-groups)) '(archived)))
+          (goto-char (oref (drover-list--find-session '(shown . "t1")) start))
+          (should (drover-session-archived (drover-session-at-point)))
+          (drover-list-test-press "Z")
+          (drover-changed-now)
+          (should (equal (mapcar #'car (drover-list-test-groups)) '(idle)))
+          (drover-set-show-archived nil))))))
 
 ;;;; Refreshing
 

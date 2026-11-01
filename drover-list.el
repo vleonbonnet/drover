@@ -77,9 +77,14 @@
 ;; the bar and the time left are redrawn as the cache runs out.
 ;;
 ;; An active region selects the sessions whose lines it spans, those
-;; Magit highlights: marking seen, interrupting, archiving and deleting
-;; act on all of them, copying (`kill-ring-save', M-w) copies their
-;; Org links, and the prompt quotes them with their last replies.
+;; Magit highlights: marking seen, interrupting, archiving, unarchiving
+;; and deleting act on all of them, copying (`kill-ring-save', M-w)
+;; copies their Org links, and the prompt quotes them with their last
+;; replies.
+;;
+;; With `drover-show-archived', the list shows archived sessions too,
+;; dimmed, after `drover-archived-glyph', in a group of their own when
+;; grouped by status.
 ;;
 ;; The buffer redraws when backends report changes, but only while it
 ;; is displayed: a hidden list is marked stale and redraws when it is
@@ -687,19 +692,32 @@ subagents and tells how many."
                              " ")
                   'help-echo (drover-list--subagents-help subagents)))))
 
+(defun drover-list--archived-glyph (session now)
+  "Return the glyph telling that SESSION is archived, in a cell of its own, or nil.
+See `drover-archived-glyph'.  Its tooltip tells how long ago, at NOW,
+when known."
+  (when-let* ((archived (drover-session-archived session)))
+    (propertize (drover-list--icon (drover-face drover-archived-glyph 'drover-dim))
+                'help-echo (if (numberp archived)
+                               (format "Archived %s ago" (drover-format-age archived now))
+                             "Archived"))))
+
 (defun drover-list--icons (session metrics)
   "Return what comes before the title of SESSION: its glyphs and a space.
 The glyph of its status comes first, then, when subagents of SESSION are
-in the middle of a turn, the glyphs telling so; one space separates
-each.  METRICS give the cells of glyphs, the frames of animated ones and
-the active subagents of each session."
+in the middle of a turn, the glyphs telling so, then, when SESSION is
+archived, the glyph telling so; one space separates each.  METRICS give
+the cells of glyphs, the frames of animated ones, the active subagents
+of each session and the time."
   (let ((indicator (drover-list--indicator
                     (and (plist-get metrics :active)
                          (gethash (drover-session-key session) (plist-get metrics :active)))
-                    metrics)))
+                    metrics))
+        (archived (drover-list--archived-glyph session (plist-get metrics :now))))
     (concat (drover-list--status-glyph (drover-session-status session) metrics)
             " "
-            (and indicator (concat indicator " ")))))
+            (and indicator (concat indicator " "))
+            (and archived (concat archived " ")))))
 
 (defun drover-list--title-face (state)
   "Return the face of a title whose session is in STATE, or nil.
@@ -712,14 +730,16 @@ STATE is a value of `drover-list--title-state'."
 (defun drover-list--title-text (session depth state)
   "Return the title of SESSION, at DEPTH in its tree, as its line shows it.
 A subagent at the top of its tree, its parent not listed, starts with
-an arrow; an idle session is dimmed; the title of a session in STATE,
-open in a buffer, is in the face of that state (see
+an arrow; an idle or archived session is dimmed; the title of a
+session in STATE, open in a buffer, is in the face of that state (see
 `drover-list--title-face'), over the dimming.  The title, not the
 arrow, carries the session's key as its property `drover-list-title',
 so that its face may change in place."
   (let* ((title (drover-list--one-line (drover-session-display-title session)))
          (faces (delq nil (list (drover-list--title-face state)
-                                (and (eq (drover-session-status session) 'idle) 'drover-dim)))))
+                                (and (or (eq (drover-session-status session) 'idle)
+                                         (drover-session-archived session))
+                                     'drover-dim)))))
     (concat (if (and (zerop depth) (drover-session-parent session))
                 (drover-face "↳ " 'drover-dim)
               "")
@@ -1854,11 +1874,12 @@ is noted in `drover-list--caches'."
 
 (defun drover-list--status-counts (sessions)
   "Return how many of SESSIONS need the user, per status, as one string.
-Return nil when none does."
+Archived sessions never count.  Return nil when none does."
   (when-let* ((parts (delq nil
                            (mapcar (lambda (status)
                                      (let ((count (seq-count (lambda (session)
-                                                               (eq (drover-session-status session) status))
+                                                               (and (eq (drover-session-status session) status)
+                                                                    (not (drover-session-archived session))))
                                                              sessions)))
                                        (when (> count 0)
                                          (concat (drover-list--icon (drover-status-glyph status))
@@ -1929,16 +1950,20 @@ line starts the next; a part wider than a line is cut."
 
 (defun drover-list--insert-header (sessions hidden layout)
   "Insert the summary of SESSIONS: how many need the user, how many are listed.
-HIDDEN is how many subagents of the trees listed are hidden, told after
-the count of sessions when there are some.  Settings and keys are the
-View menu's to show, not the list's.  Lines fit the width of LAYOUT."
+How many of them are archived follows the count of sessions, then
+HIDDEN, how many subagents of the trees listed are hidden, when there
+are some; archived sessions never count as needing the user.  Settings
+and keys are the View menu's to show, not the list's.  Lines fit the
+width of LAYOUT."
   (magit-insert-section (drover-list-header)
-    (let ((counts (seq-filter (lambda (count) (> (cdr count) 0))
-                              (mapcar (lambda (status)
-                                        (cons status (seq-count (lambda (session)
-                                                                  (eq (drover-session-status session) status))
-                                                                sessions)))
-                                      drover-attention-statuses))))
+    (let* ((archived (seq-count #'drover-session-archived sessions))
+           (counts (seq-filter (lambda (count) (> (cdr count) 0))
+                               (mapcar (lambda (status)
+                                         (cons status (seq-count (lambda (session)
+                                                                   (and (eq (drover-session-status session) status)
+                                                                        (not (drover-session-archived session))))
+                                                                 sessions)))
+                                       drover-attention-statuses))))
       (insert (drover-list--flow
                (append
                 (if counts
@@ -1954,6 +1979,7 @@ View menu's to show, not the list's.  Lines fit the width of LAYOUT."
                 (list (drover-face
                        (concat (format "%d session%s" (length sessions)
                                        (if (= (length sessions) 1) "" "s"))
+                               (and (> archived 0) (format ", %d archived" archived))
                                (and (> hidden 0)
                                     (format ", %d subagent%s hidden" hidden (if (= hidden 1) "" "s"))))
                        'drover-dim)))
@@ -2280,11 +2306,13 @@ out in pixels, measured in the faces of the buffer."
       (setq drover-list--stale t))))
 
 (defun drover-list--revert (&rest _)
-  "Fetch older sessions again if shown, measure text anew, and redraw.
+  "Fetch older and archived sessions again if shown, measure text anew, redraw.
 The recaps of expanded sessions are fetched anew too.
 For `revert-buffer-function'."
   (when drover-show-history
     (drover-history-fetch))
+  (when drover-show-archived
+    (drover-archived-fetch))
   (setq drover-list--widths nil
         drover-list--recaps nil)
   (drover-list--render))
@@ -2850,8 +2878,8 @@ Sessions in collapsed groups are passed over."
 (defun drover-list--mode-line-process ()
   "Return how the list lists sessions, for the mode line.
 It tells the grouping, the sort when not by urgency, which subagents
-show when not the active ones, whether older sessions show, and whether
-a filter leaves sessions out."
+show when not the active ones, whether older and archived sessions
+show, and whether a filter leaves sessions out."
   (concat (if drover-group-by
               (concat " by " (alist-get drover-group-by drover-grouping-labels))
             " ungrouped")
@@ -2862,6 +2890,7 @@ a filter leaves sessions out."
             ('all " +subagents")
             ('none " -subagents"))
           (and drover-show-history " +older")
+          (and drover-show-archived " +archived")
           (and (drover-filter-active-p) " filtered")))
 
 ;; The keys of `drover-session-map' come first, so they win over those
@@ -2901,8 +2930,8 @@ none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 
 An active region selects the sessions whose lines it spans, as Magit
 highlights them: a group's heading stands for its sessions.  Marking
-seen, interrupting, archiving and deleting act on every selected
-session, \\[drover-list-copy] copies their links, and the prompt quotes
+seen, interrupting, archiving, unarchiving and deleting act on every
+selected session, \\[drover-list-copy] copies their links, and the prompt quotes
 them with their last replies (see `drover-prompt-dwim').
 
 \\{drover-list-mode-map}"

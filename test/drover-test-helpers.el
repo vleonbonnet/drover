@@ -34,7 +34,8 @@
 ;; engine and model source registries.
 ;;
 ;; `drover-test-with-homes' points every engine's local state at a
-;; fresh directory, so tests never read the user's.
+;; fresh directory, so tests never read the user's;
+;; `drover-test-with-state' does drover's own.
 
 ;;; Code:
 
@@ -203,6 +204,10 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover-sort-descending nil)
          (drover-show-history nil)
          (drover--history nil)
+         (drover-show-archived nil)
+         (drover--archived nil)
+         (drover--archive nil)
+         (drover--archive-stamp 'unread)
          (drover-test-sessions ,sessions)
          (drover-test-calls nil)
          (drover-test-backend-engines '(fake))
@@ -219,6 +224,21 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (progn (drover-test-register) ,@body)
        (when (timerp drover--change-timer)
          (cancel-timer drover--change-timer)))))
+
+;;;; Drover's state
+
+(defmacro drover-test-with-state (&rest body)
+  "Run BODY with `drover-state-directory' a fresh directory, deleted afterwards.
+What drover archived itself is read from there anew, and its warnings
+are given again."
+  (declare (indent 0) (debug t))
+  `(let ((drover-state-directory (file-name-as-directory (make-temp-file "drover-state" t)))
+         (drover--archive nil)
+         (drover--archive-stamp 'unread)
+         (drover--archive-warned nil))
+     (unwind-protect
+         (progn ,@body)
+       (delete-directory drover-state-directory t))))
 
 ;;;; Fake engines
 

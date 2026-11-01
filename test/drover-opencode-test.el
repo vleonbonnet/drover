@@ -98,6 +98,11 @@ This follows the `opencode-state' contract."
          (drover--change-timer nil)
          (drover-changed-hook nil)
          (drover-show-subagents 'active)
+         (drover-show-history nil)
+         (drover--history nil)
+         (drover-show-archived nil)
+         (drover--archived nil)
+         (drover-opencode--refetch-timer nil)
          (drover-opencode--projects nil)
          (drover-opencode--projects-fetching nil)
          (drover-opencode--projects-stale nil)
@@ -706,7 +711,9 @@ nothing is fetched."
   (drover-opencode-test-with nil
     (drover-start)
     (should (memq #'drover-opencode--updated opencode-state-updated-functions))
-    (should (equal (mapcar #'car drover-opencode-test-handlers) '("project.updated" "server.connected")))
+    (should (equal (mapcar #'car drover-opencode-test-handlers)
+                   '("project.updated" "server.connected"
+                     "session.archived" "session.unarchived" "session.deleted" "server.connected")))
     (should (eq (drover-opencode-test-handler "project.updated") #'drover-opencode--projects-changed))
     (let ((ensure (assq 'opencode-state-ensure drover-opencode-test-calls)))
       (should ensure)
@@ -1109,6 +1116,92 @@ nothing is fetched."
                    (opencode-error--make :status 500 :method 'get :path "/api/session" :message "Down")))
         (should-not called)
         (should (string-match-p "older OpenCode sessions.*Down" (car messages)))))))
+
+(ert-deftest drover-opencode-test-archived ()
+  "Archived sessions come from the service on demand, telling when; one is restored."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_live" :running t :title "Live"))
+    (drover-opencode-test-with-history
+      (drover-set-show-archived t)
+      ;; Every archived session of every project, not waited for.
+      (should (equal (plist-get drover-opencode-test-history-fetch :query) '((archived . "true"))))
+      (should (equal (plist-get drover-opencode-test-history-fetch :directory) (expand-file-name "~/")))
+      (should-not (drover-archived-sessions))
+      (funcall (plist-get drover-opencode-test-history-fetch :callback)
+               '(((id . "ses_gone") (title . "Put away") (location (directory . "/work/drover/"))
+                  (time (created . 1000000) (updated . 2000000) (archived . 3000000)))))
+      (let ((gone (drover-find 'opencode "ses_gone")))
+        (should (eql (drover-session-archived gone) 3000.0))
+        (should (drover-session-archived-p gone))
+        (should (drover-unarchivable-p gone))
+        (should-not (drover-archivable-p gone))
+        ;; Listed with the live sessions, never among them.
+        (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("ses_live" "ses_gone")))
+        (should (equal (mapcar #'drover-session-id (drover-sessions)) '("ses_live")))
+        (should (equal (mapcar #'car (drover-group-trees (drover-view-trees) 'status))
+                       '(working archived)))
+        ;; Z restores it on the service.
+        (drover-unarchive gone)
+        (should (equal (assq 'opencode-session-archive drover-opencode-test-calls)
+                       '(opencode-session-archive "ses_gone" t))))
+      ;; z archives a live one there, not in drover's archive.
+      (drover-archive (drover-find 'opencode "ses_live"))
+      (should (equal (assq 'opencode-session-archive drover-opencode-test-calls)
+                     '(opencode-session-archive "ses_live")))
+      (drover-set-show-archived nil)
+      (should-not drover--archived))))
+
+(ert-deftest drover-opencode-test-archived-buffer-session ()
+  "The buffer of a session the registry knows archived tells it is."
+  (drover-opencode-test-with nil
+    (cl-letf (((symbol-function 'opencode-state-get)
+               (lambda (id) (and (equal id "ses_put") (list :id id :archived 3000.0)))))
+      (should (eql (drover-session-archived (drover-opencode--session-of "ses_put" "Put away")) 3000.0))
+      (should (drover-unarchivable-p (drover-opencode--session-of "ses_put")))
+      (should-not (drover-session-archived (drover-opencode--session-of "ses_other"))))))
+
+(ert-deftest drover-opencode-test-archived-failure ()
+  (drover-opencode-test-with nil
+    (drover-opencode-test-with-history
+      (let ((called nil)
+            (messages nil))
+        (funcall (drover-backend-property 'opencode :archived) (lambda (_) (setq called t)))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format &rest arguments) (push (apply #'format format arguments) messages))))
+          (funcall (plist-get drover-opencode-test-history-fetch :else)
+                   (opencode-error--make :status 500 :method 'get :path "/api/session" :message "Down")))
+        (should-not called)
+        (should (string-match-p "archived OpenCode sessions.*Down" (car messages)))))))
+
+(ert-deftest drover-opencode-test-archived-fetched-again ()
+  "Archiving, restoring or deleting a session fetches the lists shown again, once a burst ends."
+  (drover-opencode-test-with nil
+    (drover-start)
+    (let ((fetched nil))
+      (cl-letf (((symbol-function 'drover-history-fetch) (lambda (&rest arguments) (push (cons 'history arguments) fetched)))
+                ((symbol-function 'drover-archived-fetch) (lambda (&rest arguments) (push (cons 'archived arguments) fetched))))
+        (dolist (type '("session.archived" "session.unarchived" "session.deleted" "server.connected"))
+          (should (memq #'drover-opencode--sessions-moved
+                        (mapcar #'cdr (seq-filter (lambda (entry) (equal (car entry) type))
+                                                  drover-opencode-test-handlers)))))
+        ;; Nothing shown, nothing fetched.
+        (drover-opencode--sessions-moved '((type . "session.archived")))
+        (should-not drover-opencode--refetch-timer)
+        (let ((drover-show-archived t))
+          (drover-opencode--sessions-moved '((type . "session.archived")))
+          (let ((first drover-opencode--refetch-timer))
+            (should (timerp first))
+            (drover-opencode--sessions-moved '((type . "session.unarchived")))
+            ;; A burst is fetched once, after the last event.
+            (should-not (memq first timer-list))
+            (should (timerp drover-opencode--refetch-timer)))
+          (cancel-timer drover-opencode--refetch-timer)
+          (drover-opencode--refetch)
+          (should (equal fetched '((archived opencode))))
+          (should-not drover-opencode--refetch-timer)
+          (let ((drover-show-history t))
+            (setq fetched nil)
+            (drover-opencode--refetch)
+            (should (equal fetched '((archived opencode) (history opencode))))))))))
 
 ;;;; The dispatch menu
 

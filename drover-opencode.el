@@ -42,7 +42,10 @@
 ;; gains opencode.el's session search.
 ;;
 ;; Older sessions, beyond those of the registry, come from the service
-;; on demand (:history): every unarchived session, of every project.
+;; on demand (:history): every unarchived session, of every project;
+;; so do the archived ones (:archived), which :unarchive restores.  Both
+;; are fetched again as sessions are archived, restored or deleted, and
+;; as the event stream reconnects, while lists show them.
 ;; The recap of a session's last turn (:recap), which the list shows as
 ;; a session expands, is opencode.el's `opencode-session-last-turn'.
 ;;
@@ -481,6 +484,7 @@ after a compaction until the next step measures it:
            :cache-ttl (plist-get cache :ttl)
            :cache-tokens (plist-get cache :tokens)
            :cache-prompt-tokens (plist-get cache :prompt-tokens)
+           :archived (plist-get entry :archived)
            (drover-opencode--run entry directory))))
 
 (defun drover-opencode--sessions ()
@@ -520,23 +524,62 @@ registry follows."
           :updated (opencode-time-seconds .time.updated)
           :started nil)))
 
-(defun drover-opencode--history (callback)
-  "Fetch every unarchived session of every project, and call CALLBACK with them.
+(defun drover-opencode--fetch (archived what callback)
+  "Fetch every session of every project, ARCHIVED or not, for CALLBACK.
 CALLBACK receives `drover-session' records, mapped as registry entries
 are; their status is what the service tells of them, idle unless a
-turn ended unseen.  A failure is reported, and CALLBACK not called."
+turn ended unseen.  The service pages the list; the pages are fetched
+one after the other, never waiting.  A failure is reported, naming
+WHAT was fetched, and CALLBACK not called."
   ;; Listed from the home directory, as `opencode-list-all-sessions'
   ;; does: no project scopes the list.
   (let ((default-directory (expand-file-name "~/")))
     (opencode-fetch-sessions
-     '((archived . "false"))
+     `((archived . ,(if archived "true" "false")))
      (lambda (infos)
        (funcall callback (mapcar (lambda (info)
                                    (drover-opencode--session (drover-opencode--info-entry info)))
                                  infos)))
      (lambda (error)
-       (message "Drover: cannot fetch older OpenCode sessions: %s"
-                (opencode-error-describe error))))))
+       (message "Drover: cannot fetch %s OpenCode sessions: %s"
+                what (opencode-error-describe error))))))
+
+(defun drover-opencode--history (callback)
+  "Fetch every unarchived session of every project, and call CALLBACK with them.
+See `drover-opencode--fetch'.  The backend's :history."
+  (drover-opencode--fetch nil "older" callback))
+
+(defun drover-opencode--archived (callback)
+  "Fetch every archived session of every project, and call CALLBACK with them.
+Their records tell when they were archived.  See
+`drover-opencode--fetch'.  The backend's :archived."
+  (drover-opencode--fetch t "archived" callback))
+
+(defvar drover-opencode--refetch-timer nil
+  "Timer fetching again the older and archived sessions lists show.")
+
+(defun drover-opencode--refetch ()
+  "Fetch again the older and archived sessions lists show, if any."
+  (setq drover-opencode--refetch-timer nil)
+  (when drover-show-history
+    (drover-history-fetch 'opencode))
+  (when drover-show-archived
+    (drover-archived-fetch 'opencode)))
+
+(defun drover-opencode--sessions-moved (_event)
+  "Fetch the older and archived sessions again, after _EVENT, if lists show them.
+_EVENT archived, restored or deleted a session, which moves it between
+the lists the service gives, or reconnected the event stream, after
+which events may have been missed.  Archiving a selection sends a burst
+of events: they are fetched again once, half a second after the last."
+  (when (or drover-show-history drover-show-archived)
+    (when (timerp drover-opencode--refetch-timer)
+      (cancel-timer drover-opencode--refetch-timer))
+    (setq drover-opencode--refetch-timer (run-at-time 0.5 nil #'drover-opencode--refetch))))
+
+(defconst drover-opencode--moving-events
+  '("session.archived" "session.unarchived" "session.deleted" "server.connected")
+  "Events after which the older and archived sessions are fetched again.")
 
 ;;;; Changes
 
@@ -562,6 +605,8 @@ yet views show what sessions run by their catalogs."
   (add-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
   (opencode-events-register "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-register "server.connected" #'drover-opencode--projects-changed)
+  (dolist (type drover-opencode--moving-events)
+    (opencode-events-register type #'drover-opencode--sessions-moved))
   ;; A bootstrap with no session runs no update hook, yet ends the wait.
   (opencode-state-ensure (lambda () (drover-backend-changed 'opencode)))
   (drover-opencode--fetch-projects))
@@ -601,6 +646,10 @@ back if the user moved on meanwhile."
 (defun drover-opencode--archive (session)
   "Archive SESSION on the service."
   (opencode-session-archive (drover-session-id session)))
+
+(defun drover-opencode--unarchive (session)
+  "Restore SESSION from the service's archive."
+  (opencode-session-archive (drover-session-id session) t))
 
 (defun drover-opencode--mark-seen (session)
   "Mark the ended turn of SESSION viewed on the service, for every client."
@@ -908,6 +957,8 @@ unknown.  The backend's :options."
    :respond #'drover-opencode--respond
    :interrupt #'drover-opencode--interrupt
    :archive #'drover-opencode--archive
+   :unarchive #'drover-opencode--unarchive
+   :archived #'drover-opencode--archived
    :mark-seen #'drover-opencode--mark-seen
    :preview #'drover-opencode--preview
    :recap #'drover-opencode--recap
@@ -932,11 +983,13 @@ unknown.  The backend's :options."
 
 (defun drover-opencode--session-of (id &optional title directory parent)
   "Return the drover session ID of the OpenCode backend.
-A session the registry does not hold, such as an old one, is described
-by TITLE, DIRECTORY and PARENT, its parent's ID, as an idle session."
+A session the registry does not list, such as an old or archived one,
+is described by TITLE, DIRECTORY and PARENT, its parent's ID, as an
+idle session, archived when the registry knows it is."
   (or (drover-find 'opencode id)
       (drover-session-create :backend 'opencode :id id :engine 'opencode :engine-id id
-                             :title title :directory directory :parent parent)))
+                             :title title :directory directory :parent parent
+                             :archived (plist-get (opencode-state-get id) :archived))))
 
 (defun drover-opencode--buffer-session ()
   "Return the session of the current OpenCode session buffer, or nil."
@@ -1080,6 +1133,10 @@ commands of opencode.el."
   (remove-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
   (opencode-events-unregister "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-unregister "server.connected" #'drover-opencode--projects-changed)
+  (dolist (type drover-opencode--moving-events)
+    (opencode-events-unregister type #'drover-opencode--sessions-moved))
+  (when (timerp drover-opencode--refetch-timer)
+    (cancel-timer drover-opencode--refetch-timer))
   (drover-opencode--uninstall)
   (drover-unregister-backend 'opencode)
   (drover-opencode--unregister-engine)

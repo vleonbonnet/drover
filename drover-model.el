@@ -506,35 +506,10 @@ reported once and ignored: the next live answer replaces it."
 
 (defun drover--model-memory-write (memory)
   "Write MEMORY, an alist of remembered models, to the file, atomically.
-It is written to a temporary file in the same directory, then renamed
-over the file, so that a reader never sees it half written.  A failure
-is reported once."
-  (let* ((file (drover-model-memory-file))
-         (directory (file-name-directory file))
-         (temporary nil))
+See `drover-write-data'.  A failure is reported once."
+  (let ((file (drover-model-memory-file)))
     (condition-case err
-        (unwind-protect
-            (progn
-              (make-directory directory t)
-              (setq temporary (make-temp-file (expand-file-name ".models-" directory) nil ".eld"))
-              (with-temp-buffer
-                (insert ";;; Models drover remembers, written by drover.  -*- mode: lisp-data; coding: utf-8-unix -*-\n")
-                (let ((print-length nil)
-                      (print-level nil)
-                      (print-circle nil)
-                      (print-escape-newlines t))
-                  (insert (format "(:version %d\n :engines\n (" drover--model-memory-version))
-                  (dolist (entry memory)
-                    (unless (eq entry (car memory))
-                      (insert "\n  "))
-                    (prin1 entry (current-buffer)))
-                  (insert "))\n"))
-                (let ((coding-system-for-write 'utf-8-unix))
-                  (write-region nil nil temporary nil 'silent)))
-              (rename-file temporary file t)
-              (setq temporary nil))
-          (when temporary
-            (ignore-errors (delete-file temporary))))
+        (drover-write-data file "Models drover remembers" drover--model-memory-version :engines memory)
       (error
        (drover--model-memory-warn "Could not remember models in %s: %s"
                                   (abbreviate-file-name file) (error-message-string err))))

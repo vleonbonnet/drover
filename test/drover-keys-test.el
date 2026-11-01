@@ -144,7 +144,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                             ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
-                            ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
+                            ("Z" . drover-unarchive) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
                             ("U" . drover-toggle-subagents) ("V" . drover-view)))
                          (lambda (a b) (string< (car a) (car b))))))
     (dolist (binding bindings)
@@ -419,7 +419,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
       (should (equal (mapcar (lambda (group) (mapcar (lambda (column) (mapcar #'car column)) (cdr group)))
                              groups)
                      '((("j" "b" "\"" "n" "'") ("l" "L" "p") ("a" "m" "e" "d") ("C" "f" "." "O"))
-                       (("o" "u" "c" "v") ("A" "K" "s" "+" "g") ("r" "x" "z") ("U" "V"))
+                       (("o" "u" "c" "v") ("A" "K" "s" "+" "g") ("r" "x" "z" "Z") ("U" "V"))
                        (("RET" "S-<return>" "i" "k") ("/" "@" "y") ("t" "T")))))
       ;; One key, one command.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-dispatch))))
@@ -526,6 +526,32 @@ agent, model, effort and directory of the next prompt are among them."
         (dolist (key '("r" "x" "C" "f" "v" "+"))
           (should-not (member key apt)))
         (should (member "z" apt))))))
+
+(ert-deftest drover-keys-test-dispatch-archive ()
+  "z applies to a session not archived, by its backend or by drover; Z to one archived."
+  (drover-keys-test-with (list (drover-test-session "s"))
+    (drover-keys-test-in 'view "s"
+      (let ((apt (drover-keys-test-apt 'drover-dispatch)))
+        (should (member "z" apt))
+        (should-not (member "Z" apt))))
+    (drover-test-with-state
+      (drover-test-register-simple 'shown (list (drover-session-create :backend 'shown :id "t"
+                                                                       :engine 'claude-code :engine-id "c")
+                                                (drover-session-create :backend 'shown :id "u")))
+      (with-temp-buffer
+        (setq-local drover-view-p t)
+        (setq-local drover-session-at-point-function (lambda () (drover-find 'shown "t")))
+        ;; Its backend has no archive: drover archives it.
+        (should (member "z" (drover-keys-test-apt 'drover-dispatch)))
+        (drover-archive-session (drover-find 'shown "t"))
+        (let ((apt (drover-keys-test-apt 'drover-dispatch)))
+          (should-not (member "z" apt))
+          (should (member "Z" apt)))
+        ;; Of a conversation not known yet, it cannot.
+        (setq-local drover-session-at-point-function (lambda () (drover-find 'shown "u")))
+        (let ((apt (drover-keys-test-apt 'drover-dispatch)))
+          (should-not (member "z" apt))
+          (should-not (member "Z" apt)))))))
 
 (ert-deftest drover-keys-test-dispatch-in-foreign-list ()
   "In a list drover does not draw, the View menu does not apply."
@@ -706,6 +732,7 @@ of sessions go after p, more prompt commands after O."
                                        " f text any" " c clear"
                                        " F follow [off|on]" " U subagents [all|active|none]"
                                        " O older [hidden|shown]"
+                                       " A archived [hidden|shown]"
                                        " -l location" " -b branch" " -a agent" " -m model" " -r provider"
                                        " -x context" " -c created"
                                        " -t age" " -p cache" " -s summary")))
@@ -760,7 +787,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("Sort by" "o" "r") ("Group by" "g")
                        ("Filter by" "p" "s" "a" "m" "v" "d" "f" "c")
-                       ("Toggles" "F" "U" "O")
+                       ("Toggles" "F" "U" "O" "A")
                        ("Columns" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
       ;; One key, one setting.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
@@ -769,7 +796,12 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
       (should-not (member "O" (drover-keys-test-apt 'drover-view)))
       (setf (alist-get 'fake drover--backends)
             (append (list :history #'ignore) (alist-get 'fake drover--backends)))
-      (should (member "O" (drover-keys-test-apt 'drover-view))))))
+      (should (member "O" (drover-keys-test-apt 'drover-view)))
+      ;; Archived sessions too, or drover's archive holding some.
+      (should-not (member "A" (drover-keys-test-apt 'drover-view)))
+      (setf (alist-get 'fake drover--backends)
+            (append (list :archived #'ignore) (alist-get 'fake drover--backends)))
+      (should (member "A" (drover-keys-test-apt 'drover-view))))))
 
 (ert-deftest drover-keys-test-view-only-in-views ()
   (with-temp-buffer
@@ -980,7 +1012,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 24))
+      (should (= (length suffixes) 25))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 

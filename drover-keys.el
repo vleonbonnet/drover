@@ -47,8 +47,8 @@
 ;; search; more prompt commands after "O".
 ;;
 ;; `drover-view', the View menu, chooses how drover's list sorts, groups
-;; and filters sessions, which subagents it shows, and the fields it may
-;; show.
+;; and filters sessions, which subagents it shows, whether it shows
+;; older and archived sessions, and the fields it may show.
 
 ;;; Code:
 
@@ -389,6 +389,7 @@ other lists."
   "r" #'drover-rename
   "x" #'drover-delete
   "z" #'drover-archive
+  "Z" #'drover-unarchive
   "g" #'drover-refresh
   "+" #'drover-new-session
   "v" #'drover-peek
@@ -506,13 +507,14 @@ PREDICATE, a function of the session, returns nil for it."
 (defun drover-dispatch-selection (operation &optional predicate)
   "Return non-nil when the dispatch menu may perform OPERATION on sessions.
 With several sessions selected (see `drover-selected-sessions'), when
-the backend of one of them implements OPERATION, a keyword, and
-PREDICATE, a function of a session, if any, returns non-nil for it;
-otherwise as `drover-dispatch-session' tells of the session at point."
+the backend of one of them performs OPERATION, a keyword, unless it is
+nil, and PREDICATE, a function of a session, if any, returns non-nil
+for it; otherwise as `drover-dispatch-session' tells of the session at
+point."
   (let ((selection (plist-get (drover--scope) :selection)))
     (if (cdr selection)
         (seq-some (lambda (session)
-                    (and (drover-supports-p session operation)
+                    (and (or (null operation) (drover-supports-p session operation))
                          (or (null predicate) (funcall predicate session))))
                   selection)
       (drover-dispatch-session operation predicate))))
@@ -715,7 +717,10 @@ sends prompts, where RET stays Send."
    [:advice* drover--dispatch-in-list
     ("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
     ("x" "Delete" drover-delete :inapt-if-not (lambda () (drover-dispatch-selection :delete)))
-    ("z" "Archive" drover-archive :inapt-if-not (lambda () (drover-dispatch-selection :archive)))]
+    ("z" "Archive" drover-archive
+     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-archivable-p)))
+    ("Z" "Unarchive" drover-unarchive
+     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-unarchivable-p)))]
    [:advice* drover--dispatch-in-list
     ("U" "Subagents" drover-toggle-subagents :inapt-if-not drover-dispatch-list-p)
     ("V" "View" drover-view :inapt-if-not drover-dispatch-view-p)]]
@@ -1082,6 +1087,15 @@ even when the dispatch menu opened it from another window."
   :chooser #'not
   :options '((nil . "hidden") (t . "shown")))
 
+(transient-define-infix drover-view--archived ()
+  "Show or hide the archived sessions in every view."
+  :class 'drover--setting
+  :description "archived"
+  :getter (lambda () drover-show-archived)
+  :setter #'drover-set-show-archived
+  :chooser #'not
+  :options '((nil . "hidden") (t . "shown")))
+
 ;;;; Columns
 
 (defvar drover-list-fields)
@@ -1161,8 +1175,8 @@ Before the list is loaded, any field is."
 Each setting shows its value; changing one redraws the list at once,
 and the menu stays open.  Sorting keeps subagents under their parent.
 A filter left empty keeps every session.  The toggles turn follow mode
-on in the list, cycle the subagents shown (all, active, none), and
-show older sessions.  The columns are the fields the list may show, as
+on in the list, cycle the subagents shown (all, active, none), show
+older sessions, and show archived sessions.  The columns are the fields the list may show, as
 room allows: each switch lets a field show, or hides it, for this
 session (`drover-list-hidden-fields' keeps the choice)."
   :refresh-suffixes t
@@ -1183,7 +1197,8 @@ session (`drover-list-hidden-fields' keeps the choice)."
    ["Toggles"
     ("F" drover-view--follow)
     ("U" drover-view--subagents)
-    ("O" drover-view--history :inapt-if-not drover-history-available-p)]]
+    ("O" drover-view--history :inapt-if-not drover-history-available-p)
+    ("A" drover-view--archived :inapt-if-not drover-archived-available-p)]]
   ["Columns"
    :class transient-row
    ("-l" drover-view--column-location)

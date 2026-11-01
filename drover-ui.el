@@ -166,6 +166,14 @@ tooltip tells.  Nerd Font icons by default."
   :type '(alist :key-type (choice (const waiting) (const working)) :value-type string)
   :group 'drover)
 
+(defcustom drover-archived-glyph "\U000F003C" ; nf-md-archive
+  "Glyph telling that a session is archived.
+Session lists show archived sessions, while they show them at all (see
+`drover-show-archived'), with it after their status, their title
+dimmed.  A Nerd Font icon by default."
+  :type 'string
+  :group 'drover)
+
 (defcustom drover-attention-glyph "\U000F16A4" ; nf-md-robot_excited_outline
   "Glyph before the count of sessions needing you, in the mode line.
 `drover-attention-mode' shows it in the face of the most urgent status
@@ -302,9 +310,10 @@ defaults to the current time."
 (defun drover-group-label (grouping value)
   "Return the display name of the group of VALUE when grouping by GROUPING.
 GROUPING is one of `drover-groupings'; groups without a value, nil, are
-named after what they lack."
+named after what they lack.  Grouping by status, the group `archived'
+holds the archived sessions."
   (pcase grouping
-    ('status (drover-status-label value))
+    ('status (if (eq value 'archived) "Archived" (drover-status-label value)))
     ('updated (or (alist-get value drover-activity-labels) "No activity"))
     (_ (if value
            (replace-regexp-in-string "[\n\r\t]+" " " (format "%s" value))

@@ -44,7 +44,10 @@
 ;; `drover-sort-by' says, with the subagents `drover-show-subagents'
 ;; shows.  Those settings are global, so every view shows the same
 ;; sessions.  With `drover-show-history', views also list the older
-;; sessions backends keep (`drover-known-sessions').
+;; sessions backends keep, and with `drover-show-archived' the archived
+;; ones (`drover-known-sessions').  Backends without an archive of
+;; their own have their sessions archived by drover, which keeps them in
+;; a file (`drover-archive-session').
 ;;
 ;; Commands act on the session at point, which every list of sessions
 ;; and every prompt buffer tells through
@@ -188,7 +191,10 @@ stays what views group, sort and filter by.")
   ;; New slots go last, so that code compiled against the record before
   ;; them keeps reading the others at their place.
   (context-estimated nil :documentation "Non-nil when CONTEXT-TOKENS is the service's estimate after a compaction.
-The next step measures it."))
+The next step measures it.")
+  (archived nil :documentation "Time, as a float, at which the session was archived, t when unknown, or nil.
+Archived sessions show only while `drover-show-archived' is set; see
+`drover-session-archived-p'."))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -441,10 +447,14 @@ active subagents whether or not they are shown."
 A tree goes in the group of its most urgent status; statuses come in
 `drover-status-order', and empty groups are left out.  Statuses missing
 from `drover-status-order' come last, in the order they first appear,
-so that no tree goes unlisted."
+so that no tree goes unlisted.  A tree whose root session is archived
+goes in the group `archived', after every other (see
+`drover-show-archived')."
   (let (groups)
     (dolist (node nodes)
-      (let* ((status (drover-node-status node))
+      (let* ((status (if (drover-session-archived (drover-node-session node))
+                         'archived
+                       (drover-node-status node)))
              (group (assq status groups)))
         (if group
             (setcdr group (cons node (cdr group)))
@@ -452,7 +462,9 @@ so that no tree goes unlisted."
     (setq groups (mapcar (lambda (group) (cons (car group) (nreverse (cdr group))))
                          (nreverse groups)))
     (append (delq nil (mapcar (lambda (status) (assq status groups)) drover-status-order))
-            (seq-remove (lambda (group) (memq (car group) drover-status-order)) groups))))
+            (seq-remove (lambda (group) (memq (car group) (cons 'archived drover-status-order)))
+                        groups)
+            (and (assq 'archived groups) (list (assq 'archived groups))))))
 
 (defun drover--group-trees-by (nodes key)
   "Return trees NODES grouped as an alist (VALUE . NODES).
@@ -504,7 +516,8 @@ week; `older' before; nil when TIME is nil."
   "Return trees NODES grouped by GROUPING, as an alist (VALUE . NODES).
 GROUPING is one of `drover-groupings':
 
- status   VALUE is the most urgent status of the tree, in the order of
+ status   VALUE is the most urgent status of the tree, or `archived'
+          for a tree whose root is archived, in the order of
           `drover-group-trees-by-status'.
  project, branch, agent, model
           VALUE is that of the root session, or nil; a group comes
@@ -637,6 +650,11 @@ for FIELD come last, and ties keep the order of urgency."
   "Older sessions of the backends, as an alist (BACKEND . SESSIONS).
 Filled by `drover-history-fetch' while `drover-show-history' is set.")
 
+(defvar drover--archived nil
+  "Archived sessions of the backends, as an alist (BACKEND . SESSIONS).
+Filled by `drover-archived-fetch' while `drover-show-archived' is set,
+from the backends' :archived.")
+
 (defun drover-register-backend (name &rest properties)
   "Register backend NAME, a symbol, with PROPERTIES.
 PROPERTIES is a plist of:
@@ -645,7 +663,8 @@ PROPERTIES is a plist of:
  :start      Function of no argument preparing the backend, such as
              opening its connection; run once by `drover-start'.
  :sessions   Function of no argument returning the backend's sessions
-             as `drover-session' records, from what it already knows.
+             as `drover-session' records, from what it already knows:
+             those it follows, but archived ones (see :archived).
  :open       Function of a session and OTHER-WINDOW displaying it, in
              the selected window, or in another window when
              OTHER-WINDOW is non-nil.  `drover-open' chooses the window
@@ -653,7 +672,16 @@ PROPERTIES is a plist of:
              sessions of every backend show in the same windows.
  :respond    Function of a session answering its oldest request.
  :interrupt  Function of a session stopping its running turn.
- :archive    Function of a session archiving it.
+ :archive    Function of a session archiving it.  Sessions of a
+             backend without it drover archives itself (see
+             `drover-archive-session').
+ :unarchive  Function of a session, archived, restoring it from the
+             archive.
+ :archived   Function of a CALLBACK fetching the backend's archived
+             sessions, and calling CALLBACK with them as
+             `drover-session' records, their ARCHIVED set, as soon as
+             they arrive; like :history, it must never wait, and may
+             never call CALLBACK.  See `drover-show-archived'.
  :mark-seen  Function of a session marking its ended turn seen.
  :preview    Function of a session and a CALLBACK, which it calls with
              a string showing where the session stands, or nil.
@@ -684,6 +712,12 @@ PROPERTIES is a plist of:
              its last turn, and calling CALLBACK once with it, possibly
              before returning; it must never wait.  See `drover-recap'
              for the recap.
+ :supports   Function of a session and an OPERATION, a keyword the
+             backend implements, returning nil when OPERATION does not
+             apply to that session, such as :fork for a session whose
+             agent cannot fork.  Without it, every operation the
+             backend implements applies to all its sessions.  See
+             `drover-supports-p'.
 
 The prompt (`drover-prompt') sends to sessions and starts them through
 the following operations, all optional.  Callbacks are called at most
@@ -755,7 +789,8 @@ Backends without a :buffer function never report one."
   "Forget backend NAME."
   (setq drover--backends (assq-delete-all name drover--backends)
         drover--started (delq name drover--started)
-        drover--history (assq-delete-all name drover--history))
+        drover--history (assq-delete-all name drover--history)
+        drover--archived (assq-delete-all name drover--archived))
   (drover-backend-changed name))
 
 (defun drover-backends ()
@@ -783,17 +818,31 @@ when it has none, or when the function fails."
       engines)))
 
 (defun drover-supports-p (session operation)
-  "Return non-nil when the backend of SESSION implements OPERATION.
-OPERATION is a keyword such as :respond."
-  (functionp (drover-backend-property session operation)))
+  "Return non-nil when the backend of SESSION performs OPERATION on it.
+OPERATION is a keyword such as :respond.  The backend must implement
+it, and its :supports function, if any, must allow it for SESSION."
+  (and (functionp (drover-backend-property session operation))
+       (let ((supports (drover-backend-property session :supports)))
+         (or (not (functionp supports))
+             (with-demoted-errors "Drover backend supports: %S"
+               (funcall supports session operation))))
+       t))
+
+(defun drover--operation-name (operation)
+  "Return OPERATION, a keyword, as a verb for messages."
+  (substring (symbol-name operation) 1))
 
 (defun drover-backend-call (session operation &rest arguments)
   "Call OPERATION of SESSION's backend with SESSION and ARGUMENTS.
-Signal a `user-error' when the backend does not implement it."
+Signal a `user-error' when the backend does not implement it, or when
+its :supports function says it does not apply to SESSION."
   (let ((function (drover-backend-property session operation)))
     (unless (functionp function)
       (user-error "%s sessions do not support %s"
-                  (drover-backend-label session) (substring (symbol-name operation) 1)))
+                  (drover-backend-label session) (drover--operation-name operation)))
+    (unless (drover-supports-p session operation)
+      (user-error "%s cannot %s" (drover-session-display-title session)
+                  (drover--operation-name operation)))
     (apply function session arguments)))
 
 (defun drover--start-backend (name)
@@ -859,11 +908,18 @@ backend are distinct sessions whatever their keys."
                       (or (null keeper) (eq keeper (drover-session-backend session)))))
                   sessions))))
 
+(defun drover--live-sessions ()
+  "Return the sessions every registered backend follows, as they report them.
+They are not merged, and those drover archived are among them."
+  (mapcan (lambda (entry) (drover--backend-sessions (cdr entry)))
+          drover--backends))
+
 (defun drover-sessions ()
   "Return the sessions of every registered backend, unsorted.
 A backend whose :sessions function fails contributes nothing.  These
-are the sessions backends follow live; see `drover-known-sessions' for
-those lists show.
+are the sessions backends follow live, but those drover archived (see
+`drover-archive-session'); see `drover-known-sessions' for those lists
+show.
 
 Two front ends may show one conversation of an engine, such as an
 OpenCode session both opencode.el and agent-shell show: records of
@@ -871,9 +927,7 @@ different backends with the same engine and engine identifier (see
 `drover-session-engine-key') are one session, listed once.  The record
 kept is that of the backend whose buffer for it the user selected last,
 else that of the backend registered first."
-  (drover--merge-duplicates
-   (mapcan (lambda (entry) (drover--backend-sessions (cdr entry)))
-           drover--backends)))
+  (drover--merge-duplicates (drover--unarchived (drover--live-sessions))))
 
 (defun drover-prefetch (sessions)
   "Ask the backends of SESSIONS to fetch what their records lack.
@@ -897,24 +951,90 @@ Older sessions are those backends keep beyond the ones they follow, as
 their :history function fetches them.  Change it with
 `drover-set-show-history', which fetches them.")
 
-(defun drover--history-sessions ()
-  "Return the older sessions fetched, of the backends still registered."
+(defvar drover-show-archived nil
+  "Non-nil when session lists show archived sessions too.
+They are those the backends' :archived functions fetch, and those
+drover archived itself (see `drover-archive-session').  Change it with
+`drover-set-show-archived', which fetches them.")
+
+(defun drover--fetched-sessions (fetched)
+  "Return the sessions of FETCHED, an alist (BACKEND . SESSIONS), still registered."
   (mapcan (lambda (entry)
             (and (assq (car entry) drover--backends)
                  (copy-sequence (cdr entry))))
-          drover--history))
+          fetched))
+
+(defun drover--history-sessions ()
+  "Return the older sessions fetched, of the backends still registered.
+The conversations drover archived are left out."
+  (drover--unarchived (drover--fetched-sessions drover--history)))
+
+(defun drover-archived-sessions (&optional live)
+  "Return the archived sessions lists show while `drover-show-archived' is set.
+They are those the backends' :archived functions fetched, those a
+backend reports among the sessions it follows with their ARCHIVED set,
+and the conversations drover archived itself: the record of a backend
+following one live, among LIVE, the sessions `drover--live-sessions'
+returns by default, else the record drover kept of it, when its backend
+is still registered.  Each has its ARCHIVED set.  Records of different
+backends showing one conversation are merged as `drover-sessions'
+merges them."
+  (let* ((live (or live (drover--live-sessions)))
+         (followed (make-hash-table :test #'equal))
+         (own nil))
+    (dolist (session live)
+      (when-let* ((key (drover-session-engine-key session))
+                  ((drover--archive-entry session)))
+        (push (drover--mark-archived session) (gethash key followed))))
+    (pcase-dolist (`(,key . ,entry) (drover--archive))
+      (if-let* ((records (gethash key followed)))
+          (setq own (append (nreverse records) own))
+        (when (assq (plist-get entry :backend) drover--backends)
+          (push (drover--archive-record key entry) own))))
+    (append (drover--merge-duplicates (append (nreverse own)
+                                              (seq-filter #'drover-session-archived live)))
+            (mapcar (lambda (session)
+                      (if (drover-session-archived session)
+                          session
+                        (let ((copy (copy-sequence session)))
+                          (setf (drover-session-archived copy) t)
+                          copy)))
+                    (drover--fetched-sessions drover--archived)))))
+
+(defun drover--not-seen (sessions seen)
+  "Return SESSIONS but those SEEN holds, noting those kept in SEEN.
+SEEN is a hash table of the keys of the sessions listed already, and of
+their engine keys under (engine . KEY).  The first of several records
+of one backend's session wins; records of different backends showing
+one conversation are merged as `drover-sessions' merges them, and only
+then is their conversation noted, so that the merge chooses among
+them."
+  (let ((kept (drover--merge-duplicates
+               (seq-remove (lambda (session)
+                             (let ((key (drover-session-key session))
+                                   (engine-key (drover-session-engine-key session)))
+                               (prog1 (or (gethash key seen)
+                                          (and engine-key (gethash (cons 'engine engine-key) seen)))
+                                 (puthash key t seen))))
+                           sessions))))
+    (dolist (session kept)
+      (when-let* ((key (drover-session-engine-key session)))
+        (puthash (cons 'engine key) t seen)))
+    kept))
 
 (defun drover-known-sessions (&optional live)
   "Return the sessions lists show, unsorted.
-They are LIVE, the sessions `drover-sessions' returns by default, and
-while `drover-show-history' is set, the older sessions fetched from the
-backends; a live session wins over an older record of the same
-session, whether of its own backend or of another one with the same
-engine and engine identifier, and the first of several older records
-of one backend wins.  Older records of different backends showing one
-conversation are merged as `drover-sessions' merges live ones."
+They are LIVE, the sessions `drover-sessions' returns by default; while
+`drover-show-archived' is set, the archived sessions (see
+`drover-archived-sessions'); while `drover-show-history' is set, the
+older sessions fetched from the backends.  A live session wins over
+another record of the same session, whether of its own backend or of
+another one with the same engine and engine identifier, an archived
+record over an older one, and the first of several records of one
+backend wins.  Records of different backends showing one conversation
+are merged as `drover-sessions' merges live ones."
   (let ((live (or live (drover-sessions))))
-    (if (not drover-show-history)
+    (if (not (or drover-show-history drover-show-archived))
         live
       (let ((seen (make-hash-table :test #'equal)))
         (dolist (session live)
@@ -922,14 +1042,8 @@ conversation are merged as `drover-sessions' merges live ones."
           (when-let* ((key (drover-session-engine-key session)))
             (puthash (cons 'engine key) t seen)))
         (append live
-                (drover--merge-duplicates
-                 (seq-remove (lambda (session)
-                               (let ((key (drover-session-key session))
-                                     (engine-key (drover-session-engine-key session)))
-                                 (prog1 (or (gethash key seen)
-                                            (and engine-key (gethash (cons 'engine engine-key) seen)))
-                                   (puthash key t seen))))
-                             (drover--history-sessions))))))))
+                (and drover-show-archived (drover--not-seen (drover-archived-sessions) seen))
+                (and drover-show-history (drover--not-seen (drover--history-sessions) seen)))))))
 
 (defun drover-visible-sessions (&optional sessions)
   "Return SESSIONS, or every session, without hidden subagents.
@@ -970,19 +1084,24 @@ those waiting for the user."
 
 (defun drover-find (backend id)
   "Return the session ID of BACKEND, or nil.
-A live session is preferred; while `drover-show-history' is set, an
-older session fetched from BACKEND is found too.  The record is
-BACKEND's own, even when `drover-sessions' lists the session through
-another backend showing the same conversation."
+A live session is preferred, whether or not drover archived it; while
+`drover-show-archived' is set, an archived session of BACKEND is found
+too, and while `drover-show-history' is set, an older one.  The record
+is BACKEND's own, even when `drover-sessions' lists the session through
+another backend showing the same conversation; one drover archived has
+its ARCHIVED set."
   (cl-flet ((find (sessions)
               (seq-find (lambda (session)
                           (and (eq (drover-session-backend session) backend)
                                (equal (drover-session-id session) id)))
                         sessions)))
-    (or (when-let* ((properties (alist-get backend drover--backends)))
-          (find (drover--backend-sessions properties)))
-        (and drover-show-history
-             (find (cdr (assq backend drover--history)))))))
+    (when-let* ((session (or (when-let* ((properties (alist-get backend drover--backends)))
+                               (find (drover--backend-sessions properties)))
+                             (and drover-show-archived
+                                  (find (drover-archived-sessions)))
+                             (and drover-show-history
+                                  (find (cdr (assq backend drover--history)))))))
+      (drover--mark-archived session))))
 
 (defun drover-find-engine-session (engine engine-id)
   "Return a session of ENGINE whose engine identifier is ENGINE-ID, or nil.
@@ -1271,31 +1390,63 @@ MODE defaults to the global value of `drover-show-subagents'."
     (or (cadr (memq (or mode (default-value 'drover-show-subagents)) modes))
         (car modes))))
 
-;;;; Older sessions
+;;;; Older and archived sessions
 
-(defvar drover--history-generation 0
-  "Count of the fetches of older sessions; answers to an earlier one are dropped.")
+;; A backend fetches its older sessions (:history) and its archived ones
+;; (:archived) on demand, while lists show them.  Each fetch of a kind
+;; and backend has a generation: an answer to an earlier fetch, or
+;; arriving once its kind is hidden, is dropped.
+
+(defvar drover--fetch-generations nil
+  "Generations of the fetches of sessions, as an alist ((KIND . BACKEND) . N).
+KIND is `history' or `archived'.")
+
+(defun drover--fetch-generation (kind backend)
+  "Return the generation of the last fetch of KIND from BACKEND."
+  (alist-get (cons kind backend) drover--fetch-generations 0 nil #'equal))
+
+(defun drover--forget-fetches (kind)
+  "Make every fetch of KIND in progress stale, so that its answer is dropped."
+  (dolist (entry drover--fetch-generations)
+    (when (eq (caar entry) kind)
+      (cl-incf (cdr entry)))))
+
+(defun drover--fetch (kind backends)
+  "Fetch the sessions of KIND from BACKENDS, those of every backend when nil.
+KIND is `history', fetched by :history into `drover--history' while
+`drover-show-history' is set, or `archived', by :archived into
+`drover--archived' while `drover-show-archived' is set.  Each backend's
+answer replaces what it answered before and redraws the views, as long
+as KIND stays shown and no later fetch of KIND from that backend
+started meanwhile.  A backend failing to start its fetch is reported,
+the others fetching all the same."
+  (let ((operation (if (eq kind 'history) :history :archived)))
+    (dolist (backend (or backends (drover-backends)))
+      (when-let* ((function (drover-backend-property backend operation))
+                  ((functionp function)))
+        (let ((generation (cl-incf (alist-get (cons kind backend) drover--fetch-generations
+                                              0 nil #'equal))))
+          (with-demoted-errors "Drover backend fetch: %S"
+            (funcall function
+                     (lambda (sessions)
+                       (when (and (if (eq kind 'history) drover-show-history drover-show-archived)
+                                  (= generation (drover--fetch-generation kind backend)))
+                         (if (eq kind 'history)
+                             (setf (alist-get backend drover--history) (copy-sequence sessions))
+                           (setf (alist-get backend drover--archived) (copy-sequence sessions)))
+                         (drover-backend-changed backend))))))))))
 
 (defun drover-history-available-p ()
   "Return non-nil when a registered backend fetches older sessions."
   (seq-some (lambda (backend) (functionp (drover-backend-property backend :history)))
             (drover-backends)))
 
-(defun drover-history-fetch ()
-  "Fetch the older sessions of every backend that keeps them.
+(defun drover-history-fetch (&optional backend)
+  "Fetch the older sessions of BACKEND, or of every backend that keeps them.
 Each backend's answer replaces what it answered before and redraws the
 views, as long as `drover-show-history' stays set and no later fetch
 started meanwhile."
-  (let ((generation (cl-incf drover--history-generation)))
-    (dolist (backend (drover-backends))
-      (when-let* ((function (drover-backend-property backend :history))
-                  ((functionp function)))
-        (with-demoted-errors "Drover backend history: %S"
-          (funcall function
-                   (lambda (sessions)
-                     (when (and drover-show-history (= generation drover--history-generation))
-                       (setf (alist-get backend drover--history) (copy-sequence sessions))
-                       (drover-backend-changed backend)))))))))
+  (drover--fetch 'history (and backend (list backend))))
 
 (defun drover-set-show-history (show)
   "Show older sessions in every view when SHOW is non-nil, else hide them.
@@ -1305,9 +1456,308 @@ arrive."
   (setq drover-show-history (and show t))
   (if drover-show-history
       (drover-history-fetch)
-    (cl-incf drover--history-generation)
+    (drover--forget-fetches 'history)
     (setq drover--history nil))
   (drover-view-settings-changed))
+
+(defun drover-archived-available-p ()
+  "Return non-nil when there may be archived sessions to show.
+That is when a registered backend fetches its archived sessions, or
+when drover archived a conversation of a registered backend itself."
+  (or (seq-some (lambda (backend) (functionp (drover-backend-property backend :archived)))
+                (drover-backends))
+      (seq-some (lambda (entry) (assq (plist-get (cdr entry) :backend) drover--backends))
+                (drover--archive))))
+
+(defun drover-archived-fetch (&optional backend)
+  "Fetch the archived sessions of BACKEND, or of every backend that has them.
+Each backend's answer replaces what it answered before and redraws the
+views, as long as `drover-show-archived' stays set and no later fetch
+started meanwhile.  What drover archived itself needs no fetch."
+  (drover--fetch 'archived (and backend (list backend))))
+
+(defun drover-set-show-archived (show)
+  "Show archived sessions in every view when SHOW is non-nil, else hide them.
+Showing them fetches them (see `drover-archived-fetch'); hiding them
+forgets those fetched.  Views redraw at once, and again as archived
+sessions arrive."
+  (setq drover-show-archived (and show t))
+  (if drover-show-archived
+      (drover-archived-fetch)
+    (drover--forget-fetches 'archived)
+    (setq drover--archived nil))
+  (drover-view-settings-changed))
+
+(defun drover--forget-fetched (session)
+  "Forget the records of SESSION fetched as older or archived, once it is gone."
+  (let ((key (drover-session-key session)))
+    (cl-flet ((forget (fetched)
+                (mapcar (lambda (entry)
+                          (cons (car entry)
+                                (seq-remove (lambda (record) (equal (drover-session-key record) key))
+                                            (cdr entry))))
+                        fetched)))
+      (setq drover--history (forget drover--history)
+            drover--archived (forget drover--archived)))))
+
+;;;; State files
+
+(defun drover-write-data (file description version key entries)
+  "Write ENTRIES to FILE as Lisp data, atomically, or signal an error.
+FILE holds (:version VERSION KEY (ENTRY...)), after a comment saying
+it is DESCRIPTION, written by drover.  It is written to a temporary
+file in the same directory, created if needed, then renamed over FILE,
+so that a reader never sees it half written."
+  (let ((directory (file-name-directory file))
+        (temporary nil))
+    (unwind-protect
+        (progn
+          (make-directory directory t)
+          (setq temporary (make-temp-file (expand-file-name (concat "." (file-name-base file) "-")
+                                                            directory)
+                                          nil ".eld"))
+          (with-temp-buffer
+            (insert ";;; " description ", written by drover.  -*- mode: lisp-data; coding: utf-8-unix -*-\n")
+            (let ((print-length nil)
+                  (print-level nil)
+                  (print-circle nil)
+                  (print-escape-newlines t))
+              (insert (format "(:version %d\n %s\n (" version key))
+              (dolist (entry entries)
+                (unless (eq entry (car entries))
+                  (insert "\n  "))
+                (prin1 entry (current-buffer)))
+              (insert "))\n"))
+            (let ((coding-system-for-write 'utf-8-unix))
+              (write-region nil nil temporary nil 'silent)))
+          (rename-file temporary file t)
+          (setq temporary nil))
+      (when temporary
+        (ignore-errors (delete-file temporary))))))
+
+(defun drover-read-data (file version key)
+  "Return the entries FILE holds, as `drover-write-data' wrote them, or nil.
+Nil when FILE does not exist.  Signal an error when it holds another
+VERSION, or no list under KEY."
+  (when (file-exists-p file)
+    (let ((form (with-temp-buffer
+                  (insert-file-contents file)
+                  (read (current-buffer)))))
+      (unless (and (plistp form) (eql (plist-get form :version) version))
+        (error "Unknown format"))
+      (let ((entries (plist-get form key)))
+        (unless (proper-list-p entries)
+          (error "Malformed entries"))
+        entries))))
+
+;;;; Drover's own archive
+
+;; A backend without an archive of its own, such as claude-code-ide's
+;; terminals or agent-shell's shells, has its sessions archived by
+;; drover: it keeps the conversations it archived, by engine and engine
+;; identifier, in a file of `drover-state-directory', read again
+;; whenever another Emacs wrote it, with what lists show of each, so
+;; that an archived session whose buffer is gone still shows among the
+;; archived ones.  Archived, a conversation leaves `drover-sessions'
+;; whichever backend follows it.
+
+(defconst drover--archive-version 1
+  "Version of the format of the file of the sessions drover archived.")
+
+(defconst drover--archive-fields
+  '(:backend :title :directory :project :branch :agent :model :effort :created :updated)
+  "What drover keeps of a session it archives, besides when.")
+
+(defvar drover--archive nil
+  "Conversations drover archived, as an alist ((ENGINE . ENGINE-ID) . PLIST).
+PLIST holds :time, when, and the fields of `drover--archive-fields'.")
+
+(defvar drover--archive-stamp 'unread
+  "Modification time of the archive's file when last read or written.
+`unread' before it is read, nil when it does not exist.")
+
+(defvar drover--archive-warned nil
+  "Non-nil once a problem with the archive's file was reported.
+It is reported once per Emacs session, as sessions are listed often.")
+
+(defun drover-archive-file ()
+  "Return the file of the sessions drover archived, in `drover-state-directory'."
+  (expand-file-name "archive.eld" drover-state-directory))
+
+(defun drover--archive-warn (format-string &rest args)
+  "Report a problem with the archive's file, once per session.
+FORMAT-STRING and ARGS are as for `format-message'."
+  (unless drover--archive-warned
+    (setq drover--archive-warned t)
+    (apply #'drover-warn format-string args)))
+
+(defun drover--archive-entry-p (entry)
+  "Return non-nil when ENTRY is an entry of `drover--archive'."
+  (pcase entry
+    (`((,(and engine (pred symbolp)) . ,(and id (pred stringp))) . ,plist)
+     (and engine (not (string-empty-p id))
+          (plistp plist)
+          (numberp (plist-get plist :time))
+          (symbolp (plist-get plist :backend))
+          (seq-every-p (lambda (field)
+                         (let ((value (plist-get plist field)))
+                           (or (null value)
+                               (if (memq field '(:created :updated)) (numberp value) (stringp value)))))
+                       (remq :backend drover--archive-fields))))))
+
+(defun drover--archive-read ()
+  "Return the conversations the archive's file holds, nil when there is none.
+A file of another version, or with a malformed entry, is reported once
+and ignored."
+  (let ((file (drover-archive-file)))
+    (condition-case err
+        (let ((entries (drover-read-data file drover--archive-version :sessions)))
+          (unless (seq-every-p #'drover--archive-entry-p entries)
+            (error "Malformed entries"))
+          entries)
+      (error
+       (drover--archive-warn "Ignoring the sessions drover archived in %s: %s"
+                             (abbreviate-file-name file) (error-message-string err))
+       nil))))
+
+(defun drover--archive ()
+  "Return the conversations drover archived, reading the file when it changed."
+  (let ((stamp (file-attribute-modification-time (file-attributes (drover-archive-file)))))
+    (unless (equal stamp drover--archive-stamp)
+      (setq drover--archive (drover--archive-read)
+            drover--archive-stamp stamp))
+    drover--archive))
+
+(defun drover--archive-write (archive)
+  "Make ARCHIVE the conversations drover archived, and write it to its file.
+A failure is reported once; ARCHIVE stays for this Emacs session."
+  (setq drover--archive archive)
+  (let ((file (drover-archive-file)))
+    (condition-case err
+        (drover-write-data file "Sessions drover archived" drover--archive-version :sessions archive)
+      (error (drover--archive-warn "Could not remember the sessions drover archived in %s: %s"
+                                   (abbreviate-file-name file) (error-message-string err))))
+    (setq drover--archive-stamp (file-attribute-modification-time (file-attributes file)))))
+
+(defun drover--archive-entry (session)
+  "Return what drover keeps of SESSION's conversation, archived, or nil."
+  (when-let* ((key (drover-session-engine-key session)))
+    (alist-get key (drover--archive) nil nil #'equal)))
+
+(defun drover--unarchived (sessions)
+  "Return SESSIONS but those archived: by their backend, or by drover.
+A backend reports its archived sessions through :archived, not among
+the sessions it follows; a record telling it is archived is left out
+all the same."
+  (let ((archive (drover--archive)))
+    (seq-remove (lambda (session)
+                  (or (drover-session-archived session)
+                      (and archive
+                           (when-let* ((key (drover-session-engine-key session)))
+                             (assoc key archive)))))
+                sessions)))
+
+(defun drover--mark-archived (session)
+  "Return SESSION, or a copy with its ARCHIVED set when drover archived it."
+  (if-let* (((not (drover-session-archived session)))
+            (entry (drover--archive-entry session)))
+      (let ((copy (copy-sequence session)))
+        (setf (drover-session-archived copy) (plist-get entry :time))
+        copy)
+    session))
+
+(defun drover--archive-record (key entry)
+  "Return the session drover archived as KEY, (ENGINE . ENGINE-ID), from ENTRY.
+It stands for a conversation no backend follows any more, such as one
+whose buffer is gone: idle, identified by its engine identifier."
+  (drover-session-create :backend (plist-get entry :backend) :id (cdr key)
+                         :engine (car key) :engine-id (cdr key)
+                         :title (plist-get entry :title)
+                         :directory (plist-get entry :directory)
+                         :project (plist-get entry :project)
+                         :branch (plist-get entry :branch)
+                         :agent (plist-get entry :agent)
+                         :model (plist-get entry :model)
+                         :effort (plist-get entry :effort)
+                         :created (plist-get entry :created)
+                         :updated (plist-get entry :updated)
+                         :status 'idle
+                         :archived (plist-get entry :time)))
+
+(defun drover-session-archived-p (session)
+  "Return non-nil when SESSION is archived, by its backend or by drover."
+  (or (and (drover-session-archived session) t)
+      (and (drover--archive-entry session) t)))
+
+(defun drover--native-archive-p (session)
+  "Return non-nil when the backend of SESSION archives it itself."
+  (drover-supports-p session :archive))
+
+(defun drover-archivable-p (session)
+  "Return non-nil when SESSION may be archived: by its backend, else by drover.
+Drover archives a session of a backend without an archive of its own,
+once its engine identifier is known, as it keeps it by conversation."
+  (and (not (drover-session-archived-p session))
+       (or (drover--native-archive-p session)
+           (and (not (functionp (drover-backend-property session :archive)))
+                (drover-session-engine-key session)
+                t))))
+
+(defun drover-unarchivable-p (session)
+  "Return non-nil when SESSION is archived and may be restored."
+  (or (and (drover--archive-entry session) t)
+      (and (drover-session-archived session)
+           (drover-supports-p session :unarchive))))
+
+(defun drover-archive-session (session)
+  "Archive SESSION, through its backend, else in drover's own archive.
+A backend without an archive of its own has its sessions archived by
+drover, by conversation, so that they leave every list until restored
+with `drover-unarchive-session', which they show among while
+`drover-show-archived' is set.  Signal a `user-error' when SESSION is
+archived already, or cannot be."
+  (let ((title (drover-session-display-title session)))
+    (cond
+     ((drover-session-archived-p session) (user-error "%s is archived already" title))
+     ((functionp (drover-backend-property session :archive))
+      (drover-backend-call session :archive))
+     ((not (drover-session-engine-key session))
+      (user-error "%s cannot be archived before its conversation is known" title))
+     (t
+      (cl-flet ((text (value) (and (stringp value) (substring-no-properties value))))
+        (let ((archive (copy-alist (drover--archive)))
+              (entry (list :time (float-time)
+                           :backend (drover-session-backend session)
+                           :title (text (drover-session-title session))
+                           :directory (text (drover-session-directory session))
+                           :project (text (drover-session-project session))
+                           :branch (text (drover-session-branch session))
+                           :agent (text (drover-session-agent session))
+                           :model (text (drover-session-model session))
+                           :effort (text (drover-session-effort session))
+                           :created (drover-session-created session)
+                           :updated (drover-session-updated session))))
+          (setf (alist-get (drover-session-engine-key session) archive nil nil #'equal) entry)
+          (drover--archive-write archive)
+          (drover-backend-changed (drover-session-backend session))))))))
+
+(defun drover-unarchive-session (session)
+  "Restore SESSION from the archive, drover's own or its backend's.
+Signal a `user-error' when SESSION is not archived."
+  (cond
+   ((drover--archive-entry session)
+    (drover--archive-forget session)
+    (drover-backend-changed (drover-session-backend session)))
+   ((drover-session-archived session)
+    (drover-backend-call session :unarchive))
+   (t (user-error "%s is not archived" (drover-session-display-title session)))))
+
+(defun drover--archive-forget (session)
+  "Remove SESSION's conversation from drover's archive, if there."
+  (when-let* ((key (drover-session-engine-key session))
+              ((assoc key (drover--archive))))
+    (drover--archive-write (seq-remove (lambda (entry) (equal (car entry) key))
+                                       (drover--archive)))))
 
 ;;;; Warnings and asynchronous steps
 
@@ -1520,17 +1970,17 @@ signal a `user-error', or return nil when NOERROR is non-nil."
   "Return the sessions a command performing OPERATION acts on.
 They are the selected sessions (see `drover-selected-sessions'), as a
 session alone or a list of several.  Of several, only those whose
-backend implements OPERATION, a keyword, and for which APPLIES, a
-function of a session, returns non-nil, are kept: a region sweeping
-over sessions means those it applies to.  A session alone is kept
-whatever: its backend tells what it cannot do.  Signal a `user-error'
-when none of several is kept, DOING telling what none does, such as
-\"runs a turn\"."
+backend performs OPERATION, a keyword (see `drover-supports-p'), unless
+OPERATION is nil, and for which APPLIES, a function of a session,
+returns non-nil, are kept: a region sweeping over sessions means those
+it applies to.  A session alone is kept whatever: its backend tells
+what it cannot do.  Signal a `user-error' when none of several is kept,
+DOING telling what none does, such as \"runs a turn\"."
   (let ((sessions (drover-selected-sessions)))
     (if (null (cdr sessions))
         (car sessions)
       (or (seq-filter (lambda (session)
-                        (and (drover-supports-p session operation)
+                        (and (or (null operation) (drover-supports-p session operation))
                              (or (null applies) (funcall applies session))))
                       sessions)
           (user-error "None of the %d selected sessions %s" (length sessions) doing)))))
@@ -1561,36 +2011,41 @@ answer is typed in full."
       (user-error "Abort"))))
 
 (defun drover--act (sessions operation done)
-  "Perform OPERATION, a keyword, on SESSIONS, a session or a list, and say so.
-DONE is a format string for what was done, given the title of a session
-or a count of sessions, such as \"Archived %s\".  The backend of a
-session alone failing signals, as `drover-backend-call' does; of a
-list, each session is acted on whatever happens to the others, and
-those failing are named after how many were acted on.  Acting on a list
-in a buffer selecting sessions ends its selection."
-  (if (drover-session-p sessions)
-      (progn
-        (drover-backend-call sessions operation)
-        (message done (drover-session-display-title sessions)))
-    (let ((failures nil))
-      (dolist (session sessions)
-        (condition-case err
-            (drover-backend-call session operation)
-          (error (push (format "%s (%s)" (drover--session-names (list session))
-                               (error-message-string err))
-                       failures))))
-      ;; Done with the selection, as Magit's commands are: kept, it
-      ;; would select other sessions once these went.
-      (when drover-selected-sessions-function
-        (deactivate-mark))
-      (let ((count (- (length sessions) (length failures))))
-        (message "%s%s"
-                 (format done (if (and (= count 1) (null failures))
-                                  (drover-session-display-title (car sessions))
-                                (format "%d session%s" count (if (= count 1) "" "s"))))
-                 (if failures
-                     (format "; failed for %s" (string-join (nreverse failures) ", "))
-                   ""))))))
+  "Perform OPERATION on SESSIONS, a session or a list, and say so.
+OPERATION is a keyword, the backend operation, or a function of a
+session.  DONE is a format string for what was done, given the title of
+a session or a count of sessions, such as \"Archived %s\".  A session
+alone failing signals, as `drover-backend-call' does; of a list, each
+session is acted on whatever happens to the others, and those failing
+are named after how many were acted on.  Acting on a list in a buffer
+selecting sessions ends its selection."
+  (cl-flet ((perform (session)
+              (if (keywordp operation)
+                  (drover-backend-call session operation)
+                (funcall operation session))))
+    (if (drover-session-p sessions)
+        (progn
+          (perform sessions)
+          (message done (drover-session-display-title sessions)))
+      (let ((failures nil))
+        (dolist (session sessions)
+          (condition-case err
+              (perform session)
+            (error (push (format "%s (%s)" (drover--session-names (list session))
+                                 (error-message-string err))
+                         failures))))
+        ;; Done with the selection, as Magit's commands are: kept, it
+        ;; would select other sessions once these went.
+        (when drover-selected-sessions-function
+          (deactivate-mark))
+        (let ((count (- (length sessions) (length failures))))
+          (message "%s%s"
+                   (format done (if (and (= count 1) (null failures))
+                                    (drover-session-display-title (car sessions))
+                                  (format "%d session%s" count (if (= count 1) "" "s"))))
+                   (if failures
+                       (format "; failed for %s" (string-join (nreverse failures) ", "))
+                     "")))))))
 
 ;;;; Prompt actions
 
@@ -1814,12 +2269,24 @@ the session at point (see `drover--selected-for'), after confirmation."
 
 (defun drover-archive (sessions)
   "Archive SESSIONS, a session or a list of sessions.
-Interactively, SESSIONS are the selected sessions, or the session at
-point (see `drover--selected-for'), after confirmation."
-  (interactive (let ((sessions (drover--selected-for :archive nil "can be archived")))
+Each is archived by its backend, else by drover (see
+`drover-archive-session').  Interactively, SESSIONS are the selected
+sessions that may be archived, or the session at point (see
+`drover--selected-for'), after confirmation."
+  (interactive (let ((sessions (drover--selected-for nil #'drover-archivable-p "can be archived")))
                  (drover--confirm "Archive" sessions)
                  (list sessions)))
-  (drover--act sessions :archive "Archived %s"))
+  (drover--act sessions #'drover-archive-session "Archived %s"))
+
+(defun drover-unarchive (sessions)
+  "Restore SESSIONS from the archive, a session or a list of sessions.
+Each comes back from its backend's archive or drover's (see
+`drover-unarchive-session').  Interactively, SESSIONS are the selected
+sessions that are archived, or the session at point (see
+`drover--selected-for'); archived sessions show while
+`drover-show-archived' is set."
+  (interactive (list (drover--selected-for nil #'drover-unarchivable-p "is archived")))
+  (drover--act sessions #'drover-unarchive-session "Unarchived %s"))
 
 (defun drover-mark-seen (sessions)
   "Mark the ended turns of SESSIONS seen, a session or a list of sessions.
@@ -1875,6 +2342,15 @@ its current title as the default."
                  (list session title)))
   (drover-backend-call session :rename title))
 
+(defun drover-delete-session (session)
+  "Delete SESSION for good through its backend, without asking.
+Drover then forgets it: the records of it fetched as older or archived,
+and its conversation in drover's own archive."
+  (drover-backend-call session :delete)
+  (drover--forget-fetched session)
+  (drover--archive-forget session)
+  (drover-backend-changed (drover-session-backend session)))
+
 (defun drover-delete (sessions)
   "Delete SESSIONS for good, a session or a list of sessions.
 Interactively, SESSIONS are the selected sessions, or the session at
@@ -1883,7 +2359,7 @@ typed in full."
   (interactive (let ((sessions (drover--selected-for :delete nil "can be deleted")))
                  (drover--confirm "Delete" sessions " for good" t)
                  (list sessions)))
-  (drover--act sessions :delete "Deleted %s"))
+  (drover--act sessions #'drover-delete-session "Deleted %s"))
 
 (defun drover-fork (&optional session)
   "Fork SESSION whole into a new session, which its backend displays.
