@@ -636,8 +636,11 @@ back if the user moved on meanwhile."
     (and (buffer-live-p buffer) buffer)))
 
 (defun drover-opencode--respond (session)
-  "Answer the oldest request of SESSION in its buffer."
-  (opencode-respond-session (drover-session-id session)))
+  "Answer the oldest request of SESSION from the current window.
+Its buffer is not shown: the request's menu tells the session and what
+it asks, and the buffer, opened in the background if need be, records
+the answer."
+  (opencode-respond-session (drover-session-id session) nil t))
 
 (defun drover-opencode--interrupt (session)
   "Stop the running turn of SESSION."

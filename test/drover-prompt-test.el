@@ -362,7 +362,7 @@ Each is (DIRECTORY CALLBACK)."
     (unwind-protect
         (drover-prompt-test-with
           (with-temp-file (expand-file-name "drover-prompt-test-feature.el" directory)
-            (insert "(drover-test-register-engine 'loaded)\n(provide 'drover-prompt-test-feature)\n"))
+            (insert ";;; -*- lexical-binding: t -*-\n(drover-test-register-engine 'loaded)\n(provide 'drover-prompt-test-feature)\n"))
           (let ((drover-prompt-require-features '(drover-prompt-test-missing drover-prompt-test-feature)))
             (with-current-buffer (drover-prompt-default-buffer)
               (should (featurep 'drover-prompt-test-feature))

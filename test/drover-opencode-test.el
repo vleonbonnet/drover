@@ -858,7 +858,7 @@ nothing is fetched."
       (drover-archive session)
       (drover-mark-seen session)
       (should (equal (reverse drover-opencode-test-calls)
-                     '((opencode-respond-session "ses_1")
+                     '((opencode-respond-session "ses_1" nil t)
                        (opencode-session-interrupt "ses_1")
                        (opencode-session-archive "ses_1")
                        (opencode-session-view "ses_1")))))))

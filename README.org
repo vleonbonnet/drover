@@ -103,23 +103,23 @@ or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in thre
 
 In every list of sessions (drover's list, and the lists of other front ends that turn on =drover-session-keys-mode=) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
 
-| Key | Command                    | Action                                            |
-|-----+----------------------------+---------------------------------------------------|
-| =o= | =drover-open-other-window= | open it in another window than =RET= would        |
-| =A= | =drover-respond=           | answer its question or permission request         |
-| =K= | =drover-interrupt=         | interrupt its turn, after confirmation            |
-| =s= | =drover-mark-seen=         | mark its ended turn seen                          |
-| =u= | =drover-open-parent=       | open its parent session                           |
-| =c= | =drover-open-subagent=     | pick one of its subagent sessions and open it     |
-| =r= | =drover-rename=            | rename it                                         |
-| =x= | =drover-delete=            | delete it for good, after confirmation            |
-| =z= | =drover-archive=           | archive it, after confirmation                    |
-| =Z= | =drover-unarchive=         | restore it from the archive                       |
-| =g= | =drover-refresh=           | refresh the list, or reload the session's buffer  |
-| =+= | =drover-new-session=       | start a session in its directory                  |
-| =v= | =drover-peek=              | preview where it stands, without opening (lists)  |
-| =U= | =drover-toggle-subagents=  | show all, active or no subagents, in turn (lists) |
-| =V= | =drover-view=              | the View menu (drover's list)                     |
+| Key | Command                    | Action                                              |
+|-----+----------------------------+-----------------------------------------------------|
+| =o= | =drover-open-other-window= | open it in another window than =RET= would          |
+| =A= | =drover-respond=           | answer its question or permission request, in place |
+| =K= | =drover-interrupt=         | interrupt its turn, after confirmation              |
+| =s= | =drover-mark-seen=         | mark its ended turn seen                            |
+| =u= | =drover-open-parent=       | open its parent session                             |
+| =c= | =drover-open-subagent=     | pick one of its subagent sessions and open it       |
+| =r= | =drover-rename=            | rename it                                           |
+| =x= | =drover-delete=            | delete it for good, after confirmation              |
+| =z= | =drover-archive=           | archive it, after confirmation                      |
+| =Z= | =drover-unarchive=         | restore it from the archive                         |
+| =g= | =drover-refresh=           | refresh the list, or reload the session's buffer    |
+| =+= | =drover-new-session=       | start a session in its directory                    |
+| =v= | =drover-peek=              | preview where it stands, without opening (lists)    |
+| =U= | =drover-toggle-subagents=  | show all, active or no subagents, in turn (lists)   |
+| =V= | =drover-view=              | the View menu (drover's list)                       |
 
 =RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or the list itself. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 
