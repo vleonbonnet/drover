@@ -349,10 +349,11 @@ A tree ranks by the most urgent status within it, so a parent whose
 subagent waits for the user comes with the sessions that need the user.
 A subagent whose parent is not among SESSIONS is a tree of its own.
 Trees and siblings that rank alike keep the order of SESSIONS."
-  (let ((by-key (make-hash-table :test #'equal))
-        (by-engine (make-hash-table :test #'equal))
-        (children (make-hash-table :test #'equal))
-        (roots nil))
+  (let* ((size (length sessions))
+         (by-key (make-hash-table :test #'equal :size size))
+         (by-engine (make-hash-table :test #'equal :size size))
+         (children (make-hash-table :test #'equal))
+         (roots nil))
     (dolist (session sessions)
       (puthash (drover-session-key session) session by-key)
       (when-let* ((engine-key (drover-session-engine-key session)))
@@ -364,7 +365,7 @@ Trees and siblings that rank alike keep the order of SESSIONS."
             (push session (gethash parent children))
           (push session roots))))
     (setq roots (nreverse roots))
-    (let ((visiting (make-hash-table :test #'equal))
+    (let ((visiting (make-hash-table :test #'equal :size size))
           (nodes nil))
       (cl-labels ((build (session)
                     (let ((key (drover-session-key session)))
@@ -409,18 +410,21 @@ A subagent tree is kept as `drover-show-subagents' says: always, when a
 session in it is in the middle of a turn, or never; or when SHOWN, a
 function of a tree, returns non-nil for it.  Each tree ranks by what
 remains visible, so a hidden subagent never places its parent in a
-group its own status does not explain."
-  (sort (mapcar (lambda (node)
-                  (drover--node
-                   (drover-node-session node)
-                   (drover-tree-visible
-                    (seq-filter (lambda (child)
-                                  (or (drover--subagent-shown-p child)
-                                      (and shown (funcall shown child))))
-                                (drover-node-children node))
-                    shown)))
-                nodes)
-        #'drover--node-before-p))
+group its own status does not explain.  NODES are ranked, as
+`drover-tree' returns them."
+  (if (and (eq drover-show-subagents 'all) (not shown))
+      ;; Every subagent shows: the trees as they are, ranked alike.
+      nodes
+    (sort (mapcar (lambda (node)
+                    (let ((children nil))
+                      (dolist (child (drover-node-children node))
+                        (when (or (drover--subagent-shown-p child)
+                                  (and shown (funcall shown child)))
+                          (push child children)))
+                      (drover--node (drover-node-session node)
+                                    (drover-tree-visible (nreverse children) shown))))
+                  nodes)
+          #'drover--node-before-p)))
 
 (defun drover-tree-hidden-count (nodes)
   "Return how many subagent sessions of trees NODES are hidden.
