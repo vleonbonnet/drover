@@ -2295,8 +2295,8 @@ whole."
   "Insert the section of GROUP, a `drover-list--group', in LAYOUT.
 Without a value, its rows go alone, in the current section.  The rows
 of a collapsed group are drawn later, as Magit draws a collapsed body:
-once expanded, or searched or copied, or once Emacs is idle (see
-`drover-list--draw-deferred')."
+once expanded, searched, copied or selected, or a few at a time while
+Emacs is idle (see `drover-list--defer')."
   (let ((value (drover-list--group-value group)))
     (cl-flet ((rows ()
                 (seq-doseq (tree (drover-list--group-trees group))
@@ -2313,15 +2313,44 @@ once expanded, or searched or copied, or once Emacs is idle (see
           (magit-insert-section-body
             (if drover-list--drawing
                 (progn (rows) (insert "\n"))
-              ;; Drawn later, the rows are inserted as the list is.
-              (let ((start (point)))
-                (let ((magit-section-inhibit-markers t)
-                      (magit-section-insert-in-reverse t))
-                  (rows))
-                (oset section children (nreverse (oref section children)))
-                (drover-list--use-markers section)
+              ;; Magit draws a body from where the section ends, as its
+              ;; heading did; the rows drawn while idle come before.
+              (let ((content (save-excursion (goto-char (oref section start)) (line-beginning-position 2))))
+                (drover-list--draw-trees group nil)
                 (insert "\n")
-                (drover-list--drawn-later start (point))))))))))
+                (set-marker (oref section content) content)))))))))
+
+(defun drover-list--draw-trees (group count)
+  "Draw the trees of GROUP, a `drover-list--group', not drawn yet, COUNT at most.
+COUNT nil draws them all.  Its trees drawn come first, those left after
+them: they are drawn at point, where the rows drawn end.  Return how
+many trees are left."
+  (let* ((section (drover-list--group-container group))
+         (layout (drover-list--model-layout drover-list--model))
+         (start (point))
+         (left 0))
+    ;; Inserted as the list is, with positions, turned into markers once
+    ;; drawn.
+    (let ((magit-section-inhibit-markers t)
+          ;; Pushed, not appended to thousands of siblings each.
+          (magit-section-insert-in-reverse t)
+          (magit-insert-section--parent section))
+      (seq-doseq (tree (drover-list--group-trees group))
+        (unless (drover-list--row-section (car (drover-list--tree-shown tree)))
+          (if (and count (<= count 0))
+              (cl-incf left)
+            (dolist (row (drover-list--tree-shown tree))
+              (drover-list--insert-session row layout))
+            (when count
+              (cl-decf count))))))
+    (drover-list--use-markers section)
+    (oset section children
+          (mapcan (lambda (tree)
+                    (when-let* ((first (drover-list--row-section (car (drover-list--tree-shown tree)))))
+                      (cons first (mapcar #'drover-list--row-section (cdr (drover-list--tree-shown tree))))))
+                  (append (drover-list--group-trees group) nil)))
+    (drover-list--drawn-later start (point))
+    left))
 
 (defun drover-list--drawn-later (start end)
   "Take in the rows drawn between START and END after the list was drawn.
@@ -2337,12 +2366,13 @@ Their animated glyphs animate, their prompt caches are drawn."
                  (drover-list--model-groups drover-list--model))))
 
 (defun drover-list--deferred-p (group)
-  "Return non-nil when the rows of GROUP, a `drover-list--group', are not drawn."
+  "Return non-nil when trees of GROUP, a `drover-list--group', are not drawn.
+Those drawn come first."
   (when-let* ((container (drover-list--group-container group)))
     (and (drover-list--group-value group) (oref container washer) t)))
 
 (defun drover-list--draw-group (group)
-  "Draw the rows of GROUP, a `drover-list--group', if they are not drawn yet.
+  "Draw the rows of GROUP, a `drover-list--group', if they are not all drawn.
 A collapsed group stays collapsed."
   (when (drover-list--deferred-p group)
     (let ((section (drover-list--group-container group))
@@ -2366,8 +2396,52 @@ and copying need their text."
                        (and (< (oref section start) end) (> (oref section end) start)))))
         (drover-list--draw-group group)))))
 
+(defconst drover-list--deferred-chunk 50
+  "Trees drawn at a time while Emacs is idle, between two looks at input.")
+
+(defun drover-list--draw-some (group)
+  "Draw some of the trees of GROUP, a `drover-list--group', not drawn yet.
+They go after those drawn, inside the collapsed group; once none is
+left, the group is drawn as a drawing draws it."
+  (let* ((section (drover-list--group-container group))
+         (root magit-root-section)
+         (inhibit-read-only t)
+         (deactivate-mark nil))
+    (save-excursion
+      (goto-char (oref section end))
+      (let ((left (drover-list--draw-trees group drover-list--deferred-chunk)))
+        (when (zerop left)
+          (insert "\n")
+          (oset section washer nil))
+        (dolist (ancestor (list section root))
+          (when (< (oref ancestor end) (point))
+            (set-marker (oref ancestor end) (point))))
+        (when (zerop left)
+          (magit-section--set-section-properties section)
+          (magit-section-maybe-remove-visibility-indicator section))))
+    (if (oref section hidden)
+        (magit-section-hide section)
+      (magit-section-show section))
+    (set-buffer-modified-p nil)))
+
 (defvar-local drover-list--deferred-timer nil
   "Idle timer drawing the rows of collapsed groups, or nil.")
+
+(defun drover-list--draw-idle (buffer)
+  "Draw in BUFFER the trees of collapsed groups not drawn yet, while Emacs is idle.
+They are drawn a few at a time, and drawing stops as input comes, until
+Emacs is idle again."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq drover-list--deferred-timer nil)
+      (when drover-list--model
+        (let ((groups (seq-filter #'drover-list--deferred-p (drover-list--model-groups drover-list--model))))
+          (while (and groups (not (input-pending-p)))
+            (drover-list--draw-some (car groups))
+            (unless (drover-list--deferred-p (car groups))
+              (pop groups)))
+          (when groups
+            (drover-list--defer)))))))
 
 (defun drover-list--defer ()
   "Draw the rows of the collapsed groups of the current list once Emacs is idle.
@@ -2377,14 +2451,8 @@ Occur or Consult, a moment after it was drawn."
              (not (timerp drover-list--deferred-timer))
              drover-list--model
              (seq-some #'drover-list--deferred-p (drover-list--model-groups drover-list--model)))
-    (let ((buffer (current-buffer)))
-      (setq drover-list--deferred-timer
-            (run-with-idle-timer drover-list-deferred-delay nil
-                                 (lambda ()
-                                   (when (buffer-live-p buffer)
-                                     (with-current-buffer buffer
-                                       (setq drover-list--deferred-timer nil)
-                                       (drover-list--draw-deferred)))))))))
+    (setq drover-list--deferred-timer
+          (run-with-idle-timer drover-list-deferred-delay nil #'drover-list--draw-idle (current-buffer)))))
 
 (defun drover-list--flow (parts width)
   "Return PARTS, strings, laid out in lines WIDTH pixels wide, as one string.
@@ -3347,23 +3415,25 @@ drawing anew keeps them."
                     (append drover-list--animated
                             (drover-list--collect-animated (oref container start) (oref container end))))))
           (setq next group)))
-      ;; Trees coming, each before the next one drawn in its group.
+      ;; Trees coming, each before the next one drawn in its group.  In
+      ;; a group whose trees are drawn but the last ones, the trees
+      ;; drawn come first: one coming among those left is left too.
       (dolist (group touched)
         (when-let* (((> (drover-list--group-size group) 0))
-                    ((not (drover-list--deferred-p group)))
                     (container (drover-list--group-container group)))
           (let ((next nil)
+                (deferred (drover-list--deferred-p group))
                 (trees (drover-list--group-trees group)))
             (cl-loop for index from (1- (length trees)) downto 0
                      do (let* ((tree (aref trees index))
                                (row (car (drover-list--tree-shown tree)))
-                               (section (drover-list--row-section row)))
-                          (unless section
+                               (next-section (and next (drover-list--row-section
+                                                        (car (drover-list--tree-shown next))))))
+                          (unless (or (drover-list--row-section row)
+                                      (and deferred (not next-section)))
                             (drover-list--insert-rows
                              tree container
-                             (cond (next (oref (drover-list--row-section
-                                                (car (drover-list--tree-shown next)))
-                                               start))
+                             (cond (next-section (oref next-section start))
                                    ((drover-list--group-value group) (1- (oref container end)))
                                    (t (oref container end)))
                              layout)
@@ -3372,7 +3442,9 @@ drawing anew keeps them."
                           (setq next tree)))
             (oset container children
                   (append (and (not (drover-list--group-value group)) (list (drover-list--model-header model)))
-                          (mapcan (lambda (tree) (mapcar #'drover-list--row-section (drover-list--tree-shown tree)))
+                          (mapcan (lambda (tree)
+                                    (when (drover-list--row-section (car (drover-list--tree-shown tree)))
+                                      (mapcar #'drover-list--row-section (drover-list--tree-shown tree))))
                                   (append trees nil)))))))
       (when grouped
         (oset root children (cons (drover-list--model-header model)

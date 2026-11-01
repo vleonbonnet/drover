@@ -29,7 +29,7 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test lint clean
+.PHONY: all compile compile-standalone test lint clean bench
 
 all: compile test
 
@@ -67,6 +67,22 @@ compile-standalone:
 
 test:
 	$(BATCH) -l test/drover-test-helpers.el $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit
+
+# Times the list over thousands of sessions, as compiled: not part of
+# test.  EMACS_GUI names a graphical Emacs to run it in instead, where
+# measuring text and collecting garbage cost what they cost the user;
+# DROVER_BENCH_FONT, DROVER_BENCH_THEME and DROVER_BENCH_THEME_DIRECTORY
+# choose its font and theme.  See test/drover-bench.el.
+EMACS_GUI ?=
+BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-bench.el
+bench: compile
+	@if [ -n "$(EMACS_GUI)" ]; then \
+	  out=$$(mktemp); \
+	  DROVER_BENCH_OUTPUT=$$out $(EMACS_GUI) -Q --chdir $(CURDIR) $(LOAD_PATH) $(PREFER_NEWER) $(BENCH_FILES); \
+	  cat $$out; rm -f $$out; \
+	else \
+	  $(BATCH) $(BENCH_FILES); \
+	fi
 
 lint:
 	$(BATCH) --eval '(dolist (file (list $(patsubst %,"%",$(SOURCES)))) (checkdoc-file file))'

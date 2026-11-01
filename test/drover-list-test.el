@@ -2744,7 +2744,9 @@ yet.  Most changes are drawn in place."
         (should-not (drawn-p))
         (should (timerp drover-list--deferred-timer))
         ;; Once idle, its sessions are drawn, and it stays collapsed.
-        (funcall (timer--function drover-list--deferred-timer))
+        (let ((timer drover-list--deferred-timer))
+          (cancel-timer timer)
+          (apply (timer--function timer) (timer--args timer)))
         (should (drawn-p))
         (should (oref (idle) hidden))
         (should-not (string-match-p "Quietly" (drover-list-test-visible-text)))
@@ -2782,6 +2784,52 @@ yet.  Most changes are drawn in place."
         (should (drawn-p))
         (should (string-match-p "Also IDLE" (drover-list-test-visible-text)))
         (drover-list-test-is-fresh)))))
+
+(ert-deftest drover-list-test-collapsed-groups-drawn-a-few-at-a-time ()
+  "While idle, a collapsed group's sessions are drawn a few at a time, stopping for input.
+Sessions change meanwhile, drawn or not; once all are drawn, the list
+is the list drawn anew."
+  (let ((sessions (cl-loop for index below 12
+                           collect (drover-list-test-titled (format "i%02d" index) (format "Idle %02d" index)
+                                                            :status 'idle
+                                                            :updated (drover-list-test-ago (* 10 (1+ index))))))
+        (drover-list--deferred-chunk 2))
+    (drover-list-test-with (cons (drover-list-test-titled "w" "Working" :status 'working
+                                                          :updated (drover-list-test-ago 1))
+                                 sessions)
+      (drover-list-test-shown
+        (let ((idle (seq-find (lambda (group) (equal (oref group value) '(status . idle)))
+                              (drover-list--groups)))
+              (looks 0))
+          (should-not (oref idle children))
+          ;; Input comes after the second look.
+          (cl-letf (((symbol-function 'input-pending-p) (lambda (&rest _) (> (cl-incf looks) 2))))
+            (let ((timer drover-list--deferred-timer))
+              (cancel-timer timer)
+              (apply (timer--function timer) (timer--args timer))))
+          (should (equal (mapcar (lambda (section) (cdr (oref section value))) (oref idle children))
+                         '("i00" "i01" "i02" "i03")))
+          (should (oref idle hidden))
+          (should (timerp drover-list--deferred-timer))
+          ;; Sessions drawn and not change, come and go, in place.
+          (dolist (id '("i01" "i09"))
+            (setf (drover-session-title (drover-list-test-find id)) (format "IDLE %s" (substring id 1)))
+            (drover-backend-changed 'fake id))
+          (setf (drover-session-updated (drover-list-test-find "i10")) (drover-list-test-ago 25))
+          (drover-backend-changed 'fake "i10")
+          (setf (drover-session-updated (drover-list-test-find "i02")) (drover-list-test-ago 500))
+          (drover-backend-changed 'fake "i02")
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (equal (mapcar (lambda (section) (cdr (oref section value))) (oref idle children))
+                         '("i00" "i01" "i10" "i03")))
+          ;; Idle again, the rest is drawn.
+          (let ((timer drover-list--deferred-timer))
+            (cancel-timer timer)
+            (apply (timer--function timer) (timer--args timer)))
+          (should-not (drover-list--deferred-p (drover-list--model-group idle)))
+          (should (oref idle hidden))
+          (should (equal (length (oref idle children)) 12))
+          (drover-list-test-is-fresh))))))
 
 (ert-deftest drover-list-test-in-place-changes ()
   "Sessions changing, moving, coming and going are drawn in place; a new layout anew."
