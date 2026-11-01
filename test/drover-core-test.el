@@ -191,6 +191,71 @@ its list with every buffer-local value made from it."
         (drover-list-mode))
       (should (equal (default-value 'face-remapping-alist) global)))))
 
+;;;; Measuring ink
+
+(defmacro drover-test-with-fake-fonts (graphic &rest body)
+  "Run BODY with fonts faked, on a graphic display when GRAPHIC is non-nil.
+Every character advances 7 pixels, and draws 7 pixels of ink but R,
+whose ink reaches 9 pixels left of it and 20 right; N has no glyph.
+`fonts-asked' collects, newest first, what `font-at' was asked for:
+\(INDEX WINDOW FACE REMAPPING), FACE being the face property there and
+REMAPPING the face remapping in force."
+  (declare (indent 1) (debug t))
+  `(let ((fonts-asked nil))
+     (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _) ,graphic))
+               ((symbol-function 'buffer-text-pixel-size)
+                (lambda (&rest _) (cons (* 7 (- (point-max) (point-min))) 1)))
+               ((symbol-function 'font-at)
+                (lambda (index &optional window string)
+                  (push (list index window (get-text-property index 'face string) face-remapping-alist)
+                        fonts-asked)
+                  'fake-font))
+               ((symbol-function 'font-get-glyphs)
+                (lambda (font from _to object)
+                  (should (eq font 'fake-font))
+                  (let ((char (aref object from)))
+                    (vector (pcase char
+                              (?R (vector from from char 1 7 -9 20 10 2 nil))
+                              (?N nil)
+                              (_ (vector from from char 1 7 0 7 10 2 nil))))))))
+       ,@body)))
+
+(ert-deftest drover-test-text-ink-extent ()
+  "Ink reaching past the advance counts, in the font each character is drawn in."
+  (let ((remapping '((default drover-list default)))
+        (window (selected-window)))
+    (drover-test-with-fake-fonts t
+      ;; R, 7 pixels in, reaches 27 pixels, past the advance of the
+      ;; string, 21, and 2 pixels left of its start.
+      (should (equal (drover-text-ink-extent (concat "a" (propertize "R" 'face 'bold) "b")
+                                             remapping window)
+                     '(2 . 27)))
+      ;; Asked for each character, in the window, with the remapping in
+      ;; force, the default face named last, so that its remapping counts.
+      (should (equal (reverse fonts-asked)
+                     `((0 ,window (default) ,remapping)
+                       (1 ,window (bold default) ,remapping)
+                       (2 ,window (default) ,remapping))))
+      ;; Without ink beyond the advance, the advance.
+      (should (equal (drover-text-ink-extent "ab" remapping window) '(0 . 14)))
+      ;; A character without a glyph, or displayed as something else,
+      ;; counts by its advance.
+      (setq fonts-asked nil)
+      (should (equal (drover-text-ink-extent (concat "N" (propertize "R" 'display "x")) remapping window)
+                     '(0 . 14)))
+      (should (equal (mapcar #'car fonts-asked) '(0)))
+      ;; Faces as lists and as attributes.
+      (setq fonts-asked nil)
+      (drover-text-ink-extent (concat (propertize "a" 'face '(bold italic))
+                                      (propertize "b" 'face '(:weight bold)))
+                              remapping window)
+      (should (equal (mapcar #'cadr (mapcar #'cdr (reverse fonts-asked)))
+                     '((bold italic default) ((:weight bold) default)))))
+    ;; On a text terminal, the advance alone.
+    (drover-test-with-fake-fonts nil
+      (should (equal (drover-text-ink-extent "aRb" remapping window) '(0 . 21)))
+      (should-not fonts-asked))))
+
 ;;;; Trees
 
 (defun drover-test-tree-shape (nodes)

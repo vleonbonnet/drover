@@ -493,8 +493,11 @@ turn ended unseen.  A failure is reported, and CALLBACK not called."
   (drover-backend-changed 'opencode id))
 
 (defun drover-opencode--start ()
-  "Follow the registry and the projects, and bootstrap the registry."
+  "Follow the registry, session buffers and projects; bootstrap the registry.
+The registry does not change when a session's buffer opens or closes,
+yet views show which sessions are open."
   (add-hook 'opencode-state-updated-functions #'drover-opencode--updated)
+  (add-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (opencode-events-register "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-register "server.connected" #'drover-opencode--projects-changed)
   ;; A bootstrap with no session runs no update hook, yet ends the wait.
@@ -1002,6 +1005,7 @@ such as \"C-\\=' A\".  For `opencode-command-keys-function'."
 OpenCode buffers lose drover's keys, and `drover-dispatch' the
 commands of opencode.el."
   (remove-hook 'opencode-state-updated-functions #'drover-opencode--updated)
+  (remove-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (opencode-events-unregister "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-unregister "server.connected" #'drover-opencode--projects-changed)
   (drover-opencode--uninstall)

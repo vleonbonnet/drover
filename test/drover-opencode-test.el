@@ -34,6 +34,7 @@
 (require 'drover-opencode-fixtures)
 
 (defvar opencode-state-updated-functions)
+(defvar opencode-session-buffer-functions)
 
 (defvar drover-opencode-test-entries nil
   "Registry entries `opencode-state-sessions' returns.")
@@ -101,6 +102,7 @@ This follows the `opencode-state' contract."
          (drover-opencode--projects-fetching nil)
          (drover-opencode--projects-stale nil)
          (opencode-state-updated-functions nil)
+         (opencode-session-buffer-functions nil)
          (opencode-session-buffers (make-hash-table :test #'equal))
          (drover-opencode-test-entries ,entries)
          (drover-opencode-test-calls nil)
@@ -525,6 +527,31 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (drover-changed-now)
       (should (= runs 1)))))
 
+(ert-deftest drover-opencode-test-buffer-changes-forwarded ()
+  "A session buffer opening or closing is a change: lists tell open sessions."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (drover-start)
+    (should (memq #'drover-opencode--updated opencode-session-buffer-functions))
+    (let ((changes nil)
+          (buffer (generate-new-buffer " *opencode ses_1*")))
+      (cl-letf (((symbol-function 'drover-backend-changed)
+                 (lambda (&rest arguments) (push arguments changes))))
+        ;; opencode.el runs the hook once it registered a new buffer.
+        (with-current-buffer buffer
+          (opencode-session-mode)
+          (setq opencode-session-id "ses_1"))
+        (puthash "ses_1" buffer opencode-session-buffers)
+        (with-current-buffer buffer
+          (run-hook-with-args 'opencode-session-buffer-functions "ses_1"))
+        (should (equal changes '((opencode "ses_1"))))
+        (should (eq (drover-session-buffer (drover-opencode-test-session "ses_1")) buffer))
+        ;; Killed, the buffer unregisters itself, through opencode.el's
+        ;; own cleanup.
+        (setq changes nil)
+        (kill-buffer buffer)
+        (should (equal changes '((opencode "ses_1"))))
+        (should-not (drover-session-buffer (drover-opencode-test-session "ses_1")))))))
+
 (ert-deftest drover-opencode-test-unload ()
   (drover-test-with-engines
     (drover-opencode--register-engine)
@@ -538,6 +565,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should-not (drover-engines))
       (should-not drover--model-sources)
       (should-not (memq #'drover-opencode--updated opencode-state-updated-functions))
+      (should-not (memq #'drover-opencode--updated opencode-session-buffer-functions))
       (should (member '(opencode-events-unregister "project.updated" drover-opencode--projects-changed)
                       drover-opencode-test-calls))
       (should (member '(opencode-events-unregister "server.connected" drover-opencode--projects-changed)

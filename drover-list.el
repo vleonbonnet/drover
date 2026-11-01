@@ -29,19 +29,22 @@
 ;; whose body holds its details.  The keys of `drover-session-map' act
 ;; on the session at point.
 ;;
-;; A subagent is listed under its parent, indented one step deeper, and
-;; a parent and its subagents stay together: they go in the group of the
-;; most urgent session among them.  Subagents are sections of the group,
-;; like their parent, rather than sections inside their parent's: Magit
-;; hides the whole body of a section, and showing a parent's details
-;; must neither hide nor reveal its subagents.  Which subagents show,
-;; all, the active ones or none, `drover-show-subagents' says; whether
-;; shown or not, a session whose subagents work or wait for you tells
-;; so beside its status (`drover-subagent-glyphs').
+;; A subagent is listed under its parent, its glyph under its parent's
+;; title, and a parent and its subagents stay together: they go in the
+;; group of the most urgent session among them.  Subagents are sections
+;; of the group, like their parent, rather than sections inside their
+;; parent's: Magit hides the whole body of a section, and showing a
+;; parent's details must neither hide nor reveal its subagents.  Which
+;; subagents show, all, the active ones or none, `drover-show-subagents'
+;; says; whether shown or not, a session whose subagents work or wait
+;; for you tells so beside its status (`drover-subagent-glyphs').  The
+;; title of a session open in a buffer is in `drover-open-session'.
 ;;
 ;; Working glyphs are animated (`drover-animations'): a timer changes
 ;; the display of their characters alone, every frame as wide as the
-;; widest, while a displayed list shows one.
+;; widest, while a displayed list shows one.  Every glyph takes the room
+;; its font draws it in, which an icon font may draw wider than the
+;; advance it gives it, so that no text is drawn on an icon.
 ;;
 ;; What a line shows depends on the width of the window, measured in
 ;; pixels in the face `drover-list', variable pitch by default.
@@ -145,10 +148,9 @@ A character counts as wide as the letter x in the face `drover-list'."
 
 (defcustom drover-list-animation-interval 0.5
   "Seconds between two frames of the animated glyphs of a displayed list.
-Working sessions, those waiting to retry, and the glyph of working
-subagents show the frames of `drover-animations' in turn.  A value of
-nil shows still glyphs, those of `drover-status-glyphs' and
-`drover-subagent-glyphs'.
+Working sessions and those waiting to retry show the frames of
+`drover-animations' in turn.  A value of nil shows still glyphs, those
+of `drover-status-glyphs'.
 
 A frame changes only the display of the animated characters, as the
 prompt cache bars do, so it costs a redisplay of their lines in the
@@ -356,8 +358,9 @@ For `magit-section-set-visibility-hook'."
 CONTEXT is what widths depend on besides the text: a copy of the face
 remapping of the buffer, which `face-remap-add-relative' changes in
 place, and the frame measuring it.  TABLE maps texts, with their
-properties, to their widths in pixels for the current drawing; KNOWN
-is the table of the previous drawing in the same context, or nil.")
+properties, to their widths in pixels for the current drawing, and
+conses (extent . TEXT) to their extents (see `drover-list--extent');
+KNOWN is the table of the previous drawing in the same context, or nil.")
 
 (defun drover-list--window ()
   "Return the window the current list is drawn for.
@@ -399,6 +402,24 @@ On a text terminal, a pixel is a character cell."
 (defun drover-list--char-width ()
   "Return the width in pixels of an average character, the letter x."
   (drover-list--pixel-width "x"))
+
+(defun drover-list--extent (string)
+  "Return how far STRING reaches drawn in the current buffer, as (LEFT . RIGHT).
+See `drover-text-ink-extent': RIGHT is the further of its advance and
+its ink, LEFT how far left of its start its ink reaches, in the fonts
+of `drover-list--window' with the face remapping of the buffer.
+Extents are kept as widths are, in `drover-list--widths'."
+  (if (zerop (length string))
+      (cons 0 0)
+    (unless drover-list--widths
+      (drover-list--measure-begin))
+    (pcase-let ((`(,_ ,table ,known) drover-list--widths)
+                (key (cons 'extent string)))
+      (or (gethash key table)
+          (puthash key
+                   (or (and known (gethash key known))
+                       (drover-text-ink-extent string face-remapping-alist (drover-list--window)))
+                   table)))))
 
 (defun drover-list--line-width ()
   "Return the width in pixels that lines of the list may take.
@@ -451,98 +472,129 @@ from their last activity, matching the order of `drover-sort'."
 
 ;;;; Glyphs
 
+;; A glyph takes the room its font draws it in, its cell, which may be
+;; wider than its advance: icon fonts draw icons past their advance
+;; (see `drover-text-ink-extent'), and text after a glyph must not be
+;; drawn under its ink.
+
+(defun drover-list--pad (pixels)
+  "Return a space PIXELS wide, or \"\" when PIXELS is not positive."
+  (if (> pixels 0)
+      (propertize " " 'display `(space :width (,pixels)))
+    ""))
+
+(defun drover-list--cell (strings)
+  "Return the cell in which each of STRINGS may be drawn, as (LEFT . RIGHT).
+A string drawn in the cell begins LEFT pixels into it, and the cell ends
+RIGHT pixels past that: the ink of none of STRINGS leaves it, as
+`drover-list--extent' measures it."
+  (let ((left 0)
+        (right 0))
+    (dolist (string strings)
+      (pcase-let ((`(,ink-left . ,ink-right) (drover-list--extent string)))
+        (setq left (max left ink-left)
+              right (max right ink-right))))
+    (cons left right)))
+
+(defun drover-list--in-cell (string cell)
+  "Return STRING drawn in CELL, a value of `drover-list--cell'.
+Spaces as wide as needed come before and after it."
+  (concat (drover-list--pad (car cell))
+          string
+          (drover-list--pad (- (cdr cell) (drover-list--pixel-width string)))))
+
+(defun drover-list--icon (string)
+  "Return STRING in a cell of its own, so that no text is drawn on its ink."
+  (drover-list--in-cell string (drover-list--cell (list string))))
+
 (defun drover-list--frame-index (count now)
   "Return which of COUNT frames of an animation shows at NOW, a float time.
 Every animated glyph shows its frame of the same instant, so that a
 redraw keeps the pace."
   (mod (floor now drover-list-animation-interval) count))
 
-(defun drover-list--animation-face (kind)
-  "Return the face of the frames of animation KIND, of `drover-animations'."
-  (pcase kind
-    ('retrying 'drover-retrying)
-    (_ 'drover-working)))
-
-(defun drover-list--frames (kind)
-  "Return the frames of animation KIND, measured, or nil.
-The value is (STRINGS WIDTHS WIDTH): the frames of `drover-animations'
-in their face, their widths in pixels and the widest.  It is nil when
-the list does not animate, `drover-list-animation-interval' being nil,
-and when KIND has no frame."
+(defun drover-list--frames (status)
+  "Return the frames of the glyph of STATUS, measured, or nil.
+The value is (STRINGS WIDTHS): the frames of `drover-animations' in the
+face of STATUS, and their widths in pixels.  It is nil when the list
+does not animate, `drover-list-animation-interval' being nil, and when
+STATUS has no frame."
   (when-let* ((drover-list-animation-interval)
               (frames (seq-remove (lambda (frame) (or (not (stringp frame)) (string-empty-p frame)))
-                                  (alist-get kind drover-animations))))
-    (let* ((face (drover-list--animation-face kind))
-           (strings (mapcar (lambda (frame) (drover-face frame face)) frames))
-           (widths (mapcar #'drover-list--pixel-width strings)))
-      (list strings widths (apply #'max widths)))))
-
-(defun drover-list--glyph (kind glyph face metrics)
-  "Return GLYPH in FACE, or the animated glyph of KIND standing for it.
-KIND names an animation of `drover-animations', whose frames METRICS
-hold (see `drover-list--metrics').  An animated glyph is two
-characters: the first displays the frame of the time of METRICS, the
-second a space as wide as the widest frame is wider, so that what
-follows never moves.  Their properties `drover-list-frame' and
-`drover-list-frame-pad' name KIND: from frame to frame, only their
-display changes."
-  (if-let* ((frames (alist-get kind (plist-get metrics :frames))))
-      (pcase-let* ((`(,strings ,widths ,width) frames)
-                   (index (drover-list--frame-index (length strings) (plist-get metrics :now))))
-        (concat (propertize (drover-face (if (string-empty-p glyph) " " (substring glyph 0 1)) face)
-                            'display (nth index strings) 'drover-list-frame kind)
-                (propertize " " 'display `(space :width (,(- width (nth index widths))))
-                            'drover-list-frame-pad kind)))
-    (drover-face glyph face)))
+                                  (alist-get status drover-animations))))
+    (let ((strings (mapcar (lambda (frame) (drover-face frame (drover-status-face status))) frames)))
+      (list strings (mapcar #'drover-list--pixel-width strings)))))
 
 (defun drover-list--status-glyph (status metrics)
-  "Return the glyph of STATUS, animated as METRICS say.
-See `drover-list--glyph'."
-  (drover-list--glyph status (or (alist-get status drover-status-glyphs) "?")
-                      (drover-status-face status) metrics))
+  "Return the glyph of STATUS in the status cell of METRICS, animated as they say.
+Every status glyph takes the room of the one drawn widest, so that
+titles line up whatever the status (see `drover-list--metrics').
+
+When METRICS hold frames for STATUS, the glyph is animated: one
+character displays the frame of the time of METRICS, the next one a
+space reaching the end of the cell, so that what follows never moves.
+Their properties `drover-list-frame' and `drover-list-frame-pad' name
+STATUS: from frame to frame, only their display changes."
+  (let ((glyph (drover-status-glyph status))
+        (cell (plist-get metrics :status-cell)))
+    (if-let* ((frames (alist-get status (plist-get metrics :frames))))
+        (pcase-let* ((`(,strings ,widths ,width) frames)
+                     (index (drover-list--frame-index (length strings) (plist-get metrics :now))))
+          (concat (drover-list--pad (car cell))
+                  (propertize (if (string-empty-p glyph) (drover-face " " (drover-status-face status))
+                                (substring glyph 0 1))
+                              'display (nth index strings) 'drover-list-frame status)
+                  (propertize " " 'display `(space :width (,(- width (nth index widths))))
+                              'drover-list-frame-pad status)))
+      (drover-list--in-cell glyph cell))))
+
+(defun drover-list--subagent-glyph (kind)
+  "Return the glyph of subagents of KIND, `waiting' or `working', in its face.
+See `drover-subagent-glyphs'."
+  (drover-face (or (alist-get kind drover-subagent-glyphs) "?")
+               (if (eq kind 'waiting) 'drover-waiting 'drover-working)))
 
 (defun drover-list--subagents-help (subagents)
-  "Return the tooltip naming SUBAGENTS, active sessions, by what they do."
-  (let ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting)) subagents))
-        (titles (lambda (sessions)
-                  (mapconcat (lambda (session) (drover-list--one-line (drover-session-display-title session)))
-                             sessions ", "))))
-    (string-join (delq nil (list (and waiting
-                                      (concat "Subagents waiting for you: " (funcall titles waiting)))
-                                 (when-let* ((working (seq-difference subagents waiting #'eq)))
-                                   (concat "Subagents working: " (funcall titles working)))))
+  "Return the tooltip naming SUBAGENTS, active sessions, by what they do.
+It tells how many do each, which their glyphs do not."
+  (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting))
+                              subagents))
+         (working (seq-difference subagents waiting #'eq))
+         (line (lambda (sessions doing)
+                 (when sessions
+                   (format "%d subagent%s %s: %s" (length sessions) (if (cdr sessions) "s" "") doing
+                           (mapconcat (lambda (session)
+                                        (drover-list--one-line (drover-session-display-title session)))
+                                      sessions ", "))))))
+    (string-join (delq nil (list (funcall line waiting "waiting for you")
+                                 (funcall line working "working")))
                  "\n")))
 
 (defun drover-list--indicator (subagents metrics)
   "Return the glyphs telling that SUBAGENTS are in the middle of a turn, or nil.
 SUBAGENTS are the active subagents of a session, at any depth (see
 `drover-tree-active-subagents').  The glyph of `drover-subagent-glyphs'
-of those waiting for the user comes first, then that of those working
-or waiting to retry, animated as METRICS say, each followed by how many
-when more than one.  Their tooltip names them."
+for those waiting for the user comes first, then that for those working
+or waiting to retry, a space between, each in the subagent cell of
+METRICS.  They stay still and tell no number: their tooltip names the
+subagents and tells how many."
   (when subagents
-    (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting))
-                                subagents))
-           (working (seq-difference subagents waiting #'eq))
-           (part (lambda (kind sessions face)
-                   (when sessions
-                     (let ((glyph (or (alist-get kind drover-subagent-glyphs) "?")))
-                       (concat (if (eq kind 'working)
-                                   (drover-list--glyph 'subagents glyph face metrics)
-                                 (drover-face glyph face))
-                               (and (cdr sessions)
-                                    (drover-face (number-to-string (length sessions)) face))))))))
-      (propertize (string-join (delq nil (list (funcall part 'waiting waiting 'drover-waiting)
-                                               (funcall part 'working working 'drover-working)))
-                               " ")
+    (let* ((waiting (seq-some (lambda (session) (eq (drover-session-status session) 'waiting))
+                              subagents))
+           (working (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))
+                              subagents))
+           (cell (plist-get metrics :subagent-cell)))
+      (propertize (mapconcat (lambda (kind) (drover-list--in-cell (drover-list--subagent-glyph kind) cell))
+                             (append (and waiting '(waiting)) (and working '(working)))
+                             " ")
                   'help-echo (drover-list--subagents-help subagents)))))
 
 (defun drover-list--icons (session metrics)
   "Return what comes before the title of SESSION: its glyphs and a space.
 The glyph of its status comes first, then, when subagents of SESSION are
 in the middle of a turn, the glyphs telling so; one space separates
-each.  METRICS give the frames of animated glyphs and the active
-subagents of each session."
+each.  METRICS give the cells of glyphs, the frames of animated ones and
+the active subagents of each session."
   (let ((indicator (drover-list--indicator
                     (and (plist-get metrics :active)
                          (gethash (drover-session-key session) (plist-get metrics :active)))
@@ -554,12 +606,15 @@ subagents of each session."
 (defun drover-list--title-text (session depth)
   "Return the title of SESSION, at DEPTH in its tree, as its line shows it.
 A subagent at the top of its tree, its parent not listed, starts with
-an arrow; an idle session is dimmed."
-  (let ((title (drover-list--one-line (drover-session-display-title session))))
+an arrow; an idle session is dimmed; the title of a session open in a
+buffer is in the face `drover-open-session', over the dimming."
+  (let* ((title (drover-list--one-line (drover-session-display-title session)))
+         (faces (delq nil (list (and (drover-session-buffer session) 'drover-open-session)
+                                (and (eq (drover-session-status session) 'idle) 'drover-dim)))))
     (concat (if (and (zerop depth) (drover-session-parent session))
                 (drover-face "↳ " 'drover-dim)
               "")
-            (if (eq (drover-session-status session) 'idle) (drover-face title 'drover-dim) title))))
+            (if faces (drover-face title (if (cdr faces) faces (car faces))) title))))
 
 (defun drover-list--text (field session location now)
   "Return the text of FIELD for SESSION, or \"\" when it has none.
@@ -591,41 +646,45 @@ it is drawn apart."
   "Return the measures lines of the list are drawn with at time NOW.
 The value is a plist of :now, :char, the width of an average character,
 :gap, the room between two columns, :space, the width of a space,
-:margin, where the sessions at the top of a tree begin, :step, how much
-deeper each level of subagents begins, :width, the width lines may
-take, :frames, an alist (KIND . FRAMES) of the animations of
-`drover-animations' and their frames (see `drover-list--frames'), and
-:active, ACTIVE, the table of the active subagents of each session
-\(see `drover-tree-active-subagents'), or nil.  A step is as wide as
-the widest status glyph and a space, so that a subagent's glyph stands
-under its parent's title.  Widths are in pixels; lines leave room for
-the ellipsis Magit adds to collapsed headings."
+:margin, where the sessions at the top of a tree begin, :width, the
+width lines may take, :status-cell and :subagent-cell, the cells of the
+status glyphs and of the glyphs of active subagents (see
+`drover-list--cell'), :frames, an alist (STATUS STRINGS WIDTHS WIDTH)
+of the animated status glyphs, their frames and widths (see
+`drover-list--frames') and the right of the status cell, and :active,
+ACTIVE, the table of the active subagents of each session (see
+`drover-tree-active-subagents'), or nil.  The status cell holds every
+status glyph and frame, so that titles line up whatever the status; the
+subagent cell both glyphs of `drover-subagent-glyphs'.  Widths are in
+pixels; lines leave room for the ellipsis Magit adds to collapsed
+headings."
   (let* ((char (drover-list--char-width))
          (statuses (seq-uniq (append drover-status-order (mapcar #'car drover-status-glyphs))))
-         (metrics (list :now now
-                        :frames (mapcar (lambda (kind) (cons kind (drover-list--frames kind)))
-                                        '(working retrying subagents))
-                        :active active)))
-    (append (list :char char
-                  :gap (* drover-list--gap char)
-                  :space (drover-list--pixel-width " ")
-                  :margin (* drover-list--margin char)
-                  :step (apply #'max 0 (mapcar (lambda (status)
-                                                 (drover-list--pixel-width
-                                                  (concat (drover-list--status-glyph status metrics) " ")))
-                                               statuses))
-                  :width (- (drover-list--line-width)
-                            (drover-list--pixel-width (truncate-string-ellipsis))))
-            metrics)))
+         (frames (delq nil (mapcar (lambda (status)
+                                     (when-let* ((frames (drover-list--frames status)))
+                                       (cons status frames)))
+                                   '(working retrying))))
+         (status-cell (drover-list--cell
+                       (append (mapcar #'drover-status-glyph statuses)
+                               (mapcan (lambda (entry) (copy-sequence (nth 1 entry))) frames)))))
+    (list :now now
+          :char char
+          :gap (* drover-list--gap char)
+          :space (drover-list--pixel-width " ")
+          :margin (* drover-list--margin char)
+          :width (- (drover-list--line-width)
+                    (drover-list--pixel-width (truncate-string-ellipsis)))
+          :status-cell status-cell
+          :subagent-cell (drover-list--cell (mapcar #'drover-list--subagent-glyph '(waiting working)))
+          :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
+          :active active)))
 
-(defun drover-list--row (session depth location metrics)
-  "Return the row of SESSION at DEPTH in its tree.
+(defun drover-list--row (session depth indent location metrics)
+  "Return the row of SESSION at DEPTH in its tree, its glyph INDENT pixels in.
 LOCATION is a function of a session returning where it works, as its
 group shows it; METRICS are the measures of `drover-list--metrics'."
-  (let* ((now (plist-get metrics :now))
-         (indent (+ (plist-get metrics :margin)
-                    (* (min depth drover-list--max-depth) (plist-get metrics :step))))
-         (icons (drover-list--icons session metrics)))
+  (let ((now (plist-get metrics :now))
+        (icons (drover-list--icons session metrics)))
     (drover-list--row-create
      :session session :depth depth :indent indent :icons icons
      :title-start (+ indent (drover-list--pixel-width icons))
@@ -634,16 +693,23 @@ group shows it; METRICS are the measures of `drover-list--metrics'."
                     '(location agent model created age summary))
      :cache (drover-session-cache-fraction session now))))
 
-(defun drover-list--tree-rows (nodes location metrics &optional depth)
+(defun drover-list--tree-rows (nodes location metrics &optional depth indent)
   "Return the rows of the trees NODES at DEPTH, subagents after their parent.
-LOCATION is a function of a session returning where it works, as the
-group shows it; METRICS are the measures of `drover-list--metrics'."
-  (let ((depth (or depth 0)))
+Their glyphs begin INDENT pixels in, by default the margin.  The glyph
+of a subagent stands under its parent's title, whatever glyphs come
+before the title, down to `drover-list--max-depth'; deeper, under its
+parent's glyph.  LOCATION is a function of a session returning where it
+works, as the group shows it; METRICS are the measures of
+`drover-list--metrics'."
+  (let ((depth (or depth 0))
+        (indent (or indent (plist-get metrics :margin))))
     (mapcan (lambda (node)
-              (let ((session (drover-node-session node)))
-                (cons (drover-list--row session depth location metrics)
-                      (drover-list--tree-rows (drover-node-children node) location metrics
-                                              (1+ depth)))))
+              (let ((row (drover-list--row (drover-node-session node) depth indent location metrics)))
+                (cons row
+                      (drover-list--tree-rows (drover-node-children node) location metrics (1+ depth)
+                                              (if (< depth drover-list--max-depth)
+                                                  (drover-list--row-title-start row)
+                                                indent)))))
             nodes)))
 
 (defun drover-list--has-p (field rows)
@@ -1023,7 +1089,8 @@ text: a cache gone out shows nothing, and is forgotten."
 
 (defvar-local drover-list--frames nil
   "Frames of the animations of the last drawing, from `drover-list--metrics'.
-An alist (KIND . FRAMES), FRAMES as `drover-list--frames' returns them.")
+An alist (STATUS STRINGS WIDTHS WIDTH): the frames of the glyph of
+STATUS, their widths and the right of the cell they are drawn in.")
 
 (defvar-local drover-list--animated nil
   "Animated glyphs drawn, as a list of (POSITION . KIND).
@@ -1173,7 +1240,7 @@ in `drover-list--caches'."
                       (list (car line) (and (cdr line) 'columns) nil))
                   (let ((heading (drover-list--narrow-line row layout)))
                     (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
-         (x (+ (drover-list--row-indent row) (plist-get layout :step))))
+         (x (drover-list--row-title-start row)))
     (magit-insert-section (drover-list-session-section (drover-session-key session) t)
       (magit-insert-heading
         (drover-list--with-help (car drawn)
@@ -1209,7 +1276,7 @@ Return nil when none does."
                                                                (eq (drover-session-status session) status))
                                                              sessions)))
                                        (when (> count 0)
-                                         (concat (drover-status-glyph status)
+                                         (concat (drover-list--icon (drover-status-glyph status))
                                                  (drover-face (format "%d" count)
                                                               (drover-status-face status))))))
                                    drover-attention-statuses))))
@@ -1291,7 +1358,7 @@ LAYOUT."
            (parts (append
                    (if counts
                        (mapcar (lambda (count)
-                                 (concat (drover-status-glyph (car count))
+                                 (concat (drover-list--icon (drover-status-glyph (car count)))
                                          " "
                                          (drover-face
                                           (format "%d %s" (cdr count)

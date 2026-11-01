@@ -82,7 +82,7 @@ settings of the list are their defaults, and the clock stands still at
            (drover-status-glyphs '((waiting . "!") (failed . "✗") (done . "✓")
                                    (retrying . "↻") (working . "◐") (idle . "·")))
            (drover-subagent-glyphs '((waiting . "?") (working . "*")))
-           (drover-animations '((working "1" "2" "3") (retrying "a" "b") (subagents "+" "*")))
+           (drover-animations '((working "1" "2" "3") (retrying "a" "b")))
            (drover-list-animation-interval nil)
            (drover-list-hidden-fields nil)
            (buffer nil))
@@ -111,11 +111,32 @@ A space displayed as a stretch counts its own width."
 (defvar drover-list-test-width 1000
   "Width in pixels of the lines of the list, under `drover-list-test-with-font'.")
 
+(defvar drover-list-test-ink nil
+  "Characters of the fake font drawing ink past their advance.
+An alist (CHAR LEFT . RIGHT): the ink of CHAR reaches LEFT pixels left
+of where it is drawn and RIGHT pixels right of it.")
+
+(defun drover-list-test-fake-extent (string)
+  "Return how far STRING reaches drawn in the fake font, as (LEFT . RIGHT).
+The ink of the characters of `drover-list-test-ink' reaches past their
+advance, as `drover-list--extent' measures it; characters displayed
+otherwise count by their advance."
+  (let ((x 0) (left 0) (right 0))
+    (dotimes (index (length string))
+      (when-let* (((not (get-text-property index 'display string)))
+                  (ink (alist-get (aref string index) drover-list-test-ink)))
+        (setq left (max left (- (car ink) x))
+              right (max right (+ x (cdr ink)))))
+      (setq x (+ x (drover-list-test-fake-width (substring string index (1+ index))))))
+    (cons left (max right x))))
+
 (defmacro drover-list-test-with-font (&rest body)
   "Run BODY with text measured in `drover-list-test-fake-width'.
-Lines may take `drover-list-test-width' pixels."
+Ink reaches as `drover-list-test-fake-extent' says.  Lines may take
+`drover-list-test-width' pixels."
   (declare (indent 0) (debug t))
   `(cl-letf (((symbol-function 'drover-list--pixel-width) #'drover-list-test-fake-width)
+             ((symbol-function 'drover-list--extent) #'drover-list-test-fake-extent)
              ((symbol-function 'drover-list--line-width) (lambda () drover-list-test-width)))
      ,@body))
 
@@ -244,6 +265,12 @@ to the next cell, with its properties."
   "Return the pixel position of the cell of session ID holding TEXT."
   (car (seq-find (lambda (cell) (string-search text (cdr cell)))
                  (drover-list-test-cells id))))
+
+(defun drover-list-test-title-x (id title)
+  "Return the pixel position where TITLE begins on the first line of session ID."
+  (let ((cell (seq-find (lambda (cell) (string-search title (cdr cell)))
+                        (drover-list-test-cells id))))
+    (+ (car cell) (drover-list--pixel-width (substring (cdr cell) 0 (string-search title (cdr cell)))))))
 
 (defun drover-list-test-id-at-point ()
   "Return the identifier of the session whose section holds point, or nil."
@@ -406,9 +433,9 @@ current buffer again afterwards."
                    (concat "! 1 needs you   4 sessions, 2 subagents hidden\n"
                            "Subagents: active  U hides all\n"
                            "\n"
-                           "  ◐ ? Session root  10s\n"
-                           "    ! Session sub    1m\n"
-                           "  ◐ Session other    5s\n"
+                           "  ◐ ? Session root   10s\n"
+                           "      ! Session sub   1m\n"
+                           "  ◐ Session other     5s\n"
                            "  · Session idle\n")))
     ;; Sessions still show their details.
     (drover-list-test-goto "idle")
@@ -522,18 +549,20 @@ current buffer again afterwards."
     (revert-buffer)
     (should (equal (drover-list-test-groups)
                    '((waiting "root" "sub" "deep") (working "other" "quiet"))))
-    ;; Each level is indented one step deeper, each with its own glyph;
-    ;; ages line up past the deepest title.
-    (should (equal (drover-list-test-heading "root") "  ◐ ? Session root    10s"))
-    (should (equal (drover-list-test-heading "sub") "    ! Session sub      1m"))
-    (should (equal (drover-list-test-heading "deep") "      ✓ Session deep  30s"))
-    (should (equal (drover-list-test-heading "other") "  ◐ Session other      5s"))
-    (let ((step (plist-get (drover-list--metrics 0) :step))
-          (margin (car (car (drover-list-test-cells "root")))))
+    ;; Each subagent's glyph stands under its parent's title, past the
+    ;; glyph telling its active subagents; ages line up past the
+    ;; deepest title.
+    (should (equal (drover-list-test-heading "root") "  ◐ ? Session root      10s"))
+    (should (equal (drover-list-test-heading "sub") "      ! Session sub      1m"))
+    (should (equal (drover-list-test-heading "deep") "        ✓ Session deep  30s"))
+    (should (equal (drover-list-test-heading "other") "  ◐ Session other        5s"))
+    (should (equal (drover-list-test-heading "quiet") "    · Session quiet"))
+    (let ((margin (car (car (drover-list-test-cells "root")))))
       (should (= margin (* drover-list--margin (drover-list--char-width))))
-      (should (= (car (car (drover-list-test-cells "sub"))) (+ margin step)))
-      (should (= (car (car (drover-list-test-cells "deep"))) (+ margin step step)))
-      (should (= (car (car (drover-list-test-cells "other"))) margin)))
+      (should (= (car (car (drover-list-test-cells "sub"))) (drover-list-test-title-x "root" "Session")))
+      (should (= (car (car (drover-list-test-cells "deep"))) (drover-list-test-title-x "sub" "Session")))
+      (should (= (car (car (drover-list-test-cells "other"))) margin))
+      (should (= (car (car (drover-list-test-cells "quiet"))) (drover-list-test-title-x "other" "Session"))))
     (should (eq (oref (drover-list-test-section "sub") parent)
                 (oref (drover-list-test-section "root") parent)))))
 
@@ -546,10 +575,12 @@ current buffer again afterwards."
                     (number-sequence 1 5)))
     (setq drover-show-children t)
     (revert-buffer)
-    ;; Deeper than three levels, subagents line up with the third.
+    ;; Each glyph stands under its parent's title, past the parent's
+    ;; glyph and that of its working subagents, "◐ * "; deeper than
+    ;; three levels, subagents line up with the third.
     (should (equal (mapcar (lambda (depth) (car (car (drover-list-test-cells (format "d%d" depth)))))
                            (number-sequence 0 5))
-                   '(2 4 6 8 8 8)))))
+                   '(2 6 10 14 14 14)))))
 
 (ert-deftest drover-list-test-tree-in-group-of-urgent-subagent ()
   (drover-list-test-with
@@ -615,7 +646,7 @@ current buffer again afterwards."
         (drover-list-test-press "U")
         (should (eq drover-show-subagents 'all))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "ended" "child"))))
-        (should (string-prefix-p "    ◐ Session child" (drover-list-test-heading "child")))
+        (should (string-prefix-p "        ◐ Session child" (drover-list-test-heading "child")))
         (should (equal (drover-list--mode-line-process) " by status +subagents"))
         (should (equal (drover-list-test-id-at-point) "root"))
         (save-excursion
@@ -644,7 +675,7 @@ current buffer again afterwards."
     (magit-section-toggle (magit-current-section))
     (should-not (drover-list-test-section-hidden-p "root"))
     ;; The details come between the parent and its subagents.
-    (should (string-match-p "  ◐ \\? Session root +10s\n    Status +Working for 10s\n\\(.*\n\\)*    ! Session sub"
+    (should (string-match-p "  ◐ \\? Session root +10s\n      Status +Working for 10s\n\\(.*\n\\)*      ! Session sub"
                             (drover-list-test-visible-text)))
     (should (< (oref (drover-list-test-section "root") end)
                (1+ (oref (drover-list-test-section "sub") start))))
@@ -743,18 +774,19 @@ current buffer again afterwards."
     (search-forward "Session w")
     (should-not (get-text-property (match-beginning 0) 'font-lock-face))))
 
-(ert-deftest drover-list-test-wide-glyph-deepens-step ()
-  "A step of indentation is as wide as the widest glyph and a space."
+(ert-deftest drover-list-test-wide-glyph-widens-every-cell ()
+  "Every status glyph takes the room of the widest, so that titles line up."
   (drover-list-test-with (drover-list-test-family)
     (setq-local drover-status-glyphs (cons '(waiting . "待") drover-status-glyphs))
     (setq drover-show-subagents 'all)
     (revert-buffer)
-    (should (= (plist-get (drover-list--metrics 0) :step) 3))
-    ;; A subagent's glyph never starts left of its parent's status glyph
-    ;; and a space.
-    (should (string-prefix-p "  ◐ ? Session root" (drover-list-test-heading "root")))
-    (should (string-prefix-p "     待 Session sub" (drover-list-test-heading "sub")))
-    (should (string-prefix-p "        ✓ Session deep" (drover-list-test-heading "deep")))))
+    (should (equal (plist-get (drover-list--metrics 0) :status-cell) '(0 . 2)))
+    ;; The narrower glyphs are padded to its width, and a subagent's
+    ;; glyph stands under its parent's title.
+    (should (string-prefix-p "  ◐  ? Session root" (drover-list-test-heading "root")))
+    (should (string-prefix-p "       待 Session sub" (drover-list-test-heading "sub")))
+    (should (string-prefix-p "          ✓  Session deep" (drover-list-test-heading "deep")))
+    (should (string-prefix-p "  ◐  Session other" (drover-list-test-heading "other")))))
 
 (ert-deftest drover-list-test-one-space-after-glyph ()
   (drover-list-test-with (drover-list-test-family)
@@ -805,10 +837,11 @@ current buffer again afterwards."
                                  cells))
              (location (+ (apply #'max title-ends) gap)))
         (should (= (drover-list-test-fake-width "x") (plist-get metrics :char)))
-        ;; Status glyphs: roots at the margin, the subagent one step in.
+        ;; Status glyphs: roots at the margin, the subagent under its
+        ;; parent's title.
         (should (= (car (nth 1 (assoc "a" cells))) margin))
         (should (= (car (nth 1 (assoc "b" cells))) margin))
-        (should (= (car (nth 1 (assoc "c" cells))) (+ margin (plist-get metrics :step))))
+        (should (= (car (nth 1 (assoc "c" cells))) (drover-list-test-title-x "b" "iiiiiiii")))
         ;; Locations begin at one position, past the widest title.
         (should (= (drover-list-test-cell-at "a" "iii") location))
         (should (= (drover-list-test-cell-at "b" "mm:x") location))
@@ -993,10 +1026,10 @@ titles take 25 pixels, and each field its :min characters and a gap of
                              (concat (flush "  ! Session ask" "3m") "\n"
                                      "    asks: Which branch?")))
               (should (equal (drover-list-test-entry "root") (flush "  ◐ ? Session root" "10s")))
-              (should (equal (drover-list-test-entry "sub") (flush "    ! Session sub" "1m")))
+              (should (equal (drover-list-test-entry "sub") (flush "      ! Session sub" "1m")))
               ;; Only sessions that need you say why, and only on their
               ;; second line.
-              (should (equal (drover-list-test-entry "deep") (flush "      ✓ Session deep" "30s")))
+              (should (equal (drover-list-test-entry "deep") (flush "        ✓ Session deep" "30s")))
               (should (equal (drover-list-test-entry "busy") (flush "  ◐ Session busy" "40s"))))
             ;; The second line belongs to its session.
             (drover-list-test-goto "ask")
@@ -1050,15 +1083,17 @@ titles take 25 pixels, and each field its :min characters and a gap of
               (should (> (drover-list-test-fake-width (concat (substring title 0 (1+ (length kept))) "…"))
                          room))
               (should (string-prefix-p kept title))))
-          ;; The subagent's summary starts under its title, and fits.
+          ;; The subagent's glyph stands under its parent's title, 36
+          ;; pixels in, and its summary under its own title, and fits.
+          (should (= (car (car (drover-list-test-cells "kid"))) 36))
           (save-excursion
             (drover-list-test-goto "kid")
             (forward-line 1)
             (let* ((line (buffer-substring (line-beginning-position) (line-end-position)))
                    (summary (substring line 1)))
-              (should (equal (get-text-property 0 'display line) '(space :align-to (36))))
+              (should (equal (get-text-property 0 'display line) '(space :align-to (47))))
               (should (string-suffix-p "…" summary))
-              (should (<= (drover-list-test-fake-width summary) (- 243 36))))))))))
+              (should (<= (drover-list-test-fake-width summary) (- 243 47))))))))))
 
 (ert-deftest drover-list-test-redraws-on-width-change ()
   (drover-list-test-with (list (drover-test-session "s" :status 'waiting
@@ -1392,7 +1427,7 @@ START and END bound its overlay."
     (drover-list-test-goto "child")
     (magit-section-show (magit-current-section))
     ;; Indented as deep as the subagent's title.
-    (should (string-match-p "^      Subagent of  Parent work$" (drover-list-test-visible-text)))))
+    (should (string-match-p "^        Subagent of  Parent work$" (drover-list-test-visible-text)))))
 
 ;;;; Session at point
 
@@ -2468,36 +2503,37 @@ The one waiting to retry is a subagent of the working one."
     (should (equal (drover-list-test-groups) '((idle "p"))))
     (drover-list-test-goto-group 'idle)
     (magit-section-show (magit-current-section))
-    (should (string-prefix-p "  · ? *2 Session p" (drover-list-test-heading "p")))
+    (should (string-prefix-p "  · ? * Session p" (drover-list-test-heading "p")))
     (drover-list-test-goto "p")
     (let* ((start (point))
            (waiting (save-excursion (search-forward "?") (match-beginning 0)))
-           (working (save-excursion (search-forward "*") (match-beginning 0))))
+           (working (save-excursion (search-forward "*") (match-beginning 0)))
+           (help (concat "1 subagent waiting for you: Session a\n"
+                         "2 subagents working: Session r, Session w")))
       (should (eq (get-text-property waiting 'font-lock-face) 'drover-waiting))
       (should (eq (get-text-property working 'font-lock-face) 'drover-working))
-      (should (eq (get-text-property (1+ working) 'font-lock-face) 'drover-working))
-      ;; Its tooltip names them, most urgent first.
-      (should (equal (get-text-property waiting 'help-echo)
-                     "Subagents waiting for you: Session a\nSubagents working: Session r, Session w"))
+      ;; Its tooltip names them, most urgent first, and counts them.
+      (should (equal (get-text-property waiting 'help-echo) help))
+      (should (equal (get-text-property working 'help-echo) help))
       ;; The rest of the line names them too, after the session.
-      (should (equal (get-text-property (+ start 2) 'help-echo)
-                     (concat "Session p\nSubagents waiting for you: Session a\n"
-                             "Subagents working: Session r, Session w"))))
-    ;; Shown, they tell the same; a subagent tells its own.
+      (should (equal (get-text-property (+ start 2) 'help-echo) (concat "Session p\n" help))))
+    ;; Shown, they tell the same, the subagents under the parent's
+    ;; title; a subagent tells its own.
     (setq drover-show-subagents 'all)
     (revert-buffer)
     (should (equal (drover-list-test-groups) '((waiting "p" "a" "d" "w" "r"))))
-    (should (string-prefix-p "  · ? *2 Session p" (drover-list-test-heading "p")))
-    (should (string-prefix-p "    ◐ * Session w" (drover-list-test-heading "w")))
-    (should (string-prefix-p "    ! Session a" (drover-list-test-heading "a")))
+    (should (string-prefix-p "  · ? * Session p" (drover-list-test-heading "p")))
+    (should (string-prefix-p "        ◐ * Session w" (drover-list-test-heading "w")))
+    (should (string-prefix-p "        ! Session a" (drover-list-test-heading "a")))
+    (should (string-prefix-p "            ↻ Session r" (drover-list-test-heading "r")))
     ;; Once they are done, nothing.
     (dolist (id '("a" "w" "r"))
       (setf (drover-session-status (drover-list-test-find id)) 'done))
     (revert-buffer)
     (should (string-prefix-p "  · Session p" (drover-list-test-heading "p")))))
 
-(ert-deftest drover-list-test-active-subagents-counted ()
-  "The count shows only past one, per kind."
+(ert-deftest drover-list-test-active-subagents-not-counted ()
+  "The glyphs of active subagents tell no number: their tooltip does."
   (drover-list-test-with
       (list (drover-test-session "p" :status 'idle)
             (drover-test-session "a1" :parent "p" :status 'waiting)
@@ -2506,7 +2542,12 @@ The one waiting to retry is a subagent of the working one."
     (setq drover-show-subagents 'none
           drover-list-collapsed-groups nil)
     (revert-buffer)
-    (should (string-prefix-p "  · ?2 * Session p" (drover-list-test-heading "p")))))
+    (should (string-prefix-p "  · ? * Session p" (drover-list-test-heading "p")))
+    (drover-list-test-goto "p")
+    (search-forward "?")
+    (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                   (concat "2 subagents waiting for you: Session a1, Session a2\n"
+                           "1 subagent working: Session w")))))
 
 (ert-deftest drover-list-test-active-subagents-aligned ()
   "With the indicator, one space still parts each glyph, and columns align."
@@ -2541,8 +2582,85 @@ The one waiting to retry is a subagent of the working one."
                             '("p" "a" "q"))))
           (should (= (length (seq-uniq ends)) 1)))))))
 
+(defun drover-list-test-ink-spans ()
+  "Return what the visible characters of the line at point draw, in the fake font.
+The value is a list of (START . END) in pixels, one per character
+drawn: its advance, or the ink `drover-list-test-ink' gives it, when it
+reaches further.  Spaces draw nothing, and a character displayed as a
+string draws that string."
+  (let ((line (buffer-substring (line-beginning-position) (line-end-position)))
+        (x 0)
+        (spans nil))
+    (dotimes (index (length line))
+      (let* ((char (substring line index (1+ index)))
+             (display (get-text-property index 'display line))
+             (shown (if (stringp display) display char)))
+        (pcase display
+          (`(space :align-to (,to)) (setq x to))
+          (_
+           (unless (or (consp display) (string-blank-p shown))
+             (let ((ink (alist-get (aref shown 0) drover-list-test-ink))
+                   (width (drover-list-test-fake-width shown)))
+               (push (cons (- x (or (car ink) 0)) (+ x (max width (or (cdr ink) 0)))) spans)))
+           (setq x (+ x (drover-list-test-fake-width char)))))))
+    (nreverse spans)))
+
+(defun drover-list-test-ink-apart-p ()
+  "Return non-nil when nothing the line at point draws overlaps, in the fake font."
+  (let ((spans (drover-list-test-ink-spans)))
+    (seq-every-p (lambda (pair) (<= (cdr (car pair)) (car (cdr pair))))
+                 (seq-mapn #'cons spans (cdr spans)))))
+
+(ert-deftest drover-list-test-glyphs-leave-room-for-ink ()
+  "Text after a glyph begins past its ink, which may reach past its advance.
+Icon fonts draw icons wider than the advance they give them; titles
+still line up, and subagents under their parent's title."
+  (drover-list-test-with-font
+    (drover-list-test-with
+        (list (drover-list-test-titled "p" "Parent" :status 'working :project "x"
+                                       :updated (drover-list-test-ago 5))
+              (drover-list-test-titled "a" "Ask" :parent "p" :status 'waiting :project "y"
+                                       :since (drover-list-test-ago 60)
+                                       :requests '((:kind question :summary "Go on")))
+              (drover-list-test-titled "w" "Work" :parent "p" :status 'working :project "z"
+                                       :updated (drover-list-test-ago 7))
+              (drover-list-test-titled "q" "Quiet" :status 'idle :project "x"))
+      ;; Glyphs advance 7 pixels: the ink of the waiting subagents' reaches
+      ;; 13 pixels right, that of the waiting status and the idle one 12,
+      ;; that of the working subagents' 3 pixels left.
+      (let ((drover-list-test-ink '((?? 0 . 13) (?! 0 . 12) (?· 0 . 12) (?* 3 . 7)))
+            (drover-show-subagents 'all)
+            (drover-list-collapsed-groups nil))
+        (dolist (width '(1000 250))
+          (let ((drover-list-test-width width))
+            (revert-buffer)
+            (should (eq drover-list--layout (if (= width 1000) 'columns 'narrow)))
+            (dolist (id '("p" "a" "w" "q"))
+              (save-excursion
+                (drover-list-test-goto id)
+                (should (drover-list-test-ink-apart-p))))
+            (should (equal (plist-get (drover-list--metrics 0) :status-cell) '(0 . 12)))
+            (should (equal (plist-get (drover-list--metrics 0) :subagent-cell) '(3 . 13)))
+            ;; "◐" and its pad, a space, the subagents' glyphs in their
+            ;; cells of 16 pixels and a space each: 12 + 4 + 2 * 20.
+            (should (= (drover-list-test-title-x "p" "Parent") (+ 14 12 4 20 20)))
+            (should (= (drover-list-test-title-x "q" "Quiet") (+ 14 12 4)))
+            (should (= (car (car (drover-list-test-cells "a"))) (drover-list-test-title-x "p" "Parent")))
+            (should (= (car (car (drover-list-test-cells "w"))) (drover-list-test-title-x "p" "Parent")))
+            ;; The header's glyph and count.
+            (goto-char (point-min))
+            (should (looking-at-p "!"))
+            (should (drover-list-test-ink-apart-p))))
+        ;; A group heading's glyph and count.
+        (setq drover-group-by 'project)
+        (revert-buffer)
+        (drover-list-test-goto-group "x")
+        (should (string-match-p "\\`x (4)  ! +1\\'" (drover-list-test-line)))
+        (should (drover-list-test-ink-apart-p))))))
+
 (ert-deftest drover-list-test-active-subagents-narrow ()
-  "In two lines too, the indicator stands between the status and the title."
+  "In two lines too, the indicator stands between the status and the title.
+The subagent's glyph stands under its parent's title."
   (drover-list-test-with (list (drover-test-session "p" :status 'idle :updated (drover-list-test-ago 60))
                                (drover-test-session "a" :parent "p" :status 'waiting
                                                     :since (drover-list-test-ago 120)
@@ -2550,7 +2668,57 @@ The one waiting to retry is a subagent of the working one."
     (with-current-buffer (window-buffer (drover-list--show-side))
       (should (eq drover-list--layout 'narrow))
       (should (string-match-p "\\`  · \\? Session p +1m\\'" (drover-list-test-entry "p")))
-      (should (string-match-p "\\`    ! Session a +2m\n      asks: Go\\?\\'" (drover-list-test-entry "a"))))))
+      (should (string-match-p "\\`      ! Session a +2m\n        asks: Go\\?\\'" (drover-list-test-entry "a"))))))
+
+;;;; Open sessions
+
+(ert-deftest drover-list-test-open-sessions ()
+  "The title of a session open in a buffer is in its face, over its other faces."
+  (drover-list-test-with (list (drover-test-session "work" :status 'working)
+                               (drover-list-test-titled "idle" "Idle and open for a long while"
+                                                        :status 'idle)
+                               (drover-test-session "shut" :status 'working))
+    (drover-list-test--register-buffers)
+    (setq drover-list-collapsed-groups nil)
+    (get-buffer-create "*session work*")
+    (get-buffer-create "*session idle*")
+    (revert-buffer)
+    (cl-flet ((title-face (id title)
+                (save-excursion
+                  (drover-list-test-goto id)
+                  (search-forward title)
+                  (let ((start (match-beginning 0)))
+                    (should (equal (get-text-property start 'face)
+                                   (get-text-property start 'font-lock-face)))
+                    ;; One face over the whole title.
+                    (should (= (next-single-property-change start 'face nil (point)) (point)))
+                    (get-text-property start 'face)))))
+      (should (eq (title-face "work" "Session work") 'drover-open-session))
+      ;; Over the dimming of idle sessions, which lends what it lacks.
+      (should (equal (title-face "idle" "Idle and open") '(drover-open-session drover-dim)))
+      (should-not (title-face "shut" "Session shut"))
+      ;; Only the title: the glyph keeps the face of its status.
+      (save-excursion
+        (drover-list-test-goto "work")
+        (search-forward "◐")
+        (should (eq (get-text-property (match-beginning 0) 'face) 'drover-working)))
+      ;; Closing a buffer is a change its backend reports: the list,
+      ;; shown, redraws.
+      (drover-list-test-shown
+        (kill-buffer "*session work*")
+        (drover-backend-changed 'fake "work")
+        (drover-changed-now)
+        (should-not (title-face "work" "Session work"))
+        (should (equal (title-face "idle" "Idle and open") '(drover-open-session drover-dim)))))
+    ;; A title cut to fit keeps the face up to its ellipsis.
+    (drover-list-test-with-font
+      (let ((drover-list-test-width 150))
+        (revert-buffer)
+        (save-excursion
+          (drover-list-test-goto "idle")
+          (search-forward (truncate-string-ellipsis) (line-end-position))
+          (should (equal (get-text-property (match-beginning 0) 'face)
+                         '(drover-open-session drover-dim))))))))
 
 ;;;; Animated glyphs
 
@@ -2610,20 +2778,32 @@ The one waiting to retry is a subagent of the working one."
             (revert-buffer)
             (should (equal (frame "w") '("m" (space :width (0)) working)))))))))
 
-(ert-deftest drover-list-test-animated-indicator ()
-  "The glyph of working subagents is animated, that of waiting ones still."
-  (drover-list-test-with (list (drover-test-session "p" :status 'idle)
+(ert-deftest drover-list-test-still-indicator ()
+  "The glyphs of active subagents stay still while status glyphs move."
+  (drover-list-test-with (list (drover-test-session "p" :status 'working)
                                (drover-test-session "a" :parent "p" :status 'waiting)
                                (drover-test-session "w" :parent "p" :status 'working))
+    ;; Frames for subagents, as the option once took, animate nothing.
     (let ((drover-list-animation-interval 1)
-          (drover-show-subagents 'none)
-          (drover-list-collapsed-groups nil))
+          (drover-animations '((working "1" "2" "3") (subagents "+" "*")))
+          (drover-show-subagents 'none))
       (revert-buffer)
-      (should (string-prefix-p "  · ? + Session p" (drover-list-test-heading "p")))
-      (should (equal (mapcar #'cdr drover-list--animated) '(subagents)))
+      (should (string-prefix-p "  1 ? * Session p" (drover-list-test-heading "p")))
+      ;; The status glyph alone is animated.
+      (should (equal (mapcar #'cdr drover-list--animated) '(working)))
       (setq drover-list-test-clock (+ drover-test-now 1))
       (drover-list--draw-frames)
-      (should (string-prefix-p "  · ? * Session p" (drover-list-test-heading "p"))))))
+      (should (string-prefix-p "  2 ? * Session p" (drover-list-test-heading "p"))))))
+
+(ert-deftest drover-list-test-default-animations ()
+  "By default, only status glyphs move, through frames of one weight of ink."
+  (let ((animations (eval (car (get 'drover-animations 'standard-value)) t)))
+    (should (equal (mapcar #'car animations) '(working retrying)))
+    ;; The full hourglass, solid among outlined ones, read as a blink.
+    (should (equal (alist-get 'working animations) '("\U000F051F" "\U000F199F")))
+    ;; Four filled clocks, the hand alone turning.
+    (should (equal (alist-get 'retrying animations)
+                   '("\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447")))))
 
 (ert-deftest drover-list-test-animated-glyph-under-cache-bar ()
   "In two lines, a cache bar may end within an animated glyph, or past it."

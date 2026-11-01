@@ -67,6 +67,12 @@
   "Face of secondary details, such as directories and ages."
   :group 'drover-faces)
 
+(defface drover-open-session '((t :inherit font-lock-keyword-face))
+  "Face of the titles of sessions open in an Emacs buffer.
+It goes over the other faces of a title, such as the dimming of idle
+sessions, which keep the attributes it does not set."
+  :group 'drover-faces)
+
 (defface drover-cache-bar
   '((((class color) (min-colors 88) (background light)) :background "#e4ecf5")
     (((class color) (min-colors 88) (background dark)) :background "#26323f")
@@ -110,25 +116,25 @@ Session lists animate some of them; see `drover-animations'."
   "Glyphs telling that subagents of a session are in the middle of a turn.
 Session lists show them beside the status of the session, shown or
 not: `waiting' when subagents wait for you, `working' when subagents
-work or wait to retry, each followed by how many when more than one.
-Nerd Font icons by default; see also `drover-animations'."
+work or wait to retry.  They stay still and tell no number, which their
+tooltip tells.  Nerd Font icons by default."
   :type '(alist :key-type (choice (const waiting) (const working)) :value-type string)
   :group 'drover)
 
 (defcustom drover-animations
-  '((working "\U000F078C" "\U000F051F" "\U000F199F") ; nf-md-timer_sand_full, timer_sand, timer_sand_complete
-    (retrying "\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447") ; nf-md-clock_time_twelve, three, six, nine
-    (subagents "\U000F06A9" "\U000F167A")) ; nf-md-robot, nf-md-robot_outline
-  "Frames of the glyphs session lists animate, shown in turn.
+  '((working "\U000F051F" "\U000F199F") ; nf-md-timer_sand, timer_sand_complete
+    (retrying "\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447")) ; nf-md-clock_time_twelve, three, six, nine
+  "Frames of the status glyphs session lists animate, shown in turn.
 Each entry is (KIND FRAME...), each FRAME a string.  KIND is `working'
-or `retrying', for the status glyph of sessions of that status in place
-of their glyph of `drover-status-glyphs', or `subagents', for the glyph
-telling that subagents work, in place of its glyph of
-`drover-subagent-glyphs'.  A kind without frames stays still.  Each
-frame takes the room of the widest, so that nothing after it moves.
-Nerd Font icons by default; `drover-list-animation-interval' sets the
-pace, or stops every animation."
-  :type '(alist :key-type (choice (const working) (const retrying) (const subagents))
+or `retrying': sessions of that status show the frames in place of
+their glyph of `drover-status-glyphs'.  A kind without frames stays
+still.  Each frame takes the room of the widest, so that nothing after
+it moves.  Nerd Font icons by default, of one weight of ink: a frame
+much darker or lighter than the others, such as a full hourglass among
+outlined ones, reads as a blink rather than as motion.
+`drover-list-animation-interval' sets the pace, or stops every
+animation."
+  :type '(alist :key-type (choice (const working) (const retrying))
                 :value-type (repeat string))
   :group 'drover)
 
@@ -235,6 +241,55 @@ terminal, a pixel is a character cell."
                     display-line-numbers nil)
         (insert string)
         (car (buffer-text-pixel-size nil (and (window-live-p window) window) t))))))
+
+(defun drover--face-over-default (face)
+  "Return FACE, a value of the `face' property, merged over the face `default'."
+  (append (if (and (proper-list-p face) (not (keywordp (car face))))
+              face
+            (list face))
+          '(default)))
+
+(defun drover-text-ink-extent (string &optional remapping window)
+  "Return how far the drawing of STRING reaches, as (LEFT . RIGHT), in pixels.
+RIGHT is how far from the start of STRING its ink or its advance
+reaches, whichever is further, and LEFT how far left of its start its
+ink reaches, 0 when it does not.  REMAPPING and WINDOW are as for
+`drover-text-pixel-width', which measures only advances: text drawn
+after STRING begins at its advance, and may be drawn under its ink.
+Icon fonts draw glyphs wider than their advance: the Nerd Fonts but
+their Mono variants give an icon the advance of one cell, and up to
+half a cell of ink beyond it.
+
+The font drawing each character is the one the window's frame would
+pick, through its fontset when the face's font lacks the character.  A
+character displayed as something else, through a `display' property,
+counts by its advance alone, and so does every character on a text
+terminal."
+  (let ((width (drover-text-pixel-width string remapping window))
+        (window (if (window-live-p window) window (selected-window))))
+    (if (not (display-graphic-p (window-frame window)))
+        (cons 0 width)
+      (let ((left 0)
+            (right width)
+            ;; `font-at' merges the faces of a string over the frame's
+            ;; default face, not over the buffer's remapping of it; named,
+            ;; `default' takes the remapping, as in the view's buffer.
+            (faced (copy-sequence string)))
+        (dotimes (index (length string))
+          (put-text-property index (1+ index) 'face
+                             (drover--face-over-default (get-text-property index 'face string))
+                             faced))
+        (with-current-buffer (get-buffer-create drover--measure-buffer)
+          (setq-local face-remapping-alist remapping)
+          (dotimes (index (length string))
+            (unless (get-text-property index 'display string)
+              (when-let* ((font (font-at index window faced))
+                          (glyph (aref (font-get-glyphs font index (1+ index) faced) 0)))
+                (let ((x (drover-text-pixel-width (substring string 0 index) remapping window)))
+                  ;; Bearings run from the glyph's origin to its ink's edges.
+                  (setq left (max left (- (+ x (aref glyph 5))))
+                        right (max right (+ x (aref glyph 6)))))))))
+        (cons left right)))))
 
 (defun drover-truncate-to-pixels (string pixels measure)
   "Return STRING cut to fit PIXELS wide, as MEASURE measures it.
