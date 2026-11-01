@@ -41,7 +41,10 @@ compile:
 # with the required packages alone, as a package manager compiles it,
 # in a copy of the sources so that no front end's checkout is found
 # beside them.  Its byte code must be the byte code compiled with the
-# front ends present, if any: the backends then work either way.
+# front ends present, if any, so that the backends work either way: the
+# same but for the numbers of uninterned symbols, which count those
+# made before in the compiling Emacs.
+UNNUMBER = LC_ALL=C sed -E 's/(\#:[A-Za-z_-]*[A-Za-z_-])[0-9]+/\1/g'
 compile-standalone:
 	@build=$$(mktemp -d); status=0; \
 	cp $(SOURCES) "$$build" && \
@@ -49,8 +52,12 @@ compile-standalone:
 	   -f batch-byte-compile $(SOURCES)) || status=1; \
 	if [ $$status -eq 0 ]; then \
 	  for elc in $(SOURCES:.el=.elc); do \
-	    if [ -f "$$elc" ] && ! cmp -s "$$elc" "$$build/$$elc"; then \
-	      echo "$$elc differs when compiled without the optional front ends"; status=1; \
+	    if [ -f "$$elc" ]; then \
+	      $(UNNUMBER) "$$elc" > "$$build/present"; \
+	      $(UNNUMBER) "$$build/$$elc" > "$$build/alone"; \
+	      if ! cmp -s "$$build/present" "$$build/alone"; then \
+	        echo "$$elc differs when compiled without the optional front ends"; status=1; \
+	      fi; \
 	    fi; \
 	  done; \
 	fi; \
