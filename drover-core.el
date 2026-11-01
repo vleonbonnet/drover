@@ -184,7 +184,11 @@ reads from the cache rather than sends anew.")
   (agent-display nil :documentation "The agent as lists show it, a string in its faces, or nil.
 Such as the name the agent's catalog gives it, in the agent's colour.
 Without it, lists show AGENT in a face of `drover-agent-faces'.  AGENT
-stays what views group, sort and filter by."))
+stays what views group, sort and filter by.")
+  ;; New slots go last, so that code compiled against the record before
+  ;; them keeps reading the others at their place.
+  (context-estimated nil :documentation "Non-nil when CONTEXT-TOKENS is the service's estimate after a compaction.
+The next step measures it."))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."

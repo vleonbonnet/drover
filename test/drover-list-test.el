@@ -1315,6 +1315,30 @@ and :help its tooltip."
       (magit-section-show (magit-current-section))
       (should-not (string-match-p "^ +Context" (drover-list-test-visible-text))))))
 
+(ert-deftest drover-list-test-context-estimated ()
+  "A context the service estimated begins with a ~, which its column makes room for."
+  (drover-list-test-with-font
+    (drover-list-test-with
+        (list (drover-list-test-titled "e" "Estimated" :status 'working :updated (drover-list-test-ago 60)
+                                       :context-tokens 50000 :context-limit 200000 :context-estimated t)
+              (drover-list-test-titled "m" "Measured" :status 'working :updated (drover-list-test-ago 70)
+                                       :context-tokens 50000 :context-limit 200000))
+      (let ((e (drover-list-test-context-cell "e"))
+            (m (drover-list-test-context-cell "m")))
+        (should (equal (plist-get e :label) "~50k"))
+        (should (equal (plist-get m :label) "50k"))
+        (should (eq (plist-get e :label-face) 'drover-dim))
+        (should (string-prefix-p "Context: ~50k of 200k tokens (25%)\nEstimated by the service"
+                                 (plist-get e :help)))
+        ;; The column holds the ~: the next one begins past it.
+        (let* ((cells (drover-list-test-cells "e"))
+               (context (seq-find (lambda (cell) (string-search "~50k" (cdr cell))) cells))
+               (next (cadr (memq context cells))))
+          (should next)
+          (should (>= (- (car next) (car context))
+                      (+ (drover-list-test-fake-width (cdr context))
+                         (* drover-list--gap (drover-list--char-width))))))))))
+
 (ert-deftest drover-list-test-context-not-in-two-lines ()
   "Two lines leave the context out: the cache already colours the line."
   (drover-list-test-with (drover-list-test-rich)

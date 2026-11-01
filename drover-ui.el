@@ -258,21 +258,27 @@ from ten on; a decimal of zero is dropped."
 
 (defun drover-session-context-description (session)
   "Return what the context of SESSION fills, for tooltips and details, or nil.
-Such as \"182k of 200k tokens (91%)\", then, on a line of its own, the
-price tier it nears or passes.  Nil when the size is unknown."
+Such as \"182k of 200k tokens (91%)\", then, on lines of their own,
+whether the size is an estimate and the price tier it nears or passes.
+A size the service estimated after a compaction, which the next step
+measures, begins with \"~\".  Nil when the size is unknown."
   (when-let* ((tokens (drover-session-context-tokens session)))
     (let ((limit (drover-session-context-limit session))
-          (fraction (drover-session-context-fraction session)))
-      (concat (drover-format-tokens tokens)
+          (fraction (drover-session-context-fraction session))
+          (estimated (drover-session-context-estimated session)))
+      (concat (and estimated "~")
+              (drover-format-tokens tokens)
               (and limit (concat " of " (drover-format-tokens limit)))
               " tokens"
               (and fraction (format " (%d%%)" (round (* 100 fraction))))
+              (and estimated "\nEstimated by the service after compaction; the next step measures it")
               (pcase (drover-session-context-tier session)
                 (`(over ,size ,label)
-                 (format "\nPast %s tokens: requests cost %s" (drover-format-tokens size) label))
+                 (format "\n%s %s tokens: requests cost %s"
+                         (if estimated "Estimated past" "Past") (drover-format-tokens size) label))
                 (`(near ,size ,label)
-                 (format "\nNear %s tokens, past which requests cost %s"
-                         (drover-format-tokens size) label)))))))
+                 (format "\n%s %s tokens, past which requests cost %s"
+                         (if estimated "Estimated near" "Near") (drover-format-tokens size) label)))))))
 
 (defun drover-session-cache-description (session &optional now)
   "Return how the prompt cache of SESSION stands at NOW, or nil when not live.

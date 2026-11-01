@@ -768,10 +768,11 @@ its name; the tooltip names it."
   "Return the context of SESSION as its column shows it, or nil when unknown.
 A short bar of how much of the model's context it fills comes first,
 `drover-list-context-bar-width' characters CHAR pixels wide, then the
-size.  Near a long-context price tier, the size is in
-`drover-context-near' and the bar's full part in its inverse video,
-past it in `drover-context-over'.  Without the model's context size,
-an empty space takes the bar's place, so that sizes line up."
+size, after a \"~\" when the service estimated it after a compaction.
+Near a long-context price tier, the size is in `drover-context-near'
+and the bar's full part in its inverse video, past it in
+`drover-context-over'.  Without the model's context size, an empty
+space takes the bar's place, so that sizes line up."
   (when-let* ((tokens (drover-session-context-tokens session)))
     (let* ((fraction (drover-session-context-fraction session))
            (pixels (* drover-list-context-bar-width char))
@@ -783,7 +784,9 @@ an empty space takes the bar's place, so that sizes line up."
                    (drover-list--bar fraction pixels (if face (list '(:inverse-video t) face) 'drover-context-bar))
                  (drover-list--pad pixels))
                " "
-               (drover-face (drover-format-tokens tokens) (or face 'drover-dim)))
+               (drover-face (concat (and (drover-session-context-estimated session) "~")
+                                    (drover-format-tokens tokens))
+                            (or face 'drover-dim)))
        'help-echo (concat "Context: " (drover-session-context-description session))))))
 
 (defun drover-list--branch-text (session)

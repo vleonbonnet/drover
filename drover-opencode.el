@@ -426,8 +426,9 @@ default, its provider, and its context, as opencode.el's mode line
 shows them, read in the cached catalogs of DIRECTORY: none is fetched
 here.  Until they arrive, the model is its identifier, and what needs
 them nil; `drover-opencode--catalog-changed' redraws once they do.  The
-context size is the one the registry knows: `drover-opencode--prefetch'
-asks for the others."
+context size is the one the registry knows, the service's estimate
+after a compaction until the next step measures it:
+`drover-opencode--prefetch' asks for the others."
   (let* ((ref (plist-get entry :model))
          (directory (or directory default-directory))
          (provider-id (alist-get 'providerID ref))
@@ -444,6 +445,7 @@ asks for the others."
                               (or (alist-get 'name (opencode-provider-info provider-id directory))
                                   provider-id))
           :context-tokens tokens
+          :context-estimated (plist-get entry :context-estimated)
           :context-limit (plist-get usage :limit)
           :context-tier (plist-get usage :tier))))
 

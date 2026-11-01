@@ -300,6 +300,25 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should-not (drover-session-detail session))
       (should (equal (drover-session-summary session) "permit: bash: make test")))))
 
+(ert-deftest drover-opencode-test-maps-estimated-context ()
+  "A context the service estimated after a compaction is told so, until measured."
+  (drover-opencode-test-with
+      (list (drover-opencode-test-entry "ses_1" :model '((id . "claude-opus") (providerID . "anthropic"))
+                                        :context 40000 :context-estimated t)
+            (drover-opencode-test-entry "ses_2" :model '((id . "claude-opus") (providerID . "anthropic"))
+                                        :context 40000))
+    (let ((estimated (drover-opencode-test-session "ses_1"))
+          (measured (drover-opencode-test-session "ses_2")))
+      (should (eql (drover-session-context-tokens estimated) 40000))
+      (should (drover-session-context-estimated estimated))
+      (should (string-prefix-p "~40k of 200k" (drover-session-context-description estimated)))
+      (should-not (drover-session-context-estimated measured))
+      ;; The next step measures it: the registry clears the flag.
+      (setq drover-opencode-test-entries
+            (list (drover-opencode-test-entry "ses_1" :model '((id . "claude-opus") (providerID . "anthropic"))
+                                              :context 52000)))
+      (should-not (drover-session-context-estimated (drover-opencode-test-session "ses_1"))))))
+
 (ert-deftest drover-opencode-test-maps-missing-fields ()
   (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0))
     (cl-letf (((symbol-function 'opencode-git-branch) (lambda (_) (error "No directory to read")))

@@ -1130,6 +1130,36 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
                    "186k of 200k tokens (93%)\nNear 200k tokens, past which requests cost 2×"))
     (should-not (drover-session-context-description (session :context-limit 200000)))))
 
+(ert-deftest drover-test-context-estimated ()
+  "A context the service estimated after a compaction says so, and its tier too."
+  (cl-flet ((session (&rest properties) (apply #'drover-test-session "s" properties)))
+    (should-not (drover-session-context-estimated (session :context-tokens 50000)))
+    (should (equal (drover-session-context-description
+                    (session :context-tokens 50000 :context-limit 200000 :context-estimated t))
+                   (concat "~50k of 200k tokens (25%)\n"
+                           "Estimated by the service after compaction; the next step measures it")))
+    (should (equal (drover-session-context-description
+                    (session :context-tokens 1200000 :context-limit 1000000 :context-estimated t
+                             :context-tier '(over 200000 "2×")))
+                   (concat "~1.2M of 1M tokens (120%)\n"
+                           "Estimated by the service after compaction; the next step measures it\n"
+                           "Estimated past 200k tokens: requests cost 2×")))
+    (should (equal (drover-session-context-description
+                    (session :context-tokens 186000 :context-estimated t
+                             :context-tier '(near 200000 "2×")))
+                   (concat "~186k tokens\n"
+                           "Estimated by the service after compaction; the next step measures it\n"
+                           "Estimated near 200k tokens, past which requests cost 2×")))
+    ;; Without a size, nothing is estimated.
+    (should-not (drover-session-context-description (session :context-estimated t)))))
+
+(ert-deftest drover-test-session-record-keeps-its-layout ()
+  "New slots of the session record come last, after those compiled code reads."
+  (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
+    (should (eq (car (last slots)) 'context-estimated))
+    (should (equal (seq-take slots 4) '(backend id title directory)))
+    (should (< (seq-position slots 'agent-display) (seq-position slots 'context-estimated)))))
+
 (ert-deftest drover-test-format-tokens ()
   (should (equal (mapcar #'drover-format-tokens
                          '(0 950 999 1000 8400 9940 9960 182345 999499 999500 1200000 12345678))
