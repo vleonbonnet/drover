@@ -500,6 +500,42 @@ serves and a model without effort.")
       (should (equal (drover-claude-code-session-directory "id-a") project))
       (should-not (drover-claude-code-session-directory "id-b")))))
 
+(ert-deftest drover-claude-code-test-session-files ()
+  "A session's files are its transcript and the directory beside it, found by identifier."
+  (drover-test-with-homes
+    (let* ((id "11111111-1111-4111-8111-111111111111")
+           (project (file-name-as-directory (file-truename (expand-file-name "project" home))))
+           (other (file-name-as-directory (file-truename (expand-file-name "other" home))))
+           (transcript (drover-claude-code-transcript id project))
+           (beside (expand-file-name id (file-name-directory transcript)))
+           (delete-by-moving-to-trash nil))
+      (make-directory project t)
+      (make-directory other t)
+      ;; Only a session identifier is looked for.
+      (dolist (bad '("../../etc/passwd" "id-a" nil ""))
+        (should-error (drover-claude-code-session-files bad project) :type 'user-error))
+      (should-error (drover-claude-code-session-files id project) :type 'user-error)
+      (drover-test-write transcript "{}\n")
+      (should (equal (drover-claude-code-session-files id project) (cons transcript nil)))
+      ;; Found in its own bucket, else the one holding it.
+      (should (equal (drover-claude-code-session-files id other) (cons transcript nil)))
+      (should (equal (drover-claude-code-session-files id) (cons transcript nil)))
+      (drover-test-write (expand-file-name "subagents/agent-1.jsonl" beside) "{}\n")
+      (should (equal (drover-claude-code-session-files id project) (cons transcript beside)))
+      ;; Two buckets holding it, and the session's own not one: none.
+      (let ((copy (drover-claude-code-transcript id other)))
+        (drover-test-write copy "{}\n")
+        (should (equal (car (drover-claude-code-session-files id project)) transcript))
+        (should-error (drover-claude-code-session-files id) :type 'user-error)
+        (delete-file copy))
+      (let ((neighbour (drover-claude-code-transcript "22222222-2222-4222-8222-222222222222" project)))
+        (drover-test-write neighbour "{}\n")
+        (drover-claude-code-delete-session-files (drover-claude-code-session-files id project))
+        (should-not (file-exists-p transcript))
+        (should-not (file-exists-p beside))
+        ;; The other transcripts of the bucket stay.
+        (should (file-exists-p neighbour))))))
+
 (ert-deftest drover-claude-code-test-pid-session-id ()
   "A process's session is the one the CLI records for its PID, never a guess."
   (drover-test-with-homes

@@ -45,6 +45,12 @@
 ;; levels as their variants: a live source, which `drover-model'
 ;; remembers, told again whenever a shell's models may have changed.
 ;;
+;; A shell's agent forks its session (agent-shell's own fork, ACP's
+;; session/fork), compacts it (the command /compact, sent as a prompt)
+;; and deletes it (ACP's session/delete, after which the shell closes),
+;; as far as it advertises it can, which :supports tells.  agent-shell
+;; has no archive: drover archives shells' sessions itself.
+;;
 ;; `drover' loads this file once agent-shell.el is loaded.
 
 ;;; Code:
@@ -93,6 +99,9 @@
 (declare-function agent-shell-unsubscribe "ext:agent-shell" t)
 (declare-function agent-shell-viewport--buffer "ext:agent-shell-viewport" t)
 (declare-function agent-shell-viewport--shell-buffer "ext:agent-shell-viewport" (&optional viewport-buffer))
+(declare-function acp-make-session-delete-request "ext:acp" t)
+(declare-function acp-send-request "ext:acp" t)
+(declare-function agent-shell-fork "ext:agent-shell" ())
 (declare-function shell-maker-busy "ext:shell-maker" ())
 (declare-function shell-maker-last-output "ext:shell-maker" ())
 (declare-function shell-maker-set-buffer-name "ext:shell-maker" (buffer new-name))
@@ -947,6 +956,83 @@ name."
   "Rename the shell of SESSION to TITLE."
   (drover-agent-shell--set-title (drover-agent-shell--live-buffer session) title))
 
+(defun drover-agent-shell--session-id (buffer)
+  "Return the ACP session of the initialized shell of BUFFER, or nil."
+  (when (and (buffer-live-p buffer) (drover-agent-shell--initialized-p buffer))
+    (let ((id (map-nested-elt (buffer-local-value 'agent-shell--state buffer) '(:session :id))))
+      (and (stringp id) id))))
+
+(defun drover-agent-shell--acp-session (buffer)
+  "Return the ACP session of the shell of BUFFER with its client, or nil.
+The value is (CLIENT . SESSION-ID), what requests about the session
+are sent with."
+  (when-let* ((id (drover-agent-shell--session-id buffer))
+              (client (map-elt (buffer-local-value 'agent-shell--state buffer) :client)))
+    (cons client id)))
+
+(defun drover-agent-shell--offers-command-p (buffer name)
+  "Return non-nil when the agent of the shell of BUFFER offers command NAME.
+Agents tell the slash commands they take as the session goes, such as
+\"compact\"; a shell not initialized offers none."
+  (and (drover-agent-shell--session-id buffer)
+       (seq-some (lambda (command) (equal (map-elt command 'name) name))
+                 (map-elt (buffer-local-value 'agent-shell--state buffer) :available-commands))
+       t))
+
+(defun drover-agent-shell--fork (session)
+  "Fork SESSION whole into a new shell, which agent-shell displays.
+It is agent-shell's own fork, through the ACP session/fork of agents
+able to fork.  The backend's :fork."
+  (with-current-buffer (drover-agent-shell--live-buffer session)
+    (agent-shell-fork)))
+
+(defun drover-agent-shell--compact (session)
+  "Compact the conversation of SESSION, sending its agent /compact.
+The command goes as a prompt, as ACP agents take their commands, queued
+while the shell is busy.  The backend's :compact."
+  (drover-agent-shell-send-text (drover-agent-shell--live-buffer session) "/compact"))
+
+(defun drover-agent-shell--close (buffer)
+  "Kill the shell of BUFFER without asking: drover asked already.
+agent-shell shuts its agent down as the buffer goes."
+  (let ((kill-buffer-query-functions nil))
+    (kill-buffer buffer)))
+
+(defun drover-agent-shell--delete (session)
+  "Delete SESSION for good, through its agent, then close its shell.
+The agent deletes the session as ACP's session/delete asks, all it
+keeps of it included, such as Claude Code's transcripts; an agent that
+cannot is reported, and its shell kept.  The request is answered later:
+the shell goes once the agent deleted the session.  The backend's
+:delete."
+  (let* ((buffer (drover-agent-shell--live-buffer session))
+         (title (drover-session-display-title session))
+         (acp (or (drover-agent-shell--acp-session buffer)
+                  (user-error "%s has no session to delete yet" title))))
+    (acp-send-request
+     :client (car acp)
+     :request (acp-make-session-delete-request :session-id (cdr acp))
+     :on-success (lambda (_response)
+                   (when (buffer-live-p buffer)
+                     (drover-agent-shell--close buffer)))
+     :on-failure (lambda (error &rest _)
+                   (drover-warn "The agent of %s did not delete its session (%s); its shell stays"
+                                title (or (and (consp error) (map-elt error 'message)) error))))))
+
+(defun drover-agent-shell--supports (session operation)
+  "Return non-nil when OPERATION applies to SESSION.
+Forking needs an agent able to fork, compacting one offering the
+command \"compact\", deleting an initialized shell, whose agent tells
+whether it can.  The backend's :supports."
+  (let ((buffer (drover-session-buffer session)))
+    (pcase operation
+      (:fork (and (drover-agent-shell--session-id buffer)
+                  (map-elt (buffer-local-value 'agent-shell--state buffer) :supports-session-fork)
+                  t))
+      (:compact (drover-agent-shell--offers-command-p buffer "compact"))
+      (:delete (and (drover-agent-shell--acp-session buffer) t))
+      (_ t))))
+
 ;;;; Shell buffers
 
 (defun drover-agent-shell--changed ()
@@ -1009,6 +1095,10 @@ whose creation time is unknown."
    :new #'drover-agent-shell--new
    :buffer #'drover-agent-shell--buffer
    :rename #'drover-agent-shell--rename
+   :fork #'drover-agent-shell--fork
+   :compact #'drover-agent-shell--compact
+   :delete #'drover-agent-shell--delete
+   :supports #'drover-agent-shell--supports
    :engines #'drover-agent-shell--engines
    :create #'drover-agent-shell--create
    :apply-options #'drover-agent-shell--apply-options

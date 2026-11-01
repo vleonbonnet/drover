@@ -138,6 +138,8 @@ Terminals BODY makes are killed."
          (drover-changed-hook nil)
          (drover-show-history nil)
          (drover--history nil)
+         (drover-show-archived nil)
+         (drover--archived nil)
          (drover-claude-code-start-flags-function nil)
          (drover-claude-code-project-directory-function nil)
          (drover-claude-code-ide--watchers nil)
@@ -347,6 +349,101 @@ session of `buffer', a temporary buffer, active."
   (drover-claude-code-ide-test-starting "--verbose"
     (drover-claude-code-ide-resume "a b" "/tmp/project/")
     (should (equal (nth 1 observed) (concat "--verbose --resume " (shell-quote-argument "a b"))))))
+
+(ert-deftest drover-claude-code-ide-test-fork ()
+  "Forking resumes the conversation under a new identifier, given at start."
+  (drover-claude-code-ide-test-starting "--verbose"
+    (let ((id "33333333-3333-4333-8333-333333333333"))
+      (should (eq (drover-claude-code-ide-fork id "/tmp/project/") buffer))
+      (should (equal (car observed) "/tmp/project/"))
+      (should (string-match (concat "\\`--verbose --resume " id " --fork-session --session-id \\([^ ]+\\)\\'")
+                            (nth 1 observed)))
+      (let ((fork (match-string 1 (nth 1 observed))))
+        (should-not (equal fork id))
+        (should (string-match-p drover-claude-code--uuid-regexp fork))
+        (should (equal drover-claude-code-ide-session-id fork)))))
+  ;; Through the backend, the session's own conversation and directory.
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* fork"))
+          (forked nil))
+      (cl-letf (((symbol-function 'drover-claude-code-ide-fork)
+                 (lambda (id directory) (push (list id directory) forked) terminal)))
+        (let ((session (drover-claude-code-ide-test-session terminal)))
+          ;; Its conversation not known yet, it cannot fork.
+          (should-not (drover-supports-p session :fork))
+          (should-error (drover-fork session) :type 'user-error)
+          (with-current-buffer terminal
+            (setq-local drover-claude-code-ide-session-id "conv"))
+          (setq session (drover-claude-code-ide-test-session terminal))
+          (should (drover-supports-p session :fork))
+          (drover-fork session)
+          (should (equal forked '(("conv" "/work/drover/")))))))))
+
+(ert-deftest drover-claude-code-ide-test-compact ()
+  "Compacting types /compact in the terminal, once its turn ended and it reads input."
+  (drover-claude-code-ide-test-with
+    (drover-claude-code-ide-test-typing
+      (let ((terminal (drover-claude-code-ide-test-terminal "*claude* compact")))
+        (should (drover-supports-p (drover-claude-code-ide-test-session terminal) :compact))
+        ;; Not reading input yet.
+        (should-error (drover-compact (drover-claude-code-ide-test-session terminal)) :type 'user-error)
+        (drover-claude-code-ide-test-ready terminal)
+        ;; In the middle of a turn.
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (should-error (drover-compact (drover-claude-code-ide-test-session terminal)) :type 'user-error)
+        (should-not (drover-claude-code-ide-test-called 'ghostel-send-string))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (drover-compact (drover-claude-code-ide-test-session terminal))
+        (should (equal (drover-claude-code-ide-test-called 'ghostel-send-string) '(("/compact"))))
+        (should (equal (drover-claude-code-ide-test-called 'ghostel-send-key) '(("return"))))))))
+
+(ert-deftest drover-claude-code-ide-test-delete ()
+  "Deleting closes the terminal, then deletes the conversation's files."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (let* ((id "44444444-4444-4444-8444-444444444444")
+             (project (file-name-as-directory (file-truename (expand-file-name "project" home))))
+             (transcript (drover-claude-code-transcript id project))
+             (beside (expand-file-name id (file-name-directory transcript)))
+             (delete-by-moving-to-trash nil)
+             (terminal (drover-claude-code-ide-test-terminal "*claude* delete" :directory project)))
+        (make-directory project t)
+        (let ((session (drover-claude-code-ide-test-session terminal)))
+          (should-not (drover-supports-p session :delete))
+          (with-current-buffer terminal
+            (setq-local drover-claude-code-ide-session-id id))
+          (setq session (drover-claude-code-ide-test-session terminal))
+          (should (drover-supports-p session :delete))
+          ;; No transcript: nothing goes, the terminal stays.
+          (should-error (drover-delete session) :type 'user-error)
+          (should (buffer-live-p terminal))
+          (drover-test-write transcript "{}\n")
+          (drover-test-write (expand-file-name "tool-results/a.txt" beside) "out")
+          (drover-delete session)
+          (should-not (buffer-live-p terminal))
+          (should-not (file-exists-p transcript))
+          (should-not (file-exists-p beside)))))))
+
+(ert-deftest drover-claude-code-ide-test-archived-without-terminal ()
+  "A session whose terminal is gone, as drover keeps one archived, offers what needs none."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (let* ((id "55555555-5555-4555-8555-555555555555")
+             (project (file-name-as-directory (file-truename (expand-file-name "project" home))))
+             (kept (drover-session-create :backend 'claude-code-ide :id id :engine 'claude-code
+                                          :engine-id id :directory project :archived 1.0))
+             (recap nil))
+        (dolist (operation '(:open :respond :interrupt :mark-seen :preview :rename :compact))
+          (should-not (drover-supports-p kept operation)))
+        (dolist (operation '(:fork :delete :recap))
+          (should (drover-supports-p kept operation)))
+        ;; Its recap is read from its conversation.
+        (drover-test-write (drover-claude-code-transcript id project)
+                           (concat (json-encode '((type . "user") (message (content . "Go")))) "\n"))
+        (drover-recap kept (lambda (value) (setq recap value)))
+        (should (equal (plist-get recap :prompt) "Go"))
+        (drover-delete kept)
+        (should-not (file-exists-p (drover-claude-code-transcript id project)))))))
 
 (ert-deftest drover-claude-code-ide-test-create ()
   "A new session starts with the flags of its options, and is handed over."
@@ -1247,9 +1344,11 @@ guess could hide another session of the directory."
     (should (equal (drover-backend-label 'claude-code-ide) "Claude Code IDE"))
     (should (equal (drover-backend-engines 'claude-code-ide) '(claude-code)))
     (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new :buffer
-                                   :rename :create :apply-options :send :options :settable))
+                                   :rename :create :apply-options :send :options :settable
+                                   :delete :fork :compact :supports))
       (should (functionp (drover-backend-property 'claude-code-ide operation))))
-    (dolist (operation '(:archive :delete :fork :compact :check :history))
+    ;; Drover archives its sessions: it has no archive of its own.
+    (dolist (operation '(:archive :unarchive :archived :check :history))
       (should-not (drover-backend-property 'claude-code-ide operation)))))
 
 (ert-deftest drover-claude-code-ide-test-engine-front-end ()

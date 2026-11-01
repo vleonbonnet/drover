@@ -47,6 +47,14 @@
 ;; While a session runs, the models of the catalog its CLI caches are
 ;; the `claude-code' engine's, a live source `drover-model' remembers.
 ;;
+;; A session is forked into a new terminal resuming it with
+;; --fork-session, compacted by typing /compact, and deleted by closing
+;; its terminal, then deleting the files Claude Code keeps of it (see
+;; `drover-claude-code-session-files').  claude-code-ide has no archive:
+;; drover archives terminals' sessions itself, and keeps them listed,
+;; while archived, once their terminal is gone, which forking, deleting
+;; and recapping need not.
+;;
 ;; `drover' loads this file once claude-code-ide.el is loaded.
 
 ;;; Code:
@@ -940,16 +948,93 @@ Claude Code or no terminal starts."
 (defun drover-claude-code-ide--recap (session callback)
   "Call CALLBACK with a recap of the last turn of SESSION.
 It is read from the end of the session's transcript (see
-`drover-claude-code-recap'), local and short, so at once.  The
-backend's :recap."
+`drover-claude-code-recap'), local and short, so at once; a session
+whose terminal is gone, as one archived may be, by its conversation.
+The backend's :recap."
   (funcall callback
            (or (with-demoted-errors "Drover Claude Code recap: %S"
-                 (when-let* ((buffer (drover-claude-code-ide--buffer session))
-                             (id (drover-claude-code-ide-current-session-id buffer))
+                 (when-let* ((id (if-let* ((buffer (drover-claude-code-ide--buffer session)))
+                                     (drover-claude-code-ide-current-session-id buffer)
+                                   (drover-session-engine-id session)))
                              (file (drover-claude-code-transcript id (drover-session-directory session)))
                              ((file-readable-p file)))
                    (drover-claude-code-recap file)))
                (list :failure "No transcript of this session yet"))))
+
+(defun drover-claude-code-ide--close (buffer)
+  "Kill terminal BUFFER, and the Claude Code it runs, without asking.
+Drover asked already; claude-code-ide cleans its session up as the
+buffer goes, as when it stops a session itself."
+  (let ((kill-buffer-query-functions nil))
+    (kill-buffer buffer)))
+
+(defun drover-claude-code-ide--delete (session)
+  "Delete SESSION for good: close its terminal, then delete its conversation.
+The conversation's files are those Claude Code's SDK deletes (see
+`drover-claude-code-session-files'), found before the terminal is
+closed, so that a session whose transcript is not found keeps its
+terminal; the terminal is closed first, as a running CLI would write
+its transcript anew.  The backend's :delete."
+  (let* ((buffer (drover-claude-code-ide--buffer session))
+         (files (drover-claude-code-session-files (drover-session-engine-id session)
+                                                  (drover-session-directory session))))
+    (when (buffer-live-p buffer)
+      (drover-claude-code-ide--close buffer))
+    (drover-claude-code-delete-session-files files)
+    (drover-backend-changed 'claude-code-ide)))
+
+(defun drover-claude-code-ide-fork (session-id directory)
+  "Start a Claude Code session forking session SESSION-ID, of DIRECTORY.
+Return its terminal buffer.  It resumes SESSION-ID under a new
+identifier, as \=`--fork-session' does, which it is given at start, so
+that the buffer's `drover-claude-code-ide-session-id' names the fork
+at once.  See `drover-claude-code-ide-start'."
+  (let ((fork (drover-claude-code-ide--uuid)))
+    (when-let* ((buffer (drover-claude-code-ide-start
+                         directory
+                         (concat (or claude-code-ide-cli-extra-flags "")
+                                 " --resume " (shell-quote-argument session-id)
+                                 " --fork-session --session-id " fork))))
+      (with-current-buffer buffer
+        (setq-local drover-claude-code-ide-session-id fork))
+      buffer)))
+
+(defun drover-claude-code-ide--fork (session)
+  "Fork SESSION whole into a new session, in a terminal of its own.
+The backend's :fork."
+  (or (drover-claude-code-ide-fork (drover-session-engine-id session)
+                                   (drover-session-directory session))
+      (user-error "Could not locate the new Claude Code buffer")))
+
+(defun drover-claude-code-ide--compact (session)
+  "Compact the conversation of SESSION, typing /compact in its terminal.
+Only once its turn ended, as far as its status tells, and its interface
+reads input, as when switching models.  The backend's :compact."
+  (let ((buffer (drover-claude-code-ide--live-buffer session))
+        (title (drover-session-display-title session)))
+    (when (drover-session-active-p session)
+      (user-error "%s is in the middle of a turn; compact it once the turn ends" title))
+    (unless (drover-claude-code-ide--takes-input-p buffer)
+      (user-error "%s does not read input yet" title))
+    (with-current-buffer buffer
+      (drover-claude-code-ide--type "/compact")
+      (drover-claude-code-ide--press 'return))))
+
+(defconst drover-claude-code-ide--terminal-operations
+  '(:open :respond :interrupt :mark-seen :preview :rename :compact)
+  "Operations that need the session's terminal.")
+
+(defun drover-claude-code-ide--supports (session operation)
+  "Return non-nil when OPERATION applies to SESSION.
+Those of `drover-claude-code-ide--terminal-operations' need its live
+terminal, which a session archived may have lost; forking and deleting
+need its conversation, which a terminal not started by drover tells
+once Claude Code recorded it.  The backend's :supports."
+  (cond ((memq operation drover-claude-code-ide--terminal-operations)
+         (and (drover-claude-code-ide--buffer session) t))
+        ((memq operation '(:fork :delete))
+         (and (drover-session-engine-id session) (drover-session-directory session) t))
+        (t t)))
 
 (defun drover-claude-code-ide--new (directory)
   "Start a Claude Code session in DIRECTORY, and display it."
@@ -999,6 +1084,10 @@ With several, the most recently used."
    :new #'drover-claude-code-ide--new
    :buffer #'drover-claude-code-ide--buffer
    :rename #'drover-claude-code-ide--rename
+   :delete #'drover-claude-code-ide--delete
+   :fork #'drover-claude-code-ide--fork
+   :compact #'drover-claude-code-ide--compact
+   :supports #'drover-claude-code-ide--supports
    :engines '(claude-code)
    :create #'drover-claude-code-ide--create
    :apply-options #'drover-claude-code-ide--apply-options

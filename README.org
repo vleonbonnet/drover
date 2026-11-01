@@ -1,7 +1,7 @@
 #+TITLE: drover
 #+OPTIONS: toc:nil
 
-Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session in one list, in a window or beside your work, from which you can open, answer, interrupt, archive or preview any of them.
+Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session in one list, in a window or beside your work, from which you can open, answer, interrupt, archive, restore, fork, compact, delete or preview any of them, as far as its front end can.
 
 Agent front ends plug in as backends: [[https://github.com/vleonbonnet/opencode.el][opencode.el]] for [[https://opencode.ai/][OpenCode]] 2, [[https://github.com/xenodium/agent-shell][agent-shell]] for its ACP agents, and [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide]] for Claude Code in a terminal. One prompt buffer, =*drover*=, writes to any of them: it gathers context from where you work, lets you choose the agent, model, effort and directory, and sends to a running session or starts a new one.
 
@@ -86,10 +86,10 @@ or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in thre
    ' Show prompt
 
   Session
-   o Other window   A Answer        r Rename    U Subagents
-   u Parent         K Interrupt     x Delete    V View
+   o Other window   A Answer        r Rename      U Subagents
+   u Parent         K Interrupt     x Delete      V View
    c Subagent       s Mark seen     z Archive
-   v Peek           + New session
+   v Peek           + New session   Z Unarchive
                     g Refresh
 
   Prompt
@@ -114,6 +114,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =r= | =drover-rename=            | rename it                                         |
 | =x= | =drover-delete=            | delete it for good, after confirmation            |
 | =z= | =drover-archive=           | archive it, after confirmation                    |
+| =Z= | =drover-unarchive=         | restore it from the archive                       |
 | =g= | =drover-refresh=           | refresh the list, or reload the session's buffer  |
 | =+= | =drover-new-session=       | start a session in its directory                  |
 | =v= | =drover-peek=              | preview where it stands, without opening (lists)  |
@@ -122,7 +123,9 @@ In every list of sessions (drover's list, and the lists of other front ends that
 
 =RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or the list itself. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 
-=s=, =K=, =z= and =x= act on every session selected, when a region selects several (see [[*Selecting sessions][Selecting sessions]]): =K= on those that run a turn, =s= on those whose turn ended unseen, with one confirmation naming them all, such as =Archive 3 sessions: A, B, C?=, and one report, such as =Archived 3 sessions=, naming those that failed without stopping the others.
+=z= archives a session in its front end's archive, such as OpenCode's, or in drover's own when its front end has none (see [[*Archived sessions][Archived sessions]]); =Z= restores it, from the list showing archived sessions, or from the session's buffer.
+
+=s=, =K=, =z=, =Z= and =x= act on every session selected, when a region selects several (see [[*Selecting sessions][Selecting sessions]]): =K= on those that run a turn, =s= on those whose turn ended unseen, =z= on those not archived, =Z= on those archived, with one confirmation naming them all, such as =Archive 3 sessions: A, B, C?=, and one report, such as =Archived 3 sessions=, naming those that failed without stopping the others.
 
 To store an Org link to the session at point, use Org's own =org-store-link= (=C-c l=) with a link type of your own whose store function reads =drover-session-at-point=. Drover makes its links the same way (=drover-session-link=): =M-w= in the list copies them, and the prompt quotes them.
 
@@ -308,7 +311,7 @@ The icons of Working and Retrying sessions are animated in the list: each shows 
    o urgency                  g status   p project any    F follow [off|on]
    r [ascending|descending]              s status any     U subagents [all|active|none]
                                          a agent any      O older [hidden|shown]
-                                         m model any
+                                         m model any      A archived [hidden|shown]
                                          v provider any
                                          d updated any
                                          f text any
@@ -321,16 +324,30 @@ The icons of Working and Retrying sessions are animated in the list: each shows 
 - Sort by urgency, the most urgent first, by title, project, branch, agent, model, provider, last activity or creation, either way. Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
 - Group by status, project, branch, agent, model, provider (each group named after the provider, behind its icon), last activity (today, yesterday, this week, older), or nothing.
 - Filter by project, status, agent, model, provider (by name, among the providers of the sessions drover knows), last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. An empty answer removes a filter; =c= clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
-- Toggle follow mode, which subagents show (all, the active ones, none: =U= cycles them, as in the list), and older sessions: those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session. They are fetched when shown, and again by =g=.
+- Toggle follow mode, which subagents show (all, the active ones, none: =U= cycles them, as in the list), older sessions: those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session, and archived sessions (see [[*Archived sessions][Archived sessions]]). Both are fetched when shown, and again by =g=.
 - Choose the columns: each switch lets a field show, highlighted, or hides it, dimmed, at once; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
 
 The list redraws when sessions change while it is displayed; hidden, it waits until it is shown again, and costs nothing meanwhile.
+
+** Archived sessions
+
+Archived sessions leave the list, the mode-line count and every session picker. The View menu's =A= shows them in the list too, dimmed, after =drover-archived-glyph= (=nf-md-archive=), whose tooltip tells how long ago they were archived; grouped by status, they gather in a group of their own, Archived, last. The header line counts them apart, such as =17 sessions, 3 archived=, and they never count as needing you. They are fetched when shown, without waiting, and again by =g=; =Z= restores those selected, or the one at point.
+
+Each front end archives what it can:
+
+| Front end       | =z= archives                  | =Z= restores          | =x= deletes                                                        | =f= forks                                                 | =C= compacts                                               |
+|-----------------+-------------------------------+-----------------------+--------------------------------------------------------------------+-----------------------------------------------------------+------------------------------------------------------------|
+| opencode.el     | in OpenCode, for every client | in OpenCode           | in OpenCode                                                        | in OpenCode                                               | in OpenCode                                                |
+| agent-shell     | in drover's own archive       | from drover's archive | through the agent, ACP's =session/delete=, then closes the shell   | through the agent, ACP's =session/fork=, when it can fork | sends =/compact=, when the agent offers that command       |
+| claude-code-ide | in drover's own archive       | from drover's archive | closes the terminal, then deletes the transcript and its directory | =claude --resume ID --fork-session=, in a new terminal    | types =/compact= once the turn ended and the input is read |
+
+Drover's own archive holds, by conversation, the sessions of front ends without an archive of their own, in =archive.eld= of =drover-state-directory=, with what the list shows of them: an archived terminal still shows, among the archived sessions, once its buffer is gone, and can still be deleted or forked from there. Archiving a running shell or terminal does not stop it; restoring a session whose buffer is gone forgets it, as no front end follows it any more. A conversation two front ends show leaves both. A session whose conversation is not known yet, such as a terminal Claude Code has not recorded, cannot be archived. Deleting a Claude Code session in a terminal deletes what Claude Code's own SDK deletes, the transcript under =~/.claude/projects/= and the directory of its subagents beside it, moved to the trash when =delete-by-moving-to-trash= says so, and only once drover found exactly one transcript of that identifier.
 
 ** Selecting sessions
 
 An active region selects the sessions whose lines it spans, those the list highlights, as Magit selects sections: set the mark on a session's line and move a line down, and both sessions are selected, wherever on their lines the region begins and ends. A group's heading selected stands for its sessions, so =C-SPC= on the heading of Done selects every Done session. A region running from one group into another selects nothing, and shows as a region does in other buffers; the commands then act on the session at point. The region and what it selects survive the redraws a working session causes.
 
-- =s=, =K=, =z= and =x= act on every session selected (see [[*Session keys][Session keys]]), from the list or from =C-'=, whose List group then tells how many are selected; acting ends the selection.
+- =s=, =K=, =z=, =Z= and =x= act on every session selected (see [[*Session keys][Session keys]]), from the list or from =C-'=, whose List group then tells how many are selected; acting ends the selection.
 - =M-w= copies the Org links of the sessions selected, one per line, else that of the session at point; a session no link type stores is copied by its title, and a region selecting no session is copied as text.
 - =C-' "= quotes them in the prompt (see [[*The prompt][The prompt]]).
 
@@ -364,18 +381,18 @@ Two front ends may show one conversation, such as an OpenCode session open in op
 
 * Backends
 
-A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, mark seen, preview, start, rename, delete, fork, compact), fetch its older sessions (=:history=) and the recap of a session's last turn (=:recap=, see =drover-recap=), and reports changes with =drover-backend-changed=. A record names its engine and the engine's identifier of the conversation (=engine=, =engine-id=), and may tell when the session's prompt cache expires, how long it lasts and how much of the prompt it holds (=cache-expires=, =cache-ttl=, =cache-tokens=, =cache-prompt-tokens=), and what the session runs: its agent as lists show it, in its faces (=agent-display=), its model, compact, its effort and whether that is the model's default (=model=, =effort=, =effort-default=), its provider (=provider=, a compact display such as an icon, and =provider-name=), and its context (=context-tokens=, =context-limit=, =context-tier=, and =context-estimated= when the size is the service's estimate after a compaction). What costs a request to know, such as the context, a backend fetches when asked by =:prefetch=, for the sessions a view shows. For the prompt it may offer =:engines=, =:create=, =:check=, =:apply-options=, =:send=, =:options= and =:settable=; an engine registers with =drover-register-engine= and its models with =drover-register-model-source=. See =doc/design.org=.
+A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, unarchive, mark seen, preview, start, rename, delete, fork, compact), tell which of them apply to a session (=:supports=), fetch its older sessions (=:history=), its archived ones (=:archived=) and the recap of a session's last turn (=:recap=, see =drover-recap=), and reports changes with =drover-backend-changed=. Drover archives the sessions of a backend without =:archive= itself. A record names its engine and the engine's identifier of the conversation (=engine=, =engine-id=), whether and when it was archived (=archived=), and may tell when the session's prompt cache expires, how long it lasts and how much of the prompt it holds (=cache-expires=, =cache-ttl=, =cache-tokens=, =cache-prompt-tokens=), and what the session runs: its agent as lists show it, in its faces (=agent-display=), its model, compact, its effort and whether that is the model's default (=model=, =effort=, =effort-default=), its provider (=provider=, a compact display such as an icon, and =provider-name=), and its context (=context-tokens=, =context-limit=, =context-tier=, and =context-estimated= when the size is the service's estimate after a compaction). What costs a request to know, such as the context, a backend fetches when asked by =:prefetch=, for the sessions a view shows. For the prompt it may offer =:engines=, =:create=, =:check=, =:apply-options=, =:send=, =:options= and =:settable=; an engine registers with =drover-register-engine= and its models with =drover-register-model-source=. See =doc/design.org=.
 
 A front end also fits its buffers into the keys. A list of sessions sets =drover-session-at-point-function= and turns on =drover-session-keys-mode=; a prompt buffer sets =drover-session-at-point-function= to its own session and declares the prompt actions it implements with =drover-prompt-define=, such as =(drover-prompt-define 'send #'my-send)=.
 
 * Development
 
-| Command        | Runs                                     |
-|----------------+------------------------------------------|
-| =make test=    | every ERT test in a batch =emacs -Q=     |
-| =make compile= | byte compilation with warnings as errors, then =compile-standalone= |
+| Command                   | Runs                                                                                                                             |
+|---------------------------+----------------------------------------------------------------------------------------------------------------------------------|
+| =make test=               | every ERT test in a batch =emacs -Q=                                                                                             |
+| =make compile=            | byte compilation with warnings as errors, then =compile-standalone=                                                              |
 | =make compile-standalone= | byte compilation with the required packages alone, as a package manager compiles drover; its byte code must be that of =compile= |
-| =make lint=    | checkdoc                                 |
+| =make lint=               | checkdoc                                                                                                                         |
 
 =DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL=, =AGENT_SHELL_EL= and =CLAUDE_CODE_IDE_EL= the checkouts of opencode.el, agent-shell and claude-code-ide the backends are built and tested against. Tests use a fake backend and fake engines, or stub the front ends; they never touch a running Emacs or OpenCode service, nor read the agents' own configuration.
 

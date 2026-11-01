@@ -59,6 +59,8 @@ buffers BODY makes with `drover-agent-shell-test-shell' are killed."
          (drover-changed-hook nil)
          (drover-show-history nil)
          (drover--history nil)
+         (drover-show-archived nil)
+         (drover--archived nil)
          (drover--engines nil)
          (drover--model-sources nil)
          (drover-agent-shell--gemini-registered nil)
@@ -162,8 +164,13 @@ VALUES are strings, named by themselves capitalized."
                       agent-shell--get-available-models agent-shell--get-available-thought-levels
                       agent-shell--project-name agent-shell--stop-reason-description
                       agent-shell-viewport--buffer agent-shell-viewport--shell-buffer
-                      shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output))
+                      shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output
+                      agent-shell-fork acp-send-request acp-make-session-delete-request))
     (should (fboundp function)))
+  ;; What its state tells of a session drover reads.
+  (let ((state (agent-shell--make-state :agent-config nil :buffer nil)))
+    (dolist (key '(:client :supports-session-fork :available-commands))
+      (should (assq key state))))
   (dolist (variable '(agent-shell--state agent-shell-viewport--suffix agent-shell-mode-hook))
     (should (boundp variable)))
   (let ((usage (car (help-split-fundoc (documentation 'agent-shell--start t) 'agent-shell--start))))
@@ -194,7 +201,14 @@ VALUES are strings, named by themselves capitalized."
             (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new
                                            :buffer :rename :create :apply-options :send :options :settable))
               (should (drover-supports-p session operation)))
-            (dolist (operation '(:archive :delete :fork :compact :check :history))
+            ;; Forking, compacting and deleting need a shell, which this
+            ;; session has not.
+            (dolist (operation '(:delete :fork :compact :supports))
+              (should (functionp (drover-backend-property 'agent-shell operation))))
+            (dolist (operation '(:delete :fork :compact))
+              (should-not (drover-supports-p session operation)))
+            ;; Drover archives its sessions: it has no archive of its own.
+            (dolist (operation '(:archive :unarchive :archived :check :history))
               (should-not (drover-supports-p session operation))))
           (should (equal (drover-backend-engines 'agent-shell) '(opencode claude-code codex)))
           (should (equal (drover-engine-label 'gemini-cli) "Gemini CLI"))
@@ -1202,6 +1216,69 @@ A Claude model goes by its compact name, as in opencode.el's mode line."
         (kill-buffer shell)
         (should-error (drover-open session) :type 'user-error)
         (drover-preview session (lambda (text) (should-not text)))))))
+
+(ert-deftest drover-agent-shell-test-fork ()
+  "A shell whose agent forks is forked by agent-shell, in its own buffer."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code "forking")))
+      (cl-letf (((symbol-function 'agent-shell-fork)
+                 (lambda () (push (list 'fork (current-buffer)) drover-agent-shell-test--calls))))
+        (should-not (drover-supports-p (drover-agent-shell-test-session shell) :fork))
+        (should-error (drover-fork (drover-agent-shell-test-session shell)) :type 'user-error)
+        (with-current-buffer shell
+          (map-put! agent-shell--state :supports-session-fork t))
+        (should (drover-supports-p (drover-agent-shell-test-session shell) :fork))
+        (drover-fork (drover-agent-shell-test-session shell))
+        (should (equal drover-agent-shell-test--calls `((fork ,shell))))))))
+
+(ert-deftest drover-agent-shell-test-compact ()
+  "A shell whose agent offers /compact is sent it, as a prompt."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let ((shell (drover-agent-shell-test-followed 'claude-code "compacting")))
+        (should-not (drover-supports-p (drover-agent-shell-test-session shell) :compact))
+        (with-current-buffer shell
+          (map-put! agent-shell--state :available-commands
+                    '(((name . "context") (description . "Context")))))
+        (should-not (drover-supports-p (drover-agent-shell-test-session shell) :compact))
+        (with-current-buffer shell
+          (map-put! agent-shell--state :available-commands
+                    '(((name . "context") (description . "Context"))
+                      ((name . "compact") (description . "Compact")))))
+        (should (drover-supports-p (drover-agent-shell-test-session shell) :compact))
+        (drover-compact (drover-agent-shell-test-session shell))
+        (should (equal drover-agent-shell-test--calls
+                       `((agent-shell-insert :shell-buffer ,shell :text "/compact" :submit t :no-focus t))))))))
+
+(ert-deftest drover-agent-shell-test-delete ()
+  "A session is deleted by its agent, then its shell closed; an agent refusing keeps it."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'claude-code "deleting"))
+          (requests nil))
+      (with-current-buffer shell
+        (map-put! agent-shell--state :client 'client))
+      (cl-letf (((symbol-function 'acp-send-request)
+                 (lambda (&rest arguments) (push arguments requests))))
+        ;; Not initialized: nothing to delete yet.
+        (should-not (drover-supports-p (drover-agent-shell-test-session shell) :delete))
+        (drover-agent-shell-test-initialize shell "acp-1")
+        (with-current-buffer shell
+          (drover-agent-shell--setup))
+        (let ((session (drover-agent-shell-test-session shell)))
+          (should (drover-supports-p session :delete))
+          (drover-delete session)
+          (let ((request (car requests)))
+            (should (eq (plist-get request :client) 'client))
+            (should (equal (plist-get request :request)
+                           '((:method . "session/delete") (:params (sessionId . "acp-1")))))
+            ;; Refused: the shell stays, and the refusal is told.
+            (funcall (plist-get request :on-failure) '((code . -32601) (message . "Method not found")) nil)
+            (should (buffer-live-p shell))
+            (should (equal drover-agent-shell-test--warnings
+                           '("The agent of deleting did not delete its session (Method not found); its shell stays")))
+            ;; Deleted: the shell goes.
+            (funcall (plist-get request :on-success) nil)
+            (should-not (buffer-live-p shell))))))))
 
 (ert-deftest drover-agent-shell-test-recap ()
   "A shell's recap is what its events told of its last turn."

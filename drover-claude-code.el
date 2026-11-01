@@ -24,8 +24,9 @@
 ;; read from the CLI's local state as the CLI itself resolves it (start
 ;; flags, environment, settings layers and its cached model catalog),
 ;; its models, when it last took a prompt, where it keeps the
-;; transcripts and identifiers of its sessions, and what their last
-;; turns were (`drover-claude-code-recap').  It needs no front end:
+;; transcripts and identifiers of its sessions, what their last turns
+;; were (`drover-claude-code-recap'), and how to delete one
+;; (`drover-claude-code-session-files').  It needs no front end:
 ;; `drover-claude-code-ide' and `drover-agent-shell' show its sessions.
 ;;
 ;; The defaults follow Claude Code's documented precedence for the
@@ -228,6 +229,44 @@ It is the newest transcript of DIRECTORY's subdirectory of transcripts."
 (defun drover-claude-code-transcript (id dir)
   "Return the transcript file of session ID, started in DIR."
   (expand-file-name (concat id ".jsonl") (drover-claude-code--bucket dir)))
+
+(defun drover-claude-code-session-files (id &optional dir)
+  "Return the files of Claude Code session ID, or signal a `user-error'.
+The value is (TRANSCRIPT . DIRECTORY): the transcript, in the
+subdirectory of transcripts of DIR when given and holding it, else in
+the one subdirectory of `drover-claude-code-projects-directory' that
+does; and DIRECTORY, the directory of the session's subagent
+transcripts and tool results beside it, or nil when there is none.
+These are what Claude Code's SDK deletes to delete a session.  ID must
+be a session identifier, a UUID: nothing else is ever looked for."
+  (unless (and (stringp id) (string-match-p drover-claude-code--uuid-regexp id))
+    (user-error "Not a Claude Code session: %S" id))
+  (let* ((name (concat id ".jsonl"))
+         (root (drover-claude-code-projects-directory))
+         (own (and dir (drover-claude-code-transcript id dir)))
+         (found (if (and own (file-regular-p own))
+                    (list own)
+                  (seq-filter #'file-regular-p
+                              (mapcar (lambda (bucket) (expand-file-name name bucket))
+                                      (and (file-directory-p root)
+                                           (seq-filter #'file-directory-p
+                                                       (directory-files root t "\\`[^.]"))))))))
+    (pcase found
+      ('nil (user-error "No transcript of Claude Code session %s" id))
+      (`(,transcript)
+       (let ((directory (expand-file-name id (file-name-directory transcript))))
+         (cons transcript (and (file-directory-p directory)
+                               (not (file-symlink-p directory))
+                               directory))))
+      (_ (user-error "Several transcripts of Claude Code session %s; deleting none" id)))))
+
+(defun drover-claude-code-delete-session-files (files)
+  "Delete the FILES of a Claude Code session, its transcript and directory.
+FILES are what `drover-claude-code-session-files' returns.  They are
+moved to the trash when `delete-by-moving-to-trash' says so."
+  (delete-file (car files) t)
+  (when (cdr files)
+    (delete-directory (cdr files) t t)))
 
 (defconst drover-claude-code--transcript-tail 262144
   "Bytes at the end of a transcript `drover-claude-code-last-turn' reads.")
