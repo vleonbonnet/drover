@@ -20,7 +20,8 @@
 ;; A fake backend, `fake', serves `drover-test-sessions' and records
 ;; every action in `drover-test-calls', its prompt operations included:
 ;; it starts sessions of the engines `drover-test-backend-engines'.  What
-;; views ask it to fetch goes to `drover-test-prefetched'.
+;; views ask it to fetch goes to `drover-test-prefetched', the recaps
+;; they ask for to `drover-test-recap-calls'.
 ;; `drover-test-with-backend' isolates the registry, the change hook and
 ;; its timer, and the view settings.  `drover-test-register-simple'
 ;; registers more backends, such as a second front end showing the same
@@ -67,6 +68,32 @@ Its :create is recorded as (:create DIRECTORY ENGINE OPTIONS).")
 (defvar drover-test-prefetched nil
   "Sessions the fake backend was asked to complete, by :prefetch, newest call first.
 Each entry lists the identifiers of one call, in order.")
+
+(defvar drover-test-recaps nil
+  "Recaps of the fake sessions, as an alist (ID . RECAP), for :recap.
+A session missing here recaps a prompt \"Prompt of ID\" and a reply
+\"Reply of ID\".")
+
+(defvar drover-test-recap-calls nil
+  "Sessions whose recap the fake backend was asked for, newest first.")
+
+(defvar drover-test-recap-later nil
+  "Non-nil when the fake backend's :recap answers later.
+Its callbacks then go to `drover-test-recap-pending', newest first, as
+\(ID . CALLBACK).")
+
+(defvar drover-test-recap-pending nil
+  "Callbacks of :recap not answered yet, as (ID . CALLBACK), newest first.")
+
+(defun drover-test--recap (session callback)
+  "Call CALLBACK with the recap of SESSION, as :recap does, now or later."
+  (let ((id (drover-session-id session)))
+    (push id drover-test-recap-calls)
+    (if drover-test-recap-later
+        (push (cons id callback) drover-test-recap-pending)
+      (funcall callback (if-let* ((entry (assoc id drover-test-recaps)))
+                            (cdr entry)
+                          (list :prompt (concat "Prompt of " id) :reply (concat "Reply of " id)))))))
 
 (defvar drover-test-settable nil
   "What the fake sessions can change, as an alist (ID . KEYWORDS).
@@ -136,6 +163,7 @@ The session is served from then on, and given to THEN; with
    :send (drover-test--recorder :send)
    :options (lambda (session) (alist-get (drover-session-id session) drover-test-options
                                          nil nil #'equal))
+   :recap #'drover-test--recap
    :prefetch (lambda (sessions)
                (push (mapcar #'drover-session-id sessions) drover-test-prefetched))
    :settable (lambda (session)
@@ -174,6 +202,10 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover-test-check-result 'fake-token)
          (drover-test-options nil)
          (drover-test-prefetched nil)
+         (drover-test-recaps nil)
+         (drover-test-recap-calls nil)
+         (drover-test-recap-later nil)
+         (drover-test-recap-pending nil)
          (drover-test-settable nil))
      (unwind-protect
          (progn (drover-test-register) ,@body)

@@ -181,6 +181,11 @@ This follows the `opencode-state' contract."
                 (lambda (id callback &rest arguments)
                   (push (append (list 'opencode-session-last-reply id) arguments) drover-opencode-test-calls)
                   (funcall callback (concat "Last reply of " id))))
+               ((symbol-function 'opencode-session-last-turn)
+                (lambda (id callback)
+                  (push (list 'opencode-session-last-turn id) drover-opencode-test-calls)
+                  (funcall callback (list :prompt (concat "Prompt of " id) :reply "Done"
+                                          :changes '(("a.el" 3 1))))))
                ((symbol-function 'opencode-session-create) (drover-opencode-test--recorder 'opencode-session-create))
                ((symbol-function 'opencode-rename-session) (drover-opencode-test--recorder 'opencode-rename-session))
                ((symbol-function 'opencode-session-delete) (drover-opencode-test--recorder 'opencode-session-delete))
@@ -233,7 +238,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (should (equal (drover-backend-engines 'opencode) '(opencode)))
     (let ((session (drover-session-create :backend 'opencode :id "ses_1")))
       (dolist (operation '(:start :sessions :open :respond :interrupt :archive :mark-seen :preview :new
-                                  :buffer :rename :delete :fork :compact :history
+                                  :buffer :rename :delete :fork :compact :history :prefetch :recap
                                   :create :check :apply-options :send :options))
         (should (drover-supports-p session operation)))
       ;; A running session can change all three.
@@ -806,6 +811,14 @@ nothing is fetched."
       (drover-preview (drover-opencode-test-session "ses_1") (lambda (reply) (setq text reply)))
       (should (equal text "Last reply of ses_1"))
       (should (equal drover-opencode-test-calls '((opencode-session-last-reply "ses_1")))))))
+
+(ert-deftest drover-opencode-test-recap ()
+  "The recap of a session is opencode.el's last turn of it."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((recap nil))
+      (drover-recap (drover-opencode-test-session "ses_1") (lambda (value) (setq recap value)))
+      (should (equal recap '(:prompt "Prompt of ses_1" :reply "Done" :changes (("a.el" 3 1)))))
+      (should (equal drover-opencode-test-calls '((opencode-session-last-turn "ses_1")))))))
 
 (ert-deftest drover-opencode-test-new ()
   (drover-opencode-test-with nil

@@ -204,15 +204,17 @@ while shown."
 (defun drover-list-test-displayed (string)
   "Return STRING as a text terminal draws it.
 Each space aligned to a pixel position becomes the spaces reaching it,
-each stretched space as many spaces as it is wide, and each character
-displayed as a string that string: on a terminal, a pixel is a
-character cell.  Aligned cells must not overlap."
+each stretched space as many spaces as it is wide, each character
+displayed as a string that string, and invisible characters nothing:
+on a terminal, a pixel is a character cell.  Aligned cells must not
+overlap."
   (let ((column 0)
         (chunks nil))
     (dotimes (index (length string))
       (let ((char (aref string index))
             (display (get-text-property index 'display string)))
-        (pcase display
+        (pcase (if (get-text-property index 'invisible string) 'invisible display)
+          ('invisible nil)
           (`(space :align-to (,x))
            (should (>= x column))
            (push (make-string (- x column) ?\s) chunks)
@@ -257,6 +259,7 @@ to the next cell, with its properties."
           (cells nil))
       (dotimes (index (length line))
         (pcase (get-text-property index 'display line)
+          ((guard (get-text-property index 'invisible line)))
           (`(space :align-to (,x)) (push (cons x "") cells))
           (_ (setcdr (car cells) (concat (cdar cells) (substring line index (1+ index)))))))
       (nreverse cells))))
@@ -300,7 +303,7 @@ to the next cell, with its properties."
 
 (defun drover-list-test-heading-visible-p (id)
   "Return non-nil when the heading of session ID is visible."
-  (not (invisible-p (oref (drover-list-test-section id) start))))
+  (drover-list--line-shown-p (oref (drover-list-test-section id) start)))
 
 (defun drover-list-test-sample ()
   "Return a sample of sessions, one or more of each status."
@@ -407,6 +410,21 @@ current buffer again afterwards."
             (should (equal (drover-list--mode-line-process) " by last activity")))
         (set-time-zone-rule zone)))))
 
+(ert-deftest drover-list-test-group-by-provider ()
+  "Grouped by provider, each group is named by the provider, after its icon."
+  (drover-list-test-with (list (drover-test-session "a" :status 'working :provider "P" :provider-name "Prov")
+                               (drover-test-session "b" :status 'working :provider-name "Acme")
+                               (drover-test-session "c" :status 'working))
+    (drover-list-test-shown
+      (drover-set-group-by 'provider)
+      (should (equal (drover-list-test-groups) '(("Prov" "a") ("Acme" "b") (nil "c"))))
+      (should (equal (mapcar (lambda (value) (drover-list-test-goto-group value) (drover-list-test-line))
+                             '("Prov" "Acme" nil))
+                     '("P Prov (1)" "Acme (1)" "No provider (1)")))
+      (drover-list-test-goto-group "Prov")
+      (should (eq (get-text-property (point) 'font-lock-face) 'drover-heading))
+      (should (equal (drover-list--mode-line-process) " by provider")))))
+
 (ert-deftest drover-list-test-follows-group-by ()
   "A list drawn anew groups sessions as `drover-group-by' says."
   (drover-list-test-with (list (drover-test-session "s" :project "p"))
@@ -431,7 +449,6 @@ current buffer again afterwards."
                          (drover-list--session-sections magit-root-section)))
     (should (equal (drover-list-test-visible-text)
                    (concat "! 1 needs you   4 sessions, 2 subagents hidden\n"
-                           "Subagents: active  U hides all\n"
                            "\n"
                            "  ◐ ? Session root   10s\n"
                            "      ! Session sub   1m\n"
@@ -440,7 +457,7 @@ current buffer again afterwards."
     ;; Sessions still show their details.
     (drover-list-test-goto "idle")
     (drover-list-test-press "TAB")
-    (should (string-match-p "^    Status +Idle$" (drover-list-test-visible-text)))))
+    (should (string-match-p "^    Prompt +Prompt of idle$" (drover-list-test-visible-text)))))
 
 (ert-deftest drover-list-test-ungrouped-refresh-takes-next-session ()
   (drover-list-test-with (drover-list-test-sample)
@@ -506,12 +523,24 @@ current buffer again afterwards."
     (should (equal (drover-list-test-line)
                    "! 2 needs you   ✗ 1 failed   ✓ 1 done   6 sessions, 1 subagent hidden"))
     (should (null (drover-list-test-id-at-point)))
-    ;; Which subagents show, and the key changing it.
+    ;; Which subagents show is the View menu's to tell, not the list's.
     (forward-line 1)
-    (should (equal (drover-list-test-line) "Subagents: active  U hides all"))
-    (let ((case-fold-search nil))
-      (search-forward "U "))
-    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'help-key-binding))))
+    (should (equal (drover-list-test-line) ""))))
+
+(ert-deftest drover-list-test-no-settings-or-keys ()
+  "The list shows sessions and their counts; the View menu shows settings and keys."
+  (drover-list-test-with (append (drover-list-test-family)
+                                 (list (drover-test-session "x" :status 'waiting :project "p")))
+    (dolist (mode drover-subagent-modes)
+      (dolist (filter '(nil (:project "p") (:search "nowhere")))
+        (setq drover-show-subagents mode
+              drover-filter filter)
+        (revert-buffer)
+        (let ((text (buffer-string)))
+          (should-not (text-property-any (point-min) (point-max) 'font-lock-face 'help-key-binding))
+          (should-not (text-property-any (point-min) (point-max) 'face 'help-key-binding))
+          (dolist (word '("Subagents:" "Filter" "clears" "hides" "shows" " U " "V c"))
+            (should-not (string-search word text))))))))
 
 (ert-deftest drover-list-test-header-nothing-needs-you ()
   (drover-list-test-with (list (drover-test-session "w" :status 'working))
@@ -535,7 +564,7 @@ current buffer again afterwards."
             (forward-line 1))
           (should (equal (nreverse lines)
                          '("! 2 needs you   ✗ 1 failed" "✓ 1 done"
-                           "6 sessions, 1 subagent hidden" "Subagents: active  U hides all"))))))))
+                           "6 sessions, 1 subagent hidden"))))))))
 
 ;;;; Subagents
 
@@ -595,7 +624,7 @@ current buffer again afterwards."
     ;; The header counts sessions, not trees.
     (goto-char (point-min))
     (should (equal (drover-list-test-line)
-                   "! 2 needs you   ✓ 1 done   3 sessions   Subagents: active  U hides all"))
+                   "! 2 needs you   ✓ 1 done   3 sessions"))
     (should (string-prefix-p "  ✓ ? Session parent" (drover-list-test-heading "parent")))))
 
 (ert-deftest drover-list-test-orphan-subagent ()
@@ -607,7 +636,8 @@ current buffer again afterwards."
     (should (equal (drover-list-test-line) "Nothing needs you   1 session"))
     (drover-list-test-goto "child")
     (magit-section-show (magit-current-section))
-    (should (string-match-p "^ +Subagent of +gone$" (drover-list-test-visible-text)))))
+    ;; Under its title, the arrow included.
+    (should (string-match-p "^    Prompt +Prompt of child$" (drover-list-test-visible-text)))))
 
 (ert-deftest drover-list-test-subagents-toggle ()
   "U cycles every view through active, no and all subagents, redrawn at once."
@@ -620,8 +650,7 @@ current buffer again afterwards."
     ;; place its parent among the finished ones.
     (should (equal (drover-list-test-groups) '((waiting "root" "asking" "child"))))
     (goto-char (point-min))
-    (should (string-search "   3 sessions, 1 subagent hidden   Subagents: active  U hides all"
-                           (drover-list-test-line)))
+    (should (string-suffix-p "   3 sessions, 1 subagent hidden" (drover-list-test-line)))
     (drover-list-test-goto "root")
     (forward-char 3)
     (let ((offset (- (point) (line-beginning-position))))
@@ -642,7 +671,7 @@ current buffer again afterwards."
           (goto-char (point-min))
           (should (equal (drover-list-test-line) "Nothing needs you   1 session, 3 subagents hidden"))
           (forward-line 1)
-          (should (equal (drover-list-test-line) "Subagents: none  U shows all")))
+          (should (equal (drover-list-test-line) "")))
         (drover-list-test-press "U")
         (should (eq drover-show-subagents 'all))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "ended" "child"))))
@@ -651,8 +680,7 @@ current buffer again afterwards."
         (should (equal (drover-list-test-id-at-point) "root"))
         (save-excursion
           (goto-char (point-min))
-          (should (string-suffix-p "   4 sessions   Subagents: all  U shows active only"
-                                   (drover-list-test-line))))
+          (should (string-suffix-p "   4 sessions" (drover-list-test-line))))
         (drover-list-test-press "U")
         (should (eq drover-show-subagents 'active))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "child"))))
@@ -675,7 +703,7 @@ current buffer again afterwards."
     (magit-section-toggle (magit-current-section))
     (should-not (drover-list-test-section-hidden-p "root"))
     ;; The details come between the parent and its subagents.
-    (should (string-match-p "  ◐ \\? Session root +10s\n      Status +Working for 10s\n\\(.*\n\\)*      ! Session sub"
+    (should (string-match-p "  ◐ \\? Session root +10s\n      Prompt +Prompt of root\n\\(.*\n\\)*      ! Session sub"
                             (drover-list-test-visible-text)))
     (should (< (oref (drover-list-test-section "root") end)
                (1+ (oref (drover-list-test-section "sub") start))))
@@ -685,7 +713,7 @@ current buffer again afterwards."
     ;; Hiding them leaves the subagents in sight.
     (should (drover-list-test-heading-visible-p "sub"))
     (should (drover-list-test-heading-visible-p "deep"))
-    (should-not (string-match-p "Status" (drover-list-test-visible-text)))))
+    (should-not (string-match-p "Prompt of root" (drover-list-test-visible-text)))))
 
 (ert-deftest drover-list-test-nested-collapse-state-across-refresh ()
   (drover-list-test-with (drover-list-test-family)
@@ -701,7 +729,7 @@ current buffer again afterwards."
     (should-not (drover-list-test-section-hidden-p "sub"))
     (should (drover-list-test-section-hidden-p "root"))
     (should (drover-list-test-section-hidden-p "deep"))
-    (should (string-match-p "^      Status +Failed for 1m$" (drover-list-test-visible-text)))
+    (should (string-match-p "^      Prompt +Prompt of sub$" (drover-list-test-visible-text)))
     ;; And when the parent's details open and close around it.
     (drover-list-test-goto "root")
     (magit-section-show (magit-current-section))
@@ -752,7 +780,9 @@ current buffer again afterwards."
                                  :requests '((:kind permission :summary "bash: make"))))
     (should (equal (drover-list-test-heading "s") "  ! Session s  drover:main   5m  permit: bash: make"))
     (drover-list-test-goto "s")
-    (let ((glyph (1+ (point))))
+    ;; Past the invisible character beginning the line, and its aligned space.
+    (let ((glyph (+ 2 (point))))
+      (should (get-text-property (point) 'invisible))
       (should (equal (buffer-substring-no-properties glyph (1+ glyph)) "!"))
       (should (eq (get-text-property glyph 'font-lock-face) 'drover-waiting)))
     (search-forward "drover:main")
@@ -1060,10 +1090,10 @@ titles take 25 pixels, and each field its :min characters and a gap of
             (should (equal (drover-list-test-id-at-point) "ask"))
             ;; Collapsing a session folds its details, not its second line.
             (drover-list-test-press "TAB")
-            (should (string-match-p "Status" (drover-list-test-visible-text)))
+            (should (string-match-p "Prompt of ask" (drover-list-test-visible-text)))
             (drover-list-test-press "TAB")
             (should (string-match-p "asks: Which branch" (drover-list-test-visible-text)))
-            (should-not (string-match-p "Status" (drover-list-test-visible-text)))))))))
+            (should-not (string-match-p "Prompt of ask" (drover-list-test-visible-text)))))))))
 
 (ert-deftest drover-list-test-narrow-truncation ()
   "Narrow lines cut titles before the age and summaries at the edge, in pixels."
@@ -1104,8 +1134,9 @@ titles take 25 pixels, and each field its :min characters and a gap of
             (drover-list-test-goto "kid")
             (forward-line 1)
             (let* ((line (buffer-substring (line-beginning-position) (line-end-position)))
-                   (summary (substring line 1)))
-              (should (equal (get-text-property 0 'display line) '(space :align-to (47))))
+                   (summary (substring line 2)))
+              (should (get-text-property 0 'invisible line))
+              (should (equal (get-text-property 1 'display line) '(space :align-to (47))))
               (should (string-suffix-p "…" summary))
               (should (<= (drover-list-test-fake-width summary) (- 243 47))))))))))
 
@@ -1161,11 +1192,10 @@ titles take 25 pixels, and each field its :min characters and a gap of
       (let ((effort (- (point) 6)))
         (should (eq (get-text-property effort 'font-lock-face) 'drover-prompt-inherited))
         (should (equal (get-text-property effort 'help-echo) "Effort: medium, the model's default"))))
+    ;; The line shows them: the details do not repeat them.
     (drover-list-test-goto "b")
     (magit-section-show (magit-current-section))
-    (let ((text (drover-list-test-visible-text)))
-      (should (string-match-p "^    Model +GPT-5.5$" text))
-      (should (string-match-p "^    Effort +medium, the model's default$" text)))))
+    (should-not (string-match-p "^ +Model" (drover-list-test-visible-text)))))
 
 (ert-deftest drover-list-test-provider ()
   "The provider's column shows its icon in a cell as wide as its ink, else its name."
@@ -1200,7 +1230,7 @@ titles take 25 pixels, and each field its :min characters and a gap of
           (should (equal (get-text-property (1- (point)) 'help-echo) "Provider: Acme")))
         (drover-list-test-goto "a")
         (magit-section-show (magit-current-section))
-        (should (string-match-p "^ +Provider +Prov$" (drover-list-test-visible-text)))))))
+        (should-not (string-match-p "^ +Provider" (drover-list-test-visible-text)))))))
 
 (defun drover-list-test-context-cell (id)
   "Return the context cell of session ID as a plist.
@@ -1275,15 +1305,10 @@ and :help its tooltip."
                               (let ((case-fold-search nil))
                                 (string-match-p "[0-9][kM]\\'" (cdr cell))))
                             (drover-list-test-cells "z")))
+      ;; The line shows it: the details do not repeat it.
       (drover-list-test-goto "n")
       (magit-section-show (magit-current-section))
-      (should (string-match-p
-               (concat "^ +Context +"
-                       (regexp-quote "186k of 200k tokens (93%); Near 200k tokens, past which requests cost 2×")
-                       "$")
-               (drover-list-test-visible-text)))
-      (search-forward "186k of 200k")
-      (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-context-near)))))
+      (should-not (string-match-p "^ +Context" (drover-list-test-visible-text))))))
 
 (ert-deftest drover-list-test-context-not-in-two-lines ()
   "Two lines leave the context out: the cache already colours the line."
@@ -1472,7 +1497,7 @@ The cache holds 120k tokens of a prompt of 130k."
         (let ((drover-list-test-clock (+ drover-test-now 300)))
           (should (equal (drover-list-test-help-at label) "Prompt cache: expired")))
         ;; The rest of the line keeps the session's.
-        (should (equal (drover-list-test-help-at (point)) "Cached"))))
+        (should (equal (drover-list-test-help-at (1+ (point))) "Cached"))))
     ;; Unknown or expired: nothing.
     (should (equal (drover-list-test-cache-field "u") '(nil nil nil)))
     (should (equal (drover-list-test-cache-field "x") '(nil nil nil)))
@@ -1566,7 +1591,8 @@ START and END bound its overlay."
         (revert-buffer)
         (should (eq drover-list--layout 'narrow))
         (drover-list-test-goto "s")
-        (let* ((start (point))
+        ;; The line drawn begins past the invisible character.
+        (let* ((start (1+ (point)))
                (end (line-end-position))
                (spec (plist-get (car drover-list--caches) :spec))
                (split (lambda (from)
@@ -1659,9 +1685,14 @@ START and END bound its overlay."
       (should-not drover-list--cache-timer))))
 
 (ert-deftest drover-list-test-cache-in-details ()
+  "The details tell the prompt cache when the line does not."
   (drover-list-test-with (drover-list-test-cached)
     (drover-list-test-goto "c")
     (magit-section-show (magit-current-section))
+    (should-not (string-match-p "^ +Prompt cache" (drover-list-test-visible-text)))
+    (setq drover-list-hidden-fields '(cache))
+    (revert-buffer)
+    (should-not (memq 'cache drover-list--fields))
     (should (string-match-p "^    Prompt cache +expires in 4m (5m window), 120k of 130k tokens cached$"
                             (drover-list-test-visible-text)))))
 
@@ -1745,6 +1776,7 @@ START and END bound its overlay."
 ;;;; Details
 
 (ert-deftest drover-list-test-details-on-expand ()
+  "Expanded, a session recaps its last turn and what its line leaves out."
   (drover-list-test-with
       (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 120)
                                  :directory (expand-file-name "~/src/drover") :branch "main"
@@ -1753,27 +1785,32 @@ START and END bound its overlay."
                                  :requests '((:kind permission :summary "bash: make")
                                              (:kind question :summary "Which branch?"))))
     (should (drover-list-test-section-hidden-p "s"))
+    ;; Asked for once expanded, not before.
+    (should-not drover-test-recap-calls)
     (should-not (string-match-p "Directory" (drover-list-test-visible-text)))
     (drover-list-test-goto "s")
     (magit-section-toggle (magit-current-section))
     (should-not (drover-list-test-section-hidden-p "s"))
+    (should (equal drover-test-recap-calls '("s")))
     (let ((text (drover-list-test-visible-text)))
-      ;; Labels under the title, values past the widest label.
-      (dolist (line '("    Status      Needs you for 2m"
-                      "    Directory   ~/src/drover"
-                      "    Branch      main"
-                      "    Agent       build"
-                      "    Model       sonnet"
-                      "    Created     3d ago"
-                      "    Backend     Fake"
-                      "    Detail      Blocked"
-                      "    Permission  bash: make"
-                      "    Question    Which branch?"))
-        (should (string-match-p (concat "^" (regexp-quote line) "$") text))))
+      ;; Labels under the title, texts past the widest label: what it
+      ;; waits for in full, the last turn, and the directory a session
+      ;; without a project cannot tell otherwise.
+      (dolist (line '("    Permission  bash: make"
+                      "    Question    Which branch?"
+                      "    Prompt      Prompt of s"
+                      "    Reply       Reply of s"
+                      "    Directory   ~/src/drover"))
+        (should (string-match-p (concat "^" (regexp-quote line) "$") text)))
+      ;; Not what the line shows already.
+      (dolist (label '("Status" "Branch" "Agent" "Model" "Created" "Backend" "Detail"))
+        (should-not (string-match-p (concat "^ +" label " ") text))))
     (search-forward "Permission")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
     (search-forward "bash: make")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-waiting))
+    ;; Every line of the details begins with the invisible character.
+    (should (get-text-property (line-beginning-position) 'invisible))
     ;; Point in the details still designates the session.
     (drover-list-test-goto "s")
     (forward-line 3)
@@ -1786,7 +1823,241 @@ START and END bound its overlay."
     (drover-list-test-goto "child")
     (magit-section-show (magit-current-section))
     ;; Indented as deep as the subagent's title.
-    (should (string-match-p "^        Subagent of  Parent work$" (drover-list-test-visible-text)))))
+    (should (string-match-p "^        Prompt  Prompt of child$" (drover-list-test-visible-text)))))
+
+(ert-deftest drover-list-test-details-tell-what-the-line-leaves-out ()
+  "What the session runs shows in its details when its line does not show it."
+  (drover-list-test-with
+      (list (drover-test-session "s" :status 'working :updated (drover-list-test-ago 60)
+                                 :project "drover" :branch "main" :agent "build"
+                                 :model "Opus" :effort "high" :provider "P" :provider-name "Acme"
+                                 :context-tokens 50000 :context-limit 200000
+                                 :created (drover-list-test-ago 7200)))
+    (drover-list-test-goto "s")
+    (magit-section-show (magit-current-section))
+    (should-not (string-match-p "^ +\\(Model\\|Provider\\|Context\\|Project\\|Agent\\|Created\\|Directory\\) "
+                                (drover-list-test-visible-text)))
+    (setq drover-list-hidden-fields '(location agent model provider context created))
+    (revert-buffer)
+    (let ((text (drover-list-test-visible-text)))
+      (dolist (line '("    Prompt    Prompt of s"
+                      "    Project   drover:main"
+                      "    Agent     build"
+                      "    Model     Opus high"
+                      "    Provider  Acme"
+                      "    Context   50k of 200k tokens (25%)"
+                      "    Created   2h ago"))
+        (should (string-match-p (concat "^" (regexp-quote line) "$") text))))
+    (search-forward "Opus high")
+    (should (eq (get-text-property (- (point) 4) 'font-lock-face) 'drover-prompt-picked))))
+
+(ert-deftest drover-list-test-details-in-a-narrow-window ()
+  "With little room past the labels, texts go under their labels."
+  (drover-list-test-with
+      (list (drover-test-session "s" :status 'working :updated (drover-list-test-ago 60)
+                                 :model "Opus" :detail "Thinking hard about it"))
+    (setq drover-test-recaps '(("s" :prompt "Fix the build" :reply "Fixed it")))
+    (drover-list-test-shown
+      (save-window-excursion
+        (let ((window (split-window-right -30)))
+          (set-window-buffer window buffer)
+          (with-selected-window window
+            (drover-list--on-window-change window)
+            (should (eq drover-list--layout 'narrow))
+            (drover-list-test-goto "s")
+            (magit-section-show (magit-current-section))
+            (should (string-match-p (concat "  ◐ Session s +1m\n"
+                                            "    Prompt\n    Fix the build\n"
+                                            "    Reply\n    Fixed it\n"
+                                            "    Model\n    Opus\n")
+                                    (drover-list-test-visible-text)))))))))
+
+(ert-deftest drover-list-test-recap-wrapped ()
+  "The prompt and the reply take a few lines each, wrapped in pixels, cut short."
+  (drover-list-test-with-font
+    (drover-list-test-with (list (drover-test-session "s" :status 'working
+                                                      :updated (drover-list-test-ago 60)))
+      (let* ((words (mapcar (lambda (n) (format "word%d" n)) (number-sequence 1 200)))
+             (reply (concat "First paragraph.\n\n\n" (string-join words " "))))
+        (setq drover-test-recaps `(("s" :prompt ,(string-join words " ") :reply ,reply)))
+        (let ((drover-list-test-width 300))
+          (revert-buffer)
+          (drover-list-test-goto "s")
+          (magit-section-show (magit-current-section))
+          ;; Under the title, 25 pixels in, the texts past "Prompt", 47
+          ;; pixels, and a gap of 14: 86 pixels in, up to 293.
+          (let ((lines nil))
+            (save-excursion
+              (forward-line 1)
+              (while (and (not (eobp)) (equal (drover-list-test-id-at-point) "s"))
+                (push (drover-list-test-cells-here) lines)
+                (forward-line 1)))
+            (setq lines (nreverse lines))
+            (should (equal (mapcar #'car (car lines)) '(25 86)))
+            (should (equal (cdr (nth 0 (car lines))) "Prompt"))
+            (let ((texts (mapcar (lambda (line) (substring-no-properties (cdar (last line)))) lines)))
+              (dolist (line lines)
+                (should (= (car (car (last line))) 86))
+                (should (<= (drover-list-test-fake-width (cdar (last line))) (- 293 86))))
+              ;; Three lines of prompt, eight of reply, blank lines dropped.
+              (should (= (length texts) 11))
+              (should (string-suffix-p "…" (nth 2 texts)))
+              (should (equal (nth 3 texts) "First paragraph."))
+              (should (string-prefix-p "word1 word2 " (nth 4 texts)))
+              (should (string-suffix-p "…" (nth 10 texts)))
+              ;; Words follow one another from line to line.
+              (should (string-prefix-p (string-join (mapcar (lambda (text) (string-remove-suffix "…" text))
+                                                            (seq-subseq texts 4 10))
+                                                    " ")
+                                       (string-join words " "))))))))))
+
+(defun drover-list-test-cells-here ()
+  "Return the cells of the line at point, as `drover-list-test-cells' does."
+  (let ((line (buffer-substring (line-beginning-position) (line-end-position)))
+        (cells nil))
+    (dotimes (index (length line))
+      (pcase (get-text-property index 'display line)
+        ((guard (get-text-property index 'invisible line)))
+        (`(space :align-to (,x)) (push (cons x "") cells))
+        (_ (setcdr (car cells) (concat (cdar cells) (substring line index (1+ index)))))))
+    (nreverse cells)))
+
+(ert-deftest drover-list-test-recap-changes-and-errors ()
+  "A failed turn shows its error in full, and the files it changed."
+  (drover-list-test-with
+      (list (drover-test-session "f" :status 'failed :since (drover-list-test-ago 60)
+                                 :directory "/work/" :project "p" :detail "Short")
+            (drover-test-session "r" :status 'retrying :updated (drover-list-test-ago 30)
+                                 :project "p" :detail "retry 2: overloaded")
+            (drover-test-session "q" :status 'idle :project "p"))
+    (setq drover-test-recaps
+          '(("f" :prompt "Go" :error "The provider refused the request: quota exceeded"
+             :changes (("/work/a.el" 10 2) ("/work/sub/b.el" 2 1) ("/elsewhere/c.el" nil nil)))
+            ("r" :prompt "Go")
+            ("q")))
+    (drover-list-test-goto-group 'idle)
+    (magit-section-show (magit-current-section))
+    (dolist (id '("f" "r" "q"))
+      (drover-list-test-goto id)
+      (magit-section-show (magit-current-section)))
+    (let ((text (drover-list-test-visible-text)))
+      (should (string-match-p "^    Error +The provider refused the request: quota exceeded$" text))
+      (should (string-match-p "^    Changes +\\+12 −3 in 3 files: a\\.el, sub/b\\.el, /elsewhere/c\\.el$" text))
+      (should (string-match-p "^    Retrying +retry 2: overloaded$" text))
+      ;; A recap with neither prompt nor reply says so.
+      (should (string-match-p "^    Last turn +nothing to recap$" text)))
+    (drover-list-test-goto "f")
+    (search-forward "The provider")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-failed))))
+
+(ert-deftest drover-list-test-recap-fetched-once-per-change ()
+  "A recap is fetched as its session expands, kept until the session changes."
+  (drover-list-test-with (list (drover-test-session "a" :status 'working :updated (drover-list-test-ago 60))
+                               (drover-test-session "b" :status 'working :updated (drover-list-test-ago 90)))
+    (setq drover-test-recap-later t)
+    (drover-list-test-shown
+      (drover-list-test-goto "a")
+      (drover-list-test-type "TAB")
+      (should (equal drover-test-recap-calls '("a")))
+      (should (string-match-p "^    Last turn +loading…$" (drover-list-test-visible-text)))
+      ;; While it is fetched, a redraw asks nothing more.
+      (drover-list--render)
+      (should (equal drover-test-recap-calls '("a")))
+      ;; Arriving, it is drawn.
+      (funcall (cdr (pop drover-test-recap-pending)) '(:prompt "Fix it" :reply "Fixed"))
+      (let ((text (drover-list-test-visible-text)))
+        (should (string-match-p "^    Prompt +Fix it$" text))
+        (should (string-match-p "^    Reply +Fixed$" text))
+        (should-not (string-match-p "loading" text)))
+      (drover-list--render)
+      (should (equal drover-test-recap-calls '("a")))
+      ;; The session changed: fetched again once some time passed, the
+      ;; old recap shown meanwhile.
+      (setf (drover-session-updated (drover-list-test-find "a")) (drover-list-test-ago 1))
+      (drover-list--render)
+      (should (equal drover-test-recap-calls '("a")))
+      (should (timerp drover-list--recap-timer))
+      (setq drover-list-test-clock (+ drover-test-now drover-list--recap-interval))
+      (drover-list--render)
+      (should (equal drover-test-recap-calls '("a" "a")))
+      (should (string-match-p "^    Prompt +Fix it$" (drover-list-test-visible-text)))
+      (funcall (cdr (pop drover-test-recap-pending)) '(:failure "offline"))
+      (should (string-match-p "^    Last turn +not available: offline$" (drover-list-test-visible-text)))
+      ;; A refresh fetches again; an answer to the fetch it forgot is dropped.
+      (drover-list-test-goto "b")
+      (drover-list-test-type "TAB")
+      (should (equal drover-test-recap-calls '("b" "a" "a")))
+      (let ((forgotten (pop drover-test-recap-pending)))
+        (revert-buffer)
+        (should (equal (seq-take drover-test-recap-calls 2) '("b" "a")))
+        (funcall (cdr forgotten) '(:prompt "Stale"))
+        (should-not (string-match-p "Stale" (drover-list-test-visible-text))))
+      (dolist (pending drover-test-recap-pending)
+        (funcall (cdr pending) (list :prompt (concat "Fresh " (car pending)))))
+      (should (string-match-p "^    Prompt +Fresh b$" (drover-list-test-visible-text)))
+      ;; Collapsed, nothing is asked.
+      (setq drover-test-recap-calls nil)
+      (drover-list-test-goto "a")
+      (drover-list-test-type "TAB")
+      (setf (drover-session-updated (drover-list-test-find "a")) (drover-list-test-ago 0))
+      (setq drover-list-test-clock (+ drover-test-now 60))
+      (revert-buffer)
+      (should (equal drover-test-recap-calls '("b"))))))
+
+(ert-deftest drover-list-test-recap-without-backend-support ()
+  "A backend telling no recap shows what the session tells, and asks nothing."
+  (drover-list-test-with nil
+    (drover-test-register-simple 'plain (list (drover-session-create :backend 'plain :id "p" :title "Plain"
+                                                                     :status 'failed :detail "Boom")))
+    (revert-buffer)
+    (goto-char (oref (drover-list--find-session '(plain . "p")) start))
+    (magit-section-show (magit-current-section))
+    (let ((text (drover-list-test-visible-text)))
+      (should (string-match-p "^    Error +Boom$" text))
+      (should-not (string-match-p "Last turn" text)))))
+
+(defun drover-list-test-x (position)
+  "Return how far from its window's left edge POSITION is drawn, in pixels.
+It is measured from the start of the screen line holding POSITION,
+which the display finds, invisible text included."
+  (car (window-text-pixel-size nil (save-excursion (goto-char position) (vertical-motion 0) (point))
+                               position)))
+
+(defun drover-list-test-text-x (id text)
+  "Return where TEXT, searched from the heading of session ID, is drawn."
+  (save-excursion
+    (drover-list-test-goto id)
+    (search-forward text)
+    (drover-list-test-x (match-beginning 0))))
+
+(ert-deftest drover-list-test-collapsed-bodies-take-no-room ()
+  "Expanding and collapsing moves no line: headings keep their place, details under titles.
+Emacs draws a `display' property where invisible text begins: a hidden
+body beginning with an aligned space would push the next line right."
+  (drover-list-test-with (list (drover-test-session "a" :status 'done :since (drover-list-test-ago 30))
+                               (drover-test-session "b" :status 'done :since (drover-list-test-ago 40))
+                               (drover-test-session "c" :status 'idle))
+    (drover-list-test-goto-group 'idle)
+    (magit-section-show (magit-current-section))
+    (drover-list-test-shown
+      (let ((titles (mapcar (lambda (id) (drover-list-test-text-x id "Session")) '("a" "b" "c")))
+            (group (save-excursion (drover-list-test-goto-group 'idle) (drover-list-test-x (point)))))
+        (should (equal titles '(4 4 4)))
+        (should (= group 0))
+        (dolist (id '("b" "a" "b" "a"))
+          (drover-list-test-goto id)
+          (drover-list-test-type "TAB")
+          (should (equal (mapcar (lambda (id) (drover-list-test-text-x id "Session")) '("a" "b" "c"))
+                         titles))
+          (unless (drover-list-test-section-hidden-p id)
+            ;; The details begin under the title.
+            (should (= (drover-list-test-text-x id "Prompt") (drover-list-test-text-x id "Session")))))
+        ;; A collapsed group hides its sessions without moving the next.
+        (drover-list-test-goto-group 'done)
+        (drover-list-test-type "TAB")
+        (should (drover-list-test-group-hidden-p 'done))
+        (should (= (save-excursion (drover-list-test-goto-group 'idle) (drover-list-test-x (point))) group))
+        (should (= (drover-list-test-text-x "c" "Session") 4))))))
 
 ;;;; Session at point
 
@@ -1891,10 +2162,11 @@ Redraws keep point on the session."
   (drover-list-test-with
       (list (drover-test-session "root" :status 'working :updated (drover-list-test-ago 10))
             (drover-test-session "s" :parent "root" :status 'waiting :since (drover-list-test-ago 60)
-                                 :directory "/work/s/" :branch "feature"
+                                 :directory "/work/s/" :branch "feature" :provider-name "Anthropic"
                                  :requests '((:kind question :summary "Which?")))
             (drover-test-session "kid" :parent "s" :status 'idle)
-            (drover-test-session "other" :status 'working :updated (drover-list-test-ago 5)))
+            (drover-test-session "other" :status 'working :updated (drover-list-test-ago 5)
+                                 :provider-name "OpenAI"))
     (unwind-protect
         (progn
           (drover-list-test-goto "s")
@@ -1952,13 +2224,16 @@ Redraws keep point on the session."
                 (should-not (type "V f feature RET C-g"))
                 (should (equal drover-filter '(:search "feature")))
                 (should (equal (drover-list-test-ungrouped) '("root" "s")))
-                (save-excursion
-                  (goto-char (point-min))
-                  (forward-line 1)
-                  (should (equal (drover-list-test-line) "Filter: \"feature\"   V c clears it")))
                 (should-not (type "V c C-g"))
                 (should-not drover-filter)
                 (should (equal (drover-list-test-ungrouped) '("root" "s" "kid" "other" "new")))
+                ;; By provider: s's tree, root above it.
+                (should-not (type "V v Anthropic RET C-g"))
+                (should (equal drover-filter '(:provider "Anthropic")))
+                (should (equal (drover-list-test-ungrouped) '("root" "s")))
+                (should-not (type "V c g provider RET C-g"))
+                (should (eq drover-group-by 'provider))
+                (should (equal (drover-list-test-groups) '((nil "root" "s" "kid" "new") ("OpenAI" "other"))))
                 (should-not (bound-and-true-p transient--prefix))))))
       (when (get-buffer drover-peek-buffer)
         (kill-buffer drover-peek-buffer)))))
@@ -2264,17 +2539,13 @@ Redraws keep point on the session."
       (should (equal (drover-list-test-id-at-point) "work"))
       (should (equal (drover-list--mode-line-process) " by status filtered"))
       (goto-char (point-min))
-      ;; The header counts what is listed, and names the filter.
+      ;; The header counts what is listed; the View menu names the filter.
       (should (equal (drover-list-test-line) "! 1 needs you   2 sessions"))
       (forward-line 1)
-      (should (equal (drover-list-test-line) "Filter: project q   V c clears it"))
-      (search-forward "V c")
-      (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'help-key-binding))
-      (should (null (drover-list-test-id-at-point)))
+      (should (equal (drover-list-test-line) ""))
+      (should-not (string-search "Filter" (buffer-string)))
       (drover-set-filter :statuses '(working))
-      (goto-char (point-min))
-      (forward-line 1)
-      (should (equal (drover-list-test-line) "Filter: project q, working   V c clears it"))
+      (should (equal (drover-list-test-groups) '((working "work"))))
       (drover-set-filter :statuses nil)
       (drover-set-filter :project nil)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(waiting done working idle)))
@@ -2289,8 +2560,7 @@ Redraws keep point on the session."
     ;; Hidden subagents show when they match, under their parent.
     (should (equal (drover-list-test-groups) '((working "other" "quiet"))))
     (goto-char (point-min))
-    (should (equal (drover-list-test-line)
-                   "Nothing needs you   2 sessions   Subagents: active  U hides all"))
+    (should (equal (drover-list-test-line) "Nothing needs you   2 sessions"))
     ;; And when no subagent shows.
     (drover-list-test-shown
       (drover-set-show-subagents 'none)
@@ -2301,30 +2571,10 @@ Redraws keep point on the session."
     (drover-list-test-shown
       (drover-set-filter :search "nowhere")
       (should-not (drover-list--groups))
-      ;; The filter is named, with the keys clearing it.
-      (should (equal (buffer-string)
-                     (concat "No session matches the filter: \"nowhere\".\n"
-                             "V c clears the filter.\n")))
+      ;; The View menu names the filter, and clears it.
+      (should (equal (buffer-string) "No session matches the filter.\n"))
       (drover-filter-clear)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(waiting done working idle))))))
-
-(ert-deftest drover-list-test-filter-hint-follows-keymap ()
-  "The keys the list names are those the user bound."
-  (drover-list-test-with (list (drover-test-session "s"))
-    (unwind-protect
-        (progn
-          (keymap-unset drover-session-map "V" t)
-          (keymap-set drover-session-map "C-c v" #'drover-view)
-          (setq drover-filter '(:search "nowhere"))
-          (revert-buffer)
-          (should (equal (buffer-string)
-                         (concat "No session matches the filter: \"nowhere\".\n"
-                                 "C-c v c clears the filter.\n"))))
-      (keymap-unset drover-session-map "C-c v" t)
-      (keymap-unset drover-session-map "C-c" t)
-      (keymap-set drover-session-map "V" #'drover-view))
-    (should (eq (keymap-lookup drover-session-map "V") #'drover-view))
-    (should-not (keymap-lookup drover-session-map "C-c"))))
 
 (ert-deftest drover-list-test-filter-without-sessions ()
   "Without any session, the filter is not to blame."

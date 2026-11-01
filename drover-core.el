@@ -476,7 +476,7 @@ week; `older' before; nil when TIME is nil."
             ((>= time (drover--start-of-day (- today (* 5.5 86400)))) 'week)
             (t 'older)))))
 
-(defconst drover-groupings '(status project branch agent model updated nil)
+(defconst drover-groupings '(status project branch agent model provider updated nil)
   "The values `drover-group-by' may take.")
 
 (defun drover-group-trees (nodes grouping &optional now)
@@ -488,6 +488,8 @@ GROUPING is one of `drover-groupings':
  project, branch, agent, model
           VALUE is that of the root session, or nil; a group comes
           before another when its most urgent tree does.
+ provider VALUE is the provider name of the root session (see
+          `drover-session-provider-name'), or nil, likewise.
  updated  VALUE is the bucket of the tree's last activity at NOW (see
           `drover-activity-bucket'), newest first.
  nil      One group, of VALUE nil, holding every tree; none without
@@ -497,11 +499,12 @@ Within a group, trees keep their order in NODES."
   (pcase grouping
     ('status (drover-group-trees-by-status nodes))
     ('project (drover-group-trees-by-project nodes))
-    ((or 'branch 'agent 'model)
+    ((or 'branch 'agent 'model 'provider)
      (let ((field (pcase grouping
                     ('branch #'drover-session-branch)
                     ('agent #'drover-session-agent)
-                    (_ #'drover-session-model))))
+                    ('model #'drover-session-model)
+                    (_ #'drover-session-provider-name))))
        (drover--group-trees-by nodes (lambda (node) (funcall field (drover-node-session node))))))
     ('updated
      (let ((groups (drover--group-trees-by
@@ -512,22 +515,24 @@ Within a group, trees keep their order in NODES."
 
 ;;;; Sorting trees
 
-(defconst drover-sort-fields '(urgency title project branch agent model updated created)
+(defconst drover-sort-fields '(urgency title project branch agent model provider updated created)
   "The values `drover-sort-by' may take.")
 
 (defcustom drover-sort-by 'urgency
   "What session views sort sessions by, within each group.
 The value is one of `drover-sort-fields': `urgency', the most urgent
-first; `title', `project', `branch', `agent' or `model', in
-alphabetical order; `updated', the last activity, or `created', the
-time of creation, oldest first.  `drover-sort-descending' reverses the
-order.  Subagents stay under their parent whatever the order."
+first; `title', `project', `branch', `agent', `model' or `provider',
+the provider's name, in alphabetical order; `updated', the last
+activity, or `created', the time of creation, oldest first.
+`drover-sort-descending' reverses the order.  Subagents stay under
+their parent whatever the order."
   :type '(choice (const :tag "Urgency" urgency)
                  (const :tag "Title" title)
                  (const :tag "Project" project)
                  (const :tag "Branch" branch)
                  (const :tag "Agent" agent)
                  (const :tag "Model" model)
+                 (const :tag "Provider" provider)
                  (const :tag "Last activity" updated)
                  (const :tag "Creation" created))
   :group 'drover)
@@ -553,6 +558,7 @@ compared ignoring case; times are those of the root session, but for
                               ('branch (drover-session-branch session))
                               ('agent (drover-session-agent session))
                               ('model (drover-session-model session))
+                              ('provider (drover-session-provider-name session))
                               (_ (error "Unknown sort field %S" field))))
                      (text (format "%s" value))
                      ((not (string-empty-p text))))
@@ -649,6 +655,10 @@ PROPERTIES is a plist of:
              draw, so it must cost nothing for sessions whose details
              are known, being fetched, or cannot be fetched.  See
              `drover-prefetch'.
+ :recap      Function of a session and a CALLBACK fetching a recap of
+             its last turn, and calling CALLBACK once with it, possibly
+             before returning; it must never wait.  See `drover-recap'
+             for the recap.
 
 The prompt (`drover-prompt') sends to sessions and starts them through
 the following operations, all optional.  Callbacks are called at most
@@ -1002,14 +1012,16 @@ seconds without another change."
 (defcustom drover-group-by 'status
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
-first; `project', `branch', `agent' or `model', of the session at the
-top of each tree; `updated', the last activity, as today, yesterday,
-this week and older; or nil for no groups.  See `drover-group-trees'."
+first; `project', `branch', `agent', `model' or `provider', the
+provider's name, of the session at the top of each tree; `updated',
+the last activity, as today, yesterday, this week and older; or nil
+for no groups.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
                  (const :tag "By branch" branch)
                  (const :tag "By agent" agent)
                  (const :tag "By model" model)
+                 (const :tag "By provider" provider)
                  (const :tag "By last activity" updated)
                  (const :tag "No groups" nil))
   :group 'drover)
@@ -1022,6 +1034,8 @@ Its members are:
  :statuses  A list of statuses: sessions with one of them.
  :agent     An agent name, as `drover-session-agent' returns it.
  :model     A model name, as `drover-session-model' returns it.
+ :provider  A provider name, as `drover-session-provider-name' returns
+            it.
  :since     A float time: sessions last updated then or later.
  :search    A string found, ignoring case, in the title, summary,
             project or branch of the session.
@@ -1033,7 +1047,7 @@ session.  Change it with `drover-set-filter' so that views follow.")
   "Non-nil in the buffers of drover's own session views.
 Those follow `drover-filter', `drover-group-by' and `drover-sort-by'.")
 
-(defconst drover--filter-keys '(:project :statuses :agent :model :since :search)
+(defconst drover--filter-keys '(:project :statuses :agent :model :provider :since :search)
   "The members of `drover-filter', in the order they are described.")
 
 (defun drover--filter-value (filter key)
@@ -1055,12 +1069,14 @@ SESSION must satisfy every member of FILTER that is set."
          (statuses (drover--filter-value filter :statuses))
          (agent (drover--filter-value filter :agent))
          (model (drover--filter-value filter :model))
+         (provider (drover--filter-value filter :provider))
          (since (drover--filter-value filter :since))
          (search (drover--filter-value filter :search)))
     (and (or (null project) (equal (drover-session-project session) project))
          (or (null statuses) (memq (drover-session-status session) statuses))
          (or (null agent) (equal (drover-session-agent session) agent))
          (or (null model) (equal (drover-session-model session) model))
+         (or (null provider) (equal (drover-session-provider-name session) provider))
          (or (null since)
              (let ((updated (drover-session-updated session)))
                (and updated (>= updated since))))
@@ -1166,7 +1182,8 @@ Views redraw from `drover-changed-hook', which runs now."
 
 (defun drover-set-filter (key value)
   "Set member KEY of `drover-filter' to VALUE, nil removing it, and redraw views.
-KEY is one of :project, :statuses, :agent, :model, :since and :search."
+KEY is one of :project, :statuses, :agent, :model, :provider, :since
+and :search."
   (unless (memq key drover--filter-keys)
     (error "Unknown filter member %S" key))
   (let ((filter (copy-sequence drover-filter)))
@@ -1576,6 +1593,35 @@ Interactively, SESSION is the session at point."
 (defun drover-preview (session callback)
   "Call CALLBACK with a string showing where SESSION stands, or nil."
   (drover-backend-call session :preview callback))
+
+(defun drover-recap (session callback)
+  "Fetch a recap of the last turn of SESSION, and call CALLBACK with it.
+The recap is a plist; each member is nil when unknown or empty:
+
+ :prompt   The user's last prompt, as text.
+ :reply    The agent's newest reply to it, as text: what it said last.
+ :changes  The files the turn changed, a list of (FILE ADDITIONS
+           DELETIONS): FILE a name, absolute or relative to the
+           session's directory, ADDITIONS and DELETIONS counts of lines,
+           or nil when the backend does not know them.
+ :error    The error that ended the turn, in full.
+
+When nothing could be fetched, the recap is (:failure MESSAGE).  The
+backend's :recap fetches it in the background; CALLBACK is called once,
+possibly before this returns.  A backend without :recap, or failing
+from the start, calls CALLBACK with a failure at once."
+  (let ((called nil))
+    (cl-flet ((deliver (recap)
+                (unless called
+                  (setq called t)
+                  (funcall callback recap))))
+      (if-let* ((function (drover-backend-property session :recap))
+                ((functionp function)))
+          (condition-case err
+              (funcall function session #'deliver)
+            (error (deliver (list :failure (error-message-string err)))))
+        (deliver (list :failure (format "%s sessions tell no recap"
+                                        (drover-backend-label session))))))))
 
 (defun drover-rename (session title)
   "Rename SESSION to TITLE.

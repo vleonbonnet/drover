@@ -23,8 +23,9 @@
 ;; The `claude-code' engine: what a new Claude Code session starts with,
 ;; read from the CLI's local state as the CLI itself resolves it (start
 ;; flags, environment, settings layers and its cached model catalog),
-;; its models, when it last took a prompt, and where it keeps the
-;; transcripts and identifiers of its sessions.  It needs no front end:
+;; its models, when it last took a prompt, where it keeps the
+;; transcripts and identifiers of its sessions, and what their last
+;; turns were (`drover-claude-code-recap').  It needs no front end:
 ;; `drover-claude-code-ide' and `drover-agent-shell' show its sessions.
 ;;
 ;; The defaults follow Claude Code's documented precedence for the
@@ -260,6 +261,125 @@ without effort.  Nil when no turn is found."
               (setq turn (cons model (and (stringp effort) (intern effort))))))
           (beginning-of-line))
         turn))))
+
+(defun drover-claude-code--transcript-records (file)
+  "Return the records at the end of transcript FILE, newest first.
+Only the last `drover-claude-code--transcript-tail' bytes are read; a
+line cut by that, or that is not a JSON object, is left out."
+  (when (file-readable-p file)
+    (with-temp-buffer
+      (let ((size (file-attribute-size (file-attributes file))))
+        (insert-file-contents file nil (max 0 (- size drover-claude-code--transcript-tail)) size))
+      (let ((records nil))
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when-let* ((record (ignore-errors
+                                (json-parse-string (buffer-substring-no-properties
+                                                    (point) (line-end-position))
+                                                   :object-type 'alist :array-type 'list
+                                                   :null-object nil :false-object nil)))
+                      ((drover-json-object-p record)))
+            (push record records))
+          (forward-line 1))
+        records))))
+
+(defun drover-claude-code--texts (content)
+  "Return the texts of message CONTENT, a string or a list of blocks, joined."
+  (let ((text (if (stringp content)
+                  content
+                (string-join (delq nil (mapcar (lambda (block)
+                                                 (and (drover-json-object-p block)
+                                                      (equal (alist-get 'type block) "text")
+                                                      (alist-get 'text block)))
+                                               content))
+                             "\n"))))
+    (setq text (string-trim (or text "")))
+    (unless (string-empty-p text) text)))
+
+(defun drover-claude-code--prompt-p (record)
+  "Return the text RECORD gives as a prompt of the user, or nil.
+Tool results, notes Claude Code adds for itself, and the commands it
+runs, such as /model, are no prompt."
+  (when (and (equal (alist-get 'type record) "user")
+             (not (alist-get 'isMeta record))
+             (not (alist-get 'toolUseResult record)))
+    (let ((content (alist-get 'content (alist-get 'message record))))
+      (unless (and (listp content)
+                   (seq-some (lambda (block)
+                               (and (drover-json-object-p block)
+                                    (equal (alist-get 'type block) "tool_result")))
+                             content))
+        (when-let* ((text (drover-claude-code--texts content))
+                    ((not (string-match-p "\\`<\\(command-\\|local-command-\\|bash-\\)" text))))
+          text)))))
+
+(defun drover-claude-code--change (record)
+  "Return what RECORD's tool result changed, as (FILE ADDITIONS DELETIONS), or nil.
+A file written whole adds its lines; an edit adds and deletes those of
+its patch."
+  (let ((result (alist-get 'toolUseResult record)))
+    (when-let* (((drover-json-object-p result))
+                (file (alist-get 'filePath result))
+                ((stringp file)))
+      (if (equal (alist-get 'type result) "create")
+          (let ((content (alist-get 'content result)))
+            (list file (if (and (stringp content) (not (string-empty-p content))) (length (string-lines content)) 0) 0))
+        (let ((additions 0)
+              (deletions 0))
+          (dolist (hunk (alist-get 'structuredPatch result))
+            (dolist (line (and (drover-json-object-p hunk) (alist-get 'lines hunk)))
+              (when (stringp line)
+                (cond ((string-prefix-p "+" line) (cl-incf additions))
+                      ((string-prefix-p "-" line) (cl-incf deletions))))))
+          (and (or (> additions 0) (> deletions 0)
+                   (assq 'structuredPatch result))
+               (list file additions deletions)))))))
+
+(defun drover-claude-code-recap (file)
+  "Return a recap of the last turn transcript FILE records, as `drover-recap' does.
+The turn begins at the newest prompt of the user; its reply is the
+newest text of the main agent since, its error that of an API error
+the CLI recorded, and its changes the files its tools wrote or edited,
+with the lines they added and deleted.  Subagents' records are left
+out.  Only the end of FILE is read: a turn longer than that has no
+prompt, unless the CLI recorded the last prompt apart."
+  (let (prompt last-prompt reply reply-id error changes)
+    (catch 'turn
+      (dolist (record (drover-claude-code--transcript-records file))
+        (unless (alist-get 'isSidechain record)
+          (pcase (alist-get 'type record)
+            ("last-prompt"
+             (unless last-prompt
+               (setq last-prompt (alist-get 'lastPrompt record))))
+            ("assistant"
+             (let* ((message (alist-get 'message record))
+                    (text (drover-claude-code--texts (alist-get 'content message))))
+               (cond ((not text))
+                     ((alist-get 'isApiErrorMessage record)
+                      (unless error (setq error text)))
+                     ((not reply)
+                      (setq reply text
+                            reply-id (alist-get 'id message)))
+                     ;; The CLI records each block of a message apart.
+                     ((and reply-id (equal reply-id (alist-get 'id message)))
+                      (setq reply (concat text "\n" reply))))))
+            ("user"
+             (if-let* ((text (drover-claude-code--prompt-p record)))
+                 (progn (setq prompt text)
+                        (throw 'turn nil))
+               (when-let* ((change (drover-claude-code--change record)))
+                 ;; Walking back in time, pushing puts the oldest first.
+                 (push change changes))))))))
+    (list :prompt (or prompt (and (stringp last-prompt) (not (string-blank-p last-prompt)) last-prompt))
+          :reply reply
+          :changes (let ((merged nil))
+                     (dolist (change changes)
+                       (if-let* ((known (assoc (car change) merged)))
+                           (setcdr known (list (+ (nth 1 known) (nth 1 change))
+                                               (+ (nth 2 known) (nth 2 change))))
+                         (push (copy-sequence change) merged)))
+                     (nreverse merged))
+          :error error)))
 
 ;;;; Settings
 

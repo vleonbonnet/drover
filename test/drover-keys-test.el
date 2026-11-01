@@ -257,21 +257,6 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
           (should (eq drover-show-subagents 'active))
           (should (= runs 3)))))))
 
-(ert-deftest drover-keys-test-toggle-subagents-hint ()
-  "The hint names the key of the toggle and what pressing it does."
-  (let ((map (make-sparse-keymap))
-        (drover-show-subagents 'active))
-    (set-keymap-parent map drover-session-map)
-    (should (equal (substring-no-properties (drover-toggle-subagents-hint map)) "U hides all"))
-    (should (eq (get-text-property 0 'face (drover-toggle-subagents-hint map)) 'help-key-binding))
-    (setq drover-show-subagents 'none)
-    (should (equal (substring-no-properties (drover-toggle-subagents-hint map)) "U shows all"))
-    (setq drover-show-subagents 'all)
-    (should (equal (substring-no-properties (drover-toggle-subagents-hint map)) "U shows active only"))
-    (keymap-set map "U" nil)
-    (keymap-set map "C-c u" #'drover-toggle-subagents)
-    (should (string-prefix-p "C-c u " (substring-no-properties (drover-toggle-subagents-hint map))))))
-
 (ert-deftest drover-keys-test-refresh ()
   (drover-keys-test-with (list (drover-test-session "s"))
     (let ((reverted nil)
@@ -687,20 +672,22 @@ of sessions go after p, more prompt commands after O."
             (should (seq-set-equal-p (drover-keys-test-render 'drover-view)
                                      '(" o urgency" " r [ascending|descending]" " g status"
                                        " p project any" " s status any" " a agent any"
-                                       " m model any" " d updated any" " f text any" " c clear"
+                                       " m model any" " v provider any" " d updated any"
+                                       " f text any" " c clear"
                                        " F follow [off|on]" " U subagents [all|active|none]"
                                        " O older [hidden|shown]"
                                        " -l location" " -a agent" " -m model" " -r provider"
                                        " -x context" " -c created"
                                        " -t age" " -p cache" " -s summary")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
-                                      :since (- (float-time) 7200))
+                                      :provider "Anthropic" :since (- (float-time) 7200))
                   drover-sort-by 'updated
                   drover-sort-descending t
                   drover-group-by nil)
             (let ((view (drover-keys-test-render 'drover-view)))
               (dolist (line '(" o last activity" " g nothing" " p project drover"
-                              " s status needs you or done" " a agent build" " d updated since 2h"
+                              " s status needs you or done" " a agent build" " v provider Anthropic"
+                              " d updated since 2h"
                               " f text any"))
                 (should (member line view))))))
       (set-time-zone-rule zone))))
@@ -742,7 +729,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
       (setq-local drover-view-p t)
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("Sort by" "o" "r") ("Group by" "g")
-                       ("Filter by" "p" "s" "a" "m" "d" "f" "c")
+                       ("Filter by" "p" "s" "a" "m" "v" "d" "f" "c")
                        ("Toggles" "F" "U" "O")
                        ("Columns" "- l" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
       ;; One key, one setting.
@@ -856,6 +843,46 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
         (should-not drover-filter)
         (should (= runs 8))))))
 
+(ert-deftest drover-keys-test-view-provider ()
+  "The View menu sorts, groups and filters sessions by their provider's name."
+  (drover-keys-test-with (list (drover-test-session "a" :provider "A" :provider-name "Anthropic")
+                               (drover-test-session "b" :provider-name "OpenAI")
+                               (drover-test-session "c" :provider "A" :provider-name "Anthropic")
+                               (drover-test-session "d"))
+    (let ((runs 0))
+      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+      (with-temp-buffer
+        (setq-local drover-view-p t)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt candidates &rest _)
+                     (should (member "provider" candidates))
+                     "provider")))
+          (drover-keys-test-choose "o")
+          (should (eq drover-sort-by 'provider))
+          (setq drover-group-by nil)
+          (should (equal (mapcar #'car (drover-test-tree-shape (cdar (drover-view-groups))))
+                         '("a" "c" "b" "d")))
+          (drover-keys-test-choose "g"))
+        (should (eq drover-group-by 'provider))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "o")) '("provider")))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "g")) '("provider")))
+        (should (equal (mapcar (lambda (group) (cons (cdar group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                               (drover-view-groups))
+                       '(("Anthropic" "a" "c") ("OpenAI" "b") (nil "d"))))
+        ;; The providers of the sessions, by name.
+        (should (equal (drover-keys-test-value "v") "any"))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt candidates &rest _)
+                     (should (equal prompt "Provider (empty for any): "))
+                     (should (equal candidates '("Anthropic" "OpenAI")))
+                     "OpenAI")))
+          (drover-keys-test-choose "v"))
+        (should (equal drover-filter '(:provider "OpenAI")))
+        (should (equal (drover-keys-test-value "v") "OpenAI"))
+        (should (equal (mapcar #'car (drover-test-tree-shape (drover-view-trees))) '("b")))
+        (should (equal (drover-filter-description) "provider OpenAI"))
+        (should (= runs 3))))))
+
 (ert-deftest drover-keys-test-view-toggles ()
   (drover-keys-test-with (list (drover-test-session "a"))
     (let ((fetched 0))
@@ -923,7 +950,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 22))
+      (should (= (length suffixes) 23))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 
@@ -966,19 +993,6 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
           (setq drover-filter '(:search "x"))
           (should (equal (drover-filter-description nil now) "\"x\"")))
       (set-time-zone-rule zone))))
-
-(ert-deftest drover-keys-test-filter-clear-hint ()
-  "The hint names the keys bound to the View menu, then its clear key."
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map drover-session-map)
-    (should (equal (substring-no-properties (drover-filter-clear-hint map)) "V c clears the filter."))
-    (should (eq (get-text-property 0 'face (drover-filter-clear-keys map)) 'help-key-binding))
-    (with-temp-buffer
-      (use-local-map map)
-      (should (equal (substring-no-properties (drover-filter-clear-keys)) "V c"))
-      (keymap-set map "V" nil)
-      (keymap-set map "C-c v" #'drover-view)
-      (should (equal (substring-no-properties (drover-filter-clear-keys)) "C-c v c")))))
 
 ;;;; Projects
 

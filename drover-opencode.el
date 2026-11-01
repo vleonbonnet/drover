@@ -43,6 +43,8 @@
 ;;
 ;; Older sessions, beyond those of the registry, come from the service
 ;; on demand (:history): every unarchived session, of every project.
+;; The recap of a session's last turn (:recap), which the list shows as
+;; a session expands, is opencode.el's `opencode-session-last-turn'.
 ;;
 ;; The file also registers the `opencode' engine (see `drover-model'):
 ;; what a new OpenCode session would run, from the service's catalogs of
@@ -71,6 +73,7 @@
 (declare-function opencode-session-delete "opencode-session" (id))
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
+(declare-function opencode-session-last-turn "opencode-session" (id callback))
 
 ;;;; The OpenCode engine
 
@@ -601,6 +604,13 @@ back if the user moved on meanwhile."
   "Call CALLBACK with the last reply of SESSION, or nil."
   (opencode-session-last-reply (drover-session-id session) callback))
 
+(defun drover-opencode--recap (session callback)
+  "Call CALLBACK with a recap of the last turn of SESSION.
+It is what `opencode-session-last-turn' fetches: the last prompt, the
+reply since, the error it ended with and the files it changed, in
+drover's form already.  The backend's :recap."
+  (opencode-session-last-turn (drover-session-id session) callback))
+
 (defun drover-opencode--new (directory)
   "Create a session in DIRECTORY and display it."
   (opencode-session-create :directory directory))
@@ -894,6 +904,7 @@ unknown.  The backend's :options."
    :archive #'drover-opencode--archive
    :mark-seen #'drover-opencode--mark-seen
    :preview #'drover-opencode--preview
+   :recap #'drover-opencode--recap
    :new #'drover-opencode--new
    :buffer #'drover-opencode--buffer
    :rename #'drover-opencode--rename

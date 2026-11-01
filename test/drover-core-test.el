@@ -72,6 +72,31 @@
       (should (equal (reverse drover-test-calls)
                      '((:open "s" t) (:respond "s") (:interrupt "s") (:archive "s") (:mark-seen "s")))))))
 
+(ert-deftest drover-test-recap ()
+  "A recap comes from the backend once; a missing or failing :recap is a failure."
+  (drover-test-with-backend nil
+    (let ((results nil)
+          (pending nil))
+      (drover-register-backend 'later :label "Later" :sessions #'ignore
+                               :recap (lambda (session callback)
+                                        (push (cons (drover-session-id session) callback) pending)))
+      (drover-register-backend 'broken :label "Broken" :sessions #'ignore
+                               :recap (lambda (_session _callback) (error "No connection")))
+      (drover-register-backend 'twice :label "Twice" :sessions #'ignore
+                               :recap (lambda (_session callback)
+                                        (funcall callback '(:prompt "Hi"))
+                                        (funcall callback '(:prompt "Again"))))
+      (drover-register-backend 'bare :label "Bare" :sessions #'ignore)
+      (dolist (backend '(later broken twice bare))
+        (drover-recap (drover-session-create :backend backend :id "x")
+                      (lambda (recap) (push (cons backend recap) results))))
+      ;; Asynchronous: nothing yet from `later'.
+      (should (equal (reverse results)
+                     '((broken :failure "No connection") (twice :prompt "Hi")
+                       (bare :failure "Bare sessions tell no recap"))))
+      (funcall (cdar pending) '(:reply "Done"))
+      (should (equal (car results) '(later :reply "Done"))))))
+
 (ert-deftest drover-test-unsupported-action ()
   (drover-test-with-backend nil
     (drover-register-backend 'bare :label "Bare" :sessions (lambda () nil))
@@ -743,6 +768,18 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
     (should (equal (drover-test-filtered '(:model "opus" :agent "plan") sessions) '("b")))
     (should (drover-filter-active-p '(:agent "build")))))
 
+(ert-deftest drover-test-filter-provider ()
+  "The provider filter matches the provider's name, not its display."
+  (let ((sessions (list (drover-test-session "a" :provider "A" :provider-name "Anthropic")
+                        (drover-test-session "b" :provider-name "OpenAI")
+                        (drover-test-session "c" :provider "Anthropic"))))
+    (should (equal (drover-test-filtered '(:provider "Anthropic") sessions) '("a")))
+    (should (equal (drover-test-filtered '(:provider "OpenAI") sessions) '("b")))
+    (should (drover-filter-active-p '(:provider "OpenAI")))
+    (drover-test-with-backend nil
+      (drover-set-filter :provider "OpenAI")
+      (should (equal drover-filter '(:provider "OpenAI"))))))
+
 (ert-deftest drover-test-filter-since ()
   (let ((sessions (list (drover-test-session "old" :updated 99.0)
                         (drover-test-session "edge" :updated 100.0)
@@ -1030,6 +1067,16 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
                    '("b" "c" "a")))
     (should-error (drover-sort-trees trees 'colour))))
 
+(ert-deftest drover-test-sort-trees-by-provider ()
+  "Trees sort by the name of their provider, sessions without one last."
+  (let ((trees (drover-tree (list (drover-test-session "x" :status 'waiting :provider-name "openai")
+                                  (drover-test-session "y" :status 'done)
+                                  (drover-test-session "z" :provider "icon" :provider-name "Anthropic")))))
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'provider)))
+                   '("z" "x" "y")))
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'provider t)))
+                   '("x" "z" "y")))))
+
 (ert-deftest drover-test-set-sort ()
   (drover-test-with-backend nil
     (let ((runs 0))
@@ -1057,11 +1104,25 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
                    '(("dev" ("b")) ("main" ("a" ("kid")) ("c")))))
     (should (equal (mapcar #'car (drover-group-trees trees 'agent)) '("plan" "build" nil)))
     (should (equal (mapcar #'car (drover-group-trees trees 'model)) '(nil "opus")))
+    (should (equal (mapcar #'car (drover-group-trees trees 'provider)) '(nil)))
     (should (equal (mapcar #'car (drover-group-trees trees 'status)) '(waiting done working)))
     (should (equal (mapcar #'car (drover-group-trees trees 'project)) '(nil)))
     (should (equal (drover-group-trees trees nil) (list (cons nil trees))))
     (should-not (drover-group-trees nil nil))
     (should-error (drover-group-trees trees 'colour))))
+
+(ert-deftest drover-test-group-trees-by-provider ()
+  "Trees go with the provider name of their root, a group with its most urgent tree."
+  (let ((trees (drover-tree
+                (list (drover-test-session "a" :provider "A" :provider-name "Anthropic" :status 'idle)
+                      (drover-test-session "b" :provider-name "OpenAI" :status 'waiting :since 1.0)
+                      (drover-test-session "kid" :parent "a" :provider-name "OpenAI" :status 'done)
+                      (drover-test-session "c" :provider "A" :provider-name "Anthropic" :status 'working)
+                      (drover-test-session "d" :status 'idle)))))
+    (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
+                           (drover-group-trees trees 'provider))
+                   '(("OpenAI" ("b")) ("Anthropic" ("a" ("kid")) ("c")) (nil ("d")))))
+    (should (equal (drover-group-label 'provider nil) "No provider"))))
 
 (ert-deftest drover-test-activity-buckets ()
   (let ((zone (getenv "TZ")))

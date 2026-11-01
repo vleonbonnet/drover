@@ -42,7 +42,8 @@
 ;; `claude-code' engine the start flags and directory claude-code-ide
 ;; uses (`drover-claude-code-start-flags-function',
 ;; `drover-claude-code-project-directory-function'), and learns the
-;; conversation of every terminal claude-code-ide starts.
+;; conversation of every terminal claude-code-ide starts.  The recap of
+;; a session's last turn (:recap) is read from the end of its transcript.
 ;;
 ;; `drover' loads this file once claude-code-ide.el is loaded.
 
@@ -903,6 +904,20 @@ Claude Code or no terminal starts."
                    (let ((text (buffer-substring-no-properties (line-beginning-position) end)))
                      (and (not (string-blank-p text)) text))))))))
 
+(defun drover-claude-code-ide--recap (session callback)
+  "Call CALLBACK with a recap of the last turn of SESSION.
+It is read from the end of the session's transcript (see
+`drover-claude-code-recap'), local and short, so at once.  The
+backend's :recap."
+  (funcall callback
+           (or (with-demoted-errors "Drover Claude Code recap: %S"
+                 (when-let* ((buffer (drover-claude-code-ide--buffer session))
+                             (id (drover-claude-code-ide-current-session-id buffer))
+                             (file (drover-claude-code-transcript id (drover-session-directory session)))
+                             ((file-readable-p file)))
+                   (drover-claude-code-recap file)))
+               (list :failure "No transcript of this session yet"))))
+
 (defun drover-claude-code-ide--new (directory)
   "Start a Claude Code session in DIRECTORY, and display it."
   (or (drover-claude-code-ide-start directory)
@@ -947,6 +962,7 @@ With several, the most recently used."
    :interrupt #'drover-claude-code-ide--interrupt
    :mark-seen #'drover-claude-code-ide--mark-seen
    :preview #'drover-claude-code-ide--preview
+   :recap #'drover-claude-code-ide--recap
    :new #'drover-claude-code-ide--new
    :buffer #'drover-claude-code-ide--buffer
    :rename #'drover-claude-code-ide--rename

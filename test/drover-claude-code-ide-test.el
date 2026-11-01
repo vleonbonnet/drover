@@ -1045,6 +1045,28 @@ guess could hide another session of the directory."
               (should (equal (drover-claude-code-ide--settable session) '(:model)))))
         (delete-file transcript)))))
 
+(ert-deftest drover-claude-code-ide-test-recap ()
+  "A session's recap is read from its transcript, once its session is known."
+  (drover-claude-code-ide-test-with
+    (let* ((transcript (make-temp-file "drover-transcript" nil ".jsonl"
+                                       (concat (json-encode '((type . "user") (message (content . "Go"))))
+                                               "\n")))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* recap")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'drover-claude-code-transcript)
+                     (lambda (id directory)
+                       (should (equal (list id directory) '("known" "/work/drover/")))
+                       transcript)))
+            (let ((session (drover-claude-code-ide-test-session terminal))
+                  (recap nil))
+              (drover-recap session (lambda (value) (setq recap value)))
+              (should (equal recap '(:failure "No transcript of this session yet")))
+              (with-current-buffer terminal
+                (setq-local drover-claude-code-ide-session-id "known"))
+              (drover-recap session (lambda (value) (setq recap value)))
+              (should (equal recap '(:prompt "Go" :reply nil :changes nil :error nil)))))
+        (delete-file transcript)))))
+
 (ert-deftest drover-claude-code-ide-test-session-runs ()
   "A session shows the model and effort of its newest turn, read again once it changed."
   (drover-claude-code-ide-test-with
@@ -1178,8 +1200,8 @@ guess could hide another session of the directory."
     (should (equal (drover-backends) '(claude-code-ide)))
     (should (equal (drover-backend-label 'claude-code-ide) "Claude Code IDE"))
     (should (equal (drover-backend-engines 'claude-code-ide) '(claude-code)))
-    (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :new :buffer :rename
-                                   :create :apply-options :send :options :settable))
+    (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new :buffer
+                                   :rename :create :apply-options :send :options :settable))
       (should (functionp (drover-backend-property 'claude-code-ide operation))))
     (dolist (operation '(:archive :delete :fork :compact :check :history))
       (should-not (drover-backend-property 'claude-code-ide operation)))))

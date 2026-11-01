@@ -191,8 +191,8 @@ VALUES are strings, named by themselves capitalized."
           (should (equal (drover-backends) '(agent-shell)))
           (should (equal (drover-backend-label 'agent-shell) "agent-shell"))
           (let ((session (drover-session-create :backend 'agent-shell :id "shell-0")))
-            (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :new :buffer
-                                           :rename :create :apply-options :send :options :settable))
+            (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new
+                                           :buffer :rename :create :apply-options :send :options :settable))
               (should (drover-supports-p session operation)))
             (dolist (operation '(:archive :delete :fork :compact :check :history))
               (should-not (drover-supports-p session operation))))
@@ -1104,6 +1104,42 @@ A Claude model goes by its compact name, as in opencode.el's mode line."
         (kill-buffer shell)
         (should-error (drover-open session) :type 'user-error)
         (drover-preview session (lambda (text) (should-not text)))))))
+
+(ert-deftest drover-agent-shell-test-recap ()
+  "A shell's recap is what its events told of its last turn."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code))
+           (session (drover-agent-shell-test-session shell)))
+      (cl-flet ((recap ()
+                  (let (value)
+                    (drover-recap session (lambda (recap) (setq value recap)))
+                    value)))
+        (should (equal (recap) '(:prompt nil :reply nil :changes nil :error nil)))
+        (drover-agent-shell-test-emit shell 'input-submitted :prompt "Fix the build")
+        (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "Let me ")
+        (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "look.")
+        (should (equal (plist-get (recap) :reply) "Let me look."))
+        ;; A tool call parts two messages: the newest is the reply.
+        (drover-agent-shell-test-emit shell 'tool-call-update
+                                      :tool-call '((:status . "pending")
+                                                   (:diffs ((:file . "/w/proposed.el")))))
+        (drover-agent-shell-test-emit shell 'tool-call-update
+                                      :tool-call '((:status . "completed")
+                                                   (:diffs ((:file . "/w/a.el")) ((:file . "/w/b.el")))))
+        (drover-agent-shell-test-emit shell 'file-write :path "/w/a.el")
+        (drover-agent-shell-test-emit shell 'usage-update)
+        (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "Fixed ")
+        (drover-agent-shell-test-emit shell 'usage-update)
+        (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "it.\n")
+        (should (equal (recap) '(:prompt "Fix the build" :reply "Fixed it."
+                                 :changes (("/w/b.el" nil nil) ("/w/a.el" nil nil)) :error nil)))
+        (drover-agent-shell-test-emit shell 'error :message "Overloaded")
+        (should (equal (plist-get (recap) :error) "Overloaded"))
+        ;; A new prompt begins a new turn.
+        (drover-agent-shell-test-emit shell 'input-submitted :prompt "Again")
+        (should (equal (recap) '(:prompt "Again" :reply nil :changes nil :error nil)))
+        (kill-buffer shell)
+        (should (equal (recap) '(:failure "The shell is gone")))))))
 
 (ert-deftest drover-agent-shell-test-respond-from-side-list ()
   "Answering from a list in a side window shows the shell where the user works."

@@ -529,6 +529,51 @@ serves and a model without effort.")
         (append-to-file (point-min) (point-max) file))
       (should (equal (drover-claude-code-last-turn file) '("claude-haiku-4-5"))))))
 
+(ert-deftest drover-claude-code-test-recap ()
+  "The recap of a transcript's last turn: its prompt, reply, error and files changed."
+  (drover-test-with-homes
+    (let ((file (expand-file-name "transcript.jsonl" home)))
+      (should (equal (drover-claude-code-recap file) '(:prompt nil :reply nil :changes nil :error nil)))
+      (drover-test-write
+       file
+       (mapconcat
+        (lambda (record) (concat (json-encode record) "\n"))
+        `(((type . "user") (message (role . "user") (content . "An older prompt")))
+          ((type . "assistant") (message (id . "m0") (content . [((type . "text") (text . "Older reply"))])))
+          ((type . "user") (message (role . "user") (content . "Fix the build")))
+          ((type . "user") (isMeta . t) (message (role . "user") (content . "Caveat: notes")))
+          ((type . "assistant") (message (id . "m1") (content . [((type . "text") (text . "Looking."))])))
+          ((type . "assistant") (message (id . "m1") (content . [((type . "tool_use") (name . "Edit"))])))
+          ((type . "user") (message (content . [((type . "tool_result") (content . "ok"))]))
+           (toolUseResult (filePath . "/w/a.el")
+                          (structuredPatch . [((lines . ["-old" "+new" "+more" " same"]))])))
+          ((type . "user") (message (content . [((type . "tool_result") (content . "ok"))]))
+           (toolUseResult (type . "create") (filePath . "/w/b.el") (content . "one\ntwo\n")
+                          (structuredPatch . [])))
+          ((type . "user") (message (content . [((type . "tool_result") (content . "ok"))]))
+           (toolUseResult (filePath . "/w/a.el") (structuredPatch . [((lines . ["-x" "+y"]))])))
+          ((type . "assistant") (isSidechain . t)
+           (message (id . "s1") (content . [((type . "text") (text . "A subagent's text"))])))
+          ((type . "user") (message (role . "user") (content . "<command-name>/model</command-name>")))
+          ((type . "assistant") (message (id . "m2") (content . [((type . "text") (text . "Fixed: "))])))
+          ((type . "assistant") (message (id . "m2") (content . [((type . "text") (text . "it builds."))])))
+          ((type . "assistant") (isApiErrorMessage . t)
+           (message (id . "e1") (content . [((type . "text") (text . "API Error: overloaded"))]))))
+        ""))
+      (should (equal (drover-claude-code-recap file)
+                     '(:prompt "Fix the build" :reply "Fixed:\nit builds."
+                       :changes (("/w/a.el" 3 2) ("/w/b.el" 2 0)) :error "API Error: overloaded")))
+      ;; A turn longer than what is read keeps the prompt recorded apart.
+      (let ((drover-claude-code--transcript-tail 200))
+        (with-temp-buffer
+          (insert (json-encode '((type . "last-prompt") (lastPrompt . "Fix the build"))) "\n"
+                  (json-encode '((type . "assistant")
+                                 (message (id . "m3") (content . [((type . "text") (text . "Still on it"))]))))
+                  "\n")
+          (append-to-file (point-min) (point-max) file))
+        (should (equal (drover-claude-code-recap file)
+                       '(:prompt "Fix the build" :reply "Still on it" :changes nil :error nil)))))))
+
 (ert-deftest drover-claude-code-test-last-turn-reads-the-end ()
   "Only the end of a long transcript is read."
   (drover-test-with-homes

@@ -403,16 +403,17 @@ default, and otherwise the age of SINCE, such as \"2d\"."
 
 (defun drover-filter-description (&optional filter now)
   "Return FILTER, `drover-filter' by default, described for headers, or nil.
-The description lists each member set, such as
-\"project drover, needs you, agent build, since 2d, \"auth\"\".  Ages count up to
-NOW, the current time by default.  Return nil when FILTER lists every
-session."
+The description lists each member set, such as \"project drover,
+needs you, agent build, provider Anthropic, since 2d, \"auth\"\".  Ages
+count up to NOW, the current time by default.  Return nil when FILTER
+lists every session."
   (let ((filter (or filter drover-filter)))
     (when (drover-filter-active-p filter)
       (let ((project (drover--filter-value filter :project))
             (statuses (drover--filter-value filter :statuses))
             (agent (drover--filter-value filter :agent))
             (model (drover--filter-value filter :model))
+            (provider (drover--filter-value filter :provider))
             (since (drover--filter-value filter :since))
             (search (drover--filter-value filter :search)))
         (mapconcat #'identity
@@ -420,6 +421,7 @@ session."
                                    (and statuses (drover-filter-statuses-label statuses))
                                    (and agent (concat "agent " agent))
                                    (and model (concat "model " model))
+                                   (and provider (concat "provider " provider))
                                    (and since (drover-filter-since-label since now))
                                    (and search (format "\"%s\"" search))))
                    ", ")))))

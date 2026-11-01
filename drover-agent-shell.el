@@ -34,7 +34,9 @@
 ;; busy one works, and a turn that ended or failed while the shell was
 ;; not in front of the user is done or failed until the user looks at
 ;; it, sends another prompt or marks it seen.  Every shell is subscribed
-;; to its events from `agent-shell-mode-hook'.
+;; to its events from `agent-shell-mode-hook', which also tell the
+;; recap of its last turn (:recap): the prompt submitted, the agent's
+;; newest message since, and the files it wrote.
 ;;
 ;; The prompt starts shells set to start on a model and agent, sends to
 ;; them once they are initialized, and switches a running shell's
@@ -112,6 +114,20 @@ An alist (REQUEST-ID . TIME), TIME a float time.")
 
 (defvar-local drover-agent-shell--subscription nil
   "Token of this shell's subscription to its events.")
+
+(defvar-local drover-agent-shell--prompt nil
+  "The prompt this shell submitted last, or nil before one.")
+
+(defvar-local drover-agent-shell--reply nil
+  "The text of the agent's newest message since the last prompt, or nil.")
+
+(defvar-local drover-agent-shell--reply-open nil
+  "Non-nil while the agent's newest message streams.
+A text chunk then continues it; after a tool call or a request to the
+user, a chunk begins a new message.")
+
+(defvar-local drover-agent-shell--written nil
+  "Files the agent wrote since the last prompt, newest first.")
 
 ;;;; Shells
 
@@ -721,7 +737,26 @@ success."
     (pcase kind
       ('input-submitted
        (setq drover-agent-shell--outcome nil
-             drover-agent-shell--turn-start (float-time)))
+             drover-agent-shell--turn-start (float-time)
+             drover-agent-shell--prompt (map-elt data :prompt)
+             drover-agent-shell--reply nil
+             drover-agent-shell--reply-open nil
+             drover-agent-shell--written nil))
+      ('agent-message-chunk
+       (when-let* ((text (map-elt data :text-chunk))
+                   ((stringp text)))
+         (setq drover-agent-shell--reply (if drover-agent-shell--reply-open
+                                             (concat drover-agent-shell--reply text)
+                                           text)
+               drover-agent-shell--reply-open t)))
+      ('tool-call-update
+       (let ((tool-call (map-elt data :tool-call)))
+         ;; Proposed edits carry diffs too: only those done count.
+         (when (equal (map-elt tool-call :status) "completed")
+           (dolist (diff (map-elt tool-call :diffs))
+             (drover-agent-shell--note-change (map-elt diff :file))))))
+      ('file-write
+       (drover-agent-shell--note-change (map-elt data :path)))
       ('turn-complete
        (setq drover-agent-shell--request-times nil)
        (let ((reason (map-elt data :stop-reason)))
@@ -746,8 +781,16 @@ success."
     ;; Initialization went on, so it had not failed for good.
     (when (string-prefix-p "init-" (symbol-name kind))
       (setq drover-agent-shell--start-error nil))
+    ;; What comes between two messages of the agent parts them.
+    (when (memq kind '(tool-call-update permission-request elicitation-request turn-complete))
+      (setq drover-agent-shell--reply-open nil))
     (unless (memq kind drover-agent-shell--quiet-events)
       (drover-backend-changed 'agent-shell drover-agent-shell--id))))
+
+(defun drover-agent-shell--note-change (file)
+  "Note that the agent of the current shell changed FILE, a file name or nil."
+  (when (and (stringp file) (not (string-empty-p file)))
+    (setq drover-agent-shell--written (cons file (delete file drover-agent-shell--written)))))
 
 (defun drover-agent-shell--seen (buffer)
   "Mark the ended turn of the shell of BUFFER seen, reporting the change."
@@ -810,6 +853,26 @@ the window where the user works."
              (if (> (length output) drover-agent-shell--preview-limit)
                  (concat "…" (substring output (- drover-agent-shell--preview-limit)))
                output))))
+
+(defun drover-agent-shell--recap (session callback)
+  "Call CALLBACK with a recap of the last turn of SESSION's shell.
+It is what the shell's events told drover since it followed the shell:
+the prompt submitted last, the agent's newest message since, the files
+it wrote, their lines uncounted, and why the turn failed.  The backend's
+:recap."
+  (funcall callback
+           (if-let* ((buffer (drover-session-buffer session)))
+               (with-current-buffer buffer
+                 (let ((reply (and drover-agent-shell--reply (string-trim drover-agent-shell--reply)))
+                       (outcome drover-agent-shell--outcome))
+                   (list :prompt drover-agent-shell--prompt
+                         :reply (and reply (not (string-empty-p reply)) reply)
+                         :changes (mapcar (lambda (file) (list file nil nil))
+                                          (reverse drover-agent-shell--written))
+                         :error (or (and (eq (plist-get outcome :status) 'failed)
+                                         (plist-get outcome :detail))
+                                    drover-agent-shell--start-error))))
+             (list :failure "The shell is gone"))))
 
 (defun drover-agent-shell--set-title (buffer title)
   "Name the shell of BUFFER and its session TITLE.
@@ -875,6 +938,7 @@ whose creation time is unknown."
    :interrupt #'drover-agent-shell--interrupt
    :mark-seen #'drover-agent-shell--mark-seen
    :preview #'drover-agent-shell--preview
+   :recap #'drover-agent-shell--recap
    :new #'drover-agent-shell--new
    :buffer #'drover-agent-shell--buffer
    :rename #'drover-agent-shell--rename

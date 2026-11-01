@@ -230,21 +230,6 @@ MODE defaults to the global value of `drover-show-subagents'."
     ('none "Hiding subagents")
     (_ "Showing active subagents")))
 
-(defun drover-toggle-subagents-hint (&optional keymap)
-  "Return the keys of `drover-toggle-subagents' in KEYMAP, and what they do.
-Such as \"U hides all\", the keys in the face `help-key-binding'.
-KEYMAP defaults to the current local map."
-  (concat (let ((keys (where-is-internal #'drover-toggle-subagents (or keymap (current-local-map)) t)))
-            (if keys
-                (propertize (key-description keys) 'face 'help-key-binding
-                            'font-lock-face 'help-key-binding)
-              (substitute-command-keys "\\[drover-toggle-subagents]")))
-          (drover-face (pcase (drover-next-subagent-mode)
-                         ('all " shows all")
-                         ('none " hides all")
-                         (_ " shows active only"))
-                       'drover-dim)))
-
 (defun drover-refresh ()
   "Refresh what the current buffer shows, with `revert-buffer'.
 In a list, or in the buffer of the session at point, that reverts the
@@ -810,6 +795,10 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
   "Read the model whose sessions to list, CURRENT being the one now, or nil."
   (drover--read-known "Model" #'drover-session-model current))
 
+(defun drover--read-filter-provider (current)
+  "Read the provider whose sessions to list, CURRENT being the one now, or nil."
+  (drover--read-known "Provider" #'drover-session-provider-name current))
+
 (defun drover--read-filter-statuses (current)
   "Read the statuses to list, CURRENT being those listed now."
   (let* ((labels (mapcar (lambda (status) (cons (drover-status-label status) status))
@@ -848,12 +837,13 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
 
 (defconst drover-sort-labels
   '((urgency . "urgency") (title . "title") (project . "project") (branch . "branch")
-    (agent . "agent") (model . "model") (updated . "last activity") (created . "creation"))
+    (agent . "agent") (model . "model") (provider . "provider") (updated . "last activity")
+    (created . "creation"))
   "Display name of each field of `drover-sort-fields'.")
 
 (defconst drover-grouping-labels
   '((status . "status") (project . "project") (branch . "branch") (agent . "agent")
-    (model . "model") (updated . "last activity") (nil . "nothing"))
+    (model . "model") (provider . "provider") (updated . "last activity") (nil . "nothing"))
   "Display name of each grouping of `drover-groupings'.")
 
 (defclass drover--setting (transient-variable)
@@ -997,6 +987,13 @@ it, or \"any\" for nil.")
   :description "model"
   :filter-key :model
   :chooser #'drover--read-filter-model)
+
+(transient-define-infix drover-view--filter-provider ()
+  "List the sessions of one provider in every view."
+  :class 'drover--filter-setting
+  :description "provider"
+  :filter-key :provider
+  :chooser #'drover--read-filter-provider)
 
 (transient-define-infix drover-view--filter-since ()
   "List the sessions active since a time in every view."
@@ -1146,6 +1143,7 @@ session (`drover-list-hidden-fields' keeps the choice)."
     ("s" drover-view--filter-statuses)
     ("a" drover-view--filter-agent)
     ("m" drover-view--filter-model)
+    ("v" drover-view--filter-provider)
     ("d" drover-view--filter-since)
     ("f" drover-view--filter-search)
     ("c" "clear" drover-filter-clear :transient t)]
@@ -1172,24 +1170,6 @@ session (`drover-list-hidden-fields' keeps the choice)."
   ;; The list's window, from which the dispatch menu may have opened it.
   (transient-setup 'drover-view nil nil :scope (selected-window)
                    :display-action drover-menu-display-action))
-
-(defun drover-filter-clear-keys (&optional keymap)
-  "Return the keys clearing the filter from KEYMAP, such as \"V c\".
-They are the key of `drover-view' in KEYMAP, the current local map by
-default, then the key of `drover-filter-clear' in that menu, in the face
-`help-key-binding'."
-  (let ((menu (where-is-internal #'drover-view (or keymap (current-local-map)) t))
-        (clear (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-view #'drover-filter-clear)))
-                          :key)))
-    (if (and menu clear)
-        (propertize (concat (key-description menu) " " (key-description (kbd clear)))
-                    'face 'help-key-binding 'font-lock-face 'help-key-binding)
-      (substitute-command-keys "\\[drover-filter-clear]"))))
-
-(defun drover-filter-clear-hint (&optional keymap)
-  "Return the sentence telling how to clear the filter from KEYMAP.
-KEYMAP defaults to the current local map; see `drover-filter-clear-keys'."
-  (concat (drover-filter-clear-keys keymap) " clears the filter."))
 
 (provide 'drover-keys)
 ;;; drover-keys.el ends here
