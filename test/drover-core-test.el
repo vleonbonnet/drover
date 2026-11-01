@@ -215,6 +215,141 @@ subagent, \"busy\" works, under a subagent whose turn ended unseen."
       (drover-changed-now)
       (should (= runs 1)))))
 
+;;;; The index of sessions
+
+(defmacro drover-test-with-index (sessions &rest body)
+  "Run BODY with the fake backend serving SESSIONS, its index made.
+`changed' holds what `drover-changed-sessions' told the last time the
+hook ran, `asked' the identifiers the backend's :session was asked for,
+and `listed' how many times its :sessions was called."
+  (declare (indent 1) (debug t))
+  `(drover-test-with-backend ,sessions
+     (let ((changed 'none)
+           (asked nil)
+           (listed 0))
+       (drover-test-register-simple
+        'fake (lambda () (cl-incf listed) drover-test-sessions)
+        :session (lambda (id)
+                   (push id asked)
+                   (seq-find (lambda (session) (equal (drover-session-id session) id))
+                             drover-test-sessions)))
+       (add-hook 'drover-changed-hook (lambda () (setq changed drover-changed-sessions)))
+       (drover-index)
+       (drover-changed-now)
+       (setq listed 0 asked nil changed 'none)
+       ,@body)))
+
+(defun drover-test-index-ids (sessions)
+  "Return the identifiers of SESSIONS, records or keys, sorted."
+  (sort (mapcar (lambda (session) (if (consp session) (cdr session) (drover-session-id session)))
+                sessions)
+        #'string<))
+
+(ert-deftest drover-test-index-follows-one-session ()
+  "A session reported changed costs its backend's :session for it alone, and is told."
+  (drover-test-with-index (list (drover-test-session "a" :status 'working)
+                                (drover-test-session "b" :status 'idle))
+    (setq drover-test-sessions (list (drover-test-session "a" :status 'done)
+                                     (drover-test-session "b" :status 'idle)))
+    (drover-backend-changed 'fake "a")
+    (drover-changed-now)
+    (should (equal asked '("a")))
+    (should (zerop listed))
+    (should (equal changed '((fake . "a"))))
+    (should (eq (drover-session-status (drover-index-session '(fake . "a"))) 'done))
+    ;; The index lists what `drover-sessions' lists, in the same order.
+    (should (equal (mapcar #'drover-session-key (drover-index-sessions))
+                   (mapcar #'drover-session-key (drover-sessions))))
+    ;; A session gone, and one coming.
+    (setq drover-test-sessions (list (drover-test-session "b" :status 'idle)
+                                     (drover-test-session "c" :status 'working)))
+    (drover-backend-changed 'fake "a")
+    (drover-backend-changed 'fake "c")
+    (drover-changed-now)
+    (should (equal (drover-test-index-ids changed) '("a" "c")))
+    (should-not (drover-index-session '(fake . "a")))
+    (should (equal (drover-test-index-ids (drover-index-sessions)) '("b" "c")))
+    ;; Unreported changes wait for the index to be refreshed.
+    (setf (drover-session-title (car drover-test-sessions)) "Renamed")
+    (should-not (equal (drover-session-title (drover-index-session '(fake . "b"))) "Renamed"))
+    (setq listed 0)
+    (drover-index-refresh)
+    (should (= listed 1))
+    (should (equal changed '((fake . "b"))))
+    (should (equal (drover-session-title (drover-index-session '(fake . "b"))) "Renamed"))
+    ;; A refresh finding nothing new runs no hook.
+    (setq changed 'none)
+    (drover-index-refresh)
+    (should (eq changed 'none))))
+
+(ert-deftest drover-test-index-backend-changed ()
+  "A backend reported changed without a session is listed anew; without a backend, views draw everything."
+  (drover-test-with-index (list (drover-test-session "a") (drover-test-session "b"))
+    (setq drover-test-sessions (list (drover-test-session "a" :status 'done) (drover-test-session "b")))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (should (= listed 1))
+    (should-not asked)
+    (should (equal changed '((fake . "a"))))
+    (drover-backend-changed)
+    (drover-changed-now)
+    (should (eq changed t))
+    ;; A backend without :session is listed anew for a session too.
+    (drover-test-register-simple 'other (lambda () (list (drover-session-create :backend 'other :id "o"))))
+    (drover-changed-now)
+    (drover-backend-changed 'other "o")
+    (drover-changed-now)
+    (should (equal changed '((other . "o"))))
+    ;; View settings change everything.
+    (drover-set-show-subagents 'all)
+    (should (eq changed t))))
+
+(ert-deftest drover-test-index-trees ()
+  "The index nests subagents as `drover-tree' does, as parents come and go."
+  (drover-test-with-index (list (drover-test-session "sub" :parent "root" :status 'working)
+                                (drover-test-session "deep" :parent "sub"))
+    ;; The parent not listed, the subagent tops its tree.
+    (should-not (drover-index-parent '(fake . "sub")))
+    (should (equal (drover-index-root '(fake . "deep")) '(fake . "sub")))
+    (setq drover-test-sessions (append drover-test-sessions (list (drover-test-session "root"))))
+    (drover-backend-changed 'fake "root")
+    (drover-changed-now)
+    ;; The parent coming, its subagent's place changed, and is told.
+    (should (equal (drover-test-index-ids changed) '("root" "sub")))
+    (should (equal (drover-index-parent '(fake . "sub")) '(fake . "root")))
+    (should (equal (drover-index-root '(fake . "deep")) '(fake . "root")))
+    (should (equal (drover-test-index-ids (drover-index-tree-sessions '(fake . "root")))
+                   '("deep" "root" "sub")))
+    (should (equal (mapcar #'drover-session-key (drover-tree-sessions (drover-tree (drover-index-sessions))))
+                   (mapcar #'drover-session-key (drover-tree-sessions (drover-tree (drover-sessions))))))
+    ;; Going, it leaves its subagent at the top of its tree again.
+    (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "root"))
+                                           drover-test-sessions))
+    (drover-backend-changed 'fake "root")
+    (drover-changed-now)
+    (should-not (drover-index-parent '(fake . "sub")))
+    (should (drover-index-incremental-p))
+    ;; Parents forming a cycle: views draw everything, from an index made anew.
+    (setq drover-test-sessions (list (drover-test-session "sub" :parent "deep")
+                                     (drover-test-session "deep" :parent "sub")))
+    (drover-backend-changed 'fake "sub")
+    (drover-changed-now)
+    (should (eq changed t))
+    (should (equal (drover-test-index-ids (drover-index-sessions)) '("deep" "sub")))
+    (should-not (drover-index-incremental-p))))
+
+(ert-deftest drover-test-index-merges-like-sessions ()
+  "Records of two backends showing one conversation make views draw everything, merged."
+  (drover-test-with-index (list (drover-test-session "a" :engine 'opencode :engine-id "x"))
+    (drover-test-register-simple 'other (list (drover-session-create :backend 'other :id "o"
+                                                                     :engine 'opencode :engine-id "x")))
+    (drover-changed-now)
+    (should (eq changed t))
+    (should-not (drover-index-incremental-p))
+    (should (equal (mapcar #'drover-session-key (drover-index-sessions))
+                   (mapcar #'drover-session-key (drover-sessions))))
+    (should (= (length (drover-index-sessions)) 1))))
+
 (ert-deftest drover-test-format-age ()
   (should (equal (drover-format-age nil) ""))
   (should (equal (drover-format-age (- drover-test-now 42) drover-test-now) "42s"))

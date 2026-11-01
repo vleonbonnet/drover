@@ -25,7 +25,11 @@
 ;; `drover-session' records and performs actions on them; drover keeps
 ;; no session state of its own beyond what the interface needs.  A
 ;; backend calls `drover-backend-changed' whenever its sessions change,
-;; and drover runs `drover-changed-hook' once the burst is over.
+;; naming the session when it can, and drover runs `drover-changed-hook'
+;; once the burst is over, telling which sessions changed
+;; (`drover-changed-sessions').  Drover keeps the live sessions as
+;; backends last reported them in an index (`drover-index'), so that a
+;; change of one session costs that session alone.
 ;;
 ;; A session runs an engine, the agent program such as Claude Code,
 ;; which `drover-model' registers with its models and defaults; a

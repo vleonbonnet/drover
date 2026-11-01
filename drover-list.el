@@ -86,12 +86,17 @@
 ;; dimmed, after `drover-archived-glyph', in a group of their own when
 ;; grouped by status.
 ;;
-;; The buffer redraws when backends report changes, but only while it
+;; The buffer follows the changes backends report, but only while it
 ;; is displayed: a hidden list is marked stale and redraws when it is
-;; next shown.  A redraw keeps point on the same session, even when the
-;; session moved to another group, keeps every section expanded or
-;; collapsed as it was, and an active region active, on the same
-;; sessions.
+;; next shown.  A change draws only what it changes, in place: the lines
+;; of the sessions changed, a session moving to its new place, coming or
+;; going, so that thousands of sessions cost no more than a few; the
+;; list is drawn whole when its columns or its settings change.  The
+;; sessions of a collapsed group are drawn once it is expanded, searched,
+;; copied or selected, or a few at a time while Emacs is idle.  A redraw
+;; keeps point on the same session, even when the session moved to
+;; another group, keeps every section expanded or collapsed as it was,
+;; and an active region active, on the same sessions.
 
 ;;; Code:
 
@@ -3293,6 +3298,25 @@ those changed in place, which are the same objects before and after."
         (and (= (length before) (length after))
              (cl-every #'eq before after))))))
 
+(defun drover-list--live-p (section)
+  "Return non-nil when SECTION is still drawn."
+  (let ((start (oref section start)))
+    (or (not (markerp start)) (marker-buffer start))))
+
+(defun drover-list--forget-gone-sections ()
+  "Make Magit forget the sections no longer drawn, which it may remember."
+  (setq magit-section-pre-command-section
+        (and magit-section-pre-command-section
+             (drover-list--live-p magit-section-pre-command-section)
+             magit-section-pre-command-section)
+        magit-section-highlighted-sections
+        (seq-filter #'drover-list--live-p magit-section-highlighted-sections)
+        magit-section-focused-sections
+        (seq-filter #'drover-list--live-p magit-section-focused-sections))
+  (dolist (variable '(magit--ellipses-sections magit-section--opened-sections))
+    (when (boundp variable)
+      (set variable (seq-filter #'drover-list--live-p (symbol-value variable))))))
+
 (defun drover-list--delete-rows (rows)
   "Delete the sections of ROWS, consecutive, from the buffer."
   (let* ((first (drover-list--row-section (car rows)))
@@ -3474,6 +3498,7 @@ drawing anew keeps them."
       (let ((text (drover-list--header-text model)))
         (unless (equal-including-properties text (drover-list--model-header-text model))
           (drover-list--redraw-header model text))))
+    (drover-list--forget-gone-sections)
     ;; Sessions gone are forgotten.
     (pcase-dolist (`(,_ ,_ ,old-rows ,_ ,_) plans)
       (dolist (row old-rows)
@@ -3985,10 +4010,19 @@ For `drover-selected-sessions-function'.  Records come from the
 backends, as at point; a session gone since the list was drawn is left
 out."
   (when-let* ((sections (drover-list--selected-sections)))
-    (delq nil (mapcar (lambda (section)
-                        (let ((key (oref section value)))
-                          (drover-find (car key) (cdr key))))
-                      sections))))
+    (let ((known nil))
+      (delq nil (mapcar (lambda (section)
+                          (let ((key (oref section value)))
+                            (if (functionp (drover-backend-property (car key) :session))
+                                (drover-find (car key) (cdr key))
+                              ;; Its backend lists every session to find one:
+                              ;; once for all.
+                              (unless known
+                                (setq known (make-hash-table :test #'equal))
+                                (dolist (session (drover-known-sessions))
+                                  (puthash (drover-session-key session) session known)))
+                              (gethash key known))))
+                        sections)))))
 
 (defun drover-list-copy (&optional plain)
   "Copy Org links to the selected sessions, one per line, or the region.

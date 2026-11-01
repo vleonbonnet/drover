@@ -2920,7 +2920,26 @@ is the list drawn anew."
           (should (= (window-point window) (point)))
           (should (= (line-number-at-pos (window-start window)) start-line))
           (should (region-active-p))
-          (should (equal (save-excursion (goto-char (mark)) (drover-list-test-id-at-point)) "s32")))))))
+          (should (equal (save-excursion (goto-char (mark)) (drover-list-test-id-at-point)) "s32"))
+          ;; A session moving above point, in place, keeps point on its
+          ;; session and the window's start on its line, as a drawing
+          ;; anew does.
+          (setf (drover-session-updated (drover-list-test-find "s45")) 2000.0)
+          (drover-backend-changed 'fake "s45")
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (equal (car (drover-list-test-order)) "s45"))
+          (should (equal (drover-list-test-id-at-point) "s30"))
+          (should (= (- (point) (line-beginning-position)) column))
+          (should (= (window-point window) (point)))
+          (should (= (line-number-at-pos (window-start window)) start-line))
+          (should (region-active-p))
+          (should (equal (save-excursion (goto-char (mark)) (drover-list-test-id-at-point)) "s32"))
+          ;; Point on a session going is on the session taking its place.
+          (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "s30"))
+                                                 drover-test-sessions))
+          (drover-backend-changed 'fake "s30")
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (equal (drover-list-test-id-at-point) "s31")))))))
 
 (ert-deftest drover-list-test-in-place-details ()
   "An expanded session changing has its details drawn again; a collapsed one draws them once expanded."

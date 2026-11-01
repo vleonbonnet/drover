@@ -240,6 +240,7 @@ for its own garbage, not for that of the measure before."
                      (step (progn (drover-bench-step top)
                                   (drover-bench-measure (lambda () (drover-bench-step top)) 21)))
                      (step-sub (drover-bench-measure (lambda () (drover-bench-step sub)) 21))
+                     (shown (drover-bench-measure (lambda () (drover-bench-step top) (redisplay t)) 21))
                      (rename (drover-bench-measure
                               (lambda ()
                                 (drover-bench-change idle (lambda (session)
@@ -291,6 +292,8 @@ for its own garbage, not for that of the measure before."
                                   (drover-bench-row "a step" step 10)
                                   (drover-bench-row "a subagent's step" step-sub 10)
                                   (drover-bench-row "an idle one renamed" rename 10))
+                (drover-bench-log "               %s"
+                                  (drover-bench-row "a step, redisplayed" shown 10))
                 (drover-bench-log "               %s | %s | %s"
                                   (drover-bench-row "two taking turns" turns 10)
                                   (drover-bench-row "to idle and back" back 10)
