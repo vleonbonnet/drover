@@ -39,7 +39,7 @@ The OpenCode backend loads with opencode.el. Its sessions come from opencode.el'
 
 The first three need you (=drover-attention-statuses=). Sessions are ranked by =drover-status-order=, and among those that need you the longest wait comes first. Whether you saw a finished turn is the backend's to know: OpenCode records it in the service, so a turn read in any client, the TUI, the desktop app or Emacs, is no longer Done.
 
-Subagent sessions show under their parent, indented. Which of them show, =drover-show-subagents= says, and =U= in the list cycles it:
+Subagent sessions show under their parent, their icon under its title. Which of them show, =drover-show-subagents= says, and =U= in the list cycles it:
 
 | Mode     | Shows                                                                                          |
 |----------+------------------------------------------------------------------------------------------------|
@@ -51,12 +51,12 @@ The list's header tells how many subagents are hidden, the mode, and what =U= do
 
 Shown or not, a session whose subagents (at any depth) are active says so beside its status icon:
 
-| Icon (Nerd Font)        | Means                            |
-|-------------------------+----------------------------------|
-| =nf-md-robot_confused=  | subagents wait for you           |
-| =nf-md-robot=, animated | subagents work, or wait to retry |
+| Icon (Nerd Font)       | Means                            |
+|------------------------+----------------------------------|
+| =nf-md-robot_confused= | subagents wait for you           |
+| =nf-md-robot=          | subagents work, or wait to retry |
 
-Each is followed by how many when more than one, such as =? *2= for one waiting and two working; their tooltip names them. =drover-subagent-glyphs= changes the icons. This is how your OpenCode session shows that a subagent of its runs while it is itself idle.
+The icons stay still and tell no number: their tooltip names the subagents and tells how many do each. =drover-subagent-glyphs= changes the icons. This is how your OpenCode session shows that a subagent of its runs while it is itself idle.
 
 * Attention
 
@@ -234,13 +234,17 @@ The list is drawn in a proportional font (the face =drover-list=), laid out in p
 
 The list shows the fields with something to show, by rank, as long as they fit, as aligned columns, but those you hide (=drover-list-hidden-fields=, or the View menu's Columns). When not even the summary fits beside the title, age and cache, each session takes two lines instead: its icons, title and age, and under them, for a session that needs you, what it waits for. The layout is computed again whenever the window's width changes. One space parts each icon from the next and from the title, and columns stay aligned to the pixel whatever the icons before them.
 
+Each icon takes the room its font draws it in, which may be wider than the room the font gives it: the Nerd Fonts but their Mono variants draw icons up to half a cell past their advance, and drover measures that ink in the fonts of the list's window, so no text is drawn on an icon. Every status icon takes the room of the widest, so titles line up whatever the status. A subagent's icon stands under its parent's title, past the icons of the parent's active subagents.
+
+The title of a session open in an Emacs buffer, such as an OpenCode session you visit, is in the face =drover-open-session=, which inherits =font-lock-keyword-face=, a light blue in many dark themes; over an idle session's dimming, it lends the dimming what it does not set. The list redraws as such buffers open and close.
+
 ** Prompt caches
 
 A session whose provider still holds its prompt cache shows how much of the cache's lifetime is left: in columns, as a short bar and the time left, such as =4m=; in two lines, as the background of its line (the face =drover-cache-bar=), filled from the left and shrinking as the cache runs out. An expired or unknown cache shows nothing. While the list is shown and a cache is live, a timer redraws the caches alone, every =drover-list-cache-interval= seconds.
 
 ** Animated icons
 
-The icons of Working and Retrying sessions, and the icon of working subagents, are animated in the list: each shows the frames of =drover-animations= in turn, by default an hourglass whose sand runs, a clock whose hand turns, and a robot that blinks (Nerd Font icons, any string will do). Every frame takes the room of the widest, so nothing after it moves in the proportional font. As for prompt caches, a timer changes only how those few characters display, every =drover-list-animation-interval= seconds, half a second by default, and only while a shown list animates something; =nil= keeps the icons still.
+The icons of Working and Retrying sessions are animated in the list: each shows the frames of =drover-animations= in turn, by default an hourglass whose sand runs down and a clock whose hand turns (Nerd Font icons, any string will do). The frames of each have the same weight of ink, so they move rather than blink: a solid frame among outlined ones, such as a full hourglass, would read as a blink. Every frame takes the room of the widest, so nothing after it moves in the proportional font. As for prompt caches, a timer changes only how those few characters display, every =drover-list-animation-interval= seconds, half a second by default, and only while a shown list animates something; =nil= keeps the icons still.
 
 ** The View menu
 
