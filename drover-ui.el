@@ -99,9 +99,42 @@ The prompt's header and pickers show settings in it or in
     (retrying . "\uf021")               ; nf-fa-refresh
     (working . "\U000F051F")            ; nf-md-timer_sand
     (idle . "\uf10c"))                  ; nf-fa-circle_o
-  "Glyph of each session status, Nerd Font icons by default."
+  "Glyph of each session status, Nerd Font icons by default.
+Session lists animate some of them; see `drover-animations'."
   :type '(alist :key-type symbol :value-type string)
   :group 'drover)
+
+(defcustom drover-subagent-glyphs
+  '((waiting . "\U000F169F")            ; nf-md-robot_confused
+    (working . "\U000F06A9"))           ; nf-md-robot
+  "Glyphs telling that subagents of a session are in the middle of a turn.
+Session lists show them beside the status of the session, shown or
+not: `waiting' when subagents wait for you, `working' when subagents
+work or wait to retry, each followed by how many when more than one.
+Nerd Font icons by default; see also `drover-animations'."
+  :type '(alist :key-type (choice (const waiting) (const working)) :value-type string)
+  :group 'drover)
+
+(defcustom drover-animations
+  '((working "\U000F078C" "\U000F051F" "\U000F199F") ; nf-md-timer_sand_full, timer_sand, timer_sand_complete
+    (retrying "\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447") ; nf-md-clock_time_twelve, three, six, nine
+    (subagents "\U000F06A9" "\U000F167A")) ; nf-md-robot, nf-md-robot_outline
+  "Frames of the glyphs session lists animate, shown in turn.
+Each entry is (KIND FRAME...), each FRAME a string.  KIND is `working'
+or `retrying', for the status glyph of sessions of that status in place
+of their glyph of `drover-status-glyphs', or `subagents', for the glyph
+telling that subagents work, in place of its glyph of
+`drover-subagent-glyphs'.  A kind without frames stays still.  Each
+frame takes the room of the widest, so that nothing after it moves.
+Nerd Font icons by default; `drover-list-animation-interval' sets the
+pace, or stops every animation."
+  :type '(alist :key-type (choice (const working) (const retrying) (const subagents))
+                :value-type (repeat string))
+  :group 'drover)
+
+(defconst drover-subagent-mode-labels
+  '((all . "all") (active . "active") (none . "none"))
+  "Display name of each mode of `drover-subagent-modes'.")
 
 (defconst drover-status-labels
   '((waiting . "Needs you") (failed . "Failed") (done . "Done") (retrying . "Retrying")

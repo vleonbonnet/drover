@@ -41,9 +41,10 @@
 ;;
 ;; Views draw `drover-view-groups': the sessions as trees, filtered by
 ;; `drover-filter', grouped as `drover-group-by' says and sorted as
-;; `drover-sort-by' says.  Those settings are global, so every view
-;; shows the same sessions.  With `drover-show-history', views also
-;; list the older sessions backends keep (`drover-known-sessions').
+;; `drover-sort-by' says, with the subagents `drover-show-subagents'
+;; shows.  Those settings are global, so every view shows the same
+;; sessions.  With `drover-show-history', views also list the older
+;; sessions backends keep (`drover-known-sessions').
 ;;
 ;; Commands act on the session at point, which every list of sessions
 ;; and every prompt buffer tells through
@@ -78,10 +79,36 @@
   :type 'number
   :group 'drover)
 
-(defcustom drover-show-children nil
-  "Whether session lists show the sessions of subagents.
-A child that needs the user is always shown."
-  :type 'boolean
+(defconst drover-active-statuses '(waiting retrying working)
+  "Statuses of the sessions in the middle of a turn.
+Such a session works, waits to retry, or waits for the user to answer
+before it goes on.")
+
+(defconst drover-subagent-modes '(all active none)
+  "The values `drover-show-subagents' may take.
+They come in the order `drover-toggle-subagents' cycles through them.")
+
+(defcustom drover-show-subagents 'active
+  "Which sessions of subagents session lists show, under their parent.
+The value is one of `drover-subagent-modes':
+
+ all     Every subagent.
+ active  The subagents in the middle of a turn, those whose status is
+         one of `drover-active-statuses': working, waiting to retry, or
+         waiting for you.  A subagent whose turn ended, unseen or not,
+         is hidden, and so is a quiet one, unless a subagent of its own
+         is active.
+ none    No subagent.
+
+Whatever the value, a subagent matching `drover-filter' shows when it
+explains why its tree is listed (see `drover-view-trees').  A hidden
+subagent never places its parent in a group; whether a parent has
+active subagents, shown or not, its line tells.  Change it for every
+view with `drover-toggle-subagents', U in lists, or with
+`drover-set-show-subagents'."
+  :type '(choice (const :tag "All subagents" all)
+                 (const :tag "Active subagents" active)
+                 (const :tag "No subagent" none))
   :group 'drover)
 
 ;;;; Sessions
@@ -132,6 +159,11 @@ same conversation of one engine."
 (defun drover-session-attention-p (session)
   "Return non-nil when SESSION needs the user."
   (memq (drover-session-status session) drover-attention-statuses))
+
+(defun drover-session-active-p (session)
+  "Return non-nil when SESSION is in the middle of a turn.
+See `drover-active-statuses'."
+  (memq (drover-session-status session) drover-active-statuses))
 
 (defun drover-session-display-title (session)
   "Return the title of SESSION, or its identifier."
@@ -292,20 +324,33 @@ Trees and siblings that rank alike keep the order of SESSIONS."
             (cons (drover-node-session node) (drover-tree-sessions (drover-node-children node))))
           nodes))
 
+(defun drover-tree-active-p (node)
+  "Return non-nil when a session of tree NODE is in the middle of a turn.
+See `drover-session-active-p'."
+  (or (drover-session-active-p (drover-node-session node))
+      (seq-some #'drover-tree-active-p (drover-node-children node))))
+
+(defun drover--subagent-shown-p (node)
+  "Return non-nil when subagent tree NODE shows.
+It does as `drover-show-subagents' says."
+  (pcase drover-show-subagents
+    ('all t)
+    ('none nil)
+    (_ (drover-tree-active-p node))))
+
 (defun drover-tree-visible (nodes &optional shown)
   "Return trees NODES without the subtrees of subagents to hide.
-A subagent tree is kept when `drover-show-children' is non-nil, when
-some session in it needs the user, or when SHOWN, a function of a tree,
-returns non-nil for it.  Each tree ranks by what remains visible, so a
-hidden subagent never places its parent in a group its own status does
-not explain."
+A subagent tree is kept as `drover-show-subagents' says: always, when a
+session in it is in the middle of a turn, or never; or when SHOWN, a
+function of a tree, returns non-nil for it.  Each tree ranks by what
+remains visible, so a hidden subagent never places its parent in a
+group its own status does not explain."
   (sort (mapcar (lambda (node)
                   (drover--node
                    (drover-node-session node)
                    (drover-tree-visible
                     (seq-filter (lambda (child)
-                                  (or drover-show-children
-                                      (memq (drover-node-status child) drover-attention-statuses)
+                                  (or (drover--subagent-shown-p child)
                                       (and shown (funcall shown child))))
                                 (drover-node-children node))
                     shown)))
@@ -317,6 +362,24 @@ not explain."
 They are those `drover-tree-visible' leaves out."
   (- (length (drover-tree-sessions nodes))
      (length (drover-tree-sessions (drover-tree-visible nodes)))))
+
+(defun drover-tree-active-subagents (nodes)
+  "Return the active subagents under each session of trees NODES.
+The value is a hash table mapping the key of each session with
+subagents in the middle of a turn (see `drover-session-active-p'), at
+any depth below it, to those subagents, most urgent first.  Pass the
+whole trees, as `drover-tree' returns them, for a session to tell its
+active subagents whether or not they are shown."
+  (let ((table (make-hash-table :test #'equal)))
+    (cl-labels ((walk (node)
+                  ;; The active sessions of the tree, NODE's own included.
+                  (let* ((session (drover-node-session node))
+                         (below (mapcan #'walk (drover-node-children node))))
+                    (when below
+                      (puthash (drover-session-key session) (drover-sort below) table))
+                    (if (drover-session-active-p session) (cons session below) below))))
+      (mapc #'walk nodes))
+    table))
 
 (defun drover-group-trees-by-status (nodes)
   "Return trees NODES grouped as an alist (STATUS . NODES).
@@ -777,12 +840,14 @@ conversation are merged as `drover-sessions' merges live ones."
 
 (defun drover-visible-sessions (&optional sessions)
   "Return SESSIONS, or every session, without hidden subagents.
-Subagents are hidden unless `drover-show-children' is non-nil or they
-need the user."
+Subagents show as `drover-show-subagents' says: all of them, those in
+the middle of a turn, or none."
   (seq-filter (lambda (session)
-                (or drover-show-children
-                    (null (drover-session-parent session))
-                    (drover-session-attention-p session)))
+                (or (null (drover-session-parent session))
+                    (pcase drover-show-subagents
+                      ('all t)
+                      ('none nil)
+                      (_ (drover-session-active-p session)))))
               (or sessions (drover-sessions))))
 
 (defun drover-attention-sessions ()
@@ -997,18 +1062,28 @@ They are the trees of SESSIONS, by default of the sessions lists show,
 those of `drover-known-sessions', cut down to `drover-filter' (see
 `drover-filter-trees'), without the subagents to hide (see
 `drover-tree-visible').  While a filter is set, a subagent that matches
-it shows even when subagents are hidden, unless a session above it
-matches too: the view then explains why each tree is listed without
-listing every subagent of a matching session."
+it shows whatever `drover-show-subagents' says, even `none', unless a
+session above it matches too: the view then explains why each tree is
+listed without listing every subagent of a matching session."
   (car (drover--view-trees (or sessions (drover-known-sessions)))))
+
+(defun drover-view-subagent-counts (&optional sessions)
+  "Return how many subagents of SESSIONS a view could show, and hides.
+SESSIONS defaults to the sessions lists show.  The value is (COUNT
+. HIDDEN): COUNT is the number of subagents under the sessions of the
+trees `drover-filter' leaves, HIDDEN how many of them
+`drover-view-trees' leaves out."
+  (pcase-let ((`(,visible . ,kept) (drover--view-trees (or sessions (drover-known-sessions)))))
+    (let ((all (length (drover-tree-sessions kept))))
+      (cons (- all (length kept))
+            (- all (length (drover-tree-sessions visible)))))))
 
 (defun drover-view-hidden-count (&optional sessions)
   "Return how many subagents of SESSIONS a view hides.
 SESSIONS defaults to the sessions lists show.  They are the subagents
 of the trees `drover-filter' leaves that `drover-view-trees' leaves
 out."
-  (pcase-let ((`(,visible . ,kept) (drover--view-trees (or sessions (drover-known-sessions)))))
-    (- (length (drover-tree-sessions kept)) (length (drover-tree-sessions visible)))))
+  (cdr (drover-view-subagent-counts sessions)))
 
 (defun drover-view-groups (&optional sessions now)
   "Return the groups of trees a session view draws, in order.
@@ -1059,6 +1134,21 @@ FIELD is one of `drover-sort-fields'."
   (setq drover-sort-by field
         drover-sort-descending (and descending t))
   (drover-view-settings-changed))
+
+(defun drover-set-show-subagents (mode)
+  "Show the subagents MODE says in every view, and redraw them.
+MODE is one of `drover-subagent-modes'; see `drover-show-subagents'."
+  (unless (memq mode drover-subagent-modes)
+    (error "Unknown subagent mode %S" mode))
+  (setq-default drover-show-subagents mode)
+  (drover-view-settings-changed))
+
+(defun drover-next-subagent-mode (&optional mode)
+  "Return the mode of `drover-subagent-modes' after MODE, around.
+MODE defaults to the global value of `drover-show-subagents'."
+  (let ((modes drover-subagent-modes))
+    (or (cadr (memq (or mode (default-value 'drover-show-subagents)) modes))
+        (car modes))))
 
 ;;;; Older sessions
 

@@ -96,7 +96,7 @@ This follows the `opencode-state' contract."
          (drover--running nil)
          (drover--change-timer nil)
          (drover-changed-hook nil)
-         (drover-show-children nil)
+         (drover-show-subagents 'active)
          (drover-opencode--projects nil)
          (drover-opencode--projects-fetching nil)
          (drover-opencode--projects-stale nil)

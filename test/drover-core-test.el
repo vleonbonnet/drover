@@ -47,10 +47,13 @@
 (ert-deftest drover-test-visible-sessions-hide-children ()
   (drover-test-with-backend (list (drover-test-session "root")
                                   (drover-test-session "child" :parent "root")
+                                  (drover-test-session "ended" :parent "root" :status 'done)
                                   (drover-test-session "asking" :parent "root" :status 'waiting))
-    (should (equal (drover-test-ids (drover-visible-sessions)) '("root" "asking")))
-    (let ((drover-show-children t))
-      (should (equal (drover-test-ids (drover-visible-sessions)) '("root" "child" "asking"))))))
+                            (should (equal (drover-test-ids (drover-visible-sessions)) '("root" "asking")))
+                            (let ((drover-show-subagents 'all))
+                              (should (equal (drover-test-ids (drover-visible-sessions)) '("root" "child" "ended" "asking"))))
+                            (let ((drover-show-subagents 'none))
+                              (should (equal (drover-test-ids (drover-visible-sessions)) '("root"))))))
 
 (ert-deftest drover-test-attention-sessions ()
   (drover-test-with-backend (list (drover-test-session "idle")
@@ -239,24 +242,66 @@ its list with every buffer-local value made from it."
     (should (= (length nodes) 2))))
 
 (ert-deftest drover-test-tree-visible ()
-  (let* ((nodes (drover-tree
-                 (list (drover-test-session "root")
-                       (drover-test-session "quiet" :parent "root" :status 'idle)
-                       (drover-test-session "asking" :parent "root" :status 'waiting)
-                       (drover-test-session "deep" :parent "quiet" :status 'done)))))
-    (let ((drover-show-children nil))
-      ;; A quiet subagent stays when a session under it needs the user.
-      (should (equal (drover-test-tree-shape (drover-tree-visible nodes))
-                     '(("root" ("asking") ("quiet" ("deep"))))))
-      (should (= (drover-tree-hidden-count nodes) 0)))
-    (let ((drover-show-children nil)
-          (nodes (drover-tree (list (drover-test-session "root")
-                                    (drover-test-session "quiet" :parent "root")))))
-      (should (equal (drover-test-tree-shape (drover-tree-visible nodes)) '(("root"))))
-      (should (= (drover-tree-hidden-count nodes) 1)))
-    (let ((drover-show-children t))
+  "Subagents show as `drover-show-subagents' says: all, active, none."
+  (let ((nodes (drover-tree
+                (list (drover-test-session "root")
+                      (drover-test-session "quiet" :parent "root" :status 'idle)
+                      (drover-test-session "deep" :parent "quiet" :status 'working)
+                      (drover-test-session "asking" :parent "root" :status 'waiting)
+                      (drover-test-session "ended" :parent "root" :status 'done)
+                      (drover-test-session "broke" :parent "root" :status 'failed)
+                      (drover-test-session "retry" :parent "root" :status 'retrying)))))
+    (let ((drover-show-subagents 'all))
       (should (equal (drover-tree-sessions (drover-tree-visible nodes))
-                     (drover-tree-sessions nodes))))))
+                     (drover-tree-sessions nodes)))
+      (should (= (drover-tree-hidden-count nodes) 0)))
+    (let ((drover-show-subagents 'active))
+      ;; Ended turns hide, unseen or not; a quiet subagent stays when a
+      ;; session under it is active.
+      (should (equal (drover-test-tree-shape (drover-tree-visible nodes))
+                     '(("root" ("asking") ("retry") ("quiet" ("deep"))))))
+      (should (= (drover-tree-hidden-count nodes) 2)))
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-tree-shape (drover-tree-visible nodes)) '(("root"))))
+      (should (= (drover-tree-hidden-count nodes) 6)))
+    ;; An unknown mode behaves as the default.
+    (let ((drover-show-subagents 'bogus))
+      (should (= (drover-tree-hidden-count nodes) 2)))))
+
+(ert-deftest drover-test-subagent-modes-cycle ()
+  "The modes cycle all, active, none; setting one redraws the views."
+  (drover-test-with-backend nil
+                            (let ((runs 0))
+                              (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+                              (should (eq (drover-next-subagent-mode 'all) 'active))
+                              (should (eq (drover-next-subagent-mode 'active) 'none))
+                              (should (eq (drover-next-subagent-mode 'none) 'all))
+                              (should (eq (drover-next-subagent-mode) 'none))
+                              (drover-set-show-subagents 'all)
+                              (should (eq drover-show-subagents 'all))
+                              (should (= runs 1))
+                              (should-error (drover-set-show-subagents t))
+                              (should (eq (default-value 'drover-show-subagents) 'all))
+                              (should (eq (eval (car (get 'drover-show-subagents 'standard-value)) t) 'active)))))
+
+(ert-deftest drover-test-tree-active-subagents ()
+  "Each session knows its subagents in the middle of a turn, at any depth."
+  (let ((table (drover-tree-active-subagents
+                (drover-tree
+                 (list (drover-test-session "root" :status 'idle)
+                       (drover-test-session "quiet" :parent "root" :status 'idle)
+                       (drover-test-session "deep" :parent "quiet" :status 'working :updated 1.0)
+                       (drover-test-session "asking" :parent "root" :status 'waiting :since 2.0)
+                       (drover-test-session "ended" :parent "root" :status 'done)
+                       (drover-test-session "retry" :parent "ended" :status 'retrying)
+                       (drover-test-session "alone" :status 'working))))))
+    ;; Most urgent first.
+    (should (equal (drover-test-ids (gethash '(fake . "root") table)) '("asking" "retry" "deep")))
+    (should (equal (drover-test-ids (gethash '(fake . "quiet") table)) '("deep")))
+    (should (equal (drover-test-ids (gethash '(fake . "ended") table)) '("retry")))
+    (dolist (id '("deep" "asking" "retry" "alone"))
+      (should-not (gethash (cons 'fake id) table)))
+    (should (= (hash-table-count table) 3))))
 
 (ert-deftest drover-test-tree-keeps-order-of-ties ()
   "Trees and siblings that rank alike keep the backend's order, as `drover-sort' does."
@@ -269,13 +314,17 @@ its list with every buffer-local value made from it."
 
 (ert-deftest drover-test-tree-visible-ranks-by-what-shows ()
   "A hidden subagent does not place its parent in the subagent's group."
-  (let* ((drover-show-children nil)
-         (nodes (drover-tree (list (drover-test-session "parent" :status 'idle)
-                                   (drover-test-session "busy" :parent "parent" :status 'working)))))
-    (should (eq (drover-node-status (car nodes)) 'working))
-    (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'idle))
-    (let ((drover-show-children t))
-      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'working)))))
+  (let ((nodes (drover-tree (list (drover-test-session "parent" :status 'idle)
+                                  (drover-test-session "ended" :parent "parent" :status 'done)
+                                  (drover-test-session "busy" :parent "parent" :status 'working)))))
+    (should (eq (drover-node-status (car nodes)) 'done))
+    ;; The finished subagent hides, so its parent is not listed as done.
+    (let ((drover-show-subagents 'active))
+      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'working)))
+    (let ((drover-show-subagents 'none))
+      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'idle)))
+    (let ((drover-show-subagents 'all))
+      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'done)))))
 
 (ert-deftest drover-test-open-in-main-window ()
   "A list naming its main window opens sessions there, selected."
@@ -692,9 +741,15 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
   (drover-test-with-backend (drover-test-family)
     (should (equal (drover-test-tree-shape (drover-view-trees))
                    (drover-test-tree-shape (drover-tree-visible (drover-tree (drover-test-family))))))
+    ;; The explorer is quiet, and its own subagent ended: both hide.
     (should (equal (drover-test-tree-shape (drover-view-trees))
-                   '(("root" ("explore" ("deep"))) ("other"))))
-    (should (= (drover-view-hidden-count) 1))))
+                   '(("root" ("build")) ("other"))))
+    (should (= (drover-view-hidden-count) 2))
+    (should (equal (drover-view-subagent-counts) '(3 . 2)))
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-view-subagent-counts) '(3 . 3))))
+    (let ((drover-show-subagents 'all))
+      (should (equal (drover-view-subagent-counts) '(3 . 0))))))
 
 (ert-deftest drover-test-view-trees-show-matching-subagents ()
   (drover-test-with-backend (drover-test-family)
@@ -705,20 +760,29 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
     (should (= (drover-view-hidden-count) 0))
     (setq drover-filter '(:search "auth"))
     (should (equal (drover-test-tree-shape (drover-view-trees))
-                   '(("other") ("root" ("explore")))))))
+                   '(("other") ("root" ("explore")))))
+    ;; Even when no subagent shows: the match explains its parent.
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-tree-shape (drover-view-trees))
+                     '(("other") ("root" ("explore")))))
+      (setq drover-filter '(:statuses (working)))
+      (should (equal (drover-test-tree-shape (drover-view-trees))
+                     '(("root" ("build")) ("other")))))))
 
 (ert-deftest drover-test-view-trees-matching-root-hides-subagents ()
-  "Subagents of a matching session stay hidden, matching or not."
+  "Subagents of a matching session show as the mode says, matching or not."
   (drover-test-with-backend (drover-test-family)
     (setq drover-filter '(:project "drover"))
-    ;; The waiting subagent rule still holds: "deep" ended unseen.
     (should (equal (drover-test-tree-shape (drover-view-trees))
-                   '(("root" ("explore" ("deep"))))))
-    (should (= (drover-view-hidden-count) 1))
-    (let ((drover-show-children t))
+                   '(("root" ("build")))))
+    (should (= (drover-view-hidden-count) 2))
+    (let ((drover-show-subagents 'all))
       (should (equal (drover-test-tree-shape (drover-view-trees))
                      '(("root" ("explore" ("deep")) ("build")))))
-      (should (= (drover-view-hidden-count) 0)))))
+      (should (= (drover-view-hidden-count) 0)))
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-tree-shape (drover-view-trees)) '(("root"))))
+      (should (= (drover-view-hidden-count) 3)))))
 
 (ert-deftest drover-test-view-trees-explicit-sessions ()
   (drover-test-with-backend nil

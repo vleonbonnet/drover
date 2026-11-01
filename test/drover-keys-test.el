@@ -32,12 +32,14 @@
   "Run BODY with the fake backend serving SESSIONS and the keys' state isolated."
   (declare (indent 1) (debug t))
   `(drover-test-with-backend ,sessions
-     (let (;; Readable glyphs, whatever the defaults.
-           (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
-                                   (retrying . "↻") (working . "◐") (idle . "·")))
-           (drover-default-prompt-buffer-function nil)
-           (drover-keys-test-actions nil))
-       ,@body)))
+     ;; `dlet': the list, which declares it, may not be loaded.
+     (dlet ((drover-list-hidden-fields nil))
+       (let (;; Readable glyphs, whatever the defaults.
+             (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
+                                     (retrying . "↻") (working . "◐") (idle . "·")))
+             (drover-default-prompt-buffer-function nil)
+             (drover-keys-test-actions nil))
+         ,@body))))
 
 (defvar drover-keys-test-actions nil
   "Prompt actions performed, newest first, as (ACTION BUFFER).")
@@ -76,10 +78,12 @@ drover's commands are left out.  An untitled group of titled columns,
 as in a row of columns, stands for its columns."
   (let* ((transient--prefix (transient--init-prefix
                              prefix (and (eq prefix 'drover-dispatch) (list :scope (drover--context)))))
+         (title-of (lambda (group)
+                     (let ((description (and (slot-boundp group 'description) (oref group description))))
+                       (if (functionp description) (funcall description) description))))
          (layout (mapcan (lambda (group)
                            (if (and (cl-typep group 'transient-group)
-                                    (not (stringp (and (slot-boundp group 'description)
-                                                       (oref group description))))
+                                    (not (stringp (funcall title-of group)))
                                     (seq-every-p (lambda (child) (cl-typep child 'transient-group))
                                                  (oref group suffixes)))
                                (copy-sequence (oref group suffixes))
@@ -88,12 +92,14 @@ as in a row of columns, stands for its columns."
     (cl-labels ((entries (group)
                   (mapcan (lambda (suffix)
                             (and (or all (drover-keys-test--own-p suffix))
+                                 ;; Those an :if leaves out are neither shown nor bound.
+                                 (not (oref suffix inactive))
                                  (list (cons (key-description (kbd (oref suffix key))) (oref suffix inapt)))))
                           (oref group suffixes))))
       (delq nil
             (mapcar (lambda (group)
                       (when-let* (((cl-typep group 'transient-group))
-                                  (title (and (slot-boundp group 'description) (oref group description)))
+                                  (title (funcall title-of group))
                                   ((stringp title))
                                   ;; Not transient's own, such as its common commands.
                                   ((seq-some #'drover-keys-test--own-p
@@ -219,25 +225,52 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 ;;;; Lists
 
 (ert-deftest drover-keys-test-toggle-subagents ()
+  "U cycles every view through all, active and no subagents."
   (drover-keys-test-with nil
-    (let ((runs 0))
+    (let ((runs 0)
+          (said nil))
       (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
-      (drover-keys-test-in 'view nil
-        (call-interactively #'drover-toggle-subagents)
-        (should drover-show-children)
-        (should (= runs 1))
-        (with-temp-buffer
-          ;; Every view follows.
-          (should drover-show-children))
-        (call-interactively #'drover-toggle-subagents)
-        (should-not drover-show-children))
+      (cl-letf (((symbol-function 'current-message) (lambda () said))
+                ((symbol-function 'message) (lambda (format &rest arguments)
+                                              (setq said (apply #'format-message format arguments)))))
+        (drover-keys-test-in 'view nil
+          (should (eq drover-show-subagents 'active))
+          (call-interactively #'drover-toggle-subagents)
+          (should (eq drover-show-subagents 'none))
+          (should (equal (current-message) "Hiding subagents"))
+          (should (= runs 1))
+          (with-temp-buffer
+            ;; Every view follows.
+            (should (eq drover-show-subagents 'none)))
+          (call-interactively #'drover-toggle-subagents)
+          (should (eq drover-show-subagents 'all))
+          (should (equal (current-message) "Showing every subagent"))
+          (call-interactively #'drover-toggle-subagents)
+          (should (eq drover-show-subagents 'active))
+          (should (equal (current-message) "Showing active subagents"))
+          (should-not (local-variable-p 'drover-show-subagents))))
       (drover-keys-test-in 'list nil
         (let ((toggled 0))
           (setq-local drover-toggle-subagents-function (lambda () (interactive) (cl-incf toggled)))
           (call-interactively #'drover-toggle-subagents)
           (should (= toggled 1))
-          (should-not drover-show-children)
-          (should (= runs 2)))))))
+          (should (eq drover-show-subagents 'active))
+          (should (= runs 3)))))))
+
+(ert-deftest drover-keys-test-toggle-subagents-hint ()
+  "The hint names the key of the toggle and what pressing it does."
+  (let ((map (make-sparse-keymap))
+        (drover-show-subagents 'active))
+    (set-keymap-parent map drover-session-map)
+    (should (equal (substring-no-properties (drover-toggle-subagents-hint map)) "U hides all"))
+    (should (eq (get-text-property 0 'face (drover-toggle-subagents-hint map)) 'help-key-binding))
+    (setq drover-show-subagents 'none)
+    (should (equal (substring-no-properties (drover-toggle-subagents-hint map)) "U shows all"))
+    (setq drover-show-subagents 'all)
+    (should (equal (substring-no-properties (drover-toggle-subagents-hint map)) "U shows active only"))
+    (keymap-set map "U" nil)
+    (keymap-set map "C-c u" #'drover-toggle-subagents)
+    (should (string-prefix-p "C-c u " (substring-no-properties (drover-toggle-subagents-hint map))))))
 
 (ert-deftest drover-keys-test-refresh ()
   (drover-keys-test-with (list (drover-test-session "s"))
@@ -448,11 +481,16 @@ agent, model, effort and directory of the next prompt are among them."
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      '("j" "b" "\"" "'" "l" "L" "p" "C" "f"
-                       "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "U" "V"))))
+                       "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "U" "V"
+                       "C-n" "C-p" "M-n" "M-p" "M-<" "M->" "RET"))))
     ;; Off a session, only what needs none.
     (drover-keys-test-in 'view nil
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "\"" "'" "l" "L" "p" "+" "g" "U" "V"))))))
+                     '("j" "b" "\"" "'" "l" "L" "p" "+" "g" "U" "V"
+                       "C-n" "C-p" "M-n" "M-p" "M-<" "M->")))
+      ;; Moving between groups needs groups.
+      (setq drover-group-by nil)
+      (should-not (member "M-n" (drover-keys-test-apt 'drover-dispatch))))))
 
 (ert-deftest drover-keys-test-dispatch-session-state ()
   "Session commands apply when the session's state allows them."
@@ -511,8 +549,14 @@ shows, so they apply only there."
               (let ((apt (drover-keys-test-apt 'drover-dispatch)))
                 (dolist (key '("a" "f"))
                   (should (member key apt)))
-                (dolist (key '("RET" "k" "t" "T" "m"))
-                  (should-not (member key apt))))
+                (dolist (key '("k" "t" "T" "m"))
+                  (should-not (member key apt)))
+                ;; RET opens the session at point: the list sends nothing.
+                (should (equal (mapcar (lambda (suffix) (oref suffix command))
+                                       (seq-filter (lambda (suffix) (and (equal (oref suffix key) "RET")
+                                                                         (not (oref suffix inactive))))
+                                                   (cdr (drover-keys-test-suffixes 'drover-dispatch))))
+                               '(drover-open-at-point))))
               (should-error (call-interactively #'drover-prompt-revert) :type 'user-error)
               (should-not drover-keys-test-actions)
               (call-interactively #'drover-prompt-agent)
@@ -619,7 +663,9 @@ of sessions go after p, more prompt commands after O."
     (mapcar (lambda (suffix)
               (let ((transient--pending-group (oref suffix parent)))
                 (substring-no-properties (transient-format suffix))))
-            (seq-filter #'drover-keys-test--own-p transient--suffixes))))
+            (seq-filter (lambda (suffix)
+                          (and (drover-keys-test--own-p suffix) (not (oref suffix inactive))))
+                        transient--suffixes))))
 
 (ert-deftest drover-keys-test-menus-draw ()
   (let ((zone (getenv "TZ")))
@@ -632,15 +678,20 @@ of sessions go after p, more prompt commands after O."
               (should (member " l List" dispatch))
               (should (member " V View" dispatch))
               (should (member " k Clear" dispatch))
-              (should (member " RET Send" dispatch))
+              ;; In a list, RET opens the session rather than send.
+              (should (member " RET Open" dispatch))
+              (should-not (member " RET Send" dispatch))
+              (should (member " C-n Next session" dispatch))
               (should (member " S-<return> Schedule" dispatch)))
             ;; The order of the layout is checked elsewhere.
             (should (seq-set-equal-p (drover-keys-test-render 'drover-view)
                                      '(" o urgency" " r [ascending|descending]" " g status"
                                        " p project any" " s status any" " a agent any"
                                        " m model any" " d updated any" " f text any" " c clear"
-                                       " F follow [off|on]" " U subagents [hidden|shown]"
-                                       " O older [hidden|shown]")))
+                                       " F follow [off|on]" " U subagents [all|active|none]"
+                                       " O older [hidden|shown]"
+                                       " -l location" " -a agent" " -m model" " -c created"
+                                       " -t age" " -p cache" " -s summary")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
                                       :since (- (float-time) 7200))
                   drover-sort-by 'updated
@@ -691,7 +742,8 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("Sort by" "o" "r") ("Group by" "g")
                        ("Filter by" "p" "s" "a" "m" "d" "f" "c")
-                       ("Toggles" "F" "U" "O"))))
+                       ("Toggles" "F" "U" "O")
+                       ("Columns" "- l" "- a" "- m" "- c" "- t" "- p" "- s"))))
       ;; One key, one setting.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
         (should (equal keys (delete-dups (copy-sequence keys)))))
@@ -812,12 +864,16 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
         (delete-other-windows)
         (drover-keys-test-in 'view "a"
           (switch-to-buffer (current-buffer))
-          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("hidden")))
+          ;; Three values, the current one highlighted, cycled in turn.
+          (should (equal (substring-no-properties (drover-keys-test-value "U")) "[all|active|none]"))
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("active")))
           (drover-keys-test-choose "U")
-          (should (default-value 'drover-show-children))
-          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("shown")))
+          (should (eq (default-value 'drover-show-subagents) 'none))
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("none")))
           (drover-keys-test-choose "U")
-          (should-not drover-show-children)
+          (should (eq drover-show-subagents 'all))
+          (drover-keys-test-choose "U")
+          (should (eq drover-show-subagents 'active))
           (drover-keys-test-choose "O")
           (should drover-show-history)
           (should (= fetched 1))
@@ -833,6 +889,32 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
           (drover-keys-test-choose "F")
           (should-not drover-follow-mode))))))
 
+(ert-deftest drover-keys-test-view-columns ()
+  "Each field of the list but the title has a switch, applied at once."
+  (drover-keys-test-with nil
+    (let ((runs 0))
+      (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+      (with-temp-buffer
+        (setq-local drover-view-p t)
+        ;; Shown as Magit shows a switch: the name, highlighted when on.
+        (should (equal (drover-keys-test-value "-l") "location"))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "-l")) '("location")))
+        (drover-keys-test-choose "-l")
+        (should (equal drover-list-hidden-fields '(location)))
+        (should (= runs 1))
+        (should-not (drover-keys-test-highlighted (drover-keys-test-value "-l")))
+        (should (eq (get-text-property 0 'face (drover-keys-test-value "-l")) 'transient-inactive-value))
+        (drover-keys-test-choose "-p")
+        (should (equal drover-list-hidden-fields '(cache location)))
+        (drover-keys-test-choose "-l")
+        (should (equal drover-list-hidden-fields '(cache)))
+        (should (= runs 3))
+        ;; The title has none.
+        (should-error (drover-set-list-field 'title nil))
+        ;; A field the list does not have has no switch.
+        (dlet ((drover-list-fields '((title :priority 0) (agent :priority 1))))
+          (should (equal (cdr (assoc "Columns" (drover-keys-test-keys 'drover-view))) '("- a"))))))))
+
 (ert-deftest drover-keys-test-view-stays-open ()
   "Every setting of the View menu leaves it open, and its values redrawn."
   (let ((prefix (get 'drover-view 'transient--prefix)))
@@ -840,7 +922,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 13))
+      (should (= (length suffixes) 20))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 

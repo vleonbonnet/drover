@@ -153,7 +153,7 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--running nil)
          (drover--change-timer nil)
          (drover-changed-hook nil)
-         (drover-show-children nil)
+         (drover-show-subagents 'active)
          (drover-filter nil)
          (drover-group-by 'status)
          (drover-sort-by 'urgency)

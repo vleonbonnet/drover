@@ -34,7 +34,14 @@
 ;; most urgent session among them.  Subagents are sections of the group,
 ;; like their parent, rather than sections inside their parent's: Magit
 ;; hides the whole body of a section, and showing a parent's details
-;; must neither hide nor reveal its subagents.
+;; must neither hide nor reveal its subagents.  Which subagents show,
+;; all, the active ones or none, `drover-show-subagents' says; whether
+;; shown or not, a session whose subagents work or wait for you tells
+;; so beside its status (`drover-subagent-glyphs').
+;;
+;; Working glyphs are animated (`drover-animations'): a timer changes
+;; the display of their characters alone, every frame as wide as the
+;; widest, while a displayed list shows one.
 ;;
 ;; What a line shows depends on the width of the window, measured in
 ;; pixels in the face `drover-list', variable pitch by default.
@@ -43,7 +50,8 @@
 ;; aligned columns, narrower ones drop the fields of least priority,
 ;; and the narrowest, such as a side window, show two lines per session:
 ;; status, title and age, and what the session waits for under them.
-;; The layout is computed anew whenever the width changes.
+;; The layout is computed anew whenever the width changes, among the
+;; fields the user did not hide (`drover-list-hidden-fields').
 ;;
 ;; A session whose provider still holds its prompt cache shows how much
 ;; of the cache's lifetime is left: as a short bar and the time left in
@@ -135,6 +143,22 @@ A character counts as wide as the letter x in the face `drover-list'."
   :type 'natnum
   :group 'drover-list)
 
+(defcustom drover-list-animation-interval 0.5
+  "Seconds between two frames of the animated glyphs of a displayed list.
+Working sessions, those waiting to retry, and the glyph of working
+subagents show the frames of `drover-animations' in turn.  A value of
+nil shows still glyphs, those of `drover-status-glyphs' and
+`drover-subagent-glyphs'.
+
+A frame changes only the display of the animated characters, as the
+prompt cache bars do, so it costs a redisplay of their lines in the
+windows showing the list.  Half a second keeps the glyphs alive at two
+redisplays a second; a faster pace would cost that many more, in every
+frame showing the list, for little to see.  The timer runs only while
+a displayed list shows an animated glyph."
+  :type '(choice (const :tag "Still glyphs" nil) (number :tag "Seconds"))
+  :group 'drover-list)
+
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line)
     (location :priority 4 :min 10 :max 30)
@@ -173,10 +197,25 @@ PROPERTIES is a plist of:
 
 Characters count as wide as the letter x in the face `drover-list'.
 The list shows the fields with something to show, by priority, as long
-as their :min fit in the window; it uses columns when those include
-every field the narrow layout places, else the narrow layout, which
-shows all of those."
+as their :min fit in the window, but those of
+`drover-list-hidden-fields'; it uses columns when those include every
+field the narrow layout places, else the narrow layout, which shows all
+of those."
   :type '(repeat (cons symbol plist))
+  :group 'drover-list)
+
+(defcustom drover-list-hidden-fields nil
+  "Fields of `drover-list-fields' the list never shows.
+The list chooses among the other fields by the room they take; the
+title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
+changes it for the session, with one switch per field."
+  :type '(set (const :tag "Project and branch" location)
+              (const :tag "Agent" agent)
+              (const :tag "Model" model)
+              (const :tag "Creation" created)
+              (const :tag "Age" age)
+              (const :tag "Prompt cache" cache)
+              (const :tag "Summary" summary))
   :group 'drover-list)
 
 (defconst drover-list--gap 2
@@ -410,6 +449,108 @@ from their last activity, matching the order of `drover-sort'."
   "Return the properties of FIELD in `drover-list-fields', or nil."
   (alist-get field drover-list-fields))
 
+;;;; Glyphs
+
+(defun drover-list--frame-index (count now)
+  "Return which of COUNT frames of an animation shows at NOW, a float time.
+Every animated glyph shows its frame of the same instant, so that a
+redraw keeps the pace."
+  (mod (floor now drover-list-animation-interval) count))
+
+(defun drover-list--animation-face (kind)
+  "Return the face of the frames of animation KIND, of `drover-animations'."
+  (pcase kind
+    ('retrying 'drover-retrying)
+    (_ 'drover-working)))
+
+(defun drover-list--frames (kind)
+  "Return the frames of animation KIND, measured, or nil.
+The value is (STRINGS WIDTHS WIDTH): the frames of `drover-animations'
+in their face, their widths in pixels and the widest.  It is nil when
+the list does not animate, `drover-list-animation-interval' being nil,
+and when KIND has no frame."
+  (when-let* ((drover-list-animation-interval)
+              (frames (seq-remove (lambda (frame) (or (not (stringp frame)) (string-empty-p frame)))
+                                  (alist-get kind drover-animations))))
+    (let* ((face (drover-list--animation-face kind))
+           (strings (mapcar (lambda (frame) (drover-face frame face)) frames))
+           (widths (mapcar #'drover-list--pixel-width strings)))
+      (list strings widths (apply #'max widths)))))
+
+(defun drover-list--glyph (kind glyph face metrics)
+  "Return GLYPH in FACE, or the animated glyph of KIND standing for it.
+KIND names an animation of `drover-animations', whose frames METRICS
+hold (see `drover-list--metrics').  An animated glyph is two
+characters: the first displays the frame of the time of METRICS, the
+second a space as wide as the widest frame is wider, so that what
+follows never moves.  Their properties `drover-list-frame' and
+`drover-list-frame-pad' name KIND: from frame to frame, only their
+display changes."
+  (if-let* ((frames (alist-get kind (plist-get metrics :frames))))
+      (pcase-let* ((`(,strings ,widths ,width) frames)
+                   (index (drover-list--frame-index (length strings) (plist-get metrics :now))))
+        (concat (propertize (drover-face (if (string-empty-p glyph) " " (substring glyph 0 1)) face)
+                            'display (nth index strings) 'drover-list-frame kind)
+                (propertize " " 'display `(space :width (,(- width (nth index widths))))
+                            'drover-list-frame-pad kind)))
+    (drover-face glyph face)))
+
+(defun drover-list--status-glyph (status metrics)
+  "Return the glyph of STATUS, animated as METRICS say.
+See `drover-list--glyph'."
+  (drover-list--glyph status (or (alist-get status drover-status-glyphs) "?")
+                      (drover-status-face status) metrics))
+
+(defun drover-list--subagents-help (subagents)
+  "Return the tooltip naming SUBAGENTS, active sessions, by what they do."
+  (let ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting)) subagents))
+        (titles (lambda (sessions)
+                  (mapconcat (lambda (session) (drover-list--one-line (drover-session-display-title session)))
+                             sessions ", "))))
+    (string-join (delq nil (list (and waiting
+                                      (concat "Subagents waiting for you: " (funcall titles waiting)))
+                                 (when-let* ((working (seq-difference subagents waiting #'eq)))
+                                   (concat "Subagents working: " (funcall titles working)))))
+                 "\n")))
+
+(defun drover-list--indicator (subagents metrics)
+  "Return the glyphs telling that SUBAGENTS are in the middle of a turn, or nil.
+SUBAGENTS are the active subagents of a session, at any depth (see
+`drover-tree-active-subagents').  The glyph of `drover-subagent-glyphs'
+of those waiting for the user comes first, then that of those working
+or waiting to retry, animated as METRICS say, each followed by how many
+when more than one.  Their tooltip names them."
+  (when subagents
+    (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting))
+                                subagents))
+           (working (seq-difference subagents waiting #'eq))
+           (part (lambda (kind sessions face)
+                   (when sessions
+                     (let ((glyph (or (alist-get kind drover-subagent-glyphs) "?")))
+                       (concat (if (eq kind 'working)
+                                   (drover-list--glyph 'subagents glyph face metrics)
+                                 (drover-face glyph face))
+                               (and (cdr sessions)
+                                    (drover-face (number-to-string (length sessions)) face))))))))
+      (propertize (string-join (delq nil (list (funcall part 'waiting waiting 'drover-waiting)
+                                               (funcall part 'working working 'drover-working)))
+                               " ")
+                  'help-echo (drover-list--subagents-help subagents)))))
+
+(defun drover-list--icons (session metrics)
+  "Return what comes before the title of SESSION: its glyphs and a space.
+The glyph of its status comes first, then, when subagents of SESSION are
+in the middle of a turn, the glyphs telling so; one space separates
+each.  METRICS give the frames of animated glyphs and the active
+subagents of each session."
+  (let ((indicator (drover-list--indicator
+                    (and (plist-get metrics :active)
+                         (gethash (drover-session-key session) (plist-get metrics :active)))
+                    metrics)))
+    (concat (drover-list--status-glyph (drover-session-status session) metrics)
+            " "
+            (and indicator (concat indicator " ")))))
+
 (defun drover-list--title-text (session depth)
   "Return the title of SESSION, at DEPTH in its tree, as its line shows it.
 A subagent at the top of its tree, its parent not listed, starts with
@@ -440,34 +581,42 @@ it is drawn apart."
   (session nil :documentation "The `drover-session' shown.")
   (depth nil :documentation "Depth of the session in its tree.")
   (indent nil :documentation "Position of the status glyph, in pixels.")
+  (icons nil :documentation "The glyphs before the title, and a space.")
   (title-start nil :documentation "Position of the title, in pixels.")
   (title nil :documentation "The title, without the glyph.")
   (texts nil :documentation "Alist (FIELD . TEXT) of the other fields.")
   (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil."))
 
-(defun drover-list--metrics (now)
+(defun drover-list--metrics (now &optional active)
   "Return the measures lines of the list are drawn with at time NOW.
 The value is a plist of :now, :char, the width of an average character,
 :gap, the room between two columns, :space, the width of a space,
 :margin, where the sessions at the top of a tree begin, :step, how much
-deeper each level of subagents begins, and :width, the width lines may
-take.  A step is as wide as the widest status glyph and a space, so that
-a subagent's glyph stands under its parent's title.  Widths are in
-pixels; lines leave room for the ellipsis Magit adds to collapsed
-headings."
-  (let ((char (drover-list--char-width))
-        (statuses (seq-uniq (append drover-status-order (mapcar #'car drover-status-glyphs)))))
-    (list :now now
-          :char char
-          :gap (* drover-list--gap char)
-          :space (drover-list--pixel-width " ")
-          :margin (* drover-list--margin char)
-          :step (apply #'max 0 (mapcar (lambda (status)
-                                         (drover-list--pixel-width
-                                          (concat (drover-status-glyph status) " ")))
-                                       statuses))
-          :width (- (drover-list--line-width)
-                    (drover-list--pixel-width (truncate-string-ellipsis))))))
+deeper each level of subagents begins, :width, the width lines may
+take, :frames, an alist (KIND . FRAMES) of the animations of
+`drover-animations' and their frames (see `drover-list--frames'), and
+:active, ACTIVE, the table of the active subagents of each session
+\(see `drover-tree-active-subagents'), or nil.  A step is as wide as
+the widest status glyph and a space, so that a subagent's glyph stands
+under its parent's title.  Widths are in pixels; lines leave room for
+the ellipsis Magit adds to collapsed headings."
+  (let* ((char (drover-list--char-width))
+         (statuses (seq-uniq (append drover-status-order (mapcar #'car drover-status-glyphs))))
+         (metrics (list :now now
+                        :frames (mapcar (lambda (kind) (cons kind (drover-list--frames kind)))
+                                        '(working retrying subagents))
+                        :active active)))
+    (append (list :char char
+                  :gap (* drover-list--gap char)
+                  :space (drover-list--pixel-width " ")
+                  :margin (* drover-list--margin char)
+                  :step (apply #'max 0 (mapcar (lambda (status)
+                                                 (drover-list--pixel-width
+                                                  (concat (drover-list--status-glyph status metrics) " ")))
+                                               statuses))
+                  :width (- (drover-list--line-width)
+                            (drover-list--pixel-width (truncate-string-ellipsis))))
+            metrics)))
 
 (defun drover-list--row (session depth location metrics)
   "Return the row of SESSION at DEPTH in its tree.
@@ -475,11 +624,11 @@ LOCATION is a function of a session returning where it works, as its
 group shows it; METRICS are the measures of `drover-list--metrics'."
   (let* ((now (plist-get metrics :now))
          (indent (+ (plist-get metrics :margin)
-                    (* (min depth drover-list--max-depth) (plist-get metrics :step)))))
+                    (* (min depth drover-list--max-depth) (plist-get metrics :step))))
+         (icons (drover-list--icons session metrics)))
     (drover-list--row-create
-     :session session :depth depth :indent indent
-     :title-start (+ indent (drover-list--pixel-width
-                             (concat (drover-status-glyph (drover-session-status session)) " ")))
+     :session session :depth depth :indent indent :icons icons
+     :title-start (+ indent (drover-list--pixel-width icons))
      :title (drover-list--title-text session depth)
      :texts (mapcar (lambda (field) (cons field (drover-list--text field session location now)))
                     '(location agent model created age summary))
@@ -540,13 +689,17 @@ included."
 The value is (LAYOUT . FIELDS): LAYOUT is `columns' or `narrow', and
 FIELDS the entries of `drover-list-fields' shown, in their order.  The
 fields with something to show for ROWS are taken by priority, as long as
-their minimum widths fit, and the title always.  Columns are used when
-they include every field the narrow layout places; else the narrow
-layout shows those fields, which need no room of their own but on the
-title's line, where they give way to the title."
+their minimum widths fit, and the title always; the fields of
+`drover-list-hidden-fields' never.  Columns are used when they include
+every field the narrow layout places; else the narrow layout shows
+those fields, which need no room of their own but on the title's line,
+where they give way to the title."
   (let* ((char (plist-get metrics :char))
          (gap (plist-get metrics :gap))
-         (present (seq-filter (lambda (entry) (drover-list--has-p (car entry) rows))
+         (present (seq-filter (lambda (entry)
+                                (and (drover-list--has-p (car entry) rows)
+                                     (or (eq (car entry) 'title)
+                                         (not (memq (car entry) drover-list-hidden-fields)))))
                               drover-list-fields))
          (used (+ (plist-get metrics :margin) (drover-list--title-prefix rows metrics)))
          (chosen nil))
@@ -659,15 +812,14 @@ line, so that a bar may fill all of it."
   (list 'text string (drover-list--pixel-width string) x))
 
 (defun drover-list--title-segments (row room &optional shift)
-  "Return the segments of the glyph and title of ROW, the title ROOM pixels wide.
+  "Return the segments of the glyphs and title of ROW, the title ROOM pixels wide.
 They begin SHIFT pixels further right than the row's indentation, when
 the title's column does not come first."
   (let* ((shift (or shift 0))
-         (glyph (concat (drover-status-glyph (drover-session-status (drover-list--row-session row))) " "))
          (indent (+ shift (drover-list--row-indent row)))
          (title (drover-list--truncate (drover-list--row-title row) room)))
     (list (list 'align indent)
-          (drover-list--text-segment glyph indent)
+          (drover-list--text-segment (drover-list--row-icons row) indent)
           (drover-list--text-segment title (+ shift (drover-list--row-title-start row))))))
 
 (defun drover-list--cache-cell (fraction remaining layout)
@@ -818,7 +970,12 @@ the pixel, or between two characters of text."
               (`(,offset text ,from ,width ,string)
                (if (>= x (+ from width))
                    (setq end (+ start offset (length string)))
-                 (setq end (+ start offset (drover-list--fitting string (- x from))))
+                 ;; The text as shown now: an animated glyph may show
+                 ;; another frame than when the line was drawn.
+                 (setq end (+ start offset
+                              (drover-list--fitting
+                               (buffer-substring (+ start offset) (+ start offset (length string)))
+                               (- x from))))
                  (throw 'done nil))))))))
     (move-overlay (plist-get entry :overlay) start end)))
 
@@ -862,6 +1019,48 @@ text: a cache gone out shows nothing, and is forgotten."
                  fraction))
              drover-list--caches)))))
 
+;;;; Animated glyphs
+
+(defvar-local drover-list--frames nil
+  "Frames of the animations of the last drawing, from `drover-list--metrics'.
+An alist (KIND . FRAMES), FRAMES as `drover-list--frames' returns them.")
+
+(defvar-local drover-list--animated nil
+  "Animated glyphs drawn, as a list of (POSITION . KIND).
+POSITION is the character displaying the frame, the next one its pad;
+KIND is their animation, of `drover-animations'.")
+
+(defun drover-list--collect-animated ()
+  "Return the animated glyphs of the current list.
+The value is a list of (POSITION . KIND), see `drover-list--animated'."
+  (let ((position (point-min))
+        (found nil))
+    (while (setq position (text-property-not-all position (point-max) 'drover-list-frame nil))
+      (push (cons position (get-text-property position 'drover-list-frame)) found)
+      (setq position (1+ position)))
+    (nreverse found)))
+
+(defun drover-list--draw-frames (&optional now)
+  "Show the frames of the animated glyphs of the current list at NOW.
+NOW defaults to the current time.  Only the display of their two
+characters changes, and only where the frame did: neither the text nor
+the sections.  Glyphs out of sight, in a collapsed group, are left as
+they are until they show."
+  (when drover-list-animation-interval
+    (let ((now (or now (drover-list--now)))
+          (inhibit-read-only t))
+      (with-silent-modifications
+        (pcase-dolist (`(,position . ,kind) drover-list--animated)
+          (pcase-let ((`(,strings ,widths ,width) (alist-get kind drover-list--frames)))
+            (when strings
+              (let* ((index (drover-list--frame-index (length strings) now))
+                     (frame (nth index strings)))
+                (unless (or (invisible-p position)
+                            (eq (get-text-property position 'display) frame))
+                  (put-text-property position (1+ position) 'display frame)
+                  (put-text-property (1+ position) (+ position 2) 'display
+                                     `(space :width (,(- width (nth index widths))))))))))))))
+
 ;;;; Drawing
 
 (defvar drover-list-mode-map)
@@ -881,8 +1080,9 @@ text: a cache gone out shows nothing, and is forgotten."
 (defvar-local drover-list--drawn nil
   "Hash table of the sessions drawn, by key, as records of the last drawing.")
 
-(defun drover-list--help (session)
-  "Return the tooltip of SESSION: its full title and details."
+(defun drover-list--help (session &optional subagents)
+  "Return the tooltip of SESSION: its full title and details.
+SUBAGENTS, its active subagents, are named after them."
   (string-join
    (delq nil (list (drover-list--one-line (drover-session-display-title session))
                    (drover-session-location session)
@@ -891,8 +1091,21 @@ text: a cache gone out shows nothing, and is forgotten."
                          (format "%s (%s)" agent model)
                        agent))
                    (when-let* ((summary (drover-session-summary session)))
-                     (drover-list--one-line summary))))
+                     (drover-list--one-line summary))
+                   (and subagents (drover-list--subagents-help subagents))))
    "\n"))
+
+(defun drover-list--with-help (string help)
+  "Return STRING with HELP as the tooltip of the characters without one.
+The glyphs of active subagents keep their own."
+  (let ((string (copy-sequence string))
+        (position 0))
+    (while (< position (length string))
+      (let ((next (next-single-property-change position 'help-echo string (length string))))
+        (unless (get-text-property position 'help-echo string)
+          (put-text-property position next 'help-echo help string))
+        (setq position next)))
+    string))
 
 (defun drover-list--details (session now)
   "Return the details of SESSION as a list of (LABEL VALUE FACE).
@@ -962,7 +1175,12 @@ in `drover-list--caches'."
                     (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
          (x (+ (drover-list--row-indent row) (plist-get layout :step))))
     (magit-insert-section (drover-list-session-section (drover-session-key session) t)
-      (magit-insert-heading (propertize (car drawn) 'help-echo (drover-list--help session)))
+      (magit-insert-heading
+        (drover-list--with-help (car drawn)
+                                (drover-list--help
+                                 session (and (plist-get layout :active)
+                                              (gethash (drover-session-key session)
+                                                       (plist-get layout :active))))))
       (magit-insert-section-body
         (drover-list--insert-details session x layout)))
     (puthash (drover-session-key session) session drover-list--drawn)
@@ -1054,8 +1272,11 @@ line starts the next; a part wider than a line is cut."
     (mapconcat (lambda (line) (concat (drover-list--truncate line width) "\n"))
                (nreverse lines) "")))
 
-(defun drover-list--insert-header (sessions hidden layout)
-  "Insert the summary of SESSIONS, of which HIDDEN subagents are not shown.
+(defun drover-list--insert-header (sessions subagents layout)
+  "Insert the summary of SESSIONS, then of the subagents, for SUBAGENTS.
+SUBAGENTS is (COUNT . HIDDEN), as `drover-view-subagent-counts' returns
+it: when the trees listed have subagents, the header tells how many are
+hidden, which `drover-show-subagents' shows, and the key changing it.
 When `drover-filter' is set, the filter follows.  Lines fit the width of
 LAYOUT."
   (magit-insert-section (drover-list-header)
@@ -1065,6 +1286,7 @@ LAYOUT."
                                                                    (eq (drover-session-status session) status))
                                                                  sessions)))
                                        drover-attention-statuses)))
+           (hidden (cdr subagents))
            (width (plist-get layout :width))
            (parts (append
                    (if counts
@@ -1082,7 +1304,14 @@ LAYOUT."
                                           (if (= (length sessions) 1) "" "s"))
                                   (and (> hidden 0)
                                        (format ", %d subagent%s hidden" hidden (if (= hidden 1) "" "s"))))
-                          'drover-dim)))))
+                          'drover-dim))
+                   (and (> (car subagents) 0)
+                        (list (concat (drover-face
+                                       (format "Subagents: %s  "
+                                               (alist-get (default-value 'drover-show-subagents)
+                                                          drover-subagent-mode-labels))
+                                       'drover-dim)
+                                      (drover-toggle-subagents-hint drover-list-mode-map)))))))
       (insert (drover-list--flow parts width))
       (when-let* ((filter (drover-filter-description nil (plist-get layout :now))))
         (insert (drover-list--flow
@@ -1116,7 +1345,9 @@ filter and how to clear it.  Lines fit the width of LAYOUT."
   (let* ((now (drover-list--now))
          (all (drover-known-sessions))
          (groups (and all (drover-view-groups all now)))
-         (metrics (drover-list--metrics now))
+         ;; From every session, so that a parent tells its subagents
+         ;; at work whether or not they are shown.
+         (metrics (drover-list--metrics now (drover-tree-active-subagents (drover-tree all))))
          (grouped (mapcar (pcase-lambda (`(,group . ,nodes))
                             (cons group (drover-list--tree-rows
                                          nodes (drover-list--location-function group) metrics)))
@@ -1125,7 +1356,8 @@ filter and how to clear it.  Lines fit the width of LAYOUT."
          ;; Columns line up across groups.
          (layout (drover-list--layout rows metrics)))
     (setq drover-list--layout (plist-get layout :layout)
-          drover-list--fields (plist-get layout :fields))
+          drover-list--fields (plist-get layout :fields)
+          drover-list--frames (plist-get layout :frames))
     (drover-list--forget-visibility all)
     (magit-insert-section (drover-list)
       ;; Every tree the filter keeps has its root shown, so no row means
@@ -1133,7 +1365,7 @@ filter and how to clear it.  Lines fit the width of LAYOUT."
       (if (null rows)
           (drover-list--insert-empty all layout)
         (drover-list--insert-header (mapcar #'drover-list--row-session rows)
-                                    (drover-view-hidden-count all) layout)
+                                    (drover-view-subagent-counts all) layout)
         (pcase-dolist (`(,group . ,group-rows) grouped)
           (drover-list--insert-group group group-rows layout))))))
 
@@ -1263,6 +1495,7 @@ same session, and window starts on the same line."
     (when (eq (window-buffer) (current-buffer))
       (goto-char (window-point)))
     (drover-list--draw-caches)
+    (setq drover-list--animated (drover-list--collect-animated))
     (drover-list--update-current)
     (magit-section-update-highlight t)
     (set-buffer-modified-p nil)
@@ -1337,6 +1570,9 @@ For `revert-buffer-function'."
 (defvar drover-list--cache-timer nil
   "Timer redrawing the prompt caches of displayed lists.")
 
+(defvar drover-list--frame-timer nil
+  "Timer showing the next frames of the animated glyphs of displayed lists.")
+
 (defun drover-list--age-tick ()
   "Redraw displayed lists, mark hidden ones stale; stop when none is shown."
   (mapc #'drover-list--update (drover-list--buffers))
@@ -1349,30 +1585,54 @@ For `revert-buffer-function'."
       (drover-list--draw-caches)))
   (drover-list--update-timers))
 
+(defun drover-list--frame-tick ()
+  "Show the next frames of displayed lists; stop when none animates."
+  (dolist (buffer (drover-list--shown-buffers))
+    (with-current-buffer buffer
+      (drover-list--draw-frames)))
+  (drover-list--update-timers))
+
 (defun drover-list--stop-timer (symbol)
   "Cancel the timer in the variable SYMBOL, and forget it."
   (when (timerp (symbol-value symbol))
     (cancel-timer (symbol-value symbol)))
   (set symbol nil))
 
+(defun drover-list--keep-timer (symbol interval needed function &optional first)
+  "Keep the timer in SYMBOL running FUNCTION every INTERVAL seconds while NEEDED.
+Start it if needed and not running, FIRST seconds from now, INTERVAL by
+default; stop it when INTERVAL or NEEDED is nil."
+  (if (and interval needed)
+      (unless (timerp (symbol-value symbol))
+        (set symbol (run-at-time (or first interval) interval function)))
+    (drover-list--stop-timer symbol)))
+
 (defun drover-list--update-timers ()
   "Run the timers a displayed list needs, and only those.
 Ages need redraws while a list is displayed; prompt caches while a
-displayed list shows a live one."
+displayed list shows a live one; animated glyphs while a displayed list
+shows one.  Caches and glyphs change only the display of a few
+characters, not the text."
   (let ((shown (drover-list--shown-buffers)))
-    (if (and shown drover-list-age-interval)
-        (unless (timerp drover-list--age-timer)
-          (setq drover-list--age-timer
-                (run-at-time drover-list-age-interval drover-list-age-interval
-                             #'drover-list--age-tick)))
-      (drover-list--stop-timer 'drover-list--age-timer))
-    (if (and drover-list-cache-interval
-             (seq-some (lambda (buffer) (buffer-local-value 'drover-list--caches buffer)) shown))
-        (unless (timerp drover-list--cache-timer)
-          (setq drover-list--cache-timer
-                (run-at-time drover-list-cache-interval drover-list-cache-interval
-                             #'drover-list--cache-tick)))
-      (drover-list--stop-timer 'drover-list--cache-timer))))
+    (drover-list--keep-timer 'drover-list--age-timer drover-list-age-interval shown
+                             #'drover-list--age-tick)
+    (drover-list--keep-timer 'drover-list--cache-timer drover-list-cache-interval
+                             (seq-some (lambda (buffer) (buffer-local-value 'drover-list--caches buffer))
+                                       shown)
+                             #'drover-list--cache-tick)
+    (drover-list--keep-timer 'drover-list--frame-timer drover-list-animation-interval
+                             (seq-some (lambda (buffer) (buffer-local-value 'drover-list--animated buffer))
+                                       shown)
+                             #'drover-list--frame-tick
+                             (and drover-list-animation-interval
+                                  (drover-list--frame-delay (drover-list--now))))))
+
+(defun drover-list--frame-delay (now)
+  "Return the seconds from NOW to the middle of the next frame.
+Ticking mid-frame, the timer never shows a frame twice or skips one
+when it runs a little late or early."
+  (let ((interval drover-list-animation-interval))
+    (- (* (+ (floor now interval) 1.5) interval) now)))
 
 ;;;; Windows
 
@@ -1462,7 +1722,8 @@ For `kill-buffer-hook'."
     (remove-hook 'window-buffer-change-functions #'drover-list--windows-changed)
     (remove-hook 'window-selection-change-functions #'drover-list--windows-changed)
     (drover-list--stop-timer 'drover-list--age-timer)
-    (drover-list--stop-timer 'drover-list--cache-timer)))
+    (drover-list--stop-timer 'drover-list--cache-timer)
+    (drover-list--stop-timer 'drover-list--frame-timer)))
 
 ;;;; Commands
 
@@ -1569,19 +1830,129 @@ From a side window, that is the window where you work."
         (drover-open session t)))
     (drover-list--update-current)))
 
+;;;; Moving between sessions
+
+;; Commands of the dispatch menu's List group, which moves point in a
+;; list from wherever the menu opened (see `drover--dispatch-navigate').
+;; The list binds none of them: Magit's n, p, M-n and M-p move there.
+
+(defun drover-list--check ()
+  "Signal a `user-error' unless the current buffer is drover's list."
+  (unless (derived-mode-p 'drover-list-mode)
+    (user-error "Not in drover's list of sessions")))
+
+(defun drover-list--reachable-sessions ()
+  "Return the session sections of the current list point may reach, in order.
+Those of collapsed groups are left out: their heading stands for them."
+  (mapcan (lambda (container)
+            (unless (and (not (eq container magit-root-section)) (oref container hidden))
+              (drover-list--session-sections container)))
+          (drover-list--containers)))
+
+(defun drover-list--step (sections current count)
+  "Return the section COUNT steps away among SECTIONS, and whether it stops.
+SECTIONS are in the order of the buffer, CURRENT the one of them point
+is in, or nil.  A step goes to the next section, or back to the
+previous one when COUNT is negative; from outside SECTIONS, the first
+step goes to the first section after point, or the last before it.  The
+value is (SECTION . CLAMPED), or nil without SECTIONS; CLAMPED is
+non-nil when the steps would have left SECTIONS, SECTION being then the
+first or the last."
+  (when sections
+    (let* ((point (point))
+           (here (seq-position sections current #'eq))
+           (index (cond (here (+ here count))
+                        ((> count 0)
+                         (+ (or (cl-position-if (lambda (section) (> (oref section start) point)) sections)
+                                (length sections))
+                            count -1))
+                        (t
+                         (+ (or (cl-position-if (lambda (section) (< (oref section start) point))
+                                                sections :from-end t)
+                                -1)
+                            count 1))))
+           (clamped (max 0 (min index (1- (length sections))))))
+      (cons (nth clamped sections) (/= clamped index)))))
+
+(defun drover-list-next-session (&optional count)
+  "Move to the next session of the list, over group headings.
+With COUNT, move that many sessions, backwards when negative.  Sessions
+in collapsed groups are passed over."
+  (interactive "p" drover-list-mode)
+  (drover-list--check)
+  (let ((count (or count 1)))
+    (pcase (drover-list--step (drover-list--reachable-sessions)
+                              (drover-list--session-section (magit-current-section))
+                              count)
+      ('nil (message "No session"))
+      (`(,section . ,clamped)
+       (goto-char (oref section start))
+       (when clamped
+         (message (if (< count 0) "First session" "Last session")))))))
+
+(defun drover-list-previous-session (&optional count)
+  "Move to the previous session of the list, over group headings.
+With COUNT, move that many sessions, forwards when negative."
+  (interactive "p" drover-list-mode)
+  (drover-list-next-session (- (or count 1))))
+
+(defun drover-list-next-group (&optional count)
+  "Move to the first session of the next group of the list.
+The heading of a collapsed group stands for its sessions.  With COUNT,
+move that many groups, backwards when negative."
+  (interactive "p" drover-list-mode)
+  (drover-list--check)
+  (let ((groups (drover-list--groups))
+        (count (or count 1)))
+    (unless groups
+      (user-error "Sessions are not grouped"))
+    (pcase-let ((`(,group . ,clamped)
+                 (drover-list--step groups (drover-list--group-section (magit-current-section)) count)))
+      (goto-char (oref (or (and (not (oref group hidden)) (car (drover-list--session-sections group)))
+                           group)
+                       start))
+      (when clamped
+        (message (if (< count 0) "First group" "Last group"))))))
+
+(defun drover-list-previous-group (&optional count)
+  "Move to the first session of the previous group of the list.
+With COUNT, move that many groups, forwards when negative."
+  (interactive "p" drover-list-mode)
+  (drover-list-next-group (- (or count 1))))
+
+(defun drover-list-first-session ()
+  "Move to the first session of the list."
+  (interactive nil drover-list-mode)
+  (drover-list--check)
+  (if-let* ((section (car (drover-list--reachable-sessions))))
+      (goto-char (oref section start))
+    (message "No session")))
+
+(defun drover-list-last-session ()
+  "Move to the last session of the list.
+Sessions in collapsed groups are passed over."
+  (interactive nil drover-list-mode)
+  (drover-list--check)
+  (if-let* ((section (car (last (drover-list--reachable-sessions)))))
+      (goto-char (oref section start))
+    (message "No session")))
+
 ;;;; The mode
 
 (defun drover-list--mode-line-process ()
   "Return how the list lists sessions, for the mode line.
-It tells the grouping, the sort when not by urgency, whether subagents
-and older sessions show, and whether a filter leaves sessions out."
+It tells the grouping, the sort when not by urgency, which subagents
+show when not the active ones, whether older sessions show, and whether
+a filter leaves sessions out."
   (concat (if drover-group-by
               (concat " by " (alist-get drover-group-by drover-grouping-labels))
             " ungrouped")
           (unless (and (eq drover-sort-by 'urgency) (not drover-sort-descending))
             (concat ", " (alist-get drover-sort-by drover-sort-labels)
                     (if drover-sort-descending " ↓" " ↑")))
-          (and drover-show-children " +subagents")
+          (pcase drover-show-subagents
+            ('all " +subagents")
+            ('none " -subagents"))
           (and drover-show-history " +older")
           (and (drover-filter-active-p) " filtered")))
 
@@ -1610,8 +1981,8 @@ What a line shows depends on the window's width: see
 `drover-list-fields'.  In a side window (`drover-list-side'), sessions
 open in the window where you work, and the session it shows is
 highlighted.  The keys of `drover-session-map' act on the session at
-point; \\[drover-toggle-subagents] shows or hides subagents and
-\\[drover-refresh] redraws the list.  Text is drawn in the face
+point; \\[drover-toggle-subagents] shows every subagent, the active ones or
+none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 `drover-list'.
 
 \\{drover-list-mode-map}"

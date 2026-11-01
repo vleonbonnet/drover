@@ -27,10 +27,16 @@
 ;;   binds them in every list of sessions: drover's views inherit it,
 ;;   and `drover-session-keys-mode' adds it to lists drover does not
 ;;   draw, those of other front ends.  In a prompt buffer they act on the
-;;   buffer's session, through the menu.
+;;   buffer's session, through the menu; in a buffer without a session,
+;;   on the session at point of drover's list shown beside it.
 ;; - Prompt keys perform the prompt actions of `drover-prompt-actions',
 ;;   through the menu.
 ;; - Global keys work everywhere, through the menu.
+;;
+;; While the menu acts on drover's list, here or beside, a fourth group
+;; moves in that list, the menu staying open: C-n, C-p, M-n, M-p, M-<
+;; and M->, keys of no other set; RET opens the session at point, but
+;; in a buffer sending prompts, where it stays the prompt key Send.
 ;;
 ;; Bind `drover-dispatch' globally, for instance to C-'; drover binds no
 ;; global key.  Other packages add their own global commands to the menu
@@ -41,7 +47,8 @@
 ;; search; more prompt commands after "O".
 ;;
 ;; `drover-view', the View menu, chooses how drover's list sorts, groups
-;; and filters sessions, and what it shows.
+;; and filters sessions, which subagents it shows, and the fields it may
+;; show.
 
 ;;; Code:
 
@@ -57,6 +64,12 @@
 (autoload 'drover-select "drover-attention" nil t)
 (autoload 'drover-list "drover-list" nil t)
 (autoload 'drover-list-side "drover-list" nil t)
+(autoload 'drover-list-next-session "drover-list" nil t)
+(autoload 'drover-list-previous-session "drover-list" nil t)
+(autoload 'drover-list-next-group "drover-list" nil t)
+(autoload 'drover-list-previous-group "drover-list" nil t)
+(autoload 'drover-list-first-session "drover-list" nil t)
+(autoload 'drover-list-last-session "drover-list" nil t)
 (autoload 'drover-prompt-dwim "drover-prompt" nil t)
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 
@@ -199,15 +212,38 @@ window of the frame."
 of other front ends.")
 
 (defun drover-toggle-subagents ()
-  "Show or hide the sessions of subagents.
-In drover's views, this changes `drover-show-children' for every view;
-in another list, it calls `drover-toggle-subagents-function'.  A
-subagent that needs you always shows."
+  "Show every subagent, the active ones, or none, in turn.
+In drover's views, this sets `drover-show-subagents' to the next of
+`drover-subagent-modes' for every view: all, active, none, then all
+again.  In another list, it calls `drover-toggle-subagents-function'."
   (interactive)
   (if drover-toggle-subagents-function
       (call-interactively drover-toggle-subagents-function)
-    (drover--set-show-children (not (default-value 'drover-show-children)))
-    (message (if (default-value 'drover-show-children) "Showing subagents" "Hiding subagents"))))
+    (drover-set-show-subagents (drover-next-subagent-mode))
+    (message "%s" (drover-subagent-mode-description))))
+
+(defun drover-subagent-mode-description (&optional mode)
+  "Return a sentence telling which subagents MODE shows.
+MODE defaults to the global value of `drover-show-subagents'."
+  (pcase (or mode (default-value 'drover-show-subagents))
+    ('all "Showing every subagent")
+    ('none "Hiding subagents")
+    (_ "Showing active subagents")))
+
+(defun drover-toggle-subagents-hint (&optional keymap)
+  "Return the keys of `drover-toggle-subagents' in KEYMAP, and what they do.
+Such as \"U hides all\", the keys in the face `help-key-binding'.
+KEYMAP defaults to the current local map."
+  (concat (let ((keys (where-is-internal #'drover-toggle-subagents (or keymap (current-local-map)) t)))
+            (if keys
+                (propertize (key-description keys) 'face 'help-key-binding
+                            'font-lock-face 'help-key-binding)
+              (substitute-command-keys "\\[drover-toggle-subagents]")))
+          (drover-face (pcase (drover-next-subagent-mode)
+                         ('all " shows all")
+                         ('none " hides all")
+                         (_ " shows active only"))
+                       'drover-dim)))
 
 (defun drover-refresh ()
   "Refresh what the current buffer shows, with `revert-buffer'.
@@ -384,16 +420,73 @@ buffers also set `drover-session-at-point-function'.
 
 ;;;; The dispatch menu
 
+(defun drover--shown-list-window ()
+  "Return the window of the selected frame showing one of drover's views, or nil.
+Among several, the one used most recently."
+  (let (best)
+    (dolist (window (window-list nil 'nomini))
+      (when (and (buffer-local-value 'drover-view-p (window-buffer window))
+                 (or (null best) (> (window-use-time window) (window-use-time best))))
+        (setq best window)))
+    best))
+
 (defun drover--context ()
   "Return what the dispatch menu depends on in the current buffer, as a plist.
 :session is the session at point or nil, :list non-nil in a list of
 sessions, :view non-nil in one of drover's views, :prompt non-nil in
-drover's own prompt buffer (see `drover-prompt-mode')."
-  (list :session (with-demoted-errors "Drover session at point: %S"
-                   (drover-session-at-point t))
-        :list (and (drover-session-list-p) t)
-        :view (and drover-view-p t)
-        :prompt (and (bound-and-true-p drover-prompt-mode) t)))
+drover's own prompt buffer (see `drover-prompt-mode'), :window the
+window of a list the menu acts on in place of the current buffer, or
+nil.
+
+The menu acts on the current buffer when it is a list of sessions, or
+when it tells a session at point, as a session buffer does.  Otherwise,
+when one of drover's lists is shown in a window of the selected frame,
+the most recently used if several, the menu acts on that list: :session,
+:list and :view are the list's, its session at point the one at the
+window's point, and :window is the window.  :prompt is always the
+current buffer's.  The global commands keep to the current buffer."
+  (let ((session (drover--context-session))
+        (list (drover-session-list-p))
+        (window nil))
+    (unless (or list session)
+      (when-let* ((shown (drover--shown-list-window)))
+        (with-selected-window shown
+          (setq window shown
+                session (drover--context-session)
+                list (drover-session-list-p)))))
+    (drover--make-context session list window (bound-and-true-p drover-prompt-mode))))
+
+(defun drover--make-context (session list window prompt)
+  "Return the context of the dispatch menu, see `drover--context'.
+SESSION is the session at point, LIST non-nil in a list of sessions,
+WINDOW the window of the list the menu acts on, or nil for the current
+buffer, PROMPT non-nil in drover's prompt buffer."
+  (list :session session
+        :list (and list t)
+        :view (and (if window
+                       (buffer-local-value 'drover-view-p (window-buffer window))
+                     drover-view-p)
+                   t)
+        :prompt (and prompt t)
+        :window window))
+
+(defun drover--context-again (scope)
+  "Return the context of the dispatch menu, which acted on SCOPE, now.
+When SCOPE is that of a list in another window, the menu keeps to that
+list, whatever the current buffer became meanwhile, such as a session
+follow mode showed: only the session at point is read again."
+  (let ((window (plist-get scope :window)))
+    (if (and (window-live-p window)
+             (buffer-local-value 'drover-view-p (window-buffer window)))
+        (with-selected-window window
+          (drover--make-context (drover--context-session) (drover-session-list-p) window
+                                (plist-get scope :prompt)))
+      (drover--context))))
+
+(defun drover--context-session ()
+  "Return the session at point, or nil, reporting a failing lookup."
+  (with-demoted-errors "Drover session at point: %S"
+    (drover-session-at-point t)))
 
 (defun drover--scope ()
   "Return the context of the dispatch menu being set up, else of this buffer."
@@ -426,16 +519,101 @@ PREDICATE, a function of the session, returns nil for it."
 (defun drover-dispatch-prompt-p (action)
   "Return non-nil when prompt ACTION applies from where the dispatch menu acts.
 For `compact' and `fork', a list's session at point whose backend
-operates on it counts."
-  (let ((scope (drover--scope)))
-    (or (drover--prompt-target action (plist-get scope :session) (plist-get scope :list) t)
-        (and (plist-get scope :list)
+operates on it counts.  Prompt actions run in the current buffer, so a
+list shown in another window does not count."
+  (let* ((scope (drover--scope))
+         (here (not (plist-get scope :window)))
+         (session (and here (plist-get scope :session)))
+         (list (and here (plist-get scope :list))))
+    (or (drover--prompt-target action session list t)
+        (and list
              (when-let* ((operation (alist-get action drover--backend-prompt-actions)))
                (drover-dispatch-session operation))))))
 
+(defun drover-dispatch-list-return-p ()
+  "Return non-nil when RET in the dispatch menu opens the session at point.
+It does so in the menu's List group, while the menu acts on one of
+drover's lists, unless the current buffer sends prompts: there RET
+stays Send, as losing a prompt to a slip is worse than reaching for o."
+  (and (drover-dispatch-view-p)
+       (not (drover-prompt-defines-p (current-buffer) 'send))))
+
+(defun drover--dispatch-window ()
+  "Return the window of the list the dispatch menu acts on, when not current.
+It is nil when the menu acts on the current buffer, and when that
+window no longer shows one of drover's views."
+  (let ((window (plist-get (drover--scope) :window)))
+    (and (window-live-p window)
+         (buffer-local-value 'drover-view-p (window-buffer window))
+         window)))
+
+(defun drover--call-in-window (window function)
+  "Call FUNCTION with no argument, WINDOW selected, and return its value.
+Selection then returns to the window selected before, unless FUNCTION
+selected another window or showed another buffer in WINDOW, such as a
+session it opened: the user goes where it took them."
+  (let ((origin (selected-window))
+        (buffer (window-buffer window)))
+    (select-window window 'norecord)
+    (unwind-protect
+        (funcall function)
+      (when (and (window-live-p origin)
+                 (eq (selected-window) window)
+                 (eq (window-buffer window) buffer))
+        (select-window origin 'norecord)))))
+
+(defun drover--dispatch-in-list (function &rest arguments)
+  "Apply FUNCTION to ARGUMENTS in the window of the list the menu acts on.
+Without such a window, in the current buffer.  It is the advice of the
+dispatch menu's session commands, for their interactive specification
+and body alike, so that they read and act on the session at the point
+of that window, as typed there."
+  (if-let* ((window (drover--dispatch-window)))
+      (drover--call-in-window window (lambda () (apply function arguments)))
+    (apply function arguments)))
+
+(defun drover--run-local-hook (hook)
+  "Run the functions of HOOK local to the current buffer, not the global ones."
+  (when (local-variable-p hook)
+    (dolist (function (symbol-value hook))
+      (unless (eq function t)
+        (with-demoted-errors "Drover list hook: %S"
+          (funcall function))))))
+
+(defun drover--dispatch-navigate (function &rest arguments)
+  "Apply FUNCTION, a command moving point in a list, to ARGUMENTS.
+It is the advice of the menu's List group.  In a list shown in another
+window, the command moves that window's point, between the list's own
+`pre-command-hook' and `post-command-hook' functions, as if typed
+there, so that follow mode and highlights follow it.  The menu, which
+stays, then acts on the new session at point."
+  (prog1 (if-let* ((window (drover--dispatch-window)))
+             (drover--call-in-window window
+                                     (lambda ()
+                                       (drover--run-local-hook 'pre-command-hook)
+                                       (prog1 (apply function arguments)
+                                         (drover--run-local-hook 'post-command-hook))))
+           (apply function arguments))
+    (when-let* ((prefix (transient-prefix-object))
+                ((eq (oref prefix command) 'drover-dispatch)))
+      (oset prefix scope (drover--context-again (oref prefix scope))))))
+
+(defun drover--dispatch-list-description ()
+  "Return the title of the dispatch menu's List group, naming the session at point."
+  (if-let* ((session (plist-get (drover--scope) :session)))
+      (concat "List: " (truncate-string-to-width
+                        (replace-regexp-in-string "[\n\r\t]+" " "
+                                                  (format "%s" (drover-session-display-title session)))
+                        60 nil nil (truncate-string-ellipsis)))
+    "List"))
+
+(defun drover--dispatch-grouped-p ()
+  "Return non-nil when the list the dispatch menu acts on groups sessions."
+  (and (drover-dispatch-view-p) drover-group-by))
+
 (defun drover--running-p (session)
   "Return non-nil when SESSION runs a turn, which can be interrupted."
-  (memq (drover-session-status session) '(waiting retrying working)))
+  (drover-session-active-p session))
 
 (defun drover--ended-unseen-p (session)
   "Return non-nil when SESSION ended a turn the user did not see."
@@ -466,7 +644,16 @@ then hide from the commands it runs."
 Global commands work everywhere; session commands act on the session at
 point, in lists and in prompt buffers; prompt commands perform the
 prompt actions of the current buffer.  Commands that do not apply here
-are shown, greyed out."
+are shown, greyed out.
+
+From a buffer telling no session, such as the prompt or a file, while
+one of drover's lists shows in a window of the frame, session commands
+act on that list, on the session at its window's point (see
+`drover--context').  While the menu acts on one of drover's lists, its
+List group moves that point, the menu staying open and following the
+new session at point, and RET opens the session, but in a buffer that
+sends prompts, where RET stays Send."
+  :refresh-suffixes t
   ["Global"
    [("j" "Next" drover-next)
     ("b" "Select" drover-select)
@@ -487,7 +674,8 @@ are shown, greyed out."
     ("O" "Open link" drover-prompt-open-link
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'open-link)))]]
   ["Session"
-   [("o" "Other window" drover-open-other-window
+   [:advice* drover--dispatch-in-list
+    ("o" "Other window" drover-open-other-window
      :inapt-if-not (lambda () (drover-dispatch-session :open)))
     ("u" "Parent" drover-open-parent
      :inapt-if-not (lambda () (drover-dispatch-session :open #'drover-session-parent)))
@@ -495,7 +683,8 @@ are shown, greyed out."
      :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
     ("v" "Peek" drover-peek
      :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))]
-   [("A" "Answer" drover-respond
+   [:advice* drover--dispatch-in-list
+    ("A" "Answer" drover-respond
      :inapt-if-not (lambda () (drover-dispatch-session :respond #'drover-session-requests)))
     ("K" "Interrupt" drover-interrupt
      :inapt-if-not (lambda () (drover-dispatch-session :interrupt #'drover--running-p)))
@@ -506,13 +695,16 @@ are shown, greyed out."
                                    (drover--can-start-p))))
     ("g" "Refresh" drover-refresh
      :inapt-if-not (lambda () (or (drover-dispatch-list-p) (drover-dispatch-session))))]
-   [("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
+   [:advice* drover--dispatch-in-list
+    ("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
     ("x" "Delete" drover-delete :inapt-if-not (lambda () (drover-dispatch-session :delete)))
     ("z" "Archive" drover-archive :inapt-if-not (lambda () (drover-dispatch-session :archive)))]
-   [("U" "Subagents" drover-toggle-subagents :inapt-if-not drover-dispatch-list-p)
+   [:advice* drover--dispatch-in-list
+    ("U" "Subagents" drover-toggle-subagents :inapt-if-not drover-dispatch-list-p)
     ("V" "View" drover-view :inapt-if-not drover-dispatch-view-p)]]
   ["Prompt"
-   [("RET" "Send" drover-prompt-send :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send)))
+   [("RET" "Send" drover-prompt-send :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
+     :if-not drover-dispatch-list-return-p)
     ("S-<return>" "Schedule" drover-prompt-schedule
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'schedule)))
     ("i" "Attach" drover-prompt-attach :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))
@@ -524,6 +716,26 @@ are shown, greyed out."
    [("t" "Revert here" drover-prompt-revert :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert)))
     ("T" "Cancel revert" drover-prompt-revert-cancel
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert-cancel)))]]
+  ;; Only while the menu acts on one of drover's lists, here or in
+  ;; another window.  Moving stays in the menu, which follows the new
+  ;; session at point.
+  [:description drover--dispatch-list-description
+   :if drover-dispatch-view-p
+   [:advice drover--dispatch-navigate
+    ("C-n" "Next session" drover-list-next-session :transient t)
+    ("C-p" "Previous session" drover-list-previous-session :transient t)]
+   [:advice drover--dispatch-navigate
+    ("M-n" "Next group" drover-list-next-group :transient t
+     :inapt-if-not drover--dispatch-grouped-p)
+    ("M-p" "Previous group" drover-list-previous-group :transient t
+     :inapt-if-not drover--dispatch-grouped-p)]
+   [:advice drover--dispatch-navigate
+    ("M-<" "First session" drover-list-first-session :transient t)
+    ("M->" "Last session" drover-list-last-session :transient t)]
+   [:advice* drover--dispatch-in-list
+    ("RET" "Open" drover-open-at-point
+     :if drover-dispatch-list-return-p
+     :inapt-if-not (lambda () (drover-dispatch-session :open)))]]
   ;; The key opening the menu closes it, as users bind it globally.
   [:hide always
    ("C-'" "Close" transient-quit-one)]
@@ -625,11 +837,6 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
     (:since (drover-filter-since-label value))
     (:search (format "\"%s\"" value))
     (_ (format "%s" value))))
-
-(defun drover--set-show-children (show)
-  "Show subagents in every view when SHOW is non-nil, else hide them, and redraw."
-  (setq-default drover-show-children (and show t))
-  (drover-view-settings-changed))
 
 (defun drover-filter-clear ()
   "List every session in every view."
@@ -805,23 +1012,37 @@ it, or \"any\" for nil.")
   :filter-key :search
   :chooser #'drover--read-filter-search)
 
+(defun drover--view-window ()
+  "Return the window of the list the View menu acts on.
+It is the window selected when the menu opened, which shows the list,
+even when the dispatch menu opened it from another window."
+  (let ((prefix (transient-prefix-object)))
+    (or (and prefix
+             (eq (oref prefix command) 'drover-view)
+             (window-live-p (oref prefix scope))
+             (oref prefix scope))
+        (selected-window))))
+
 (transient-define-infix drover-view--follow ()
   "Show the session at point in another window as point moves, or stop."
   :class 'drover--setting
   :description "follow"
-  :getter (lambda () (bound-and-true-p drover-follow-mode))
-  :setter (lambda (on) (drover-follow-mode (if on 1 -1)))
+  :getter (lambda () (buffer-local-value 'drover-follow-mode (window-buffer (drover--view-window))))
+  :setter (lambda (on)
+            ;; Follow mode is the list's own, and reads its window's point.
+            (with-selected-window (drover--view-window)
+              (drover-follow-mode (if on 1 -1))))
   :chooser #'not
   :options '((nil . "off") (t . "on")))
 
 (transient-define-infix drover-view--subagents ()
-  "Show or hide subagents in every view."
+  "Show every subagent, the active ones, or none, in every view."
   :class 'drover--setting
   :description "subagents"
-  :getter (lambda () (default-value 'drover-show-children))
-  :setter #'drover--set-show-children
-  :chooser #'not
-  :options '((nil . "hidden") (t . "shown")))
+  :getter (lambda () (default-value 'drover-show-subagents))
+  :setter #'drover-set-show-subagents
+  :chooser #'drover-next-subagent-mode
+  :options drover-subagent-mode-labels)
 
 (transient-define-infix drover-view--history ()
   "Show or hide the older sessions of the backends in every view."
@@ -832,12 +1053,85 @@ it, or \"any\" for nil.")
   :chooser #'not
   :options '((nil . "hidden") (t . "shown")))
 
+;;;; Columns
+
+(defvar drover-list-fields)
+(defvar drover-list-hidden-fields)
+
+(defconst drover-list-field-labels
+  '((location . "location") (agent . "agent") (model . "model") (created . "created")
+    (age . "age") (cache . "cache") (summary . "summary"))
+  "Display name of each field of `drover-list-fields' the user may hide.")
+
+(defun drover-list-field-enabled-p (field)
+  "Return non-nil unless FIELD is one of `drover-list-hidden-fields'."
+  (not (memq field (bound-and-true-p drover-list-hidden-fields))))
+
+(defun drover-set-list-field (field enabled)
+  "Let the list show FIELD when ENABLED is non-nil, else hide it, and redraw.
+FIELD is a field of `drover-list-fields' other than the title.  This
+changes `drover-list-hidden-fields' for this session; customize it to
+keep the change."
+  (when (eq field 'title)
+    (error "The title always shows"))
+  (setq drover-list-hidden-fields
+        (if enabled
+            (remq field drover-list-hidden-fields)
+          (cons field (remq field drover-list-hidden-fields))))
+  (drover-view-settings-changed))
+
+(defclass drover--column-setting (drover--setting)
+  ((field :initarg :field :documentation "The field of `drover-list-fields' it lets show."))
+  "An infix of `drover-view' letting the list show one field, or not.
+It shows the name of the field as Magit shows a switch: highlighted
+while the list may show the field, dimmed otherwise.")
+
+(cl-defmethod drover--setting-value ((obj drover--column-setting))
+  "Return non-nil when the list may show the field of OBJ."
+  (drover-list-field-enabled-p (oref obj field)))
+
+(cl-defmethod drover--setting-set ((obj drover--column-setting) value)
+  "Let the list show the field of OBJ when VALUE is non-nil."
+  (drover-set-list-field (oref obj field) value))
+
+(cl-defmethod transient-format-value ((obj drover--column-setting))
+  "Return the name of the field of OBJ, highlighted when the list may show it."
+  (propertize (alist-get (oref obj field) drover-list-field-labels)
+              'face (if (drover--setting-value obj) 'transient-value 'transient-inactive-value)))
+
+(defun drover--list-field-p (field)
+  "Return non-nil when FIELD is one of `drover-list-fields'.
+Before the list is loaded, any field is."
+  (or (not (boundp 'drover-list-fields))
+      (assq field drover-list-fields)))
+
+(defmacro drover--define-column-switch (field)
+  "Define the infix of the View menu letting the list show FIELD, or not."
+  `(transient-define-infix ,(intern (format "drover-view--column-%s" field)) ()
+     ,(format "Let the list show the field `%s', or not." field)
+     :class 'drover--column-setting
+     :field ',field
+     :format " %k %v"
+     :chooser #'not
+     :if (lambda () (drover--list-field-p ',field))))
+
+(drover--define-column-switch location)
+(drover--define-column-switch agent)
+(drover--define-column-switch model)
+(drover--define-column-switch created)
+(drover--define-column-switch age)
+(drover--define-column-switch cache)
+(drover--define-column-switch summary)
+
 (transient-define-prefix drover-view ()
   "Choose how drover's session list sorts, groups and filters sessions.
 Each setting shows its value; changing one redraws the list at once,
 and the menu stays open.  Sorting keeps subagents under their parent.
 A filter left empty keeps every session.  The toggles turn follow mode
-on in the list, and show subagents and older sessions."
+on in the list, cycle the subagents shown (all, active, none), and
+show older sessions.  The columns are the fields the list may show, as
+room allows: each switch lets a field show, or hides it, for this
+session (`drover-list-hidden-fields' keeps the choice)."
   :refresh-suffixes t
   [["Sort by"
     ("o" drover-view--sort-by)
@@ -856,12 +1150,23 @@ on in the list, and show subagents and older sessions."
     ("F" drover-view--follow)
     ("U" drover-view--subagents)
     ("O" drover-view--history :inapt-if-not drover-history-available-p)]]
+  ["Columns"
+   :class transient-row
+   ("-l" drover-view--column-location)
+   ("-a" drover-view--column-agent)
+   ("-m" drover-view--column-model)
+   ("-c" drover-view--column-created)
+   ("-t" drover-view--column-age)
+   ("-p" drover-view--column-cache)
+   ("-s" drover-view--column-summary)]
   ;; The key opening the menu closes it.
   [:hide always
    ("V" "Close" transient-quit-one)]
   (interactive)
   (drover--check-view)
-  (transient-setup 'drover-view nil nil :display-action drover-menu-display-action))
+  ;; The list's window, from which the dispatch menu may have opened it.
+  (transient-setup 'drover-view nil nil :scope (selected-window)
+                   :display-action drover-menu-display-action))
 
 (defun drover-filter-clear-keys (&optional keymap)
   "Return the keys clearing the filter from KEYMAP, such as \"V c\".
