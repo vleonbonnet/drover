@@ -70,6 +70,11 @@
   (let ((last-command 'drover-next))
     (drover-next)))
 
+(defun drover-attention-test-help (string)
+  "Return the tooltip of STRING, the mode line count, as hovering it shows it."
+  (let ((help (get-text-property 1 'help-echo string)))
+    (if (functionp help) (funcall help (selected-window) string 1) help)))
+
 (defun drover-attention-test-face-at (string text)
   "Return the face in STRING at the first occurrence of TEXT."
   (get-text-property (string-search text string) 'face string))
@@ -146,7 +151,7 @@
     (drover-set-show-subagents 'none)
     (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
     (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-waiting))
-    (let ((help (get-text-property 1 'help-echo drover-attention-mode-line)))
+    (let ((help (drover-attention-test-help drover-attention-mode-line)))
       (should (string-match-p "Session asking" help))
       (should-not (string-match-p "Session ended\\|Session broke" help)))
     ;; A filter narrows lists, not the count.
@@ -161,7 +166,7 @@
                                     (drover-test-session "e" :status 'done :since 3.0)
                                     (drover-test-session "i" :status 'idle))
     (drover-attention-mode 1)
-    (let ((help (get-text-property 1 'help-echo drover-attention-mode-line)))
+    (let ((help (drover-attention-test-help drover-attention-mode-line)))
       (should (equal help (concat "Sessions that need you:\n"
                                   "Needs you (1):\n"
                                   "  ⚑ Session w  drover:main  permit: bash: make\n"
@@ -200,6 +205,7 @@
     (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
     (setq drover-test-sessions (list (drover-test-session "w" :status 'idle)))
     (drover-backend-changed 'fake "w")
+    (drover-backend-changed 'fake "f")
     (drover-changed-now)
     (should-not drover-attention-mode-line)))
 

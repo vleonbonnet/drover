@@ -17,7 +17,8 @@
 
 ;;; Commentary:
 
-;; A fake backend, `fake', serves `drover-test-sessions' and records
+;; A fake backend, `fake', serves `drover-test-sessions', one by one
+;; through :session as well as all at once, and records
 ;; every action in `drover-test-calls', its prompt operations included:
 ;; it starts sessions of the engines `drover-test-backend-engines'.  What
 ;; views ask it to fetch goes to `drover-test-prefetched', the recaps
@@ -151,6 +152,9 @@ The session is served from then on, and given to THEN; with
    'fake
    :label "Fake"
    :sessions (lambda () drover-test-sessions)
+   :session (lambda (id)
+              (seq-find (lambda (session) (equal (drover-session-id session) id))
+                        drover-test-sessions))
    :start (lambda () (push '(:start nil) drover-test-calls))
    :open (drover-test--recorder :open)
    :respond (drover-test--recorder :respond)
@@ -196,6 +200,11 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--started nil)
          (drover--running nil)
          (drover--change-timer nil)
+         (drover--changed-keys nil)
+         (drover--changed-backends nil)
+         (drover--changed-all nil)
+         (drover--changed-applied nil)
+         (drover--index nil)
          (drover-changed-hook nil)
          (drover-show-subagents 'active)
          (drover-filter nil)

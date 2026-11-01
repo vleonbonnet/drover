@@ -56,6 +56,11 @@ buffers BODY makes with `drover-agent-shell-test-shell' are killed."
          (drover--started nil)
          (drover--running nil)
          (drover--change-timer nil)
+         (drover--changed-keys nil)
+         (drover--changed-backends nil)
+         (drover--changed-all nil)
+         (drover--changed-applied nil)
+         (drover--index nil)
          (drover-changed-hook nil)
          (drover-show-history nil)
          (drover--history nil)
@@ -259,6 +264,11 @@ VALUES are strings, named by themselves capitalized."
         (drover--started nil)
         (drover--running nil)
         (drover--change-timer nil)
+        (drover--changed-keys nil)
+        (drover--changed-backends nil)
+        (drover--changed-all nil)
+        (drover--changed-applied nil)
+        (drover--index nil)
         (drover-agent-shell--gemini-registered nil))
     (unwind-protect
         (progn

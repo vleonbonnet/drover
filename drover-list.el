@@ -305,6 +305,8 @@ narrow window.")
 
 ;;;; Sections
 
+(defvar drover-list--model)
+
 (defvar-keymap drover-list-group-section-map
   :doc "Keys on the heading of a group of sessions."
   "RET" #'magit-section-toggle)
@@ -313,7 +315,13 @@ narrow window.")
   ((keymap :initform 'drover-list-group-section-map))
   "A group of sessions; the value is (GROUPING . VALUE).")
 
-(defclass drover-list-session-section (magit-section) ()
+(defvar drover-list--no-keymap nil
+  "The keymap of session sections: none, their lines taking that of headings.")
+
+(defclass drover-list-session-section (magit-section)
+  ;; Named, so that Magit does not look one up by the section's type,
+  ;; formatting and interning two names per section drawn.
+  ((keymap :initform 'drover-list--no-keymap))
   "One session; the value is its `drover-session-key'.
 Its subagents follow it in its group, as sections of their own.")
 
@@ -367,10 +375,9 @@ sessions only while they are not grouped."
 
 (defun drover-list--find-session (key)
   "Return the section showing the session whose key is KEY, or nil."
-  (seq-some (lambda (container)
-              (seq-find (lambda (section) (equal (oref section value) key))
-                        (drover-list--session-sections container)))
-            (drover-list--containers)))
+  (when-let* ((model drover-list--model)
+              (row (gethash key (drover-list--model-rows model))))
+    (drover-list--row-section row)))
 
 (defun drover-list--session-at-point ()
   "Return the current record of the session at point, or nil.
@@ -442,15 +449,40 @@ showing it, else the selected window."
       (selected-window)
     (or (get-buffer-window nil 0) (selected-window))))
 
+(defun drover-list--measure-context ()
+  "Return what the widths of texts depend on besides the texts themselves.
+That is a copy of the face remapping of the buffer, which
+`face-remap-add-relative' changes in place, the frame measuring them,
+the fonts of the faces lines are drawn in, so that a face given another
+font measures anew, and the functions measuring."
+  (let ((frame (window-frame (drover-list--window))))
+    (list (copy-tree face-remapping-alist) frame
+          (mapcar (lambda (face) (face-font face frame))
+                  '(default drover-list variable-pitch fixed-pitch header-line bold))
+          (drover-list--measurer))))
+
+(defun drover-list--measurer ()
+  "Return the functions measuring texts, which tests replace."
+  (cons (symbol-function 'drover-list--pixel-width) (symbol-function 'drover-list--extent)))
+
+(defvar-local drover-list--measuring 0
+  "Generation of the widths of `drover-list--widths'.
+It changes when texts measure otherwise than before, as with another
+font: what was measured before, such as rows kept from one drawing to
+the next, is measured anew.")
+
 (defun drover-list--measure-begin ()
   "Start a drawing: widths measured for the last one stay known.
 Laying text out costs more than the rest of a redraw, so widths are
 reused while the faces and fonts stay the same."
-  (let ((context (list (copy-tree face-remapping-alist) (window-frame (drover-list--window)))))
+  (let* ((context (drover-list--measure-context))
+         (same (equal (car drover-list--widths) context)))
+    (unless same
+      (cl-incf drover-list--measuring))
     (setq drover-list--widths
           (list context
                 (make-hash-table :test 'drover-list--text)
-                (and (equal (car drover-list--widths) context) (nth 1 drover-list--widths))))))
+                (and same (nth 1 drover-list--widths))))))
 
 (defun drover-list--measure (string)
   "Return the width in pixels of STRING, laid out as the list draws it."
@@ -463,13 +495,20 @@ remapping of the buffer, which draws its text in the face `drover-list'.
 On a text terminal, a pixel is a character cell."
   (if (zerop (length string))
       0
-    (unless drover-list--widths
-      (drover-list--measure-begin))
-    (pcase-let ((`(,_ ,table ,known) drover-list--widths))
-      (or (gethash string table)
-          (puthash string
-                   (or (and known (gethash string known)) (drover-list--measure string))
-                   table)))))
+    (drover-list--memo string (lambda () (drover-list--measure string)))))
+
+(defun drover-list--memo (key compute)
+  "Return what is known of KEY in `drover-list--widths', else what COMPUTE returns.
+COMPUTE is a function of no argument, whose value is then known for
+the current drawing.  KEY is compared with its text properties."
+  (unless (and drover-list--widths
+               (let ((measurer (nth 3 (car drover-list--widths))))
+                 (and (eq (car measurer) (symbol-function 'drover-list--pixel-width))
+                      (eq (cdr measurer) (symbol-function 'drover-list--extent)))))
+    (drover-list--measure-begin))
+  (pcase-let ((`(,_ ,table ,known) drover-list--widths))
+    (or (gethash key table)
+        (puthash key (or (and known (gethash key known)) (funcall compute)) table))))
 
 (defun drover-list--char-width ()
   "Return the width in pixels of an average character, the letter x."
@@ -483,15 +522,9 @@ of `drover-list--window' with the face remapping of the buffer.
 Extents are kept as widths are, in `drover-list--widths'."
   (if (zerop (length string))
       (cons 0 0)
-    (unless drover-list--widths
-      (drover-list--measure-begin))
-    (pcase-let ((`(,_ ,table ,known) drover-list--widths)
-                (key (cons 'extent string)))
-      (or (gethash key table)
-          (puthash key
-                   (or (and known (gethash key known))
-                       (drover-text-ink-extent string face-remapping-alist (drover-list--window)))
-                   table)))))
+    (drover-list--memo (cons 'extent string)
+                       (lambda ()
+                         (drover-text-ink-extent string face-remapping-alist (drover-list--window))))))
 
 (defun drover-list--line-width ()
   "Return the width in pixels that lines of the list may take.
@@ -522,11 +555,19 @@ as the effort after a model."
   "Return STRING cut to at most PIXELS wide, ending in an ellipsis if cut.
 The ellipsis takes the properties of the text before it.  A tail of
 STRING marked to keep (see `drover-list--kept') stays whole, its head
-being cut, room allowing.  Return \"\" when not even the ellipsis fits."
-  (let ((pixels (max 0 pixels))
-        (keep (drover-list--kept string)))
+being cut, room allowing.  Return \"\" when not even the ellipsis fits.
+What a string is cut to is known as its widths are, so that drawing
+the same text in the same room again measures nothing."
+  (let ((pixels (max 0 pixels)))
+    (if (<= (drover-list--pixel-width string) pixels)
+        string
+      (drover-list--memo (list 'cut pixels string)
+                         (lambda () (drover-list--cut string pixels))))))
+
+(defun drover-list--cut (string pixels)
+  "Return STRING, wider than PIXELS, cut to fit, as `drover-list--truncate' does."
+  (let ((keep (drover-list--kept string)))
     (or (and keep
-             (> (drover-list--pixel-width string) pixels)
              (let* ((tail (concat " " (substring string keep)))
                     (head (drover-truncate-to-pixels (string-trim-right (substring string 0 keep))
                                                      (- pixels (drover-list--pixel-width tail))
@@ -556,6 +597,10 @@ The list reads the clock through it, so that tests may stop the clock."
   (float-time))
 
 ;;;; Fields
+
+(defconst drover-list--text-fields
+  '(location branch agent model provider context created age summary)
+  "The fields of `drover-list-fields' a row holds a text for.")
 
 (defun drover-list--one-line (string)
   "Return STRING, or \"\" for nil, on one line."
@@ -850,7 +895,12 @@ character.  The prompt cache has no text: it is drawn apart."
   (title nil :documentation "The title, without the glyph.")
   (state nil :documentation "Where the session is in Emacs, see `drover-list--title-state'.")
   (texts nil :documentation "Alist (FIELD . TEXT) of the other fields.")
-  (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil."))
+  (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil.")
+  (inputs nil :documentation "What the row was made of, see `drover-list--row-inputs'.")
+  (measures nil :documentation "What the layout needs of it, see `drover-list--row-measures'.")
+  (heading nil :documentation "Its heading as drawn, see `drover-list--heading', or nil.")
+  (tree nil :documentation "The `drover-list--tree' showing it.")
+  (section nil :documentation "Its section, once drawn."))
 
 (defun drover-list--metrics (now &optional active places)
   "Return the measures lines of the list are drawn with at time NOW.
@@ -878,33 +928,96 @@ collapsed headings."
          (status-cell (drover-list--cell
                        (append (mapcar #'drover-status-glyph statuses)
                                (mapcan (lambda (entry) (copy-sequence (nth 1 entry))) frames)))))
-    (list :now now
-          :char char
-          :gap (* drover-list--gap char)
-          :space (drover-list--pixel-width " ")
-          :margin (* drover-list--margin char)
-          :width (- (drover-list--line-width)
-                    (drover-list--pixel-width (truncate-string-ellipsis)))
-          :status-cell status-cell
-          :subagent-cell (drover-list--cell (mapcar #'drover-list--subagent-glyph '(waiting working)))
-          :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
-          :active active
-          :places places)))
+    (let ((metrics (list :now now
+                         :char char
+                         :gap (* drover-list--gap char)
+                         :space (drover-list--pixel-width " ")
+                         :margin (* drover-list--margin char)
+                         :width (- (drover-list--line-width)
+                                   (drover-list--pixel-width (truncate-string-ellipsis)))
+                         :status-cell status-cell
+                         :subagent-cell (drover-list--cell (mapcar #'drover-list--subagent-glyph
+                                                                   '(waiting working)))
+                         :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
+                         :active active
+                         :places places)))
+      (append metrics (list :stamp (drover-list--metrics-stamp metrics))))))
+
+(defun drover-list--metrics-stamp (metrics)
+  "Return what rows depend on in METRICS and the settings, besides their session.
+A row made with the same stamp, from the same record and in the same
+place, is the same row; see `drover-list--inputs'."
+  (list (plist-get metrics :char) (plist-get metrics :margin)
+        (plist-get metrics :status-cell) (plist-get metrics :subagent-cell)
+        (mapcar (lambda (entry) (list (car entry) (nth 2 entry) (nth 3 entry)))
+                (plist-get metrics :frames))
+        drover-status-glyphs drover-subagent-glyphs drover-animations drover-archived-glyph
+        drover-list-animation-interval drover-list-context-bar-width
+        drover-list--measuring))
+
+(defvar drover-list--reuse nil
+  "Rows a drawing may reuse, by session key, or nil.
+`drover-list--row' returns the row of this table made of the same
+inputs rather than make it anew: most rows of a list stay the same from
+one drawing to the next.")
+
+(defun drover-list--inputs (session depth indent group metrics state)
+  "Return what the row of SESSION is made of, as a vector.
+That is SESSION itself, the record, its DEPTH, INDENT and GROUP, its
+active subagents and STATE, what changes with time, its ages, whether
+its prompt cache is live, the frame of its animated glyph and the age
+of its archiving, and the stamp of METRICS (see
+`drover-list--metrics-stamp')."
+  (let* ((now (plist-get metrics :now))
+         (status (drover-session-status session))
+         (archived (drover-session-archived session))
+         (frames (alist-get status (plist-get metrics :frames))))
+    (vector session depth indent group
+            (and (plist-get metrics :active)
+                 (gethash (drover-session-key session) (plist-get metrics :active)))
+            state
+            (drover-format-age (drover-list--age-time session) now)
+            (drover-format-age (drover-session-created session) now)
+            (and (drover-session-cache-fraction session now) t)
+            (and frames (drover-list--frame-index (length (car frames)) now))
+            (and (numberp archived) (drover-format-age archived now))
+            (plist-get metrics :stamp))))
+
+(defun drover-list--same-inputs-p (a b)
+  "Return non-nil when row inputs A and B are the same.
+Records and subagents are compared as objects: the index replaces the
+record of a session that changed."
+  (and (eq (aref a 0) (aref b 0))
+       (let ((subagents-a (aref a 4))
+             (subagents-b (aref b 4)))
+         (and (= (length subagents-a) (length subagents-b))
+              (cl-every #'eq subagents-a subagents-b)))
+       (cl-loop for index in '(1 2 3 5 6 7 8 9 10 11)
+                always (equal (aref a index) (aref b index)))))
 
 (defun drover-list--row (session depth indent group metrics)
   "Return the row of SESSION at DEPTH in its tree, its glyph INDENT pixels in.
 GROUP is the group showing it, as (GROUPING . VALUE), or nil; METRICS
-are the measures of `drover-list--metrics'."
-  (let ((icons (drover-list--icons session metrics))
-        (state (drover-list--title-state session (plist-get metrics :places))))
-    (drover-list--row-create
-     :session session :depth depth :indent indent :icons icons
-     :title-start (+ indent (drover-list--pixel-width icons))
-     :title (drover-list--title-text session depth state)
-     :state state
-     :texts (mapcar (lambda (field) (cons field (drover-list--text field session group metrics)))
-                    '(location branch agent model provider context created age summary))
-     :cache (drover-session-cache-fraction session (plist-get metrics :now)))))
+are the measures of `drover-list--metrics'.  A row of
+`drover-list--reuse' made of the same inputs is returned as it is."
+  (let* ((state (drover-list--title-state session (plist-get metrics :places)))
+         (inputs (and (plist-get metrics :stamp)
+                      (drover-list--inputs session depth indent group metrics state)))
+         (old (and inputs drover-list--reuse
+                   (gethash (drover-session-key session) drover-list--reuse))))
+    (if (and old (drover-list--row-inputs old)
+             (drover-list--same-inputs-p (drover-list--row-inputs old) inputs))
+        old
+      (let ((icons (drover-list--icons session metrics)))
+        (drover-list--row-create
+         :session session :depth depth :indent indent :icons icons
+         :title-start (+ indent (drover-list--pixel-width icons))
+         :title (drover-list--title-text session depth state)
+         :state state
+         :texts (mapcar (lambda (field) (cons field (drover-list--text field session group metrics)))
+                        drover-list--text-fields)
+         :cache (drover-session-cache-fraction session (plist-get metrics :now))
+         :inputs inputs)))))
 
 (defun drover-list--tree-rows (nodes group metrics &optional depth indent)
   "Return the rows of the trees NODES at DEPTH, subagents after their parent.
@@ -924,14 +1037,106 @@ or nil; METRICS are the measures of `drover-list--metrics'."
                                                 indent)))))
             nodes)))
 
-(defun drover-list--has-p (field rows)
-  "Return non-nil when one of ROWS has something to show for FIELD."
+;;;; Summaries of rows
+
+;; The layout depends on rows through a few maxima: the widest text of
+;; each field, the furthest title.  With thousands of rows, a change of
+;; one row must not measure them all again: a summary counts the rows
+;; of each width, per field, so that a row changed takes its widths out
+;; and puts its new ones in, and the maxima follow.
+
+(defconst drover-list--measure-count (+ 3 (* 2 (length drover-list--text-fields)))
+  "How many measures a row has, see `drover-list--measures'.")
+
+(defun drover-list--text-index (field)
+  "Return the index of the width of the text of FIELD among a row's measures."
+  (+ 3 (cl-position field drover-list--text-fields)))
+
+(defun drover-list--kept-index (field)
+  "Return the index of the room FIELD needs to keep its tail whole, in measures."
+  (+ (drover-list--text-index field) (length drover-list--text-fields)))
+
+(defun drover-list--measures (row)
+  "Return what the layout needs of ROW, as a vector, measured once.
+Its elements are: where its title begins, where it ends, 1 when it
+shows a prompt cache, then for each of `drover-list--text-fields' the
+width of its text, nil when empty, then for each the width an ellipsis
+and the tail to keep whole take (see `drover-list--kept'), nil without
+one.  Widths are in pixels."
+  (or (drover-list--row-measures row)
+      (setf (drover-list--row-measures row)
+            (let ((measures (make-vector drover-list--measure-count nil))
+                  (start (drover-list--row-title-start row))
+                  (count (length drover-list--text-fields)))
+              (aset measures 0 start)
+              (aset measures 1 (+ start (drover-list--pixel-width (drover-list--row-title row))))
+              (aset measures 2 (and (drover-list--row-cache row) 1))
+              (cl-loop for field in drover-list--text-fields
+                       for index from 3
+                       do (let ((text (alist-get field (drover-list--row-texts row))))
+                            (unless (or (null text) (string-empty-p text))
+                              (aset measures index (drover-list--pixel-width text))
+                              (when-let* ((keep (drover-list--kept text)))
+                                (aset measures (+ index count)
+                                      (drover-list--pixel-width
+                                       (concat (truncate-string-ellipsis) " " (substring text keep))))))))
+              measures))))
+
+(defun drover-list--tally-create ()
+  "Return an empty tally: how many times each number counts, and the largest."
+  (cons (make-hash-table :test #'eql) 0))
+
+(defun drover-list--tally-add (tally value delta)
+  "Count VALUE DELTA more times in TALLY, a negative DELTA counting it less."
+  (let* ((table (car tally))
+         (count (+ (gethash value table 0) delta)))
+    (if (> count 0)
+        (puthash value count table)
+      (remhash value table))
+    (cond ((and (> delta 0) (cdr tally) (> value (cdr tally)))
+           (setcdr tally value))
+          ((and (< delta 0) (<= count 0) (eql value (cdr tally)))
+           ;; Found again when next asked.
+           (setcdr tally nil)))))
+
+(defun drover-list--tally-max (tally)
+  "Return the largest number TALLY counts, 0 when it counts none."
+  (or (cdr tally)
+      (setcdr tally (let ((largest 0))
+                      (maphash (lambda (value _) (setq largest (max largest value))) (car tally))
+                      largest))))
+
+(defun drover-list--tally-any-p (tally)
+  "Return non-nil when TALLY counts a number."
+  (> (hash-table-count (car tally)) 0))
+
+(defun drover-list--summary-create ()
+  "Return the summary of no row: a vector of tallies, one per measure."
+  (let ((summary (make-vector drover-list--measure-count nil)))
+    (dotimes (index drover-list--measure-count)
+      (aset summary index (drover-list--tally-create)))
+    summary))
+
+(defun drover-list--summary-add (summary row delta)
+  "Count the measures of ROW DELTA times in SUMMARY: 1 adds it, -1 takes it out."
+  (let ((measures (drover-list--measures row)))
+    (dotimes (index drover-list--measure-count)
+      (when-let* ((value (aref measures index)))
+        (drover-list--tally-add (aref summary index) value delta)))))
+
+(defun drover-list--summarize (rows)
+  "Return the summary of ROWS, for the layout."
+  (let ((summary (drover-list--summary-create)))
+    (dolist (row rows)
+      (drover-list--summary-add summary row 1))
+    summary))
+
+(defun drover-list--has-p (field summary)
+  "Return non-nil when a row of SUMMARY has something to show for FIELD."
   (pcase field
     ('title t)
-    ('cache (seq-some #'drover-list--row-cache rows))
-    (_ (seq-some (lambda (row)
-                   (not (string-empty-p (or (alist-get field (drover-list--row-texts row)) ""))))
-                 rows))))
+    ('cache (drover-list--tally-any-p (aref summary 2)))
+    (_ (drover-list--tally-any-p (aref summary (drover-list--text-index field))))))
 
 ;;;; Layout
 
@@ -958,76 +1163,66 @@ mislead; the provider is an icon.  Their columns may give up only the
 room of their names."
   (memq field '(cache context created age provider)))
 
-(defun drover-list--content-width (field rows metrics)
-  "Return the width in pixels FIELD takes to show ROWS in full, per METRICS.
-That of the title counts from the margin, indentation and glyph
-included."
+(defun drover-list--content-width (field summary metrics)
+  "Return the width in pixels FIELD takes to show the rows of SUMMARY in full.
+METRICS are the measures of lines.  That of the title counts from the
+margin, indentation and glyph included."
   (pcase field
-    ('title (- (apply #'max 0 (mapcar (lambda (row)
-                                        (+ (drover-list--row-title-start row)
-                                           (drover-list--pixel-width (drover-list--row-title row))))
-                                      rows))
-               (plist-get metrics :margin)))
+    ('title (- (drover-list--tally-max (aref summary 1)) (plist-get metrics :margin)))
     ('cache (drover-list--cache-cell-width metrics))
-    (_ (apply #'max 0 (mapcar (lambda (row)
-                                (drover-list--pixel-width (alist-get field (drover-list--row-texts row))))
-                              rows)))))
+    (_ (drover-list--tally-max (aref summary (drover-list--text-index field))))))
 
-(defun drover-list--narrowest (entry rows metrics)
-  "Return the fewest pixels the field of ENTRY needs to show ROWS, per METRICS.
-ENTRY is an entry of `drover-list-fields'.  It is the room of its :min
-characters, and for a field never cut (see `drover-list--whole-p'),
-the room of what it shows at least; for a field keeping a tail whole,
-such as the model its effort, the room of an ellipsis and that tail.
-That of the title does not count the glyphs before it."
+(defun drover-list--narrowest (entry summary metrics)
+  "Return the fewest pixels the field of ENTRY needs for the rows of SUMMARY.
+ENTRY is an entry of `drover-list-fields', METRICS the measures of
+lines.  It is the room of its :min characters, and for a field never
+cut (see `drover-list--whole-p'), the room of what it shows at least;
+for a field keeping a tail whole, such as the model its effort, the
+room of an ellipsis and that tail.  That of the title does not count
+the glyphs before it."
   (let* ((field (car entry))
          (least (* (plist-get metrics :char) (or (plist-get (cdr entry) :min) 0))))
     (cond ((drover-list--whole-p field)
-           (max least (drover-list--content-width field rows metrics)))
+           (max least (drover-list--content-width field summary metrics)))
           ((eq field 'title) least)
-          (t (apply #'max least
-                    (mapcar (lambda (row)
-                              (let ((text (alist-get field (drover-list--row-texts row))))
-                                (if-let* ((keep (drover-list--kept text)))
-                                    (drover-list--pixel-width
-                                     (concat (truncate-string-ellipsis) " " (substring text keep)))
-                                  0)))
-                            rows))))))
+          (t (max least (drover-list--tally-max (aref summary (drover-list--kept-index field))))))))
 
-(defun drover-list--natural (field rows metrics)
-  "Return the width in pixels the column of FIELD wants to show ROWS, per METRICS.
+(defun drover-list--natural (field summary metrics)
+  "Return the width in pixels the column of FIELD wants for the rows of SUMMARY.
 It is as wide as what it shows, see `drover-list--content-width', and
-at least as wide as its name in the header line."
-  (max (drover-list--label-width field) (drover-list--content-width field rows metrics)))
+at least as wide as its name in the header line; METRICS are the
+measures of lines."
+  (max (drover-list--label-width field) (drover-list--content-width field summary metrics)))
 
-(defun drover-list--title-prefix (rows metrics)
-  "Return the room, in pixels, before titles in ROWS, from the margin, per METRICS."
-  (- (apply #'max 0 (mapcar #'drover-list--row-title-start rows))
-     (plist-get metrics :margin)))
+(defun drover-list--title-prefix (summary metrics)
+  "Return the room, in pixels, before the titles of SUMMARY, from the margin.
+METRICS are the measures of lines."
+  (- (drover-list--tally-max (aref summary 0)) (plist-get metrics :margin)))
 
-(defun drover-list--choose (rows metrics)
-  "Return the layout of ROWS in lines of the width of METRICS.
+(defun drover-list--choose (summary metrics)
+  "Return the layout of the rows of SUMMARY in lines of the width of METRICS.
 The value is (LAYOUT . FIELDS): LAYOUT is `columns' or `narrow', and
 FIELDS the entries of `drover-list-fields' shown, in their order.  The
-fields with something to show for ROWS are taken by priority, as long as
-the fewest pixels each needs fit (see `drover-list--narrowest'), and the
-title always; the fields of `drover-list-hidden-fields' never.  Columns
-are used when they include every field the narrow layout places; else
-the narrow layout shows those fields, which need no room of their own
-but on the title's line, where they give way to the title."
+fields with something to show for the rows are taken by priority, as
+long as the fewest pixels each needs fit (see `drover-list--narrowest'),
+and the title always; the fields of `drover-list-hidden-fields' never.
+Columns are used when they include every field the narrow layout
+places; else the narrow layout shows those fields, which need no room
+of their own but on the title's line, where they give way to the
+title."
   (let* ((gap (plist-get metrics :gap))
          (present (seq-filter (lambda (entry)
-                                (and (drover-list--has-p (car entry) rows)
+                                (and (drover-list--has-p (car entry) summary)
                                      (or (eq (car entry) 'title)
                                          (not (memq (car entry) drover-list-hidden-fields)))))
                               drover-list-fields))
-         (used (+ (plist-get metrics :margin) (drover-list--title-prefix rows metrics)))
+         (used (+ (plist-get metrics :margin) (drover-list--title-prefix summary metrics)))
          (chosen nil))
     (catch 'full
       (dolist (entry (seq-sort-by (lambda (entry) (or (plist-get (cdr entry) :priority) 99)) #'<
                                   present))
         (let* ((title (eq (car entry) 'title))
-               (need (+ (drover-list--narrowest entry rows metrics) (if title 0 gap))))
+               (need (+ (drover-list--narrowest entry summary metrics) (if title 0 gap))))
           (if (or title (<= (+ used need) (plist-get metrics :width)))
               (setq used (+ used need)
                     chosen (cons entry chosen))
@@ -1061,8 +1256,8 @@ the line had room.  Return the deficit left."
             (aset widths (car share) (- (aref widths (car share)) take))))
         (- deficit cut)))))
 
-(defun drover-list--column-widths (fields rows metrics)
-  "Return the widths in pixels of the columns of FIELDS showing ROWS.
+(defun drover-list--column-widths (fields summary metrics)
+  "Return the widths in pixels of the columns of FIELDS for the rows of SUMMARY.
 FIELDS are entries of `drover-list-fields'; METRICS give the width of
 lines.  A column is as wide as what it shows and its name, up to its
 :max.  When the line is too narrow for that, room is given up, each
@@ -1074,7 +1269,7 @@ other fields, in proportion to what they would lose.  So the ages and
 the effort show whole while the summary or the title has room to give,
 the project and model whole while the title has, and no column is
 narrowed while the line has room."
-  (let* ((prefix (drover-list--title-prefix rows metrics))
+  (let* ((prefix (drover-list--title-prefix summary metrics))
          (room (- (plist-get metrics :width) (plist-get metrics :margin)
                   (* (plist-get metrics :gap) (max 0 (1- (length fields))))))
          (widths (make-vector (length fields) 0))
@@ -1085,10 +1280,10 @@ narrowed while the line has room."
        (let* ((field (car entry))
               (extra (if (eq field 'title) prefix 0))
               (max (plist-get (cdr entry) :max))
-              (natural (drover-list--natural field rows metrics))
+              (natural (drover-list--natural field summary metrics))
               (want (if max (min natural (+ extra (* (plist-get metrics :char) max))) natural)))
          (aset widths index want)
-         (aset floors index (min want (+ extra (drover-list--narrowest entry rows metrics))))
+         (aset floors index (min want (+ extra (drover-list--narrowest entry summary metrics))))
          (push index (nth (cond ((drover-list--whole-p field) 1)
                                 ((null max) 0)
                                 ((eq field 'title) 2)
@@ -1100,21 +1295,33 @@ narrowed while the line has room."
         (setq deficit (drover-list--give widths floors (nreverse indices) deficit))))
     (append widths nil)))
 
-(defun drover-list--layout (rows metrics)
-  "Return METRICS with the layout of ROWS added.
+(defun drover-list--layout-of (summary metrics)
+  "Return METRICS with the layout of the rows of SUMMARY added.
 Add :layout, `columns' or `narrow', and :fields, the fields shown; in
 columns, :columns, a list of (FIELD X WIDTH ALIGN) giving where each
 field begins and how wide it is, in pixels."
-  (pcase-let* ((`(,layout . ,fields) (drover-list--choose rows metrics))
+  (pcase-let* ((`(,layout . ,fields) (drover-list--choose summary metrics))
                (columns nil))
     (when (eq layout 'columns)
       (let ((x (plist-get metrics :margin)))
         (cl-mapc (lambda (entry width)
                    (push (list (car entry) x width (plist-get (cdr entry) :align)) columns)
                    (setq x (+ x width (plist-get metrics :gap))))
-                 fields (drover-list--column-widths fields rows metrics))))
+                 fields (drover-list--column-widths fields summary metrics))))
     (append (list :layout layout :fields (mapcar #'car fields) :columns (nreverse columns))
             metrics)))
+
+(defun drover-list--layout (rows metrics)
+  "Return METRICS with the layout of ROWS added, see `drover-list--layout-of'."
+  (drover-list--layout-of (drover-list--summarize rows) metrics))
+
+(defun drover-list--layout-key (layout)
+  "Return what drawing a heading depends on in LAYOUT, but the time.
+Two layouts of the same key draw rows alike: a heading drawn for one is
+the heading for the other."
+  (list (plist-get layout :layout) (plist-get layout :fields) (plist-get layout :columns)
+        (plist-get layout :width) (plist-get layout :margin) (plist-get layout :char)
+        (plist-get layout :gap) (plist-get layout :space) (plist-get layout :stamp)))
 
 ;;;; Lines
 
@@ -1451,12 +1658,14 @@ POSITION is a marker at the character displaying the frame, the next
 one its pad: the time left of a prompt cache before it may change
 length.  KIND is their animation, of `drover-animations'.")
 
-(defun drover-list--collect-animated ()
-  "Return the animated glyphs of the current list.
-The value is a list of (POSITION . KIND), see `drover-list--animated'."
-  (let ((position (point-min))
+(defun drover-list--collect-animated (&optional start end)
+  "Return the animated glyphs of the current list, between START and END.
+They default to the whole buffer.  The value is a list of (POSITION .
+KIND), see `drover-list--animated'."
+  (let ((position (or start (point-min)))
+        (end (or end (point-max)))
         (found nil))
-    (while (setq position (text-property-not-all position (point-max) 'drover-list-frame nil))
+    (while (setq position (text-property-not-all position end 'drover-list-frame nil))
       (push (cons (copy-marker position) (get-text-property position 'drover-list-frame)) found)
       (setq position (1+ position)))
     (nreverse found)))
@@ -1481,6 +1690,57 @@ they are until they show."
                   (put-text-property position (1+ position) 'display frame)
                   (put-text-property (1+ position) (+ position 2) 'display
                                      `(space :width (,(- width (nth index widths))))))))))))))
+
+;;;; The model of the list
+
+;; A drawing keeps what it drew: the groups, their trees, the rows of
+;; their sessions, the summary of the rows the layout follows, and the
+;; counts of the header and of each group.  A change of a few sessions
+;; then redraws their lines in place, when it moves no tree (see
+;; `drover-list--follow'), and a redraw reuses the rows of the sessions
+;; that did not change (`drover-list--reuse').
+
+(cl-defstruct (drover-list--tree (:constructor drover-list--tree-create)
+                                 (:copier nil))
+  "A tree of sessions the list shows, under the session at its top."
+  (root nil :documentation "The key of the session at the top.")
+  (node nil :documentation "The tree as drawn: its visible sessions, sorted.")
+  (full nil :documentation "The whole tree, as `drover-tree' made it.")
+  (cut nil :documentation "The tree as `drover-filter' cuts it, or nil without a filter.")
+  (serial nil :documentation "The place of its top session in the sessions listed.")
+  (group nil :documentation "The `drover-list--group' showing it.")
+  (position nil :documentation "Its place among the trees of its group.")
+  (shown nil :documentation "The rows of its visible sessions, in the order drawn.")
+  (hidden 0 :documentation "How many of its subagents the list hides."))
+
+(cl-defstruct (drover-list--group (:constructor drover-list--group-create)
+                                  (:copier nil))
+  "A group of trees the list shows."
+  (value nil :documentation "(GROUPING . VALUE), or nil when sessions are not grouped.")
+  (container nil :documentation "Its section; the root section without groups.")
+  (trees nil :documentation "Its trees, in the order drawn, a vector.")
+  (head nil :documentation "Its most urgent tree, which places it among groups.")
+  (counts nil :documentation "How many sessions of each status it shows, see `drover-list--count-row'.")
+  (size 0 :documentation "How many sessions it shows.")
+  (heading-text nil :documentation "Its heading as drawn."))
+
+(cl-defstruct (drover-list--model (:constructor drover-list--model-create)
+                                  (:copier nil))
+  "What the list drew, to draw again only what changes."
+  (settings nil :documentation "The settings it was drawn with, see `drover-list--settings'.")
+  (groups nil :documentation "The `drover-list--group's, in their order.")
+  (trees nil :documentation "Hash table of the trees drawn, by the key of their top session.")
+  (rows nil :documentation "Hash table of the rows drawn, by session key.")
+  (summary nil :documentation "The summary of the rows, see `drover-list--summarize'.")
+  (layout nil :documentation "The layout of the rows, see `drover-list--layout-of'.")
+  (counts nil :documentation "How many sessions of each status it shows.")
+  (size 0 :documentation "How many sessions it shows.")
+  (hidden 0 :documentation "How many subagents of its trees it hides.")
+  (header nil :documentation "The header section.")
+  (header-text nil :documentation "The text of the header, as drawn."))
+
+(defvar-local drover-list--model nil
+  "The `drover-list--model' of the last drawing, or nil.")
 
 ;;;; Drawing
 
@@ -1608,24 +1868,31 @@ again once it arrives.  Nil when the backend of SESSION tells no recap."
                          (- (+ (plist-get entry :fetched) drover-list--recap-interval)
                             (drover-list--now)))))
           (if (and wait (> wait 0))
-              (drover-list--recap-later wait)
+              (drover-list--recap-later wait key)
             (drover-list--fetch-recap session)
             (setq entry (gethash key drover-list--recaps)))))
       (list :recap (plist-get entry :recap)
             :known (and (plist-member entry :recap) t)
             :loading (and (plist-get entry :pending) t)))))
 
-(defun drover-list--recap-later (delay)
-  "Draw the current list again in DELAY seconds, unless a redraw is due already."
+(defvar-local drover-list--recap-deferred nil
+  "Keys of the sessions whose recap is to be fetched once the timer runs.")
+
+(defun drover-list--recap-later (delay key)
+  "Draw the details of session KEY again in DELAY seconds, fetching its recap.
+One timer draws those of every session put off meanwhile."
+  (cl-pushnew key drover-list--recap-deferred :test #'equal)
   (unless (timerp drover-list--recap-timer)
     (let ((buffer (current-buffer)))
       (setq drover-list--recap-timer
             (run-at-time delay nil
                          (lambda ()
                            (when (buffer-live-p buffer)
-                             (with-current-buffer buffer
-                               (setq drover-list--recap-timer nil))
-                             (drover-list--update buffer))))))))
+                             (let ((keys (buffer-local-value 'drover-list--recap-deferred buffer)))
+                               (with-current-buffer buffer
+                                 (setq drover-list--recap-timer nil
+                                       drover-list--recap-deferred nil))
+                               (drover-list--update-sessions buffer nil keys)))))))))
 
 (defun drover-list--fetch-recap (session)
   "Ask the backend of SESSION for its recap, for the current list.
@@ -1660,7 +1927,7 @@ dropped."
   (when-let* ((section (drover-list--find-session key))
               ((not (oref section hidden)))
               ((drover-list--line-shown-p (oref section start))))
-    (drover-list--update (current-buffer))))
+    (drover-list--update-sessions (current-buffer) nil (list key))))
 
 (defun drover-list--forget-recaps (sessions)
   "Forget the recaps of sessions other than SESSIONS."
@@ -1823,43 +2090,64 @@ with `drover-list--line-start'."
           (dolist (text texts)
             (line (drover-list--align text-x) text)))))))
 
-(defun drover-list--insert-session (row layout)
-  "Insert the section of the session of ROW, in LAYOUT.
-Its heading is its line; its body, drawn once expanded, its details,
-as `drover-list--insert-details' draws them.  A prompt cache it shows
-is noted in `drover-list--caches'."
+(defun drover-list--row-key (row)
+  "Return the key of the session of ROW."
+  (drover-session-key (drover-list--row-session row)))
+
+(defun drover-list--row-subagents (row layout)
+  "Return the active subagents of the session of ROW, from its inputs or LAYOUT."
+  (if-let* ((inputs (drover-list--row-inputs row)))
+      (aref inputs 4)
+    (and (plist-get layout :active)
+         (gethash (drover-list--row-key row) (plist-get layout :active)))))
+
+(defun drover-list--heading (row layout)
+  "Return the heading of ROW in LAYOUT, as (TEXT KIND SPEC KEY).
+TEXT is its line or lines, beginning with `drover-list--line-start',
+the tooltip of the session on the characters without one of their own;
+KIND is `columns' when it shows a prompt cache field, `narrow' when a
+prompt cache colours its first line, else nil; SPEC tells where the
+segments of that line lie, see `drover-list--assemble'.  KEY is the
+layout key the heading was drawn for (see `drover-list--layout-key'):
+the heading is kept in ROW, and drawn again only for another layout."
+  (let ((key (or (plist-get layout :key) (drover-list--layout-key layout)))
+        (heading (drover-list--row-heading row)))
+    (if (and heading (eq (nth 3 heading) key))
+        heading
+      (setf (drover-list--row-heading row)
+            (let* ((session (drover-list--row-session row))
+                   (drawn (if (eq (plist-get layout :layout) 'columns)
+                              (let ((line (drover-list--column-line row layout)))
+                                (list (car line) (and (cdr line) 'columns) nil))
+                            (let ((heading (drover-list--narrow-line row layout)))
+                              (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
+                   (help (drover-list--help session (drover-list--row-subagents row layout))))
+              (list (concat drover-list--line-start
+                            (if (eq (nth 1 drawn) 'narrow)
+                                ;; The cache colours the line: its tooltip tells
+                                ;; of it too, as it stands when shown.
+                                (drover-list--with-help (propertize (car drawn) 'drover-list-help help)
+                                                        #'drover-list--cache-help-echo)
+                              (drover-list--with-help (car drawn) help)))
+                    (nth 1 drawn) (nth 2 drawn) key))))))
+
+(defun drover-list--note-row (row heading start layout)
+  "Note ROW, drawn with HEADING from START, in the tables of the list.
+Those are the sessions drawn and where they are, and the prompt cache
+the heading shows, if any, in `drover-list--caches', LAYOUT giving its
+measures.  START is where the heading begins."
   (let* ((session (drover-list--row-session row))
-         (drawn (if (eq (plist-get layout :layout) 'columns)
-                    (let ((line (drover-list--column-line row layout)))
-                      (list (car line) (and (cdr line) 'columns) nil))
-                  (let ((heading (drover-list--narrow-line row layout)))
-                    (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
-         (help (drover-list--help session (and (plist-get layout :active)
-                                               (gethash (drover-session-key session)
-                                                        (plist-get layout :active)))))
-         start)
-    (magit-insert-section (drover-list-session-section (drover-session-key session) t)
-      ;; Where the line drawn begins: caches find their parts from there.
-      (setq start (+ (point) (length drover-list--line-start)))
-      (magit-insert-heading
-        drover-list--line-start
-        (if (eq (nth 1 drawn) 'narrow)
-            ;; The cache colours the line: its tooltip tells of it too,
-            ;; as it stands when shown.
-            (drover-list--with-help (propertize (car drawn) 'drover-list-help help)
-                                    #'drover-list--cache-help-echo)
-          (drover-list--with-help (car drawn) help)))
-      (magit-insert-section-body
-        (drover-list--insert-details row layout)))
-    (puthash (drover-session-key session) session drover-list--drawn)
-    (puthash (drover-session-key session) (drover-list--row-state row) drover-list--title-states)
+         (key (drover-session-key session))
+         (start (+ start (length drover-list--line-start))))
+    (puthash key session drover-list--drawn)
+    (puthash key (drover-list--row-state row) drover-list--title-states)
     (when (drover-list--row-state row)
       (puthash (drover-session-buffer session) t drover-list--session-buffers))
-    (when (nth 1 drawn)
-      (push (list :session session :start (copy-marker start) :kind (nth 1 drawn) :spec (nth 2 drawn)
+    (when (nth 1 heading)
+      (push (list :session session :start (copy-marker start) :kind (nth 1 heading) :spec (nth 2 heading)
                   :width (plist-get layout :width)
                   :bar (* drover-list-cache-bar-width (plist-get layout :char))
-                  :overlay (and (eq (nth 1 drawn) 'narrow)
+                  :overlay (and (eq (nth 1 heading) 'narrow)
                                 (let ((overlay (make-overlay start start)))
                                   (overlay-put overlay 'face (drover-list--cache-line-face))
                                   ;; Under the highlights of the current section and
@@ -1868,19 +2156,59 @@ is noted in `drover-list--caches'."
                                   overlay)))
             drover-list--caches))))
 
-(defun drover-list--count (rows)
-  "Return the number of ROWS, dimmed and in parentheses."
-  (drover-face (format " (%d)" (length rows)) 'drover-dim))
+(defun drover-list--insert-details-of (key)
+  "Insert the details of the session KEY, as the list knows it now.
+The body of a collapsed section is drawn once expanded, maybe long
+after the drawing: from the row the list holds then."
+  (when-let* ((model drover-list--model)
+              (row (gethash key (drover-list--model-rows model))))
+    (drover-list--insert-details row (drover-list--model-layout model))))
 
-(defun drover-list--status-counts (sessions)
-  "Return how many of SESSIONS need the user, per status, as one string.
-Archived sessions never count.  Return nil when none does."
+(defun drover-list--insert-heading (text)
+  "Insert TEXT, a heading in faces, as `magit-insert-heading' inserts it.
+Magit concatenates its arguments and looks for faces in them, which
+costs thousands of headings a copy and two scans for nothing."
+  (insert text)
+  (unless (bolp)
+    (insert ?\n))
+  (when (fboundp 'magit-maybe-make-margin-overlay)
+    (magit-maybe-make-margin-overlay))
+  (oset magit-insert-section--current content
+        (if magit-section-inhibit-markers (point) (point-marker))))
+
+(defun drover-list--insert-session (row layout)
+  "Insert the section of the session of ROW, in LAYOUT.
+Its heading is its line; its body, drawn once expanded, its details,
+as `drover-list--insert-details' draws them.  A prompt cache it shows
+is noted in `drover-list--caches'."
+  (let* ((heading (drover-list--heading row layout))
+         (key (drover-list--row-key row))
+         (start (point)))
+    (magit-insert-section section (drover-list-session-section key t)
+      (setf (drover-list--row-section row) section)
+      (drover-list--insert-heading (car heading))
+      (magit-insert-section-body
+        (drover-list--insert-details-of key)))
+    (drover-list--note-row row heading start layout)))
+
+(defun drover-list--count (size)
+  "Return SIZE, the number of rows of a group, dimmed and in parentheses."
+  (drover-face (format " (%d)" size) 'drover-dim))
+
+(defun drover-list--count-row (counts row delta)
+  "Count the session of ROW DELTA times in COUNTS, a hash table by status.
+Archived sessions count apart, as `archived'."
+  (let* ((session (drover-list--row-session row))
+         (key (if (drover-session-archived session) 'archived (drover-session-status session))))
+    (puthash key (+ (gethash key counts 0) delta) counts)))
+
+(defun drover-list--status-counts (counts)
+  "Return how many sessions need the user, per status, as one string, or nil.
+COUNTS is a hash table of the sessions of each status, see
+`drover-list--count-row'; archived sessions never count."
   (when-let* ((parts (delq nil
                            (mapcar (lambda (status)
-                                     (let ((count (seq-count (lambda (session)
-                                                               (and (eq (drover-session-status session) status)
-                                                                    (not (drover-session-archived session))))
-                                                             sessions)))
+                                     (let ((count (gethash status counts 0)))
                                        (when (> count 0)
                                          (concat (drover-list--icon (drover-status-glyph status))
                                                  (drover-face (format "%d" count)
@@ -1888,47 +2216,60 @@ Archived sessions never count.  Return nil when none does."
                                    drover-attention-statuses))))
     (string-join parts " ")))
 
-(defun drover-list--group-icon (group rows)
-  "Return the icon of GROUP, (GROUPING . VALUE), listing ROWS, and a space, or nil.
-A group of a provider has the icon its sessions show for it, when they
-show one rather than its name."
+(defun drover-list--group-icon (group trees)
+  "Return the icon of GROUP, (GROUPING . VALUE), of TREES, and a space, or nil.
+TREES is a sequence of `drover-list--tree'.  A group of a provider has
+the icon its sessions show for it, when they show one rather than its
+name: the first session showing one, so that a long group is not read
+whole."
   (pcase group
     (`(provider . ,(and name (pred stringp)))
-     (when-let* ((icon (seq-some (lambda (row)
-                                   (let ((session (drover-list--row-session row)))
-                                     (and (equal (drover-session-provider-name session) name)
-                                          (drover-session-provider session))))
-                                 rows))
+     (when-let* ((icon (catch 'icon
+                         (seq-doseq (tree trees)
+                           (dolist (row (drover-list--tree-shown tree))
+                             (let ((session (drover-list--row-session row)))
+                               (when-let* (((equal (drover-session-provider-name session) name))
+                                           (icon (drover-session-provider session)))
+                                 (throw 'icon icon)))))
+                         nil))
                  ((not (equal icon name))))
        (concat (drover-list--icon (drover-face (drover-list--one-line icon) 'drover-heading)) " ")))))
 
-(defun drover-list--group-heading (group rows)
-  "Return the heading of GROUP, (GROUPING . VALUE), listing ROWS."
-  (pcase-let ((`(,grouping . ,value) group))
-    (concat (drover-list--group-icon group rows)
-            (drover-face (drover-group-label grouping value)
-                         (cond ((eq grouping 'status) (list (drover-status-face value) 'drover-heading))
-                               ((and (null value) (not (eq grouping 'updated))) '(italic drover-heading))
-                               (t 'drover-heading)))
-            (drover-list--count rows)
-            (unless (eq grouping 'status)
-              (when-let* ((counts (drover-list--status-counts
-                                   (mapcar #'drover-list--row-session rows))))
-                (concat "  " counts))))))
+(defun drover-list--group-heading (group layout)
+  "Return the heading of GROUP, a `drover-list--group', fit to LAYOUT."
+  (pcase-let ((`(,grouping . ,value) (drover-list--group-value group)))
+    (drover-list--truncate
+     (concat (and (eq grouping 'provider)
+                  (drover-list--group-icon (drover-list--group-value group)
+                                           (drover-list--group-trees group)))
+             (drover-face (drover-group-label grouping value)
+                          (cond ((eq grouping 'status) (list (drover-status-face value) 'drover-heading))
+                                ((and (null value) (not (eq grouping 'updated))) '(italic drover-heading))
+                                (t 'drover-heading)))
+             (drover-list--count (drover-list--group-size group))
+             (unless (eq grouping 'status)
+               (when-let* ((counts (drover-list--status-counts (drover-list--group-counts group))))
+                 (concat "  " counts))))
+     (plist-get layout :width))))
 
-(defun drover-list--insert-group (group rows layout)
-  "Insert the section of GROUP holding ROWS, in LAYOUT.
-GROUP is (GROUPING . VALUE); when it is nil, insert the rows alone, in
-the current section."
-  (if (null group)
-      (dolist (row rows)
-        (drover-list--insert-session row layout))
-    (magit-insert-section (drover-list-group-section group (and (member group drover-list-collapsed-groups) t))
-      (magit-insert-heading (drover-list--truncate (drover-list--group-heading group rows)
-                                                   (plist-get layout :width)))
-      (dolist (row rows)
-        (drover-list--insert-session row layout))
-      (insert "\n"))))
+(defun drover-list--insert-group (group layout)
+  "Insert the section of GROUP, a `drover-list--group', in LAYOUT.
+Without a value, its rows go alone, in the current section."
+  (let ((value (drover-list--group-value group)))
+    (cl-flet ((rows ()
+                (seq-doseq (tree (drover-list--group-trees group))
+                  (dolist (row (drover-list--tree-shown tree))
+                    (drover-list--insert-session row layout)))))
+      (if (null value)
+          (progn (setf (drover-list--group-container group) magit-insert-section--parent)
+                 (rows))
+        (magit-insert-section section (drover-list-group-section
+                                       value (and (member value drover-list-collapsed-groups) t))
+          (setf (drover-list--group-container group) section
+                (drover-list--group-heading-text group) (drover-list--group-heading group layout))
+          (magit-insert-heading (drover-list--group-heading-text group))
+          (rows)
+          (insert "\n"))))))
 
 (defun drover-list--flow (parts width)
   "Return PARTS, strings, laid out in lines WIDTH pixels wide, as one string.
@@ -1948,43 +2289,39 @@ line starts the next; a part wider than a line is cut."
     (mapconcat (lambda (line) (concat (drover-list--truncate line width) "\n"))
                (nreverse lines) "")))
 
-(defun drover-list--insert-header (sessions hidden layout)
-  "Insert the summary of SESSIONS: how many need the user, how many are listed.
-How many of them are archived follows the count of sessions, then
-HIDDEN, how many subagents of the trees listed are hidden, when there
-are some; archived sessions never count as needing the user.  Settings
-and keys are the View menu's to show, not the list's.  Lines fit the
-width of LAYOUT."
-  (magit-insert-section (drover-list-header)
-    (let* ((archived (seq-count #'drover-session-archived sessions))
-           (counts (seq-filter (lambda (count) (> (cdr count) 0))
-                               (mapcar (lambda (status)
-                                         (cons status (seq-count (lambda (session)
-                                                                   (and (eq (drover-session-status session) status)
-                                                                        (not (drover-session-archived session))))
-                                                                 sessions)))
-                                       drover-attention-statuses))))
-      (insert (drover-list--flow
-               (append
-                (if counts
-                    (mapcar (lambda (count)
-                              (concat (drover-list--icon (drover-status-glyph (car count)))
-                                      " "
-                                      (drover-face
-                                       (format "%d %s" (cdr count)
-                                               (downcase (drover-status-label (car count))))
-                                       (drover-status-face (car count)))))
-                            counts)
-                  (list (drover-face "Nothing needs you" 'drover-dim)))
-                (list (drover-face
-                       (concat (format "%d session%s" (length sessions)
-                                       (if (= (length sessions) 1) "" "s"))
-                               (and (> archived 0) (format ", %d archived" archived))
-                               (and (> hidden 0)
-                                    (format ", %d subagent%s hidden" hidden (if (= hidden 1) "" "s"))))
-                       'drover-dim)))
-               (plist-get layout :width))
-              "\n"))))
+(defun drover-list--header-text (model)
+  "Return the summary of the sessions MODEL shows, as the list's first lines.
+It tells how many need the user, per status, how many are listed, how
+many of them are archived, and how many subagents of the trees listed
+are hidden, when there are some; archived sessions never count as
+needing the user.  Settings and keys are the View menu's to show, not
+the list's.  Lines fit the width of the layout."
+  (let* ((counts (drover-list--model-counts model))
+         (size (drover-list--model-size model))
+         (archived (gethash 'archived counts 0))
+         (hidden (drover-list--model-hidden model))
+         (needing (seq-filter (lambda (status) (> (gethash status counts 0) 0))
+                              drover-attention-statuses)))
+    (concat (drover-list--flow
+             (append
+              (if needing
+                  (mapcar (lambda (status)
+                            (concat (drover-list--icon (drover-status-glyph status))
+                                    " "
+                                    (drover-face
+                                     (format "%d %s" (gethash status counts)
+                                             (downcase (drover-status-label status)))
+                                     (drover-status-face status))))
+                          needing)
+                (list (drover-face "Nothing needs you" 'drover-dim)))
+              (list (drover-face
+                     (concat (format "%d session%s" size (if (= size 1) "" "s"))
+                             (and (> archived 0) (format ", %d archived" archived))
+                             (and (> hidden 0)
+                                  (format ", %d subagent%s hidden" hidden (if (= hidden 1) "" "s"))))
+                     'drover-dim)))
+             (plist-get (drover-list--model-layout model) :width))
+            "\n")))
 
 (defun drover-list--insert-empty (sessions layout)
   "Insert why the list shows none of SESSIONS, every session known.
@@ -2039,25 +2376,31 @@ tooltip of a name tells what its column shows, from
 (defvar-local drover-list--prefetched nil
   "Keys of the sessions the list asked their backends to complete, or nil.
 A hash table, made anew by each drawing that may show what backends
-fetch on demand, nil when the drawing shows none of it.  See
-`drover-list--prefetch'.")
+fetch on demand, nil when the drawing shows none of it.  The groups
+whose sessions were all asked for are in it too, as (group . VALUE).
+See `drover-list--prefetch'.")
 
 (defun drover-list--prefetch ()
   "Ask backends to fetch what the sessions in sight lack, once per drawing.
 Those are the sessions of the expanded groups, not yet asked for since
 the list was drawn: a group expanded after the drawing has its sessions
-asked for then, as `post-command-hook' runs this.  See
-`drover-prefetch'."
-  (when drover-list--prefetched
+asked for then, as `post-command-hook' runs this.  A group asked for is
+not looked at again, so that a command costs nothing in a long list.
+See `drover-prefetch'."
+  (when (and drover-list--prefetched drover-list--model)
     (let ((sessions nil))
-      (dolist (container (drover-list--containers))
-        (unless (and (not (eq container magit-root-section)) (oref container hidden))
-          (dolist (section (drover-list--session-sections container))
-            (let ((key (oref section value)))
-              (unless (gethash key drover-list--prefetched)
-                (puthash key t drover-list--prefetched)
-                (when-let* ((session (gethash key drover-list--drawn)))
-                  (push session sessions)))))))
+      (dolist (group (drover-list--model-groups drover-list--model))
+        (let ((section (drover-list--group-container group))
+              (id (cons 'group (drover-list--group-value group))))
+          (unless (or (gethash id drover-list--prefetched)
+                      (and (drover-list--group-value group) (oref section hidden)))
+            (puthash id t drover-list--prefetched)
+            (seq-doseq (tree (drover-list--group-trees group))
+              (dolist (row (drover-list--tree-shown tree))
+                (let ((key (drover-list--row-key row)))
+                  (unless (gethash key drover-list--prefetched)
+                    (puthash key t drover-list--prefetched)
+                    (push (drover-list--row-session row) sessions))))))))
       (when sessions
         (drover-prefetch (nreverse sessions))))))
 
@@ -2069,36 +2412,209 @@ unless the user hides it.  In two lines, it does not show."
        (assq 'context drover-list-fields)
        (not (memq 'context drover-list-hidden-fields))))
 
-(defun drover-list--insert ()
-  "Insert every section of the list at point."
-  (let* ((now (drover-list--now))
-         (all (drover-known-sessions))
-         (groups (and all (drover-view-groups all now)))
+(defun drover-list--settings ()
+  "Return the settings a drawing depends on, besides sessions and width."
+  (list drover-group-by drover-sort-by drover-sort-descending (copy-tree drover-filter)
+        drover-show-subagents drover-show-history drover-show-archived
+        drover-list-hidden-fields (copy-tree drover-list-fields)
+        drover-status-order drover-attention-statuses))
+
+(defun drover-list--before-p (a b)
+  "Return non-nil when tree A comes before tree B in the order of urgency.
+That is the order views sort trees in, sort after sort, each keeping
+the order of the one before where trees rank alike: by what each tree
+shows, by what the filter leaves of it, by the whole tree, and by the
+order its top session was listed in.  It is total: no two trees rank
+alike, so that where a changed tree goes among the others is known
+from its neighbours alone."
+  (let ((pairs (list (cons (drover-list--tree-node a) (drover-list--tree-node b))
+                     (cons (drover-list--tree-cut a) (drover-list--tree-cut b))
+                     (cons (drover-list--tree-full a) (drover-list--tree-full b))))
+        (order nil))
+    (while (and pairs (null order))
+      (pcase-let ((`(,x . ,y) (pop pairs)))
+        (when (and x y)
+          (cond ((drover--node-before-p x y) (setq order 'before))
+                ((drover--node-before-p y x) (setq order 'after))))))
+    (if order
+        (eq order 'before)
+      (< (drover-list--tree-serial a) (drover-list--tree-serial b)))))
+
+(defun drover-list--drawn-before-p (a b)
+  "Return non-nil when tree A is drawn before tree B in their group.
+They are sorted as `drover-sort-trees' sorts them, by
+`drover-sort-by', trees alike keeping the order of urgency, see
+`drover-list--before-p'."
+  (let ((field drover-sort-by)
+        (descending drover-sort-descending))
+    (if (eq field 'urgency)
+        (if descending (drover-list--before-p b a) (drover-list--before-p a b))
+      (let ((key-a (drover--sort-key field (drover-list--tree-node a) 0))
+            (key-b (drover--sort-key field (drover-list--tree-node b) 0)))
+        (cond ((drover--sort-key-less-p key-a key-b descending) t)
+              ((drover--sort-key-less-p key-b key-a descending) nil)
+              (t (drover-list--before-p a b)))))))
+
+(defun drover-list--head (group)
+  "Return the most urgent tree of GROUP, a `drover-list--group'."
+  (let ((head nil))
+    (seq-doseq (tree (drover-list--group-trees group))
+      (when (or (null head) (drover-list--before-p tree head))
+        (setq head tree)))
+    head))
+
+(defun drover-list--build (sessions now)
+  "Return the model of the list of SESSIONS at NOW, not drawn yet.
+Rows of the last drawing made of the same inputs are reused (see
+`drover-list--row')."
+  (let* ((trees (drover-tree sessions))
          ;; From every session, so that a parent tells its subagents
          ;; at work whether or not they are shown.
-         (metrics (drover-list--metrics now (drover-tree-active-subagents (drover-tree all))
-                                        (drover-list--places)))
-         (grouped (mapcar (pcase-lambda (`(,group . ,nodes))
-                            (cons group (drover-list--tree-rows nodes group metrics)))
-                          groups))
-         (rows (mapcan (lambda (group) (copy-sequence (cdr group))) grouped))
-         ;; Columns line up across groups.
-         (layout (drover-list--layout rows metrics)))
-    (setq drover-list--layout (plist-get layout :layout)
-          drover-list--fields (plist-get layout :fields)
-          drover-list--frames (plist-get layout :frames)
-          header-line-format (and rows (drover-list--header-line layout)))
-    (drover-list--forget-visibility all)
-    (drover-list--forget-recaps all)
+         (active (drover-tree-active-subagents trees))
+         (view (drover--view-trees nil trees))
+         (filtered (drover-filter-active-p))
+         (metrics (drover-list--metrics now active (drover-list--places)))
+         (old drover-list--model)
+         (model (drover-list--model-create
+                 :settings (drover-list--settings)
+                 :trees (make-hash-table :test #'equal :size (length (cdr view)))
+                 :rows (make-hash-table :test #'equal :size (length sessions))
+                 :counts (make-hash-table :test #'eq)))
+         (serials (make-hash-table :test #'equal :size (length sessions)))
+         (fulls (make-hash-table :test #'equal))
+         (cuts (make-hash-table :test #'equal))
+         (summary (drover-list--summary-create))
+         (drover-list--reuse (and old (drover-list--model-rows old))))
+    (let ((index 0))
+      (dolist (session sessions)
+        (puthash (drover-session-key session) (cl-incf index) serials)))
+    (dolist (node trees)
+      (puthash (drover-session-key (drover-node-session node)) node fulls))
+    (dolist (node (cdr view))
+      (puthash (drover-session-key (drover-node-session node)) node cuts))
+    (setf (drover-list--model-groups model)
+          (mapcar
+           (pcase-lambda (`(,value . ,nodes))
+             (let ((group (drover-list--group-create :value value
+                                                     :counts (make-hash-table :test #'eq)))
+                   (position -1))
+               (setf (drover-list--group-trees group)
+                     (vconcat
+                      (mapcar
+                       (lambda (node)
+                         (let* ((root (drover-session-key (drover-node-session node)))
+                                (kept (gethash root cuts))
+                                (tree (drover-list--tree-create
+                                       :root root :node node :full (gethash root fulls)
+                                       :cut (and filtered kept)
+                                       :serial (gethash root serials)
+                                       :group group :position (cl-incf position)
+                                       :shown (drover-list--tree-rows (list node) value metrics)
+                                       :hidden (- (length (drover-tree-sessions (list kept)))
+                                                  (length (drover-tree-sessions (list node)))))))
+                           (puthash root tree (drover-list--model-trees model))
+                           (cl-incf (drover-list--model-hidden model) (drover-list--tree-hidden tree))
+                           (dolist (row (drover-list--tree-shown tree))
+                             (setf (drover-list--row-tree row) tree)
+                             (puthash (drover-list--row-key row) row (drover-list--model-rows model))
+                             (drover-list--summary-add summary row 1)
+                             (drover-list--count-row (drover-list--group-counts group) row 1)
+                             (drover-list--count-row (drover-list--model-counts model) row 1)
+                             (cl-incf (drover-list--group-size group))
+                             (cl-incf (drover-list--model-size model)))
+                           tree))
+                       nodes)))
+               (setf (drover-list--group-head group) (drover-list--head group))
+               group))
+           (drover-view-arrange (car view) now)))
+    (let* ((layout (drover-list--layout-of summary metrics))
+           (key (drover-list--layout-key layout))
+           (old-key (and old (plist-get (drover-list--model-layout old) :key))))
+      ;; The key of the last layout, when the same, keeps the headings
+      ;; of the rows reused.
+      (setf (drover-list--model-summary model) summary
+            (drover-list--model-layout model)
+            (append (list :key (if (equal key old-key) old-key key)) layout)))
+    model))
+
+(defun drover-list--insert-model (model sessions)
+  "Insert the sections of MODEL at point, SESSIONS being every session known."
+  (let ((layout (drover-list--model-layout model)))
     (magit-insert-section (drover-list)
       ;; Every tree the filter keeps has its root shown, so no row means
       ;; no session at all, or none the filter keeps.
-      (if (null rows)
-          (drover-list--insert-empty all layout)
-        (drover-list--insert-header (mapcar #'drover-list--row-session rows)
-                                    (drover-view-hidden-count all) layout)
-        (pcase-dolist (`(,group . ,group-rows) grouped)
-          (drover-list--insert-group group group-rows layout))))))
+      (if (zerop (drover-list--model-size model))
+          (drover-list--insert-empty sessions layout)
+        (magit-insert-section section (drover-list-header)
+          (setf (drover-list--model-header model) section
+                (drover-list--model-header-text model) (drover-list--header-text model))
+          (insert (drover-list--model-header-text model)))
+        (dolist (group (drover-list--model-groups model))
+          (drover-list--insert-group group layout))))))
+
+(defun drover-list--insert ()
+  "Insert every section of the list at point, from what backends report now.
+The model of the drawing goes to `drover-list--model'."
+  (let* ((now (drover-list--now))
+         (all (if (or drover-show-history drover-show-archived)
+                  (drover-known-sessions)
+                (drover-index-sessions)))
+         (model (drover-list--build all now))
+         (layout (drover-list--model-layout model)))
+    (setq drover-list--model model
+          drover-list--layout (plist-get layout :layout)
+          drover-list--fields (plist-get layout :fields)
+          drover-list--frames (plist-get layout :frames)
+          header-line-format (and (> (drover-list--model-size model) 0)
+                                  (drover-list--header-line layout)))
+    (drover-list--forget-visibility all)
+    (drover-list--forget-recaps all)
+    ;; Sections pushed, not appended to thousands of siblings each.
+    (let ((magit-section-inhibit-markers t)
+          (magit-section-insert-in-reverse t))
+      (drover-list--insert-model model all))
+    (drover-list--use-markers)))
+
+(defun drover-list--use-markers ()
+  "Turn the positions of every section into markers.
+Sections are inserted with positions, which inserting text does not
+move, since a marker moves on every insertion before it: thousands of
+sections inserted with markers cost each insertion a walk over all of
+them.  Once drawn, lines change in place, which markers follow.  Starts
+advance on insertion and the other positions do not, as Magit makes
+them."
+  (when magit-root-section
+    (magit-map-sections
+     (lambda (section)
+       (oset section start (copy-marker (oref section start) t))
+       (when-let* ((content (oref section content)))
+         (oset section content (copy-marker content)))
+       (oset section end (copy-marker (oref section end)))))))
+
+(defvar magit--ellipses-sections)
+(defvar magit-section--opened-sections)
+
+(defun drover-list--release-markers ()
+  "Detach the markers of the sections of the current list, before it is erased.
+Markers detached cost later insertions nothing, while those of sections
+no longer drawn would until collected.  Magit forgets those sections,
+whose positions are gone: the ellipses it painted and the sections
+Isearch opened."
+  (dolist (variable '(magit--ellipses-sections magit-section--opened-sections))
+    (when (boundp variable)
+      (set variable nil)))
+  (setq magit--context-menu-section nil)
+  (when magit-root-section
+    (let ((markers nil))
+      (magit-map-sections
+       (lambda (section)
+         (dolist (position (list (oref section start) (oref section content) (oref section end)))
+           (when (markerp position)
+             (push position markers)))))
+      ;; Detaching a marker finds it from the newest of the buffer: the
+      ;; newest first, each is found at once.
+      (dolist (marker markers)
+        (set-marker marker nil)))))
 
 ;;;; Keeping point
 
@@ -2215,6 +2731,7 @@ second during a turn."
           drover-list--caches)
     (pcase-dolist (`(,marker . ,_) drover-list--animated)
       (set-marker marker nil))
+    (drover-list--release-markers)
     (setq magit-section-pre-command-section nil
           magit-section-highlight-overlays nil
           magit-section-selection-overlays nil
@@ -2254,6 +2771,359 @@ second during a turn."
     (push (current-buffer) magit-section--refreshed-buffers)
     (drover-list--update-timers)))
 
+;;;; Drawing in place
+
+;; A change of a few sessions, the common case while a turn runs,
+;; redraws their lines in place, as long as it moves no line: each
+;; session changed is placed again within its tree, which is made anew
+;; from the index (`drover-index-tree-sessions'); its tree must keep its
+;; shape and group, and come between the same neighbours, in its group
+;; and among groups, and the layout must stay the same.  Otherwise the
+;; list is drawn anew.  The lines then drawn are those a drawing anew
+;; would draw, so that the two are the same, which the tests check.
+
+(defun drover-list--hold (positions sections)
+  "Return POSITIONS, held across the redrawing of SECTIONS, as markers or anchors.
+A position within one of SECTIONS, whose text goes, is held as
+\(SECTION LINE . COLUMN): its line within the section and its place in
+that line, in characters; any other as a marker."
+  (mapcar (lambda (position)
+            (when position
+              (let ((section (seq-find (lambda (section)
+                                         (and (<= (oref section start) position)
+                                              (< position (or (oref section end) position))))
+                                       sections)))
+                (if section
+                    (save-excursion
+                      (goto-char position)
+                      (cons section (cons (count-lines (oref section start) (line-beginning-position))
+                                          (- position (line-beginning-position)))))
+                  (copy-marker position)))))
+          positions))
+
+(defun drover-list--release (held)
+  "Return the position HELD stands for, as `drover-list--hold' held it, or nil."
+  (cond ((markerp held) (prog1 (marker-position held) (set-marker held nil)))
+        ((consp held)
+         (pcase-let ((`(,section ,line . ,column) held))
+           (save-excursion
+             (goto-char (oref section start))
+             (forward-line line)
+             (when (>= (point) (oref section end))
+               (goto-char (oref section start)))
+             (drover-list--move-in-line column)
+             (point))))))
+
+(defun drover-list--replace-text (section start end text)
+  "Replace the text of SECTION from START to END with TEXT, starting at START.
+TEXT goes in before the old text goes, so that what begins where it
+ends, as the next section, follows it.  The start of SECTION, and of
+those of its ancestors beginning there too, stay at START."
+  (let* ((start (if (markerp start) (marker-position start) start))
+         (starting (seq-filter (lambda (ancestor) (= (oref ancestor start) start))
+                               (magit-section-lineage section t)))
+         (length (- end start)))
+    (goto-char start)
+    (insert text)
+    (delete-region (point) (+ (point) length))
+    (dolist (ancestor starting)
+      (set-marker (oref ancestor start) start))))
+
+(defun drover-list--forget-marks (start end)
+  "Forget the prompt caches and animated glyphs drawn between START and END."
+  (setq drover-list--caches
+        (seq-remove (lambda (entry)
+                      (let ((position (plist-get entry :start)))
+                        (when (and (<= start position) (< position end))
+                          (when-let* ((overlay (plist-get entry :overlay))) (delete-overlay overlay))
+                          (set-marker position nil)
+                          t)))
+                    drover-list--caches)
+        drover-list--animated
+        (seq-remove (lambda (entry)
+                      (when (and (<= start (car entry)) (< (car entry) end))
+                        (set-marker (car entry) nil)
+                        t))
+                    drover-list--animated)))
+
+(defun drover-list--redraw-row (row heading body)
+  "Draw ROW in place of the section it shares with the row it replaces.
+HEADING is its heading (see `drover-list--heading'), or nil to keep
+the text drawn;
+with BODY non-nil, its details too: drawn again if shown, else made to
+be drawn once expanded, as a drawing anew leaves a collapsed section."
+  (let* ((section (drover-list--row-section row))
+         (key (drover-list--row-key row))
+         (start (marker-position (oref section start)))
+         (layout (drover-list--model-layout drover-list--model)))
+    (drover-list--forget-marks start (oref section end))
+    (when heading
+      ;; Magit ends a heading with a newline.
+      (drover-list--replace-text section start (oref section content) (concat (car heading) "\n")))
+    (when body
+      (let ((content (oref section content)))
+        (unless (and (oref section hidden) (oref section washer))
+          (delete-region content (oref section end))
+          (goto-char content)
+          (let ((magit-insert-section--current section)
+                (magit-insert-section--parent section))
+            (magit-insert-section-body
+              (drover-list--insert-details-of key)))
+          (set-marker (oref section end) (point))
+          ;; Without details, its heading has no keymap of a heading,
+          ;; as when drawn anew.
+          (unless (magit-section-content-p section)
+            (remove-text-properties start (magit--eol-position start) '(keymap nil))))))
+    (magit-section--set-section-properties section)
+    (magit-section-maybe-add-heading-map section)
+    (magit-section-maybe-update-visibility-indicator section)
+    (drover-list--note-row row (drover-list--row-heading row) start layout)
+    (setq drover-list--animated
+          (append drover-list--animated
+                  (drover-list--collect-animated start (oref section content))))))
+
+(defun drover-list--redraw-group (group text)
+  "Draw TEXT as the heading of GROUP, a `drover-list--group', in place."
+  (let* ((section (drover-list--group-container group))
+         (start (marker-position (oref section start)))
+         (keymap (oref section keymap)))
+    (drover-list--replace-text section start (oref section content) (concat text "\n"))
+    (add-text-properties start (oref section content)
+                         `(magit-section ,section
+                                         ,@(and (symbol-value keymap) (list 'keymap (symbol-value keymap)))))
+    (magit-section-maybe-add-heading-map section)
+    (magit-section-maybe-update-visibility-indicator section)
+    (setf (drover-list--group-heading-text group) text)))
+
+(defun drover-list--redraw-header (model text)
+  "Draw TEXT as the header of MODEL, in place."
+  (let ((section (drover-list--model-header model)))
+    (drover-list--replace-text section (oref section start) (oref section end) text)
+    (magit-section--set-section-properties section)
+    (setf (drover-list--model-header-text model) text)))
+
+(defun drover-list--grouped-by-trees-p ()
+  "Return non-nil when groups come in the order of their most urgent trees.
+So do groups of a project, branch, agent, model or provider; those of a
+status or a time come in an order of their own."
+  (memq drover-group-by '(project branch agent model provider)))
+
+(defun drover-list--follow (keys &optional bodies)
+  "Draw in place what the change of the sessions KEYS changes, if it can.
+The sessions are those of `drover-changed-sessions', as the index has
+them now.  BODIES lists sessions whose details are drawn again even if
+they did not change, such as one whose recap arrived.  Return nil,
+drawing nothing, when that change cannot be drawn in place: the list
+must then be drawn anew."
+  (let ((model drover-list--model))
+    (and model
+         (not drover-list--stale)
+         (> (drover-list--model-size model) 0)
+         (not drover-show-history)
+         (not drover-show-archived)
+         (eql drover-list--width (drover-list--line-width))
+         (equal (drover-list--model-settings model) (drover-list--settings))
+         (drover-index-incremental-p)
+         (catch 'redraw
+           (drover-list--follow-1 model keys bodies)
+           t))))
+
+(defun drover-list--follow-1 (model keys bodies)
+  "Draw in place in MODEL the change of the sessions KEYS, or throw `redraw'.
+BODIES are as for `drover-list--follow'."
+  (let* ((now (drover-list--now))
+         (places (drover-list--places))
+         (rows-table (drover-list--model-rows model))
+         (layout (drover-list--model-layout model))
+         (roots nil)
+         (changes nil))
+    (dolist (key (append keys bodies))
+      (let ((row (gethash key rows-table)))
+        (cond ((drover-index-session key)
+               (let ((root (drover-index-root key)))
+                 (when (and row (not (equal root (drover-list--tree-root (drover-list--row-tree row)))))
+                   (throw 'redraw nil))
+                 (cl-pushnew root roots :test #'equal)))
+              (row (throw 'redraw nil)))))
+    ;; Each tree touched is made anew: it must keep its shape and group.
+    (dolist (root roots)
+      (let* ((trees (drover-tree (drover-index-tree-sessions root)))
+             (old (gethash root (drover-list--model-trees model))))
+        (unless (and trees (null (cdr trees))
+                     (equal (drover-session-key (drover-node-session (car trees))) root))
+          (throw 'redraw nil))
+        (let* ((active (drover-tree-active-subagents trees))
+               (view (drover--view-trees nil trees))
+               (arranged (drover-view-arrange (car view) now)))
+          (cond
+           ((and (null arranged) (null old)))
+           ((or (null arranged) (null old) (cdr arranged) (cdr (cdar arranged)))
+            (throw 'redraw nil))
+           (t
+            (let* ((group (drover-list--tree-group old))
+                   (value (caar arranged))
+                   (node (cadar arranged))
+                   (metrics (append (list :now now :active active :places places) layout))
+                   (rows (let ((drover-list--reuse rows-table))
+                           (drover-list--tree-rows (list node) value metrics)))
+                   (old-rows (drover-list--tree-shown old)))
+              (unless (and (equal value (drover-list--group-value group))
+                           (or (not (eq (car value) 'status))
+                               (memq (cdr value) (cons 'archived drover-status-order)))
+                           (= (length rows) (length old-rows))
+                           (cl-every (lambda (new old)
+                                       (and (equal (drover-list--row-key new) (drover-list--row-key old))
+                                            (eql (drover-list--row-depth new) (drover-list--row-depth old))))
+                                     rows old-rows))
+                (throw 'redraw nil))
+              (let ((global (plist-get layout :active)))
+                (when global
+                  (dolist (session (drover-tree-sessions trees))
+                    (let ((key (drover-session-key session)))
+                      (if-let* ((subagents (gethash key active)))
+                          (puthash key subagents global)
+                        (remhash key global))))))
+              (push (list old node (car trees) (and (drover-filter-active-p) (car (cdr view))) rows
+                          (- (length (drover-tree-sessions (cdr view)))
+                             (length (drover-tree-sessions (car view)))))
+                    changes)))))))
+    ;; The trees take their new state, then must stand where they stood.
+    (let ((groups nil))
+      (pcase-dolist (`(,tree ,node ,full ,cut ,_ ,hidden) changes)
+        (cl-incf (drover-list--model-hidden model) (- hidden (drover-list--tree-hidden tree)))
+        (setf (drover-list--tree-node tree) node
+              (drover-list--tree-full tree) full
+              (drover-list--tree-cut tree) cut
+              (drover-list--tree-hidden tree) hidden)
+        (cl-pushnew (drover-list--tree-group tree) groups))
+      (pcase-dolist (`(,tree . ,_) changes)
+        (let* ((trees (drover-list--group-trees (drover-list--tree-group tree)))
+               (position (drover-list--tree-position tree)))
+          (unless (and (or (zerop position)
+                           (drover-list--drawn-before-p (aref trees (1- position)) tree))
+                       (or (= (1+ position) (length trees))
+                           (drover-list--drawn-before-p tree (aref trees (1+ position)))))
+            (throw 'redraw nil))))
+      (when (drover-list--grouped-by-trees-p)
+        (dolist (group groups)
+          (let ((head (drover-list--group-head group)))
+            (setf (drover-list--group-head group)
+                  (if (and (eq drover-sort-by 'urgency) (not drover-sort-descending))
+                      (aref (drover-list--group-trees group) 0)
+                    (let ((changed (mapcar #'car changes)))
+                      (if (memq head changed)
+                          (drover-list--head group)
+                        (seq-reduce (lambda (head tree)
+                                      (if (and (eq (drover-list--tree-group tree) group)
+                                               (drover-list--before-p tree head))
+                                          tree
+                                        head))
+                                    changed head)))))))
+        (let ((all (drover-list--model-groups model)))
+          (dolist (group groups)
+            (let* ((position (seq-position all group #'eq))
+                   (previous (and (> position 0) (nth (1- position) all)))
+                   (next (nth (1+ position) all))
+                   (head (drover-list--group-head group)))
+              (unless (and (or (null previous)
+                               (drover-list--before-p (drover-list--group-head previous) head))
+                           (or (null next)
+                               (drover-list--before-p head (drover-list--group-head next))))
+                (throw 'redraw nil))))))
+      ;; Rows changed take their place in the summary and counts; the
+      ;; layout must stay.
+      (let ((summary (drover-list--model-summary model))
+            (replaced nil))
+        (pcase-dolist (`(,tree ,_ ,_ ,_ ,rows ,_) changes)
+          (let ((group (drover-list--tree-group tree)))
+            (cl-mapc (lambda (new old)
+                       (if (eq new old)
+                           (when (member (drover-list--row-key new) bodies)
+                             (push (cons new old) replaced))
+                         (drover-list--summary-add summary old -1)
+                         (drover-list--summary-add summary new 1)
+                         (dolist (counts (list (drover-list--group-counts group)
+                                               (drover-list--model-counts model)))
+                           (drover-list--count-row counts old -1)
+                           (drover-list--count-row counts new 1))
+                         (setf (drover-list--row-tree new) tree
+                               (drover-list--row-section new) (drover-list--row-section old))
+                         (puthash (drover-list--row-key new) new rows-table)
+                         (push (cons new old) replaced)))
+                     rows (drover-list--tree-shown tree))
+            (setf (drover-list--tree-shown tree) rows)))
+        (unless (equal (drover-list--layout-key (drover-list--layout-of summary layout))
+                       (plist-get layout :key))
+          (throw 'redraw nil))
+        (plist-put layout :now now)
+        (drover-list--redraw-in-place model (nreverse replaced) groups bodies)))))
+
+(defun drover-list--redraw-in-place (model replaced groups bodies)
+  "Draw in MODEL the rows of REPLACED, the headings of GROUPS and the header.
+REPLACED is a list of (NEW . OLD) rows; GROUPS the groups holding them;
+BODIES the sessions whose details are drawn again.  Each is drawn only
+where its text changed.  Point, the mark and the windows showing the
+list keep their places."
+  (let* ((layout (drover-list--model-layout model))
+         (edits (mapcar (pcase-lambda (`(,new . ,old))
+                          (let ((heading (drover-list--heading new layout)))
+                            ;; A heading the same as the one drawn is not drawn again.
+                            (list new
+                                  (unless (and (drover-list--row-heading old)
+                                               (equal-including-properties
+                                                (car heading) (car (drover-list--row-heading old))))
+                                    heading)
+                                  (or (not (eq new old))
+                                      (member (drover-list--row-key new) bodies)))))
+                        replaced))
+         (group-texts (delq nil
+                            (mapcar (lambda (group)
+                                      (when (drover-list--group-value group)
+                                        (let ((text (drover-list--group-heading group layout)))
+                                          (unless (equal-including-properties
+                                                   text (drover-list--group-heading-text group))
+                                            (cons group text)))))
+                                    groups)))
+         (header (let ((text (drover-list--header-text model)))
+                   (unless (equal-including-properties text (drover-list--model-header-text model))
+                     text)))
+         (sections (append (mapcar (lambda (edit) (drover-list--row-section (car edit))) edits)
+                           (mapcar (lambda (entry) (drover-list--group-container (car entry))) group-texts)
+                           (and header (list (drover-list--model-header model)))))
+         (windows (get-buffer-window-list nil nil t))
+         (held (drover-list--hold (append (list (point) (and (region-active-p) (mark)))
+                                          (mapcan (lambda (window)
+                                                    (list (window-point window) (window-start window)))
+                                                  windows))
+                                  sections))
+         (inhibit-read-only t)
+         (deactivate-mark nil))
+    (when sections
+      (save-excursion
+        (pcase-dolist (`(,row ,heading ,body) edits)
+          (drover-list--redraw-row row heading body))
+        (pcase-dolist (`(,group . ,text) group-texts)
+          (drover-list--redraw-group group text))
+        (when header
+          (drover-list--redraw-header model header)))
+      (goto-char (drover-list--release (pop held)))
+      (let ((mark (drover-list--release (pop held))))
+        (when mark
+          (set-marker (mark-marker) mark)))
+      (dolist (window windows)
+        (set-window-point window (drover-list--release (pop held)))
+        (set-window-start window (drover-list--release (pop held)) t))
+      (when (eq (window-buffer) (current-buffer))
+        (goto-char (window-point)))
+      (drover-list--draw-caches)
+      (magit-section-update-highlight t)
+      (set-buffer-modified-p nil)
+      (push (current-buffer) magit-section--refreshed-buffers))
+    (dolist (position held)
+      (when (markerp position)
+        (set-marker position nil)))
+    (drover-list--update-timers)))
+
 (defun drover-list--visible-p (buffer)
   "Return non-nil when a window of a visible or iconified frame shows BUFFER."
   (get-buffer-window buffer 0))
@@ -2273,10 +3143,29 @@ second during a turn."
         (drover-list--render)
       (setq drover-list--stale t))))
 
+(defun drover-list--update-sessions (buffer keys &optional bodies)
+  "Bring list BUFFER up to date with the change of the sessions KEYS.
+Draw it in place if displayed, and anew when it cannot; mark it stale
+otherwise.  BODIES are as for `drover-list--follow'.  Older and archived
+sessions, which the index does not hold, draw the list anew."
+  (with-current-buffer buffer
+    (cond ((not (drover-list--visible-p buffer))
+           (setq drover-list--stale t))
+          ((or drover-show-history drover-show-archived)
+           (drover-list--render))
+          ((not (or keys bodies)))
+          ((drover-list--follow keys bodies))
+          (t (drover-list--render)))))
+
 (defun drover-list--on-change ()
   "Bring every list up to date with the backends.
-For `drover-changed-hook'."
-  (mapc #'drover-list--update (drover-list--buffers)))
+For `drover-changed-hook': the sessions `drover-changed-sessions' tells
+are drawn in place, when they can be."
+  (let ((changed drover-changed-sessions))
+    (dolist (buffer (drover-list--buffers))
+      (if (eq changed t)
+          (drover-list--update buffer)
+        (drover-list--update-sessions buffer changed)))))
 
 (defun drover-list--refresh-if-needed ()
   "Redraw the current list if it is stale or was drawn for another width.
@@ -2305,17 +3194,60 @@ out in pixels, measured in the faces of the buffer."
         (drover-list--render)
       (setq drover-list--stale t))))
 
-(defun drover-list--revert (&rest _)
-  "Fetch older and archived sessions again if shown, measure text anew, redraw.
-The recaps of expanded sessions are fetched anew too.
-For `revert-buffer-function'."
+(defun drover-list--revert (&optional ignore-auto _noconfirm)
+  "Fetch older and archived sessions again if shown, list sessions anew, redraw.
+The recaps of expanded sessions are fetched anew too.  Rows of sessions
+that did not change are kept, and texts measured anew only when fonts
+changed; with IGNORE-AUTO nil, as with a prefix argument to
+\\[revert-buffer], every row is made and measured anew.  For
+`revert-buffer-function'."
   (when drover-show-history
     (drover-history-fetch))
   (when drover-show-archived
     (drover-archived-fetch))
-  (setq drover-list--widths nil
-        drover-list--recaps nil)
+  ;; Changes backends did not report reach every view.
+  (drover-index-refresh)
+  (unless ignore-auto
+    ;; Nothing drawn before is kept: rows are made and measured anew.
+    (setq drover-list--widths nil
+          drover-list--model nil))
+  (setq drover-list--recaps nil)
   (drover-list--render))
+
+(defun drover-list--refresh-times ()
+  "Draw again the rows of the current list whose times read otherwise now.
+Those are their ages, and whether their prompt caches live: rows of
+sessions that did not change are drawn in place, as the time passes.
+Groups of last activity a tree leaves draw the list anew."
+  (when-let* ((model drover-list--model))
+    (let ((now (drover-list--now))
+          (keys nil))
+      (if (and (eq drover-group-by 'updated)
+               (seq-some (lambda (group)
+                           (seq-some (lambda (tree)
+                                       (not (eq (drover-activity-bucket
+                                                 (drover-node-updated (drover-list--tree-node tree)) now)
+                                                (cdr (drover-list--group-value group)))))
+                                     (drover-list--group-trees group)))
+                         (drover-list--model-groups model)))
+          (drover-list--render)
+        (maphash (lambda (key row)
+                   (let ((inputs (drover-list--row-inputs row))
+                         (session (drover-list--row-session row)))
+                     (unless (and inputs
+                                  (equal (aref inputs 6)
+                                         (drover-format-age (drover-list--age-time session) now))
+                                  (equal (aref inputs 7)
+                                         (drover-format-age (drover-session-created session) now))
+                                  (eq (aref inputs 8)
+                                      (and (drover-session-cache-fraction session now) t))
+                                  (equal (aref inputs 10)
+                                         (let ((archived (drover-session-archived session)))
+                                           (and (numberp archived) (drover-format-age archived now)))))
+                       (push key keys))))
+                 (drover-list--model-rows model))
+        (when keys
+          (drover-list--update-sessions (current-buffer) keys))))))
 
 ;;;; Timers
 
@@ -2329,8 +3261,16 @@ For `revert-buffer-function'."
   "Timer showing the next frames of the animated glyphs of displayed lists.")
 
 (defun drover-list--age-tick ()
-  "Redraw displayed lists, mark hidden ones stale; stop when none is shown."
-  (mapc #'drover-list--update (drover-list--buffers))
+  "Keep displayed lists current, mark hidden ones stale; stop when none is shown.
+The sessions are listed anew, for what backends change unreported, as
+a branch; the rows whose ages read otherwise are drawn again in place."
+  (drover-index-refresh)
+  (dolist (buffer (drover-list--buffers))
+    (if (drover-list--visible-p buffer)
+        (with-current-buffer buffer
+          (drover-list--refresh-times))
+      (with-current-buffer buffer
+        (setq drover-list--stale t))))
   (drover-list--update-timers))
 
 (defun drover-list--cache-tick ()
@@ -2480,19 +3420,15 @@ no window shows, and nil without a buffer."
           ((gethash buffer (cdr places)) 'shown)
           (t 'open))))
 
-(defun drover-list--title-runs (keys)
-  "Return the titles of the sessions whose keys KEYS holds, as (KEY START END).
-KEYS is a hash table, whose values may be nil; titles are found by
-their property `drover-list-title', their ellipsis included when cut."
-  (let ((position (point-min))
-        (runs nil))
-    (while (setq position (text-property-not-all position (point-max) 'drover-list-title nil))
-      (let ((key (get-text-property position 'drover-list-title))
-            (end (next-single-property-change position 'drover-list-title nil (point-max))))
-        (unless (eq (gethash key keys 'absent) 'absent)
-          (push (list key position end) runs))
-        (setq position end)))
-    (nreverse runs)))
+(defun drover-list--title-run (key)
+  "Return where the title of the session KEY lies, as (KEY START END), or nil.
+The title is found by its property `drover-list-title' in the session's
+heading, its ellipsis included when cut."
+  (when-let* ((section (drover-list--find-session key))
+              (start (text-property-not-all (oref section start) (oref section content)
+                                            'drover-list-title nil)))
+    (list key start (next-single-property-change start 'drover-list-title nil
+                                                 (oref section content)))))
 
 (defun drover-list--title-faces (face state)
   "Return FACE, the face of a title, with the face of STATE in place of its own.
@@ -2521,15 +3457,16 @@ as a bold one would, whose line was laid out in the other one."
   (when (and drover-list--drawn drover-list--title-states)
     (let ((places (drover-list--places))
           (changed (make-hash-table :test #'equal)))
-      (maphash (lambda (key session)
-                 (let ((state (drover-list--title-state session places)))
+      (maphash (lambda (key _)
+                 (let* ((session (gethash key drover-list--drawn))
+                        (state (drover-list--title-state session places)))
                    (unless (eq state (gethash key drover-list--title-states))
                      (puthash key state changed))
                    (when state
                      (puthash (drover-session-buffer session) t drover-list--session-buffers))))
                drover-list--drawn)
       (unless (zerop (hash-table-count changed))
-        (let ((runs (drover-list--title-runs changed)))
+        (let ((runs (delq nil (mapcar #'drover-list--title-run (hash-table-keys changed)))))
           (if (seq-some (pcase-lambda (`(,key ,start ,end))
                           (let ((text (buffer-substring start end)))
                             (/= (drover-list--pixel-width text)
@@ -2544,7 +3481,15 @@ as a bold one would, whose line was laid out in the other one."
               (with-silent-modifications
                 (pcase-dolist (`(,key ,start ,end) runs)
                   (drover-list--reface start end (gethash key changed)))))
-            (maphash (lambda (key state) (puthash key state drover-list--title-states))
+            (maphash (lambda (key state)
+                       (puthash key state drover-list--title-states)
+                       ;; Its row no longer tells what its line shows:
+                       ;; made anew the next time it is drawn.
+                       (when-let* ((row (and drover-list--model
+                                             (gethash key (drover-list--model-rows drover-list--model)))))
+                         (setf (drover-list--row-state row) state
+                               (drover-list--row-inputs row) nil
+                               (drover-list--row-heading row) nil)))
                      changed)))))))
 
 (defun drover-list--windows-changed (&optional _frame)
@@ -2629,10 +3574,10 @@ For `drover-selected-sessions-function'.  Records come from the
 backends, as at point; a session gone since the list was drawn is left
 out."
   (when-let* ((sections (drover-list--selected-sections)))
-    (let ((known (make-hash-table :test #'equal)))
-      (dolist (session (drover-known-sessions))
-        (puthash (drover-session-key session) session known))
-      (delq nil (mapcar (lambda (section) (gethash (oref section value) known)) sections)))))
+    (delq nil (mapcar (lambda (section)
+                        (let ((key (oref section value)))
+                          (drover-find (car key) (cdr key))))
+                      sections))))
 
 (defun drover-list-copy (&optional plain)
   "Copy Org links to the selected sessions, one per line, or the region.

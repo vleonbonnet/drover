@@ -501,26 +501,44 @@ MEASURE is a function of a string returning its width in pixels.  A
 cut string loses its trailing blanks and ends in an ellipsis in the
 properties of the text before it; when not even the ellipsis fits, the
 result is empty."
-  (if (or (zerop (length string)) (<= (funcall measure string) pixels))
-      string
-    (let* ((ellipsis (truncate-string-ellipsis))
-           (cut (lambda (length)
-                  (concat (string-trim-right (substring string 0 length))
-                          (apply #'propertize ellipsis
-                                 (text-properties-at (max 0 (1- length)) string)))))
-           (fits (lambda (length) (<= (funcall measure (funcall cut length)) pixels)))
-           (low 0)
-           (high (1- (length string))))
-      (if (not (funcall fits 0))
-          ""
-        ;; Characters differ in width, so the longest prefix that fits is
-        ;; found by bisection, laying out each candidate.
-        (while (< low high)
-          (let ((middle (/ (+ low high 1) 2)))
-            (if (funcall fits middle)
-                (setq low middle)
-              (setq high (1- middle)))))
-        (funcall cut low)))))
+  (let ((width (if (zerop (length string)) 0 (funcall measure string))))
+    (if (<= width pixels)
+        string
+      (let* ((ellipsis (truncate-string-ellipsis))
+             (cut (lambda (length)
+                    (concat (string-trim-right (substring string 0 length))
+                            (apply #'propertize ellipsis
+                                   (text-properties-at (max 0 (1- length)) string)))))
+             (fits (lambda (length) (<= (funcall measure (funcall cut length)) pixels)))
+             (low 0)
+             (high (1- (length string))))
+        (if (not (funcall fits 0))
+            ""
+          ;; Characters differ in width, so the longest prefix that fits
+          ;; is found by laying out candidates.  Each costs a layout:
+          ;; the search starts where the average width of a character
+          ;; puts the cut, and gallops away from it, before bisecting.
+          (let ((guess (max 0 (min high (floor (* (length string) pixels) (max 1 width)))))
+                (step 1))
+            (if (funcall fits guess)
+                (progn
+                  (setq low guess)
+                  (while (and (<= (+ low step) high) (funcall fits (+ low step)))
+                    (setq low (+ low step)
+                          step (* 2 step)))
+                  (setq high (min high (+ low step -1))))
+              (setq high (1- guess))
+              (while (and (> (- high step) low) (not (funcall fits (- high step))))
+                (setq high (- high step 1)
+                      step (* 2 step)))
+              (when (> (- high step) low)
+                (setq low (- high step)))))
+          (while (< low high)
+            (let ((middle (/ (+ low high 1) 2)))
+              (if (funcall fits middle)
+                  (setq low middle)
+                (setq high (1- middle)))))
+          (funcall cut low))))))
 
 ;;;; Filters
 

@@ -259,7 +259,11 @@ the limit, or nil when either is unknown."
 
 (defun drover-status-rank (status)
   "Return the rank of STATUS in `drover-status-order', lowest most urgent."
-  (or (seq-position drover-status-order status) (length drover-status-order)))
+  ;; Sorting thousands of sessions ranks statuses tens of thousands of
+  ;; times: `memq' rather than the generic `seq-position'.
+  (let ((tail (memq status drover-status-order))
+        (count (length drover-status-order)))
+    (if tail (- count (length tail)) count)))
 
 (defun drover--time (time)
   "Return TIME, or a time later than any for nil."
@@ -665,6 +669,12 @@ PROPERTIES is a plist of:
  :sessions   Function of no argument returning the backend's sessions
              as `drover-session' records, from what it already knows:
              those it follows, but archived ones (see :archived).
+ :session    Function of an ID returning the record :sessions would
+             return for session ID, or nil when :sessions would not
+             list it.  It is called for each session the backend
+             reports changed (see `drover-backend-changed'), so it must
+             be cheap; without it, drover lists all the backend's
+             sessions on every change.
  :open       Function of a session and OTHER-WINDOW displaying it, in
              the selected window, or in another window when
              OTHER-WINDOW is non-nil.  `drover-open' chooses the window
@@ -862,6 +872,12 @@ its :supports function says it does not apply to SESSION."
   "Return the sessions of the backend of PROPERTIES, or nil when they fail."
   (with-demoted-errors "Drover backend sessions: %S"
     (copy-sequence (funcall (plist-get properties :sessions)))))
+
+(defun drover--backend-session (properties id)
+  "Return session ID of the backend of PROPERTIES, through its :session, or nil.
+Nil too when :session fails."
+  (with-demoted-errors "Drover backend session: %S"
+    (funcall (plist-get properties :session) id)))
 
 (defun drover--registration-rank (backend)
   "Return how many of the registered backends were registered before BACKEND."
@@ -1096,7 +1112,9 @@ its ARCHIVED set."
                                (equal (drover-session-id session) id)))
                         sessions)))
     (when-let* ((session (or (when-let* ((properties (alist-get backend drover--backends)))
-                               (find (drover--backend-sessions properties)))
+                               (if (functionp (plist-get properties :session))
+                                   (drover--backend-session properties id)
+                                 (find (drover--backend-sessions properties))))
                              (and drover-show-archived
                                   (find (drover-archived-sessions)))
                              (and drover-show-history
@@ -1146,31 +1164,416 @@ They are taken from SESSIONS, by default those lists show (see
 (defvar drover-changed-hook nil
   "Hook run once backends stop reporting changes for `drover-refresh-delay'.
 It also runs at once when view settings change, through
-`drover-view-settings-changed': views redraw from it.")
+`drover-view-settings-changed': views redraw from it.  While it runs,
+`drover-changed-sessions' tells which sessions changed.")
+
+(defvar drover-changed-sessions t
+  "The sessions that changed, while `drover-changed-hook' runs.
+A list of the keys of the sessions whose records changed, appeared or
+went, or whose place among the trees of sessions changed (see
+`drover-index-parent'), as `drover-index' has them now; or t when
+anything may have changed, such as view settings or the sessions of a
+backend drover could not follow one by one, and views draw everything
+anew.  A key may be listed though its record is the same: a backend
+reports a session whose buffer opened or closed, which its record does
+not tell.")
 
 (defvar drover--change-timer nil
   "Timer running `drover-changed-hook'.")
 
-(defun drover--run-changed ()
-  "Run `drover-changed-hook'."
-  (setq drover--change-timer nil)
-  (run-hooks 'drover-changed-hook))
+(defvar drover--changed-keys nil
+  "Keys of the sessions reported changed since the hook last ran.")
 
-(defun drover-backend-changed (&optional _backend _id)
-  "Note that sessions of a backend changed.
-The optional arguments name the backend and session, for callers that
-know them.  `drover-changed-hook' runs after `drover-refresh-delay'
-seconds without another change."
+(defvar drover--changed-backends nil
+  "Backends reported changed, without a session, since the hook last ran.")
+
+(defvar drover--changed-all nil
+  "Non-nil when views must draw everything anew the next time the hook runs.")
+
+(defvar drover--changed-applied nil
+  "What the index took in of the changes reported since the hook last ran.
+Keys, or t, as `drover-changed-sessions' tells them: a view drawing
+before the hook runs brings the index up to date first (see
+`drover-index'), and the hook then tells what changed all the same.")
+
+(defun drover--apply-changed ()
+  "Bring the index up to date with the changes reported, noting what changed.
+See `drover--changed-applied'."
+  (when (or drover--changed-keys drover--changed-backends)
+    (let ((keys (nreverse drover--changed-keys))
+          (backends (nreverse drover--changed-backends)))
+      (setq drover--changed-keys nil
+            drover--changed-backends nil)
+      (let ((changed (drover--index-apply keys backends)))
+        (setq drover--changed-applied
+              (if (or (eq changed t) (eq drover--changed-applied t))
+                  t
+                (append drover--changed-applied changed)))))))
+
+(defun drover--run-changed ()
+  "Bring the index up to date, then run `drover-changed-hook'."
+  (setq drover--change-timer nil)
+  (drover--apply-changed)
+  (let ((drover-changed-sessions (if drover--changed-all
+                                     t
+                                   (if (listp drover--changed-applied)
+                                       (delete-dups drover--changed-applied)
+                                     t))))
+    (setq drover--changed-applied nil
+          drover--changed-all nil)
+    (run-hooks 'drover-changed-hook)))
+
+(defun drover--schedule-changed ()
+  "Run `drover-changed-hook' after `drover-refresh-delay' seconds of quiet."
   (when (timerp drover--change-timer)
     (cancel-timer drover--change-timer))
   (setq drover--change-timer
         (run-at-time drover-refresh-delay nil #'drover--run-changed)))
+
+(defun drover-backend-changed (&optional backend id)
+  "Note that sessions of BACKEND changed: session ID, or any of them.
+`drover-changed-hook' runs after `drover-refresh-delay' seconds without
+another change.  A change of session ID costs drover the backend's
+:session for ID alone, when the backend has one; a change of BACKEND
+without ID, listing all its sessions anew.  Without BACKEND either,
+views draw everything anew."
+  (cond ((and backend id) (push (cons backend id) drover--changed-keys))
+        (backend (push backend drover--changed-backends))
+        (t (setq drover--changed-all t)))
+  (drover--schedule-changed))
 
 (defun drover-changed-now ()
   "Run a pending `drover-changed-hook' at once."
   (when (timerp drover--change-timer)
     (cancel-timer drover--change-timer)
     (drover--run-changed)))
+
+;;;; The index of sessions
+
+;; Listing every session costs a record per session, and views used to
+;; list them on every change: with thousands of sessions, a change cost
+;; tens of milliseconds before anything was drawn.  The index keeps the
+;; records `drover-sessions' would list, and the trees they make,
+;; current through what backends report: a change of one session costs
+;; its backend's :session for it, and tells views which sessions
+;; changed (`drover-changed-sessions'), so that they draw only those.
+
+(cl-defstruct (drover--index (:constructor drover--index-make)
+                             (:copier nil))
+  "The live sessions, kept current as backends report changes."
+  (records (make-hash-table :test #'equal)
+           :documentation "Copies of the records listed, by key: unarchived, not merged.")
+  (serials (make-hash-table :test #'equal)
+           :documentation "When each key was first listed, a number, for the listing order.")
+  (serial 0 :documentation "The last serial number given.")
+  (engines (make-hash-table :test #'equal)
+           :documentation "Keys of the records of each engine key.")
+  (shared 0 :documentation "How many engine keys have several records, to merge.")
+  (parents (make-hash-table :test #'equal)
+           :documentation "The key of the parent of each session that has one listed.")
+  (children (make-hash-table :test #'equal)
+            :documentation "The keys of the subagents of each session that has some.")
+  (claims (make-hash-table :test #'equal)
+          :documentation "Keys of the sessions naming each (BACKEND . ID) their parent.")
+  (engine-claims (make-hash-table :test #'equal)
+                 :documentation "Keys of the sessions whose parent may be each engine key.")
+  (cyclic nil :documentation "Non-nil when parents form a cycle."))
+
+(defvar drover--index nil
+  "The index of the live sessions, or nil until a view asks for it.")
+
+(defun drover--index-listed (record)
+  "Return RECORD as `drover-sessions' lists it, a copy, or nil when it does not."
+  (and record
+       (not (drover-session-archived record))
+       (not (drover--archive-entry record))
+       (copy-sequence record)))
+
+(defun drover--index-resolve (index key record)
+  "Return the key of the listed parent of RECORD, of KEY, in INDEX, or nil.
+It is found as `drover-tree' finds it: by RECORD's backend, else
+through RECORD's engine."
+  (when-let* ((parent-id (drover-session-parent record)))
+    (let* ((own (cons (drover-session-backend record) parent-id))
+           (parent (if (gethash own (drover--index-records index))
+                       own
+                     (when-let* ((engine (drover-session-engine record)))
+                       (car (gethash (cons engine parent-id) (drover--index-engines index)))))))
+      (and parent (not (equal parent key)) parent))))
+
+(defun drover--index-file (index key record)
+  "File RECORD, of KEY, in INDEX's tables of engines and claims.
+With RECORD nil, take KEY's record out of them instead."
+  (let* ((filed (or record (gethash key (drover--index-records index))))
+         (engine-key (drover-session-engine-key filed))
+         (parent (drover-session-parent filed)))
+    (cl-flet ((file (table table-key)
+                (let ((keys (gethash table-key table)))
+                  (setq keys (if record (cons key keys) (delete key keys)))
+                  (if keys (puthash table-key keys table) (remhash table-key table))
+                  keys)))
+      (when engine-key
+        (let ((before (cdr (gethash engine-key (drover--index-engines index))))
+              (after (cdr (file (drover--index-engines index) engine-key))))
+          (cond ((and after (not before)) (cl-incf (drover--index-shared index)))
+                ((and before (not after)) (cl-decf (drover--index-shared index))))))
+      (when parent
+        (file (drover--index-claims index) (cons (drover-session-backend filed) parent))
+        (when-let* ((engine (drover-session-engine filed)))
+          (file (drover--index-engine-claims index) (cons engine parent)))))))
+
+(defun drover--index-link (index key parent)
+  "Make PARENT the parent of KEY in INDEX, nil for none.
+Return the keys whose place changed: KEY and its parents, before and
+after, or nil when its parent stays."
+  (let ((before (gethash key (drover--index-parents index)))
+        (children (drover--index-children index)))
+    (unless (equal before parent)
+      (when before
+        (let ((siblings (delete key (gethash before children))))
+          (if siblings (puthash before siblings children) (remhash before children))))
+      (if parent
+          (progn (puthash key parent (drover--index-parents index))
+                 (push key (gethash parent children)))
+        (remhash key (drover--index-parents index)))
+      (delq nil (list key before parent)))))
+
+(defun drover--index-cycle-p (index key)
+  "Return non-nil when following the parents of KEY in INDEX comes back to it."
+  (let ((parents (drover--index-parents index))
+        (seen (list key))
+        (current key)
+        (cycle nil))
+    (while (and (not cycle) (setq current (gethash current parents)))
+      (if (member current seen)
+          (setq cycle t)
+        (push current seen)))
+    cycle))
+
+(defun drover--index-put (index key record)
+  "Make RECORD, as listed, the record of KEY in INDEX; nil removes it.
+Return the keys whose place among the trees changed."
+  (let* ((records (drover--index-records index))
+         (old (gethash key records))
+         (moved nil))
+    (when old
+      (drover--index-file index key nil))
+    (if record
+        (progn
+          (puthash key record records)
+          (unless (gethash key (drover--index-serials index))
+            (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index)))
+          (drover--index-file index key record))
+      (remhash key records)
+      (remhash key (drover--index-serials index)))
+    ;; Sessions naming KEY their parent, directly or through its
+    ;; engine, find it or lose it as it comes, goes or changes engine.
+    (let ((claimants (and (or (not (eq (null old) (null record)))
+                              (not (equal (and old (drover-session-engine-key old))
+                                          (and record (drover-session-engine-key record)))))
+                          (append (gethash key (drover--index-claims index))
+                                  (and old (drover-session-engine-key old)
+                                       (gethash (drover-session-engine-key old)
+                                                (drover--index-engine-claims index)))
+                                  (and record (drover-session-engine-key record)
+                                       (gethash (drover-session-engine-key record)
+                                                (drover--index-engine-claims index)))))))
+      (dolist (claimant (delete-dups (cons key claimants)))
+        (let* ((claimant-record (gethash claimant records))
+               (parent (and claimant-record (drover--index-resolve index claimant claimant-record)))
+               (changed (drover--index-link index claimant parent)))
+          (when changed
+            (setq moved (append changed moved))
+            (when (and parent (drover--index-cycle-p index claimant))
+              (setf (drover--index-cyclic index) t))))))
+    (unless record
+      ;; Its subagents found it through their claims, now gone.
+      (remhash key (drover--index-children index)))
+    moved))
+
+(defun drover--index-build ()
+  "Return a new index of the sessions `drover-sessions' lists, before merging."
+  (let ((index (drover--index-make))
+        (listed nil))
+    (dolist (record (drover--unarchived (drover--live-sessions)))
+      (let ((key (drover-session-key record)))
+        ;; The first of several records of one key wins.
+        (unless (gethash key (drover--index-records index))
+          (puthash key (copy-sequence record) (drover--index-records index))
+          (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index))
+          (drover--index-file index key (gethash key (drover--index-records index)))
+          (push key listed))))
+    (dolist (key listed)
+      (drover--index-link index key (drover--index-resolve
+                                     index key (gethash key (drover--index-records index)))))
+    (setf (drover--index-cyclic index)
+          (seq-some (lambda (key) (drover--index-cycle-p index key)) listed))
+    index))
+
+(defun drover--index-relist (index backend)
+  "List the sessions of BACKEND anew into INDEX, as they differ from its records.
+Return (CHANGED . MOVED): the keys whose records changed, came or went,
+and those whose place among the trees changed.  The sessions of a
+backend no longer registered go."
+  (let* ((properties (alist-get backend drover--backends))
+         (fresh (make-hash-table :test #'equal))
+         (order nil)
+         (changed nil)
+         (moved nil))
+    (dolist (record (and properties (drover--unarchived (drover--backend-sessions properties))))
+      (let ((key (drover-session-key record)))
+        (unless (gethash key fresh)
+          (puthash key record fresh)
+          (push key order))))
+    (let ((gone nil))
+      (maphash (lambda (key _)
+                 (when (and (eq (car key) backend) (not (gethash key fresh)))
+                   (push key gone)))
+               (drover--index-records index))
+      (dolist (key gone)
+        (push key changed)
+        (setq moved (append (drover--index-put index key nil) moved))))
+    (dolist (key (nreverse order))
+      (let ((record (gethash key fresh)))
+        (unless (equal-including-properties record (gethash key (drover--index-records index)))
+          (push key changed)
+          (setq moved (append (drover--index-put index key (copy-sequence record)) moved)))))
+    (cons changed moved)))
+
+(defun drover--index-apply (keys backends)
+  "Bring the index up to date with the sessions KEYS and BACKENDS reported.
+Each key is looked up with its backend's :session, or its backend is
+listed anew when it has none, as BACKENDS are.  Return the keys whose
+records or places changed, or t when views must draw everything anew:
+without an index, or while records of several backends make one
+session, to merge, or while parents form a cycle."
+  (if (not drover--index)
+      t
+    (let ((index drover--index)
+          (relist (delete-dups (copy-sequence backends)))
+          (changed nil)
+          (moved nil))
+      (dolist (key (delete-dups (copy-sequence keys)))
+        (let* ((properties (alist-get (car key) drover--backends))
+               (function (plist-get properties :session)))
+          (if (and properties (not (functionp function)))
+              (progn (cl-pushnew (car key) relist)
+                     ;; Reported, it may have changed what its record
+                     ;; does not tell, as its buffer.
+                     (push key changed))
+            (pcase (if properties
+                       (condition-case err
+                           (list (drover--index-listed (funcall function (cdr key))))
+                         (error (message "Drover backend session: %S" err) 'failed))
+                     (list nil))
+              ('failed (cl-pushnew (car key) relist))
+              (`(,record)
+               (push key changed)
+               (setq moved (append (drover--index-put index key record) moved)))))))
+      (dolist (backend relist)
+        (pcase-let ((`(,relisted . ,relinked) (drover--index-relist index backend)))
+          (setq changed (append relisted changed)
+                moved (append relinked moved))))
+      (cond ((drover--index-cyclic index)
+             ;; A cycle is rare: lists rebuild the index rather than follow it.
+             (setq drover--index nil)
+             t)
+            ((> (drover--index-shared index) 0) t)
+            (t (delete-dups (append (nreverse changed) moved)))))))
+
+(defun drover-index ()
+  "Return the index of the live sessions, made if needed.
+Views use it to draw only what changed, as `drover-changed-sessions'
+tells it while `drover-changed-hook' runs."
+  (if drover--index
+      (drover--apply-changed)
+    (setq drover--index (drover--index-build)))
+  drover--index)
+
+(defun drover-index-incremental-p ()
+  "Return non-nil when views may follow the index session by session.
+They may not while records of several backends make one session, which
+`drover-sessions' merges by the buffers the user selected last, nor
+while parents form a cycle."
+  (let ((index (drover-index)))
+    (and (zerop (drover--index-shared index))
+         (not (drover--index-cyclic index)))))
+
+(defun drover-index-sessions ()
+  "Return the sessions `drover-sessions' would list, from the index.
+They come in the order the index first listed them, merged when
+records of several backends make one session."
+  (let* ((index (drover-index))
+         (serials (drover--index-serials index))
+         (sessions nil))
+    (maphash (lambda (_ record) (push record sessions)) (drover--index-records index))
+    (setq sessions (sort sessions :key (lambda (record) (gethash (drover-session-key record) serials))
+                         :in-place t))
+    (if (> (drover--index-shared index) 0)
+        (drover--merge-duplicates sessions)
+      sessions)))
+
+(defun drover-index-session (key)
+  "Return the record of the session whose key is KEY in the index, or nil."
+  (gethash key (drover--index-records (drover-index))))
+
+(defun drover-index-parent (key)
+  "Return the key of the parent of the session KEY in the index, or nil.
+It is nil for a session at the top of its tree, as `drover-tree' makes
+them: no parent, or one not listed."
+  (gethash key (drover--index-parents (drover-index))))
+
+(defun drover-index-children (key)
+  "Return the keys of the subagents of the session KEY in the index, unordered."
+  (gethash key (drover--index-children (drover-index))))
+
+(defun drover-index-root (key)
+  "Return the key of the session at the top of the tree of session KEY."
+  (let ((parents (drover--index-parents (drover-index)))
+        (parent nil))
+    (while (setq parent (gethash key parents))
+      (setq key parent))
+    key))
+
+(defun drover-index-tree-sessions (root)
+  "Return the records of the tree of session ROOT, in the order of the index.
+That is ROOT and every subagent below it, as `drover-tree' would nest
+them from the sessions `drover-index-sessions' lists."
+  (let* ((index (drover-index))
+         (children (drover--index-children index))
+         (records (drover--index-records index))
+         (serials (drover--index-serials index))
+         (keys nil)
+         (stack (list root)))
+    (while stack
+      (let ((key (pop stack)))
+        (push key keys)
+        (setq stack (append (gethash key children) stack))))
+    (mapcar (lambda (key) (gethash key records))
+            (sort keys :key (lambda (key) (gethash key serials)) :in-place t))))
+
+(defun drover-index-refresh ()
+  "List every session anew, and tell views what changed since the index knew.
+Backends report their changes, but some details change unreported, such
+as a branch: views refresh the index from time to time, and on demand.
+Run `drover-changed-hook' when something changed."
+  (when drover--index
+    (let ((changed nil)
+          (moved nil))
+      (dolist (backend (delete-dups (append (drover-backends)
+                                            (let ((backends nil))
+                                              (maphash (lambda (key _) (push (car key) backends))
+                                                       (drover--index-records drover--index))
+                                              backends))))
+        (pcase-let ((`(,relisted . ,relinked) (drover--index-relist drover--index backend)))
+          (setq changed (append relisted changed)
+                moved (append relinked moved))))
+      (when (or changed moved (drover--index-cyclic drover--index))
+        (let ((drover-changed-sessions
+               (cond ((drover--index-cyclic drover--index) (setq drover--index nil) t)
+                     ((> (drover--index-shared drover--index) 0) t)
+                     (t (delete-dups (append changed moved))))))
+          (run-hooks 'drover-changed-hook))))))
 
 ;;;; View settings
 
@@ -1283,11 +1686,12 @@ match and those above them, so a matching subagent shows under its
 parent.  Each tree ranks by what remains."
   (car (drover--filter-trees nodes (or filter drover-filter))))
 
-(defun drover--view-trees (sessions)
+(defun drover--view-trees (sessions &optional trees)
   "Return the trees of SESSIONS a view draws, and those it could draw.
 The value is (VISIBLE . KEPT): KEPT are the trees `drover-filter'
-leaves, VISIBLE the same without the subagents to hide."
-  (let ((trees (drover-tree sessions)))
+leaves, VISIBLE the same without the subagents to hide.  TREES are the
+trees of SESSIONS, when made already by `drover-tree'."
+  (let ((trees (or trees (drover-tree sessions))))
     (if (drover-filter-active-p)
         (pcase-let ((`(,kept . ,shown) (drover--filter-trees trees drover-filter)))
           (cons (drover-tree-visible
@@ -1332,16 +1736,23 @@ The trees are those of `drover-view-trees' for SESSIONS, grouped as
 and `drover-sort-descending' say (see `drover-sort-trees').  The value
 is a list of (GROUP . TREES): GROUP is (GROUPING . VALUE), or nil when
 sessions are not grouped.  It is nil when no tree is drawn."
+  (drover-view-arrange (drover-view-trees sessions) now))
+
+(defun drover-view-arrange (trees &optional now)
+  "Return TREES grouped and sorted as views draw them, a list of (GROUP . TREES).
+TREES are the trees of `drover-view-trees'; the value is that of
+`drover-view-groups', at NOW for groups of last activity."
   (mapcar (pcase-lambda (`(,value . ,nodes))
             (cons (and drover-group-by (cons drover-group-by value))
                   (drover-sort-trees nodes)))
-          (drover-group-trees (drover-view-trees sessions) drover-group-by now)))
+          (drover-group-trees trees drover-group-by now)))
 
 (defun drover-view-settings-changed ()
   "Redraw every session view at once, after view settings changed.
 Views redraw from `drover-changed-hook', which runs now."
   (when (timerp drover--change-timer)
     (cancel-timer drover--change-timer))
+  (setq drover--changed-all t)
   (drover--run-changed)
   (force-mode-line-update t))
 

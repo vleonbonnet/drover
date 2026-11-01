@@ -491,6 +491,18 @@ after a compaction until the next step measures it:
   "Return the sessions of the `opencode-state' registry."
   (mapcar #'drover-opencode--session (opencode-state-sessions)))
 
+(defun drover-opencode--session-by-id (id)
+  "Return the session ID of the `opencode-state' registry, or nil.
+It is nil for a session `opencode-state-sessions' leaves out: an
+archived one, unless its buffer keeps it in the registry.  The
+backend's :session, which drover calls for each session the registry
+reports changed: a registry of thousands of sessions is then not
+listed whole on every change."
+  (when-let* ((entry (opencode-state-get id))
+              ((or (not (plist-get entry :archived))
+                   (buffer-live-p (gethash id opencode-session-buffers)))))
+    (drover-opencode--session entry)))
+
 (defun drover-opencode--prefetch (sessions)
   "Ask the registry for the context size of SESSIONS, which a view shows.
 The registry knows the size of a session it saw take a step, but not of
@@ -956,6 +968,7 @@ unknown.  The backend's :options."
    :label "OpenCode"
    :start #'drover-opencode--start
    :sessions #'drover-opencode--sessions
+   :session #'drover-opencode--session-by-id
    :open #'drover-opencode--open
    :respond #'drover-opencode--respond
    :interrupt #'drover-opencode--interrupt

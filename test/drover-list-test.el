@@ -2014,7 +2014,8 @@ START and END bound its overlay."
       ;; The session changed: fetched again once some time passed, the
       ;; old recap shown meanwhile.
       (setf (drover-session-updated (drover-list-test-find "a")) (drover-list-test-ago 1))
-      (drover-list--render)
+      (drover-backend-changed 'fake "a")
+      (drover-changed-now)
       (should (equal drover-test-recap-calls '("a")))
       (should (timerp drover-list--recap-timer))
       (setq drover-list-test-clock (+ drover-test-now drover-list--recap-interval))
@@ -2524,6 +2525,281 @@ Redraws keep point on the session."
                                            (drover-list-test-id-at-point))
                            "s30"))
             (should (= (line-number-at-pos (window-start window)) start-line))))))))
+
+;;;; Drawing in place
+
+(defun drover-list-test-without-sections (string)
+  "Return STRING without its sections, which belong to one drawing, as text."
+  (let ((string (copy-sequence string)))
+    (remove-list-of-text-properties 0 (length string) '(magit-section) string)
+    string))
+
+(defun drover-list-test-sections ()
+  "Return the sections of the current list as data: type, value, positions, visibility."
+  (let ((sections nil))
+    (magit-map-sections
+     (lambda (section)
+       (push (list (oref section type) (oref section value)
+                   (drover-list-test--position (oref section start))
+                   (drover-list-test--position (oref section content))
+                   (drover-list-test--position (oref section end))
+                   (oref section hidden)
+                   (and (oref section washer) t))
+             sections)))
+    (nreverse sections)))
+
+(defun drover-list-test--position (position)
+  "Return POSITION, a marker or a number, as a number."
+  (if (markerp position) (marker-position position) position))
+
+(defun drover-list-test-fresh ()
+  "Return the list drawn anew, from nothing, in a buffer of its own.
+The value is (TEXT SECTIONS HEADER-LINE), TEXT without sections.  The
+buffer has the visibility of the list, and is killed."
+  (let* ((list (get-buffer drover-list-buffer-name))
+         (visibility (with-current-buffer list (drover-list--remember-visibility)))
+         (visibility (copy-hash-table (buffer-local-value 'drover-list--visibility list)))
+         (recaps (buffer-local-value 'drover-list--recaps list))
+         (fresh (generate-new-buffer "*drover sessions fresh*")))
+    (unwind-protect
+        (with-current-buffer fresh
+          (drover-list-mode)
+          (setq drover-list--visibility visibility
+                drover-list--recaps (and recaps (copy-hash-table recaps)))
+          (drover-list--render)
+          (list (drover-list-test-without-sections (buffer-string))
+                (drover-list-test-sections)
+                header-line-format))
+      (kill-buffer fresh))))
+
+(defun drover-list-test-drawn ()
+  "Return the list as `drover-list-test-fresh' returns a fresh one."
+  (with-current-buffer drover-list-buffer-name
+    (list (drover-list-test-without-sections (buffer-string))
+          (drover-list-test-sections)
+          header-line-format)))
+
+(defun drover-list-test-random-sessions (count)
+  "Return COUNT fake sessions of random statuses, places and times, a third subagents."
+  (let ((sessions nil))
+    (dotimes (index count)
+      (let* ((id (format "r%02d" index))
+             (parent (and (> index 3) (zerop (random 3))
+                          (drover-session-id (nth (random (length sessions)) sessions))))
+             (status (seq-random-elt '(waiting failed done retrying working idle idle idle))))
+        (push (drover-list-test-titled
+               id (concat "Session " id (make-string (random 40) ?x))
+               :parent parent :status status
+               :since (drover-list-test-ago (+ 1 (random 7200)))
+               :updated (drover-list-test-ago (+ 1 (random 7200)))
+               :created (drover-list-test-ago (+ 7200 (random 7200)))
+               :project (seq-random-elt '("alpha" "beta" nil))
+               :model (seq-random-elt '("Opus 5.5" "Sonnet" nil))
+               :effort (seq-random-elt '("high" nil))
+               :context-tokens (seq-random-elt '(nil 12000 180000))
+               :context-limit 200000
+               :requests (and (eq status 'waiting) '((:kind question :summary "Which file?"))))
+              sessions)))
+    (nreverse sessions)))
+
+(defun drover-list-test-mutate (sessions)
+  "Change SESSIONS at random as a backend would, and return what it reports.
+The value is (SESSIONS . IDS), IDS the sessions changed, came or went."
+  (let* ((index (random (length sessions)))
+         (old (nth index sessions))
+         (new (copy-sequence old))
+         (id (drover-session-id old)))
+    (pcase (random 9)
+      (0 (setf (drover-session-status new) (seq-random-elt '(waiting failed done retrying working idle))))
+      (1 (setf (drover-session-updated new) (drover-list-test-ago (random 7200))))
+      (2 (setf (drover-session-context-tokens new) (+ 1000 (random 199000))))
+      (3 (setf (drover-session-title new) (concat "Renamed " id (make-string (random 50) ?y))))
+      (4 (setf (drover-session-since new) (drover-list-test-ago (random 7200))))
+      (5 (setf (drover-session-project new) (seq-random-elt '("alpha" "beta" "gamma" nil))))
+      (6 (setf (drover-session-effort new) (seq-random-elt '("high" "low" nil))))
+      (7 (setq new nil))
+      (8 (setq new (drover-list-test-titled (format "n%03d" (random 1000)) "New subagent"
+                                            :parent id :status (seq-random-elt '(working idle done))
+                                            :updated (drover-list-test-ago (random 60)))
+               id (drover-session-id new))))
+    (cond ((null new) (cons (remq old sessions) (list id)))
+          ((equal (drover-session-id new) (drover-session-id old))
+           (cons (append (seq-take sessions index) (list new) (nthcdr (1+ index) sessions)) (list id)))
+          (t (cons (append sessions (list new)) (list id))))))
+
+(defmacro drover-list-test-counting-redraws (&rest body)
+  "Run BODY counting the drawings anew of the list, and return the count."
+  (declare (indent 0) (debug t))
+  `(let ((count 0)
+         (render (symbol-function 'drover-list--render)))
+     (cl-letf (((symbol-function 'drover-list--render)
+                (lambda () (cl-incf count) (funcall render))))
+       ,@body)
+     count))
+
+(ert-deftest drover-list-test-in-place-is-a-fresh-drawing ()
+  "Whatever sessions change, the list drawn in place is the list drawn anew.
+Its text and properties, its sections and their places, its header
+line, after each of many random changes, in every subagent mode, in
+columns and in two lines, grouped by status or by project, sorted by
+urgency or by activity, some sessions expanded."
+  (pcase-dolist (`(,mode ,width ,grouping ,sort)
+                 '((all 1000 status urgency) (active 300 status urgency)
+                   (none 1000 project updated) (all 1000 project urgency)))
+    (random (format "drover %s %s %s %s" mode width grouping sort))
+    (drover-list-test-with (drover-list-test-random-sessions 40)
+      (drover-list-test-with-font
+        (let ((drover-list-test-width width)
+              (drover-show-subagents mode)
+              (drover-group-by grouping)
+              (drover-sort-by sort)
+              (drover-list-collapsed-groups nil)
+              (in-place 0))
+          (drover-list-test-shown
+            (revert-buffer)
+            ;; Some sessions show their details.
+            (dolist (section (seq-take (seq-filter (lambda (section) (oref section hidden))
+                                                   (mapcan #'drover-list--session-sections
+                                                           (drover-list--containers)))
+                                       3))
+              (magit-section-show section))
+            (dotimes (step 30)
+              (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
+                (setq drover-test-sessions sessions)
+                (dolist (id ids)
+                  (drover-backend-changed 'fake id))
+                (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
+                  (cl-incf in-place))
+                (let ((drawn (drover-list-test-drawn))
+                      (fresh (drover-list-test-fresh)))
+                  (should (equal (list mode width step (nth 1 drawn) (nth 2 drawn))
+                                 (list mode width step (nth 1 fresh) (nth 2 fresh))))
+                  (should (equal-including-properties (car drawn) (car fresh))))))
+            ;; Many changes are drawn in place.
+            (should (> in-place 6))))))))
+
+(ert-deftest drover-list-test-in-place-changes ()
+  "A session changing within its place redraws its line alone, in place."
+  (drover-list-test-with (list (drover-list-test-titled "a" "Alpha" :status 'working
+                                                        :updated (drover-list-test-ago 10)
+                                                        :context-tokens 1000 :context-limit 200000)
+                               (drover-list-test-titled "b" "Bravo" :status 'working
+                                                        :updated (drover-list-test-ago 20)
+                                                        :context-tokens 1000 :context-limit 200000)
+                               (drover-list-test-titled "c" "Charlie" :status 'done
+                                                        :since (drover-list-test-ago 30)))
+    (drover-list-test-shown
+      (let ((root magit-root-section)
+            (section (drover-list-test-section "a")))
+        ;; As wide as it was, its context leaves the columns as they are.
+        (setf (drover-session-context-tokens (drover-list-test-find "a")) 5000)
+        (drover-backend-changed 'fake "a")
+        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+        (should (eq magit-root-section root))
+        (should (eq (drover-list-test-section "a") section))
+        (should (string-match-p "5k" (drover-list-test-heading "a")))
+        ;; Wider than any, it widens its column: the list is drawn anew.
+        (setf (drover-session-context-tokens (drover-list-test-find "a")) 50000)
+        (drover-backend-changed 'fake "a")
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
+        (should (string-match-p "50k" (drover-list-test-heading "a")))
+        ;; Its newer activity keeps it first among those working.
+        (setf (drover-session-updated (drover-list-test-find "a")) (drover-list-test-ago 1))
+        (drover-backend-changed 'fake "a")
+        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+        ;; Another passing it moves a line: the list is drawn anew.
+        (setf (drover-session-updated (drover-list-test-find "b")) (drover-list-test-ago 0))
+        (drover-backend-changed 'fake "b")
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
+        (should (equal (drover-list-test-order) '("c" "b" "a")))
+        ;; So does a session going to another group, coming or going.
+        (setf (drover-session-status (drover-list-test-find "a")) 'done)
+        (drover-backend-changed 'fake "a")
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
+        (should (equal (drover-list-test-groups) '((done "c" "a") (working "b"))))
+        (setq drover-test-sessions (append drover-test-sessions
+                                           (list (drover-test-session "d" :status 'idle))))
+        (drover-backend-changed 'fake "d")
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
+        (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "c"))
+                                               drover-test-sessions))
+        (drover-backend-changed 'fake "c")
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
+        (should (equal (drover-list-test-groups) '((done "a") (working "b") (idle "d"))))
+        ;; A hidden subagent changing redraws what tells of it: its
+        ;; parent's line, in place.
+        (setq drover-test-sessions (append drover-test-sessions
+                                           (list (drover-test-session "q" :parent "b" :status 'idle))))
+        (drover-backend-changed 'fake "q")
+        (drover-changed-now)
+        (setf (drover-session-status (drover-list-test-find "q")) 'working)
+        (let ((drover-show-subagents 'none))
+          (drover-list--render)
+          (drover-backend-changed 'fake "q")
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (string-match-p "\\*" (drover-list-test-heading "b"))))))))
+
+(ert-deftest drover-list-test-in-place-keeps-point ()
+  "Lines drawn in place keep point, the mark and window starts where they were."
+  (drover-list-test-with (cl-loop for i below 60
+                                  collect (drover-list-test-titled (format "s%02d" i) (format "Session %02d" i)
+                                                                   :status 'working
+                                                                   :updated (- 1000.0 i)))
+    (save-window-excursion
+      (let ((window (selected-window))
+            (transient-mark-mode t))
+        (set-window-buffer window buffer)
+        (drover-list-test-goto "s30")
+        (forward-char 5)
+        (set-window-point window (point))
+        (let* ((start (save-excursion (forward-line -5) (point)))
+               (start-line (line-number-at-pos start))
+               (column (- (point) (line-beginning-position))))
+          (set-window-start window start)
+          (push-mark (save-excursion (drover-list-test-goto "s32") (point)) t t)
+          ;; The line of point, and one above it, change in place.
+          (dolist (id '("s30" "s28"))
+            (setf (drover-session-title (drover-list-test-find id)) (concat "Sess " id))
+            (drover-backend-changed 'fake id))
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (string-match-p "Sess s30" (drover-list-test-heading "s30")))
+          (should (equal (drover-list-test-id-at-point) "s30"))
+          (should (= (- (point) (line-beginning-position)) column))
+          (should (= (window-point window) (point)))
+          (should (= (line-number-at-pos (window-start window)) start-line))
+          (should (region-active-p))
+          (should (equal (save-excursion (goto-char (mark)) (drover-list-test-id-at-point)) "s32")))))))
+
+(ert-deftest drover-list-test-in-place-details ()
+  "An expanded session changing has its details drawn again; a collapsed one draws them once expanded."
+  (drover-list-test-with (list (drover-test-session "a" :status 'working :updated (drover-list-test-ago 10))
+                               (drover-test-session "b" :status 'working :updated (drover-list-test-ago 20)))
+    (drover-list-test-shown
+      (drover-list-test-goto "a")
+      (magit-section-show (drover-list-test-section "a"))
+      (should (string-match-p "Prompt +Prompt of a" (drover-list-test-visible-text)))
+      (setq drover-test-recaps '(("a" :prompt "Second prompt") ("b" :prompt "Prompt b2"))
+            drover-list-test-clock (+ drover-list-test-clock drover-list--recap-interval))
+      (dolist (id '("a" "b"))
+        (cl-incf (drover-session-updated (drover-list-test-find id)) -1)
+        (drover-backend-changed 'fake id))
+      (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+      (should (string-match-p "Prompt +Second prompt" (drover-list-test-visible-text)))
+      (should-not (string-match-p "Prompt b2" (drover-list-test-visible-text)))
+      (magit-section-show (drover-list-test-section "b"))
+      (should (string-match-p "Prompt +Prompt b2" (drover-list-test-visible-text))))))
+
+(ert-deftest drover-list-test-in-place-follows-the-age-timer ()
+  "As time passes, the age timer draws the rows whose ages read otherwise, in place."
+  (drover-list-test-with (list (drover-test-session "a" :status 'working :updated (drover-list-test-ago 30))
+                               (drover-test-session "b" :status 'working :updated (drover-list-test-ago 7200)))
+    (drover-list-test-shown
+      (should (string-match-p "30s" (drover-list-test-heading "a")))
+      (setq drover-list-test-clock (+ drover-test-now 60))
+      (should (zerop (drover-list-test-counting-redraws (drover-list--age-tick))))
+      (should (string-match-p "1m" (drover-list-test-heading "a")))
+      (should (string-match-p "2h" (drover-list-test-heading "b")))
+      (should (equal-including-properties (car (drover-list-test-drawn)) (car (drover-list-test-fresh)))))))
 
 (ert-deftest drover-list-test-collapse-state-preserved ()
   (drover-list-test-with (drover-list-test-sample)
@@ -4242,7 +4518,9 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
           (when (eq (plist-get layout :layout) 'columns)
             (pcase-let ((`(,_ ,x ,column ,_) (car (last columns))))
               (let ((wanted (apply #'+ (mapcar (lambda (entry)
-                                                 (drover-list--natural (car entry) rows metrics))
+                                                 (drover-list--natural (car entry)
+                                                                       (drover-list--summarize rows)
+                                                                       metrics))
                                                columns))))
                 ;; Either every column has what it wants, or the line is full.
                 (should (or (<= (+ wanted (* 14 (1- (length columns))) 14) (plist-get metrics :width))

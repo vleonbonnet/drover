@@ -146,27 +146,100 @@ The room is measured once per font, see `drover-attention--pads'."
                    (puthash key (drover-attention--measure glyph face) drover-attention--pads))))
     (concat (drover-attention--space (car pads)) glyph (drover-attention--space (cdr pads)))))
 
+(defvar drover-attention--sessions nil
+  "The sessions that need the user, as a hash table by key, or nil.
+They are those of `drover-attention-sessions', kept current as
+sessions change: a change of one session looks at that session and
+those above it, not at every session.")
+
+(defun drover-attention--current ()
+  "Return the sessions that need the user, most urgent first."
+  (let ((sessions nil))
+    (when drover-attention--sessions
+      (maphash (lambda (_ session) (push session sessions)) drover-attention--sessions))
+    (drover-sort sessions)))
+
+(defun drover-attention--help-echo (&rest _)
+  "Return the tooltip of the mode line count, from the sessions needing you now.
+It is made when shown, however many the sessions are, rather than on
+every change."
+  (drover-attention--help (drover-attention--current)))
+
 (defun drover-attention--format (sessions)
   "Return the mode line count of SESSIONS, the sessions that need the user.
 It is their number after `drover-attention-glyph', both in the face of
 the most urgent status among them, or nil when SESSIONS is empty.  The
 glyph takes the room its ink does, so that it is never drawn over the
-count; the tooltip lists SESSIONS by status."
+count; the tooltip lists the sessions needing the user by status, when
+shown (see `drover-attention--help-echo')."
   (when sessions
     (let ((face (drover-status-face
                  (car (seq-sort-by #'drover-status-rank #'<
-                                   (mapcar #'drover-session-status sessions))))))
+                                   (delete-dups (mapcar #'drover-session-status sessions)))))))
       (concat " "
               (propertize
                (concat (drover-attention--glyph face)
                        (propertize (number-to-string (length sessions)) 'face face))
-               'help-echo (drover-attention--help sessions)
+               'help-echo #'drover-attention--help-echo
                'mouse-face 'mode-line-highlight
                'local-map drover-attention-mode-line-map)))))
 
-(defun drover-attention--update ()
-  "Compute the mode line counts again and redraw every mode line."
-  (setq drover-attention-mode-line (drover-attention--format (drover-attention-sessions)))
+(defun drover-attention--active-below-p (key)
+  "Return non-nil when session KEY or a subagent below it is mid-turn.
+That is `drover-tree-active-p' of its tree, through the index."
+  (let ((stack (list key))
+        (active nil))
+    (while (and stack (not active))
+      (let* ((key (pop stack))
+             (session (drover-index-session key)))
+        (if (and session (drover-session-active-p session))
+            (setq active t)
+          (setq stack (append (drover-index-children key) stack)))))
+    active))
+
+(defun drover-attention--needs-p (key session)
+  "Return non-nil when SESSION, of KEY in the index, needs the user and shows.
+See `drover-surfaced-sessions': it shows at the top of its tree, or as
+a subagent `drover-show-subagents' shows, or waits for the user."
+  (and (drover-session-attention-p session)
+       (or (eq (drover-session-status session) 'waiting)
+           (null (drover-index-parent key))
+           (pcase drover-show-subagents
+             ('all t)
+             ('none nil)
+             (_ (drover-attention--active-below-p key))))))
+
+(defun drover-attention--recount ()
+  "Find again every session that needs the user, from the index."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (session (seq-filter #'drover-session-attention-p
+                                 (drover-surfaced-sessions (drover-index-sessions))))
+      (puthash (drover-session-key session) session table))
+    (setq drover-attention--sessions table)))
+
+(defun drover-attention--follow (keys)
+  "Bring the sessions that need the user up to date with the change of KEYS.
+A session changing may change whether those above it show, so those
+are looked at again too."
+  (let ((seen (make-hash-table :test #'equal)))
+    (dolist (key keys)
+      (while (and key (not (gethash key seen)))
+        (puthash key t seen)
+        (let ((session (drover-index-session key)))
+          (if (and session (drover-attention--needs-p key session))
+              (puthash key session drover-attention--sessions)
+            (remhash key drover-attention--sessions)))
+        (setq key (drover-index-parent key))))))
+
+(defun drover-attention--update (&optional keys)
+  "Compute the mode line counts again and redraw every mode line.
+With KEYS, the sessions changed, look at those alone, and those above
+them, when the index can tell."
+  (if (and keys drover-attention--sessions (drover-index-incremental-p))
+      (drover-attention--follow keys)
+    (drover-attention--recount))
+  (setq drover-attention-mode-line
+        (drover-attention--format (hash-table-values drover-attention--sessions)))
   (force-mode-line-update t))
 
 (defun drover-attention--fonts-changed (&rest _)
@@ -176,8 +249,10 @@ For `after-setting-font-hook' and `enable-theme-functions'."
   (drover-attention--update))
 
 (defun drover-attention--changed ()
-  "Follow a change of sessions."
-  (drover-attention--update))
+  "Follow a change of sessions, those `drover-changed-sessions' tells."
+  (let ((changed drover-changed-sessions))
+    (cond ((eq changed t) (drover-attention--update))
+          (changed (drover-attention--update changed)))))
 
 (defun drover-attention--show ()
   "Add the counts to `global-mode-string'."
@@ -231,6 +306,7 @@ starts the backends."
     (remove-hook 'enable-theme-functions #'drover-attention--fonts-changed)
     (drover-attention--hide)
     (setq drover-attention-mode-line nil
+          drover-attention--sessions nil
           drover-attention--cycle nil)
     (force-mode-line-update t)))
 
