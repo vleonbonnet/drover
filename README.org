@@ -47,7 +47,7 @@ Subagent sessions show under their parent, their icon under its title. Which of 
 | =active= | the subagents in the middle of a turn: working, waiting to retry, or waiting for you (default) |
 | =none=   | no subagent                                                                                    |
 
-The list's header tells how many subagents are hidden, the mode, and what =U= does next, such as =Subagents: active  U hides all=; its mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count and =drover-next= count every session, subagents included, whatever the mode.
+The list's header tells how many subagents are hidden, such as =17 sessions, 89 subagents hidden=; the mode is the View menu's to show, and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count and =drover-next= count every session, subagents included, whatever the mode.
 
 Shown or not, a session whose subagents (at any depth) are active says so beside its status icon:
 
@@ -213,7 +213,9 @@ Add your own commands with =transient-append-suffix= and =transient-insert-suffi
 
 * The list
 
-=drover-list= shows every session in a Magit-style buffer, =*drover sessions*=, in an ordinary window; =drover-list-side= shows the same buffer in a side window beside your work (=drover-list-side-window-side=, =drover-list-side-window-width=), or hides it, and with a prefix argument moves between it and your work. Groups and sessions are sections: =TAB= folds a group, or shows the details of a session: its directory, agent, model and effort, provider, context, creation, prompt cache and every request it waits on. The Idle group starts collapsed (=drover-list-collapsed-groups=); what you collapse or expand survives refreshes.
+=drover-list= shows every session in a Magit-style buffer, =*drover sessions*=, in an ordinary window; =drover-list-side= shows the same buffer in a side window beside your work (=drover-list-side-window-side=, =drover-list-side-window-width=), or hides it, and with a prefix argument moves between it and your work. Groups and sessions are sections: =TAB= folds a group, or recaps the last turn of a session (see [[*The last turn][The last turn]]). The Idle group starts collapsed (=drover-list-collapsed-groups=); what you collapse or expand survives refreshes.
+
+The buffer shows sessions and how many need you, nothing else: which subagents show, the filter, the sort and the keys are the View menu's to show (=V=), and the mode line's to hint at, such as =by status filtered=. A filter leaving every session out says =No session matches the filter.=; the View menu tells which, and clears it.
 
 From the side window, =RET= and =o= open the session at point in the window where you work, =C-o= shows it there and leaves you in the list, and follow mode shows each session there as point reaches it. Wherever the list is, the session shown in the window beside it is highlighted.
 
@@ -244,6 +246,26 @@ Each icon takes the room its font draws it in, which may be wider than the room 
 
 The title of a session open in an Emacs buffer, such as an OpenCode session you visit, is in the face =drover-open-session=, which inherits =font-lock-keyword-face=, a light blue in many dark themes; over an idle session's dimming, it lends the dimming what it does not set. The list redraws as such buffers open and close.
 
+** The last turn
+
+Expanded, a session recaps its last turn under its title, in the list's font:
+
+#+begin_example
+  ✓  Fix the login redirect          plan  Opus 5.5 high   1h
+     Prompt   The login page sends users back to /home after they sign
+              in; keep the page they came from.
+     Reply    The redirect now keeps the page users came from, in a
+              signed parameter, …
+     Changes  +42 −7 in 3 files: auth/login.go, auth/redirect.go, …
+#+end_example
+
+- what the session waits for, every question or permission request in full, and the error that ended its turn or that it retries after;
+- the prompt it was given last, and the agent's newest reply since, a few lines each, wrapped to the window (=drover-list-recap-lines=): =v= previews the whole reply, =RET= opens the session;
+- the files the turn changed, with the lines added and removed when the backend knows them;
+- what the session's line leaves out at this width, such as the model, provider and context in a side window, and the directory of a session without a project.
+
+The recap is fetched as the session expands, without waiting: =loading…= shows meanwhile. It is kept until the session changes, fetched again then at most every two seconds while the session stays expanded, and anew by =g=. OpenCode sessions ask the service (=opencode-session-last-turn=), Claude Code terminals read their transcript, and agent-shell's shells tell what their events said since drover followed them.
+
 ** Prompt caches
 
 A session whose provider still holds its prompt cache, so that its next turn costs less if sent before the cache expires, shows how much of the cache's lifetime is left: in columns, as a short bar and the time left, such as =4m=, text you may copy; in two lines, as the background of its line (the face =drover-cache-bar=), filled from the left and shrinking as the cache runs out. Its tooltip tells how the cache stands as you read it, such as =Prompt cache: expires in 4m (1h window), 120k of 130k tokens cached=: the window is how long the provider keeps it after each turn, and the tokens what share of the conversation the next turn reads from it. An expired or unknown cache shows nothing. While the list is shown and a cache is live, a timer redraws the caches alone, every =drover-list-cache-interval= seconds.
@@ -257,11 +279,12 @@ The icons of Working and Retrying sessions are animated in the list: each shows 
 =V= opens the View menu, which stays open as you change its settings and redraws the list at once:
 
 #+begin_example
-  Sort by                    Group by   Filter by       Toggles
-   o urgency                  g status   p project any   F follow [off|on]
-   r [ascending|descending]              s status any    U subagents [all|active|none]
-                                         a agent any     O older [hidden|shown]
+  Sort by                    Group by   Filter by        Toggles
+   o urgency                  g status   p project any    F follow [off|on]
+   r [ascending|descending]              s status any     U subagents [all|active|none]
+                                         a agent any      O older [hidden|shown]
                                          m model any
+                                         v provider any
                                          d updated any
                                          f text any
                                          c clear
@@ -270,9 +293,9 @@ The icons of Working and Retrying sessions are animated in the list: each shows 
    -l location  -a agent  -m model  -r provider  -x context  -c created  -t age  -p cache  -s summary
 #+end_example
 
-- Sort by urgency, the most urgent first, by title, project, branch, agent, model, last activity or creation, either way. Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
-- Group by status, project, branch, agent, model, last activity (today, yesterday, this week, older), or nothing.
-- Filter by project, status, agent, model, last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. An empty answer removes a filter; =c= clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
+- Sort by urgency, the most urgent first, by title, project, branch, agent, model, provider, last activity or creation, either way. Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
+- Group by status, project, branch, agent, model, provider (each group named after the provider, behind its icon), last activity (today, yesterday, this week, older), or nothing.
+- Filter by project, status, agent, model, provider (by name, among the providers of the sessions drover knows), last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. An empty answer removes a filter; =c= clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
 - Toggle follow mode, which subagents show (all, the active ones, none: =U= cycles them, as in the list), and older sessions: those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session. They are fetched when shown, and again by =g=.
 - Choose the columns: each switch lets a field show, highlighted, or hides it, dimmed, at once; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
 
@@ -294,7 +317,7 @@ Two front ends may show one conversation, such as an OpenCode session open in op
 
 * Backends
 
-A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, mark seen, preview, start, rename, delete, fork, compact), fetch its older sessions (=:history=), and reports changes with =drover-backend-changed=. A record names its engine and the engine's identifier of the conversation (=engine=, =engine-id=), and may tell when the session's prompt cache expires, how long it lasts and how much of the prompt it holds (=cache-expires=, =cache-ttl=, =cache-tokens=, =cache-prompt-tokens=), and what the session runs: its model, compact, its effort and whether that is the model's default (=model=, =effort=, =effort-default=), its provider (=provider=, a compact display such as an icon, and =provider-name=), and its context (=context-tokens=, =context-limit=, =context-tier=). What costs a request to know, such as the context, a backend fetches when asked by =:prefetch=, for the sessions a view shows. For the prompt it may offer =:engines=, =:create=, =:check=, =:apply-options=, =:send=, =:options= and =:settable=; an engine registers with =drover-register-engine= and its models with =drover-register-model-source=. See =doc/design.org=.
+A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, mark seen, preview, start, rename, delete, fork, compact), fetch its older sessions (=:history=) and the recap of a session's last turn (=:recap=, see =drover-recap=), and reports changes with =drover-backend-changed=. A record names its engine and the engine's identifier of the conversation (=engine=, =engine-id=), and may tell when the session's prompt cache expires, how long it lasts and how much of the prompt it holds (=cache-expires=, =cache-ttl=, =cache-tokens=, =cache-prompt-tokens=), and what the session runs: its model, compact, its effort and whether that is the model's default (=model=, =effort=, =effort-default=), its provider (=provider=, a compact display such as an icon, and =provider-name=), and its context (=context-tokens=, =context-limit=, =context-tier=). What costs a request to know, such as the context, a backend fetches when asked by =:prefetch=, for the sessions a view shows. For the prompt it may offer =:engines=, =:create=, =:check=, =:apply-options=, =:send=, =:options= and =:settable=; an engine registers with =drover-register-engine= and its models with =drover-register-model-source=. See =doc/design.org=.
 
 A front end also fits its buffers into the keys. A list of sessions sets =drover-session-at-point-function= and turns on =drover-session-keys-mode=; a prompt buffer sets =drover-session-at-point-function= to its own session and declares the prompt actions it implements with =drover-prompt-define=, such as =(drover-prompt-define 'send #'my-send)=.
 
