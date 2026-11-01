@@ -167,7 +167,11 @@ It is the time from the last cache write to CACHE-EXPIRES.")
   (cache-tokens nil :documentation "Prompt tokens the prompt cache holds, or nil.")
   (cache-prompt-tokens nil :documentation "Prompt tokens of the last request, cached or not, or nil.
 CACHE-TOKENS of them are in the prompt cache: the share a next turn
-reads from the cache rather than sends anew."))
+reads from the cache rather than sends anew.")
+  (agent-display nil :documentation "The agent as lists show it, a string in its faces, or nil.
+Such as the name the agent's catalog gives it, in the agent's colour.
+Without it, lists show AGENT in a face of `drover-agent-faces'.  AGENT
+stays what views group, sort and filter by."))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -1321,18 +1325,25 @@ nothing.  THEN is called exactly once."
 (defvar drover--branches (make-hash-table :test #'equal)
   "Directories mapped to (BRANCH . TIME), as `drover-git-branch' read them.")
 
+;; Read from the file system: views ask as they draw, and must never
+;; wait for a Git process.
+
+(defun drover--git-directory (directory)
+  "Return the Git directory of the worktree of DIRECTORY, or nil outside Git."
+  (when-let* ((root (locate-dominating-file directory ".git"))
+              (dotgit (expand-file-name ".git" root)))
+    (if (file-directory-p dotgit)
+        dotgit
+      ;; A linked worktree's .git file names its Git directory.
+      (with-temp-buffer
+        (insert-file-contents dotgit)
+        (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
+          (expand-file-name (match-string 1) root))))))
+
 (defun drover--read-git-branch (directory)
   "Return the branch checked out in the worktree of DIRECTORY, or a short commit.
 Return nil outside Git.  HEAD is read directly, without running Git."
-  (when-let* ((root (locate-dominating-file directory ".git"))
-              (dotgit (expand-file-name ".git" root))
-              (gitdir (if (file-directory-p dotgit)
-                          dotgit
-                        ;; A linked worktree's .git file names its Git directory.
-                        (with-temp-buffer
-                          (insert-file-contents dotgit)
-                          (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
-                            (expand-file-name (match-string 1) root)))))
+  (when-let* ((gitdir (drover--git-directory directory))
               (head (expand-file-name "HEAD" gitdir))
               ((file-readable-p head)))
     (with-temp-buffer
@@ -1340,22 +1351,78 @@ Return nil outside Git.  HEAD is read directly, without running Git."
       (cond ((looking-at "ref: refs/heads/\\(.+?\\) *$") (match-string 1))
             ((looking-at "[0-9a-f]\\{7\\}") (match-string 0))))))
 
+(defun drover--read-git-default-branch (directory)
+  "Return the default branch of the repository of DIRECTORY, or nil when unknown.
+It is the branch the HEAD of the remote origin names, else that of
+another remote, as cloning or `git remote set-head' records it in the
+common Git directory, which linked worktrees share."
+  (when-let* ((gitdir (drover--git-directory directory))
+              (common (let ((file (expand-file-name "commondir" gitdir)))
+                        (if (file-readable-p file)
+                            (with-temp-buffer
+                              (insert-file-contents file)
+                              (expand-file-name (string-trim (buffer-string)) gitdir))
+                          gitdir)))
+              (remotes (expand-file-name "refs/remotes" common))
+              ((file-directory-p remotes)))
+    (seq-some (lambda (remote)
+                (let ((head (expand-file-name "HEAD" (expand-file-name remote remotes))))
+                  (when (file-readable-p head)
+                    (with-temp-buffer
+                      (insert-file-contents head)
+                      (and (looking-at "ref: refs/remotes/[^/\n]+/\\(.+?\\) *$")
+                           (match-string 1))))))
+              (cons "origin" (remove "origin" (directory-files remotes nil "\\`[^.]"))))))
+
+(defun drover--git-cached (table directory reader)
+  "Return what READER reads of DIRECTORY, kept in TABLE for a while.
+It is read again once `drover-branch-ttl' seconds passed.
+Nil for a nil or missing directory."
+  (when directory
+    (let* ((directory (file-name-as-directory (expand-file-name directory)))
+           (entry (gethash directory table))
+           (now (float-time)))
+      (if (and entry (< (- now (cdr entry)) drover-branch-ttl))
+          (car entry)
+        (let ((value (and (file-directory-p directory)
+                          (ignore-errors (funcall reader directory)))))
+          (puthash directory (cons value now) table)
+          value)))))
+
 (defun drover-git-branch (directory)
   "Return the Git branch of DIRECTORY, or a short commit when detached, or nil.
 It is read from HEAD without running Git, so backends may call it for
 every session they list: a directory's branch is kept for
 `drover-branch-ttl' seconds.  Nil outside Git and for a missing
 directory."
-  (when directory
-    (let* ((directory (file-name-as-directory (expand-file-name directory)))
-           (entry (gethash directory drover--branches))
-           (now (float-time)))
-      (if (and entry (< (- now (cdr entry)) drover-branch-ttl))
-          (car entry)
-        (let ((branch (and (file-directory-p directory)
-                           (ignore-errors (drover--read-git-branch directory)))))
-          (puthash directory (cons branch now) drover--branches)
-          branch)))))
+  (drover--git-cached drover--branches directory #'drover--read-git-branch))
+
+(defvar drover--default-branches (make-hash-table :test #'equal)
+  "Directories mapped to (BRANCH . TIME), as `drover-git-default-branch' read them.")
+
+(defun drover-git-default-branch (directory)
+  "Return the default branch of the repository of DIRECTORY, or nil when unknown.
+It is the branch the HEAD of a remote names, origin's first, read
+without running Git and kept `drover-branch-ttl' seconds, so that views
+may ask for it as they draw.  Nil outside Git, for a missing directory,
+and for a repository whose remotes record no HEAD."
+  (drover--git-cached drover--default-branches directory #'drover--read-git-default-branch))
+
+(defcustom drover-default-branches '("main" "master")
+  "Branches taken for the default one of a repository whose own is unknown.
+See `drover-session-default-branch-p'."
+  :type '(repeat string)
+  :group 'drover)
+
+(defun drover-session-default-branch-p (session)
+  "Return non-nil when SESSION works on the default branch of its repository.
+The default branch is the one a remote of the repository names (see
+`drover-git-default-branch'), else one of `drover-default-branches'.
+Nil for a session without a branch."
+  (when-let* ((branch (drover-session-branch session)))
+    (if-let* ((default (drover-git-default-branch (drover-session-directory session))))
+        (equal branch default)
+      (and (member branch drover-default-branches) t))))
 
 ;;;; The session at point
 
@@ -1382,13 +1449,106 @@ Drover's views are lists, and so are the buffers where
 `drover-session-keys-mode' is on, the lists of other front ends."
   (or drover-view-p (bound-and-true-p drover-session-keys-mode)))
 
-(defun drover--confirm (prompt session &optional strongly)
-  "Ask PROMPT about SESSION, signalling a `user-error' unless the user agrees.
-PROMPT is a format string for the session's title.  With STRONGLY, the
+(defvar-local drover-selected-sessions-function nil
+  "Function of no argument returning the sessions the user selected, or nil.
+A list of sessions sets it to return those its active region selects,
+as drover's list does; nil stands for no selection, and the commands
+acting on selected sessions then act on the session at point.")
+
+(defun drover-selected-sessions (&optional noerror)
+  "Return the sessions selected in the current buffer, else the session at point.
+The selection is what `drover-selected-sessions-function' returns, such
+as the sessions an active region selects in drover's list.  Without
+one, the value lists the session at point alone; without that either,
+signal a `user-error', or return nil when NOERROR is non-nil."
+  (or (and drover-selected-sessions-function
+           (funcall drover-selected-sessions-function))
+      (when-let* ((session (drover-session-at-point noerror)))
+        (list session))))
+
+(defun drover--running-p (session)
+  "Return non-nil when SESSION runs a turn, which can be interrupted."
+  (drover-session-active-p session))
+
+(defun drover--ended-unseen-p (session)
+  "Return non-nil when SESSION ended a turn the user did not see."
+  (memq (drover-session-status session) '(done failed)))
+
+(defun drover--selected-for (operation &optional applies doing)
+  "Return the sessions a command performing OPERATION acts on.
+They are the selected sessions (see `drover-selected-sessions'), as a
+session alone or a list of several.  Of several, only those whose
+backend implements OPERATION, a keyword, and for which APPLIES, a
+function of a session, returns non-nil, are kept: a region sweeping
+over sessions means those it applies to.  A session alone is kept
+whatever: its backend tells what it cannot do.  Signal a `user-error'
+when none of several is kept, DOING telling what none does, such as
+\"runs a turn\"."
+  (let ((sessions (drover-selected-sessions)))
+    (if (null (cdr sessions))
+        (car sessions)
+      (or (seq-filter (lambda (session)
+                        (and (drover-supports-p session operation)
+                             (or (null applies) (funcall applies session))))
+                      sessions)
+          (user-error "None of the %d selected sessions %s" (length sessions) doing)))))
+
+(defun drover--session-names (sessions)
+  "Return the titles of SESSIONS, each on one line and cut short, joined by commas."
+  (mapconcat (lambda (session)
+               (truncate-string-to-width
+                (replace-regexp-in-string "[\n\r\t]+" " "
+                                          (format "%s" (drover-session-display-title session)))
+                40 nil nil (truncate-string-ellipsis)))
+             sessions ", "))
+
+(defun drover--confirm (verb sessions &optional suffix strongly)
+  "Ask whether to VERB SESSIONS, signalling a `user-error' unless the user agrees.
+SESSIONS is a session or a list of them.  VERB is capitalized, such
+as \"Archive\", and SUFFIX, such as \" for good\", follows what it acts
+on: a session by its title, several by their count, then their
+titles, as \"Archive 3 sessions: A, B, C? \".  With STRONGLY, the
 answer is typed in full."
-  (unless (funcall (if strongly #'yes-or-no-p #'y-or-n-p)
-                   (format prompt (drover-session-display-title session)))
-    (user-error "Abort")))
+  (let ((sessions (if (drover-session-p sessions) (list sessions) sessions)))
+    (unless (funcall (if strongly #'yes-or-no-p #'y-or-n-p)
+                     (if (cdr sessions)
+                         (format "%s %d sessions%s: %s? " verb (length sessions) (or suffix "")
+                                 (drover--session-names sessions))
+                       (format "%s %s%s? " verb (drover-session-display-title (car sessions))
+                               (or suffix ""))))
+      (user-error "Abort"))))
+
+(defun drover--act (sessions operation done)
+  "Perform OPERATION, a keyword, on SESSIONS, a session or a list, and say so.
+DONE is a format string for what was done, given the title of a session
+or a count of sessions, such as \"Archived %s\".  The backend of a
+session alone failing signals, as `drover-backend-call' does; of a
+list, each session is acted on whatever happens to the others, and
+those failing are named after how many were acted on.  Acting on a list
+in a buffer selecting sessions ends its selection."
+  (if (drover-session-p sessions)
+      (progn
+        (drover-backend-call sessions operation)
+        (message done (drover-session-display-title sessions)))
+    (let ((failures nil))
+      (dolist (session sessions)
+        (condition-case err
+            (drover-backend-call session operation)
+          (error (push (format "%s (%s)" (drover--session-names (list session))
+                               (error-message-string err))
+                       failures))))
+      ;; Done with the selection, as Magit's commands are: kept, it
+      ;; would select other sessions once these went.
+      (when drover-selected-sessions-function
+        (deactivate-mark))
+      (let ((count (- (length sessions) (length failures))))
+        (message "%s%s"
+                 (format done (if (and (= count 1) (null failures))
+                                  (drover-session-display-title (car sessions))
+                                (format "%d session%s" count (if (= count 1) "" "s"))))
+                 (if failures
+                     (format "; failed for %s" (string-join (nreverse failures) ", "))
+                   ""))))))
 
 ;;;; Prompt actions
 
@@ -1568,27 +1728,31 @@ Interactively, SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
   (drover-backend-call session :respond))
 
-(defun drover-interrupt (session)
-  "Stop the running turn of SESSION.
-Interactively, SESSION is the session at point, after confirmation."
-  (interactive (let ((session (drover-session-at-point)))
-                 (drover--confirm "Interrupt %s? " session)
-                 (list session)))
-  (drover-backend-call session :interrupt))
+(defun drover-interrupt (sessions)
+  "Stop the running turns of SESSIONS, a session or a list of sessions.
+Interactively, SESSIONS are the selected sessions running a turn, or
+the session at point (see `drover--selected-for'), after confirmation."
+  (interactive (let ((sessions (drover--selected-for :interrupt #'drover--running-p "runs a turn")))
+                 (drover--confirm "Interrupt" sessions)
+                 (list sessions)))
+  (drover--act sessions :interrupt "Interrupted %s"))
 
-(defun drover-archive (session)
-  "Archive SESSION.
-Interactively, SESSION is the session at point, after confirmation."
-  (interactive (let ((session (drover-session-at-point)))
-                 (drover--confirm "Archive %s? " session)
-                 (list session)))
-  (drover-backend-call session :archive))
+(defun drover-archive (sessions)
+  "Archive SESSIONS, a session or a list of sessions.
+Interactively, SESSIONS are the selected sessions, or the session at
+point (see `drover--selected-for'), after confirmation."
+  (interactive (let ((sessions (drover--selected-for :archive nil "can be archived")))
+                 (drover--confirm "Archive" sessions)
+                 (list sessions)))
+  (drover--act sessions :archive "Archived %s"))
 
-(defun drover-mark-seen (session)
-  "Mark the ended turn of SESSION seen.
-Interactively, SESSION is the session at point."
-  (interactive (list (drover-session-at-point)))
-  (drover-backend-call session :mark-seen))
+(defun drover-mark-seen (sessions)
+  "Mark the ended turns of SESSIONS seen, a session or a list of sessions.
+Interactively, SESSIONS are the selected sessions whose turn ended
+unseen, or the session at point (see `drover--selected-for')."
+  (interactive (list (drover--selected-for :mark-seen #'drover--ended-unseen-p
+                                           "ended a turn unseen")))
+  (drover--act sessions :mark-seen "Marked %s seen"))
 
 (defun drover-preview (session callback)
   "Call CALLBACK with a string showing where SESSION stands, or nil."
@@ -1636,13 +1800,15 @@ its current title as the default."
                  (list session title)))
   (drover-backend-call session :rename title))
 
-(defun drover-delete (session)
-  "Delete SESSION for good.
-Interactively, SESSION is the session at point, after confirmation."
-  (interactive (let ((session (drover-session-at-point)))
-                 (drover--confirm "Delete %s for good? " session t)
-                 (list session)))
-  (drover-backend-call session :delete))
+(defun drover-delete (sessions)
+  "Delete SESSIONS for good, a session or a list of sessions.
+Interactively, SESSIONS are the selected sessions, or the session at
+point (see `drover--selected-for'), after a confirmation naming them,
+typed in full."
+  (interactive (let ((sessions (drover--selected-for :delete nil "can be deleted")))
+                 (drover--confirm "Delete" sessions " for good" t)
+                 (list sessions)))
+  (drover--act sessions :delete "Deleted %s"))
 
 (defun drover-fork (&optional session)
   "Fork SESSION whole into a new session, which its backend displays.

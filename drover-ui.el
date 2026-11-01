@@ -280,6 +280,90 @@ named after what they lack."
           (project project)
           (branch branch))))
 
+;;;; Agents
+
+(defconst drover--agent-faces
+  '(font-lock-keyword-face font-lock-type-face font-lock-constant-face font-lock-string-face)
+  "Faces agents take without `drover-agent-faces' nor opencode.el.
+The defaults of `opencode-mode-line-agent-faces'.")
+
+(defcustom drover-agent-faces nil
+  "Faces in which lists show agents whose backend gives no display of its own.
+An agent takes one by its name, always the same.  Nil takes those of
+opencode.el's mode line, `opencode-mode-line-agent-faces', once it is
+loaded, so that agents of every backend draw from one set of faces;
+OpenCode's own sessions show their agent as that mode line does."
+  :type '(choice (const :tag "Those of opencode.el's mode line" nil) (repeat face))
+  :group 'drover-faces)
+
+(defun drover-agent-face (name)
+  "Return the face of the agent NAME, among `drover-agent-faces'.
+It is chosen by a digest of NAME, so that an agent keeps its face from
+one session, one list and one Emacs to the next."
+  (let ((faces (or drover-agent-faces
+                   (bound-and-true-p opencode-mode-line-agent-faces)
+                   drover--agent-faces)))
+    (nth (mod (string-to-number (substring (md5 name) 0 6) 16) (length faces)) faces)))
+
+(defun drover--lock-faces (string)
+  "Return STRING with its `face' properties also as `font-lock-face'.
+Font lock, which runs in lists, replaces the first and keeps the
+second (see `drover-face')."
+  (let ((string (copy-sequence string))
+        (position 0))
+    (while (< position (length string))
+      (let ((next (next-single-property-change position 'face string (length string))))
+        (when-let* ((face (get-text-property position 'face string)))
+          (put-text-property position next 'font-lock-face face string))
+        (setq position next)))
+    string))
+
+(defun drover-agent-label (session)
+  "Return the agent of SESSION as lists show it, \"@\" and its name, or nil.
+The name is the backend's display of it (`drover-session-agent-display'),
+else the agent in bold in its face of `drover-agent-face'.  The \"@\"
+takes the face of the name, so that both read as one word, as an agent
+mentioned in a prompt is spelt."
+  (when-let* ((agent (drover-session-agent session))
+              ((not (string-empty-p agent))))
+    (let ((name (or (drover-session-agent-display session)
+                    (propertize agent 'face (list 'bold (drover-agent-face agent))
+                                'help-echo (concat "Agent: " agent)))))
+      (drover--lock-faces
+       (concat (propertize "@" 'face (get-text-property 0 'face name)
+                           'help-echo (get-text-property 0 'help-echo name))
+               name)))))
+
+;;;; Links
+
+(defvar org-store-link-plist)
+(declare-function org-store-link-functions "ol" ())
+(declare-function org-link-make-string "ol" (link &optional description))
+
+(defun drover-session-link (session)
+  "Return an Org link to SESSION, described by its title, or nil.
+It is the link `org-store-link' would store with SESSION at point in a
+list of sessions: drover defines no link type of its own, so the link
+comes from the first type whose store function knows the session at
+point (see `drover-session-at-point'), such as one of your own.  Nil
+when no type does."
+  (require 'ol)
+  (let ((drover-session-at-point-function (lambda () session))
+        (drover-selected-sessions-function nil)
+        (org-store-link-plist nil)
+        (stored nil))
+    (dolist (function (org-store-link-functions))
+      (unless stored
+        (when (with-demoted-errors "Drover session link: %S"
+                (condition-case nil
+                    (funcall function nil)
+                  ;; Store functions of Org before 9.7 take no argument.
+                  (wrong-number-of-arguments (funcall function))))
+          (setq stored (copy-sequence org-store-link-plist)))))
+    (when-let* ((link (plist-get stored :link)))
+      (org-link-make-string link (replace-regexp-in-string
+                                  "[\n\r\t]+" " " (format "%s" (drover-session-display-title session)))))))
+
 ;;;; Measuring text
 
 (defun drover-remap-default-face (face)

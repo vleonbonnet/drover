@@ -676,7 +676,7 @@ of sessions go after p, more prompt commands after O."
                                        " f text any" " c clear"
                                        " F follow [off|on]" " U subagents [all|active|none]"
                                        " O older [hidden|shown]"
-                                       " -l location" " -a agent" " -m model" " -r provider"
+                                       " -l location" " -b branch" " -a agent" " -m model" " -r provider"
                                        " -x context" " -c created"
                                        " -t age" " -p cache" " -s summary")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
@@ -731,7 +731,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
                      '(("Sort by" "o" "r") ("Group by" "g")
                        ("Filter by" "p" "s" "a" "m" "v" "d" "f" "c")
                        ("Toggles" "F" "U" "O")
-                       ("Columns" "- l" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
+                       ("Columns" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
       ;; One key, one setting.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
         (should (equal keys (delete-dups (copy-sequence keys)))))
@@ -950,7 +950,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 23))
+      (should (= (length suffixes) 24))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 

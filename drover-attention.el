@@ -380,10 +380,8 @@ only sessions whose status began at least that many hours ago."
      ((y-or-n-p (format "Mark %d session%s seen%s? "
                         (length sessions) (if (cdr sessions) "s" "")
                         (if hours (format " (ended %d hour%s ago or more)" hours (if (= hours 1) "" "s")) "")))
-      (dolist (session sessions)
-        (with-demoted-errors "Drover mark seen: %S"
-          (drover-mark-seen session)))
-      (message "Marked %d session%s seen" (length sessions) (if (cdr sessions) "s" ""))))))
+      ;; As a list: each is marked whatever happens to the others.
+      (drover-mark-seen sessions)))))
 
 (defun drover-attention-unload-function ()
   "Disable `drover-attention-mode' before unloading."

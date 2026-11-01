@@ -1551,6 +1551,131 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
             (should (equal (drover-git-branch main) "0123456"))))
       (delete-directory root t))))
 
+(ert-deftest drover-test-git-default-branch ()
+  "The default branch is the one a remote's HEAD names, read without Git."
+  (let* ((root (file-name-as-directory (make-temp-file "drover-git" t)))
+         (main (expand-file-name "main/" root))
+         (linked (expand-file-name "linked/" root))
+         (fork (expand-file-name "fork/" root))
+         (local (expand-file-name "local/" root))
+         (drover--default-branches (make-hash-table :test #'equal)))
+    (unwind-protect
+        (cl-flet ((write (file content)
+                    (make-directory (file-name-directory file) t)
+                    (with-temp-file file (insert content))))
+          (write (expand-file-name ".git/HEAD" main) "ref: refs/heads/main\n")
+          (write (expand-file-name ".git/refs/remotes/origin/HEAD" main)
+                 "ref: refs/remotes/origin/develop\n")
+          ;; A linked worktree finds it in the common Git directory.
+          (write (expand-file-name ".git/worktrees/linked/HEAD" main) "ref: refs/heads/side\n")
+          (write (expand-file-name ".git/worktrees/linked/commondir" main) "../..\n")
+          (write (expand-file-name ".git" linked)
+                 (concat "gitdir: " (expand-file-name ".git/worktrees/linked" main) "\n"))
+          ;; Without origin, another remote.
+          (write (expand-file-name ".git/HEAD" fork) "ref: refs/heads/trunk\n")
+          (write (expand-file-name ".git/refs/remotes/upstream/HEAD" fork)
+                 "ref: refs/remotes/upstream/trunk\n")
+          ;; A repository whose remotes record no HEAD.
+          (write (expand-file-name ".git/HEAD" local) "ref: refs/heads/master\n")
+          (make-directory (expand-file-name ".git/refs/remotes/origin" local) t)
+          (should (equal (drover-git-default-branch main) "develop"))
+          (should (equal (drover-git-default-branch linked) "develop"))
+          (should (equal (drover-git-default-branch fork) "trunk"))
+          (should-not (drover-git-default-branch local))
+          (should-not (drover-git-default-branch nil))
+          (should-not (drover-git-default-branch (expand-file-name "missing/" root)))
+          (cl-flet ((default-p (directory branch)
+                      (drover-session-default-branch-p
+                       (drover-session-create :directory directory :branch branch))))
+            ;; Known, the repository's default alone is.
+            (should (default-p main "develop"))
+            (should-not (default-p main "main"))
+            (should (default-p fork "trunk"))
+            ;; Unknown, main and master are.
+            (should (default-p local "master"))
+            (should (default-p local "main"))
+            (should-not (default-p local "feature"))
+            (should-not (default-p nil nil)))
+          ;; Kept for `drover-branch-ttl' seconds.
+          (write (expand-file-name ".git/refs/remotes/origin/HEAD" main)
+                 "ref: refs/remotes/origin/main\n")
+          (should (equal (drover-git-default-branch main) "develop"))
+          (let ((drover-branch-ttl 0))
+            (should (equal (drover-git-default-branch main) "main"))))
+      (delete-directory root t))))
+
+;;;; Several sessions at once
+
+(ert-deftest drover-test-selected-sessions ()
+  "The selection is what the buffer selects, else the session at point."
+  (drover-test-with-backend (list (drover-test-session "a") (drover-test-session "b"))
+    (drover-test-at-point "a"
+      (should (equal (drover-test-ids (drover-selected-sessions)) '("a")))
+      (setq-local drover-selected-sessions-function (lambda () drover-test-sessions))
+      (should (equal (drover-test-ids (drover-selected-sessions)) '("a" "b")))
+      (setq-local drover-selected-sessions-function #'ignore)
+      (should (equal (drover-test-ids (drover-selected-sessions)) '("a"))))
+    (with-temp-buffer
+      (should-not (drover-selected-sessions t))
+      (should-error (drover-selected-sessions) :type 'user-error))))
+
+(ert-deftest drover-test-commands-on-several ()
+  "Commands act on several sessions with one confirmation and one report."
+  (drover-test-with-backend (list (drover-test-session "a" :status 'done)
+                                  (drover-test-session "b" :status 'working)
+                                  (drover-test-session "c" :status 'idle))
+    (drover-register-backend 'bare :label "Bare"
+                             :sessions (lambda () (list (drover-session-create :backend 'bare :id "x"
+                                                                               :title "Bare x"
+                                                                               :status 'done))))
+    (drover-test-at-point "a"
+      (setq-local drover-selected-sessions-function
+                  (lambda () (append drover-test-sessions (drover--backend-sessions
+                                                            (alist-get 'bare drover--backends)))))
+      (let ((asked nil)
+            (messages nil))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t))
+                  ((symbol-function 'yes-or-no-p) (lambda (prompt) (push prompt asked) t))
+                  ((symbol-function 'message)
+                   (lambda (format-string &rest arguments)
+                     (push (apply #'format-message format-string arguments) messages))))
+          (dolist (command '(drover-mark-seen drover-interrupt drover-archive drover-delete))
+            (call-interactively command)))
+        ;; The bare backend acts on nothing: its session is left out.
+        (should (equal (reverse drover-test-calls)
+                       '((:mark-seen "a") (:interrupt "b")
+                         (:archive "a") (:archive "b") (:archive "c")
+                         (:delete "a") (:delete "b") (:delete "c"))))
+        (should (equal (reverse asked)
+                       '("Interrupt Session b? "
+                         "Archive 3 sessions: Session a, Session b, Session c? "
+                         "Delete 3 sessions for good: Session a, Session b, Session c? ")))
+        (should (equal (reverse messages)
+                       '("Marked Session a seen" "Interrupted Session b"
+                         "Archived 3 sessions" "Deleted 3 sessions")))))))
+
+(ert-deftest drover-test-several-titles-cut ()
+  "A confirmation names every session, each title on one line, cut short."
+  (let ((sessions (list (drover-session-create :title (concat "Long\n" (make-string 60 ?l)))
+                        (drover-session-create :id "id-only"))))
+    (should (equal (drover--session-names sessions)
+                   (concat "Long " (make-string 34 ?l) "…, id-only")))))
+
+(ert-deftest drover-test-act-on-a-session-signals ()
+  "A session alone whose backend fails signals, as before; listed, it is reported."
+  (drover-test-with-backend (list (drover-test-session "a"))
+    (drover-register-backend 'bare :label "Bare"
+                             :sessions (lambda () (list (drover-session-create :backend 'bare :id "x"))))
+    (let ((bare (drover-session-create :backend 'bare :id "x" :title "Bare x")))
+      (should-error (drover-archive bare) :type 'user-error)
+      (let ((messages nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest arguments)
+                     (push (apply #'format-message format-string arguments) messages))))
+          (drover-archive (list (drover-find 'fake "a") bare)))
+        (should (equal messages '("Archived 1 session; failed for Bare x (Bare sessions do not support archive)")))
+        (should (equal drover-test-calls '((:archive "a"))))))))
+
 ;;;; The default prompt buffer
 
 (ert-deftest drover-test-default-prompt-buffer-function ()

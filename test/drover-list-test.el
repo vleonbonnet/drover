@@ -373,9 +373,8 @@ current buffer again afterwards."
       (should (equal (drover-list-test-line) "No project (1)  ✓1"))
       (should (string-prefix-p "  ! Session wait2" (drover-list-test-heading "wait2")))
       (should (string-prefix-p "  · Session idle" (drover-list-test-heading "idle")))
-      ;; The heading names the project: lines keep only the branch.
-      (should (string-match-p "Session fail +main +5s" (drover-list-test-heading "fail")))
-      (should-not (string-match-p "p:main" (drover-list-test-heading "fail")))
+      ;; The heading names the project, and main is the default branch.
+      (should (string-match-p "Session fail +5s\\'" (drover-list-test-heading "fail")))
       (drover-set-group-by 'status)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(waiting failed done working idle))))))
 
@@ -766,10 +765,11 @@ current buffer again afterwards."
     (should (equal (drover-list-test-groups) '(("p" "root" "elsewhere" "here"))))
     (drover-list-test-goto-group "p")
     (should (equal (drover-list-test-line) "p (3)  !2"))
-    (should (string-match-p "Session root +main\\'" (drover-list-test-heading "root")))
+    ;; The group names the project, and main is the default branch.
+    (should (string-match-p "Session root\\'" (drover-list-test-heading "root")))
     (should (string-match-p "Session here +feat +10s\\'" (drover-list-test-heading "here")))
     ;; Another project than the group's is named.
-    (should (string-match-p "Session elsewhere +q:dev +20s\\'" (drover-list-test-heading "elsewhere")))))
+    (should (string-match-p "Session elsewhere +q +dev +20s\\'" (drover-list-test-heading "elsewhere")))))
 
 ;;;; Lines
 
@@ -778,14 +778,15 @@ current buffer again afterwards."
       (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 300)
                                  :project "drover" :branch "main"
                                  :requests '((:kind permission :summary "bash: make"))))
-    (should (equal (drover-list-test-heading "s") "  ! Session s  drover:main   5m  permit: bash: make"))
+    ;; On the default branch, which no column repeats.
+    (should (equal (drover-list-test-heading "s") "  ! Session s  drover    5m  permit: bash: make"))
     (drover-list-test-goto "s")
     ;; Past the invisible character beginning the line, and its aligned space.
     (let ((glyph (+ 2 (point))))
       (should (get-text-property (point) 'invisible))
       (should (equal (buffer-substring-no-properties glyph (1+ glyph)) "!"))
       (should (eq (get-text-property glyph 'font-lock-face) 'drover-waiting)))
-    (search-forward "drover:main")
+    (search-forward "drover")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
     (search-forward "5m")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
@@ -840,8 +841,9 @@ current buffer again afterwards."
                                      :detail "Thinking"))
     (let ((a (drover-list-test-heading "a"))
           (b (drover-list-test-heading "b")))
-      (should (string-prefix-p "  ◐ Short           p:b" a))
-      (should (= (string-search "p:b" a) (string-search "project" b)))
+      ;; The project, then the branch, in a column of its own.
+      (should (string-prefix-p "  ◐ Short           p        b  " a))
+      (should (= (string-search " p " a) (1- (string-search "project" b))))
       (should (= (string-search "5s" a) (string-search "2h" b)))
       (should (string-suffix-p "5s" a))
       (should (string-suffix-p "2h  Thinking" b)))))
@@ -874,7 +876,7 @@ current buffer again afterwards."
         (should (= (car (nth 1 (assoc "c" cells))) (drover-list-test-title-x "b" "iiiiiiii")))
         ;; Locations begin at one position, past the widest title.
         (should (= (drover-list-test-cell-at "a" "iii") location))
-        (should (= (drover-list-test-cell-at "b" "mm:x") location))
+        (should (= (drover-list-test-cell-at "b" "mm") location))
         (should (= (drover-list-test-cell-at "c" "p") location))
         ;; Ages end at one position.
         (let ((ends (mapcar (lambda (entry)
@@ -965,15 +967,17 @@ provider, its context a quarter full; B asks a question."
 (ert-deftest drover-list-test-fields-by-width ()
   "The wider the window, the more fields show, by priority.
 With the fake font, an x is 7 pixels: the margin and the room before
-titles take 25 pixels, and each field its :min characters and a gap of
-14 pixels, but the title; Magit's ellipsis takes 7 more."
+titles take 25 pixels, and each field its :min characters, or the room
+of its text when it is never cut, and a gap of 14 pixels, but the
+title; Magit's ellipsis takes 7 more."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-with-font
-      ;; Title 109, age 144, cache 221, summary 319, model 389, context
-      ;; 466, provider 494, location 578, agent 627, created 662.
-      (should (equal (drover-list-test-layout-at 670)
+      ;; Title 109, age 144, cache 223 (its bar, a space and 59m, 65
+      ;; pixels, past its 9 characters), summary 321, model 391, context
+      ;; 468, provider 496, location 580, agent 629, created 664.
+      (should (equal (drover-list-test-layout-at 680)
                      '(columns title location agent model provider context created age cache summary)))
-      (should (equal (drover-list-test-layout-at 660)
+      (should (equal (drover-list-test-layout-at 670)
                      '(columns title location agent model provider context age cache summary)))
       (should (equal (drover-list-test-layout-at 600)
                      '(columns title location model provider context age cache summary)))
@@ -1028,11 +1032,12 @@ titles take 25 pixels, and each field its :min characters and a gap of
     (drover-list-test-with-font
       (let ((drover-list-fields (append '((model :priority 1 :min 4))
                                         (assq-delete-all 'model (copy-alist drover-list-fields)))))
-        ;; The model now comes second, and first in the line.
-        ;; 109 + 42 + 35 + 77 + 98 = 361.
-        (should (equal (drover-list-test-layout-at 370) '(columns model title age cache summary)))
-        (should (equal (drover-list-test-layout-at 360) '(narrow title age cache summary)))
-        (drover-list-test-layout-at 370)
+        ;; The model now comes second, and first in the line.  It needs
+        ;; the room of an ellipsis and its effort, "… high", 35 pixels,
+        ;; more than its :min: 109 + 49 + 35 + 79 + 98 = 370.
+        (should (equal (drover-list-test-layout-at 380) '(columns model title age cache summary)))
+        (should (equal (drover-list-test-layout-at 370) '(narrow title age cache summary)))
+        (drover-list-test-layout-at 380)
         (let ((cells (drover-list-test-cells "a")))
           (should (equal (car cells) (cons 14 "opus high")))
           ;; The title's column follows, past the widest model and a gap.
@@ -1349,8 +1354,8 @@ and :help its tooltip."
                   (end (name) (+ (car (rassoc name names)) (drover-list-test-fake-width name))))
           ;; Names begin where their columns do...
           (should (= (at "Session") (car (car (drover-list-test-cells "a")))))
-          (should (= (at "Project") (drover-list-test-cell-at "a" "drover:main")))
-          (should (= (at "Agent") (drover-list-test-cell-at "a" "build")))
+          (should (= (at "Project") (drover-list-test-cell-at "a" "drover")))
+          (should (= (at "Agent") (drover-list-test-cell-at "a" "@build")))
           (should (= (at "Model") (drover-list-test-cell-at "a" "opus high")))
           (should (= (at "Provider") (drover-list-test-cell-at "a" "P")))
           (should (= (at "Context") (plist-get (drover-list-test-context-cell "a") :x)))
@@ -1800,10 +1805,12 @@ START and END bound its overlay."
                       "    Question    Which branch?"
                       "    Prompt      Prompt of s"
                       "    Reply       Reply of s"
-                      "    Directory   ~/src/drover"))
+                      "    Directory   ~/src/drover"
+                      ;; The line leaves out the default branch.
+                      "    Branch      main"))
         (should (string-match-p (concat "^" (regexp-quote line) "$") text)))
       ;; Not what the line shows already.
-      (dolist (label '("Status" "Branch" "Agent" "Model" "Created" "Backend" "Detail"))
+      (dolist (label '("Status" "Agent" "Model" "Created" "Backend" "Detail"))
         (should-not (string-match-p (concat "^ +" label " ") text))))
     (search-forward "Permission")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
@@ -1841,8 +1848,9 @@ START and END bound its overlay."
     (revert-buffer)
     (let ((text (drover-list-test-visible-text)))
       (dolist (line '("    Prompt    Prompt of s"
-                      "    Project   drover:main"
-                      "    Agent     build"
+                      "    Project   drover"
+                      "    Branch    main"
+                      "    Agent     @build"
                       "    Model     Opus high"
                       "    Provider  Acme"
                       "    Context   50k of 200k tokens (25%)"
@@ -2129,13 +2137,15 @@ body beginning with an aligned space would push the next line right."
     (let ((parent (keymap-parent drover-list-mode-map)))
       (should (eq (nth 1 parent) drover-session-map))
       (should (eq (nth 2 parent) magit-section-mode-map)))
-    ;; RET, C-o and q are the only keys of the list's own.
+    ;; RET, C-o and q are the only keys of the list's own, and copying
+    ;; copies sessions, wherever the user binds it.
     (let ((own nil))
       (map-keymap (lambda (event _) (push (key-description (vector event)) own))
                   (let ((map (copy-keymap drover-list-mode-map)))
                     (set-keymap-parent map nil)
                     map))
-      (should (seq-set-equal-p own '("RET" "C-o" "q"))))
+      (should (seq-set-equal-p own '("RET" "C-o" "q" "<remap>"))))
+    (should (eq (key-binding (kbd "M-w")) #'drover-list-copy))
     (drover-list-test-goto-group 'working)
     (should (eq (key-binding (kbd "RET")) #'magit-section-toggle))))
 
@@ -3872,6 +3882,610 @@ window of the code buffer, selected, `side' the list's, its point on
         (should-not drover-list-hidden-fields)
         (should (memq field drover-list--fields))
         (should-not transient--prefix)))))
+
+;;;; Short columns
+
+(defmacro drover-list-test-messages (&rest body)
+  "Run BODY and return the messages it showed in the echo area, in order."
+  (declare (indent 0) (debug t))
+  `(let ((messages nil))
+     (cl-letf (((symbol-function 'message)
+                (lambda (format-string &rest arguments)
+                  ;; The command loop clears the echo area, with "".
+                  (when (and format-string (not (equal format-string "")))
+                    (push (apply #'format-message format-string arguments) messages)))))
+       ,@body)
+     (nreverse messages)))
+
+(defun drover-list-test-ages-sample ()
+  "Return the sessions of a wide row whose ages were cut while it had room.
+One works, aged 11m, created 25m ago, on a model and effort, its prompt
+cache live; the other asks a long question, which the summary shows."
+  (list (drover-list-test-titled "a" "drover list: provider, expansion" :status 'working
+                                 :project ".emacs.d" :branch "main" :agent "general"
+                                 :model "Opus 5.5" :effort "high"
+                                 :created (drover-list-test-ago 1500)
+                                 :updated (drover-list-test-ago 700)
+                                 :cache-expires (+ drover-test-now 240) :cache-ttl 300)
+        (drover-list-test-titled "b" "Bravo" :status 'waiting :since (drover-list-test-ago 60)
+                                 :created (drover-list-test-ago 1500)
+                                 :requests '((:kind question :summary "Which of the many files should I edit before the tests run, and in which order would you like them changed?")))))
+
+(ert-deftest drover-list-test-short-columns-never-cut ()
+  "Ages are never cut while the summary or the title has room to give.
+The summary of b wants more than the line has: before, every column
+without a :max gave up room in proportion, the ages too, and at least a
+pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
+:min, 21, though the line had room."
+  (drover-list-test-with (drover-list-test-ages-sample)
+    (drover-list-test-with-font
+      (dolist (width '(1100 1000 900 800 700 600 560))
+        (drover-list-test-layout-at width)
+        (should (memq 'age drover-list--fields))
+        (let ((cells (mapcar #'cdr (drover-list-test-cells "a"))))
+          (should (member "11m" cells))
+          (when (memq 'created drover-list--fields)
+            (should (member "25m" cells)))
+          ;; The model may give way, its effort never.
+          (should (seq-find (lambda (cell) (string-suffix-p " high" cell)) cells))
+          ;; The title gives way before it.
+          (when (>= width 700)
+            (should (member "Opus 5.5 high" cells)))
+          (should-not (seq-find (lambda (cell) (string-match-p "\\`[0-9]+…\\'" cell)) cells)))
+        ;; The summary, last, ends within the line.
+        (let ((last (car (last (drover-list-test-cells "b")))))
+          (should (<= (+ (car last) (drover-list-test-fake-width (cdr last)))
+                      (- width 7)))))
+      ;; Narrower, the title gives way, the ages and effort stay whole.
+      (drover-list-test-layout-at 520)
+      (let ((cells (mapcar #'cdr (drover-list-test-cells "a"))))
+        (should (member "11m" cells))
+        (should (seq-find (lambda (cell) (string-match-p "provider…\\|exp…\\|…\\'" cell)) cells))))))
+
+(ert-deftest drover-list-test-columns-give-exactly ()
+  "Columns give up the room missing, no more: no column is narrowed while the line has room."
+  (drover-list-test-with (drover-list-test-ages-sample)
+    (drover-list-test-with-font
+      (dolist (width (number-sequence 500 1200 37))
+        (let* ((drover-list-test-width width)
+               (metrics (drover-list--metrics drover-test-now))
+               (rows (mapcan (lambda (group) (drover-list--tree-rows (cdr group) (car group) metrics))
+                             (drover-view-groups (drover-known-sessions) drover-test-now)))
+               (layout (drover-list--layout rows metrics))
+               (columns (plist-get layout :columns)))
+          (when (eq (plist-get layout :layout) 'columns)
+            (pcase-let ((`(,_ ,x ,column ,_) (car (last columns))))
+              (let ((wanted (apply #'+ (mapcar (lambda (entry)
+                                                 (drover-list--natural (car entry) rows metrics))
+                                               columns))))
+                ;; Either every column has what it wants, or the line is full.
+                (should (or (<= (+ wanted (* 14 (1- (length columns))) 14) (plist-get metrics :width))
+                            (= (+ x column) (plist-get metrics :width))))))))))))
+
+(ert-deftest drover-list-test-give-never-takes-more ()
+  "Room given up is shared in proportion, its rounding never taking a pixel too many."
+  (let ((widths (vector 26 1000 70))
+        (floors (vector 21 84 70)))
+    (should (= (drover-list--give widths floors '(0 1 2) 10) 0))
+    (should (= (apply #'+ (append widths nil)) (- 1096 10)))
+    ;; The age gives 10 × 5 / 921 pixels, which rounds to none.
+    (should (= (aref widths 0) 26))
+    (should (equal (append floors nil) '(21 84 70))))
+  (let ((widths (vector 30 30 30))
+        (floors (vector 0 0 0)))
+    ;; Two pixels among three equal columns: two give one each.
+    (should (= (drover-list--give widths floors '(0 1 2) 2) 0))
+    (should (equal (sort (append widths nil) #'<) '(29 29 30))))
+  (let ((widths (vector 30 30))
+        (floors (vector 25 28)))
+    ;; More missing than they can give: they give all, the rest remains.
+    (should (= (drover-list--give widths floors '(0 1) 10) 3))
+    (should (equal (append widths nil) '(25 28)))))
+
+(ert-deftest drover-list-test-model-keeps-its-effort ()
+  "A model's column too narrow cuts the model's name and keeps its effort."
+  (drover-list-test-with-font
+    (let* ((text (drover-list--model-text
+                  (drover-session-create :model "Claude Opus 5.5" :effort "high")))
+           (cut (drover-list--truncate text 70)))
+      (should (string-suffix-p "… high" cut))
+      (should (<= (drover-list-test-fake-width cut) 70))
+      (should (eq (get-text-property (1- (length cut)) 'font-lock-face cut) 'drover-prompt-picked))
+      ;; Too narrow even for that: cut as any text.
+      (should (equal (drover-list--truncate text 21) "Cl…"))
+      ;; An effort alone is cut as any text.
+      (should (equal (drover-list--truncate (drover-list--model-text
+                                             (drover-session-create :effort "medium"))
+                                            30)
+                     "me…")))))
+
+;;;; The branch column
+
+(ert-deftest drover-list-test-branch-column ()
+  "The branch has a column of its own, for the branches that are not the default one."
+  (drover-list-test-with
+      (list (drover-test-session "m" :status 'working :project "p" :branch "main"
+                                 :updated (drover-list-test-ago 10))
+            (drover-test-session "f" :status 'working :project "p" :branch "feature/x"
+                                 :updated (drover-list-test-ago 20))
+            (drover-test-session "o" :status 'working :project "q" :branch "master"
+                                 :updated (drover-list-test-ago 30)))
+    (should (memq 'branch drover-list--fields))
+    (should (string-match-p "Session m +p +10s\\'" (drover-list-test-heading "m")))
+    (should (string-match-p "Session f +p +feature/x +20s\\'" (drover-list-test-heading "f")))
+    (should (string-match-p "Session o +q +30s\\'" (drover-list-test-heading "o")))
+    (should (= (drover-list-test-cell-at "f" "feature/x")
+               (car (rassoc "Branch" (drover-list-test-header-cells)))))
+    (save-excursion
+      (drover-list-test-goto "f")
+      (search-forward "feature/x")
+      (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim)))
+    ;; On default branches alone, the column takes no room.
+    (setf (drover-session-branch (drover-list-test-find "f")) "main")
+    (revert-buffer)
+    (should-not (memq 'branch drover-list--fields))
+    (should-not (string-search "Branch" header-line-format))
+    ;; Grouped by branch, the group names it.
+    (setf (drover-session-branch (drover-list-test-find "f")) "feature/x")
+    (drover-list-test-shown
+      (drover-set-group-by 'branch)
+      (should (string-match-p "Session f +p +20s\\'" (drover-list-test-heading "f"))))))
+
+(ert-deftest drover-list-test-branch-default-from-the-repository ()
+  "A repository naming its default branch shows main when it is not that one."
+  (let* ((root (make-temp-file "drover-repo" t))
+         (remote (expand-file-name ".git/refs/remotes/origin" root)))
+    (unwind-protect
+        (progn
+          (make-directory remote t)
+          (with-temp-file (expand-file-name ".git/HEAD" root) (insert "ref: refs/heads/main\n"))
+          (with-temp-file (expand-file-name "HEAD" remote) (insert "ref: refs/remotes/origin/develop\n"))
+          (let ((drover--default-branches (make-hash-table :test #'equal)))
+            (drover-list-test-with
+                (list (drover-test-session "m" :status 'working :project "p" :branch "main"
+                                           :directory root :updated (drover-list-test-ago 10))
+                      (drover-test-session "d" :status 'working :project "p" :branch "develop"
+                                           :directory root :updated (drover-list-test-ago 20)))
+              (should (string-match-p "Session m +p +main +10s\\'" (drover-list-test-heading "m")))
+              (should (string-match-p "Session d +p +20s\\'" (drover-list-test-heading "d"))))))
+      (delete-directory root t))))
+
+(ert-deftest drover-list-test-branch-in-view-menu ()
+  "The View menu's Columns switch the branch's column."
+  (drover-list-test-with
+      (list (drover-test-session "f" :status 'working :project "p" :branch "feature"
+                                 :updated (drover-list-test-ago 20)))
+    (drover-list-test-shown
+      (revert-buffer)
+      (should (memq 'branch drover-list--fields))
+      (drover-list-test-type "V - b C-g")
+      (should (equal drover-list-hidden-fields '(branch)))
+      (should-not (memq 'branch drover-list--fields))
+      (should-not (string-search "feature" (drover-list-test-heading "f"))))))
+
+;;;; The agent column
+
+(ert-deftest drover-list-test-agent-column ()
+  "The agent shows as @name, bold, in its face, the @ too; a backend may draw it itself."
+  (drover-list-test-with
+      (list (drover-test-session "b" :status 'working :agent "build" :updated (drover-list-test-ago 10))
+            (drover-test-session "c" :status 'working :agent "Coder" :updated (drover-list-test-ago 20)
+                                 :agent-display (propertize "Code" 'face '(bold (:foreground "#ff8800"))
+                                                            'help-echo "Agent: Code")))
+    (let ((drover-agent-faces '(font-lock-keyword-face font-lock-type-face)))
+      (revert-buffer)
+      (should (string-match-p "Session b +@build +10s\\'" (drover-list-test-heading "b")))
+      (should (string-match-p "Session c +@Code +20s\\'" (drover-list-test-heading "c")))
+      (save-excursion
+        (drover-list-test-goto "b")
+        (search-forward "@build")
+        (let ((face (get-text-property (match-beginning 0) 'font-lock-face)))
+          (should (equal face (list 'bold (drover-agent-face "build"))))
+          (should (memq (cadr face) drover-agent-faces))
+          ;; The @ and the name read as one word.
+          (should (equal (get-text-property (1+ (match-beginning 0)) 'font-lock-face) face))
+          (should (equal (get-text-property (match-beginning 0) 'help-echo) "Agent: build"))))
+      (save-excursion
+        (drover-list-test-goto "c")
+        (search-forward "@Code")
+        (should (equal (get-text-property (match-beginning 0) 'font-lock-face)
+                       '(bold (:foreground "#ff8800"))))
+        (should (equal (get-text-property (1- (point)) 'help-echo) "Agent: Code")))
+      ;; Grouped and filtered by the agent's name, not its display.
+      (should (equal (drover-session-agent (drover-list-test-find "c")) "Coder")))))
+
+(ert-deftest drover-list-test-agent-width-counts-its-face ()
+  "The agent's column is as wide as @name drawn bold."
+  (drover-list-test-with
+      (list (drover-test-session "b" :status 'working :agent "build" :updated (drover-list-test-ago 10)
+                                 :detail "Busy"))
+    ;; A font whose bold characters take one pixel more.
+    (cl-letf (((symbol-function 'drover-list--pixel-width)
+               (lambda (string)
+                 (let ((width (drover-list-test-fake-width string)))
+                   (dotimes (index (length string) width)
+                     (let ((face (get-text-property index 'face string)))
+                       (when (or (eq face 'bold) (memq 'bold (ensure-list face)))
+                         (setq width (1+ width))))))))
+              ((symbol-function 'drover-list--extent)
+               (lambda (string) (cons 0 (drover-list--pixel-width string))))
+              ((symbol-function 'drover-list--line-width) (lambda () 1000)))
+      (revert-buffer)
+      (let ((agent (seq-find (lambda (column) (eq (car column) 'agent))
+                             (plist-get (drover-list--layout
+                                         (drover-list--tree-rows
+                                          (cdar (drover-view-groups (drover-known-sessions) drover-test-now))
+                                          nil (drover-list--metrics drover-test-now))
+                                         (drover-list--metrics drover-test-now))
+                                        :columns))))
+        ;; "@build", 38 pixels, and 6 more drawn bold: wider than "Agent".
+        (should (= (nth 2 agent) 44))))))
+
+;;;; Selection
+
+(defun drover-list-test-selection-sample ()
+  "Return sessions in one group and another: done a, b and c, working w."
+  (list (drover-test-session "a" :status 'done :since (drover-list-test-ago 30))
+        (drover-test-session "b" :status 'done :since (drover-list-test-ago 20))
+        (drover-test-session "c" :status 'done :since (drover-list-test-ago 10))
+        (drover-test-session "w" :status 'working :updated (drover-list-test-ago 5))))
+
+(defun drover-list-test-selected ()
+  "Return the identifiers of the sessions selected in the list, in order."
+  (mapcar #'drover-session-id (drover-selected-sessions t)))
+
+(defun drover-list-test-highlighted ()
+  "Return the values of the sections Magit highlights as selected, in order.
+A session by its identifier, a group by its value."
+  (mapcar (lambda (overlay)
+            (let ((section (magit-section-at (overlay-start overlay))))
+              (if (object-of-class-p section 'drover-list-session-section)
+                  (cdr (oref section value))
+                (cdr (oref section value)))))
+          (sort (copy-sequence magit-section-selection-overlays)
+                (lambda (a b) (< (overlay-start a) (overlay-start b))))))
+
+(defmacro drover-list-test-selecting (sessions &rest body)
+  "Run BODY in the list of SESSIONS shown, Transient Mark mode on.
+Confirmations answer yes, their prompts pushed to `asked', newest first."
+  (declare (indent 1) (debug t))
+  `(drover-list-test-with ,sessions
+     (let ((transient-mark-mode t)
+           (asked nil))
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t))
+                 ((symbol-function 'yes-or-no-p) (lambda (prompt) (push prompt asked) t)))
+         (drover-list-test-shown
+           (ignore asked)
+           ,@body)))))
+
+(ert-deftest drover-list-test-region-selects-sessions ()
+  "A region selects the sessions whose lines it spans, those Magit highlights."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    ;; Set within the line of a, point a line down: two sessions,
+    ;; though the text of the region lies on a's line but for a few
+    ;; characters.
+    (drover-list-test-goto "a")
+    (forward-char 3)
+    (drover-list-test-type "C-SPC C-n")
+    (should (region-active-p))
+    (should (equal (drover-list-test-id-at-point) "b"))
+    (should (equal (drover-list-test-selected) '("a" "b")))
+    (should (equal (drover-list-test-highlighted) '("a" "b")))
+    (drover-list-test-type "C-n")
+    (should (equal (drover-list-test-selected) '("a" "b" "c")))
+    (should (equal (drover-list-test-highlighted) '("a" "b" "c")))
+    ;; Point back on a's line: a alone.
+    (drover-list-test-type "C-p C-p")
+    (should (equal (drover-list-test-selected) '("a")))
+    ;; Into another group: Magit selects nothing, nor does drover, and
+    ;; the session at point stands alone.
+    (deactivate-mark)
+    (drover-list-test-goto "c")
+    (drover-list-test-type "C-SPC")
+    (goto-char (oref (drover-list-test-section "w") start))
+    (drover-list-test-type "C-e")
+    (should (region-active-p))
+    (should-not (drover-list-test-highlighted))
+    (should-not (drover-list--selected-sessions))
+    (should (equal (drover-list-test-selected) '("w")))
+    ;; A group's heading selected stands for its sessions.
+    (deactivate-mark)
+    (drover-list-test-goto-group 'done)
+    (drover-list-test-type "C-SPC")
+    (should (equal (drover-list-test-highlighted) '(done)))
+    (should (equal (drover-list-test-selected) '("a" "b" "c")))
+    ;; Without a region, the session at point.
+    (deactivate-mark)
+    (drover-list-test-goto "b")
+    (should (equal (drover-list-test-selected) '("b")))))
+
+(ert-deftest drover-list-test-region-survives-redraws ()
+  "A redraw keeps the region and the sessions it selects."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    (drover-list-test-goto "a")
+    (forward-char 2)
+    (drover-list-test-type "C-SPC C-n")
+    (setq deactivate-mark nil)
+    (setf (drover-session-since (drover-list-test-find "c")) (drover-list-test-ago 40))
+    (drover-list--on-change)
+    (should-not deactivate-mark)
+    (should (region-active-p))
+    (should (equal (mapcar #'cdr (drover-list-test-groups)) '(("c" "a" "b") ("w"))))
+    (should (equal (drover-list-test-selected) '("a" "b")))
+    (should (equal (drover-list-test-highlighted) '("a" "b")))
+    (drover-list--draw-caches)
+    (should-not deactivate-mark)))
+
+(ert-deftest drover-list-test-actions-on-selection ()
+  "Marking seen, interrupting, archiving and deleting act on every session selected."
+  (drover-list-test-selecting
+      (list (drover-test-session "a" :status 'failed :since (drover-list-test-ago 30))
+            (drover-test-session "b" :status 'done :since (drover-list-test-ago 20))
+            (drover-test-session "c" :status 'working :since (drover-list-test-ago 10))
+            (drover-test-session "d" :status 'idle))
+    (setq drover-group-by nil)
+    (revert-buffer)
+    (cl-flet ((select-all ()
+                (drover-list-test-goto "a")
+                (forward-char 1)
+                (drover-list-test-type "C-SPC")
+                (goto-char (oref (drover-list-test-section "d") start))
+                (drover-list-test-type "C-f")
+                (should (equal (drover-list-test-selected) '("a" "b" "c" "d"))))
+              (calls (operation)
+                (prog1 (mapcar #'cadr (seq-filter (lambda (call) (eq (car call) operation))
+                                                  (reverse drover-test-calls)))
+                  (setq drover-test-calls nil))))
+      (should (equal (drover-list-test-order) '("a" "b" "c" "d")))
+      ;; Only the turns that ended unseen are marked seen.
+      (select-all)
+      (should (equal (drover-list-test-messages (drover-list-test-type "s"))
+                     '("Marked 2 sessions seen")))
+      (should (equal (calls :mark-seen) '("a" "b")))
+      ;; Acting ends the selection.
+      (should-not (region-active-p))
+      ;; Only the running turn is interrupted, after asking.
+      (select-all)
+      (drover-list-test-type "K")
+      (should (equal asked '("Interrupt Session c? ")))
+      (should (equal (calls :interrupt) '("c")))
+      ;; One confirmation names them all.
+      (setq asked nil)
+      (select-all)
+      (should (equal (drover-list-test-messages (drover-list-test-type "z"))
+                     '("Archived 4 sessions")))
+      (should (equal asked '("Archive 4 sessions: Session a, Session b, Session c, Session d? ")))
+      (should (equal (calls :archive) '("a" "b" "c" "d")))
+      (setq asked nil)
+      (select-all)
+      (drover-list-test-type "x")
+      (should (equal asked '("Delete 4 sessions for good: Session a, Session b, Session c, Session d? ")))
+      (should (equal (calls :delete) '("a" "b" "c" "d")))
+      ;; Declined, nothing happens, and the selection stays.
+      (cl-letf (((symbol-function 'yes-or-no-p) #'ignore))
+        (select-all)
+        (should-error (call-interactively #'drover-delete) :type 'user-error)
+        (should-not (calls :delete))
+        (should (region-active-p)))
+      ;; Nothing selected applies: said so, nothing done.
+      (deactivate-mark)
+      (drover-list-test-goto "c")
+      (drover-list-test-type "C-SPC C-n")
+      (should (equal (drover-list-test-selected) '("c" "d")))
+      (should (equal (cadr (should-error (call-interactively #'drover-mark-seen) :type 'user-error))
+                     "None of the 2 selected sessions ended a turn unseen")))))
+
+(ert-deftest drover-list-test-selection-failures-reported-once ()
+  "A session failing does not stop the others, and the outcome is told once."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    (setf (plist-get (alist-get 'fake drover--backends) :archive)
+          (lambda (session)
+            (if (equal (drover-session-id session) "b")
+                (error "Gone already")
+              (push (list :archive (drover-session-id session)) drover-test-calls))))
+    (drover-list-test-goto-group 'done)
+    (drover-list-test-type "C-SPC")
+    (should (equal (drover-list-test-messages (drover-list-test-type "z"))
+                   '("Archived 2 sessions; failed for Session b (Gone already)")))
+    (should (equal (reverse drover-test-calls) '((:archive "a") (:archive "c"))))))
+
+(ert-deftest drover-list-test-selection-from-menu ()
+  "The menu, in the list, acts on the selection, and tells how many it holds."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    (use-local-map (let ((map (make-sparse-keymap)))
+                     (set-keymap-parent map drover-list-mode-map)
+                     (keymap-set map "C-'" #'drover-dispatch)
+                     map))
+    (unwind-protect
+        (progn
+          (drover-list-test-goto "a")
+          (drover-list-test-type "C-SPC C-n")
+          (execute-kbd-macro (kbd "C-'"))
+          (should (equal (mapcar #'drover-session-id (plist-get (oref transient--prefix scope) :selection))
+                         '("a" "b")))
+          (should (equal (drover--dispatch-list-description) "List: 2 sessions selected"))
+          ;; Moving extends the selection, which the menu follows.
+          (execute-kbd-macro (kbd "C-n"))
+          (should (equal (length (plist-get (oref transient--prefix scope) :selection)) 3))
+          (execute-kbd-macro (kbd "z"))
+          (should-not transient--prefix)
+          (should (equal asked '("Archive 3 sessions: Session a, Session b, Session c? ")))
+          (should (equal (reverse drover-test-calls) '((:archive "a") (:archive "b") (:archive "c")))))
+      (when transient--prefix
+        (execute-kbd-macro (kbd "C-g")))
+      (use-local-map drover-list-mode-map))))
+
+(ert-deftest drover-list-test-selection-menu-apt ()
+  "An entry applies to a selection when it applies to one of its sessions."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    (drover-list-test-goto "a")
+    (drover-list-test-type "C-SPC C-n")
+    (let ((scope (drover--context)))
+      (cl-letf (((symbol-function 'drover--scope) (lambda () scope)))
+        (should (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p))
+        (should (drover-dispatch-selection :archive))
+        ;; None of a and b runs a turn.
+        (should-not (drover-dispatch-selection :interrupt #'drover--running-p))))))
+
+;;;; Copying sessions
+
+(defmacro drover-list-test-with-links (&rest body)
+  "Run BODY with an Org link type storing the session at point, as test-session:ID."
+  (declare (indent 0) (debug t))
+  `(progn
+     (require 'ol)
+     (let ((org-link-parameters (copy-tree org-link-parameters)))
+       (org-link-set-parameters
+        "test-session"
+        :store (lambda (&optional _interactive)
+                 (when-let* ((session (drover-session-at-point t)))
+                   (org-link-store-props :type "test-session"
+                                         :link (concat "test-session:" (drover-session-id session))
+                                         :description "Not the title"))))
+       ,@body)))
+
+(ert-deftest drover-list-test-copy-links ()
+  "M-w copies the links of the sessions selected, else of the session at point."
+  (drover-list-test-with-links
+    (drover-list-test-selecting (drover-list-test-selection-sample)
+      (let ((kill-ring nil))
+        (drover-list-test-goto "a")
+        (drover-list-test-type "C-SPC C-n")
+        (should (equal (drover-list-test-messages (drover-list-test-type "M-w"))
+                       '("Copied links to 2 sessions")))
+        (should (equal (substring-no-properties (car kill-ring))
+                       "[[test-session:a][Session a]]\n[[test-session:b][Session b]]"))
+        (should-not (region-active-p))
+        ;; Without a region, the session at point.
+        (drover-list-test-goto "c")
+        (should (equal (drover-list-test-messages (drover-list-test-type "M-w"))
+                       '("Copied a link to Session c")))
+        (should (equal (car kill-ring) "[[test-session:c][Session c]]"))
+        ;; A region selecting no session copies its text.
+        (drover-list-test-goto "c")
+        (drover-list-test-type "C-SPC")
+        (goto-char (oref (drover-list-test-section "w") start))
+        (drover-list-test-type "C-e M-w")
+        (should (string-match-p "Session c 10s\n\nWorking (1)\n.*Session w" (car kill-ring)))))))
+
+(ert-deftest drover-list-test-copy-without-link-type ()
+  "Without a link type storing sessions, their titles are copied."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    (let ((kill-ring nil)
+          (org-link-parameters nil))
+      (drover-list-test-goto "a")
+      (drover-list-test-type "C-SPC C-n")
+      (should (equal (drover-list-test-messages (drover-list-test-type "M-w"))
+                     '("Copied links to 2 sessions, 2 by title: no Org link type stores them")))
+      (should (equal (car kill-ring) "Session a\nSession b")))))
+
+;;;; Quoting sessions in the prompt
+
+(defmacro drover-list-test-quoting (sessions &rest body)
+  "Run BODY in the list of SESSIONS, selecting, with a prompt of its own.
+The prompt shows nowhere; `prompt' returns its text."
+  (declare (indent 1) (debug t))
+  `(drover-list-test-with-links
+     (require 'drover-prompt)
+     (let ((drover-prompt-buffer-name "*drover quote test*")
+           (drover-prompt-require-features nil)
+           (org-mode-hook nil))
+       (unwind-protect
+           (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                     ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
+                     ((symbol-function 'drover-prompt--fetch-defaults) #'ignore))
+             (cl-flet ((prompt () (and (get-buffer drover-prompt-buffer-name)
+                                       (with-current-buffer drover-prompt-buffer-name
+                                         (buffer-substring-no-properties (point-min) (point-max))))))
+               (drover-list-test-selecting ,sessions
+                 ,@body)))
+         (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+           (kill-buffer prompt))))))
+
+(ert-deftest drover-list-test-quote-selection ()
+  "The prompt quotes the sessions selected: link, status and last reply."
+  (drover-list-test-quoting
+      (list (drover-test-session "a" :status 'failed :since (drover-list-test-ago 30) :detail "Rate limited")
+            (drover-test-session "b" :status 'failed :since (drover-list-test-ago 20))
+            (drover-test-session "c" :status 'done :since (drover-list-test-ago 10)))
+    (setq drover-test-recaps
+          `(("a" :prompt "Fix it" :reply ,(concat "Fixed.\n* Not a heading\n#+end_src\n"
+                                                  (mapconcat (lambda (n) (format "Line %d" n))
+                                                             (number-sequence 1 25) "\n")))
+            ("b" :failure "Gone")))
+    (drover-list-test-goto "a")
+    (drover-list-test-type "C-SPC C-n")
+    (let ((messages (drover-list-test-messages (drover-prompt-dwim))))
+      (should (equal (car (last messages)) "Quoted 2 sessions")))
+    (should (equal (prompt)
+                   (concat "Agent sessions:\n"
+                           "- [[test-session:a][Session a]] — failed: Rate limited\n"
+                           "  Last reply:\n"
+                           "  #+begin_src markdown\n"
+                           "  Fixed.\n"
+                           "  ,* Not a heading\n"
+                           "  ,#+end_src\n"
+                           (mapconcat (lambda (n) (format "  Line %d\n" n)) (number-sequence 1 17) "")
+                           "  #+end_src\n"
+                           "  (The reply goes on for 8 more lines.)\n"
+                           ;; Its recap failed: no reply.
+                           "- [[test-session:b][Session b]] — failed\n"
+                           "\n")))
+    ;; Sent, the reply is a Markdown fence, escapes undone.
+    (should (string-match-p "^  ```markdown\n  Fixed\\.\n  \\* Not a heading\n  #\\+end_src\n"
+                            (drover-prompt-to-markdown (prompt))))
+    (should (equal (sort (copy-sequence drover-test-recap-calls) #'string<) '("a" "b")))))
+
+(ert-deftest drover-list-test-quote-at-point ()
+  "Without a region, the prompt quotes the session at point; on a heading, the line."
+  (drover-list-test-quoting (drover-list-test-selection-sample)
+    (drover-list-test-goto "b")
+    (drover-prompt-dwim)
+    (should (equal (prompt) (concat "Agent session:\n"
+                                    "- [[test-session:b][Session b]] — done\n"
+                                    "  Last reply:\n"
+                                    "  #+begin_src markdown\n"
+                                    "  Reply of b\n"
+                                    "  #+end_src\n\n")))
+    (with-current-buffer drover-prompt-buffer-name (erase-buffer))
+    (drover-list-test-goto-group 'done)
+    (drover-prompt-dwim)
+    (should (string-prefix-p "From buffer *drover sessions* line" (prompt)))))
+
+(ert-deftest drover-list-test-quote-waits-for-replies ()
+  "Replies arriving later are quoted once all arrived, or once the wait is over."
+  (drover-list-test-quoting (drover-list-test-selection-sample)
+    (setq drover-test-recap-later t)
+    (let ((timers nil))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (time _repeat function &rest arguments)
+                   (let ((timer (timer-create)))
+                     (push (list time function arguments timer) timers)
+                     timer))))
+        (drover-list-test-goto-group 'done)
+        (drover-list-test-type "C-SPC")
+        (should (equal (drover-list-test-messages (drover-prompt-dwim))
+                       '("Fetching the last replies of 3 sessions… 0/3")))
+        (should-not (prompt))
+        (should (= (caar timers) drover-prompt-quote-timeout))
+        (pcase-dolist (`(,id . ,callback) (reverse drover-test-recap-pending))
+          (unless (equal id "c")
+            (should (equal (drover-list-test-messages
+                            (funcall callback (list :reply (concat "Late reply of " id))))
+                           (list (format "Fetching the last replies of 3 sessions… %d/3"
+                                         (if (equal id "a") 1 2)))))))
+        (should-not (prompt))
+        ;; The wait is over: c is quoted without a reply.
+        (should (equal (drover-list-test-messages
+                        (apply (nth 1 (car timers)) (nth 2 (car timers))))
+                       '("Quoted 3 sessions; 1 reply did not arrive in time")))
+        (let ((text (prompt)))
+          (should (string-match-p "Late reply of a" text))
+          (should (string-match-p "Late reply of b" text))
+          (should (string-match-p "- \\[\\[test-session:c\\]\\[Session c\\]\\] — done\n\n\\'" text))
+          ;; c's reply, arriving later still, adds nothing.
+          (funcall (cdr (assoc "c" drover-test-recap-pending)) (list :reply "Too late"))
+          (should (equal (prompt) text)))))))
 
 (provide 'drover-list-test)
 ;;; drover-list-test.el ends here

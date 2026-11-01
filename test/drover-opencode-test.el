@@ -132,6 +132,9 @@ This follows the `opencode-state' contract."
                ((symbol-function 'opencode-provider-display)
                 (lambda (provider &optional _directory)
                   (propertize (concat "icon-" provider) 'help-echo (concat "Provider: " provider))))
+               ((symbol-function 'opencode-agent-display)
+                (lambda (agent &optional directory)
+                  (propertize (format "%s in %s" agent directory) 'face 'bold)))
                ((symbol-function 'opencode-provider-info)
                 (lambda (provider &optional _directory)
                   (and (equal provider "anthropic") '((id . "anthropic") (name . "Anthropic")))))
@@ -434,7 +437,8 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 (defconst drover-opencode-test--displays
   (mapcar (lambda (function) (cons function (symbol-function function)))
           '(opencode-model-display opencode-variant-display opencode-provider-display
-                                   opencode-provider-info opencode-context-usage))
+                                   opencode-provider-info opencode-context-usage
+                                   opencode-agent-display))
   "The displays of opencode.el, as loaded, before tests stub them.")
 
 (defmacro drover-opencode-test-with-catalogs (catalogs &rest body)
@@ -456,17 +460,18 @@ nothing is fetched."
                       (lambda (kind &optional _directory)
                         (and cached (pcase kind
                                       ('model drover-opencode-fixtures-models)
-                                      ('provider drover-opencode-fixtures-providers))))))
+                                      ('provider drover-opencode-fixtures-providers)
+                                      ('agent drover-opencode-fixtures-agents))))))
              ,@body))
        (dolist (entry stubs)
          (fset (car entry) (cdr entry))))))
 
 (ert-deftest drover-opencode-test-real-displays ()
   "A session shows what it runs as opencode.el's mode line does, once catalogs arrive."
-  (let ((entries (list (drover-opencode-test-entry "ses_1" :context 190000
+  (let ((entries (list (drover-opencode-test-entry "ses_1" :context 190000 :agent "build"
                                                    :model '((id . "claude-opus-5-5") (providerID . "anthropic")
                                                             (variant . "max")))
-                       (drover-opencode-test-entry "ses_2" :context 8400
+                       (drover-opencode-test-entry "ses_2" :context 8400 :agent "plan"
                                                    :model '((id . "gpt-5.5") (providerID . "openai")))
                        (drover-opencode-test-entry "ses_3" :context 1000
                                                    :model '((id . "retired") (providerID . "acme"))))))
@@ -500,7 +505,24 @@ nothing is fetched."
           (should (equal (drover-session-model retired) "retired"))
           (should-not (drover-session-effort retired))
           (should (equal (drover-session-provider retired) "\U000F048D acme"))
-          (should (equal (drover-session-provider-name retired) "acme"))))
+          (should (equal (drover-session-provider-name retired) "acme"))
+          ;; The agent as the mode line draws it: its catalog name, bold,
+          ;; in its colour, else a face of its own among the primary ones.
+          (dolist (session (list opus gpt))
+            (should (equal-including-properties
+                     (drover-session-agent-display session)
+                     (opencode-agent-display (drover-session-agent session) "/work/drover/"))))
+          (should (equal (drover-session-agent-display opus) "Build"))
+          (should (equal (get-text-property 0 'face (drover-session-agent-display opus))
+                         (list 'bold (nth 0 opencode-mode-line-agent-faces))))
+          (should (equal (get-text-property 0 'face (drover-session-agent-display gpt))
+                         (list 'bold (nth 1 opencode-mode-line-agent-faces))))
+          ;; Views still group and filter by the agent's identifier.
+          (should (equal (drover-session-agent opus) "build"))
+          (should (equal (drover-agent-label opus)
+                         (concat (propertize "@" 'face (list 'bold (nth 0 opencode-mode-line-agent-faces)))
+                                 "Build")))
+          (should-not (drover-session-agent-display retired))))
       (drover-opencode-test-with-catalogs nil
         ;; Until the catalogs arrive: the identifiers, the effort chosen.
         (let ((opus (drover-opencode-test-session "ses_1"))
@@ -511,7 +533,9 @@ nothing is fetched."
           (should (equal (drover-session-provider-name opus) "anthropic"))
           (should (eql (drover-session-context-tokens opus) 190000))
           (should-not (drover-session-context-limit opus))
-          (should-not (drover-session-effort gpt)))))))
+          (should-not (drover-session-effort gpt))
+          ;; The agent by its identifier, plain.
+          (should (equal-including-properties (drover-session-agent-display opus) "build")))))))
 
 (ert-deftest drover-opencode-test-catalog-changes-redraw ()
   "A catalog arriving or forgotten is a change: what sessions run reads otherwise."

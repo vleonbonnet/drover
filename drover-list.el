@@ -73,11 +73,17 @@
 ;; lines.  Only the bar and the time left are redrawn as the cache runs
 ;; out.
 ;;
+;; An active region selects the sessions whose lines it spans, those
+;; Magit highlights: marking seen, interrupting, archiving and deleting
+;; act on all of them, copying (`kill-ring-save', M-w) copies their
+;; Org links, and the prompt quotes them with their last replies.
+;;
 ;; The buffer redraws when backends report changes, but only while it
 ;; is displayed: a hidden list is marked stale and redraws when it is
 ;; next shown.  A redraw keeps point on the same session, even when the
-;; session moved to another group, and keeps every section expanded or
-;; collapsed as it was.
+;; session moved to another group, keeps every section expanded or
+;; collapsed as it was, and an active region active, on the same
+;; sessions.
 
 ;;; Code:
 
@@ -188,11 +194,12 @@ a displayed list shows an animated glyph."
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
     (location :priority 7 :min 10 :max 30 :label "Project")
-    (agent :priority 8 :min 5 :max 12 :label "Agent")
+    (branch :priority 8 :min 6 :max 24 :label "Branch")
+    (agent :priority 9 :min 5 :max 14 :label "Agent")
     (model :priority 4 :min 8 :max 22 :label "Model")
     (provider :priority 6 :min 2 :max 12 :label "Provider")
     (context :priority 5 :min 9 :label "Context")
-    (created :priority 9 :min 3 :align right :label "Created")
+    (created :priority 10 :min 3 :align right :label "Created")
     (age :priority 1 :min 3 :align right :narrow line :label "Age")
     (cache :priority 2 :min 9 :narrow background :label "Cache")
     (summary :priority 3 :min 12 :narrow below :label "Summary"))
@@ -200,8 +207,10 @@ a displayed list shows an animated glyph."
 Each entry is (FIELD . PROPERTIES).  FIELD is one of:
 
  title     The status icon and the title; it is always shown.
- location  The project and branch, as \"project:branch\".
- agent     The agent.
+ location  The project.
+ branch    The Git branch, unless it is the default branch of its
+           repository (see `drover-session-default-branch-p').
+ agent     The agent, as @name, in the agent's colour.
  model     The model, compact, and the effort it runs, dimmed when it
            is the model's default.
  provider  The provider serving the model, often as an icon.
@@ -219,7 +228,9 @@ PROPERTIES is a plist of:
 
  :priority  Rank of the field, 0 first; fields of a lower rank show
             only when every field of a higher one does.
- :min       Fewest characters the field needs to be shown.
+ :min       Fewest characters the field needs to be shown.  Fields of
+            a short text, the ages, context, cache and provider, are
+            never cut, and need the room of their text at least.
  :max       Most characters it takes before being cut; nil lets it
             take what is left of the line.
  :align     `right' to align the field on the right of its column.
@@ -236,7 +247,10 @@ as their :min fit in the window, but those of
 `drover-list-hidden-fields'; it uses columns when those include every
 field the narrow layout places, else the narrow layout, which shows all
 of those.  Columns are named in the header line, and are at least as
-wide as their name, room allowing."
+wide as their name, room allowing.  On a line too narrow for every
+column, the summary gives up room first, then the names of the columns
+of short texts, then the title, then the other fields in proportion;
+the model keeps its effort, cutting its name."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
@@ -245,7 +259,8 @@ wide as their name, room allowing."
 The list chooses among the other fields by the room they take; the
 title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
 changes it for the session, with one switch per field."
-  :type '(set (const :tag "Project and branch" location)
+  :type '(set (const :tag "Project" location)
+              (const :tag "Branch" branch)
               (const :tag "Agent" agent)
               (const :tag "Model and effort" model)
               (const :tag "Provider" provider)
@@ -258,7 +273,8 @@ changes it for the session, with one switch per field."
 
 (defconst drover-list-field-descriptions
   '((title . "The status of the session, the subagents at work under it, and its title")
-    (location . "The project and branch the session works in")
+    (location . "The project the session works in")
+    (branch . "The branch the session works on, unless its repository's default one")
     (agent . "The agent the session runs")
     (model . "The model the session runs, and its effort: dimmed when the model's default")
     (provider . "The provider serving the model")
@@ -487,11 +503,31 @@ column of the continuation glyph when the window has no fringe for it."
         width
       (- width (window-font-width window)))))
 
+(defun drover-list--kept (string)
+  "Return where the tail of STRING to keep whole begins, or nil without one.
+The tail is what the property `drover-list-keep' marks at its end, such
+as the effort after a model."
+  (let ((end (length string)))
+    (when (and (> end 0) (get-text-property (1- end) 'drover-list-keep string))
+      (let ((start (or (previous-single-property-change end 'drover-list-keep string) 0)))
+        (and (> start 0) start)))))
+
 (defun drover-list--truncate (string pixels)
   "Return STRING cut to at most PIXELS wide, ending in an ellipsis if cut.
-The ellipsis takes the properties of the text before it.  Return \"\"
-when not even the ellipsis fits."
-  (drover-truncate-to-pixels string (max 0 pixels) #'drover-list--pixel-width))
+The ellipsis takes the properties of the text before it.  A tail of
+STRING marked to keep (see `drover-list--kept') stays whole, its head
+being cut, room allowing.  Return \"\" when not even the ellipsis fits."
+  (let ((pixels (max 0 pixels))
+        (keep (drover-list--kept string)))
+    (or (and keep
+             (> (drover-list--pixel-width string) pixels)
+             (let* ((tail (concat " " (substring string keep)))
+                    (head (drover-truncate-to-pixels (string-trim-right (substring string 0 keep))
+                                                     (- pixels (drover-list--pixel-width tail))
+                                                     #'drover-list--pixel-width)))
+               (unless (string-empty-p head)
+                 (concat head tail))))
+        (drover-truncate-to-pixels string pixels #'drover-list--pixel-width))))
 
 (defun drover-list--align (x)
   "Return a space reaching X pixels from the left of the text area."
@@ -690,7 +726,9 @@ in `drover-cache-trough'."
   "Return the model of SESSION and the effort it runs, as its column shows them.
 The effort is in `drover-prompt-picked' when chosen, in
 `drover-prompt-inherited' when it is the model's default; its tooltip
-says which."
+says which.  A column too narrow cuts the model's name and keeps the
+effort, which the property `drover-list-keep' marks (see
+`drover-list--truncate')."
   (let* ((model (drover-session-model session))
          (effort (drover-session-effort session))
          (default (drover-session-effort-default session)))
@@ -701,7 +739,8 @@ says which."
                       (propertize (drover-face (drover-list--one-line effort)
                                                (if default 'drover-prompt-inherited 'drover-prompt-picked))
                                   'help-echo (format "Effort: %s, %s" effort
-                                                     (if default "the model's default" "chosen"))))))
+                                                     (if default "the model's default" "chosen"))
+                                  'drover-list-keep (and model t)))))
      " ")))
 
 (defun drover-list--provider-text (session)
@@ -734,15 +773,28 @@ an empty space takes the bar's place, so that sizes line up."
                (drover-face (drover-format-tokens tokens) (or face 'drover-dim)))
        'help-echo (concat "Context: " (drover-session-context-description session))))))
 
-(defun drover-list--text (field session location metrics)
+(defun drover-list--branch-text (session)
+  "Return the branch of SESSION as its column shows it, or nil.
+Nil for the default branch of its repository, which a column of
+\"main\" on every line would only repeat (see
+`drover-session-default-branch-p')."
+  (when-let* ((branch (drover-session-branch session))
+              ((not (drover-session-default-branch-p session))))
+    (drover-face (drover-list--one-line branch) 'drover-dim)))
+
+(defun drover-list--text (field session group metrics)
   "Return the text of FIELD for SESSION, or \"\" when it has none.
-LOCATION is a function of a session returning where it works, as its
-group shows it; METRICS give the time ages count up to and the width
-of a character.  The prompt cache has no text: it is drawn apart."
+GROUP is the group showing SESSION, as (GROUPING . VALUE), or nil: a
+group of a project or a branch names it, so its sessions do not repeat
+it.  METRICS give the time ages count up to and the width of a
+character.  The prompt cache has no text: it is drawn apart."
   (let ((now (plist-get metrics :now)))
     (or (pcase field
-          ('location (drover-face (drover-list--one-line (funcall location session)) 'drover-dim))
-          ('agent (drover-face (drover-list--one-line (drover-session-agent session)) 'drover-dim))
+          ('location (unless (equal group (cons 'project (drover-session-project session)))
+                       (drover-face (drover-list--one-line (drover-session-project session)) 'drover-dim)))
+          ('branch (unless (equal group (cons 'branch (drover-session-branch session)))
+                     (drover-list--branch-text session)))
+          ('agent (drover-list--one-line (drover-agent-label session)))
           ('model (drover-list--model-text session))
           ('provider (drover-list--provider-text session))
           ('context (drover-list--context-text session (plist-get metrics :char)))
@@ -800,33 +852,32 @@ headings."
           :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
           :active active)))
 
-(defun drover-list--row (session depth indent location metrics)
+(defun drover-list--row (session depth indent group metrics)
   "Return the row of SESSION at DEPTH in its tree, its glyph INDENT pixels in.
-LOCATION is a function of a session returning where it works, as its
-group shows it; METRICS are the measures of `drover-list--metrics'."
+GROUP is the group showing it, as (GROUPING . VALUE), or nil; METRICS
+are the measures of `drover-list--metrics'."
   (let ((icons (drover-list--icons session metrics)))
     (drover-list--row-create
      :session session :depth depth :indent indent :icons icons
      :title-start (+ indent (drover-list--pixel-width icons))
      :title (drover-list--title-text session depth)
-     :texts (mapcar (lambda (field) (cons field (drover-list--text field session location metrics)))
-                    '(location agent model provider context created age summary))
+     :texts (mapcar (lambda (field) (cons field (drover-list--text field session group metrics)))
+                    '(location branch agent model provider context created age summary))
      :cache (drover-session-cache-fraction session (plist-get metrics :now)))))
 
-(defun drover-list--tree-rows (nodes location metrics &optional depth indent)
+(defun drover-list--tree-rows (nodes group metrics &optional depth indent)
   "Return the rows of the trees NODES at DEPTH, subagents after their parent.
 Their glyphs begin INDENT pixels in, by default the margin.  The glyph
 of a subagent stands under its parent's title, whatever glyphs come
 before the title, down to `drover-list--max-depth'; deeper, under its
-parent's glyph.  LOCATION is a function of a session returning where it
-works, as the group shows it; METRICS are the measures of
-`drover-list--metrics'."
+parent's glyph.  GROUP is the group showing them, as (GROUPING . VALUE),
+or nil; METRICS are the measures of `drover-list--metrics'."
   (let ((depth (or depth 0))
         (indent (or indent (plist-get metrics :margin))))
     (mapcan (lambda (node)
-              (let ((row (drover-list--row (drover-node-session node) depth indent location metrics)))
+              (let ((row (drover-list--row (drover-node-session node) depth indent group metrics)))
                 (cons row
-                      (drover-list--tree-rows (drover-node-children node) location metrics (1+ depth)
+                      (drover-list--tree-rows (drover-node-children node) group metrics (1+ depth)
                                               (if (< depth drover-list--max-depth)
                                                   (drover-list--row-title-start row)
                                                 indent)))))
@@ -860,9 +911,11 @@ draws it."
 
 (defun drover-list--whole-p (field)
   "Return non-nil when FIELD is drawn whole or not at all, never cut.
-Those are the fields of a bar and a number: cut, the number would
-mislead."
-  (memq field '(cache context)))
+Those are the fields of a short text: the ages, cut, would read as
+another age, and the context and cache, a bar and a number, would
+mislead; the provider is an icon.  Their columns may give up only the
+room of their names."
+  (memq field '(cache context created age provider)))
 
 (defun drover-list--content-width (field rows metrics)
   "Return the width in pixels FIELD takes to show ROWS in full, per METRICS.
@@ -878,6 +931,27 @@ included."
     (_ (apply #'max 0 (mapcar (lambda (row)
                                 (drover-list--pixel-width (alist-get field (drover-list--row-texts row))))
                               rows)))))
+
+(defun drover-list--narrowest (entry rows metrics)
+  "Return the fewest pixels the field of ENTRY needs to show ROWS, per METRICS.
+ENTRY is an entry of `drover-list-fields'.  It is the room of its :min
+characters, and for a field never cut (see `drover-list--whole-p'),
+the room of what it shows at least; for a field keeping a tail whole,
+such as the model its effort, the room of an ellipsis and that tail.
+That of the title does not count the glyphs before it."
+  (let* ((field (car entry))
+         (least (* (plist-get metrics :char) (or (plist-get (cdr entry) :min) 0))))
+    (cond ((drover-list--whole-p field)
+           (max least (drover-list--content-width field rows metrics)))
+          ((eq field 'title) least)
+          (t (apply #'max least
+                    (mapcar (lambda (row)
+                              (let ((text (alist-get field (drover-list--row-texts row))))
+                                (if-let* ((keep (drover-list--kept text)))
+                                    (drover-list--pixel-width
+                                     (concat (truncate-string-ellipsis) " " (substring text keep)))
+                                  0)))
+                            rows))))))
 
 (defun drover-list--natural (field rows metrics)
   "Return the width in pixels the column of FIELD wants to show ROWS, per METRICS.
@@ -895,13 +969,12 @@ at least as wide as its name in the header line."
 The value is (LAYOUT . FIELDS): LAYOUT is `columns' or `narrow', and
 FIELDS the entries of `drover-list-fields' shown, in their order.  The
 fields with something to show for ROWS are taken by priority, as long as
-their minimum widths fit, and the title always; the fields of
-`drover-list-hidden-fields' never.  Columns are used when they include
-every field the narrow layout places; else the narrow layout shows
-those fields, which need no room of their own but on the title's line,
-where they give way to the title."
-  (let* ((char (plist-get metrics :char))
-         (gap (plist-get metrics :gap))
+the fewest pixels each needs fit (see `drover-list--narrowest'), and the
+title always; the fields of `drover-list-hidden-fields' never.  Columns
+are used when they include every field the narrow layout places; else
+the narrow layout shows those fields, which need no room of their own
+but on the title's line, where they give way to the title."
+  (let* ((gap (plist-get metrics :gap))
          (present (seq-filter (lambda (entry)
                                 (and (drover-list--has-p (car entry) rows)
                                      (or (eq (car entry) 'title)
@@ -913,7 +986,7 @@ where they give way to the title."
       (dolist (entry (seq-sort-by (lambda (entry) (or (plist-get (cdr entry) :priority) 99)) #'<
                                   present))
         (let* ((title (eq (car entry) 'title))
-               (need (+ (* char (or (plist-get (cdr entry) :min) 0)) (if title 0 gap))))
+               (need (+ (drover-list--narrowest entry rows metrics) (if title 0 gap))))
           (if (or title (<= (+ used need) (plist-get metrics :width)))
               (setq used (+ used need)
                     chosen (cons entry chosen))
@@ -925,49 +998,66 @@ where they give way to the title."
           (cons 'columns (seq-filter (lambda (entry) (memq entry chosen)) present))
         (cons 'narrow narrow)))))
 
+(defun drover-list--give (widths floors indices deficit)
+  "Take up to DEFICIT pixels from WIDTHS at INDICES, down to FLOORS.
+WIDTHS and FLOORS are vectors; WIDTHS changes in place.  Each column
+gives in proportion to its room above its floor, the pixels left by
+rounding going to the largest remainders, so that no more is taken
+than DEFICIT: a column given a pixel too few would cut its text, while
+the line had room.  Return the deficit left."
+  (let* ((gives (mapcar (lambda (index) (max 0 (- (aref widths index) (aref floors index)))) indices))
+         (slack (apply #'+ gives)))
+    (if (or (<= slack 0) (<= deficit 0))
+        deficit
+      (let* ((cut (min deficit slack))
+             (shares (cl-mapcar (lambda (index give)
+                                  (list index (/ (* cut give) slack) (% (* cut give) slack)))
+                                indices gives))
+             (left (- cut (apply #'+ (mapcar #'cadr shares)))))
+        (dolist (share (sort shares (lambda (a b) (> (nth 2 a) (nth 2 b)))))
+          (let ((take (+ (nth 1 share) (if (> left 0) 1 0))))
+            (setq left (1- left))
+            (aset widths (car share) (- (aref widths (car share)) take))))
+        (- deficit cut)))))
+
 (defun drover-list--column-widths (fields rows metrics)
   "Return the widths in pixels of the columns of FIELDS showing ROWS.
 FIELDS are entries of `drover-list-fields'; METRICS give the width of
 lines.  A column is as wide as what it shows and its name, up to its
-:max; when the line is too narrow for that, the fields without a :max
-give up room first, down to their :min, then the others in proportion
-to what they would lose, down to theirs.  A field drawn whole (see
-`drover-list--whole-p') gives up the room of its name alone."
-  (let* ((char (plist-get metrics :char))
-         (prefix (drover-list--title-prefix rows metrics))
+:max.  When the line is too narrow for that, room is given up, each
+column down to the fewest pixels it needs (see
+`drover-list--narrowest'), in turn by: the fields without a :max, of a
+long text, such as the summary; the names of the columns of short
+texts, which are never cut (see `drover-list--whole-p'); the title; the
+other fields, in proportion to what they would lose.  So the ages and
+the effort show whole while the summary or the title has room to give,
+the project and model whole while the title has, and no column is
+narrowed while the line has room."
+  (let* ((prefix (drover-list--title-prefix rows metrics))
          (room (- (plist-get metrics :width) (plist-get metrics :margin)
                   (* (plist-get metrics :gap) (max 0 (1- (length fields))))))
-         (bounds (mapcar (lambda (entry)
-                           (let* ((field (car entry))
-                                  (natural (drover-list--natural field rows metrics))
-                                  (extra (if (eq field 'title) prefix 0))
-                                  (max (plist-get (cdr entry) :max))
-                                  (want (if max (min natural (+ extra (* char max))) natural))
-                                  (floor (if (drover-list--whole-p field)
-                                             (min want (drover-list--content-width field rows metrics))
-                                           (min want (+ extra (* char (or (plist-get (cdr entry) :min) 0)))))))
-                             (list want floor (null max))))
-                         fields))
-         (widths (mapcar #'car bounds))
-         (deficit (- (apply #'+ widths) room)))
-    (when (> deficit 0)
-      ;; Flexible fields first, then the others in proportion.
-      (dolist (pass '(flexible fixed))
-        (when (> deficit 0)
-          (let* ((indices (seq-filter (lambda (index)
-                                        (eq (nth 2 (nth index bounds)) (eq pass 'flexible)))
-                                      (number-sequence 0 (1- (length bounds)))))
-                 (slack (apply #'+ (mapcar (lambda (index)
-                                             (- (nth index widths) (nth 1 (nth index bounds))))
-                                           indices))))
-            (when (> slack 0)
-              (let ((cut (min deficit slack)))
-                (dolist (index indices)
-                  (let ((give (- (nth index widths) (nth 1 (nth index bounds)))))
-                    (setf (nth index widths)
-                          (- (nth index widths) (ceiling (* cut give) slack)))))
-                (setq deficit (- deficit cut))))))))
-    (cl-mapcar (lambda (width bound) (max width (nth 1 bound) 0)) widths bounds)))
+         (widths (make-vector (length fields) 0))
+         (floors (make-vector (length fields) 0))
+         (passes (list nil nil nil nil)))
+    (seq-do-indexed
+     (lambda (entry index)
+       (let* ((field (car entry))
+              (extra (if (eq field 'title) prefix 0))
+              (max (plist-get (cdr entry) :max))
+              (natural (drover-list--natural field rows metrics))
+              (want (if max (min natural (+ extra (* (plist-get metrics :char) max))) natural)))
+         (aset widths index want)
+         (aset floors index (min want (+ extra (drover-list--narrowest entry rows metrics))))
+         (push index (nth (cond ((drover-list--whole-p field) 1)
+                                ((null max) 0)
+                                ((eq field 'title) 2)
+                                (t 3))
+                          passes))))
+     fields)
+    (let ((deficit (- (apply #'+ (append widths nil)) room)))
+      (dolist (indices passes)
+        (setq deficit (drover-list--give widths floors (nreverse indices) deficit))))
+    (append widths nil)))
 
 (defun drover-list--layout (rows metrics)
   "Return METRICS with the layout of ROWS added.
@@ -1261,7 +1351,8 @@ NOW defaults to the current time.  Only the caches change: the display
 of their bars, and the text of the time left.  A cache gone out shows
 nothing, and is forgotten."
   (let ((now (or now (drover-list--now)))
-        (inhibit-read-only t))
+        (inhibit-read-only t)
+        (deactivate-mark nil))
     (with-silent-modifications
       (setq drover-list--caches
             (seq-filter
@@ -1556,8 +1647,9 @@ out when unknown.  Files under DIRECTORY are named relative to it."
 (defun drover-list--hidden-facts (session layout)
   "Return what the line of SESSION does not show of it, as (LABEL VALUE FACE).
 Those are the fields of `drover-list-fields' LAYOUT leaves out, such
-as the model in two lines, and the directory of a session without a
-project, which its line cannot tell."
+as the model in two lines, and what its line cannot tell: the directory
+of a session without a project, and the default branch, which the
+branch's column leaves out."
   (let ((shown (plist-get layout :fields))
         (now (plist-get layout :now))
         (facts nil))
@@ -1568,8 +1660,11 @@ project, which its line cannot tell."
       (unless (drover-session-project session)
         (fact 'directory "Directory" (and (drover-session-directory session)
                                           (abbreviate-file-name (drover-session-directory session)))))
-      (fact 'location "Project" (drover-session-location session))
-      (fact 'agent "Agent" (drover-session-agent session))
+      (fact 'location "Project" (drover-session-project session))
+      ;; Its column leaves out the default branch, which details tell.
+      (fact (if (drover-session-default-branch-p session) 'default-branch 'branch)
+            "Branch" (drover-session-branch session))
+      (fact 'agent "Agent" (drover-agent-label session))
       (fact 'model "Model" (let ((text (drover-list--model-text session)))
                              (unless (string-empty-p text) text)))
       (fact 'provider "Provider" (drover-session-provider-name session))
@@ -1719,18 +1814,6 @@ Return nil when none does."
                                                               (drover-status-face status))))))
                                    drover-attention-statuses))))
     (string-join parts " ")))
-
-(defun drover-list--location-function (group)
-  "Return the function giving where a session works, as GROUP shows it.
-GROUP is (GROUPING . VALUE), or nil.  A project group names its
-project, so its sessions show only their branch."
-  (pcase group
-    (`(project . ,project)
-     (lambda (session)
-       (if (equal (drover-session-project session) project)
-           (drover-session-branch session)
-         (drover-session-location session))))
-    (_ #'drover-session-location)))
 
 (defun drover-list--group-icon (group rows)
   "Return the icon of GROUP, (GROUPING . VALUE), listing ROWS, and a space, or nil.
@@ -1917,8 +2000,7 @@ unless the user hides it.  In two lines, it does not show."
          ;; at work whether or not they are shown.
          (metrics (drover-list--metrics now (drover-tree-active-subagents (drover-tree all))))
          (grouped (mapcar (pcase-lambda (`(,group . ,nodes))
-                            (cons group (drover-list--tree-rows
-                                         nodes (drover-list--location-function group) metrics)))
+                            (cons group (drover-list--tree-rows nodes group metrics)))
                           groups))
          (rows (mapcan (lambda (group) (copy-sequence (cdr group))) grouped))
          ;; Columns line up across groups.
@@ -2032,17 +2114,22 @@ then the same line."
 (defun drover-list--render ()
   "Redraw the current list from what backends report now.
 Point, in the buffer and in every window showing it, stays on the
-same session, and window starts on the same line."
+same session, and window starts on the same line.  An active region
+stays active, its mark on the same session too, so that it selects the
+same sessions: a list redraws whenever a session changes, many times a
+second during a turn."
   (let* ((windows (get-buffer-window-list nil nil t))
          (anchor (drover-list--anchor (point)))
+         (mark (and (region-active-p) (drover-list--anchor (mark))))
          (placements (mapcar (lambda (window)
                                (list window
                                      (drover-list--anchor (window-point window))
                                      (line-number-at-pos (window-start window))))
                              windows))
-         (inhibit-read-only t))
+         (inhibit-read-only t)
+         ;; Redrawing, often from a timer, must not end the user's region.
+         (deactivate-mark nil))
     (drover-list--remember-visibility)
-    (deactivate-mark)
     (mapc (lambda (entry)
             (when-let* ((overlay (plist-get entry :overlay))) (delete-overlay overlay))
             (set-marker (plist-get entry :start) nil))
@@ -2075,6 +2162,8 @@ same session, and window starts on the same line."
                         t))
     (when (eq (window-buffer) (current-buffer))
       (goto-char (window-point)))
+    (when mark
+      (set-marker (mark-marker) (drover-list--resolve mark)))
     (drover-list--draw-caches)
     (setq drover-list--animated (drover-list--collect-animated)
           drover-list--prefetched (and (drover-list--prefetch-wanted-p)
@@ -2313,6 +2402,65 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
     (drover-list--stop-timer 'drover-list--cache-timer)
     (drover-list--stop-timer 'drover-list--frame-timer)))
 
+;;;; Selection
+
+;; An active region selects the sessions whose headings it spans, as
+;; Magit selects sections: from the heading of one section to that of
+;; a sibling, which Magit highlights.  Group headings so selected stand
+;; for their sessions, as the heading of a collapsed group stands for
+;; them when moving.  A region Magit does not take for a selection, as
+;; one from a session to another group's, selects nothing, and shows as
+;; a region does elsewhere.
+
+(defun drover-list--selected-sections ()
+  "Return the session sections the region selects, in order, or nil.
+They are the sections `magit-region-sections' selects, whose headings
+Magit highlights, each group among them standing for its sessions."
+  (mapcan (lambda (section)
+            (cond ((object-of-class-p section 'drover-list-session-section) (list section))
+                  ((object-of-class-p section 'drover-list-group-section)
+                   (drover-list--session-sections section))))
+          (magit-region-sections)))
+
+(defun drover-list--selected-sessions ()
+  "Return the current records of the sessions the region selects, or nil.
+For `drover-selected-sessions-function'.  Records come from the
+backends, as at point; a session gone since the list was drawn is left
+out."
+  (when-let* ((sections (drover-list--selected-sections)))
+    (let ((known (make-hash-table :test #'equal)))
+      (dolist (session (drover-known-sessions))
+        (puthash (drover-session-key session) session known))
+      (delq nil (mapcar (lambda (section) (gethash (oref section value) known)) sections)))))
+
+(defun drover-list-copy (&optional plain)
+  "Copy Org links to the selected sessions, one per line, or the region.
+The sessions are those the region selects, else the session at point;
+each is copied as `drover-session-link' makes its link, or by its title
+without one.  A region selecting no session, which shows as a region
+does in other buffers, is copied as text, as `kill-ring-save' does, and
+so is any region with prefix argument PLAIN."
+  (interactive "P" drover-list-mode)
+  (if (and (use-region-p) (or plain (null (drover-list--selected-sections))))
+      (call-interactively #'kill-ring-save)
+    (let* ((sessions (drover-selected-sessions))
+           (links (mapcar #'drover-session-link sessions))
+           (missing (seq-count #'null links)))
+      (kill-new (string-join (cl-mapcar (lambda (session link)
+                                          (or link (drover-list--one-line
+                                                    (drover-session-display-title session))))
+                                        sessions links)
+                             "\n"))
+      (deactivate-mark)
+      (message "%s"
+               (let ((title (drover-list--one-line (drover-session-display-title (car sessions)))))
+                 (cond ((and (null (cdr sessions)) (zerop missing)) (format "Copied a link to %s" title))
+                       ((null (cdr sessions))
+                        (format "Copied the title of %s: no Org link type stores sessions" title))
+                       ((zerop missing) (format "Copied links to %d sessions" (length sessions)))
+                       (t (format "Copied links to %d sessions, %d by title: no Org link type stores %s"
+                                  (length sessions) missing (if (= missing 1) "it" "them")))))))))
+
 ;;;; Commands
 
 (defun drover-list--goto-first-session ()
@@ -2548,13 +2696,15 @@ a filter leaves sessions out."
 ;; of `magit-section-mode-map' and its parent `special-mode-map'.  The
 ;; only one they share is g, which refreshes either way: `drover-refresh'
 ;; reverts the buffer, as `revert-buffer' would.  RET on a group heading
-;; toggles it, through the group sections' own keymap.
+;; toggles it, through the group sections' own keymap.  Copying, M-w
+;; wherever the user binds it, copies sessions rather than their lines.
 (defvar-keymap drover-list-mode-map
   :doc "Keymap of `drover-list-mode'."
   :parent (make-composed-keymap (list drover-session-map magit-section-mode-map))
   "RET" #'drover-open-at-point
   "C-o" #'drover-list-display
-  "q" #'drover-list-quit)
+  "q" #'drover-list-quit
+  "<remap> <kill-ring-save>" #'drover-list-copy)
 
 (define-derived-mode drover-list-mode magit-section-mode "Drover"
   "Major mode of the list of agent sessions.
@@ -2574,12 +2724,19 @@ act on the session at point; \\[drover-toggle-subagents] shows every subagent, t
 none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 `drover-list'.
 
+An active region selects the sessions whose lines it spans, as Magit
+highlights them: a group's heading stands for its sessions.  Marking
+seen, interrupting, archiving and deleting act on every selected
+session, \\[drover-list-copy] copies their links, and the prompt quotes
+them with their last replies (see `drover-prompt-dwim').
+
 \\{drover-list-mode-map}"
   :group 'drover-list
   :interactive nil
   (setq-local drover-view-p t)
   (setq-local drover-list--visibility (make-hash-table :test #'equal))
   (setq-local drover-session-at-point-function #'drover-list--session-at-point)
+  (setq-local drover-selected-sessions-function #'drover-list--selected-sessions)
   (setq-local drover-main-window-function #'drover-list--target-window)
   (setq-local revert-buffer-function #'drover-list--revert)
   (setq-local mode-line-process '(:eval (drover-list--mode-line-process)))

@@ -22,12 +22,14 @@
 
 ;; The prompt: an Org buffer, `*drover*', where the user writes to an
 ;; agent, gathering context from the buffers worked in
-;; (`drover-prompt-dwim'), then sends it to a running session or a new
-;; one of any backend and engine (`drover-prompt-submit').  The buffer
-;; is in `drover-prompt-mode', which defines drover's prompt actions
-;; (see `drover-prompt-actions'): send, clear, attach, copy-block,
-;; open-link, and the choice of agent, model, effort and directory the
-;; next session runs.
+;; (`drover-prompt-dwim'), or from a list of sessions the sessions
+;; selected, quoted with their last replies
+;; (`drover-prompt-quote-sessions'), then sends it to a running session
+;; or a new one of any backend and engine (`drover-prompt-submit').  The
+;; buffer is in `drover-prompt-mode', which defines drover's prompt
+;; actions (see `drover-prompt-actions'): send, clear, attach,
+;; copy-block, open-link, and the choice of agent, model, effort and
+;; directory the next session runs.
 ;;
 ;; The prompt knows no backend: it sends through their prompt
 ;; operations (:create :check :apply-options :send :options :settable,
@@ -142,6 +144,26 @@ their defaults; opencode.el's loads drover's OpenCode backend."
 When non-nil, `drover-prompt-dwim' on a heading line, without an
 active region nor a prefix argument, runs `drover-prompt-org-task'."
   :type 'boolean
+  :group 'drover)
+
+(defcustom drover-prompt-quote-timeout 10
+  "Seconds `drover-prompt-quote-sessions' waits for the replies it quotes.
+The prompt gains the quote once every session's reply arrived, or once
+this time passed, those late left without a reply."
+  :type 'number
+  :group 'drover)
+
+(defcustom drover-prompt-quote-reply-lines 20
+  "Lines of a last reply `drover-prompt-quote-sessions' quotes at most.
+A longer reply is cut, and a note tells how many lines it goes on for."
+  :type 'natnum
+  :group 'drover)
+
+(defcustom drover-prompt-quote-reply-characters 2000
+  "Characters of a last reply `drover-prompt-quote-sessions' quotes at most.
+It bounds the quote of replies of few long lines, as
+`drover-prompt-quote-reply-lines' does of many lines."
+  :type 'natnum
   :group 'drover)
 
 ;;;; State of the prompt buffer
@@ -558,11 +580,14 @@ buffer."
 The first call from a buffer shows the prompt, begun in that buffer's
 directory, with a link to the line at point and the active region
 quoted in a code block; later calls add such a block at the point the
-user left the prompt at.  On an Org heading line, without an active
-region, start a prompt for that task instead (see
-`drover-prompt-org-task'), when `drover-prompt-org-headings-start-tasks'
-says so, unless PLAIN, the prefix argument, asks for the heading line
-as plain context.  Signal a `user-error' in the prompt buffer itself."
+user left the prompt at.  In a list of sessions, the context is the
+sessions the region selects, else the one at point, each linked and
+quoted with its last reply (see `drover-prompt-quote-sessions').  On
+an Org heading line, without an active region, start a prompt for that
+task instead (see `drover-prompt-org-task'), when
+`drover-prompt-org-headings-start-tasks' says so, unless PLAIN, the
+prefix argument, asks for the heading line as plain context.  Signal a
+`user-error' in the prompt buffer itself."
   (interactive "P")
   (when drover-prompt-mode
     (user-error "Already in the prompt"))
@@ -575,29 +600,46 @@ as plain context.  Signal a `user-error' in the prompt buffer itself."
   "Open the prompt, or add to it the context at point.
 As `drover-prompt-dwim' does, without its Org task case.  The context
 is the active region, else the line at point, formatted by
-`drover-prompt-format-context'.  It goes at point in the prompt's
+`drover-prompt-format-context'.  In a list of sessions, it is the
+sessions selected, or the one at point, quoted with their last replies
+by `drover-prompt-quote-sessions'.  It goes at point in the prompt's
 window, or while the prompt is hidden where the user left point."
-  (let* ((source (current-buffer))
-         (region (if (use-region-p)
-                     (buffer-substring-no-properties (region-beginning) (region-end))
-                   (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
-         (block (drover-prompt-format-context source region (drover-prompt-language major-mode)))
-         (buffer (drover-prompt-buffer t)))
+  (if-let* (((drover-session-list-p))
+            (sessions (drover-selected-sessions t)))
+      (drover-prompt-quote-sessions sessions)
+    (let* ((source (current-buffer))
+           (region (if (use-region-p)
+                       (buffer-substring-no-properties (region-beginning) (region-end))
+                     (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+           (block (drover-prompt-format-context source region (drover-prompt-language major-mode))))
+      (drover-prompt--add block default-directory))))
+
+(defun drover-prompt--add (text directory &optional quietly)
+  "Add TEXT to the prompt, and show the prompt.
+An empty prompt begins in DIRECTORY with TEXT.  Otherwise TEXT goes at
+point in the prompt's window, or while the prompt is hidden where the
+user left point, after a blank line.  The prompt's window is selected,
+unless QUIETLY, as when TEXT arrives after the command that asked for
+it: the user may be elsewhere by then."
+  (let ((buffer (drover-prompt-buffer t)))
     (with-current-buffer buffer
       (if (zerop (buffer-size))
           (progn
-            (drover-prompt--begin (buffer-local-value 'default-directory source))
-            (insert block))
+            (drover-prompt--begin directory)
+            (insert text))
         ;; Another engine may have taken a prompt since this one began.
         (drover-prompt--schedule-refresh)
         (if-let* ((window (get-buffer-window buffer)))
             (with-selected-window window
               (drover-prompt--ensure-blank-line)
-              (insert block))
+              (insert text))
           (goto-char (if (markerp drover-prompt--last-point) drover-prompt--last-point (point-max)))
           (drover-prompt--ensure-blank-line)
-          (insert block))))
-    (drover-prompt--display buffer)))
+          (insert text))))
+    (if quietly
+        (or (get-buffer-window buffer t)
+            (display-buffer buffer drover-prompt-display-action))
+      (drover-prompt--display buffer))))
 
 ;;;###autoload
 (defun drover-prompt-toggle ()
@@ -668,6 +710,123 @@ heading; picks made on an empty prompt stay, a replaced draft's go."
       (when drover-prompt-task-agent
         (setq drover-prompt-picked-agent drover-prompt-task-agent)))
     (drover-prompt--display buffer)))
+
+;;;; Quoting sessions
+
+(defun drover-prompt-quote-sessions (sessions)
+  "Add SESSIONS to the prompt, each with a link, its status and its last reply.
+The links are made at once, from the current buffer, by
+`drover-session-link'; the replies are fetched from the backends of
+SESSIONS all at once, without waiting (see `drover-recap'), the echo
+area telling how many arrived.  The quote goes into the prompt once
+every reply arrived, or after `drover-prompt-quote-timeout' seconds, a
+session whose reply did not arrive, or that has none, quoted without
+one.  See `drover-prompt-format-sessions' for the quote."
+  (let* ((count (length sessions))
+         (links (mapcar #'drover-session-link sessions))
+         (directory (or (drover-session-directory (car sessions)) default-directory))
+         (origin (selected-window))
+         (recaps (make-hash-table :test #'equal))
+         (finished nil)
+         (timer nil))
+    (cl-labels ((finish ()
+                  (unless finished
+                    (setq finished t)
+                    (when timer
+                      (cancel-timer timer))
+                    (let ((late (- count (hash-table-count recaps))))
+                      ;; Arriving later, after the user went elsewhere,
+                      ;; the prompt shows without taking the window.
+                      (drover-prompt--add (drover-prompt-format-sessions sessions links recaps)
+                                          directory (not (eq (selected-window) origin)))
+                      (message "Quoted %s%s"
+                               (if (cdr sessions)
+                                   (format "%d sessions" count)
+                                 (drover-session-display-title (car sessions)))
+                               (if (> late 0)
+                                   (format "; %d repl%s did not arrive in time"
+                                           late (if (= late 1) "y" "ies"))
+                                 "")))))
+                (progress ()
+                  (unless finished
+                    (message "Fetching the last repl%s of %s… %d/%d"
+                             (if (cdr sessions) "ies" "y")
+                             (if (cdr sessions)
+                                 (format "%d sessions" count)
+                               (drover-session-display-title (car sessions)))
+                             (hash-table-count recaps) count))))
+      (setq timer (run-at-time drover-prompt-quote-timeout nil #'finish))
+      (dolist (session sessions)
+        (let ((key (drover-session-key session)))
+          (drover-recap session
+                        (lambda (recap)
+                          (unless finished
+                            (puthash key recap recaps)
+                            (if (= (hash-table-count recaps) count)
+                                (finish)
+                              (progress)))))))
+      (progress))))
+
+(defun drover-prompt--quote-status (session)
+  "Return how SESSION stands, as a quote tells an agent."
+  (let ((summary (drover-session-summary session)))
+    (concat (pcase (drover-session-status session)
+              ('waiting "waiting for an answer")
+              (status (symbol-name status)))
+            (and summary
+                 (concat ": " (replace-regexp-in-string "[\n\r\t]+" " " (string-trim summary)))))))
+
+(defun drover-prompt--quote-reply (reply)
+  "Return REPLY cut for a quote, as (TEXT . MORE), or nil when blank.
+TEXT is at most `drover-prompt-quote-reply-lines' lines and
+`drover-prompt-quote-reply-characters' characters of REPLY, a line cut
+in the middle ending in an ellipsis; MORE is how many lines of REPLY it
+leaves out, a line cut counting, or 0."
+  (when (and (stringp reply) (not (string-blank-p reply)))
+    (let* ((lines (split-string (string-trim-right (string-trim-left reply "\n+")) "\n"))
+           (kept nil)
+           (room drover-prompt-quote-reply-characters)
+           (left lines))
+      (while (and left (< (length kept) drover-prompt-quote-reply-lines) (> room 0))
+        (let ((line (pop left)))
+          (if (<= (length line) room)
+              (progn (push line kept)
+                     (setq room (- room (length line) 1)))
+            (push (concat (string-trim-right (substring line 0 room)) (truncate-string-ellipsis)) kept)
+            ;; The line cut counts among those left out.
+            (push line left)
+            (setq room 0))))
+      (cons (string-join (nreverse kept) "\n") (length left)))))
+
+(defun drover-prompt-format-sessions (sessions links recaps)
+  "Return the Org text quoting SESSIONS for an agent to read.
+LINKS are Org links to SESSIONS, in their order, nil for a session
+without one; RECAPS is a hash table of the recaps of `drover-recap' by
+session key.  Each session is an item of a list: its link, else its
+title, and how it stands, then its last reply, when it has one, in a
+Markdown block, which a sent prompt turns into a fence, cut by
+`drover-prompt--quote-reply' with a note telling how much is left out."
+  (concat
+   (if (cdr sessions) "Agent sessions:\n" "Agent session:\n")
+   (string-join
+    (cl-mapcar
+     (lambda (session link)
+       (let* ((title (replace-regexp-in-string "[\n\r\t]+" " "
+                                               (format "%s" (drover-session-display-title session))))
+              (reply (drover-prompt--quote-reply
+                      (plist-get (gethash (drover-session-key session) recaps) :reply))))
+         (concat "- " (or link title) " — " (drover-prompt--quote-status session) "\n"
+                 (when reply
+                   (concat "  Last reply:\n"
+                           "  #+begin_src markdown\n"
+                           (replace-regexp-in-string "^\\(.\\)" "  \\1"
+                                                     (org-escape-code-in-string (car reply)))
+                           "\n  #+end_src\n"
+                           (when (> (cdr reply) 0)
+                             (format "  (The reply goes on for %d more line%s.)\n"
+                                     (cdr reply) (if (= (cdr reply) 1) "" "s"))))))))
+     sessions links))
+   "\n"))
 
 ;;;; Text
 

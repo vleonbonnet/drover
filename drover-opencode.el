@@ -28,8 +28,8 @@
 ;; kept here, fetched when the backend starts and again whenever the
 ;; service reports a project change or the event stream reconnects.
 ;;
-;; What a session runs, its model, effort, provider and context, the
-;; records tell as opencode.el's mode line does, through its displays,
+;; What a session runs, its agent, model, effort, provider and context,
+;; the records tell as opencode.el's mode line does, through its displays,
 ;; which read the cached catalogs of the session's directory: drover
 ;; redraws as catalogs arrive.  The registry knows the context size of
 ;; the sessions it saw take a step; the others it fetches when asked,
@@ -74,6 +74,7 @@
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
 (declare-function opencode-session-last-turn "opencode-session" (id callback))
+(declare-function opencode-agent-display "opencode-display" (id &optional directory))
 
 ;;;; The OpenCode engine
 
@@ -470,6 +471,9 @@ asks for the others."
            :updated (plist-get entry :updated)
            :created (plist-get entry :created)
            :agent (plist-get entry :agent)
+           ;; Plain until the agent catalog arrives, which redraws.
+           :agent-display (when-let* ((agent (plist-get entry :agent)))
+                            (or (opencode-agent-display agent directory) agent))
            :detail (drover-opencode--detail entry status)
            :cache-expires (plist-get cache :expires)
            :cache-ttl (plist-get cache :ttl)
