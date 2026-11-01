@@ -3408,11 +3408,15 @@ The subagent's glyph stands under its parent's title."
       (should (string-prefix-p "  2 ? * Session p" (drover-list-test-heading "p"))))))
 
 (ert-deftest drover-list-test-default-animations ()
-  "By default, only status glyphs move, through frames of one weight of ink."
+  "By default, only status glyphs move, each frame close to the one before."
   (let ((animations (eval (car (get 'drover-animations 'standard-value)) t)))
     (should (equal (mapcar #'car animations) '(working retrying)))
-    ;; The full hourglass, solid among outlined ones, read as a blink.
-    (should (equal (alist-get 'working animations) '("\U000F051F" "\U000F199F")))
+    ;; The phases of the moon in order; the hourglass blinked.
+    (should (equal (alist-get 'working animations)
+                   '("\U000F0F64" "\U000F0F67" "\U000F0F61" "\U000F0F68"
+                     "\U000F0F62" "\U000F0F66" "\U000F0F63" "\U000F0F65")))
+    (should (= (eval (car (get 'drover-list-animation-interval 'standard-value)) t)
+               0.15))
     ;; Four filled clocks, the hand alone turning.
     (should (equal (alist-get 'retrying animations)
                    '("\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447")))))

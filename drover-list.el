@@ -170,7 +170,7 @@ A character counts as wide as the letter x in the face `drover-list'."
   :type 'natnum
   :group 'drover-list)
 
-(defcustom drover-list-animation-interval 0.5
+(defcustom drover-list-animation-interval 0.15
   "Seconds between two frames of the animated glyphs of a displayed list.
 Working sessions and those waiting to retry show the frames of
 `drover-animations' in turn.  A value of nil shows still glyphs, those
@@ -178,9 +178,9 @@ of `drover-status-glyphs'.
 
 A frame changes only the display of the animated characters, as the
 prompt cache bars do, so it costs a redisplay of their lines in the
-windows showing the list.  Half a second keeps the glyphs alive at two
-redisplays a second; a faster pace would cost that many more, in every
-frame showing the list, for little to see.  The timer runs only while
+windows showing the list.  The default turns the eight phases of the
+moon in 1.2 seconds, quick enough to read as busy rather than as a slow
+blink; a slower pace costs fewer redisplays.  The timer runs only while
 a displayed list shows an animated glyph."
   :type '(choice (const :tag "Still glyphs" nil) (number :tag "Seconds"))
   :group 'drover-list)

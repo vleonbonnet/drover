@@ -145,16 +145,21 @@ tooltip tells.  Nerd Font icons by default."
   :group 'drover)
 
 (defcustom drover-animations
-  '((working "\U000F051F" "\U000F199F") ; nf-md-timer_sand, timer_sand_complete
+  ;; nf-md-moon_new, waxing_crescent, first_quarter, waxing_gibbous,
+  ;; full, waning_gibbous, last_quarter, waning_crescent
+  '((working "\U000F0F64" "\U000F0F67" "\U000F0F61" "\U000F0F68"
+             "\U000F0F62" "\U000F0F66" "\U000F0F63" "\U000F0F65")
     (retrying "\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447")) ; nf-md-clock_time_twelve, three, six, nine
   "Frames of the status glyphs session lists animate, shown in turn.
 Each entry is (KIND FRAME...), each FRAME a string.  KIND is `working'
 or `retrying': sessions of that status show the frames in place of
 their glyph of `drover-status-glyphs'.  A kind without frames stays
 still.  Each frame takes the room of the widest, so that nothing after
-it moves.  Nerd Font icons by default, of one weight of ink: a frame
-much darker or lighter than the others, such as a full hourglass among
-outlined ones, reads as a blink rather than as motion.
+it moves.  Nerd Font icons by default: the phases of the moon, and a
+clock whose hand turns.  Each frame differs little from the one before,
+so the cycle reads as motion; a lone frame much darker or lighter than
+the others, such as a full hourglass among outlined ones, reads as a
+blink.
 `drover-list-animation-interval' sets the pace, or stops every
 animation."
   :type '(alist :key-type (choice (const working) (const retrying))
