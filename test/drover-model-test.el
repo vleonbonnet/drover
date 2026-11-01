@@ -65,6 +65,57 @@ table's metadata."
     (should-not (drover-model-id-for bare 'opencode))
     (should (equal (drover-model-id-for bare 'claude-code) "claude-opus-5-5"))))
 
+(ert-deftest drover-model-test-id-for-front-end ()
+  "A front end listing a model under another name is sent that name, others the identifier."
+  (let ((opus (drover-model-create :id "claude-opus-5-5"
+                                   :aliases '(((claude-code . agent-shell) . "opus"))
+                                   :engines '(claude-code))))
+    (should (equal (drover-model-alias opus 'claude-code 'agent-shell) "opus"))
+    (should-not (drover-model-alias opus 'claude-code 'claude-code-ide))
+    (should (equal (drover-model-id-for opus 'claude-code 'agent-shell) "opus"))
+    (should (equal (drover-model-id-for opus 'claude-code 'claude-code-ide) "claude-opus-5-5"))
+    (should (equal (drover-model-id-for opus 'claude-code) "claude-opus-5-5"))
+    ;; An engine that cannot run it is sent nothing, alias or not.
+    (should-not (drover-model-id-for opus 'codex 'agent-shell))
+    (should (equal (drover-model-key opus) '(nil . "claude-opus-5-5")))))
+
+(ert-deftest drover-model-test-merge ()
+  "A model takes from another report of it what it does not know."
+  (let* ((older (drover-model-create :provider-name "Anthropic" :id "claude-opus-5-5" :name "Opus 5.5"
+                                     :variants '((low) (max)) :default-variant 'low
+                                     :aliases '(((claude-code . agent-shell) . "opus")
+                                                ((claude-code . other) . "o"))
+                                     :engines '(claude-code)))
+         (unknown (drover-model-create :id "claude-opus-5-5" :variants-known nil
+                                       :aliases '(((claude-code . other) . "opus-5.5"))
+                                       :engines '(claude-code)))
+         (merged (drover-model-merge unknown older)))
+    (should (equal (drover-model-variants merged) '((low) (max))))
+    (should (eq (drover-model-default-variant merged) 'low))
+    (should (drover-model-variants-known merged))
+    (should (equal (drover-model-label merged) "Anthropic: Opus 5.5"))
+    (should (equal (drover-model-aliases merged)
+                   '(((claude-code . other) . "opus-5.5") ((claude-code . agent-shell) . "opus"))))
+    ;; Neither is modified.
+    (should-not (drover-model-variants-known unknown))
+    (should (equal (drover-model-aliases unknown) '(((claude-code . other) . "opus-5.5"))))
+    ;; Known variants, none included, stay.
+    (let ((none (drover-model-create :id "claude-opus-5-5" :engines '(claude-code))))
+      (should-not (drover-model-variants (drover-model-merge none older))))
+    ;; Reported twice in one list: one model, at its first place.
+    (let ((other (drover-model-create :id "other" :engines '(claude-code))))
+      (should (equal (mapcar #'drover-model-id (drover-model-merge-all (list unknown other older)))
+                     '("claude-opus-5-5" "other")))
+      (should (drover-model-variants-known (car (drover-model-merge-all (list unknown other older))))))))
+
+(ert-deftest drover-model-test-unknown-variants ()
+  "Variants no source told are unknown: pickers offer none, and say so."
+  (let ((model (drover-model-create :id "m" :variants-known nil)))
+    (should (equal (drover-model-annotation model) "  m  {effort unknown}"))
+    (drover-model-test-reading '("low")
+      (should-not (drover-read-variant model))
+      (should-not reads))))
+
 (ert-deftest drover-model-test-short-name ()
   "Lists name a model without the family every model of it shares."
   (should (equal (drover-model-short-name "Claude Opus 5.5") "Opus 5.5"))
@@ -311,12 +362,12 @@ Warnings are recorded in `warnings', newest first."
       (should (file-in-directory-p (drover-model-memory-file) drover-state-directory))
       (let* ((form (drover-model-test-read-file))
              (entry (alist-get 'claude-code (plist-get form :engines))))
-        (should (eql (plist-get form :version) 1))
+        (should (eql (plist-get form :version) 2))
         (should (< (- (float-time) (plist-get entry :time)) 60))
         (should (equal (plist-get entry :models)
                        '((:provider-id nil :provider-name "Anthropic" :id "opus" :name "Opus"
                           :variants ((low) (high :effort "high")) :default-variant high
-                          :engines (claude-code))))))
+                          :variants-known t :aliases nil :engines (claude-code))))))
       ;; Written whole through a temporary file: none is left.
       (should (equal (directory-files drover-state-directory nil "\\`[^.]\\|\\`\\.models-")
                      '("models.eld")))
@@ -363,6 +414,104 @@ Warnings are recorded in `warnings', newest first."
         (drover-model-test-forget-session)
         (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("sonnet"))))
       (should-not warnings))))
+
+(ert-deftest drover-model-test-memory-accumulates-variants ()
+  "A model's variants, told while a session runs it, stay known once it switched models."
+  (drover-model-test-remembering
+    (let* ((opus-levels '((low) (medium) (high) (xhigh) (max)))
+           (sonnet-levels '((low) (medium) (high)))
+           (live nil))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (cl-flet ((answer (opus sonnet)
+                  (setq live (list (drover-model-create :id "opus" :variants opus :variants-known (and opus t)
+                                                        :engines '(claude-code))
+                                   (drover-model-create :id "sonnet" :variants sonnet
+                                                        :variants-known (and sonnet t)
+                                                        :engines '(claude-code)))))
+                (variants ()
+                  (mapcar (lambda (model)
+                            (cons (drover-model-variants-known model) (drover-model-variants model)))
+                          (drover-models "/work/"))))
+        ;; The session runs Opus: Sonnet's variants are unknown, not Opus's.
+        (answer opus-levels nil)
+        (should (equal (variants) (list (cons t opus-levels) (list nil))))
+        ;; It switched to Sonnet: Opus keeps what was told of it.
+        (answer nil sonnet-levels)
+        (should (equal (variants) (list (cons t opus-levels) (cons t sonnet-levels))))
+        ;; So does the file, for the next Emacs session.
+        (setq drover--model-sources nil)
+        (drover-model-test-forget-session)
+        (should (equal (variants) (list (cons t opus-levels) (cons t sonnet-levels))))
+        ;; A live answer naming another set of models replaces it.
+        (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+        (setq live (list (drover-model-create :id "haiku" :variants-known nil :engines '(claude-code))))
+        (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("haiku")))
+        (setq drover--model-sources nil)
+        (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("haiku"))))
+      (should-not warnings))))
+
+(ert-deftest drover-model-test-memory-session-only ()
+  "Not remembering, variants still accumulate in this Emacs session, and no file is written."
+  (drover-model-test-remembering
+    (let ((drover-remember-models nil)
+          (live (list (drover-model-create :id "opus" :variants '((low)) :engines '(claude-code))
+                      (drover-model-create :id "sonnet" :variants-known nil :engines '(claude-code)))))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (drover-models "/work/")
+      (setq live (list (drover-model-create :id "opus" :variants-known nil :engines '(claude-code))
+                       (drover-model-create :id "sonnet" :variants '((high)) :engines '(claude-code))))
+      (should (equal (mapcar #'drover-model-variants (drover-models "/work/")) '(((low)) ((high)))))
+      (should-not (file-exists-p (drover-model-memory-file)))
+      ;; Once the sessions are gone, nothing stands in.
+      (setq drover--model-sources nil)
+      (should-not (drover-models "/work/")))))
+
+(ert-deftest drover-model-test-memory-aliases ()
+  "A model keeps the name a front end takes for it, whichever source names it later."
+  (drover-model-test-remembering
+    (let* ((key '(claude-code . agent-shell))
+           (live nil)
+           (model (lambda (id &optional alias)
+                    (drover-model-create :id id :aliases (and alias (list (cons key alias)))
+                                         :engines '(claude-code)))))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (setq live (list (funcall model "claude-opus-5-5" "opus") (funcall model "claude-opus-5")))
+      (drover-models "/work/")
+      ;; A source listing identifiers alone, such as the CLI's catalog.
+      (setq live (list (funcall model "claude-opus-5-5") (funcall model "claude-opus-5")))
+      (should (equal (mapcar (lambda (model) (drover-model-id-for model 'claude-code 'agent-shell))
+                             (drover-models "/work/"))
+                     '("opus" "claude-opus-5")))
+      ;; The alias moved to a newer model: the older one is sent by identifier.
+      (setq live (list (funcall model "claude-opus-6" "opus") (funcall model "claude-opus-5-5")))
+      (should (equal (mapcar (lambda (model) (drover-model-id-for model 'claude-code 'agent-shell))
+                             (drover-models "/work/"))
+                     '("opus" "claude-opus-5-5")))
+      (should-not warnings))))
+
+(ert-deftest drover-model-test-memory-version-1 ()
+  "Models remembered in the first format are read, their variants unknown."
+  (drover-model-test-remembering
+    (drover-test-write (drover-model-memory-file)
+                       (prin1-to-string
+                        `(:version 1 :engines
+                                   ((claude-code :time ,(float-time)
+                                                 :models ((:provider-id nil :provider-name "Anthropic"
+                                                           :id "opus" :name "Opus"
+                                                           :variants ((low) (high)) :default-variant high
+                                                           :engines (claude-code))))))))
+    (let ((models (drover-models "/work/")))
+      (should (equal (mapcar #'drover-model-label models) '("Anthropic: Opus")))
+      ;; Version 1 gave every model the levels of the one a session ran.
+      (should-not (drover-model-variants (car models)))
+      (should-not (drover-model-default-variant (car models)))
+      (should-not (drover-model-variants-known (car models)))
+      (should (drover-model-remembered (car models))))
+    (should-not warnings)
+    ;; The next live answer writes the current format.
+    (drover-register-model-source 'claude-code (lambda (_) (list drover-model-test-opus)) -10 t)
+    (drover-models "/work/")
+    (should (eql (plist-get (drover-model-test-read-file) :version) 2))))
 
 (ert-deftest drover-model-test-memory-order ()
   "Live sources answer first, then the memory, then sources deeper than it."

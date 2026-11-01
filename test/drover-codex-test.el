@@ -84,9 +84,10 @@
     (let ((model (plist-get (drover-codex-defaults) :model)))
       (should (equal (drover-model-id model) "o4-mini"))
       ;; A provider other than OpenAI names itself; without a cache
-      ;; entry, the model has no name, variants nor default.
+      ;; entry, the model has no name nor default, and unknown variants.
       (should (equal (drover-model-label model) "azure: o4-mini"))
       (should-not (drover-model-variants model))
+      (should-not (drover-model-variants-known model))
       (should-not (drover-model-default-variant model))
       ;; Codex runs it, whatever family its name tells.
       (should (equal (drover-model-engines model) '(codex))))))
@@ -99,6 +100,43 @@
     (should (eq (drover-codex-effort "gpt-a" nil) 'medium))
     (should (eq (drover-codex-effort "gpt-a" '(("model_reasoning_effort" . "xhigh"))) 'xhigh))
     (should-not (drover-codex-effort "gpt-z" nil))))
+
+(ert-deftest drover-codex-test-acp-model-efforts ()
+  "The model identifiers Codex's ACP agent lists apart tell each model's levels."
+  (should (equal (drover-codex-acp-model-efforts
+                  '("gpt-5.5[low]" "gpt-5.5[medium]" "gpt-6-astra[ultra]" "gpt-5.5[xhigh]"
+                    "gpt-5.5[low]" "plain" nil "[low]"))
+                 '(("gpt-5.5" low medium xhigh) ("gpt-6-astra" ultra))))
+  (should-not (drover-codex-acp-model-efforts nil)))
+
+(ert-deftest drover-codex-test-acp-models ()
+  "A Codex session's models take their own levels, the one it runs those it offers."
+  (drover-test-with-homes
+    (drover-test-write (expand-file-name "models_cache.json" drover-codex-home) drover-test-codex-models-cache)
+    ;; As codex-acp 1.13 lists them: model values, names without "gpt-",
+    ;; and apart, every model with every level.
+    (let* ((options '(("gpt-5.5" . "5.5") ("gpt-6-astra" . "6 Astra") ("gpt-next" . "Next")))
+           (efforts (drover-codex-acp-model-efforts
+                     '("gpt-5.5[low]" "gpt-5.5[medium]" "gpt-5.5[high]" "gpt-5.5[xhigh]"
+                       "gpt-6-astra[low]" "gpt-6-astra[max]")))
+           (models (drover-codex-acp-models options "gpt-6-astra" '(low medium high) efforts)))
+      (should (equal (mapcar #'drover-model-label models)
+                     '("OpenAI: GPT-5.5" "OpenAI: GPT-6-Astra" "OpenAI: Next")))
+      (should (equal (mapcar (lambda (model) (mapcar #'car (drover-model-variants model))) models)
+                     '((low medium high xhigh) (low medium high) nil)))
+      (should (equal (mapcar #'drover-model-variants-known models) '(t t nil)))
+      (should (equal (mapcar #'drover-model-default-variant models) '(xhigh low nil)))
+      (should (equal (drover-model-engines (car models)) '(codex)))
+      ;; Without levels listed apart, the cache's.
+      (let ((models (drover-codex-acp-models options "gpt-next" nil nil)))
+        (should (equal (mapcar (lambda (model) (mapcar #'car (drover-model-variants model))) models)
+                       '((low medium high xhigh) (low medium high xhigh max ultra) nil)))
+        ;; The session runs a model without levels: known to have none.
+        (should (equal (mapcar #'drover-model-variants-known models) '(t t t))))
+      ;; The same model as the engine's defaults describe it.
+      (drover-codex-test-write-config "model = \"gpt-5.5\"\n")
+      (should (equal (plist-get (drover-codex-defaults) :model)
+                     (car (drover-codex-acp-models options nil nil nil)))))))
 
 (ert-deftest drover-codex-test-registered ()
   "Loading the file registers the engine."

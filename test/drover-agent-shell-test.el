@@ -48,39 +48,44 @@
 
 (defmacro drover-agent-shell-test-with (&rest body)
   "Run BODY with the agent-shell backend alone registered, in isolation.
-Engines, model sources and the change timer are isolated, `drover-warn'
-collects its messages in `drover-agent-shell-test--warnings', and the
-buffers BODY makes with `drover-agent-shell-test-shell' are killed."
+Engines, model sources, the models learnt and the change timer are
+isolated, engines read their local state from the throwaway homes of
+`drover-test-with-homes', `drover-warn' collects its messages in
+`drover-agent-shell-test--warnings', and the buffers BODY makes with
+`drover-agent-shell-test-shell' are killed."
   (declare (indent 0) (debug t))
-  `(let ((drover--backends nil)
-         (drover--started nil)
-         (drover--running nil)
-         (drover--change-timer nil)
-         (drover-changed-hook nil)
-         (drover-show-history nil)
-         (drover--history nil)
-         (drover-show-archived nil)
-         (drover--archived nil)
-         (drover--engines nil)
-         (drover--model-sources nil)
-         (drover-agent-shell--gemini-registered nil)
-         (drover-agent-shell-test--buffers nil)
-         (drover-agent-shell-test--calls nil)
-         (drover-agent-shell-test--warnings nil)
-         ;; Busy test shells must not ask the system to stay awake.
-         (agent-shell-inhibit-system-sleep nil))
-     (unwind-protect
-         (cl-letf (((symbol-function 'drover-warn)
-                    (lambda (format-string &rest args)
-                      (push (apply #'format-message format-string args)
-                            drover-agent-shell-test--warnings))))
-           (drover-agent-shell--register)
-           ,@body)
-       (dolist (buffer drover-agent-shell-test--buffers)
-         (when (buffer-live-p buffer)
-           (kill-buffer buffer)))
-       (when (timerp drover--change-timer)
-         (cancel-timer drover--change-timer)))))
+  `(drover-test-with-homes
+     (let ((drover--backends nil)
+           (drover--started nil)
+           (drover--running nil)
+           (drover--change-timer nil)
+           (drover-changed-hook nil)
+           (drover-show-history nil)
+           (drover--history nil)
+           (drover-show-archived nil)
+           (drover--archived nil)
+           (drover--engines nil)
+           (drover--model-sources nil)
+           (drover--model-memory nil)
+           (drover--model-memory-stamp 'unread)
+           (drover-agent-shell--gemini-registered nil)
+           (drover-agent-shell-test--buffers nil)
+           (drover-agent-shell-test--calls nil)
+           (drover-agent-shell-test--warnings nil)
+           ;; Busy test shells must not ask the system to stay awake.
+           (agent-shell-inhibit-system-sleep nil))
+       (unwind-protect
+           (cl-letf (((symbol-function 'drover-warn)
+                      (lambda (format-string &rest args)
+                        (push (apply #'format-message format-string args)
+                              drover-agent-shell-test--warnings))))
+             (drover-agent-shell--register)
+             ,@body)
+         (dolist (buffer drover-agent-shell-test--buffers)
+           (when (buffer-live-p buffer)
+             (kill-buffer buffer)))
+         (when (timerp drover--change-timer)
+           (cancel-timer drover--change-timer))))))
 
 (defun drover-agent-shell-test--recorder (function &optional value)
   "Return a stub of FUNCTION recording its arguments and returning VALUE."
@@ -128,6 +133,24 @@ VALUES are strings, named by themselves capitalized."
                                                  `((:value . ,value) (:name . ,(capitalize value))))
                                                values))))
                       options))))
+
+(defun drover-agent-shell-test-acp-models (buffer models current &optional levels level)
+  "Give the shell of BUFFER the model option MODELS, running CURRENT.
+MODELS are (VALUE . NAME); LEVELS, the values of a thought level option
+whose current value is LEVEL, or nil for none, as an agent offers no
+effort for a model without effort."
+  (with-current-buffer buffer
+    (map-put! (map-elt agent-shell--state :session) :config-options
+              (append
+               `(((:id . "model") (:category . "model") (:current-value . ,current)
+                  (:options . ,(mapcar (pcase-lambda (`(,value . ,name))
+                                         `((:value . ,value) (:name . ,name)))
+                                       models))))
+               (and levels
+                    `(((:id . "effort") (:category . "thought_level") (:current-value . ,level)
+                       (:options . ,(mapcar (lambda (value)
+                                              `((:value . ,value) (:name . ,(capitalize value))))
+                                            levels)))))))))
 
 (defun drover-agent-shell-test-emit (buffer event &rest data)
   "Emit EVENT in the shell of BUFFER with DATA, a plist turned into an alist."
@@ -719,9 +742,10 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
       (drover-agent-shell-test-options opencode '("model" "model" "anthropic/claude-opus" "anthropic/claude-opus"))
       (let ((options (drover-agent-shell--options (drover-agent-shell-test-session claude))))
         (should (eq (plist-get options :variant) 'high))
+        ;; Without the CLI's catalog, the alias is the only name known.
         (should (equal (plist-get options :model)
-                       (drover-model-create :id "opus" :name "Opus" :variants '((low) (high))
-                                            :engines '(claude-code)))))
+                       (drover-model-create :provider-name "Anthropic" :id "opus" :name "Opus"
+                                            :variants '((low) (high)) :engines '(claude-code)))))
       (let ((options (drover-agent-shell--options (drover-agent-shell-test-session opencode))))
         (should-not (plist-get options :variant))
         (should (equal (plist-get options :model)
@@ -741,7 +765,7 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
 ;;;; Models of live shells
 
 (ert-deftest drover-agent-shell-test-live-models ()
-  "Live shells offer the models of their engine, thought levels as variants."
+  "Live shells offer the models of their engine, the one each runs with its thought levels."
   (drover-agent-shell-test-with
     (let ((claude (drover-agent-shell-test-shell 'claude-code))
           (other (drover-agent-shell-test-shell 'claude-code))
@@ -755,14 +779,122 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
       (let ((models (drover-agent-shell--live-models 'claude-code)))
         (should (equal (mapcar #'drover-model-id models) '("opus" "sonnet" "haiku")))
         (should (equal (drover-model-variants (car models)) '((low) (high))))
+        (should (drover-model-variants-known (car models)))
+        ;; Models no shell runs have unknown variants, not those of opus.
+        (should-not (drover-model-variants (nth 1 models)))
+        (should-not (drover-model-variants-known (nth 1 models)))
+        (should-not (drover-model-variants-known (nth 2 models)))
         (should (equal (drover-model-engines (car models)) '(claude-code))))
       (let ((models (drover-agent-shell--opencode-models "/work")))
         (should (equal (mapcar #'drover-model-provider-id models) '("openai" "local")))
         (should (equal (mapcar #'drover-model-id models) '("gpt-6" "llama")))
+        (should (drover-model-variants-known (car models)))
+        (should-not (drover-model-variants-known (cadr models)))
         (should (equal (drover-model-engines (car models)) '(opencode codex)))
         (should (equal (drover-model-engines (cadr models)) '(opencode))))
       (should-not (drover-agent-shell--codex-models "/work"))
       (should-not (drover-agent-shell--gemini-cli-models "/work")))))
+
+(ert-deftest drover-agent-shell-test-claude-models-identified ()
+  "A Claude shell's aliases are the catalog's models, each once, with its own levels."
+  (drover-agent-shell-test-with
+    (drover-test-write-claude-catalog)
+    (let ((shell (drover-agent-shell-test-shell 'claude-code)))
+      ;; As claude-agent-acp offers effort to a client without recommended
+      ;; values: "default" first, which leaves the effort to the CLI.
+      (drover-agent-shell-test-acp-models shell drover-test-claude-acp-models "default"
+                                          '("default" "low" "medium" "high") "default")
+      (let ((models (drover-agent-shell--claude-code-models "/work")))
+        (should (equal (mapcar #'drover-model-id models)
+                       '("claude-opus-5-5" "claude-opus-5-5[1m]" "claude-sonnet-5-5"
+                         "claude-haiku-4-5-20251001")))
+        (should (equal (mapcar (lambda (model) (drover-model-id-for model 'claude-code 'agent-shell)) models)
+                       '("opus" "opus[1m]" "sonnet" "haiku")))
+        ;; "default" is no level; Opus offers max, which the session, on
+        ;; Sonnet, does not.
+        (should (equal (mapcar (lambda (model) (mapcar #'car (drover-model-variants model))) models)
+                       '((low medium high xhigh max) (low medium high xhigh max) (low medium high) nil))))
+      ;; The shell runs the default: Sonnet 5.5 at its default effort.
+      (drover-agent-shell-test-initialize shell)
+      (let ((options (drover-agent-shell--options (drover-agent-shell-test-session shell))))
+        (should (equal (drover-model-id (plist-get options :model)) "claude-sonnet-5-5"))
+        (should (equal (drover-model-id-for (plist-get options :model) 'claude-code 'agent-shell) "sonnet"))
+        (should (eq (plist-get options :variant) 'medium))))))
+
+(ert-deftest drover-agent-shell-test-claude-alias-sent ()
+  "A Claude model, however a source named it, reaches a shell by the alias the shell lists."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-setters
+      (drover-agent-shell-test-with-start
+        (drover-test-write-claude-catalog)
+        (let ((drover-models-changed-hook nil)
+              (shell (drover-agent-shell-test-shell 'claude-code "claude"))
+              ;; As the CLI's catalog lists it, by identifier.
+              (opus (car (drover-claude-code-catalog-models (drover-claude-code-catalog)))))
+          (drover-agent-shell-test-acp-models shell drover-test-claude-acp-models "sonnet"
+                                              '("default" "low" "medium" "high") "low")
+          (drover-agent-shell-test-initialize shell)
+          (with-current-buffer shell
+            (drover-agent-shell--setup))
+          (drover-agent-shell-test-emit shell 'init-session)
+          ;; The picker offers the model the shell knows by its alias.
+          (let ((offered (seq-find (lambda (model) (equal (drover-model-key model) (drover-model-key opus)))
+                                   (drover-models "/work"))))
+            (should (equal (drover-model-id-for offered 'claude-code 'agent-shell) "opus"))
+            (drover-agent-shell--apply-options (drover-agent-shell-test-session shell)
+                                               (list :model offered) #'ignore)
+            (should (equal (drover-agent-shell-test--calls-of 'model) `((,shell "opus"))))
+            ;; A new shell starts on it by that name.
+            (let ((config (cdr (drover-agent-shell-test--create "/work" 'claude-code
+                                                                (list :model offered)))))
+              (should (equal (funcall (map-elt config :default-model-id)) "opus"))))
+          ;; A model the shell does not list goes by its identifier.
+          (let ((older (cadr (drover-claude-code-catalog-models (drover-claude-code-catalog)))))
+            (should (equal (drover-model-id-for older 'claude-code 'agent-shell) "claude-opus-5"))))))))
+
+(ert-deftest drover-agent-shell-test-variants-accumulate ()
+  "Each model keeps the levels told while a shell ran it, once the shell switched."
+  (drover-agent-shell-test-with
+    (let ((drover-models-changed-hook nil)
+          (shell (drover-agent-shell-test-shell 'gemini-cli))
+          (models '(("gemini-pro" . "Gemini Pro") ("gemini-flash" . "Gemini Flash"))))
+      (with-current-buffer shell
+        (drover-agent-shell--setup))
+      (drover-agent-shell-test-acp-models shell models "gemini-pro" '("low" "high") "high")
+      (drover-agent-shell-test-emit shell 'init-session)
+      (cl-flet ((variants ()
+                  (mapcar (lambda (model)
+                            (and (drover-model-variants-known model)
+                                 (mapcar #'car (drover-model-variants model))))
+                          (drover-models "/work"))))
+        (should (equal (variants) '((low high) nil)))
+        (drover-agent-shell-test-acp-models shell models "gemini-flash" '("minimal" "low") "low")
+        (drover-agent-shell-test-emit shell 'config-option-update)
+        (should (equal (variants) '((low high) (minimal low))))
+        ;; The picker offers each model its own levels only.
+        (let ((flash (cadr (drover-models "/work"))))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt table &rest _)
+                       (should (equal (all-completions "" table) '("Default" "minimal" "low")))
+                       "minimal")))
+            (should (eq (drover-read-variant flash) 'minimal))))))))
+
+(ert-deftest drover-agent-shell-test-codex-models-per-model ()
+  "A Codex shell's models take the levels its agent lists apart for each."
+  (drover-agent-shell-test-with
+    (drover-test-write (expand-file-name "models_cache.json" drover-codex-home) "{\"models\": []}")
+    (let ((shell (drover-agent-shell-test-shell 'codex)))
+      (drover-agent-shell-test-acp-models shell '(("gpt-5.5" . "5.5") ("gpt-6-astra" . "6 Astra"))
+                                          "gpt-5.5" '("low" "medium") "medium")
+      (with-current-buffer shell
+        ;; codex-acp's session models: every model at every level.
+        (map-put! (map-elt agent-shell--state :session) :models
+                  (mapcar (lambda (value) `((:model-id . ,value) (:name . ,value)))
+                          '("gpt-5.5[low]" "gpt-5.5[medium]" "gpt-6-astra[low]" "gpt-6-astra[max]"))))
+      (let ((models (drover-agent-shell--codex-models "/work")))
+        (should (equal (mapcar #'drover-model-id models) '("gpt-5.5" "gpt-6-astra")))
+        (should (equal (mapcar #'drover-model-variants models) '(((low) (medium)) ((low) (max)))))
+        (should (equal (drover-model-id-for (cadr models) 'codex 'agent-shell) "gpt-6-astra"))))))
 
 (ert-deftest drover-agent-shell-test-model-source-depths ()
   "A Claude shell answers before other sources; an OpenCode shell after them."
@@ -860,10 +992,10 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
                    (drover-agent-shell-test-options shell '("model" "model" "gpt-6" "gpt-6" "gpt-6-mini"))
                    (drover-agent-shell-test-emit shell 'init-session)
                    (push (all-completions "" table) seen)
-                   "Gpt-6-Mini")))
+                   "OpenAI: Gpt-6-Mini")))
         (should (equal (drover-model-id (drover-read-model nil "/work")) "gpt-6-mini")))
       ;; Named by themselves capitalized, as `drover-agent-shell-test-options' does.
-      (should (equal seen '(("Default" "Gpt-6" "Gpt-6-Mini") ("Default"))))
+      (should (equal seen '(("Default" "OpenAI: Gpt-6" "OpenAI: Gpt-6-Mini") ("Default"))))
       (should-not drover-models-changed-hook))))
 
 ;;;; Sessions

@@ -41,9 +41,12 @@
 ;; The prompt starts shells set to start on a model and agent, sends to
 ;; them once they are initialized, and switches a running shell's
 ;; session mode, model and thought level through ACP before sending.  A
-;; live shell also offers the models of its engine, and its thought
-;; levels as their variants: a live source, which `drover-model'
-;; remembers, told again whenever a shell's models may have changed.
+;; live shell also offers the models of its engine: a live source, which
+;; `drover-model' remembers, told again whenever a shell's models may
+;; have changed.  ACP tells the thought levels of the model a shell runs
+;; only: the others take the levels their engine tells, else none known
+;; (see `drover-agent-shell--models-of'), and a model is sent to a shell
+;; by the name the shell lists it under, such as Claude Code's aliases.
 ;;
 ;; A shell's agent forks its session (agent-shell's own fork, ACP's
 ;; session/fork), compacts it (the command /compact, sent as a prompt)
@@ -59,6 +62,7 @@
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-claude-code)
+(require 'drover-codex)
 (require 'map)
 (require 'seq)
 (require 'subr-x)
@@ -300,7 +304,7 @@ cannot run is reported and left out."
          (variant (or requested
                       (plist-get inherited :variant)
                       (and model (eq engine 'opencode) (drover-model-default-variant model))))
-         (model-id (and model (drover-model-id-for model engine))))
+         (model-id (and model (drover-model-id-for model engine 'agent-shell))))
     (unless (functionp maker)
       (error "No agent-shell configuration for %s" (drover-engine-label engine)))
     (when (and model (not model-id))
@@ -434,12 +438,13 @@ ENGINE is the shell's engine.  AGENT is switched through the ACP
 session mode, which OpenCode maps to its agents and Claude Code to the
 permission modes of `drover-claude-code-agent-modes'; any other agent
 of Claude Code is a session-start option, so it and an AGENT for any
-other engine are reported and skipped.  MODEL-ID is the engine's
-identifier of MODEL.  EFFORT-VARIANT is the variant whose effort to
-set, VARIANT the explicit one: only an explicit variant without a
-matching thought level is worth a warning.  Each step finds its target
-when it runs, so effort is matched against the thought levels the
-model switch before it brought.  See `drover-run-steps'."
+other engine are reported and skipped.  MODEL-ID is the name
+agent-shell takes for MODEL (see `drover-model-id-for').  EFFORT-VARIANT
+is the variant whose effort to set, VARIANT the explicit one: only an
+explicit variant without a matching thought level is worth a warning.
+Each step finds its target when it runs, so effort is matched against
+the thought levels the model switch before it brought.  See
+`drover-run-steps'."
   (let ((candidates (drover-model-effort-candidates model effort-variant))
         (name (buffer-name buffer)))
     (delq nil
@@ -506,7 +511,7 @@ adapter otherwise picks the first effort it offers."
              (effort-variant (or variant
                                  (and model (eq engine 'opencode) (drover-model-default-variant model))))
              (steps (drover-agent-shell--option-steps
-                     buffer engine agent (and model (drover-model-id-for model engine))
+                     buffer engine agent (and model (drover-model-id-for model engine 'agent-shell))
                      model effort-variant variant)))
         (if (null steps)
             (funcall then)
@@ -525,36 +530,93 @@ the others by bare identifier, PROVIDER being nil."
       (cons (match-string 1 value) (match-string 2 value))
     (cons nil value)))
 
-(defun drover-agent-shell--model (engine value state)
-  "Return the `drover-model' of model VALUE a shell of ENGINE offers in STATE.
-Its name is the one the shell gives it, its variants the thought levels
-the shell offers now, and its engines ENGINE, then those
-`drover-model-engines-for' names."
-  (pcase-let ((`(,provider . ,id) (drover-agent-shell--split-model-id engine value)))
-    (drover-model-create
-     :provider-id provider
-     :id id
-     :name (map-elt (seq-find (lambda (model) (equal (map-elt model :model-id) value))
-                              (agent-shell--get-available-models state))
-                    :name)
-     :variants (delq nil (mapcar (lambda (level)
-                                   (when-let* ((value (map-elt level :value))
-                                               ((stringp value)))
-                                     (list (intern value))))
-                                 (agent-shell--get-available-thought-levels state)))
-     :engines (delete-dups (cons engine (drover-model-engines-for provider id))))))
+(defun drover-agent-shell--levels (state)
+  "Return the thought levels the shell of STATE offers for its model, symbols.
+\"default\", which Claude Code's agent offers to leave the effort to
+the CLI, is no level: drover's pickers offer the default already."
+  (delq nil (mapcar (lambda (level)
+                      (when-let* ((value (map-elt level :value))
+                                  ((stringp value))
+                                  ((not (member value '("" "default")))))
+                        (intern value)))
+                    (agent-shell--get-available-thought-levels state))))
+
+(defun drover-agent-shell--model-options (state)
+  "Return the models the shell of STATE lists, as (VALUE . NAME), in order.
+VALUE is how the shell's agent names the model, NAME how it shows it."
+  (delq nil (mapcar (lambda (entry)
+                      (let ((value (map-elt entry :model-id)))
+                        (and (stringp value) (not (string-empty-p value))
+                             (cons value (map-elt entry :name)))))
+                    (agent-shell--get-available-models state))))
+
+(defun drover-agent-shell--models-of (engine options current levels state)
+  "Return the models OPTIONS name, which a shell of ENGINE in STATE lists.
+OPTIONS are (VALUE . NAME), as `drover-agent-shell--model-options'
+returns them; CURRENT is the VALUE the shell runs, and LEVELS the
+thought levels it offers for it.  ACP tells the thought levels of the
+model a session runs only: that model has them as variants, and the
+others the variants their engine tells otherwise, else unknown ones.
+Claude Code's models are identified through the catalog its CLI
+caches, the alias the shell lists kept as the name agent-shell takes
+\(see `drover-claude-code-acp-models'); Codex's take the levels its
+agent lists apart, per model (see `drover-codex-acp-models')."
+  (pcase engine
+    ('claude-code (drover-claude-code-acp-models options current levels 'agent-shell))
+    ('codex (drover-codex-acp-models
+             options current levels
+             (drover-codex-acp-model-efforts
+              (mapcar (lambda (model) (map-elt model :model-id))
+                      (map-nested-elt state '(:session :models))))))
+    (_ (mapcar (pcase-lambda (`(,value . ,name))
+                 (pcase-let ((`(,provider . ,id) (drover-agent-shell--split-model-id engine value))
+                             (current-p (equal value current)))
+                   (drover-model-create
+                    :provider-id provider
+                    :id id
+                    :name name
+                    :variants (and current-p (mapcar #'list levels))
+                    :variants-known current-p
+                    :engines (delete-dups (cons engine (drover-model-engines-for provider id))))))
+               options))))
+
+(defun drover-agent-shell--shell-models (engine state)
+  "Return the models the shell of ENGINE offers in STATE.
+They are `drover-model' records; see `drover-agent-shell--models-of'."
+  (let ((current (agent-shell--current-model-id state)))
+    (drover-agent-shell--models-of engine (drover-agent-shell--model-options state)
+                                   (and (stringp current) current)
+                                   (drover-agent-shell--levels state)
+                                   state)))
 
 (defun drover-agent-shell--options (session)
   "Return what the shell of SESSION runs, or nil.
-The value is (:model MODEL :variant VARIANT), MODEL a `drover-model'."
+The value is (:model MODEL :variant VARIANT), MODEL a `drover-model' as
+the shell's models describe it (see `drover-agent-shell--models-of'),
+and VARIANT its thought level, MODEL's default variant when the shell
+leaves the effort to its agent."
   (when-let* ((buffer (drover-session-buffer session)))
     (with-current-buffer buffer
       (when-let* ((state agent-shell--state)
                   (value (agent-shell--current-model-id state))
                   ((stringp value)))
-        (let ((level (agent-shell--current-thought-level-id state)))
-          (list :model (drover-agent-shell--model (drover-agent-shell--engine) value state)
-                :variant (and (stringp level) (not (string-empty-p level)) (intern level))))))))
+        (let* ((engine (drover-agent-shell--engine))
+               (options (drover-agent-shell--model-options state))
+               (alone (car (drover-agent-shell--models-of
+                            engine (list (or (assoc value options) (list value)))
+                            value (drover-agent-shell--levels state) state)))
+               ;; As the shell lists it, which may know it by another name.
+               (model (and alone
+                           (or (seq-find (lambda (model)
+                                           (equal (drover-model-key model) (drover-model-key alone)))
+                                         (drover-agent-shell--models-of
+                                          engine options value (drover-agent-shell--levels state) state))
+                               alone)))
+               (level (agent-shell--current-thought-level-id state)))
+          (list :model model
+                :variant (cond ((not (and (stringp level) (not (string-empty-p level)))) nil)
+                               ((equal level "default") (and model (drover-model-default-variant model)))
+                               (t (intern level)))))))))
 
 (defun drover-agent-shell--settable (session)
   "Return which of :agent, :model and :variant the shell of SESSION can change.
@@ -573,23 +635,18 @@ variant when the shell offers thought levels."
 ;;;; Models of live shells
 
 (defun drover-agent-shell--live-models (engine)
-  "Return the models the live shells of ENGINE offer, without duplicates.
+  "Return the models the live shells of ENGINE offer, each once.
 An ACP agent publishes its models once its session exists, so a
-running shell is the catalog of its engine; its thought levels stand in
-as every model's variants."
-  (let ((seen (make-hash-table :test #'equal))
-        models)
-    (dolist (buffer (drover-agent-shell--shells))
-      (with-current-buffer buffer
-        (when (eq (drover-agent-shell--engine) engine)
-          (let ((state agent-shell--state))
-            (dolist (entry (agent-shell--get-available-models state))
-              (when-let* ((value (map-elt entry :model-id))
-                          ((stringp value))
-                          ((not (gethash value seen))))
-                (puthash value t seen)
-                (push (drover-agent-shell--model engine value state) models)))))))
-    (nreverse models)))
+running shell is the catalog of its engine.  Each shell tells the
+thought levels of the model it runs (see
+`drover-agent-shell--shell-models'): a model several shells list is
+merged, each telling what it knows, most recently used shell first."
+  (drover-model-merge-all
+   (mapcan (lambda (buffer)
+             (with-current-buffer buffer
+               (when (eq (drover-agent-shell--engine) engine)
+                 (drover-agent-shell--shell-models engine agent-shell--state))))
+           (drover-agent-shell--shells))))
 
 (defun drover-agent-shell--claude-code-models (_directory)
   "Return the Claude Code models live shells offer."
