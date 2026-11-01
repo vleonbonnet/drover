@@ -174,13 +174,15 @@ dimmed.  A Nerd Font icon by default."
   :type 'string
   :group 'drover)
 
-(defcustom drover-attention-glyph "\U000F16A4" ; nf-md-robot_excited_outline
+(defcustom drover-attention-glyph "\U0001F916" ; robot face
   "Glyph before the count of sessions needing you, in the mode line.
-`drover-attention-mode' shows it in the face of the most urgent status
-counted.  A Nerd Font icon by default: an excited robot, calling for
-you, in outline, so that it is told from the solid robots of
-`drover-subagent-glyphs', at work under a session, at the size of a
-mode line too, where the faces of the solid robots blur together."
+`drover-attention-mode' shows it, a space and the count, in the face of
+the most urgent status counted.  The robot emoji by default, a plain
+Unicode symbol as other indicators of the mode line use, such as mail
+counts.  A Nerd Font icon suits a mode line of Nerd Font icons, such as
+\"\\U000F16A4\" (nf-md-robot_excited_outline): an icon whose ink
+reaches past its advance further than a space is given room to keep it
+off the count."
   :type 'string
   :group 'drover)
 
