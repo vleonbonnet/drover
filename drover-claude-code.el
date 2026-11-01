@@ -40,10 +40,11 @@
 ;; macOS configuration profiles, merged managed sources and effort pins
 ;; at launch are not modeled.
 ;;
-;; The CLI publishes no model list without a running session.  Live
-;; agent-shell sessions answer for it (see `drover-agent-shell'); when
-;; `drover-claude-code-oauth-catalog' allows it, Anthropic's model list
-;; answers otherwise, read with the CLI's own OAuth token.
+;; Claude Code's models come from its live sessions: agent-shell's
+;; shells (see `drover-agent-shell') and, while claude-code-ide runs a
+;; session, the catalog that session's CLI caches
+;; (`drover-claude-code-catalog-models', see `drover-claude-code-ide').
+;; `drover-model' remembers what they reported for when none runs.
 
 ;;; Code:
 
@@ -55,9 +56,6 @@
 (require 'drover-model)
 
 (declare-function w32-read-registry "w32fns.c" (root key &optional name))
-
-(defvar url-http-response-status)
-(defvar url-request-extra-headers)
 
 ;;;; Options
 
@@ -105,14 +103,14 @@ agents, and its `--agent' refuses a name no agent definition provides."
   :type '(alist :key-type (string :tag "Agent") :value-type (string :tag "Permission mode"))
   :group 'drover)
 
-(defcustom drover-claude-code-oauth-catalog nil
-  "Whether Claude Code's models may come from Anthropic's model list.
-When non-nil and no live session offers Claude Code's models, they are
-fetched from the Anthropic API with the OAuth token the CLI keeps in
-`drover-claude-code-home', once per Emacs session.  Off by default, as
-it calls a vendor API with your credential."
-  :type 'boolean
-  :group 'drover)
+(defvar drover-claude-code-oauth-catalog nil
+  "Ignored: drover no longer asks Anthropic for Claude Code's models.
+They come from live sessions, and drover remembers them (see
+`drover-remember-models').")
+
+(make-obsolete-variable 'drover-claude-code-oauth-catalog
+                        "models come from live sessions, remembered on disk."
+                        "0.1.0")
 
 (defvar drover-claude-code-start-flags-function nil
   "Function of no argument returning the flags of new Claude Code sessions.
@@ -638,6 +636,18 @@ identifier: Claude Code runs whatever model it names, an alias too."
      :default-variant (drover-claude-code-effort id layers catalog)
      :engines (delete-dups (cons 'claude-code (drover-model-engines-for nil id))))))
 
+(defun drover-claude-code-catalog-models (catalog &optional layers)
+  "Return the `drover-model' of every model CATALOG lists, in its order.
+CATALOG is what `drover-claude-code-catalog' returns: the CLI's own
+list, main section and overflow alike, with each model's effort
+options; LAYERS, the settings layers giving default efforts, as for
+`drover-claude-code-model'."
+  (delq nil (mapcar (lambda (entry)
+                      (when-let* ((id (and (drover-json-object-p entry) (alist-get 'id entry)))
+                                  ((stringp id)))
+                        (drover-claude-code-model id layers catalog)))
+                    (map-nested-elt catalog '(config models)))))
+
 ;;;; Defaults
 
 (defun drover-claude-code--project-directory (dir)
@@ -710,88 +720,23 @@ so the transcripts of the sessions drover lists count too."
     (when-let* ((times (delq nil times)))
       (apply #'max times))))
 
-;;;; Anthropic's model list
-
-(defvar drover-claude-code--oauth-models nil
-  "Models Anthropic's model list returned, kept for the Emacs session.")
-
-(defconst drover-claude-code--oauth-timeout 5
-  "Seconds to wait for Anthropic's model list.")
-
-(defun drover-claude-code--oauth-token ()
-  "Return Claude Code's OAuth access token, or nil when absent or expired.
-The CLI refreshes it whenever it runs, so an expired token means no
-recent run: Anthropic's model list is then unavailable, rather than
-the token refreshed here."
-  (let* ((credentials (drover-read-json (expand-file-name ".credentials.json" drover-claude-code-home)))
-         (oauth (and (drover-json-object-p credentials) (alist-get 'claudeAiOauth credentials)))
-         (token (and (drover-json-object-p oauth) (alist-get 'accessToken oauth)))
-         (expires (and token (alist-get 'expiresAt oauth))))
-    (and (stringp token)
-         (numberp expires)
-         (> (/ expires 1000.0) (float-time))
-         token)))
-
-(defun drover-claude-code--oauth-models (token)
-  "Return the models of Anthropic's model list, read with the OAuth TOKEN, or nil.
-The beta header admits OAuth tokens: this is the only interface listing
-Claude Code's models without a running session.  Models have no
-variants, as effort levels show only in a running session."
-  (require 'url)
-  (let* ((url-request-extra-headers `(("Authorization" . ,(concat "Bearer " token))
-                                      ("anthropic-version" . "2023-06-01")
-                                      ("anthropic-beta" . "oauth-2025-04-20")))
-         (buffer (ignore-errors
-                   (url-retrieve-synchronously "https://api.anthropic.com/v1/models?limit=100"
-                                               t t drover-claude-code--oauth-timeout))))
-    (when buffer
-      (unwind-protect
-          (with-current-buffer buffer
-            (goto-char (point-min))
-            (when (and (eql (bound-and-true-p url-http-response-status) 200)
-                       (search-forward "\n\n" nil t))
-              (let ((json (ignore-errors
-                            (json-parse-buffer :object-type 'alist :array-type 'list
-                                               :null-object nil :false-object nil))))
-                (delq nil (mapcar (lambda (model)
-                                    (when-let* ((id (and (drover-json-object-p model)
-                                                         (alist-get 'id model)))
-                                                ((stringp id)))
-                                      (drover-model-create :provider-name "Anthropic"
-                                                           :id id
-                                                           :name (alist-get 'display_name model)
-                                                           :engines (drover-model-engines-for nil id))))
-                                  (and (drover-json-object-p json) (alist-get 'data json)))))))
-        (kill-buffer buffer)))))
-
-(defun drover-claude-code--oauth-source (_directory)
-  "Return Claude Code's models from Anthropic's model list, or nil.
-Only when `drover-claude-code-oauth-catalog' allows it; the list is
-fetched once per Emacs session, and again while it gives nothing."
-  (when drover-claude-code-oauth-catalog
-    (or drover-claude-code--oauth-models
-        (when-let* ((token (drover-claude-code--oauth-token)))
-          (setq drover-claude-code--oauth-models (drover-claude-code--oauth-models token))))))
-
 ;;;; Registration
 
 (defun drover-claude-code--register ()
-  "Register the `claude-code' engine and its model source."
+  "Register the `claude-code' engine."
   (drover-register-engine 'claude-code
                           :label "Claude Code"
                           :defaults #'drover-claude-code--fetch-defaults
                           :volatile t
                           :resolve #'drover-claude-code--resolve
                           :agents #'drover-claude-code--agents
-                          :last-used #'drover-claude-code--last-used)
-  (drover-register-model-source 'claude-code #'drover-claude-code--oauth-source 0))
+                          :last-used #'drover-claude-code--last-used))
 
 (drover-claude-code--register)
 
 (defun drover-claude-code-unload-function ()
-  "Forget the `claude-code' engine, and the model source this file gave it.
-Sources other files give it, such as agent-shell's, are theirs to remove."
-  (drover-unregister-model-source 'claude-code #'drover-claude-code--oauth-source)
+  "Forget the `claude-code' engine.
+Its model sources, such as agent-shell's, are their files' to remove."
   (drover-unregister-engine 'claude-code)
   nil)
 

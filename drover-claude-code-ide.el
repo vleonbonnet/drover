@@ -44,6 +44,8 @@
 ;; `drover-claude-code-project-directory-function'), and learns the
 ;; conversation of every terminal claude-code-ide starts.  The recap of
 ;; a session's last turn (:recap) is read from the end of its transcript.
+;; While a session runs, the models of the catalog its CLI caches are
+;; the `claude-code' engine's, a live source `drover-model' remembers.
 ;;
 ;; `drover' loads this file once claude-code-ide.el is loaded.
 
@@ -342,6 +344,7 @@ when it started, DEADLINE the time to give up at."
     t)
    ((drover-claude-code-ide-live-session-id buffer)
     (drover-backend-changed 'claude-code-ide)
+    (drover-models-changed 'claude-code)
     t)
    (t
     (let ((new (seq-difference (drover-claude-code-ide--transcripts bucket) before)))
@@ -349,6 +352,8 @@ when it started, DEADLINE the time to give up at."
         (with-current-buffer buffer
           (setq-local drover-claude-code-ide-session-id (file-name-base (car new))))
         (drover-backend-changed 'claude-code-ide)
+        ;; By its first transcript, the CLI refreshed its catalog if stale.
+        (drover-models-changed 'claude-code)
         t)))))
 
 (defun drover-claude-code-ide--stop-watching (timer)
@@ -375,7 +380,8 @@ conversation at once; otherwise it is looked for as it starts (see
                 (setq-local drover-claude-code-ide-session-id (downcase (match-string 1 flags)))))
             (unless (buffer-local-value 'drover-claude-code-ide-session-id buffer)
               (drover-claude-code-ide--capture-session-id buffer working-dir)))
-          (drover-backend-changed 'claude-code-ide))
+          (drover-backend-changed 'claude-code-ide)
+          (drover-models-changed 'claude-code))
       (error (drover-warn "Cannot follow the new Claude terminal %s: %s"
                           buffer-name (error-message-string err))))
     result))
@@ -780,6 +786,18 @@ changed since shows from the next answer."
   "Return what a running session can change: only its model."
   '(:model))
 
+;;;; Models
+
+(defun drover-claude-code-ide--models (_directory)
+  "Return the models of the catalog Claude Code caches, while a session runs.
+The CLI keeps its catalog of models on disk and fetches it again once
+stale (see `drover-claude-code-catalog'): it is what a running session
+offers, effort levels included.  Nil without a live session, or before
+the CLI cached a catalog.  Default variants leave out the settings of
+directories, as one list stands for every directory."
+  (when (drover-claude-code-ide--buffers)
+    (drover-claude-code-catalog-models (drover-claude-code-catalog))))
+
 ;;;; Starting sessions
 
 (defun drover-claude-code-ide-start (directory &optional flags)
@@ -952,7 +970,7 @@ With several, the most recently used."
 ;;;; Installing
 
 (defun drover-claude-code-ide--register ()
-  "Register the `claude-code-ide' backend."
+  "Register the `claude-code-ide' backend, and its live model source."
   (drover-register-backend
    'claude-code-ide
    :label "Claude Code IDE"
@@ -971,7 +989,10 @@ With several, the most recently used."
    :apply-options #'drover-claude-code-ide--apply-options
    :send #'drover-claude-code-ide--send
    :options #'drover-claude-code-ide--options
-   :settable #'drover-claude-code-ide--settable))
+   :settable #'drover-claude-code-ide--settable)
+  ;; After live agent-shell shells, whose model identifiers their ACP
+  ;; agent takes.
+  (drover-register-model-source 'claude-code #'drover-claude-code-ide--models -5 t))
 
 (defun drover-claude-code-ide--terminal-killed ()
   "Report a Claude terminal going away."
@@ -1049,6 +1070,7 @@ claude-code-ide starts sessions."
 (defun drover-claude-code-ide--uninstall ()
   "Undo `drover-claude-code-ide--install'."
   (drover-unregister-backend 'claude-code-ide)
+  (drover-unregister-model-source 'claude-code #'drover-claude-code-ide--models)
   (when (eq drover-claude-code-start-flags-function #'drover-claude-code-ide--cli-flags)
     (setq drover-claude-code-start-flags-function nil))
   (when (eq drover-claude-code-project-directory-function

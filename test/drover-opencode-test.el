@@ -1507,13 +1507,15 @@ PATH . KEYS), newest first; `warnings' the warnings of drover."
     (should (plist-get engine :model-resets-variant))
     ;; Its defaults are fetched, not read from local files.
     (should-not (plist-get engine :volatile)))
-  (should (member '(opencode 0 drover-opencode--catalog-source)
+  ;; OpenCode's catalog is the service's, not a live session's: it is
+  ;; not remembered.
+  (should (member '(opencode 0 drover-opencode--catalog-source nil)
                   (default-value 'drover--model-sources)))
   (drover-test-with-engines
     (drover-opencode--register-engine)
     (should (equal (drover-engines) '(opencode)))
     (should (equal (drover-engine-label 'opencode) "OpenCode"))
-    (should (equal drover--model-sources '((opencode 0 drover-opencode--catalog-source))))))
+    (should (equal drover--model-sources '((opencode 0 drover-opencode--catalog-source nil))))))
 
 (ert-deftest drover-opencode-test-engine-unregistered ()
   "Unregistering keeps the sources other front ends give the engine."
@@ -1525,7 +1527,7 @@ PATH . KEYS), newest first; `warnings' the warnings of drover."
       (should (equal (drover-engines) '(opencode)))
       (should (equal (drover-engine-label 'opencode) "OpenCode"))
       (should-not (drover-engine-property 'opencode :defaults))
-      (should (equal drover--model-sources (list (list 'opencode 10 shells))))
+      (should (equal drover--model-sources (list (list 'opencode 10 shells nil))))
       ;; Without them, the engine goes.
       (drover-unregister-model-source 'opencode shells)
       (drover-opencode--register-engine)

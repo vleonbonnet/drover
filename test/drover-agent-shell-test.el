@@ -763,6 +763,95 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
       (drover-agent-shell--unregister)
       (should (equal (mapcar #'drover-model-id (drover-models "/work")) '("claude-api" "catalog"))))))
 
+(ert-deftest drover-agent-shell-test-model-sources-live ()
+  "Every model source of shells is live: what it answers is remembered."
+  (drover-agent-shell-test-with
+    (should (equal (sort (mapcar (lambda (source) (list (car source) (nth 3 source)))
+                                 drover--model-sources)
+                         (lambda (a b) (string< (car a) (car b))))
+                   '((claude-code t) (codex t) (gemini-cli t) (opencode t))))))
+
+(ert-deftest drover-agent-shell-test-models-changed ()
+  "A shell tells drover its models may have changed, as its session and options come."
+  (drover-agent-shell-test-with
+    (let* ((told nil)
+           (timers nil)
+           (drover-models-changed-hook (list (lambda (engine) (push engine told))))
+           (shell (drover-agent-shell-test-shell 'codex)))
+      (with-current-buffer shell
+        (drover-agent-shell--setup))
+      (should-not told)
+      (dolist (event '(init-session init-model init-config-options config-option-update
+                       session-selected session-restored))
+        (drover-agent-shell-test-emit shell event)
+        (should (equal told '(codex)))
+        (setq told nil))
+      (dolist (event '(agent-message-chunk turn-complete usage-update))
+        (drover-agent-shell-test-emit shell event))
+      (should-not told)
+      ;; A shell drover follows late tells at once.
+      (with-current-buffer shell
+        (drover-agent-shell--setup t))
+      (should (equal told '(codex)))
+      (setq told nil)
+      ;; A killed shell tells once it is gone.
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_delay _repeat function &rest arguments)
+                   (push (cons function arguments) timers))))
+        (kill-buffer shell))
+      (should-not told)
+      (pcase-dolist (`(,function . ,arguments) timers)
+        (apply function arguments))
+      (should (equal told '(codex))))))
+
+(ert-deftest drover-agent-shell-test-models-remembered ()
+  "A shell's models are remembered as it starts, and offered once it is gone."
+  (drover-test-with-homes
+    (drover-agent-shell-test-with
+      (let ((drover-remember-models t)
+            (drover--model-memory nil)
+            (drover--model-memory-stamp 'unread)
+            (drover-models-changed-hook nil)
+            (shell (drover-agent-shell-test-shell 'claude-code)))
+        (with-current-buffer shell
+          (drover-agent-shell--setup))
+        (drover-agent-shell-test-options shell
+                                         '("model" "model" "opus" "opus" "sonnet")
+                                         '("effort" "thought_level" "high" "low" "high"))
+        (drover-agent-shell-test-emit shell 'init-session)
+        (should (file-exists-p (drover-model-memory-file)))
+        (cl-letf (((symbol-function 'run-at-time) #'ignore))
+          (kill-buffer shell))
+        ;; A new Emacs session, before any shell.
+        (setq drover--model-memory nil
+              drover--model-memory-stamp 'unread)
+        (let ((models (drover-models "/work")))
+          (should (equal (mapcar #'drover-model-id models) '("opus" "sonnet")))
+          (should (equal (drover-model-variants (car models)) '((low) (high))))
+          (should (equal (drover-model-engines (car models)) '(claude-code)))
+          (should (cl-every #'drover-model-remembered models)))))))
+
+(ert-deftest drover-agent-shell-test-picker-follows-shell-start ()
+  "A model picker open as a shell starts offers the shell's models."
+  (drover-agent-shell-test-with
+    (let ((drover-models-changed-hook nil)
+          (shell (drover-agent-shell-test-shell 'codex))
+          (seen nil))
+      (with-current-buffer shell
+        (drover-agent-shell--setup))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _)
+                   (push (all-completions "" table) seen)
+                   ;; The shell's session starts while the picker reads.
+                   (drover-agent-shell-test-options shell '("model" "model" "gpt-6" "gpt-6" "gpt-6-mini"))
+                   (drover-agent-shell-test-emit shell 'init-session)
+                   (push (all-completions "" table) seen)
+                   "Gpt-6-Mini")))
+        (should (equal (drover-model-id (drover-read-model nil "/work")) "gpt-6-mini")))
+      ;; Named by themselves capitalized, as `drover-agent-shell-test-options' does.
+      (should (equal seen '(("Default" "Gpt-6" "Gpt-6-Mini") ("Default"))))
+      (should-not drover-models-changed-hook))))
+
 ;;;; Sessions
 
 (ert-deftest drover-agent-shell-test-session-fields ()

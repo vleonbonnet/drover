@@ -24,9 +24,6 @@
 
 (require 'drover-test-helpers)
 (require 'drover-claude-code)
-;; Loaded here, so that the stub of `url-retrieve-synchronously' is not
-;; replaced when the engine requires it.
-(require 'url)
 
 (defconst drover-claude-code-test-catalog
   "{\"catalog\": {\"surface\": \"cc\",
@@ -304,6 +301,29 @@ serves and a model without effort.")
       (should (equal (drover-model-label alias) "Anthropic: opus"))
       (should (equal (drover-model-engines alias) '(claude-code))))))
 
+(ert-deftest drover-claude-code-test-catalog-models ()
+  "The catalog's models, in its order, each as the catalog describes it."
+  (drover-test-with-homes
+    (should-not (drover-claude-code-catalog-models (drover-claude-code-catalog)))
+    (drover-claude-code-test-write-catalog)
+    (let* ((catalog (drover-claude-code-catalog))
+           (models (drover-claude-code-catalog-models catalog)))
+      (should (equal (mapcar #'drover-model-id models)
+                     '("claude-opus-5-5" "claude-sonnet-5-5" "claude-opus-5" "claude-opus-4-6"
+                       "claude-haiku-4-5-20251001")))
+      (should (equal (mapcar #'drover-model-label models)
+                     '("Anthropic: Opus 5.5" "Anthropic: Sonnet 5.5" "Anthropic: Opus 5"
+                       "Anthropic: Opus 4.6" "Anthropic: Haiku 4.5")))
+      (should (equal (drover-model-variants (nth 1 models)) '((low) (medium) (high))))
+      ;; The default effort the catalog's state keeps for Sonnet.
+      (should (eq (drover-model-default-variant (nth 1 models)) 'low))
+      (should-not (drover-model-variants (nth 4 models)))
+      ;; Settings layers decide default efforts when given.
+      (should (eq (drover-model-default-variant
+                   (car (drover-claude-code-catalog-models
+                         catalog '((project (effortLevel . "high"))))))
+                  'high)))))
+
 (ert-deftest drover-claude-code-test-defaults-start-directory ()
   "Project settings are read where a front end starts the session."
   (drover-test-with-homes
@@ -325,23 +345,32 @@ serves and a model without effort.")
 ;;;; The engine
 
 (ert-deftest drover-claude-code-test-registered ()
-  "Loading the file registers the engine and its model source."
+  "Loading the file registers the engine, and no model source of its own."
   (should (memq 'claude-code (drover-engines)))
   (should (equal (drover-engine-label 'claude-code) "Claude Code"))
   (should (drover-engine-property 'claude-code :volatile))
   (should-not (drover-engine-property 'claude-code :model-resets-variant))
-  (should (member '(claude-code 0 drover-claude-code--oauth-source) drover--model-sources))
   (drover-test-with-engines
     (drover-claude-code--register)
     (should (equal (drover-engines) '(claude-code)))
     (should (eq (drover-engine-property 'claude-code :resolve) #'drover-claude-code--resolve))
     (should (equal (drover-agent-names "/any/") '("plan" "build")))
-    (should (equal drover--model-sources '((claude-code 0 drover-claude-code--oauth-source))))
-    ;; Another front end's source survives the engine's unloading.
-    (drover-register-model-source 'claude-code #'ignore -10)
+    (should-not drover--model-sources)
+    ;; A front end's source survives the engine's unloading.
+    (drover-register-model-source 'claude-code #'ignore -10 t)
     (drover-claude-code-unload-function)
     (should-not (drover-engines))
-    (should (equal drover--model-sources '((claude-code -10 ignore))))))
+    (should (equal drover--model-sources '((claude-code -10 ignore t))))))
+
+(ert-deftest drover-claude-code-test-oauth-catalog-obsolete ()
+  "Setting the old option of Anthropic's model list is harmless, and warned of."
+  (should (get 'drover-claude-code-oauth-catalog 'byte-obsolete-variable))
+  (should (string-match-p "live sessions"
+                          (car (get 'drover-claude-code-oauth-catalog 'byte-obsolete-variable))))
+  (should-not (fboundp 'drover-claude-code--oauth-source))
+  (with-suppressed-warnings ((obsolete drover-claude-code-oauth-catalog))
+    (let ((drover-claude-code-oauth-catalog t))
+      (should drover-claude-code-oauth-catalog))))
 
 (ert-deftest drover-claude-code-test-defaults-callback ()
   "The engine's defaults come at once; a failure is warned about, without callback."
@@ -584,100 +613,6 @@ serves and a model without effort.")
        (concat "{\"type\":\"assistant\",\"requestedModel\":\"claude-opus-5-5\",\"effort\":\"xhigh\"}\n"
                (make-string 300 ?x) "\n"))
       (should-not (drover-claude-code-last-turn file)))))
-
-;;;; Anthropic's model list
-
-(defmacro drover-claude-code-test-with-api (status body &rest forms)
-  "Run FORMS with Anthropic's API answering STATUS and BODY, a string.
-Requests are recorded in `requests', newest first, as (URL . HEADERS),
-and the response buffers in `responses'."
-  (declare (indent 2) (debug t))
-  `(let ((requests nil)
-         (responses nil)
-         (drover-claude-code--oauth-models nil))
-     (cl-letf (((symbol-function 'url-retrieve-synchronously)
-                (lambda (url &rest _)
-                  (push (cons url url-request-extra-headers) requests)
-                  (let ((buffer (generate-new-buffer " *drover-test-response*")))
-                    (push buffer responses)
-                    (with-current-buffer buffer
-                      (setq-local url-http-response-status ,status)
-                      (insert "HTTP/1.1 " (number-to-string ,status) " Status\n"
-                              "Content-Type: application/json\n\n" ,body))
-                    buffer))))
-       ,@forms)))
-
-(defconst drover-claude-code-test-models
-  "{\"data\": [{\"id\": \"claude-opus-5-5\", \"display_name\": \"Claude Opus 5.5\"},
-               {\"id\": \"claude-haiku-4-5-20251001\", \"display_name\": \"Claude Haiku 4.5\"}]}"
-  "Anthropic's model list.")
-
-(defun drover-claude-code-test-write-credentials (expires)
-  "Write Claude Code's OAuth credentials, a token expiring at EXPIRES."
-  (drover-test-write (expand-file-name ".credentials.json" drover-claude-code-home)
-                     (json-serialize `((claudeAiOauth (accessToken . "token-1")
-                                                   (expiresAt . ,(* 1000 expires)))))))
-
-(ert-deftest drover-claude-code-test-oauth-models ()
-  "With the option on, Anthropic's model list answers, once per session."
-  (drover-test-with-homes
-    (drover-claude-code-test-with-api 200 drover-claude-code-test-models
-      (drover-claude-code-test-write-credentials (+ (float-time) 3600))
-      (let ((drover-claude-code-oauth-catalog nil))
-        (should-not (drover-claude-code--oauth-source "/any/"))
-        (should-not requests))
-      (let ((drover-claude-code-oauth-catalog t))
-        (let ((models (drover-claude-code--oauth-source "/any/")))
-          (should (equal (mapcar #'drover-model-id models)
-                         '("claude-opus-5-5" "claude-haiku-4-5-20251001")))
-          (should (equal (mapcar #'drover-model-label models)
-                         '("Anthropic: Claude Opus 5.5" "Anthropic: Claude Haiku 4.5")))
-          (should (equal (drover-model-engines (car models)) '(claude-code)))
-          (should-not (drover-model-variants (car models))))
-        (should (= (length requests) 1))
-        (should (string-prefix-p "https://api.anthropic.com/v1/models" (caar requests)))
-        (should (equal (cdr (assoc "Authorization" (cdar requests))) "Bearer token-1"))
-        (should (equal (cdr (assoc "anthropic-beta" (cdar requests))) "oauth-2025-04-20"))
-        (should-not (seq-some #'buffer-live-p responses))
-        (drover-claude-code--oauth-source "/any/")
-        (should (= (length requests) 1))))))
-
-(ert-deftest drover-claude-code-test-oauth-unavailable ()
-  "Without a valid token, or with an error, there are no models, and no cache."
-  (drover-test-with-homes
-    (let ((drover-claude-code-oauth-catalog t))
-      (drover-claude-code-test-with-api 200 drover-claude-code-test-models
-        (should-not (drover-claude-code--oauth-source "/any/"))
-        (drover-claude-code-test-write-credentials (- (float-time) 60))
-        (should-not (drover-claude-code--oauth-source "/any/"))
-        (should-not requests))
-      (drover-claude-code-test-write-credentials (+ (float-time) 3600))
-      (drover-claude-code-test-with-api 401 "{\"error\": {}}"
-        (should-not (drover-claude-code--oauth-source "/any/"))
-        (should-not drover-claude-code--oauth-models)
-        (should-not (seq-some #'buffer-live-p responses)))
-      (drover-claude-code-test-with-api 200 "not json"
-        (should-not (drover-claude-code--oauth-source "/any/"))
-        (should-not (seq-some #'buffer-live-p responses)))
-      (drover-claude-code-test-with-api 200 drover-claude-code-test-models
-        (cl-letf (((symbol-function 'url-retrieve-synchronously)
-                   (lambda (&rest _) (error "Network down"))))
-          (should-not (drover-claude-code--oauth-source "/any/")))))))
-
-(ert-deftest drover-claude-code-test-oauth-catalog-of-models ()
-  "Anthropic's list is Claude Code's catalog unless a lower source answers."
-  (drover-test-with-homes
-    (drover-test-with-engines
-      (drover-claude-code--register)
-      (drover-claude-code-test-write-credentials (+ (float-time) 3600))
-      (drover-claude-code-test-with-api 200 drover-claude-code-test-models
-        (let ((drover-claude-code-oauth-catalog t))
-          (should (equal (mapcar #'drover-model-id (drover-models "/any/"))
-                         '("claude-opus-5-5" "claude-haiku-4-5-20251001")))
-          (drover-register-model-source 'claude-code
-                                        (lambda (_) (list (drover-model-create :id "opus")))
-                                        -10)
-          (should (equal (mapcar #'drover-model-id (drover-models "/any/")) '("opus"))))))))
 
 (provide 'drover-claude-code-test)
 ;;; drover-claude-code-test.el ends here
