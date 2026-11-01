@@ -131,6 +131,13 @@ nothing for a model without provider; the others the bare identifier."
         (name (or (drover-model-name model) (drover-model-id model))))
     (if provider (format "%s: %s" provider name) name)))
 
+(defun drover-model-short-name (name)
+  "Return model NAME without the family prefix every model of it shares.
+It is \"Opus 5.5\" for \"Claude Opus 5.5\", as opencode.el shows models
+in its mode line, so that session lists name a model alike whatever
+front end shows the session."
+  (and name (replace-regexp-in-string "\\`Claude " "" name)))
+
 (defun drover-model-annotation (model)
   "Return the annotation of MODEL in pickers: its identifier and variants."
   (propertize

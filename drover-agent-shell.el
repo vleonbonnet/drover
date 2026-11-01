@@ -627,6 +627,20 @@ The value is a plist of :status, :since, :detail and :requests, as
                      :detail (plist-get outcome :detail))
              (list :status 'idle))))))))
 
+(defun drover-agent-shell--effort (state)
+  "Return the thought level the current shell runs, from its STATE, or nil.
+Whether it is the model's default the shell does not tell."
+  (let ((level (ignore-errors (agent-shell--current-thought-level-id state))))
+    (and (stringp level) (not (string-empty-p level)) level)))
+
+(defun drover-agent-shell--provider (state)
+  "Return the provider of the model the current shell runs, from its STATE, or nil.
+Only shells of engines naming models \"PROVIDER/ID\", such as
+OpenCode's, tell it."
+  (let ((value (ignore-errors (agent-shell--current-model-id state))))
+    (and (stringp value)
+         (car (drover-agent-shell--split-model-id (drover-agent-shell--engine) value)))))
+
 (defun drover-agent-shell--session (buffer)
   "Return the `drover-session' of the shell of BUFFER."
   (with-current-buffer buffer
@@ -646,7 +660,9 @@ The value is a plist of :status, :since, :detail and :requests, as
        :updated (and activity (float-time activity))
        :created drover-agent-shell--created
        :agent (ignore-errors (agent-shell--current-mode-id state))
-       :model (ignore-errors (agent-shell-get-model-name state))
+       :model (drover-model-short-name (ignore-errors (agent-shell-get-model-name state)))
+       :effort (drover-agent-shell--effort state)
+       :provider-name (drover-agent-shell--provider state)
        :detail (plist-get status :detail)
        :engine (drover-agent-shell--engine)
        :engine-id (map-nested-elt state '(:session :id))))))

@@ -788,7 +788,8 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
             (drover-agent-shell-test-initialize shell "ses_abc")
             (drover-agent-shell-test-options shell
                                              '("mode" "mode" "plan" "build" "plan")
-                                             '("model" "model" "anthropic/claude-opus" "anthropic/claude-opus"))
+                                             '("model" "model" "anthropic/claude-opus" "anthropic/claude-opus")
+                                             '("effort" "thought_level" "high" "low" "high"))
             (with-current-buffer shell
               (map-put! (map-elt agent-shell--state :session) :title "Fix\n  the build")
               (map-put! agent-shell--state :last-activity-time (seconds-to-time 1000)))
@@ -798,6 +799,13 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
               (should (equal (drover-session-title session) "Fix the build"))
               (should (equal (drover-session-agent session) "plan"))
               (should (equal (drover-session-model session) "Anthropic/Claude-Opus"))
+              ;; The thought level it runs, whose being the default the
+              ;; shell does not tell, and the provider OpenCode names.
+              (should (equal (drover-session-effort session) "high"))
+              (should-not (drover-session-effort-default session))
+              (should (equal (drover-session-provider-name session) "anthropic"))
+              (should-not (drover-session-provider session))
+              (should-not (drover-session-context-tokens session))
               (should (= (drover-session-updated session) 1000.0))
               ;; The identifier is a token of the buffer, stable while it lives.
               (should (equal (drover-session-id session)
@@ -805,6 +813,22 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
               (should (eq (drover-session-buffer session) shell))
               (should (eq (drover-backend-call session :buffer) shell))))
         (delete-directory directory t)))))
+
+(ert-deftest drover-agent-shell-test-session-runs ()
+  "A shell of an engine naming models bare tells no provider; without levels, no effort.
+A Claude model goes by its compact name, as in opencode.el's mode line."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-shell 'codex))
+          (claude (drover-agent-shell-test-shell 'claude-code)))
+      (drover-agent-shell-test-initialize shell "thr_1")
+      (drover-agent-shell-test-options shell '("model" "model" "gpt-5.5" "gpt-5.5"))
+      (let ((session (drover-agent-shell-test-session shell)))
+        (should (equal (drover-session-model session) "Gpt-5.5"))
+        (should-not (drover-session-provider-name session))
+        (should-not (drover-session-effort session)))
+      (drover-agent-shell-test-initialize claude "abc")
+      (drover-agent-shell-test-options claude '("model" "model" "claude opus" "claude opus"))
+      (should (equal (drover-session-model (drover-agent-shell-test-session claude)) "Opus")))))
 
 (ert-deftest drover-agent-shell-test-project-cached ()
   "A shell looks its project up once per directory."

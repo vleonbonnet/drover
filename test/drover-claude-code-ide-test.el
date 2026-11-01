@@ -1045,6 +1045,50 @@ guess could hide another session of the directory."
               (should (equal (drover-claude-code-ide--settable session) '(:model)))))
         (delete-file transcript)))))
 
+(ert-deftest drover-claude-code-ide-test-session-runs ()
+  "A session shows the model and effort of its newest turn, read again once it changed."
+  (drover-claude-code-ide-test-with
+    (let* ((transcript (make-temp-file "drover-transcript" nil ".jsonl" "{}\n"))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* runs"))
+           (turn '("claude-opus-4-5" . high))
+           (reads 0))
+      (unwind-protect
+          (cl-letf (((symbol-function 'drover-claude-code-transcript)
+                     (lambda (id directory)
+                       (should (equal (list id directory) '("known" "/work/drover/")))
+                       transcript))
+                    ((symbol-function 'drover-claude-code-last-turn)
+                     (lambda (file) (should (equal file transcript)) (cl-incf reads) turn))
+                    ((symbol-function 'drover-claude-code-catalog) (lambda () 'catalog))
+                    ((symbol-function 'drover-claude-code-model)
+                     (lambda (id _layers _catalog)
+                       (drover-model-create :id id :name (and (equal id "claude-opus-4-5")
+                                                              "Claude Opus 4.5")))))
+            ;; No transcript known: nothing guessed.
+            (let ((session (drover-claude-code-ide-test-session terminal)))
+              (should-not (drover-session-model session))
+              (should (= reads 0)))
+            (with-current-buffer terminal
+              (setq-local drover-claude-code-ide-session-id "known"))
+            (let ((session (drover-claude-code-ide-test-session terminal)))
+              (should (equal (drover-session-model session) "Opus 4.5"))
+              (should (equal (drover-session-effort session) "high"))
+              ;; Neither whether it is the default nor the provider is known.
+              (should-not (drover-session-effort-default session))
+              (should-not (drover-session-provider session))
+              (should-not (drover-session-provider-name session)))
+            ;; Listed again, the unchanged transcript is not read again.
+            (drover-claude-code-ide-test-session terminal)
+            (should (= reads 1))
+            ;; A new turn appends to it: read again.
+            (setq turn '("claude-sonnet-9" . nil))
+            (write-region "{\"more\": true}\n" nil transcript t 'silent)
+            (let ((session (drover-claude-code-ide-test-session terminal)))
+              (should (= reads 2))
+              (should (equal (drover-session-model session) "claude-sonnet-9"))
+              (should-not (drover-session-effort session))))
+        (delete-file transcript)))))
+
 ;;;; Actions
 
 (ert-deftest drover-claude-code-ide-test-rename ()

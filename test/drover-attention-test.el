@@ -35,6 +35,9 @@
                                    (drover-attention--position 0)
                                    (drover-attention-statuses '(waiting failed done))
                                    (drover-attention-echo t)
+                                   (drover-attention--pads (make-hash-table :test #'equal))
+                                   (after-setting-font-hook nil)
+                                   (enable-theme-functions nil)
                                    (last-command nil))
                                (unwind-protect
                                    (progn ,@body)
@@ -164,6 +167,104 @@
     ;; The construct is a variable holding a string, nothing to evaluate.
     (should (equal global-mode-string '("" drover-attention-mode-line)))
     (should (stringp drover-attention-mode-line))))
+
+;;;; Glyphs' ink
+
+(defvar drover-attention-test-measured nil
+  "Strings the fake font measured the ink of, newest first.")
+
+(defmacro drover-attention-test-with-font (ink &rest body)
+  "Run BODY with text measured in a fake font, every character 10 pixels wide.
+INK is an alist (GLYPH LEFT . RIGHT): the ink of GLYPH reaches LEFT
+pixels left of its start and RIGHT pixels right of it."
+  (declare (indent 1) (debug t))
+  `(let ((drover-attention-test-measured nil)
+         (ink ,ink))
+     (cl-letf (((symbol-function 'drover-text-pixel-width)
+                (lambda (string &rest _) (* 10 (length string))))
+               ((symbol-function 'drover-text-ink-extent)
+                (lambda (string &rest _)
+                  (push string drover-attention-test-measured)
+                  (or (cdr (assoc (substring-no-properties string) ink))
+                      (cons 0 (* 10 (length string)))))))
+       ,@body)))
+
+(defun drover-attention-test-spans (string ink)
+  "Return what the characters of mode line STRING draw, as (START END TEXT).
+Each character not displayed as a space draws its ink, in the fake font
+of `drover-attention-test-with-font' with INK, from START to END in
+pixels; spaces displayed as stretches advance by their width."
+  (let ((x 0) (spans nil))
+    (dotimes (index (length string))
+      (let ((char (substring-no-properties string index (1+ index))))
+        (pcase (get-text-property index 'display string)
+          (`(space :width (,width)) (setq x (+ x width)))
+          (_ (let ((reach (cdr (assoc char ink))))
+               (unless (string-blank-p char)
+                 (push (list (- x (or (car reach) 0)) (+ x (max 10 (or (cdr reach) 0))) char) spans))
+               (setq x (+ x 10)))))))
+    (nreverse spans)))
+
+(ert-deftest drover-attention-test-glyphs-leave-room-for-ink ()
+  "A count never goes under the ink of its glyph, which may reach past its advance."
+  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0)
+                                    (drover-test-session "d" :status 'done :since 2.0))
+    ;; The flag draws 2 pixels left of its start and 16 right, past its
+    ;; advance of 10; the check stays within its own.
+    (drover-attention-test-with-font '(("⚑" 2 . 16))
+      (drover-attention-mode 1)
+      (let ((string drover-attention-mode-line))
+        (should (equal (substring-no-properties string) "  ⚑ 1 ✓1"))
+        (should (equal (get-text-property 1 'display string) '(space :width (2))))
+        (should (equal (get-text-property 3 'display string) '(space :width (6))))
+        ;; Nothing overlaps, the space before the flag included.
+        (let ((spans (drover-attention-test-spans string ink)))
+          ;; The flag's ink, from 12 - 2 to 12 + 16.
+          (should (equal (car spans) '(10 28 "⚑")))
+          (should (equal (mapcar #'caddr spans) '("⚑" "1" "✓" "1")))
+          (seq-mapn (lambda (span next) (should (<= (nth 1 span) (car next))))
+                    spans (cdr spans))
+          (should (>= (car (car spans)) 10)))
+        ;; The pads belong to the counts: they click and show the tooltip.
+        (should (eq (get-text-property 3 'local-map string) drover-attention-mode-line-map))
+        (should (get-text-property 3 'help-echo string))
+        (should (eq (get-text-property 2 'face string) 'drover-waiting)))
+      ;; Measured as the mode line draws: over its face.
+      (should (equal (get-text-property 0 'face (car (last drover-attention-test-measured)))
+                     '(drover-waiting mode-line)))
+      (should (= (length drover-attention-test-measured) 2)))))
+
+(ert-deftest drover-attention-test-glyphs-measured-once-per-font ()
+  "Glyphs are measured once per font, though the counts change often."
+  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0))
+    (drover-attention-test-with-font '(("⚑" 0 . 16))
+      (drover-attention-mode 1)
+      (should (= (length drover-attention-test-measured) 1))
+      (dotimes (_ 3)
+        (setq drover-test-sessions (cons (drover-test-session (format "w%d" (length drover-test-sessions))
+                                                              :status 'waiting :since 2.0)
+                                         drover-test-sessions))
+        (drover-backend-changed 'fake)
+        (drover-changed-now))
+      (should (equal (substring-no-properties drover-attention-mode-line) " ⚑ 4"))
+      (should (= (length drover-attention-test-measured) 1))
+      ;; Another font for the mode line: measured again.
+      (cl-letf (((symbol-function 'face-font) (lambda (&rest _) "-other-font-")))
+        (drover-attention--update))
+      (should (= (length drover-attention-test-measured) 2))
+      ;; A font set, or a theme enabled, measures again, and redraws.
+      (should (memq #'drover-attention--fonts-changed after-setting-font-hook))
+      (should (memq #'drover-attention--fonts-changed enable-theme-functions))
+      (setq ink '(("⚑" 0 . 30)))
+      (run-hooks 'after-setting-font-hook)
+      (should (= (length drover-attention-test-measured) 3))
+      (should (equal (get-text-property 2 'display drover-attention-mode-line) '(space :width (20))))
+      (run-hook-with-args 'enable-theme-functions 'some-theme)
+      (should (= (length drover-attention-test-measured) 4))
+      ;; Off, the mode follows fonts no more.
+      (drover-attention-mode -1)
+      (should-not (memq #'drover-attention--fonts-changed after-setting-font-hook))
+      (should-not (memq #'drover-attention--fonts-changed enable-theme-functions)))))
 
 ;;;; Enabling and disabling
 

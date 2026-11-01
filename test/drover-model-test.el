@@ -65,6 +65,13 @@ table's metadata."
     (should-not (drover-model-id-for bare 'opencode))
     (should (equal (drover-model-id-for bare 'claude-code) "claude-opus-5-5"))))
 
+(ert-deftest drover-model-test-short-name ()
+  "Lists name a model without the family every model of it shares."
+  (should (equal (drover-model-short-name "Claude Opus 5.5") "Opus 5.5"))
+  (should (equal (drover-model-short-name "GPT-5.5") "GPT-5.5"))
+  (should (equal (drover-model-short-name "Claude") "Claude"))
+  (should-not (drover-model-short-name nil)))
+
 (ert-deftest drover-model-test-labels ()
   (let ((named (drover-model-create :provider-id "openai" :provider-name "OpenAI" :id "gpt-5.5"
                                     :name "GPT-5.5" :variants '((low :effort "low") (high :effort "high"))

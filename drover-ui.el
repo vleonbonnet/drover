@@ -27,6 +27,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'drover-core)
 (require 'face-remap)
 
@@ -88,14 +89,36 @@ short bar, so it stays subtle: only a background."
 It shows how long the bar would be, without drawing attention."
   :group 'drover-faces)
 
+(defface drover-context-bar
+  '((((class color) (min-colors 88) (background light)) :background "#ebe3f2")
+    (((class color) (min-colors 88) (background dark)) :background "#382d45")
+    (((class color)) :background "magenta")
+    (t :underline t))
+  "Face of the part of a model's context a session's context fills, in short bars.
+Only a background, as `drover-cache-bar', in another hue so that the
+two bars of a line are told apart."
+  :group 'drover-faces)
+
+(defface drover-context-near '((t :inherit warning))
+  "Face of a context size nearing a long-context price tier.
+Bars draw it in inverse video: its foreground as their background."
+  :group 'drover-faces)
+
+(defface drover-context-over '((t :inherit error))
+  "Face of a context size past a long-context price tier, whose requests cost more.
+Bars draw it in inverse video: its foreground as their background."
+  :group 'drover-faces)
+
 (defface drover-prompt-picked '((t :inherit success))
-  "Face of a prompt setting the user chose, such as the model.
+  "Face of a setting the user chose, such as the model or the effort.
 The prompt's header and pickers show settings in it or in
-`drover-prompt-inherited'."
+`drover-prompt-inherited', and session lists the effort a session runs."
   :group 'drover-faces)
 
 (defface drover-prompt-inherited '((t :inherit shadow))
-  "Face of a prompt setting a new session would inherit, not chosen."
+  "Face of a setting inherited rather than chosen, such as a default effort.
+The prompt shows in it what a new session would inherit, and session
+lists the effort a session runs by default."
   :group 'drover-faces)
 
 (defcustom drover-status-glyphs
@@ -183,6 +206,51 @@ NOW defaults to the current time.  Return \"\" for a nil TIME."
   (if (null time)
       ""
     (drover-format-duration (- (or now (float-time)) time))))
+
+(defun drover-format-tokens (tokens)
+  "Return a count of TOKENS as \"950\", \"8.4k\", \"182k\" or \"1.2M\".
+Counts of thousands and millions keep one decimal below ten, none
+from ten on; a decimal of zero is dropped."
+  (cl-flet ((scaled (value unit)
+              (if (< value 9.95)
+                  (concat (string-remove-suffix ".0" (format "%.1f" value)) unit)
+                (format "%d%s" (round value) unit))))
+    (cond ((< tokens 1000) (format "%d" tokens))
+          ((< tokens 999500) (scaled (/ tokens 1000.0) "k"))
+          (t (scaled (/ tokens 1000000.0) "M")))))
+
+(defun drover-session-context-description (session)
+  "Return what the context of SESSION fills, for tooltips and details, or nil.
+Such as \"182k of 200k tokens (91%)\", then, on a line of its own, the
+price tier it nears or passes.  Nil when the size is unknown."
+  (when-let* ((tokens (drover-session-context-tokens session)))
+    (let ((limit (drover-session-context-limit session))
+          (fraction (drover-session-context-fraction session)))
+      (concat (drover-format-tokens tokens)
+              (and limit (concat " of " (drover-format-tokens limit)))
+              " tokens"
+              (and fraction (format " (%d%%)" (round (* 100 fraction))))
+              (pcase (drover-session-context-tier session)
+                (`(over ,size ,label)
+                 (format "\nPast %s tokens: requests cost %s" (drover-format-tokens size) label))
+                (`(near ,size ,label)
+                 (format "\nNear %s tokens, past which requests cost %s"
+                         (drover-format-tokens size) label)))))))
+
+(defun drover-session-cache-description (session &optional now)
+  "Return how the prompt cache of SESSION stands at NOW, or nil when not live.
+Such as \"expires in 4m (1h window), 120k of 130k tokens cached\".  NOW
+defaults to the current time."
+  (when-let* ((remaining (drover-session-cache-remaining session now)))
+    (let ((ttl (drover-session-cache-ttl session))
+          (tokens (drover-session-cache-tokens session))
+          (prompt (drover-session-cache-prompt-tokens session)))
+      (concat "expires in " (drover-format-duration remaining)
+              (and (numberp ttl) (format " (%s window)" (drover-format-duration ttl)))
+              (and (numberp tokens)
+                   (concat ", " (drover-format-tokens tokens)
+                           (and (numberp prompt) (concat " of " (drover-format-tokens prompt)))
+                           " tokens cached"))))))
 
 (defconst drover-activity-labels
   '((today . "Today") (yesterday . "Yesterday") (week . "This week") (older . "Older"))

@@ -750,7 +750,7 @@ current buffer again afterwards."
       (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 300)
                                  :project "drover" :branch "main"
                                  :requests '((:kind permission :summary "bash: make"))))
-    (should (equal (drover-list-test-heading "s") "  ! Session s  drover:main  5m  permit: bash: make"))
+    (should (equal (drover-list-test-heading "s") "  ! Session s  drover:main   5m  permit: bash: make"))
     (drover-list-test-goto "s")
     (let ((glyph (1+ (point))))
       (should (equal (buffer-substring-no-properties glyph (1+ glyph)) "!"))
@@ -914,9 +914,13 @@ current buffer again afterwards."
 
 (defun drover-list-test-rich ()
   "Return two sessions with something to show in every field.
-A works, its prompt cache four fifths full; B asks a question."
+A works, its prompt cache four fifths full, on a model, effort and
+provider, its context a quarter full; B asks a question."
   (list (drover-list-test-titled "a" "Alpha" :status 'working :project "drover" :branch "main"
-                                 :agent "build" :model "opus" :created (drover-list-test-ago 86400)
+                                 :agent "build" :model "opus" :effort "high"
+                                 :provider "P" :provider-name "Prov"
+                                 :context-tokens 50000 :context-limit 200000
+                                 :created (drover-list-test-ago 86400)
                                  :updated (drover-list-test-ago 300) :detail "Busy"
                                  :cache-expires (+ drover-test-now 240) :cache-ttl 300)
         (drover-list-test-titled "b" "Bravo" :status 'waiting :since (drover-list-test-ago 60)
@@ -935,19 +939,29 @@ titles take 25 pixels, and each field its :min characters and a gap of
 14 pixels, but the title; Magit's ellipsis takes 7 more."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-with-font
-      ;; Title 109, age 144, cache 221, summary 319, location 403,
-      ;; agent 452, model 522, created 557.
+      ;; Title 109, age 144, cache 221, summary 319, model 389, context
+      ;; 466, provider 494, location 578, agent 627, created 662.
+      (should (equal (drover-list-test-layout-at 670)
+                     '(columns title location agent model provider context created age cache summary)))
+      (should (equal (drover-list-test-layout-at 660)
+                     '(columns title location agent model provider context age cache summary)))
       (should (equal (drover-list-test-layout-at 600)
-                     '(columns title location agent model created age cache summary)))
-      (should (equal (drover-list-test-layout-at 540)
-                     '(columns title location agent model age cache summary)))
+                     '(columns title location model provider context age cache summary)))
+      (should (equal (drover-list-test-layout-at 580)
+                     '(columns title model provider context age cache summary)))
+      (should (equal (drover-list-test-layout-at 500)
+                     '(columns title model context age cache summary)))
       (should (equal (drover-list-test-layout-at 470)
-                     '(columns title location agent age cache summary)))
-      (should (equal (drover-list-test-layout-at 420)
-                     '(columns title location age cache summary)))
+                     '(columns title model age cache summary)))
       (should (equal (drover-list-test-layout-at 330)
                      '(columns title age cache summary)))
-      ;; Too narrow for the summary in a column: two lines.
+      ;; Windows of 75 and 100 columns as wide as an x, as the README says.
+      (should (equal (drover-list-test-layout-at (* 75 7))
+                     '(columns title model provider context age cache summary)))
+      (should (equal (drover-list-test-layout-at (* 100 7))
+                     '(columns title location agent model provider context created age cache summary)))
+      ;; Too narrow for the summary in a column: two lines, where
+      ;; neither the model, its provider nor the context shows.
       (should (equal (drover-list-test-layout-at 320) '(narrow title age cache summary)))
       (should (equal (drover-list-test-layout-at 120) '(narrow title age cache summary))))))
 
@@ -990,9 +1004,9 @@ titles take 25 pixels, and each field its :min characters and a gap of
         (should (equal (drover-list-test-layout-at 360) '(narrow title age cache summary)))
         (drover-list-test-layout-at 370)
         (let ((cells (drover-list-test-cells "a")))
-          (should (equal (car cells) (cons 14 "opus")))
+          (should (equal (car cells) (cons 14 "opus high")))
           ;; The title's column follows, past the widest model and a gap.
-          (should (equal (nth 1 cells) (cons (+ 14 28 14) "◐ Alpha")))))
+          (should (equal (nth 1 cells) (cons (+ 14 56 14) "◐ Alpha")))))
       ;; A field the narrow layout does not place never forces two lines.
       (let ((drover-list-fields (mapcar (lambda (entry)
                                           (if (eq (car entry) 'summary)
@@ -1116,59 +1130,355 @@ titles take 25 pixels, and each field its :min characters and a gap of
         (drover-list--on-window-change window)
         (should (eq drover-list--layout 'columns))))))
 
+;;;; What sessions run
+
+(ert-deftest drover-list-test-model-and-effort ()
+  "The model's column shows the model, then its effort, dimmed when the model's default."
+  (drover-list-test-with
+      (list (drover-list-test-titled "a" "Alpha" :status 'working :updated (drover-list-test-ago 60)
+                                     :model "Opus 5.5" :effort "high")
+            (drover-list-test-titled "b" "Bravo" :status 'working :updated (drover-list-test-ago 90)
+                                     :model "GPT-5.5" :effort "medium" :effort-default t)
+            (drover-list-test-titled "c" "Charlie" :status 'working :updated (drover-list-test-ago 120)
+                                     :model "Big Pickle"))
+    (should (memq 'model drover-list--fields))
+    (let ((x (drover-list-test-cell-at "a" "Opus 5.5 high")))
+      (should (= x (drover-list-test-cell-at "b" "GPT-5.5 medium")))
+      (should (= x (drover-list-test-cell-at "c" "Big Pickle"))))
+    (save-excursion
+      (drover-list-test-goto "a")
+      (search-forward "Opus 5.5 high")
+      (let ((model (match-beginning 0))
+            (effort (- (point) 4)))
+        (should (eq (get-text-property model 'font-lock-face) 'drover-dim))
+        (should (eq (get-text-property effort 'font-lock-face) 'drover-prompt-picked))
+        (should (equal (get-text-property effort 'help-echo) "Effort: high, chosen"))
+        ;; The session's tooltip names them too.
+        (should (equal (get-text-property model 'help-echo) "Alpha\nOpus 5.5 high"))))
+    (save-excursion
+      (drover-list-test-goto "b")
+      (search-forward "GPT-5.5 medium")
+      (let ((effort (- (point) 6)))
+        (should (eq (get-text-property effort 'font-lock-face) 'drover-prompt-inherited))
+        (should (equal (get-text-property effort 'help-echo) "Effort: medium, the model's default"))))
+    (drover-list-test-goto "b")
+    (magit-section-show (magit-current-section))
+    (let ((text (drover-list-test-visible-text)))
+      (should (string-match-p "^    Model +GPT-5.5$" text))
+      (should (string-match-p "^    Effort +medium, the model's default$" text)))))
+
+(ert-deftest drover-list-test-provider ()
+  "The provider's column shows its icon in a cell as wide as its ink, else its name."
+  (drover-list-test-with-font
+    (drover-list-test-with
+        (list (drover-list-test-titled "a" "Alpha" :status 'working :updated (drover-list-test-ago 60)
+                                       :model "opus" :provider "P" :provider-name "Prov")
+              (drover-list-test-titled "b" "Bravo" :status 'working :updated (drover-list-test-ago 90)
+                                       :model "opus" :provider-name "Acme"))
+      ;; The icon advances 7 pixels, and draws 80 past its start: more
+      ;; than its column's name and gap.
+      (let ((drover-list-test-ink '((?P 0 . 80))))
+        (revert-buffer)
+        (should (memq 'provider drover-list--fields))
+        (let ((x (drover-list-test-cell-at "a" "P")))
+          (should (= x (drover-list-test-cell-at "b" "Acme")))
+          (dolist (id '("a" "b"))
+            (save-excursion
+              (drover-list-test-goto id)
+              (should (drover-list-test-ink-apart-p))))
+          ;; The next column begins past the icon's ink and a gap.
+          (should (= (drover-list-test-cell-at "a" "1m") (+ x 80 14 (- 21 19)))))
+        (save-excursion
+          (drover-list-test-goto "a")
+          (let ((case-fold-search nil))
+            (search-forward "P"))
+          (should (equal (get-text-property (1- (point)) 'help-echo) "Provider: Prov"))
+          (should (eq (get-text-property (1- (point)) 'font-lock-face) 'drover-dim)))
+        (save-excursion
+          (drover-list-test-goto "b")
+          (search-forward "Acme")
+          (should (equal (get-text-property (1- (point)) 'help-echo) "Provider: Acme")))
+        (drover-list-test-goto "a")
+        (magit-section-show (magit-current-section))
+        (should (string-match-p "^ +Provider +Prov$" (drover-list-test-visible-text)))))))
+
+(defun drover-list-test-context-cell (id)
+  "Return the context cell of session ID as a plist.
+:x is where it begins, :full and :trough the widths of its bar's
+parts, nil without a bar, :pad the width of the space standing for a
+missing bar, :label its size, :label-face and :bar-face their faces,
+and :help its tooltip."
+  (let* ((cell (seq-find (lambda (cell)
+                           (let ((case-fold-search nil))
+                             (string-match-p "[0-9][kM]?\\'" (cdr cell))))
+                         (drover-list-test-cells id)))
+         (text (cdr cell))
+         (widths (mapcar (lambda (index)
+                           (pcase (get-text-property index 'display text)
+                             (`(space :width (,width)) width)))
+                         (number-sequence 0 (1- (length text)))))
+         (bar (eq (get-text-property 1 'font-lock-face text) 'drover-cache-trough)))
+    (list :x (car cell)
+          :full (and bar (nth 0 widths)) :trough (and bar (nth 1 widths))
+          :pad (and (not bar) (nth 0 widths))
+          :label (substring-no-properties text (if bar 3 2))
+          :label-face (get-text-property (1- (length text)) 'font-lock-face text)
+          :bar-face (and bar (get-text-property 0 'font-lock-face text))
+          :help (get-text-property (1- (length text)) 'help-echo text))))
+
+(ert-deftest drover-list-test-context ()
+  "The context's column shows a short bar of how full it is and its size, warning near a tier."
+  (drover-list-test-with-font
+    (drover-list-test-with
+        (list (drover-list-test-titled "a" "Alpha" :status 'working :updated (drover-list-test-ago 60)
+                                       :context-tokens 50000 :context-limit 200000)
+              (drover-list-test-titled "n" "Near" :status 'working :updated (drover-list-test-ago 70)
+                                       :context-tokens 186000 :context-limit 200000
+                                       :context-tier '(near 200000 "2×"))
+              (drover-list-test-titled "o" "Over" :status 'working :updated (drover-list-test-ago 80)
+                                       :context-tokens 1200000 :context-limit 1000000
+                                       :context-tier '(over 200000 "2×"))
+              (drover-list-test-titled "u" "Unsized" :status 'working :updated (drover-list-test-ago 90)
+                                       :context-tokens 8400)
+              (drover-list-test-titled "z" "None" :status 'working :updated (drover-list-test-ago 95)))
+      (should (memq 'context drover-list--fields))
+      (let ((a (drover-list-test-context-cell "a"))
+            (n (drover-list-test-context-cell "n"))
+            (o (drover-list-test-context-cell "o"))
+            (u (drover-list-test-context-cell "u")))
+        ;; One column, bars of five characters, 35 pixels.
+        (should (= (length (seq-uniq (mapcar (lambda (cell) (plist-get cell :x)) (list a n o u)))) 1))
+        (should (equal (list (plist-get a :full) (plist-get a :trough)) '(9 26)))
+        (should (equal (list (plist-get n :full) (plist-get n :trough)) '(33 2)))
+        ;; Past the model's context, the bar is full.
+        (should (equal (list (plist-get o :full) (plist-get o :trough)) '(35 0)))
+        ;; Without the model's context size, no bar, but its room.
+        (should (= (plist-get u :pad) 35))
+        (should (equal (mapcar (lambda (cell) (plist-get cell :label)) (list a n o u))
+                       '("50k" "186k" "1.2M" "8.4k")))
+        (should (eq (plist-get a :label-face) 'drover-dim))
+        (should (eq (plist-get a :bar-face) 'drover-context-bar))
+        ;; Near the tier, in a warning; past it, in an error; the bar
+        ;; in inverse video, the face's colour as its background.
+        (should (eq (plist-get n :label-face) 'drover-context-near))
+        (should (equal (plist-get n :bar-face) '((:inverse-video t) drover-context-near)))
+        (should (eq (plist-get o :label-face) 'drover-context-over))
+        (should (equal (plist-get o :bar-face) '((:inverse-video t) drover-context-over)))
+        (should (equal (plist-get a :help) "Context: 50k of 200k tokens (25%)"))
+        (should (equal (plist-get n :help)
+                       "Context: 186k of 200k tokens (93%)\nNear 200k tokens, past which requests cost 2×"))
+        (should (equal (plist-get o :help)
+                       "Context: 1.2M of 1M tokens (120%)\nPast 200k tokens: requests cost 2×"))
+        (should (equal (plist-get u :help) "Context: 8.4k tokens")))
+      ;; A session without a context shows nothing there.
+      (should-not (seq-find (lambda (cell)
+                              (let ((case-fold-search nil))
+                                (string-match-p "[0-9][kM]\\'" (cdr cell))))
+                            (drover-list-test-cells "z")))
+      (drover-list-test-goto "n")
+      (magit-section-show (magit-current-section))
+      (should (string-match-p
+               (concat "^ +Context +"
+                       (regexp-quote "186k of 200k tokens (93%); Near 200k tokens, past which requests cost 2×")
+                       "$")
+               (drover-list-test-visible-text)))
+      (search-forward "186k of 200k")
+      (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-context-near)))))
+
+(ert-deftest drover-list-test-context-not-in-two-lines ()
+  "Two lines leave the context out: the cache already colours the line."
+  (drover-list-test-with (drover-list-test-rich)
+    (drover-list-test-with-font
+      (drover-list-test-layout-at 250)
+      (should (eq drover-list--layout 'narrow))
+      (should-not (memq 'context drover-list--fields))
+      (should-not (string-search "50k" (drover-list-test-entry "a"))))))
+
+;;;; The header line
+
+(defun drover-list-test-header-cells ()
+  "Return the names of the header line as a list of (X . NAME), X in pixels."
+  (let ((header header-line-format)
+        (cells nil))
+    (dotimes (index (length header))
+      (pcase (get-text-property index 'display header)
+        (`(space :align-to (,x)) (push (cons x "") cells))
+        (_ (setcdr (car cells) (concat (cdar cells) (substring header index (1+ index)))))))
+    (nreverse cells)))
+
+(ert-deftest drover-list-test-header-line ()
+  "In columns, the header line names each column, aligned to it to the pixel."
+  (drover-list-test-with (drover-list-test-rich)
+    (drover-list-test-with-font
+      (drover-list-test-layout-at 1000)
+      (should (equal drover-list--fields
+                     '(title location agent model provider context created age cache summary)))
+      (let ((names (drover-list-test-header-cells))
+            (right (lambda (text)
+                     (let ((x (drover-list-test-cell-at "a" text)))
+                       (+ x (drover-list-test-fake-width text))))))
+        (should (equal (mapcar #'cdr names)
+                       '("Session" "Project" "Agent" "Model" "Provider" "Context" "Created" "Age"
+                         "Cache" "Summary")))
+        (cl-flet ((at (name) (car (rassoc name names)))
+                  (end (name) (+ (car (rassoc name names)) (drover-list-test-fake-width name))))
+          ;; Names begin where their columns do...
+          (should (= (at "Session") (car (car (drover-list-test-cells "a")))))
+          (should (= (at "Project") (drover-list-test-cell-at "a" "drover:main")))
+          (should (= (at "Agent") (drover-list-test-cell-at "a" "build")))
+          (should (= (at "Model") (drover-list-test-cell-at "a" "opus high")))
+          (should (= (at "Provider") (drover-list-test-cell-at "a" "P")))
+          (should (= (at "Context") (plist-get (drover-list-test-context-cell "a") :x)))
+          (should (= (at "Cache") (drover-list-test-cell-at "a" "4m")))
+          (should (= (at "Summary") (drover-list-test-cell-at "a" "Busy")))
+          ;; ... or end where they do, aligned right.
+          (should (= (end "Created") (funcall right "1d")))
+          (should (= (end "Age") (funcall right "5m"))))
+        ;; A column is at least as wide as its name, such as "Created"
+        ;; over "1d": names never overlap, a gap apart at least.
+        (seq-mapn (lambda (name next)
+                    (should (>= (car next) (+ (car name) (drover-list-test-fake-width (cdr name)) 14))))
+                  names (cdr names))
+        (let ((model (seq-find (lambda (name) (equal (cdr name) "Model")) names)))
+          (should (eq (get-text-property 0 'face (cdr model)) 'drover-list-header))
+          (should (equal (get-text-property 0 'help-echo (cdr model))
+                         (alist-get 'model drover-list-field-descriptions)))))
+      ;; Past line numbers, which the header line lacks.
+      (let ((before (drover-list-test-header-cells)))
+        (drover-list-test-shown
+          (setq-local display-line-numbers t)
+          (cl-letf (((symbol-function 'line-number-display-width) (lambda (&optional _) 21)))
+            (drover-list-test-layout-at 1000))
+          (should (equal (mapcar (lambda (name) (cons (- (car name) 21) (cdr name)))
+                                 (drover-list-test-header-cells))
+                         before))
+          (setq-local display-line-numbers nil)))
+      ;; Two lines name no column.
+      (drover-list-test-layout-at 250)
+      (should (eq drover-list--layout 'narrow))
+      (should-not header-line-format)
+      (drover-list-test-layout-at 1000)
+      (should header-line-format))))
+
+(ert-deftest drover-list-test-header-names-are-data ()
+  "Names come from `drover-list-fields', cut to their column, and `%' shows as such."
+  (drover-list-test-with (drover-list-test-rich)
+    (drover-list-test-with-font
+      (let ((drover-list-fields '((title :priority 0 :min 5 :label "100%")
+                                  (agent :priority 1 :min 2 :max 3 :label "Agents")
+                                  (age :priority 2 :min 3 :align right))))
+        (drover-list-test-layout-at 1000)
+        ;; Three characters of 7 pixels: "Ag" and the ellipsis.
+        ;; Doubled, as the header line shows "%%" as "%".
+        (should (equal (mapcar #'cdr (drover-list-test-header-cells)) '("100%%" "Ag…")))))))
+
+;;;; Fetching what sessions lack
+
+(ert-deftest drover-list-test-prefetch ()
+  "The list asks backends for what the sessions in sight lack, once per drawing."
+  (drover-list-test-with (drover-list-test-sample)
+    (should (equal (drover-list-test-groups)
+                   '((waiting "wait1" "wait2") (done "done") (working "work") (idle "idle"))))
+    (should (eq drover-list--layout 'columns))
+    ;; The idle group is collapsed: its session is not asked for.
+    (should (equal drover-test-prefetched '(("wait1" "wait2" "done" "work"))))
+    (revert-buffer)
+    (should (equal drover-test-prefetched '(("wait1" "wait2" "done" "work") ("wait1" "wait2" "done" "work"))))
+    ;; Expanding the group asks for its session after the command, once.
+    (setq drover-test-prefetched nil)
+    (should (memq #'drover-list--prefetch post-command-hook))
+    (drover-list-test-goto-group 'idle)
+    (magit-section-show (magit-current-section))
+    (run-hooks 'post-command-hook)
+    (should (equal drover-test-prefetched '(("idle"))))
+    (run-hooks 'post-command-hook)
+    (should (equal drover-test-prefetched '(("idle"))))
+    ;; A context the user hides needs nothing.
+    (setq drover-test-prefetched nil
+          drover-list-hidden-fields '(context))
+    (revert-buffer)
+    (should-not drover-test-prefetched)
+    (run-hooks 'post-command-hook)
+    (should-not drover-test-prefetched)
+    ;; Nor do two lines, which leave it out.
+    (setq drover-list-hidden-fields nil)
+    (drover-list-test-with-font
+      (drover-list-test-layout-at 100))
+    (should (eq drover-list--layout 'narrow))
+    (should-not drover-test-prefetched)))
+
 ;;;; The prompt cache
 
-(defun drover-list-test-cache-parts (id)
-  "Return the parts of the prompt cache field of session ID, as an alist.
-Each entry is (PART . DISPLAY), PART being `full', `trough', `space' or
-`label'."
+(defun drover-list-test-cache-field (id)
+  "Return the prompt cache field of session ID as (FULL TROUGH LABEL).
+FULL and TROUGH are the widths of the bar's parts, from their display,
+LABEL the text of the time left, or nil for those it lacks."
   (save-excursion
     (drover-list-test-goto id)
     (let ((end (line-end-position))
-          (parts nil))
-      (while (setq parts (let ((position (text-property-not-all (point) end 'drover-list-cache nil)))
-                           (if (not position)
-                               (throw 'done parts)
-                             (goto-char (1+ position))
-                             (cons (cons (get-text-property position 'drover-list-cache)
-                                         (get-text-property position 'display))
-                                   parts)))))
-      parts)))
+          (position (point))
+          full trough label)
+      (while (setq position (text-property-not-all position end 'drover-list-cache nil))
+        (let ((width (pcase (get-text-property position 'display) (`(space :width (,width)) width))))
+          (pcase (get-text-property position 'drover-list-cache)
+            ('full (setq full width))
+            ('trough (setq trough width))
+            ('label (setq label (concat label (buffer-substring-no-properties position (1+ position)))))))
+        (setq position (1+ position)))
+      (list full trough label))))
 
-(defun drover-list-test-cache-field (id)
-  "Return the prompt cache field of session ID as (FULL TROUGH LABEL)."
-  (let ((parts (catch 'done (drover-list-test-cache-parts id))))
-    (list (pcase (alist-get 'full parts) (`(space :width (,width)) width))
-          (pcase (alist-get 'trough parts) (`(space :width (,width)) width))
-          (alist-get 'label parts))))
+(defun drover-list-test-help-at (position)
+  "Return the tooltip of the list at POSITION, as a window showing it would."
+  (let ((help (get-text-property position 'help-echo)))
+    (if (functionp help) (funcall help (selected-window) (current-buffer) position) help)))
 
 (defun drover-list-test-cached ()
-  "Return a session whose prompt cache lasts five minutes, four left, and two others."
+  "Return a session whose prompt cache lasts five minutes, four left, and two others.
+The cache holds 120k tokens of a prompt of 130k."
   (list (drover-list-test-titled "c" "Cached" :status 'working :updated (drover-list-test-ago 60)
-                                 :cache-expires (+ drover-test-now 240) :cache-ttl 300)
+                                 :cache-expires (+ drover-test-now 240) :cache-ttl 300
+                                 :cache-tokens 120000 :cache-prompt-tokens 130000)
         (drover-list-test-titled "u" "Unknown" :status 'working :updated (drover-list-test-ago 90))
         (drover-list-test-titled "x" "Expired" :status 'working :updated (drover-list-test-ago 120)
                                  :cache-expires (- drover-test-now 10) :cache-ttl 300)))
 
 (ert-deftest drover-list-test-cache-field ()
-  "In columns, a live cache shows a short bar and the time left."
+  "In columns, a live cache shows a short bar and the time left, as text."
   (drover-list-test-with (drover-list-test-cached)
     (should (eq drover-list--layout 'columns))
     ;; A bar of five characters, four fifths full, and four minutes.
     (should (equal (drover-list-test-cache-field "c") '(4 1 "4m")))
     (should (memq 'cache drover-list--fields))
     ;; The title, the age, a gap, the bar, a space and the time left.
-    (should (equal (drover-list-test-heading "c") "  ◐ Cached   1m        4m"))
+    (should (equal (drover-list-test-heading "c") "  ◐ Cached    1m        4m"))
     (save-excursion
       (drover-list-test-goto "c")
-      (let ((full (text-property-any (point) (line-end-position) 'drover-list-cache 'full)))
+      (let* ((full (text-property-any (point) (line-end-position) 'drover-list-cache 'full))
+             (label (text-property-any (point) (line-end-position) 'drover-list-cache 'label)))
         (should (eq (get-text-property full 'face) 'drover-cache-bar))
-        (should (eq (get-text-property (1+ full) 'face) 'drover-cache-trough))))
+        (should (eq (get-text-property (1+ full) 'face) 'drover-cache-trough))
+        ;; The time left is text, which copying the line keeps.
+        (should (string-suffix-p "4m" (buffer-substring-no-properties (point) (line-end-position))))
+        (should-not (get-text-property label 'display))
+        (should (eq (get-text-property label 'font-lock-face) 'drover-dim))
+        ;; Its tooltip, and the bar's, tell what it is.
+        (dolist (position (list full (1+ full) label))
+          (should (equal (drover-list-test-help-at position)
+                         "Prompt cache: expires in 4m (5m window), 120k of 130k tokens cached")))
+        ;; As the cache stands when the tooltip shows.
+        (let ((drover-list-test-clock (+ drover-test-now 200)))
+          (should (equal (drover-list-test-help-at label)
+                         "Prompt cache: expires in 40s (5m window), 120k of 130k tokens cached")))
+        (let ((drover-list-test-clock (+ drover-test-now 300)))
+          (should (equal (drover-list-test-help-at label) "Prompt cache: expired")))
+        ;; The rest of the line keeps the session's.
+        (should (equal (drover-list-test-help-at (point)) "Cached"))))
     ;; Unknown or expired: nothing.
     (should (equal (drover-list-test-cache-field "u") '(nil nil nil)))
     (should (equal (drover-list-test-cache-field "x") '(nil nil nil)))
-    (should (equal (drover-list-test-heading "u") "  ◐ Unknown  1m"))
+    (should (equal (drover-list-test-heading "u") "  ◐ Unknown   1m"))
     (should (= (length drover-list--caches) 1))
+    (should (markerp (plist-get (car drover-list--caches) :start)))
     ;; No live cache, no field.
     (setq drover-test-sessions (cdr drover-test-sessions))
     (revert-buffer)
@@ -1180,23 +1490,62 @@ Each entry is (PART . DISPLAY), PART being `full', `trough', `space' or
   "As time passes, only the bar and the time left change, until nothing shows."
   (drover-list-test-with (drover-list-test-cached)
     (let ((root magit-root-section)
-          (text (buffer-substring-no-properties (point-min) (point-max))))
+          (text (buffer-substring-no-properties (point-min) (point-max)))
+          (section (drover-list-test-section "c")))
       (setq drover-list-test-clock (+ drover-test-now 90))
       (drover-list--draw-caches)
       (should (equal (drover-list-test-cache-field "c") '(2 3 "2m")))
+      ;; Only the time left changed, in place.
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     (replace-regexp-in-string "4m\n" "2m\n" text)))
       (setq drover-list-test-clock (+ drover-test-now 200))
       (drover-list--draw-caches)
       (should (equal (drover-list-test-cache-field "c") '(1 4 "40s")))
-      ;; Nothing was drawn anew: same sections, same text, unmodified.
+      ;; Nothing was drawn anew: same sections, unmodified; the new time
+      ;; left belongs to its session, and what follows it kept its place.
       (should (eq magit-root-section root))
-      (should (equal (buffer-substring-no-properties (point-min) (point-max)) text))
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     (replace-regexp-in-string "4m\n" "40s\n" text)))
       (should-not (buffer-modified-p))
+      (save-excursion
+        (drover-list-test-goto "c")
+        (let ((label (text-property-any (point) (line-end-position) 'drover-list-cache 'label)))
+          (should (eq (magit-section-at label) section))
+          (should (eq (magit-section-at (+ label 2)) section))
+          (should (eq (get-text-property (+ label 2) 'font-lock-face) 'drover-dim))
+          (should (equal (drover-list-test-help-at (+ label 2))
+                         "Prompt cache: expires in 40s (5m window), 120k of 130k tokens cached"))))
+      (should (equal (drover-list-test-heading "u") "  ◐ Unknown   1m"))
+      (should (equal (drover-session-id (save-excursion (drover-list-test-goto "u") (drover-session-at-point)))
+                     "u"))
       ;; Expired: nothing shows, and the cache is forgotten.
       (setq drover-list-test-clock (+ drover-test-now 240))
       (drover-list--draw-caches)
-      (should (equal (drover-list-test-cache-field "c") '(0 0 "")))
-      (should (equal (string-trim-right (drover-list-test-heading "c")) "  ◐ Cached   1m"))
+      (should (equal (drover-list-test-cache-field "c") '(0 0 nil)))
+      (should (equal (string-trim-right (drover-list-test-heading "c")) "  ◐ Cached    1m"))
       (should-not drover-list--caches))))
+
+(ert-deftest drover-list-test-cache-label-keeps-glyphs-in-place ()
+  "A time left changing length leaves the animated glyphs after it animated."
+  (drover-list-test-with (drover-list-test-cached)
+    (setq drover-list-animation-interval 0.5)
+    (revert-buffer)
+    (let ((glyphs (mapcar (lambda (entry) (marker-position (car entry))) drover-list--animated)))
+      (should (= (length glyphs) 3))
+      (should (seq-every-p (lambda (entry) (markerp (car entry))) drover-list--animated))
+      ;; "4m" becomes "40s", one character longer, before the glyphs of
+      ;; the sessions listed after it.
+      (setq drover-list-test-clock (+ drover-test-now 200))
+      (drover-list--draw-caches)
+      (should (equal (mapcar (lambda (entry) (marker-position (car entry))) drover-list--animated)
+                     (cons (car glyphs) (mapcar #'1+ (cdr glyphs)))))
+      ;; The next frame shows on the glyphs, not beside them.
+      (let* ((time (+ drover-test-now 200.5))
+             (frame (nth (drover-list--frame-index 3 time) '("1" "2" "3"))))
+        (drover-list--draw-frames time)
+        (dolist (entry drover-list--animated)
+          (should (eq (get-text-property (car entry) 'drover-list-frame) 'working))
+          (should (equal (substring-no-properties (get-text-property (car entry) 'display)) frame)))))))
 
 (defun drover-list-test-bar ()
   "Return the bar of the first cache drawn as a background, as (START END).
@@ -1230,6 +1579,15 @@ START and END bound its overlay."
           (should (equal (car (last (seq-filter (lambda (item) (eq (nth 1 item) 'text)) spec)))
                          (list (nth 0 (car (last spec 2))) 'text 274 19 (drover-face "1m" 'drover-dim))))
           (should (eq (overlay-get (plist-get (car drover-list--caches) :overlay) 'face) 'drover-cache-bar))
+          ;; The line's tooltip tells of the cache too, as it stands when
+          ;; shown, on both lines.
+          (should (equal (drover-list-test-help-at start)
+                         "Session s\nasks: Go?\nPrompt cache: expires in 5m (5m window)"))
+          (should (equal (drover-list-test-help-at (1+ end))
+                         "Session s\nasks: Go?\nPrompt cache: expires in 5m (5m window)"))
+          (let ((drover-list-test-clock (+ drover-test-now 100)))
+            (should (string-suffix-p "Prompt cache: expires in 3m (5m window)"
+                                     (drover-list-test-help-at start))))
           ;; Full: the whole first line, up to its last 293 pixels.
           (should (equal (drover-list-test-bar) (list start end)))
           ;; Half, 146 pixels: within the space between the title, which
@@ -1304,7 +1662,8 @@ START and END bound its overlay."
   (drover-list-test-with (drover-list-test-cached)
     (drover-list-test-goto "c")
     (magit-section-show (magit-current-section))
-    (should (string-match-p "^    Prompt cache +4m left$" (drover-list-test-visible-text)))))
+    (should (string-match-p "^    Prompt cache +expires in 4m (5m window), 120k of 130k tokens cached$"
+                            (drover-list-test-visible-text)))))
 
 ;;;; Faces and measures
 
@@ -2471,6 +2830,7 @@ Each shows its own buffer."
       (should (= drover-list--width before))
       ;; Two lines: the summary does not fit in a column.
       (should (eq drover-list--layout 'narrow))
+      (should-not header-line-format)
       (should (string-suffix-p "1m" (drover-list-test-heading "a")))
       (should (= (string-width (drover-list-test-heading "a")) (1- before)))
       (window-resize side 6 t nil t)
@@ -2479,7 +2839,9 @@ Each shows its own buffer."
       (should (= drover-list--width (+ before 6)))
       ;; Now it does: one line, in columns.
       (should (eq drover-list--layout 'columns))
-      (should (equal (drover-list-test-entry "a") "  ! Session a  1m  asks: Go?")))))
+      (should (equal (drover-list-test-entry "a") "  ! Session a   1m  asks: Go?"))
+      ;; Named in the header line, which two lines lack.
+      (should (equal (drover-list-test-displayed header-line-format) "  Session      Age  Summary")))))
 
 ;;;; Active subagents
 
@@ -3216,12 +3578,17 @@ window of the code buffer, selected, `side' the list's, its point on
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-with-font
       (setq drover-list-hidden-fields '(location model))
-      (should (equal (drover-list-test-layout-at 600) '(columns title agent created age cache summary)))
-      ;; Room freed for the fields of lower rank.
-      (should (equal (drover-list-test-layout-at 470) '(columns title agent created age cache summary)))
+      (should (equal (drover-list-test-layout-at 600)
+                     '(columns title agent provider context created age cache summary)))
+      ;; Room freed for the fields of lower rank: context 396, provider
+      ;; 424, agent 473, created 508.
+      (should (equal (drover-list-test-layout-at 520)
+                     '(columns title agent provider context created age cache summary)))
+      (should (equal (drover-list-test-layout-at 510)
+                     '(columns title agent provider context age cache summary)))
       ;; In two lines, a hidden summary leaves no second line.
       (setq drover-list-hidden-fields '(summary))
-      (should (equal (drover-list-test-layout-at 320) '(columns title location age cache)))
+      (should (equal (drover-list-test-layout-at 320) '(columns title model age cache)))
       (setq drover-list-hidden-fields '(cache title))
       (should (equal (drover-list-test-layout-at 120) '(narrow title age summary)))
       (should-not drover-list--caches)
@@ -3235,16 +3602,22 @@ window of the code buffer, selected, `side' the list's, its point on
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-shown
       (revert-buffer)
-      (should (memq 'location drover-list--fields))
-      (drover-list-test-type "V - l")
-      (should (eq (oref transient--prefix command) 'drover-view))
-      (should (equal drover-list-hidden-fields '(location)))
-      (should-not (memq 'location drover-list--fields))
-      (should-not (string-search "drover:main" (drover-list-test-heading "a")))
-      (drover-list-test-type "- l C-g")
-      (should-not drover-list-hidden-fields)
-      (should (memq 'location drover-list--fields))
-      (should-not transient--prefix))))
+      (pcase-dolist (`(,key ,field ,text) '(("m" model "opus high") ("r" provider "P")
+                                            ("x" context "50k")))
+        (should (memq field drover-list--fields))
+        (should (string-search text (drover-list-test-heading "a")))
+        (drover-list-test-type (concat "V - " key))
+        (should (eq (oref transient--prefix command) 'drover-view))
+        (should (equal drover-list-hidden-fields (list field)))
+        (should-not (memq field drover-list--fields))
+        (should-not (string-search text (drover-list-test-heading "a")))
+        ;; Its column is no longer named.
+        (should-not (string-search (plist-get (drover-list--field-spec field) :label)
+                                   header-line-format))
+        (drover-list-test-type (concat "- " key " C-g"))
+        (should-not drover-list-hidden-fields)
+        (should (memq field drover-list--fields))
+        (should-not transient--prefix)))))
 
 (provide 'drover-list-test)
 ;;; drover-list-test.el ends here

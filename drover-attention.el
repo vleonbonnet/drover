@@ -96,14 +96,55 @@ out."
           (mapconcat #'drover-attention--describe sessions "\n")
           "\n\nmouse-1: visit the most urgent\nmouse-3: choose a session"))
 
+(defvar drover-attention--pads (make-hash-table :test #'equal)
+  "Room around the status glyphs of the mode line, measured.
+Keys are (GLYPH FACE FONT), FONT being `drover-attention--font-key';
+values are (LEFT . RIGHT), the pixels to leave before GLYPH and after
+its advance.  The counts are computed whenever sessions change, so a
+glyph is measured once per font; a change of fonts empties the table.")
+
+(defun drover-attention--font-key ()
+  "Return what the fonts of the mode line of the selected frame depend on.
+Those are its font and the frame's, not the frame: frames of the same
+fonts draw glyphs alike, and a frame deleted leaves nothing behind."
+  (list (face-font 'mode-line) (frame-parameter nil 'font)))
+
+(defun drover-attention--measure (glyph face)
+  "Return the room GLYPH in FACE needs in the mode line, as (LEFT . RIGHT).
+LEFT is how far left of its start its ink reaches, RIGHT how far past
+its advance (see `drover-text-ink-extent'), drawn over the face
+`mode-line' in the fonts of the selected frame: the Nerd Fonts draw
+icons up to half a cell past their advance, onto the count after them."
+  (let* ((string (propertize glyph 'face (list face 'mode-line)))
+         (extent (drover-text-ink-extent string))
+         (advance (drover-text-pixel-width string)))
+    (cons (max 0 (car extent)) (max 0 (- (cdr extent) advance)))))
+
+(defun drover-attention--space (pixels)
+  "Return a space PIXELS wide, or \"\" when PIXELS is not positive."
+  (if (> pixels 0)
+      (propertize " " 'display `(space :width (,pixels)))
+    ""))
+
+(defun drover-attention--glyph (status)
+  "Return the glyph of STATUS in its face, with the room its ink takes.
+The room is measured once per font, see `drover-attention--pads'."
+  (let* ((glyph (drover-status-glyph status))
+         (face (drover-status-face status))
+         (key (list (substring-no-properties glyph) face (drover-attention--font-key)))
+         (pads (or (gethash key drover-attention--pads)
+                   (puthash key (drover-attention--measure glyph face) drover-attention--pads))))
+    (concat (drover-attention--space (car pads)) glyph (drover-attention--space (cdr pads)))))
+
 (defun drover-attention--format (sessions)
   "Return the mode line counts of SESSIONS, the sessions that need the user.
-Return nil when SESSIONS is empty."
+Return nil when SESSIONS is empty.  Each glyph takes the room its ink
+does, so that it is never drawn over its count."
   (when-let* ((counts (drover-attention--counts sessions)))
     (concat " "
             (propertize
              (mapconcat (pcase-lambda (`(,status . ,count))
-                          (concat (drover-status-glyph status)
+                          (concat (drover-attention--glyph status)
                                   (propertize (number-to-string count)
                                               'face (drover-status-face status))))
                         counts " ")
@@ -115,6 +156,12 @@ Return nil when SESSIONS is empty."
   "Compute the mode line counts again and redraw every mode line."
   (setq drover-attention-mode-line (drover-attention--format (drover-attention-sessions)))
   (force-mode-line-update t))
+
+(defun drover-attention--fonts-changed (&rest _)
+  "Measure the glyphs of the mode line again, the fonts having changed.
+For `after-setting-font-hook' and `enable-theme-functions'."
+  (clrhash drover-attention--pads)
+  (drover-attention--update))
 
 (defun drover-attention--changed ()
   "Follow a change of sessions."
@@ -159,9 +206,13 @@ chooses one (`drover-select').  Enabling the mode starts the backends."
       (progn
         (drover-attention--show)
         (add-hook 'drover-changed-hook #'drover-attention--changed)
+        (add-hook 'after-setting-font-hook #'drover-attention--fonts-changed)
+        (add-hook 'enable-theme-functions #'drover-attention--fonts-changed)
         (drover-start)
         (drover-attention--update))
     (remove-hook 'drover-changed-hook #'drover-attention--changed)
+    (remove-hook 'after-setting-font-hook #'drover-attention--fonts-changed)
+    (remove-hook 'enable-theme-functions #'drover-attention--fonts-changed)
     (drover-attention--hide)
     (setq drover-attention-mode-line nil
           drover-attention--cycle nil)

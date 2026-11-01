@@ -517,6 +517,37 @@ and `after-focus-change-function'."
 
 ;;;; Sessions
 
+(defvar-local drover-claude-code-ide--last-run nil
+  "What the terminal's session ran in its newest turn, as (STAMP . PLIST), or nil.
+STAMP is the transcript read, its size and its modification time;
+PLIST is what `drover-claude-code-ide--run' returns.")
+
+(defun drover-claude-code-ide--run (id directory)
+  "Return what session ID, started in DIRECTORY, ran in its newest turn.
+The value is a plist of keyword arguments of `drover-session-create':
+:model, the compact name Claude Code's catalog gives the model, else its
+identifier, and :effort, the effort of the turn.  Whether that effort
+is the model's default the transcript does not tell, nor which provider
+served it, as the CLI may reach Claude through a cloud's.  The
+transcript is read again only once it changed, so that listing sessions
+costs a file status; the current buffer, the session's terminal, keeps
+what was read.  Nil without a turn."
+  (with-demoted-errors "Drover Claude Code run: %S"
+    (when-let* ((file (drover-claude-code-transcript id directory))
+                (attributes (file-attributes file)))
+      (let ((stamp (list file (file-attribute-size attributes)
+                         (file-attribute-modification-time attributes))))
+        (unless (equal (car drover-claude-code-ide--last-run) stamp)
+          (setq drover-claude-code-ide--last-run
+                (cons stamp
+                      (when-let* ((turn (drover-claude-code-last-turn file))
+                                  ((car turn)))
+                        (let ((model (drover-claude-code-model (car turn) nil (drover-claude-code-catalog))))
+                          (list :model (drover-model-short-name
+                                        (or (drover-model-name model) (drover-model-id model)))
+                                :effort (and (cdr turn) (symbol-name (cdr turn)))))))))
+        (cdr drover-claude-code-ide--last-run)))))
+
 (defun drover-claude-code-ide--session-of (buffer)
   "Return the `drover-session' of terminal BUFFER."
   (let* ((directory (drover-claude-code-ide--directory buffer))
@@ -525,22 +556,24 @@ and `after-focus-change-function'."
       (unless drover-claude-code-ide--token
         (setq drover-claude-code-ide--token
               (format "terminal-%d" (cl-incf drover-claude-code-ide--counter))))
-      (drover-session-create
-       :backend 'claude-code-ide
-       :id drover-claude-code-ide--token
-       :title (drover-claude-code-ide--title buffer)
-       :directory directory
-       :project (drover-claude-code-ide--project-name buffer directory)
-       :branch (drover-git-branch directory)
-       :status (nth 0 status)
-       :requests (nth 1 status)
-       :detail (nth 2 status)
-       :since drover-claude-code-ide--since
-       :updated (or drover-claude-code-ide--updated drover-claude-code-ide--created)
-       :created drover-claude-code-ide--created
-       :engine 'claude-code
-       ;; Never a guess: drover merges sessions of one engine identifier.
-       :engine-id (drover-claude-code-ide-live-session-id buffer)))))
+      (let ((id (drover-claude-code-ide-live-session-id buffer)))
+        (apply #'drover-session-create
+               :backend 'claude-code-ide
+               :id drover-claude-code-ide--token
+               :title (drover-claude-code-ide--title buffer)
+               :directory directory
+               :project (drover-claude-code-ide--project-name buffer directory)
+               :branch (drover-git-branch directory)
+               :status (nth 0 status)
+               :requests (nth 1 status)
+               :detail (nth 2 status)
+               :since drover-claude-code-ide--since
+               :updated (or drover-claude-code-ide--updated drover-claude-code-ide--created)
+               :created drover-claude-code-ide--created
+               :engine 'claude-code
+               ;; Never a guess: drover merges sessions of one engine identifier.
+               :engine-id id
+               (and id directory (drover-claude-code-ide--run id directory)))))))
 
 (defun drover-claude-code-ide--sessions ()
   "Return the sessions of the Claude terminals."

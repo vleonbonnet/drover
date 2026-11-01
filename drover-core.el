@@ -130,7 +130,28 @@ Each is a plist with :kind, `permission' or `question', and :summary.")
   (updated nil :documentation "Time, as a float, of the last activity, or nil.")
   (created nil :documentation "Time, as a float, at which the session was created, or nil.")
   (agent nil :documentation "Agent name, or nil.")
-  (model nil :documentation "Model name, or nil.")
+  (model nil :documentation "Compact display name of the model, such as \"Opus 5.5\", or nil.
+Lists show it in a column of its own, followed by EFFORT, and group,
+sort and filter sessions by it, so it names the model alone: not its
+provider, which PROVIDER tells, nor its effort.")
+  (effort nil :documentation "Display name of the reasoning effort or variant the model runs, or nil.
+Such as \"high\": the one chosen, or else the one the model runs by
+default, when the backend knows it.")
+  (effort-default nil :documentation "Non-nil when EFFORT is the model's default rather than a choice.
+Lists dim a default effort, as the prompt dims what a new session
+would inherit.")
+  (provider nil :documentation "Compact display of the provider serving the model, or nil.
+It may be an icon, such as a Nerd Font glyph; lists show it as it is,
+in a column of its own, and fall back to PROVIDER-NAME without it.")
+  (provider-name nil :documentation "Display name of the provider serving the model, or nil.
+Such as \"GitHub Copilot\"; tooltips name the provider with it.")
+  (context-tokens nil :documentation "Tokens the next request of the session sends again, or nil.
+That is the size of its context, as of its last step.")
+  (context-limit nil :documentation "Context size of the model, in tokens, or nil.
+See `drover-session-context-fraction'.")
+  (context-tier nil :documentation "The long-context price tier CONTEXT-TOKENS nears or passes, or nil.
+It is (STATE SIZE LABEL): STATE is `near' or `over', SIZE the tokens
+past which requests cost more, and LABEL how much more, such as \"2×\".")
   (detail nil :documentation "One line on the status, such as an error, or nil.")
   (engine nil :documentation "Symbol of the engine running the session, such as `claude-code', or nil.
 Engines are the agent programs, registered with `drover-register-engine';
@@ -142,7 +163,11 @@ are one session (see `drover-sessions').")
 The prompt cache is the provider's: until it expires, the next turn
 reuses the conversation already sent.  Nil when unknown.")
   (cache-ttl nil :documentation "Lifetime of the prompt cache, in seconds, or nil.
-It is the time from the last cache write to CACHE-EXPIRES."))
+It is the time from the last cache write to CACHE-EXPIRES.")
+  (cache-tokens nil :documentation "Prompt tokens the prompt cache holds, or nil.")
+  (cache-prompt-tokens nil :documentation "Prompt tokens of the last request, cached or not, or nil.
+CACHE-TOKENS of them are in the prompt cache: the share a next turn
+reads from the cache rather than sends anew."))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -195,6 +220,15 @@ the cache is expired or its expiry or lifetime is unknown."
               (ttl (drover-session-cache-ttl session))
               ((and (numberp ttl) (> ttl 0))))
     (min 1.0 (/ remaining (float ttl)))))
+
+(defun drover-session-context-fraction (session)
+  "Return how much of its model's context the context of SESSION fills.
+The value is CONTEXT-TOKENS over CONTEXT-LIMIT, a float beyond 1 past
+the limit, or nil when either is unknown."
+  (let ((tokens (drover-session-context-tokens session))
+        (limit (drover-session-context-limit session)))
+    (and (numberp tokens) (numberp limit) (> limit 0)
+         (/ tokens (float limit)))))
 
 (defun drover-status-rank (status)
   "Return the rank of STATUS in `drover-status-order', lowest most urgent."
@@ -607,6 +641,14 @@ PROPERTIES is a plist of:
              as they arrive; it may never call it, when they cannot be
              fetched.  Their statuses are what the backend reports of
              them, idle as a rule.  See `drover-show-history'.
+ :prefetch   Function of a list of SESSIONS a view shows, starting in
+             the background the fetches of what their records lack
+             and cost a request to know, such as the size of their
+             context, and reporting what arrives with
+             `drover-backend-changed'.  Views call it whenever they
+             draw, so it must cost nothing for sessions whose details
+             are known, being fetched, or cannot be fetched.  See
+             `drover-prefetch'.
 
 The prompt (`drover-prompt') sends to sessions and starts them through
 the following operations, all optional.  Callbacks are called at most
@@ -797,6 +839,22 @@ else that of the backend registered first."
   (drover--merge-duplicates
    (mapcan (lambda (entry) (drover--backend-sessions (cdr entry)))
            drover--backends)))
+
+(defun drover-prefetch (sessions)
+  "Ask the backends of SESSIONS to fetch what their records lack.
+Each backend with a :prefetch function is given its own SESSIONS, in
+their order, once; what arrives it reports as a change.  Views call it
+for the sessions they show, whenever they draw, so that a detail
+costing a request is fetched for those sessions alone.  A backend whose
+:prefetch fails is reported, the others asked all the same."
+  (let ((by-backend nil))
+    (dolist (session sessions)
+      (push session (alist-get (drover-session-backend session) by-backend)))
+    (pcase-dolist (`(,backend . ,records) (nreverse by-backend))
+      (when-let* ((function (drover-backend-property backend :prefetch))
+                  ((functionp function)))
+        (with-demoted-errors "Drover backend prefetch: %S"
+          (funcall function (nreverse records)))))))
 
 (defvar drover-show-history nil
   "Non-nil when session lists show older sessions too.

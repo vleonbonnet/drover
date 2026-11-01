@@ -54,12 +54,20 @@
 ;; and the narrowest, such as a side window, show two lines per session:
 ;; status, title and age, and what the session waits for under them.
 ;; The layout is computed anew whenever the width changes, among the
-;; fields the user did not hide (`drover-list-hidden-fields').
+;; fields the user did not hide (`drover-list-hidden-fields').  Columns
+;; are named in the header line, aligned to them.
+;;
+;; Besides the session's own fields, a line may show what it runs: its
+;; model and effort, its provider, and its context, as a short bar of
+;; how much of the model's context it fills and its size.  The context
+;; costs a request per session to some backends: the list asks for it
+;; (`drover-prefetch') only for the sessions in sight.
 ;;
 ;; A session whose provider still holds its prompt cache shows how much
 ;; of the cache's lifetime is left: as a short bar and the time left in
 ;; columns, as the background of its line, filled from the left, in two
-;; lines.  Only that display is redrawn as the cache runs out.
+;; lines.  Only the bar and the time left are redrawn as the cache runs
+;; out.
 ;;
 ;; The buffer redraws when backends report changes, but only while it
 ;; is displayed: a hidden list is marked stale and redraws when it is
@@ -90,6 +98,12 @@ It inherits `variable-pitch', which fits more in a line; inherit
 
 (defface drover-list-current '((t :inherit highlight :extend t))
   "Face of the session shown in the main window."
+  :group 'drover-faces)
+
+(defface drover-list-header '((t :inherit drover-list))
+  "Face of the names of the columns, in the header line of the session list.
+It goes over the face `header-line'; inheriting `drover-list', it draws
+the names in the font of the columns they name."
   :group 'drover-faces)
 
 (defconst drover-list-buffer-name "*drover sessions*"
@@ -146,6 +160,12 @@ A character counts as wide as the letter x in the face `drover-list'."
   :type 'natnum
   :group 'drover-list)
 
+(defcustom drover-list-context-bar-width 5
+  "Width of the short bar of the context field, in characters.
+A character counts as wide as the letter x in the face `drover-list'."
+  :type 'natnum
+  :group 'drover-list)
+
 (defcustom drover-list-animation-interval 0.5
   "Seconds between two frames of the animated glyphs of a displayed list.
 Working sessions and those waiting to retry show the frames of
@@ -162,25 +182,33 @@ a displayed list shows an animated glyph."
   :group 'drover-list)
 
 (defcustom drover-list-fields
-  '((title :priority 0 :min 12 :max 40 :narrow line)
-    (location :priority 4 :min 10 :max 30)
-    (agent :priority 5 :min 5 :max 12)
-    (model :priority 6 :min 8 :max 24)
-    (created :priority 7 :min 3 :align right)
-    (age :priority 1 :min 3 :align right :narrow line)
-    (cache :priority 2 :min 9 :narrow background)
-    (summary :priority 3 :min 12 :narrow below))
+  '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+    (location :priority 7 :min 10 :max 30 :label "Project")
+    (agent :priority 8 :min 5 :max 12 :label "Agent")
+    (model :priority 4 :min 8 :max 22 :label "Model")
+    (provider :priority 6 :min 2 :max 12 :label "Provider")
+    (context :priority 5 :min 9 :label "Context")
+    (created :priority 9 :min 3 :align right :label "Created")
+    (age :priority 1 :min 3 :align right :narrow line :label "Age")
+    (cache :priority 2 :min 9 :narrow background :label "Cache")
+    (summary :priority 3 :min 12 :narrow below :label "Summary"))
   "Fields a line of the session list may show, in the order of columns.
 Each entry is (FIELD . PROPERTIES).  FIELD is one of:
 
  title     The status icon and the title; it is always shown.
  location  The project and branch, as \"project:branch\".
  agent     The agent.
- model     The model.
+ model     The model, compact, and the effort it runs, dimmed when it
+           is the model's default.
+ provider  The provider serving the model, often as an icon.
+ context   The size of the context, and a short bar of how much of the
+           model's context it fills, in a warning face near a
+           long-context price tier.
  created   How long ago the session was created.
  age       How long ago it last did something, or since when it needs
            you.
- cache     How much of the lifetime of its prompt cache is left.
+ cache     How much of the lifetime of its prompt cache is left: a
+           short bar and the time left.
  summary   What it waits for, or one line on its status.
 
 PROPERTIES is a plist of:
@@ -196,13 +224,15 @@ PROPERTIES is a plist of:
             `below', on a second line, under the title, for the
             sessions that need you; `background', as the background
             of the line; nil, not shown.
+ :label     The name of the field's column in the header line.
 
 Characters count as wide as the letter x in the face `drover-list'.
 The list shows the fields with something to show, by priority, as long
 as their :min fit in the window, but those of
 `drover-list-hidden-fields'; it uses columns when those include every
 field the narrow layout places, else the narrow layout, which shows all
-of those."
+of those.  Columns are named in the header line, and are at least as
+wide as their name, room allowing."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
@@ -213,12 +243,28 @@ title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the
 changes it for the session, with one switch per field."
   :type '(set (const :tag "Project and branch" location)
               (const :tag "Agent" agent)
-              (const :tag "Model" model)
+              (const :tag "Model and effort" model)
+              (const :tag "Provider" provider)
+              (const :tag "Context" context)
               (const :tag "Creation" created)
               (const :tag "Age" age)
               (const :tag "Prompt cache" cache)
               (const :tag "Summary" summary))
   :group 'drover-list)
+
+(defconst drover-list-field-descriptions
+  '((title . "The status of the session, the subagents at work under it, and its title")
+    (location . "The project and branch the session works in")
+    (agent . "The agent the session runs")
+    (model . "The model the session runs, and its effort: dimmed when the model's default")
+    (provider . "The provider serving the model")
+    (context . "The size of the session's context, and how much of the model's it fills")
+    (created . "How long ago the session was created")
+    (age . "How long ago the session last did something, or since when it needs you")
+    (cache . "How long the provider keeps the conversation cached: the next turn sent before then costs less")
+    (summary . "What the session waits for, or how its turn stands"))
+  "What each field of `drover-list-fields' shows.
+The header line's tooltips tell it.")
 
 (defconst drover-list--gap 2
   "Characters between two columns.")
@@ -616,19 +662,79 @@ buffer is in the face `drover-open-session', over the dimming."
               "")
             (if faces (drover-face title (if (cdr faces) faces (car faces))) title))))
 
-(defun drover-list--text (field session location now)
+(defun drover-list--bar (fraction pixels face)
+  "Return a short bar PIXELS wide, FRACTION of it full in FACE.
+It is two stretched spaces, the full part and the trough, the trough
+in `drover-cache-trough'."
+  (let ((full (round (* pixels (max 0 (min 1 fraction))))))
+    (concat (drover-face (propertize " " 'display `(space :width (,full))) face)
+            (drover-face (propertize " " 'display `(space :width (,(- pixels full))))
+                         'drover-cache-trough))))
+
+(defun drover-list--model-text (session)
+  "Return the model of SESSION and the effort it runs, as its column shows them.
+The effort is in `drover-prompt-picked' when chosen, in
+`drover-prompt-inherited' when it is the model's default; its tooltip
+says which."
+  (let* ((model (drover-session-model session))
+         (effort (drover-session-effort session))
+         (default (drover-session-effort-default session)))
+    (string-join
+     (delq nil
+           (list (and model (drover-face (drover-list--one-line model) 'drover-dim))
+                 (and effort
+                      (propertize (drover-face (drover-list--one-line effort)
+                                               (if default 'drover-prompt-inherited 'drover-prompt-picked))
+                                  'help-echo (format "Effort: %s, %s" effort
+                                                     (if default "the model's default" "chosen"))))))
+     " ")))
+
+(defun drover-list--provider-text (session)
+  "Return the provider of SESSION as its column shows it, or nil.
+That is its compact display, often an icon, in a cell of its own, else
+its name; the tooltip names it."
+  (when-let* ((text (or (drover-session-provider session) (drover-session-provider-name session))))
+    (propertize (drover-list--icon (drover-face (drover-list--one-line text) 'drover-dim))
+                'help-echo (concat "Provider: " (or (drover-session-provider-name session) text)))))
+
+(defun drover-list--context-text (session char)
+  "Return the context of SESSION as its column shows it, or nil when unknown.
+A short bar of how much of the model's context it fills comes first,
+`drover-list-context-bar-width' characters CHAR pixels wide, then the
+size.  Near a long-context price tier, the size is in
+`drover-context-near' and the bar's full part in its inverse video,
+past it in `drover-context-over'.  Without the model's context size,
+an empty space takes the bar's place, so that sizes line up."
+  (when-let* ((tokens (drover-session-context-tokens session)))
+    (let* ((fraction (drover-session-context-fraction session))
+           (pixels (* drover-list-context-bar-width char))
+           (face (pcase (car (drover-session-context-tier session))
+                   ('over 'drover-context-over)
+                   ('near 'drover-context-near))))
+      (propertize
+       (concat (if fraction
+                   (drover-list--bar fraction pixels (if face (list '(:inverse-video t) face) 'drover-context-bar))
+                 (drover-list--pad pixels))
+               " "
+               (drover-face (drover-format-tokens tokens) (or face 'drover-dim)))
+       'help-echo (concat "Context: " (drover-session-context-description session))))))
+
+(defun drover-list--text (field session location metrics)
   "Return the text of FIELD for SESSION, or \"\" when it has none.
 LOCATION is a function of a session returning where it works, as its
-group shows it; ages count up to NOW.  The prompt cache has no text:
-it is drawn apart."
-  (pcase field
-    ('location (drover-face (drover-list--one-line (funcall location session)) 'drover-dim))
-    ('agent (drover-face (drover-list--one-line (drover-session-agent session)) 'drover-dim))
-    ('model (drover-face (drover-list--one-line (drover-session-model session)) 'drover-dim))
-    ('created (drover-face (drover-format-age (drover-session-created session) now) 'drover-dim))
-    ('age (drover-face (drover-format-age (drover-list--age-time session) now) 'drover-dim))
-    ('summary (drover-list--one-line (drover-session-summary session)))
-    (_ "")))
+group shows it; METRICS give the time ages count up to and the width
+of a character.  The prompt cache has no text: it is drawn apart."
+  (let ((now (plist-get metrics :now)))
+    (or (pcase field
+          ('location (drover-face (drover-list--one-line (funcall location session)) 'drover-dim))
+          ('agent (drover-face (drover-list--one-line (drover-session-agent session)) 'drover-dim))
+          ('model (drover-list--model-text session))
+          ('provider (drover-list--provider-text session))
+          ('context (drover-list--context-text session (plist-get metrics :char)))
+          ('created (drover-face (drover-format-age (drover-session-created session) now) 'drover-dim))
+          ('age (drover-face (drover-format-age (drover-list--age-time session) now) 'drover-dim))
+          ('summary (drover-list--one-line (drover-session-summary session))))
+        "")))
 
 (cl-defstruct (drover-list--row (:constructor drover-list--row-create)
                                 (:copier nil))
@@ -683,15 +789,14 @@ headings."
   "Return the row of SESSION at DEPTH in its tree, its glyph INDENT pixels in.
 LOCATION is a function of a session returning where it works, as its
 group shows it; METRICS are the measures of `drover-list--metrics'."
-  (let ((now (plist-get metrics :now))
-        (icons (drover-list--icons session metrics)))
+  (let ((icons (drover-list--icons session metrics)))
     (drover-list--row-create
      :session session :depth depth :indent indent :icons icons
      :title-start (+ indent (drover-list--pixel-width icons))
      :title (drover-list--title-text session depth)
-     :texts (mapcar (lambda (field) (cons field (drover-list--text field session location now)))
-                    '(location agent model created age summary))
-     :cache (drover-session-cache-fraction session now))))
+     :texts (mapcar (lambda (field) (cons field (drover-list--text field session location metrics)))
+                    '(location agent model provider context created age summary))
+     :cache (drover-session-cache-fraction session (plist-get metrics :now)))))
 
 (defun drover-list--tree-rows (nodes location metrics &optional depth indent)
   "Return the rows of the trees NODES at DEPTH, subagents after their parent.
@@ -730,7 +835,21 @@ It holds the short bar, a space and the longest time left it shows."
      (plist-get metrics :space)
      (drover-list--pixel-width (drover-face "59m" 'drover-dim))))
 
-(defun drover-list--natural (field rows metrics)
+(defun drover-list--label-width (field)
+  "Return the width in pixels of the name of FIELD's column, 0 without one.
+It is measured over the face `header-line', in which the header line
+draws it."
+  (if-let* ((label (plist-get (drover-list--field-spec field) :label)))
+      (drover-list--pixel-width (propertize label 'face '(drover-list-header header-line)))
+    0))
+
+(defun drover-list--whole-p (field)
+  "Return non-nil when FIELD is drawn whole or not at all, never cut.
+Those are the fields of a bar and a number: cut, the number would
+mislead."
+  (memq field '(cache context)))
+
+(defun drover-list--content-width (field rows metrics)
   "Return the width in pixels FIELD takes to show ROWS in full, per METRICS.
 That of the title counts from the margin, indentation and glyph
 included."
@@ -744,6 +863,12 @@ included."
     (_ (apply #'max 0 (mapcar (lambda (row)
                                 (drover-list--pixel-width (alist-get field (drover-list--row-texts row))))
                               rows)))))
+
+(defun drover-list--natural (field rows metrics)
+  "Return the width in pixels the column of FIELD wants to show ROWS, per METRICS.
+It is as wide as what it shows, see `drover-list--content-width', and
+at least as wide as its name in the header line."
+  (max (drover-list--label-width field) (drover-list--content-width field rows metrics)))
 
 (defun drover-list--title-prefix (rows metrics)
   "Return the room, in pixels, before titles in ROWS, from the margin, per METRICS."
@@ -788,10 +913,11 @@ where they give way to the title."
 (defun drover-list--column-widths (fields rows metrics)
   "Return the widths in pixels of the columns of FIELDS showing ROWS.
 FIELDS are entries of `drover-list-fields'; METRICS give the width of
-lines.  A column is as wide as what it shows, up to its :max; when the
-line is too narrow for that, the fields without a :max give up room
-first, down to their :min, then the others in proportion to what they
-would lose, down to theirs."
+lines.  A column is as wide as what it shows and its name, up to its
+:max; when the line is too narrow for that, the fields without a :max
+give up room first, down to their :min, then the others in proportion
+to what they would lose, down to theirs.  A field drawn whole (see
+`drover-list--whole-p') gives up the room of its name alone."
   (let* ((char (plist-get metrics :char))
          (prefix (drover-list--title-prefix rows metrics))
          (room (- (plist-get metrics :width) (plist-get metrics :margin)
@@ -802,8 +928,10 @@ would lose, down to theirs."
                                   (extra (if (eq field 'title) prefix 0))
                                   (max (plist-get (cdr entry) :max))
                                   (want (if max (min natural (+ extra (* char max))) natural))
-                                  (floor (min want (+ extra (* char (or (plist-get (cdr entry) :min) 0))))))
-                             (list want (if (eq field 'cache) want floor) (null max))))
+                                  (floor (if (drover-list--whole-p field)
+                                             (min want (drover-list--content-width field rows metrics))
+                                           (min want (+ extra (* char (or (plist-get (cdr entry) :min) 0)))))))
+                             (list want floor (null max))))
                          fields))
          (widths (mapcar #'car bounds))
          (deficit (- (apply #'+ widths) room)))
@@ -888,21 +1016,30 @@ the title's column does not come first."
           (drover-list--text-segment (drover-list--row-icons row) indent)
           (drover-list--text-segment title (+ shift (drover-list--row-title-start row))))))
 
+(defun drover-list--cache-label (remaining)
+  "Return the time left of a prompt cache, REMAINING seconds, as a field shows it.
+It is text, as copyable as the rest of the line, which the cache timer
+replaces as time passes: its characters tell their part in the
+property `drover-list-cache', as `label'."
+  (propertize (drover-face (drover-format-duration remaining) 'drover-dim)
+              'drover-list-cache 'label 'help-echo #'drover-list--cache-help-echo))
+
 (defun drover-list--cache-cell (fraction remaining layout)
   "Return the prompt cache field: a bar FRACTION full, REMAINING seconds left.
-The value is a string of four characters, displayed as the full part of
-the bar, its empty part, a space and the time left; LAYOUT gives the
-measures.  Each character tells its part in the property
-`drover-list-cache', so that only they change as time passes."
+The value is a string displayed as the full part of the bar, its empty
+part, a space and the time left, in text (see
+`drover-list--cache-label'); LAYOUT gives the measures.  Each character
+tells its part in the property `drover-list-cache', so that only they
+change as time passes.  The tooltip tells how the cache stands when
+shown, see `drover-list--cache-help-echo'."
   (let* ((bar (* drover-list-cache-bar-width (plist-get layout :char)))
          (full (round (* bar fraction))))
     (concat (propertize " " 'display `(space :width (,full)) 'face 'drover-cache-bar
-                        'drover-list-cache 'full)
+                        'drover-list-cache 'full 'help-echo #'drover-list--cache-help-echo)
             (propertize " " 'display `(space :width (,(- bar full))) 'face 'drover-cache-trough
-                        'drover-list-cache 'trough)
-            (propertize " " 'drover-list-cache 'space)
-            (propertize " " 'display (drover-face (drover-format-duration remaining) 'drover-dim)
-                        'drover-list-cache 'label))))
+                        'drover-list-cache 'trough 'help-echo #'drover-list--cache-help-echo)
+            (propertize " " 'drover-list-cache 'space 'help-echo #'drover-list--cache-help-echo)
+            (drover-list--cache-label remaining))))
 
 (defun drover-list--column-line (row layout)
   "Return the heading line of ROW in the columns of LAYOUT, and its bar.
@@ -987,13 +1124,38 @@ else nil."
 
 ;;;; The prompt cache
 
+(defvar-local drover-list--drawn nil
+  "Hash table of the sessions drawn, by key, as records of the last drawing.")
+
 (defvar-local drover-list--caches nil
   "Prompt caches drawn, live when last drawn, as plists.
-Each has :session, the record drawn, :start, where its heading begins,
-:kind, `columns' for a field or `narrow' for a background, :spec, the
-segments of a background line from `drover-list--assemble', :width, the
-width a background fills, :bar, the width of a field's bar, in pixels,
-and :overlay, the overlay of a background.")
+Each has :session, the record drawn, :start, a marker where its heading
+begins, :kind, `columns' for a field or `narrow' for a background,
+:spec, the segments of a background line from `drover-list--assemble',
+:width, the width a background fills, :bar, the width of a field's bar,
+in pixels, and :overlay, the overlay of a background.  The time left a
+field shows is text, which changes length as time passes: positions
+after it are kept by markers.")
+
+(defun drover-list--cache-help (session now)
+  "Return the line telling how the prompt cache of SESSION stands at NOW."
+  (concat "Prompt cache: " (or (drover-session-cache-description session now) "expired")))
+
+(defun drover-list--cache-help-echo (window object position)
+  "Return the tooltip of the prompt cache drawn at POSITION in OBJECT.
+OBJECT is the list's buffer, else WINDOW shows it.  The tooltip tells
+how the cache stands when it shows, see
+`drover-session-cache-description', after the text of the property
+`drover-list-help' there, if any: in two lines, where the cache is the
+background of the line, that of the session.  For `help-echo'."
+  (with-current-buffer (cond ((bufferp object) object)
+                             ((window-live-p window) (window-buffer window))
+                             (t (current-buffer)))
+    (when-let* ((section (drover-list--session-section (magit-section-at position)))
+                (session (and drover-list--drawn (gethash (oref section value) drover-list--drawn))))
+      (string-join (delq nil (list (get-text-property position 'drover-list-help)
+                                   (drover-list--cache-help session (drover-list--now))))
+                   "\n"))))
 
 (defun drover-list--fitting (string pixels)
   "Return how many characters of STRING, from its start, fit in PIXELS."
@@ -1047,26 +1209,42 @@ the pixel, or between two characters of text."
 
 (defun drover-list--draw-field (entry fraction remaining)
   "Draw the prompt cache field of ENTRY, FRACTION full, REMAINING seconds left.
-FRACTION nil draws nothing in its place."
+FRACTION nil draws nothing in its place.  The bar changes its display
+alone; the time left, text, is replaced when it reads otherwise, in the
+properties it had, the section it belongs to included."
   (let* ((start (plist-get entry :start))
          (bar (plist-get entry :bar))
          (full (if fraction (round (* bar fraction)) 0))
-         (end (save-excursion (goto-char start) (line-end-position))))
+         (end (save-excursion (goto-char start) (line-end-position)))
+         (label nil))
     (let ((position start))
       (while (setq position (text-property-not-all position end 'drover-list-cache nil))
-        (put-text-property
-         position (1+ position) 'display
-         (pcase (get-text-property position 'drover-list-cache)
-           ('full `(space :width (,full)))
-           ('trough `(space :width (,(if fraction (- bar full) 0))))
-           ('space (if fraction nil '(space :width (0))))
-           ('label (if fraction (drover-face (drover-format-duration remaining) 'drover-dim) ""))))
-        (setq position (1+ position))))))
+        (pcase (get-text-property position 'drover-list-cache)
+          ('label (setq label (or label position)))
+          (part (put-text-property
+                 position (1+ position) 'display
+                 (pcase part
+                   ('full `(space :width (,full)))
+                   ('trough `(space :width (,(if fraction (- bar full) 0))))
+                   ('space (if fraction nil '(space :width (0))))))))
+        (setq position (1+ position))))
+    (when label
+      (let* ((label-end (next-single-property-change label 'drover-list-cache nil end))
+             (text (if fraction (drover-format-duration remaining) "")))
+        (unless (equal (buffer-substring-no-properties label label-end) text)
+          (let ((properties (text-properties-at label)))
+            (save-excursion
+              ;; Inserted before the old text goes, so that a marker
+              ;; right after the label stays after the new one.
+              (goto-char label)
+              (insert (apply #'propertize text properties))
+              (delete-region (point) (+ (point) (- label-end label))))))))))
 
 (defun drover-list--draw-caches (&optional now)
   "Redraw the prompt caches of the current list as they stand at NOW.
-NOW defaults to the current time.  Only the caches change, not the
-text: a cache gone out shows nothing, and is forgotten."
+NOW defaults to the current time.  Only the caches change: the display
+of their bars, and the text of the time left.  A cache gone out shows
+nothing, and is forgotten."
   (let ((now (or now (drover-list--now)))
         (inhibit-read-only t))
     (with-silent-modifications
@@ -1081,7 +1259,8 @@ text: a cache gone out shows nothing, and is forgotten."
                                             (drover-session-cache-remaining session now)))
                  (unless fraction
                    (when-let* ((overlay (plist-get entry :overlay)))
-                     (delete-overlay overlay)))
+                     (delete-overlay overlay))
+                   (set-marker (plist-get entry :start) nil))
                  fraction))
              drover-list--caches)))))
 
@@ -1094,8 +1273,9 @@ STATUS, their widths and the right of the cell they are drawn in.")
 
 (defvar-local drover-list--animated nil
   "Animated glyphs drawn, as a list of (POSITION . KIND).
-POSITION is the character displaying the frame, the next one its pad;
-KIND is their animation, of `drover-animations'.")
+POSITION is a marker at the character displaying the frame, the next
+one its pad: the time left of a prompt cache before it may change
+length.  KIND is their animation, of `drover-animations'.")
 
 (defun drover-list--collect-animated ()
   "Return the animated glyphs of the current list.
@@ -1103,7 +1283,7 @@ The value is a list of (POSITION . KIND), see `drover-list--animated'."
   (let ((position (point-min))
         (found nil))
     (while (setq position (text-property-not-all position (point-max) 'drover-list-frame nil))
-      (push (cons position (get-text-property position 'drover-list-frame)) found)
+      (push (cons (copy-marker position) (get-text-property position 'drover-list-frame)) found)
       (setq position (1+ position)))
     (nreverse found)))
 
@@ -1144,8 +1324,11 @@ they are until they show."
 (defvar-local drover-list--fields nil
   "Fields of `drover-list-fields' the last drawing shows, in their order.")
 
-(defvar-local drover-list--drawn nil
-  "Hash table of the sessions drawn, by key, as records of the last drawing.")
+(defun drover-list--model-label (session)
+  "Return the model of SESSION and its effort as one plain string, or nil."
+  (let ((label (string-join (delq nil (list (drover-session-model session) (drover-session-effort session)))
+                            " ")))
+    (unless (string-empty-p label) label)))
 
 (defun drover-list--help (session &optional subagents)
   "Return the tooltip of SESSION: its full title and details.
@@ -1153,10 +1336,10 @@ SUBAGENTS, its active subagents, are named after them."
   (string-join
    (delq nil (list (drover-list--one-line (drover-session-display-title session))
                    (drover-session-location session)
-                   (when-let* ((agent (drover-session-agent session)))
-                     (if-let* ((model (drover-session-model session)))
-                         (format "%s (%s)" agent model)
-                       agent))
+                   (let ((agent (drover-session-agent session))
+                         (model (drover-list--model-label session)))
+                     (cond ((and agent model) (format "%s (%s)" agent model))
+                           (t (or agent model))))
                    (when-let* ((summary (drover-session-summary session)))
                      (drover-list--one-line summary))
                    (and subagents (drover-list--subagents-help subagents))))
@@ -1181,7 +1364,8 @@ Ages are relative to NOW; details without a value are left out."
          (time (drover-list--age-time session))
          (parent-id (drover-session-parent session))
          (created (drover-session-created session))
-         (cache (drover-session-cache-remaining session now))
+         (effort (drover-session-effort session))
+         (context (drover-session-context-description session))
          (details
           `(("Status" ,(concat (drover-status-label status)
                                (and time (format " for %s" (drover-format-age time now))))
@@ -1191,8 +1375,15 @@ Ages are relative to NOW; details without a value are left out."
             ("Branch" ,(drover-session-branch session))
             ("Agent" ,(drover-session-agent session))
             ("Model" ,(drover-session-model session))
+            ("Effort" ,(and effort (concat effort (and (drover-session-effort-default session)
+                                                       ", the model's default"))))
+            ("Provider" ,(drover-session-provider-name session))
+            ("Context" ,(and context (string-replace "\n" "; " context))
+             ,(pcase (car (drover-session-context-tier session))
+                ('over 'drover-context-over)
+                ('near 'drover-context-near)))
             ("Created" ,(and created (concat (drover-format-age created now) " ago")))
-            ("Prompt cache" ,(and cache (concat (drover-format-duration cache) " left")))
+            ("Prompt cache" ,(drover-session-cache-description session now))
             ("Subagent of" ,(and parent-id
                                  (if-let* ((parent (drover-find (drover-session-backend session)
                                                                 parent-id)))
@@ -1240,19 +1431,23 @@ in `drover-list--caches'."
                       (list (car line) (and (cdr line) 'columns) nil))
                   (let ((heading (drover-list--narrow-line row layout)))
                     (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
-         (x (drover-list--row-title-start row)))
+         (x (drover-list--row-title-start row))
+         (help (drover-list--help session (and (plist-get layout :active)
+                                               (gethash (drover-session-key session)
+                                                        (plist-get layout :active))))))
     (magit-insert-section (drover-list-session-section (drover-session-key session) t)
       (magit-insert-heading
-        (drover-list--with-help (car drawn)
-                                (drover-list--help
-                                 session (and (plist-get layout :active)
-                                              (gethash (drover-session-key session)
-                                                       (plist-get layout :active))))))
+        (if (eq (nth 1 drawn) 'narrow)
+            ;; The cache colours the line: its tooltip tells of it too,
+            ;; as it stands when shown.
+            (drover-list--with-help (propertize (car drawn) 'drover-list-help help)
+                                    #'drover-list--cache-help-echo)
+          (drover-list--with-help (car drawn) help)))
       (magit-insert-section-body
         (drover-list--insert-details session x layout)))
     (puthash (drover-session-key session) session drover-list--drawn)
     (when (nth 1 drawn)
-      (push (list :session session :start start :kind (nth 1 drawn) :spec (nth 2 drawn)
+      (push (list :session session :start (copy-marker start) :kind (nth 1 drawn) :spec (nth 2 drawn)
                   :width (plist-get layout :width)
                   :bar (* drover-list-cache-bar-width (plist-get layout :char))
                   :overlay (and (eq (nth 1 drawn) 'narrow)
@@ -1407,6 +1602,74 @@ filter and how to clear it.  Lines fit the width of LAYOUT."
                 (drover-list--flow (list (drover-filter-clear-hint drover-list-mode-map)) width)))
        (t (insert "No sessions.\n"))))))
 
+(defun drover-list--line-numbers-width ()
+  "Return the width in pixels of the line numbers of the list's window, or 0.
+Positions aligned to in the text count from past the line numbers,
+those of the header line from the text area's edge."
+  (let ((window (drover-list--window)))
+    (if (buffer-local-value 'display-line-numbers (window-buffer window))
+        (with-selected-window window (line-number-display-width t))
+      0)))
+
+(defun drover-list--header-line (layout)
+  "Return the header line naming the columns of LAYOUT, or nil in two lines.
+Each name, the :label of its field in `drover-list-fields', begins with
+a space aligned to its column as the cells of lines do, past the line
+numbers, which the header line lacks; the name of a column aligned
+right is aligned right.  A name wider than its column is cut.  The
+tooltip of a name tells what its column shows, from
+`drover-list-field-descriptions'."
+  (when (eq (plist-get layout :layout) 'columns)
+    (let ((shift (drover-list--line-numbers-width))
+          (segments nil))
+      (pcase-dolist (`(,field ,x ,width ,align) (plist-get layout :columns))
+        (when-let* ((label (plist-get (drover-list--field-spec field) :label))
+                    ;; Measured over the face of the header line, which draws it.
+                    (cut (drover-list--truncate (propertize label 'face '(drover-list-header header-line))
+                                                width))
+                    ((not (string-empty-p cut))))
+          (let* ((label-width (drover-list--pixel-width cut))
+                 (start (+ shift (if (eq align 'right) (- (+ x width) label-width) x)))
+                 (text (propertize (string-replace "%" "%%" (substring-no-properties cut))
+                                   'face 'drover-list-header
+                                   'help-echo (alist-get field drover-list-field-descriptions))))
+            (setq segments (append segments (list (list 'align start)
+                                                  (list 'text text label-width start)))))))
+      (and segments (car (drover-list--assemble segments))))))
+
+(defvar-local drover-list--prefetched nil
+  "Keys of the sessions the list asked their backends to complete, or nil.
+A hash table, made anew by each drawing that may show what backends
+fetch on demand, nil when the drawing shows none of it.  See
+`drover-list--prefetch'.")
+
+(defun drover-list--prefetch ()
+  "Ask backends to fetch what the sessions in sight lack, once per drawing.
+Those are the sessions of the expanded groups, not yet asked for since
+the list was drawn: a group expanded after the drawing has its sessions
+asked for then, as `post-command-hook' runs this.  See
+`drover-prefetch'."
+  (when drover-list--prefetched
+    (let ((sessions nil))
+      (dolist (container (drover-list--containers))
+        (unless (and (not (eq container magit-root-section)) (oref container hidden))
+          (dolist (section (drover-list--session-sections container))
+            (let ((key (oref section value)))
+              (unless (gethash key drover-list--prefetched)
+                (puthash key t drover-list--prefetched)
+                (when-let* ((session (gethash key drover-list--drawn)))
+                  (push session sessions)))))))
+      (when sessions
+        (drover-prefetch (nreverse sessions))))))
+
+(defun drover-list--prefetch-wanted-p ()
+  "Return non-nil when the list may show what backends fetch on demand.
+That is the context, which costs a request per session: in columns,
+unless the user hides it.  In two lines, it does not show."
+  (and (eq drover-list--layout 'columns)
+       (assq 'context drover-list-fields)
+       (not (memq 'context drover-list-hidden-fields))))
+
 (defun drover-list--insert ()
   "Insert every section of the list at point."
   (let* ((now (drover-list--now))
@@ -1424,7 +1687,8 @@ filter and how to clear it.  Lines fit the width of LAYOUT."
          (layout (drover-list--layout rows metrics)))
     (setq drover-list--layout (plist-get layout :layout)
           drover-list--fields (plist-get layout :fields)
-          drover-list--frames (plist-get layout :frames))
+          drover-list--frames (plist-get layout :frames)
+          header-line-format (and rows (drover-list--header-line layout)))
     (drover-list--forget-visibility all)
     (magit-insert-section (drover-list)
       ;; Every tree the filter keeps has its root shown, so no row means
@@ -1533,8 +1797,12 @@ same session, and window starts on the same line."
          (inhibit-read-only t))
     (drover-list--remember-visibility)
     (deactivate-mark)
-    (mapc (lambda (entry) (when-let* ((overlay (plist-get entry :overlay))) (delete-overlay overlay)))
+    (mapc (lambda (entry)
+            (when-let* ((overlay (plist-get entry :overlay))) (delete-overlay overlay))
+            (set-marker (plist-get entry :start) nil))
           drover-list--caches)
+    (pcase-dolist (`(,marker . ,_) drover-list--animated)
+      (set-marker marker nil))
     (setq magit-section-pre-command-section nil
           magit-section-highlight-overlays nil
           magit-section-selection-overlays nil
@@ -1562,7 +1830,10 @@ same session, and window starts on the same line."
     (when (eq (window-buffer) (current-buffer))
       (goto-char (window-point)))
     (drover-list--draw-caches)
-    (setq drover-list--animated (drover-list--collect-animated))
+    (setq drover-list--animated (drover-list--collect-animated)
+          drover-list--prefetched (and (drover-list--prefetch-wanted-p)
+                                       (make-hash-table :test #'equal)))
+    (drover-list--prefetch)
     (drover-list--update-current)
     (magit-section-update-highlight t)
     (set-buffer-modified-p nil)
@@ -1678,8 +1949,8 @@ default; stop it when INTERVAL or NEEDED is nil."
   "Run the timers a displayed list needs, and only those.
 Ages need redraws while a list is displayed; prompt caches while a
 displayed list shows a live one; animated glyphs while a displayed list
-shows one.  Caches and glyphs change only the display of a few
-characters, not the text."
+shows one.  Caches and glyphs change only a few characters: their
+display, and the text of a cache's time left, never the sections."
   (let ((shown (drover-list--shown-buffers)))
     (drover-list--keep-timer 'drover-list--age-timer drover-list-age-interval shown
                              #'drover-list--age-tick)
@@ -2045,10 +2316,11 @@ session, \\[drover-open-at-point] opens the session at point and
 \\[drover-list-display] shows it, the list staying selected.
 
 What a line shows depends on the window's width: see
-`drover-list-fields'.  In a side window (`drover-list-side'), sessions
-open in the window where you work, and the session it shows is
-highlighted.  The keys of `drover-session-map' act on the session at
-point; \\[drover-toggle-subagents] shows every subagent, the active ones or
+`drover-list-fields'.  In columns, the header line names them; hover
+a name to read what its column shows.  In a side window, opened by
+`drover-list-side', sessions open in the window where you work, and
+the session it shows is highlighted.  The keys of `drover-session-map'
+act on the session at point; \\[drover-toggle-subagents] shows every subagent, the active ones or
 none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 `drover-list'.
 
@@ -2072,6 +2344,7 @@ none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
   (add-hook 'text-scale-mode-hook #'drover-list--on-face-change nil t)
   (add-hook 'buffer-face-mode-hook #'drover-list--on-face-change nil t)
   (add-hook 'kill-buffer-hook #'drover-list--on-kill nil t)
+  (add-hook 'post-command-hook #'drover-list--prefetch nil t)
   (drover-list--watch))
 
 (provide 'drover-list)

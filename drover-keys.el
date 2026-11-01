@@ -1059,8 +1059,9 @@ even when the dispatch menu opened it from another window."
 (defvar drover-list-hidden-fields)
 
 (defconst drover-list-field-labels
-  '((location . "location") (agent . "agent") (model . "model") (created . "created")
-    (age . "age") (cache . "cache") (summary . "summary"))
+  '((location . "location") (agent . "agent") (model . "model") (provider . "provider")
+    (context . "context") (created . "created") (age . "age") (cache . "cache")
+    (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
 
 (defun drover-list-field-enabled-p (field)
@@ -1118,6 +1119,8 @@ Before the list is loaded, any field is."
 (drover--define-column-switch location)
 (drover--define-column-switch agent)
 (drover--define-column-switch model)
+(drover--define-column-switch provider)
+(drover--define-column-switch context)
 (drover--define-column-switch created)
 (drover--define-column-switch age)
 (drover--define-column-switch cache)
@@ -1155,6 +1158,8 @@ session (`drover-list-hidden-fields' keeps the choice)."
    ("-l" drover-view--column-location)
    ("-a" drover-view--column-agent)
    ("-m" drover-view--column-model)
+   ("-r" drover-view--column-provider)
+   ("-x" drover-view--column-context)
    ("-c" drover-view--column-created)
    ("-t" drover-view--column-age)
    ("-p" drover-view--column-cache)

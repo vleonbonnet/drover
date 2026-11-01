@@ -19,7 +19,8 @@
 
 ;; A fake backend, `fake', serves `drover-test-sessions' and records
 ;; every action in `drover-test-calls', its prompt operations included:
-;; it starts sessions of the engines `drover-test-backend-engines'.
+;; it starts sessions of the engines `drover-test-backend-engines'.  What
+;; views ask it to fetch goes to `drover-test-prefetched'.
 ;; `drover-test-with-backend' isolates the registry, the change hook and
 ;; its timer, and the view settings.  `drover-test-register-simple'
 ;; registers more backends, such as a second front end showing the same
@@ -62,6 +63,10 @@ Its :create is recorded as (:create DIRECTORY ENGINE OPTIONS).")
 
 (defvar drover-test-options nil
   "What the fake sessions run, as an alist (ID . PLIST), for :options.")
+
+(defvar drover-test-prefetched nil
+  "Sessions the fake backend was asked to complete, by :prefetch, newest call first.
+Each entry lists the identifiers of one call, in order.")
 
 (defvar drover-test-settable nil
   "What the fake sessions can change, as an alist (ID . KEYWORDS).
@@ -131,6 +136,8 @@ The session is served from then on, and given to THEN; with
    :send (drover-test--recorder :send)
    :options (lambda (session) (alist-get (drover-session-id session) drover-test-options
                                          nil nil #'equal))
+   :prefetch (lambda (sessions)
+               (push (mapcar #'drover-session-id sessions) drover-test-prefetched))
    :settable (lambda (session)
                (if-let* ((entry (assoc (drover-session-id session) drover-test-settable)))
                    (cdr entry)
@@ -166,6 +173,7 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover-test-create-error nil)
          (drover-test-check-result 'fake-token)
          (drover-test-options nil)
+         (drover-test-prefetched nil)
          (drover-test-settable nil))
      (unwind-protect
          (progn (drover-test-register) ,@body)

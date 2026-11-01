@@ -20,7 +20,8 @@
 ;; The OpenCode service's agent, model and provider catalogs, shaped
 ;; like the responses recorded in opencode.el's test/fixtures/v2, with
 ;; Claude entries shaped like the variants OpenCode's variant.ts gives
-;; them on the Anthropic, Copilot and Bedrock packages.  The recorded
+;; them on the Anthropic, Copilot and Bedrock packages, Opus 5.5 with a
+;; context size and a long-context price tier.  The recorded
 ;; files themselves are read by `drover-opencode-fixtures-recorded',
 ;; which skips the test when opencode.el's tests are not installed.
 
@@ -112,6 +113,9 @@ shaped like them.")
        \"variants\": [], \"status\": \"active\", \"enabled\": true}]")
    `(((id . "claude-opus-5-5") (providerID . "anthropic") (name . "Claude Opus 5.5")
       (package . "@opencode/ai/providers/anthropic")
+      (limit (context . 1000000) (output . 128000))
+      ;; Twice the price past 200k tokens of context, as models.dev lists it.
+      (cost ((input . 5)) ((input . 10) (tier (type . "context") (size . 200000))))
       (variants . ,(drover-opencode-fixtures-claude-variants "low" "medium" "high" "xhigh" "max")))
      ((id . "claude-sonnet-5-5") (providerID . "anthropic") (name . "Claude Sonnet 5.5")
       (package . "@opencode/ai/providers/anthropic")

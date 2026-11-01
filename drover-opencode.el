@@ -28,6 +28,13 @@
 ;; kept here, fetched when the backend starts and again whenever the
 ;; service reports a project change or the event stream reconnects.
 ;;
+;; What a session runs, its model, effort, provider and context, the
+;; records tell as opencode.el's mode line does, through its displays,
+;; which read the cached catalogs of the session's directory: drover
+;; redraws as catalogs arrive.  The registry knows the context size of
+;; the sessions it saw take a step; the others it fetches when asked,
+;; and the backend asks for those a view shows (:prefetch).
+;;
 ;; The backend also fits opencode.el's session buffers into drover's
 ;; keys: each tells its session (`drover-session-at-point-function') and
 ;; its prompt actions (`drover-prompt-define').  opencode.el lists no
@@ -408,45 +415,81 @@ changes missed while disconnected are fetched like the registry is."
                  (and at (concat " at " (format-time-string "%H:%M" at)))
                  (and message (concat ": " message))))))))
 
-(defun drover-opencode--model (entry)
-  "Return the display name of the model of registry ENTRY, or nil."
-  (when-let* ((model (plist-get entry :model)))
-    ;; Model catalogs belong to a location.
-    (let ((default-directory (or (plist-get entry :directory) default-directory)))
-      (opencode-model-label model))))
+(defun drover-opencode--run (entry directory)
+  "Return what registry ENTRY runs, as arguments of `drover-session-create'.
+They are its model, compact, the effort it runs, dimmed when the model's
+default, its provider, and its context, as opencode.el's mode line
+shows them, read in the cached catalogs of DIRECTORY: none is fetched
+here.  Until they arrive, the model is its identifier, and what needs
+them nil; `drover-opencode--catalog-changed' redraws once they do.  The
+context size is the one the registry knows: `drover-opencode--prefetch'
+asks for the others."
+  (let* ((ref (plist-get entry :model))
+         (directory (or directory default-directory))
+         (provider-id (alist-get 'providerID ref))
+         (effort (and ref (opencode-variant-display ref directory)))
+         (tokens (plist-get entry :context))
+         (usage (and ref tokens (opencode-context-usage tokens ref directory))))
+    (list :model (and ref (or (opencode-model-display ref directory) (alist-get 'id ref)))
+          :effort (and effort (substring-no-properties effort))
+          :effort-default (and effort (not (drover-opencode--ref-variant ref)))
+          :provider (when-let* ((provider (and provider-id
+                                               (opencode-provider-display provider-id directory))))
+                      (substring-no-properties provider))
+          :provider-name (and provider-id
+                              (or (alist-get 'name (opencode-provider-info provider-id directory))
+                                  provider-id))
+          :context-tokens tokens
+          :context-limit (plist-get usage :limit)
+          :context-tier (plist-get usage :tier))))
 
 (defun drover-opencode--session (entry)
   "Return the `drover-session' of `opencode-state' registry ENTRY."
   (let ((directory (plist-get entry :directory))
         (status (opencode-state-status entry))
         (cache (opencode-state-cache (plist-get entry :id))))
-    (drover-session-create
-     :backend 'opencode
-     :id (plist-get entry :id)
-     :engine 'opencode
-     :engine-id (plist-get entry :id)
-     :title (plist-get entry :title)
-     :directory directory
-     :project (drover-opencode--project-name (plist-get entry :project-id) directory)
-     :branch (and directory (opencode-git-branch directory))
-     :parent (plist-get entry :parent-id)
-     :status status
-     :requests (mapcar (lambda (request)
-                         (list :kind (plist-get request :kind)
-                               :summary (plist-get request :summary)))
-                       (plist-get entry :requests))
-     :since (opencode-state-since entry)
-     :updated (plist-get entry :updated)
-     :created (plist-get entry :created)
-     :agent (plist-get entry :agent)
-     :model (drover-opencode--model entry)
-     :detail (drover-opencode--detail entry status)
-     :cache-expires (plist-get cache :expires)
-     :cache-ttl (plist-get cache :ttl))))
+    (apply #'drover-session-create
+           :backend 'opencode
+           :id (plist-get entry :id)
+           :engine 'opencode
+           :engine-id (plist-get entry :id)
+           :title (plist-get entry :title)
+           :directory directory
+           :project (drover-opencode--project-name (plist-get entry :project-id) directory)
+           :branch (and directory (opencode-git-branch directory))
+           :parent (plist-get entry :parent-id)
+           :status status
+           :requests (mapcar (lambda (request)
+                               (list :kind (plist-get request :kind)
+                                     :summary (plist-get request :summary)))
+                             (plist-get entry :requests))
+           :since (opencode-state-since entry)
+           :updated (plist-get entry :updated)
+           :created (plist-get entry :created)
+           :agent (plist-get entry :agent)
+           :detail (drover-opencode--detail entry status)
+           :cache-expires (plist-get cache :expires)
+           :cache-ttl (plist-get cache :ttl)
+           :cache-tokens (plist-get cache :tokens)
+           :cache-prompt-tokens (plist-get cache :prompt-tokens)
+           (drover-opencode--run entry directory))))
 
 (defun drover-opencode--sessions ()
   "Return the sessions of the `opencode-state' registry."
   (mapcar #'drover-opencode--session (opencode-state-sessions)))
+
+(defun drover-opencode--prefetch (sessions)
+  "Ask the registry for the context size of SESSIONS, which a view shows.
+The registry knows the size of a session it saw take a step, but not of
+one it loaded: `opencode-state-context' fetches that in the background,
+a few at a time, the first time it is asked, and runs
+`opencode-state-updated-functions' once it arrives, which redraws.  It
+costs nothing for a size known, being fetched, or that failed, and
+asks nothing for a session the registry does not hold, as an older one.
+Asking for every session of the registry, a hundred, would fetch the
+sizes of sessions nobody looks at.  The backend's :prefetch."
+  (dolist (session sessions)
+    (opencode-state-context (drover-session-id session))))
 
 ;;;; Older sessions
 
@@ -492,12 +535,22 @@ turn ended unseen.  A failure is reported, and CALLBACK not called."
   "Report a change of session ID to drover."
   (drover-backend-changed 'opencode id))
 
+(defun drover-opencode--catalog-changed (_kind _directory)
+  "Report that sessions may read otherwise, now that a catalog changed.
+Names, icons, efforts and context sizes come from a location's
+catalogs, which opencode.el fetches the first time they are asked for,
+and fetches again once an event or a reconnection made it forget them.
+For `opencode-catalog-changed-functions'."
+  (drover-backend-changed 'opencode))
+
 (defun drover-opencode--start ()
-  "Follow the registry, session buffers and projects; bootstrap the registry.
+  "Follow the registry, session buffers, catalogs and projects; bootstrap it.
 The registry does not change when a session's buffer opens or closes,
-yet views show which sessions are open."
+yet views show which sessions are open, nor when a catalog arrives,
+yet views show what sessions run by their catalogs."
   (add-hook 'opencode-state-updated-functions #'drover-opencode--updated)
   (add-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
+  (add-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
   (opencode-events-register "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-register "server.connected" #'drover-opencode--projects-changed)
   ;; A bootstrap with no session runs no update hook, yet ends the wait.
@@ -848,6 +901,7 @@ unknown.  The backend's :options."
    :fork #'drover-opencode--fork
    :compact #'drover-opencode--compact
    :history #'drover-opencode--history
+   :prefetch #'drover-opencode--prefetch
    :engines '(opencode)
    :create #'drover-opencode--create
    :check #'drover-opencode--check
@@ -1006,6 +1060,7 @@ OpenCode buffers lose drover's keys, and `drover-dispatch' the
 commands of opencode.el."
   (remove-hook 'opencode-state-updated-functions #'drover-opencode--updated)
   (remove-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
+  (remove-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
   (opencode-events-unregister "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-unregister "server.connected" #'drover-opencode--projects-changed)
   (drover-opencode--uninstall)

@@ -911,6 +911,72 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (should (= (drover-session-cache-fraction (session :cache-expires (+ now 400) :cache-ttl 300) now)
                  1.0)))))
 
+;;;; What sessions run
+
+(ert-deftest drover-test-cache-description ()
+  "A prompt cache tells when it expires, its window and the share of the prompt it holds."
+  (let ((now drover-test-now))
+    (cl-flet ((session (&rest properties) (apply #'drover-test-session "s" properties)))
+      (should (equal (drover-session-cache-description
+                      (session :cache-expires (+ now 240) :cache-ttl 3600
+                               :cache-tokens 120000 :cache-prompt-tokens 130000)
+                      now)
+                     "expires in 4m (1h window), 120k of 130k tokens cached"))
+      ;; A service not telling the whole prompt, or the tokens at all.
+      (should (equal (drover-session-cache-description
+                      (session :cache-expires (+ now 40) :cache-ttl 300 :cache-tokens 900) now)
+                     "expires in 40s (5m window), 900 tokens cached"))
+      (should (equal (drover-session-cache-description (session :cache-expires (+ now 40)) now)
+                     "expires in 40s"))
+      (should-not (drover-session-cache-description (session :cache-expires (- now 1) :cache-ttl 300) now))
+      (should-not (drover-session-cache-description (session) now)))))
+
+(ert-deftest drover-test-context-fraction ()
+  "A context fills a share of its model's, beyond 1 past it, and tells its tier."
+  (cl-flet ((session (&rest properties) (apply #'drover-test-session "s" properties)))
+    (should (= (drover-session-context-fraction (session :context-tokens 50000 :context-limit 200000)) 0.25))
+    (should (= (drover-session-context-fraction (session :context-tokens 300000 :context-limit 200000)) 1.5))
+    (should-not (drover-session-context-fraction (session :context-tokens 50000)))
+    (should-not (drover-session-context-fraction (session :context-limit 200000)))
+    (should-not (drover-session-context-fraction (session :context-tokens 5 :context-limit 0)))
+    (should (equal (drover-session-context-description (session :context-tokens 50000 :context-limit 200000))
+                   "50k of 200k tokens (25%)"))
+    (should (equal (drover-session-context-description (session :context-tokens 950))
+                   "950 tokens"))
+    (should (equal (drover-session-context-description
+                    (session :context-tokens 1200000 :context-limit 1000000 :context-tier '(over 200000 "2×")))
+                   "1.2M of 1M tokens (120%)\nPast 200k tokens: requests cost 2×"))
+    (should (equal (drover-session-context-description
+                    (session :context-tokens 186000 :context-limit 200000 :context-tier '(near 200000 "2×")))
+                   "186k of 200k tokens (93%)\nNear 200k tokens, past which requests cost 2×"))
+    (should-not (drover-session-context-description (session :context-limit 200000)))))
+
+(ert-deftest drover-test-format-tokens ()
+  (should (equal (mapcar #'drover-format-tokens
+                         '(0 950 999 1000 8400 9940 9960 182345 999499 999500 1200000 12345678))
+                 '("0" "950" "999" "1k" "8.4k" "9.9k" "10k" "182k" "999k" "1M" "1.2M" "12M"))))
+
+(ert-deftest drover-test-prefetch ()
+  "Each backend is asked once for its own sessions, in order; one failing spares the others."
+  (drover-test-with-backend (list (drover-test-session "a") (drover-test-session "b"))
+    (let ((other nil))
+      (drover-test-register-simple 'other nil
+                                   :prefetch (lambda (sessions)
+                                               (push (mapcar #'drover-session-id sessions) other)))
+      (drover-test-register-simple 'broken nil :prefetch (lambda (_) (error "Down")))
+      (drover-test-register-simple 'plain nil)
+      (let ((x (drover-session-create :backend 'other :id "x"))
+            (y (drover-session-create :backend 'other :id "y"))
+            (z (drover-session-create :backend 'broken :id "z"))
+            (p (drover-session-create :backend 'plain :id "p")))
+        (let ((inhibit-message t))
+          (drover-prefetch (list (drover-test-session "b") x z p (drover-test-session "a") y)))
+        (should (equal drover-test-prefetched '(("b" "a"))))
+        (should (equal other '(("x" "y"))))
+        ;; Nothing to ask, nothing asked.
+        (drover-prefetch nil)
+        (should (= (length drover-test-prefetched) 1))))))
+
 ;;;; Sorting
 
 (defun drover-test-sortable ()

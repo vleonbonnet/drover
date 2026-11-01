@@ -103,6 +103,7 @@ This follows the `opencode-state' contract."
          (drover-opencode--projects-stale nil)
          (opencode-state-updated-functions nil)
          (opencode-session-buffer-functions nil)
+         (opencode-catalog-changed-functions nil)
          (opencode-session-buffers (make-hash-table :test #'equal))
          (drover-opencode-test-entries ,entries)
          (drover-opencode-test-calls nil)
@@ -119,9 +120,31 @@ This follows the `opencode-state' contract."
                ((symbol-function 'opencode-state-ensure) (drover-opencode-test--recorder 'opencode-state-ensure))
                ((symbol-function 'opencode-git-branch)
                 (lambda (directory) (cdr (assoc directory drover-opencode-test-branches))))
-               ((symbol-function 'opencode-model-label)
-                (lambda (model)
-                  (format "%s in %s" (alist-get 'id model) default-directory)))
+               ((symbol-function 'opencode-model-display)
+                (lambda (model &optional directory)
+                  (format "%s in %s" (alist-get 'id model) directory)))
+               ((symbol-function 'opencode-variant-display)
+                (lambda (model &optional _directory)
+                  (if-let* ((variant (alist-get 'variant model))
+                            ((not (equal variant "default"))))
+                      (propertize variant 'face 'success 'help-echo "Variant: selected")
+                    (propertize "medium" 'face 'shadow 'help-echo "Variant: default"))))
+               ((symbol-function 'opencode-provider-display)
+                (lambda (provider &optional _directory)
+                  (propertize (concat "icon-" provider) 'help-echo (concat "Provider: " provider))))
+               ((symbol-function 'opencode-provider-info)
+                (lambda (provider &optional _directory)
+                  (and (equal provider "anthropic") '((id . "anthropic") (name . "Anthropic")))))
+               ((symbol-function 'opencode-context-usage)
+                (lambda (tokens _model &optional _directory)
+                  (list :tokens tokens :limit 200000 :fraction (/ tokens 200000.0)
+                        :tier (and (>= tokens 180000) '(near 200000 "2×")))))
+               ((symbol-function 'opencode-state-context)
+                (lambda (id)
+                  (push (list 'opencode-state-context id) drover-opencode-test-calls)
+                  (plist-get (seq-find (lambda (entry) (equal (plist-get entry :id) id))
+                                       drover-opencode-test-entries)
+                             :context)))
                ((symbol-function 'opencode-fetch-projects)
                 (lambda (callback &optional else)
                   (setq drover-opencode-test-fetches
@@ -223,7 +246,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (list (list :id "ses_1" :title "Fix the build" :directory "/work/drover/"
                   :project-id "prj_drover" :parent-id "ses_0" :agent "build"
                   :model '((id . "claude-opus") (providerID . "anthropic") (variant . "high"))
-                  :running t :retry nil
+                  :context 190000 :running t :retry nil
                   :requests '((:kind permission :id "per_1" :summary "bash: make test" :time 100.5)
                               (:kind question :id "frm_1" :summary "Which branch?" :time 110.0))
                   :outcome nil :error nil :idle 50.0 :viewed 50.0 :archived nil
@@ -253,14 +276,29 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should-not (drover-session-cache-expires session))
       (should-not (drover-session-cache-ttl session))
       (should (equal (drover-session-agent session) "build"))
+      ;; What it runs, as opencode.el's displays show it in its directory,
+      ;; without their properties: drover draws its own.
       (should (equal (drover-session-model session) "claude-opus in /work/drover/"))
+      (should (equal-including-properties (drover-session-effort session) "high"))
+      (should-not (drover-session-effort-default session))
+      (should (equal-including-properties (drover-session-provider session) "icon-anthropic"))
+      (should (equal (drover-session-provider-name session) "Anthropic"))
+      (should (eql (drover-session-context-tokens session) 190000))
+      (should (eql (drover-session-context-limit session) 200000))
+      (should (equal (drover-session-context-tier session) '(near 200000 "2×")))
+      (should (= (drover-session-context-fraction session) 0.95))
+      ;; The size is the one the registry knows: the record asks nothing.
+      (should-not (assq 'opencode-state-context drover-opencode-test-calls))
       (should-not (drover-session-detail session))
       (should (equal (drover-session-summary session) "permit: bash: make test")))))
 
 (ert-deftest drover-opencode-test-maps-missing-fields ()
   (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0))
     (cl-letf (((symbol-function 'opencode-git-branch) (lambda (_) (error "No directory to read")))
-              ((symbol-function 'opencode-model-label) (lambda (_) (error "No model to label"))))
+              ((symbol-function 'opencode-model-display) (lambda (&rest _) (error "No model to show")))
+              ((symbol-function 'opencode-variant-display) (lambda (&rest _) (error "No model to show")))
+              ((symbol-function 'opencode-provider-display) (lambda (&rest _) (error "No provider")))
+              ((symbol-function 'opencode-context-usage) (lambda (&rest _) (error "No context"))))
       (let ((session (car (drover-sessions))))
         (should (equal (drover-session-id session) "ses_1"))
         (should-not (drover-session-title session))
@@ -273,6 +311,11 @@ PROJECTS defaults to `drover-opencode-test-projects'."
         (should-not (drover-session-since session))
         (should-not (drover-session-agent session))
         (should-not (drover-session-model session))
+        (should-not (drover-session-effort session))
+        (should-not (drover-session-provider session))
+        (should-not (drover-session-provider-name session))
+        (should-not (drover-session-context-tokens session))
+        (should-not (drover-session-context-limit session))
         (should-not (drover-session-detail session))))))
 
 (ert-deftest drover-opencode-test-status-working ()
@@ -357,6 +400,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (should-not (drover-sessions))))
 
 (ert-deftest drover-opencode-test-model-in-session-location ()
+  "Catalogs belong to a location: a session's own, else the current directory."
   (drover-opencode-test-with
       (list (drover-opencode-test-entry "ses_1" :directory "/work/opencode/" :model '((id . "gpt")))
             (drover-opencode-test-entry "ses_2" :directory nil :model '((id . "gpt"))))
@@ -364,15 +408,131 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (let ((default-directory "/elsewhere/"))
       (should (equal (drover-session-model (drover-opencode-test-session "ses_2")) "gpt in /elsewhere/")))))
 
-(ert-deftest drover-opencode-test-uses-real-model-label ()
-  (let ((label (symbol-function 'opencode-model-label)))
-    (drover-opencode-test-with
-        (list (drover-opencode-test-entry "ses_1" :model '((id . "unknown-model") (providerID . "p")
-                                                           (variant . "max"))))
-      (cl-letf (((symbol-function 'opencode-model-label) label))
-        ;; Without a catalog, the model shows its ID.
-        (should (equal (drover-session-model (drover-opencode-test-session "ses_1"))
-                       "unknown-model max"))))))
+(ert-deftest drover-opencode-test-default-effort ()
+  "An effort the session did not choose is the model's default, which lists dim."
+  (drover-opencode-test-with
+      (list (drover-opencode-test-entry "ses_1" :model '((id . "gpt") (providerID . "openai")))
+            (drover-opencode-test-entry "ses_2" :model '((id . "gpt") (providerID . "openai")
+                                                         (variant . "default")))
+            (drover-opencode-test-entry "ses_3" :model '((id . "gpt") (providerID . "openai")
+                                                         (variant . "low"))))
+    (dolist (id '("ses_1" "ses_2"))
+      (let ((session (drover-opencode-test-session id)))
+        (should (equal (drover-session-effort session) "medium"))
+        (should (drover-session-effort-default session))))
+    (let ((session (drover-opencode-test-session "ses_3")))
+      (should (equal (drover-session-effort session) "low"))
+      (should-not (drover-session-effort-default session)))
+    ;; A provider without a catalog name goes by its identifier.
+    (should (equal (drover-session-provider-name (drover-opencode-test-session "ses_1")) "openai"))))
+
+(defconst drover-opencode-test--displays
+  (mapcar (lambda (function) (cons function (symbol-function function)))
+          '(opencode-model-display opencode-variant-display opencode-provider-display
+                                   opencode-provider-info opencode-context-usage))
+  "The displays of opencode.el, as loaded, before tests stub them.")
+
+(defmacro drover-opencode-test-with-catalogs (catalogs &rest body)
+  "Run BODY with opencode.el's real displays reading CATALOGS.
+CATALOGS is non-nil for the fixture catalogs to be cached, nil for
+none: opencode.el's public catalog functions are stubbed, so that
+nothing is fetched."
+  (declare (indent 1) (debug t))
+  `(let ((cached ,catalogs)
+         (stubs (mapcar (lambda (entry) (cons (car entry) (symbol-function (car entry))))
+                        drover-opencode-test--displays)))
+     (unwind-protect
+         (progn
+           (dolist (entry drover-opencode-test--displays)
+             (fset (car entry) (cdr entry)))
+           (cl-letf (((symbol-function 'opencode-catalog-ensure) #'ignore)
+                     ((symbol-function 'opencode-catalog-cached-p) (lambda (&rest _) cached))
+                     ((symbol-function 'opencode-catalog)
+                      (lambda (kind &optional _directory)
+                        (and cached (pcase kind
+                                      ('model drover-opencode-fixtures-models)
+                                      ('provider drover-opencode-fixtures-providers))))))
+             ,@body))
+       (dolist (entry stubs)
+         (fset (car entry) (cdr entry))))))
+
+(ert-deftest drover-opencode-test-real-displays ()
+  "A session shows what it runs as opencode.el's mode line does, once catalogs arrive."
+  (let ((entries (list (drover-opencode-test-entry "ses_1" :context 190000
+                                                   :model '((id . "claude-opus-5-5") (providerID . "anthropic")
+                                                            (variant . "max")))
+                       (drover-opencode-test-entry "ses_2" :context 8400
+                                                   :model '((id . "gpt-5.5") (providerID . "openai")))
+                       (drover-opencode-test-entry "ses_3" :context 1000
+                                                   :model '((id . "retired") (providerID . "acme"))))))
+    (drover-opencode-test-with entries
+      (drover-opencode-test-with-catalogs t
+        (let ((opus (drover-opencode-test-session "ses_1"))
+              (gpt (drover-opencode-test-session "ses_2"))
+              (retired (drover-opencode-test-session "ses_3")))
+          ;; Compact, as the mode line names it.
+          (should (equal (drover-session-model opus) "Opus 5.5"))
+          (should (equal (drover-session-effort opus) "max"))
+          (should-not (drover-session-effort-default opus))
+          (should (equal (drover-session-provider opus) "\uec82"))
+          (should-not (text-properties-at 0 (drover-session-provider opus)))
+          (should (equal (drover-session-provider-name opus) "Anthropic"))
+          ;; Past 90% of the 200k tier of its pricing, of a 1M context.
+          (should (eql (drover-session-context-tokens opus) 190000))
+          (should (eql (drover-session-context-limit opus) 1000000))
+          (should (equal (drover-session-context-tier opus) '(near 200000 "2×")))
+          ;; The effort a request without one sends.
+          (should (equal (drover-session-model gpt) "GPT-5.5"))
+          (should (equal (drover-session-effort gpt)
+                         (symbol-name (drover-model-default-variant
+                                       (drover-opencode-fixtures-model "openai" "gpt-5.5")))))
+          (should (drover-session-effort-default gpt))
+          (should (equal (drover-session-provider gpt) "\uec81"))
+          (should (equal (drover-session-provider-name gpt) "OpenAI"))
+          (should-not (drover-session-context-limit gpt))
+          ;; A model the catalog lost goes by its identifier; its
+          ;; provider by a generic icon and its identifier.
+          (should (equal (drover-session-model retired) "retired"))
+          (should-not (drover-session-effort retired))
+          (should (equal (drover-session-provider retired) "\U000F048D acme"))
+          (should (equal (drover-session-provider-name retired) "acme"))))
+      (drover-opencode-test-with-catalogs nil
+        ;; Until the catalogs arrive: the identifiers, the effort chosen.
+        (let ((opus (drover-opencode-test-session "ses_1"))
+              (gpt (drover-opencode-test-session "ses_2")))
+          (should (equal (drover-session-model opus) "claude-opus-5-5"))
+          (should (equal (drover-session-effort opus) "max"))
+          (should-not (drover-session-provider opus))
+          (should (equal (drover-session-provider-name opus) "anthropic"))
+          (should (eql (drover-session-context-tokens opus) 190000))
+          (should-not (drover-session-context-limit opus))
+          (should-not (drover-session-effort gpt)))))))
+
+(ert-deftest drover-opencode-test-catalog-changes-redraw ()
+  "A catalog arriving or forgotten is a change: what sessions run reads otherwise."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (drover-start)
+    (should (memq #'drover-opencode--catalog-changed opencode-catalog-changed-functions))
+    (let ((changes nil))
+      (cl-letf (((symbol-function 'drover-backend-changed)
+                 (lambda (&rest arguments) (push arguments changes))))
+        (run-hook-with-args 'opencode-catalog-changed-functions 'model "/work/drover/")
+        (run-hook-with-args 'opencode-catalog-changed-functions nil nil))
+      (should (equal changes '((opencode) (opencode)))))))
+
+(ert-deftest drover-opencode-test-prefetch ()
+  "The context of the sessions a view shows is asked of the registry, which fetches it."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1")
+                                   (drover-opencode-test-entry "ses_2" :context 5000)
+                                   (drover-opencode-test-entry "ses_3"))
+    (should (drover-supports-p (drover-opencode-test-session "ses_1") :prefetch))
+    (drover-sessions)
+    ;; Listing sessions asks nothing.
+    (should-not (assq 'opencode-state-context drover-opencode-test-calls))
+    (drover-prefetch (list (drover-opencode-test-session "ses_3") (drover-opencode-test-session "ses_1")))
+    (should (equal (seq-filter (lambda (call) (eq (car call) 'opencode-state-context))
+                               (reverse drover-opencode-test-calls))
+                   '((opencode-state-context "ses_3") (opencode-state-context "ses_1"))))))
 
 ;;;; Projects
 
@@ -566,6 +726,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should-not drover--model-sources)
       (should-not (memq #'drover-opencode--updated opencode-state-updated-functions))
       (should-not (memq #'drover-opencode--updated opencode-session-buffer-functions))
+      (should-not (memq #'drover-opencode--catalog-changed opencode-catalog-changed-functions))
       (should (member '(opencode-events-unregister "project.updated" drover-opencode--projects-changed)
                       drover-opencode-test-calls))
       (should (member '(opencode-events-unregister "server.connected" drover-opencode--projects-changed)
@@ -675,15 +836,20 @@ PROJECTS defaults to `drover-opencode-test-projects'."
   "The prompt actions OpenCode session buffers define.")
 
 (ert-deftest drover-opencode-test-session-cache ()
-  "A session carries the expiry and lifetime of its prompt cache from the registry."
+  "A session carries its prompt cache from the registry: expiry, lifetime and tokens."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1") (drover-opencode-test-entry "ses_2"))
-    (let ((drover-opencode-test-caches '(("ses_1" :expires 1000.0 :ttl 300.0 :tokens 42))))
+    (let ((drover-opencode-test-caches '(("ses_1" :expires 1000.0 :ttl 300.0 :tokens 42
+                                          :prompt-tokens 50))))
       (let ((cached (drover-opencode-test-session "ses_1"))
             (bare (drover-opencode-test-session "ses_2")))
         (should (= (drover-session-cache-expires cached) 1000.0))
         (should (= (drover-session-cache-ttl cached) 300.0))
+        (should (= (drover-session-cache-tokens cached) 42))
+        (should (= (drover-session-cache-prompt-tokens cached) 50))
         (should-not (drover-session-cache-expires bare))
-        (should-not (drover-session-cache-ttl bare))))))
+        (should-not (drover-session-cache-ttl bare))
+        (should-not (drover-session-cache-tokens bare))
+        (should-not (drover-session-cache-prompt-tokens bare))))))
 
 (ert-deftest drover-opencode-test-session-buffer ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
@@ -841,6 +1007,8 @@ PROJECTS defaults to `drover-opencode-test-projects'."
           (should (equal (drover-session-parent old) "ses_parent"))
           (should (equal (drover-session-agent old) "build"))
           (should (equal (drover-session-model old) "claude in /work/drover/"))
+          ;; The registry has no context size of a session it does not hold.
+          (should-not (drover-session-context-tokens old))
           (should (eql (drover-session-created old) 1000.0))
           (should (eql (drover-session-updated old) 2000.0))
           ;; Statuses are what the service tells: seen is idle.
