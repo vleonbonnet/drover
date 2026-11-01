@@ -263,6 +263,224 @@ table's metadata."
       (should (equal (mapcar #'drover-model-id (drover-models "/"))
                      '("claude-opus-5-5" "claude-opus-5-5" "x"))))))
 
+;;;; Remembered models
+
+(defmacro drover-model-test-remembering (&rest body)
+  "Run BODY remembering models, in a fresh home with no engine nor source.
+Warnings are recorded in `warnings', newest first."
+  (declare (indent 0) (debug t))
+  `(drover-test-with-homes
+     (drover-test-with-engines
+       (let ((drover-remember-models t)
+             (warnings nil))
+         (cl-letf (((symbol-function 'drover-warn)
+                    (lambda (format-string &rest args)
+                      (push (apply #'format-message format-string args) warnings))))
+           ,@body)))))
+
+(defun drover-model-test-forget-session ()
+  "Forget what this Emacs read of the remembered models, as a new session would."
+  (setq drover--model-memory nil
+        drover--model-memory-stamp 'unread
+        drover--model-memory-warned nil))
+
+(defun drover-model-test-read-file ()
+  "Return the data of the file of remembered models, read."
+  (with-temp-buffer
+    (insert-file-contents (drover-model-memory-file))
+    (read (current-buffer))))
+
+(defconst drover-model-test-opus
+  (drover-model-create :provider-name "Anthropic" :id "opus" :name "Opus"
+                       :variants '((low) (high :effort "high")) :default-variant 'high
+                       :engines '(claude-code))
+  "A model a live Claude Code session offers.")
+
+(defconst drover-model-test-gpt
+  (drover-model-create :provider-id "openai" :provider-name "OpenAI" :id "gpt-6" :name "GPT-6"
+                       :engines '(opencode codex))
+  "A model a live OpenCode session offers.")
+
+(ert-deftest drover-model-test-memory-written ()
+  "What a live source answers is written to the state directory, as Lisp data."
+  (drover-model-test-remembering
+    (let ((live (list drover-model-test-opus)))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (should-not (file-exists-p (drover-model-memory-file)))
+      (should (equal (drover-models "/work/") live))
+      (should (file-in-directory-p (drover-model-memory-file) drover-state-directory))
+      (let* ((form (drover-model-test-read-file))
+             (entry (alist-get 'claude-code (plist-get form :engines))))
+        (should (eql (plist-get form :version) 1))
+        (should (< (- (float-time) (plist-get entry :time)) 60))
+        (should (equal (plist-get entry :models)
+                       '((:provider-id nil :provider-name "Anthropic" :id "opus" :name "Opus"
+                          :variants ((low) (high :effort "high")) :default-variant high
+                          :engines (claude-code))))))
+      ;; Written whole through a temporary file: none is left.
+      (should (equal (directory-files drover-state-directory nil "\\`[^.]\\|\\`\\.models-")
+                     '("models.eld")))
+      (with-temp-buffer
+        (insert-file-contents (drover-model-memory-file))
+        (should (string-match-p "-\\*- mode: lisp-data" (buffer-string))))
+      ;; A source not live, such as a service's catalog, is not remembered.
+      (drover-register-model-source 'opencode (lambda (_) (list drover-model-test-gpt)))
+      (drover-models "/work/")
+      (should-not (alist-get 'opencode (plist-get (drover-model-test-read-file) :engines)))
+      (should-not warnings))))
+
+(ert-deftest drover-model-test-memory-read-back ()
+  "A new session offers what was remembered, telling the day, until a live answer."
+  (drover-model-test-remembering
+    (let ((live (list drover-model-test-opus)))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (drover-models "/work/")
+      ;; A new Emacs session: no live session, no source even.
+      (drover-model-test-forget-session)
+      (setq drover--model-sources nil)
+      (let ((models (drover-models "/work/")))
+        (should (= (length models) 1))
+        (let ((opus (car models)))
+          (should (equal (drover-model-label opus) "Anthropic: Opus"))
+          (should (equal (drover-model-id opus) "opus"))
+          (should (equal (drover-model-variants opus) '((low) (high :effort "high"))))
+          (should (eq (drover-model-default-variant opus) 'high))
+          (should (equal (drover-model-engines opus) '(claude-code)))
+          (should (numberp (drover-model-remembered opus)))
+          (should (string-suffix-p (format-time-string "  remembered from %Y-%m-%d")
+                                   (drover-model-annotation opus)))
+          (should (drover-model-runs-on-p opus 'claude-code))))
+      ;; Off, nothing is remembered.
+      (let ((drover-remember-models nil))
+        (should-not (drover-models "/work/")))
+      ;; A live answer wins, and replaces what was remembered.
+      (let ((sonnet (drover-model-create :id "sonnet" :engines '(claude-code))))
+        (drover-register-model-source 'claude-code (lambda (_) (list sonnet)) -10 t)
+        (should (equal (drover-models "/work/") (list sonnet)))
+        (should-not (drover-model-remembered (car (drover-models "/work/"))))
+        (should-not (string-search "remembered" (drover-model-annotation sonnet)))
+        (setq drover--model-sources nil)
+        (drover-model-test-forget-session)
+        (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("sonnet"))))
+      (should-not warnings))))
+
+(ert-deftest drover-model-test-memory-order ()
+  "Live sources answer first, then the memory, then sources deeper than it."
+  (drover-model-test-remembering
+    (let ((live nil)
+          (deep (list (drover-model-create :id "deep" :engines '(claude-code)))))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (drover-register-model-source 'claude-code (lambda (_) deep) (1+ drover-model-memory-depth))
+      ;; Nothing remembered yet: the deeper source answers.
+      (should (equal (drover-models "/work/") deep))
+      (setq live (list drover-model-test-opus))
+      (should (equal (drover-models "/work/") live))
+      (setq live nil)
+      (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("opus")))
+      ;; A source above the memory, live or not, answers before it.
+      (drover-register-model-source 'claude-code (lambda (_) deep) 0)
+      (should (equal (drover-models "/work/") deep)))))
+
+(ert-deftest drover-model-test-memory-written-when-changed ()
+  "The file is written when the models change, or were offered another day only."
+  (drover-model-test-remembering
+    (let* ((live (list drover-model-test-opus))
+           (writes 0)
+           (write (symbol-function 'drover--model-memory-write)))
+      (cl-letf (((symbol-function 'drover--model-memory-write)
+                 (lambda (memory) (cl-incf writes) (funcall write memory))))
+        (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+        (drover-models "/work/")
+        (drover-models "/work/")
+        (drover-models-changed 'claude-code)
+        (should (= writes 1))
+        (setq live (list drover-model-test-opus (drover-model-create :id "haiku" :engines '(claude-code))))
+        (drover-models "/work/")
+        (should (= writes 2))
+        ;; The same models, offered on a later day than remembered.
+        (setf (plist-get (alist-get 'claude-code drover--model-memory) :time)
+              (- (float-time) (* 2 86400)))
+        (drover-models "/work/")
+        (should (= writes 3))
+        (drover-models "/work/")
+        (should (= writes 3))))))
+
+(ert-deftest drover-model-test-memory-changed-without-picker ()
+  "A live source telling its models changed is remembered at once."
+  (drover-model-test-remembering
+    (let ((live nil)
+          (told nil)
+          (drover-models-changed-hook nil))
+      (drover-register-model-source 'codex (lambda (_) live) 0 t)
+      (add-hook 'drover-models-changed-hook (lambda (engine) (push engine told)))
+      (setq live (list drover-model-test-gpt))
+      (drover-models-changed 'codex)
+      (should (equal told '(codex)))
+      (should (equal (mapcar (lambda (data) (plist-get data :id))
+                             (plist-get (alist-get 'codex (plist-get (drover-model-test-read-file) :engines))
+                                        :models))
+                     '("gpt-6"))))))
+
+(ert-deftest drover-model-test-memory-corrupt ()
+  "A file that is not remembered models is ignored with one warning, then replaced."
+  (dolist (content '("(:version 1 :engines ((claude-code :time"
+                     "not lisp ) data"
+                     "(:version 0 :models (\"opus\"))"
+                     "(:version 1 :engines ((claude-code :time \"today\" :models nil)))"
+                     "(:version 1 :engines ((claude-code :time 1.0 :models ((:id nil)))))"
+                     "[1 2 3]"))
+    (drover-model-test-remembering
+      (drover-test-write (drover-model-memory-file) content)
+      (should-not (drover-models "/work/"))
+      (should-not (drover-models "/work/"))
+      (should (= (length warnings) 1))
+      (should (string-match-p "Ignoring the models remembered in" (car warnings)))
+      (drover-register-model-source 'claude-code (lambda (_) (list drover-model-test-opus)) -10 t)
+      (drover-models "/work/")
+      (setq drover--model-sources nil)
+      (drover-model-test-forget-session)
+      (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("opus")))
+      (should (= (length warnings) 1)))))
+
+(ert-deftest drover-model-test-memory-unwritable ()
+  "A file that cannot be written is reported once; models are still offered."
+  (drover-model-test-remembering
+    (drover-test-write (expand-file-name "state" home) "a file, not a directory")
+    (let ((live (list drover-model-test-opus)))
+      (drover-register-model-source 'claude-code (lambda (_) live) -10 t)
+      (should (equal (drover-models "/work/") live))
+      (setq live (list drover-model-test-gpt))
+      (should (equal (drover-models "/work/") live))
+      (should (= (length warnings) 1))
+      (should (string-match-p "Could not remember models in" (car warnings))))))
+
+(ert-deftest drover-model-test-memory-shared ()
+  "What another Emacs remembered is read again once the file changed."
+  (drover-model-test-remembering
+    (drover-register-model-source 'claude-code (lambda (_) (list drover-model-test-opus)) -10 t)
+    (drover-models "/work/")
+    (setq drover--model-sources nil)
+    (let ((other (drover-model-test-read-file)))
+      (setf (plist-get other :engines)
+            (append (plist-get other :engines)
+                    `((codex :time ,(float-time)
+                             :models ((:id "gpt-6" :name "GPT-6" :engines (codex)))))))
+      (drover-test-write (drover-model-memory-file) (prin1-to-string other))
+      ;; The file changes within the second it was written in.
+      (set-file-times (drover-model-memory-file) (time-add nil 5)))
+    (should (equal (mapcar #'drover-model-id (drover-models "/work/")) '("opus" "gpt-6")))))
+
+(ert-deftest drover-model-test-forget-models ()
+  "Forgetting deletes the file and what this session read of it."
+  (drover-model-test-remembering
+    (drover-register-model-source 'claude-code (lambda (_) (list drover-model-test-opus)) -10 t)
+    (drover-models "/work/")
+    (setq drover--model-sources nil)
+    (should (drover-models "/work/"))
+    (drover-forget-models)
+    (should-not (file-exists-p (drover-model-memory-file)))
+    (should-not (drover-models "/work/"))))
+
 ;;;; Reading
 
 (ert-deftest drover-model-test-read-model ()
@@ -288,6 +506,85 @@ table's metadata."
       (drover-model-test-reading '("Default")
         (should-not (drover-read-model))
         (should (equal (car (nth 1 (car reads))) "Default"))))))
+
+(ert-deftest drover-model-test-models-changed ()
+  "A change runs every function of the hook with the engine, one failing too."
+  (let* ((calls nil)
+         (drover-models-changed-hook
+          (list (lambda (engine) (push (list 'first engine) calls))
+                (lambda (_engine) (error "Broken"))
+                (lambda (engine) (push (list 'last engine) calls)))))
+    (drover-models-changed 'claude-code)
+    (should (equal calls '((last claude-code) (first claude-code))))))
+
+(ert-deftest drover-model-test-read-model-late-models ()
+  "Models arriving while the picker reads are offered; the picker then stops listening."
+  (drover-test-with-engines
+    (let* ((late nil)
+           (opus (drover-model-create :id "claude-opus-5-5" :name "Opus 5.5" :provider-name "Anthropic"))
+           (drover-models-changed-hook nil)
+           (seen nil))
+      (drover-register-model-source 'claude-code (lambda (_) late))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _)
+                   (push (all-completions "" table) seen)
+                   (setq late (list opus))
+                   (drover-models-changed 'claude-code)
+                   (push (all-completions "" table) seen)
+                   (should (equal (funcall (completion-metadata-get (completion-metadata "" table nil)
+                                                                    'annotation-function)
+                                           "Anthropic: Opus 5.5")
+                                  (drover-model-annotation opus)))
+                   "Anthropic: Opus 5.5")))
+        (should (eq (drover-read-model nil "/work/") opus)))
+      (should (equal seen '(("Default" "Anthropic: Opus 5.5") ("Default"))))
+      (should-not drover-models-changed-hook)
+      ;; Quitting stops listening too.
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (signal 'quit nil))))
+        (should (eq (condition-case nil (drover-read-model nil "/work/") (quit 'quit)) 'quit)))
+      (should-not drover-models-changed-hook))))
+
+(ert-deftest drover-model-test-refresh-completion ()
+  "The minibuffer's candidates are computed anew and shown again by each UI."
+  (let ((minibuffer (generate-new-buffer " *drover-test-minibuffer*"))
+        (calls nil))
+    (unwind-protect
+        (let ((drover-completion-refresh-functions
+               (list (lambda () (push (list 'first (current-buffer) completion-all-sorted-completions) calls))
+                     (lambda () (error "Broken"))
+                     (lambda () (push (list 'last (current-buffer)) calls)))))
+          (with-current-buffer minibuffer
+            (setq completion-all-sorted-completions '("stale")))
+          (drover--refresh-completion minibuffer)
+          (should (equal calls (list (list 'last minibuffer) (list 'first minibuffer nil))))
+          (setq calls nil)
+          (kill-buffer minibuffer)
+          (drover--refresh-completion minibuffer)
+          (drover--refresh-completion nil)
+          (should-not calls))
+      (when (buffer-live-p minibuffer)
+        (kill-buffer minibuffer)))))
+
+(defvar vertico--input)
+(defvar icomplete-mode)
+
+(ert-deftest drover-model-test-refresh-completion-uis ()
+  "Vertico computes candidates again for any input, Icomplete shows them, each when on."
+  (let ((exhibited nil))
+    (cl-letf (((symbol-function 'vertico--exhibit) (lambda () (push (list 'vertico vertico--input) exhibited)))
+              ((symbol-function 'icomplete-exhibit) (lambda () (push 'icomplete exhibited))))
+      (with-temp-buffer
+        (drover--refresh-vertico)
+        (drover--refresh-icomplete)
+        (should-not exhibited)
+        (setq-local vertico--input '("opus" . 4))
+        (drover--refresh-vertico)
+        (should (equal exhibited '((vertico t))))
+        (let ((icomplete-mode t))
+          (drover--refresh-icomplete))
+        (should (eq (car exhibited) 'icomplete))))
+    (should (equal drover-completion-refresh-functions
+                   '(drover--refresh-completions-list drover--refresh-icomplete drover--refresh-vertico)))))
 
 (ert-deftest drover-model-test-read-variant ()
   (let ((model (drover-model-create :id "m" :variants '((low :effort "low") (high :effort "high"))

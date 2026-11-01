@@ -42,7 +42,8 @@
 ;; them once they are initialized, and switches a running shell's
 ;; session mode, model and thought level through ACP before sending.  A
 ;; live shell also offers the models of its engine, and its thought
-;; levels as their variants.
+;; levels as their variants: a live source, which `drover-model'
+;; remembers, told again whenever a shell's models may have changed.
 ;;
 ;; `drover' loads this file once agent-shell.el is loaded.
 
@@ -565,7 +566,21 @@ as every model's variants."
     (opencode 10 drover-agent-shell--opencode-models))
   "Model sources of live shells, as (ENGINE DEPTH FUNCTION).
 A live Claude Code shell knows its models before any catalog; an
-OpenCode one only stands in when the service's catalog cannot answer.")
+OpenCode one only stands in when the service's catalog cannot answer.
+Each is registered live: what it answers is remembered.")
+
+(defconst drover-agent-shell--model-events
+  '(init-session init-model init-config-options config-option-update
+    session-selected session-restored)
+  "Events after which a shell may offer other models or thought levels.
+Its session, new or loaded, brings the agent's models; its options, set
+at start or changed by the agent, the thought levels of its model.")
+
+(defun drover-agent-shell--models-changed (&optional buffer)
+  "Tell drover the models of the shell of BUFFER may have changed.
+BUFFER is the current buffer by default."
+  (when-let* ((engine (drover-agent-shell--engine buffer)))
+    (drover-models-changed engine)))
 
 ;;;; Sessions
 
@@ -785,7 +800,9 @@ success."
     (when (memq kind '(tool-call-update permission-request elicitation-request turn-complete))
       (setq drover-agent-shell--reply-open nil))
     (unless (memq kind drover-agent-shell--quiet-events)
-      (drover-backend-changed 'agent-shell drover-agent-shell--id))))
+      (drover-backend-changed 'agent-shell drover-agent-shell--id))
+    (when (memq kind drover-agent-shell--model-events)
+      (drover-agent-shell--models-changed))))
 
 (defun drover-agent-shell--note-change (file)
   "Note that the agent of the current shell changed FILE, a file name or nil."
@@ -897,6 +914,14 @@ name."
   "Report a change of the current shell to drover."
   (drover-backend-changed 'agent-shell drover-agent-shell--id))
 
+(defun drover-agent-shell--killed ()
+  "Report the current shell going away, and the models it no longer offers.
+The models are told once the buffer is gone, as a dying shell is still
+live."
+  (drover-agent-shell--changed)
+  (when-let* ((engine (ignore-errors (drover-agent-shell--engine))))
+    (run-at-time 0 nil #'drover-models-changed engine)))
+
 (defun drover-agent-shell--setup (&optional existing)
   "Follow the current shell and tell drover its session.
 EXISTING is non-nil for a shell that ran before drover followed it,
@@ -910,8 +935,11 @@ whose creation time is unknown."
           (agent-shell-subscribe-to :shell-buffer (current-buffer)
                                     :on-event #'drover-agent-shell--on-event))
     (setq-local drover-session-at-point-function #'drover-agent-shell--buffer-session)
-    (add-hook 'kill-buffer-hook #'drover-agent-shell--changed nil t)
-    (drover-agent-shell--changed)))
+    (add-hook 'kill-buffer-hook #'drover-agent-shell--killed nil t)
+    (drover-agent-shell--changed)
+    ;; A shell drover follows late may offer models already.
+    (when existing
+      (drover-agent-shell--models-changed))))
 
 (defun drover-agent-shell--teardown ()
   "Undo `drover-agent-shell--setup' in the current shell."
@@ -920,7 +948,7 @@ whose creation time is unknown."
     (setq drover-agent-shell--subscription nil))
   (when (eq drover-session-at-point-function #'drover-agent-shell--buffer-session)
     (kill-local-variable 'drover-session-at-point-function))
-  (remove-hook 'kill-buffer-hook #'drover-agent-shell--changed t))
+  (remove-hook 'kill-buffer-hook #'drover-agent-shell--killed t))
 
 ;;;; Registering and installing
 
@@ -953,7 +981,7 @@ whose creation time is unknown."
     (drover-register-engine 'gemini-cli :label "Gemini CLI")
     (setq drover-agent-shell--gemini-registered t))
   (pcase-dolist (`(,engine ,depth ,function) drover-agent-shell--model-sources)
-    (drover-register-model-source engine function depth)))
+    (drover-register-model-source engine function depth t)))
 
 (defun drover-agent-shell--unregister ()
   "Undo `drover-agent-shell--register'."

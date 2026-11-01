@@ -44,6 +44,14 @@
 (require 'drover-claude-code)
 (require 'drover-codex)
 
+;; No test may touch the user's state.  Models are not remembered unless
+;; a test asks for it, so that tests of sources see their answers alone,
+;; and the state directory is a temporary one.
+(setq drover-remember-models nil
+      drover-state-directory (make-temp-file "drover-test-state" t))
+(let ((directory drover-state-directory))
+  (add-hook 'kill-emacs-hook (lambda () (delete-directory directory t))))
+
 ;;;; The fake backend
 
 (defvar drover-test-sessions nil
@@ -251,10 +259,15 @@ give one, so it runs the choices as they are."
     (apply #'drover-register-engine name fake)))
 
 (defmacro drover-test-with-engines (&rest body)
-  "Run BODY with no engine nor model source registered but those BODY registers."
+  "Run BODY with no engine nor model source registered but those BODY registers.
+No model is remembered, nor read from the file of remembered models
+until BODY reads it."
   (declare (indent 0) (debug t))
   `(let ((drover--engines nil)
          (drover--model-sources nil)
+         (drover--model-memory nil)
+         (drover--model-memory-stamp 'unread)
+         (drover--model-memory-warned nil)
          (drover--json-cache (make-hash-table :test #'equal))
          (drover-test-engine-calls nil)
          (drover-test-engine-defaults nil)
@@ -280,16 +293,17 @@ default to (fake)."
   "Run BODY with the local state of every engine under a fresh directory.
 The directory is bound to `home' in BODY, and deleted afterwards.
 `drover-claude-code-home' is its \"claude\", the managed settings
-`managed', `drover-codex-home' \"codex\" and `drover-opencode-database'
-\"opencode/opencode.db\"; Claude Code gets no start flags, and starts
-in the directory asked for.  Environment variables overriding them are
-cleared, the Windows registry reads nothing, and cached JSON is
-forgotten."
+`managed', `drover-codex-home' \"codex\", `drover-opencode-database'
+\"opencode/opencode.db\" and `drover-state-directory' \"state\";
+Claude Code gets no start flags, and starts in the directory asked
+for.  Environment variables overriding them are cleared, the Windows
+registry reads nothing, and cached JSON is forgotten."
   (declare (indent 0) (debug t))
   `(let ((home (file-name-as-directory (make-temp-file "drover-homes" t))))
      ;; `dlet': `drover-opencode-database' may not be defined yet.
      (dlet ((drover-claude-code-home (expand-file-name "claude" home))
             (drover-claude-code-managed-directory (expand-file-name "managed" home))
+            (drover-state-directory (expand-file-name "state" home))
             (drover-codex-home (expand-file-name "codex" home))
             (drover-opencode-database (expand-file-name "opencode/opencode.db" home))
             (drover-claude-code-start-flags-function (lambda () ""))

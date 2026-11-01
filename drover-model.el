@@ -26,7 +26,13 @@
 ;; startup defaults and when they took a prompt last.  Each registers
 ;; with `drover-register-engine'; models come from sources registered
 ;; per engine with `drover-register-model-source', the first source of
-;; an engine that answers being its catalog.
+;; an engine that answers being its catalog.  Sources are the live
+;; sessions of backends, and OpenCode's service: drover asks no vendor.
+;; What a live session offered is remembered on disk
+;; (`drover-remember-models'), and answers when no live session does.  A
+;; source whose models change or arrive late announces them with
+;; `drover-models-changed', and a model picker open meanwhile offers
+;; them.
 ;;
 ;; A model is a `drover-model' record naming the engines able to run it:
 ;; engines taking provider-qualified ids run any model of a provider
@@ -73,7 +79,9 @@ PLIST may hold :effort, the effort string the variant sends; a variant
 without a known effort has a nil PLIST, printed as (SYMBOL).")
   (default-variant nil :documentation "Symbol of the variant a request naming none runs, or nil.
 Nil when the provider decides, or it is unknown.")
-  (engines nil :documentation "Engines able to run the model, in order of preference."))
+  (engines nil :documentation "Engines able to run the model, in order of preference.")
+  (remembered nil :documentation "When a live session last offered the model, as a float time.
+Nil for a model a live session offers now; see `drover-remember-models'."))
 
 (defcustom drover-model-families
   '((claude-code . "anthropic\\|claude")
@@ -139,7 +147,9 @@ front end shows the session."
   (and name (replace-regexp-in-string "\\`Claude " "" name)))
 
 (defun drover-model-annotation (model)
-  "Return the annotation of MODEL in pickers: its identifier and variants."
+  "Return the annotation of MODEL in pickers: its identifier and variants.
+A model no live session offers now also tells the day it was last
+offered."
   (propertize
    (concat (format "  %s" (drover-model-id model))
            (when-let* ((variants (drover-model-variants model)))
@@ -147,7 +157,9 @@ front end shows the session."
                      (mapconcat (lambda (variant) (symbol-name (car variant))) variants ",")
                      (if-let* ((default (drover-model-default-variant model)))
                          (format " default:%s" default)
-                       " default:provider"))))
+                       " default:provider")))
+           (when-let* ((time (drover-model-remembered model)))
+             (format "  remembered from %s" (format-time-string "%Y-%m-%d" time))))
    'face 'completions-annotations))
 
 (defun drover-model-candidates (models)
@@ -187,7 +199,7 @@ date suffix is not read as one."
 ;;;; Engines
 
 (defvar drover--model-sources nil
-  "Model sources, as a list of (ENGINE DEPTH FUNCTION), in registration order.")
+  "Model sources, as a list of (ENGINE DEPTH FUNCTION LIVE), in registration order.")
 
 (defvar drover--engines nil
   "Registered engines, as an alist (NAME . PROPERTIES), in registration order.")
@@ -279,15 +291,37 @@ as unused."
 
 ;;;; Model sources
 
-(defun drover-register-model-source (engine function &optional depth)
+(defcustom drover-remember-models t
+  "Whether drover remembers the models live sessions offer.
+When non-nil, the models a live session last offered for an engine are
+kept in \"models.eld\" of `drover-state-directory', with the day they
+were offered, and offered when no live session of that engine answers:
+the model picker tells them by that day.  A live answer always wins,
+and replaces what was remembered."
+  :type 'boolean
+  :group 'drover)
+
+(defconst drover-model-memory-depth 100
+  "Depth at which the remembered models of an engine answer.
+Sources of a lower depth, live sessions and OpenCode's catalog, answer
+first; deeper ones only when nothing is remembered.")
+
+(defun drover-register-model-source (engine function &optional depth live)
   "Make FUNCTION a source of the models of ENGINE.
 FUNCTION is called with a DIRECTORY and returns `drover-model' records,
 or nil when it cannot answer.  DEPTH, 0 by default, orders the sources
-of ENGINE: lower first.  `drover-models' takes the first answer.
-Registering FUNCTION again for ENGINE changes its depth."
+of ENGINE: lower first, the models remembered answering at
+`drover-model-memory-depth'.  `drover-models' takes the first answer.
+LIVE non-nil says FUNCTION answers for live sessions: what it answers
+is remembered (see `drover-remember-models').  Registering FUNCTION
+again for ENGINE changes its depth and whether it is live.
+
+FUNCTION must answer at once.  A source whose models take time to come,
+or change, returns those it has, nil at first, and calls
+`drover-models-changed' when they arrive."
   (drover-unregister-model-source engine function)
   (setq drover--model-sources
-        (append drover--model-sources (list (list engine (or depth 0) function)))))
+        (append drover--model-sources (list (list engine (or depth 0) function (and live t))))))
 
 (defun drover-unregister-model-source (engine function)
   "Stop FUNCTION being a source of the models of ENGINE."
@@ -295,6 +329,27 @@ Registering FUNCTION again for ENGINE changes its depth."
         (seq-remove (lambda (source)
                       (and (eq (car source) engine) (equal (nth 2 source) function)))
                     drover--model-sources)))
+
+(defvar drover-models-changed-hook nil
+  "Hook run when the models an engine's sources offer changed.
+Its functions take the ENGINE.  `drover-models-changed' runs it, and
+`drover-read-model' offers from it the models that arrive while it
+reads.")
+
+(defun drover-models-changed (engine)
+  "Note that the models the sources of ENGINE offer changed.
+A source calls it when its models arrive or change, such as when a
+live session starts.  What a live source of ENGINE answers now is
+remembered, then `drover-models-changed-hook' runs.  A function of the
+hook failing is reported, and stops neither the others nor the
+caller."
+  (with-demoted-errors "Drover models changed: %S"
+    (drover--engine-models engine default-directory))
+  (run-hook-wrapped 'drover-models-changed-hook
+                    (lambda (function)
+                      (with-demoted-errors "Drover models changed: %S"
+                        (funcall function engine))
+                      nil)))
 
 (defun drover-engine-model-sources (engine)
   "Return the functions registered as model sources of ENGINE, lowest depth first."
@@ -304,24 +359,36 @@ Registering FUNCTION again for ENGINE changes its depth."
 
 (defun drover--engine-models (engine directory)
   "Return the models of ENGINE in DIRECTORY, from its first source answering.
-A source that fails does not answer."
-  (let ((sources (sort (seq-filter (lambda (source) (eq (car source) engine)) drover--model-sources)
+A source that fails does not answer.  The models remembered answer at
+`drover-model-memory-depth', after sources registered at the same
+depth; what a live source answers is remembered."
+  (let ((sources (sort (append (seq-filter (lambda (source) (eq (car source) engine))
+                                           drover--model-sources)
+                               ;; The memory, which has no function.
+                               (list (list engine drover-model-memory-depth nil nil)))
                        (lambda (a b) (< (nth 1 a) (nth 1 b))))))
-    (seq-some (lambda (source)
-                (with-demoted-errors "Drover model source: %S"
-                  (funcall (nth 2 source) directory)))
-              sources)))
+    (catch 'answer
+      (dolist (source sources)
+        (when-let* ((models (with-demoted-errors "Drover model source: %S"
+                              (if (nth 2 source)
+                                  (funcall (nth 2 source) directory)
+                                (drover-remembered-models engine)))))
+          (when (nth 3 source)
+            (drover--remember-models engine models))
+          (throw 'answer models))))))
 
 (defun drover-models (&optional directory)
   "Return every model the engines offer in DIRECTORY.
 DIRECTORY defaults to `default-directory'.  Each engine answers
 through its first source returning models (see
-`drover-register-model-source').  Engines come in the order of
-`drover-model-engine-order', then of `drover-engines', then any other
-with a source; a model reported twice, with the same provider and
-identifier, is the first report."
+`drover-register-model-source'), or the models remembered of it.
+Engines come in the order of `drover-model-engine-order', then of
+`drover-engines', then any other with a source or remembered models; a
+model reported twice, with the same provider and identifier, is the
+first report."
   (let* ((directory (or directory default-directory))
-         (with-source (delete-dups (mapcar #'car drover--model-sources)))
+         (with-source (delete-dups (append (mapcar #'car drover--model-sources)
+                                           (drover--remembered-engines))))
          (engines (delete-dups (seq-filter (lambda (engine) (memq engine with-source))
                                            (append drover-model-engine-order (drover-engines)
                                                    with-source))))
@@ -333,40 +400,291 @@ identifier, is the first report."
                 (mapcan (lambda (engine) (copy-sequence (drover--engine-models engine directory)))
                         engines))))
 
+;;;; Remembered models
+
+;; The file is Lisp data: a version, then per engine the day its models
+;; were offered and each model as a plist of the slots pickers show.
+;; It is read again whenever another Emacs wrote it, and written whole,
+;; through a temporary file renamed over it.
+
+(defconst drover--model-memory-version 1
+  "Version of the format of the file of remembered models.")
+
+(defvar drover--model-memory nil
+  "The models remembered, as an alist (ENGINE . (:time TIME :models MODELS)).
+TIME is when a live session offered MODELS, a list of plists of
+`drover--model-data'.")
+
+(defvar drover--model-memory-stamp 'unread
+  "Modification time of the file of remembered models when last read or written.
+`unread' before it is read, nil when it does not exist.")
+
+(defvar drover--model-memory-warned nil
+  "Non-nil once a problem with the file of remembered models was reported.
+A file that cannot be read or written is reported once per Emacs
+session, as models are asked for often.")
+
+(defun drover-model-memory-file ()
+  "Return the file where drover remembers models, in `drover-state-directory'."
+  (expand-file-name "models.eld" drover-state-directory))
+
+(defun drover--model-memory-warn (format-string &rest args)
+  "Report a problem with the file of remembered models, once per session.
+FORMAT-STRING and ARGS are as for `format-message'."
+  (unless drover--model-memory-warned
+    (setq drover--model-memory-warned t)
+    (apply #'drover-warn format-string args)))
+
+(defun drover--model-data (model)
+  "Return what is remembered of MODEL, a plist of the slots pickers show."
+  (list :provider-id (drover-model-provider-id model)
+        :provider-name (drover-model-provider-name model)
+        :id (drover-model-id model)
+        :name (drover-model-name model)
+        :variants (drover-model-variants model)
+        :default-variant (drover-model-default-variant model)
+        :engines (drover-model-engines model)))
+
+(defun drover--model-data-p (data)
+  "Return non-nil when DATA is a model as `drover--model-data' gives it."
+  (and (plistp data)
+       (stringp (plist-get data :id))
+       (seq-every-p (lambda (key) (let ((value (plist-get data key)))
+                                    (or (null value) (stringp value))))
+                    '(:provider-id :provider-name :name))
+       (proper-list-p (plist-get data :variants))
+       (seq-every-p (lambda (variant)
+                      (and (consp variant) (symbolp (car variant)) (plistp (cdr variant))))
+                    (plist-get data :variants))
+       (symbolp (plist-get data :default-variant))
+       (proper-list-p (plist-get data :engines))
+       (seq-every-p #'symbolp (plist-get data :engines))))
+
+(defun drover--model-memory-parse (form)
+  "Return the alist of remembered models FORM holds, or signal an error.
+FORM is what the file holds, read."
+  (unless (and (plistp form) (eql (plist-get form :version) drover--model-memory-version))
+    (error "Unknown format"))
+  (let ((engines (plist-get form :engines)))
+    (unless (and (proper-list-p engines)
+                 (seq-every-p (lambda (entry)
+                                (and (consp entry)
+                                     (symbolp (car entry))
+                                     (plistp (cdr entry))
+                                     (numberp (plist-get (cdr entry) :time))
+                                     (proper-list-p (plist-get (cdr entry) :models))
+                                     (seq-every-p #'drover--model-data-p (plist-get (cdr entry) :models))))
+                              engines))
+      (error "Malformed entries"))
+    (mapcar (lambda (entry)
+              (cons (car entry) (list :time (float (plist-get (cdr entry) :time))
+                                      :models (plist-get (cdr entry) :models))))
+            engines)))
+
+(defun drover--model-memory-read ()
+  "Return the alist of models the file remembers, nil when there is none.
+A file that is not one of remembered models, or of another version, is
+reported once and ignored: the next live answer replaces it."
+  (let ((file (drover-model-memory-file)))
+    (when (file-exists-p file)
+      (condition-case err
+          (with-temp-buffer
+            (insert-file-contents file)
+            (drover--model-memory-parse (read (current-buffer))))
+        (error
+         (drover--model-memory-warn "Ignoring the models remembered in %s: %s"
+                                    (abbreviate-file-name file) (error-message-string err))
+         nil)))))
+
+(defun drover--model-memory ()
+  "Return the alist of models remembered, reading the file when it changed."
+  (let ((stamp (drover-file-mtime (drover-model-memory-file))))
+    (unless (equal stamp drover--model-memory-stamp)
+      (setq drover--model-memory (drover--model-memory-read)
+            drover--model-memory-stamp stamp))
+    drover--model-memory))
+
+(defun drover--model-memory-write (memory)
+  "Write MEMORY, an alist of remembered models, to the file, atomically.
+It is written to a temporary file in the same directory, then renamed
+over the file, so that a reader never sees it half written.  A failure
+is reported once."
+  (let* ((file (drover-model-memory-file))
+         (directory (file-name-directory file))
+         (temporary nil))
+    (condition-case err
+        (unwind-protect
+            (progn
+              (make-directory directory t)
+              (setq temporary (make-temp-file (expand-file-name ".models-" directory) nil ".eld"))
+              (with-temp-buffer
+                (insert ";;; Models drover remembers, written by drover.  -*- mode: lisp-data; coding: utf-8-unix -*-\n")
+                (let ((print-length nil)
+                      (print-level nil)
+                      (print-circle nil)
+                      (print-escape-newlines t))
+                  (insert (format "(:version %d\n :engines\n (" drover--model-memory-version))
+                  (dolist (entry memory)
+                    (unless (eq entry (car memory))
+                      (insert "\n  "))
+                    (prin1 entry (current-buffer)))
+                  (insert "))\n"))
+                (let ((coding-system-for-write 'utf-8-unix))
+                  (write-region nil nil temporary nil 'silent)))
+              (rename-file temporary file t)
+              (setq temporary nil))
+          (when temporary
+            (ignore-errors (delete-file temporary))))
+      (error
+       (drover--model-memory-warn "Could not remember models in %s: %s"
+                                  (abbreviate-file-name file) (error-message-string err))))
+    (setq drover--model-memory-stamp (drover-file-mtime file))))
+
+(defun drover--remember-models (engine models)
+  "Remember MODELS, which a live session of ENGINE offers now.
+The file is written only when they differ from those remembered, or
+were remembered on another day, so that the day the picker shows stays
+true without a write at every answer."
+  (when (and drover-remember-models models)
+    (let* ((memory (copy-alist (drover--model-memory)))
+           (data (mapcar #'drover--model-data models))
+           (entry (alist-get engine memory))
+           (now (float-time)))
+      (unless (and (equal (plist-get entry :models) data)
+                   (equal (format-time-string "%F" (plist-get entry :time))
+                          (format-time-string "%F" now)))
+        (setf (alist-get engine memory) (list :time now :models data))
+        (setq drover--model-memory memory)
+        (drover--model-memory-write memory)))))
+
+(defun drover-remembered-models (engine)
+  "Return the models remembered of ENGINE, each telling when it was offered.
+Nil when `drover-remember-models' is off."
+  (when drover-remember-models
+    (when-let* ((entry (alist-get engine (drover--model-memory))))
+      (let ((time (plist-get entry :time)))
+        (mapcar (lambda (data)
+                  (drover-model-create :provider-id (plist-get data :provider-id)
+                                       :provider-name (plist-get data :provider-name)
+                                       :id (plist-get data :id)
+                                       :name (plist-get data :name)
+                                       :variants (copy-tree (plist-get data :variants))
+                                       :default-variant (plist-get data :default-variant)
+                                       :engines (copy-sequence (plist-get data :engines))
+                                       :remembered time))
+                (plist-get entry :models))))))
+
+(defun drover--remembered-engines ()
+  "Return the engines whose models are remembered."
+  (and drover-remember-models (mapcar #'car (drover--model-memory))))
+
+(defun drover-forget-models ()
+  "Forget the models drover remembers, and delete their file.
+Pickers then offer only what live sessions offer, until they offer
+models again."
+  (interactive)
+  (let ((file (drover-model-memory-file)))
+    (when (file-exists-p file)
+      (delete-file file))
+    (setq drover--model-memory nil
+          drover--model-memory-stamp nil)
+    (when (called-interactively-p 'interactive)
+      (message "Drover forgot the models it remembered"))))
+
 ;;;; Reading models, variants and agents
 
 (defun drover--completion-table (candidates category &optional annotate)
   "Return a completion table of CANDIDATES, in their order, of CATEGORY.
-CANDIDATES is a list of strings or an alist keyed by strings; ANNOTATE,
-a function of a candidate returning its annotation, or nil."
+CANDIDATES is a list of strings or an alist keyed by strings, or a
+function of no argument returning one, called whenever the table is,
+so that candidates arriving late are offered; ANNOTATE, a function of
+a candidate returning its annotation, or nil."
   (lambda (string predicate action)
     (if (eq action 'metadata)
         `(metadata (category . ,category)
                    (display-sort-function . identity)
                    (cycle-sort-function . identity)
                    ,@(and annotate `((annotation-function . ,annotate))))
-      (complete-with-action action candidates string predicate))))
+      (complete-with-action action (if (functionp candidates) (funcall candidates) candidates)
+                            string predicate))))
+
+(defvar vertico--input)
+(declare-function vertico--exhibit "ext:vertico" ())
+(declare-function icomplete-exhibit "icomplete" ())
+
+(defun drover--refresh-completions-list ()
+  "Show the current minibuffer's candidates again in *Completions*, when shown."
+  (when (get-buffer-window "*Completions*" 0)
+    (minibuffer-completion-help)))
+
+(defun drover--refresh-icomplete ()
+  "Show the current minibuffer's candidates again, when Icomplete shows them."
+  (when (and (bound-and-true-p icomplete-mode) (fboundp 'icomplete-exhibit))
+    (icomplete-exhibit)))
+
+(defun drover--refresh-vertico ()
+  "Show the current minibuffer's candidates again, when Vertico shows them."
+  ;; Vertico computes candidates again only for new input, which a
+  ;; non-string `vertico--input' stands for, as Consult does.
+  (when (and (bound-and-true-p vertico--input) (fboundp 'vertico--exhibit))
+    (setq vertico--input t)
+    (vertico--exhibit)))
+
+(defvar drover-completion-refresh-functions
+  (list #'drover--refresh-completions-list #'drover--refresh-icomplete #'drover--refresh-vertico)
+  "Functions showing again the candidates of the current minibuffer.
+A picker calls each, without argument, in its minibuffer when its
+candidates changed while it reads, such as models that arrived.  The
+defaults update the *Completions* list, Icomplete (and Fido) and
+Vertico; another completion UI adds its own.")
+
+(defun drover--refresh-completion (minibuffer)
+  "Show the candidates of MINIBUFFER, a minibuffer buffer, again.
+They are computed anew, then shown by every function of
+`drover-completion-refresh-functions'.  Nothing happens once
+MINIBUFFER is gone."
+  (when (buffer-live-p minibuffer)
+    (with-current-buffer minibuffer
+      ;; The sorted completions Icomplete and `minibuffer-force-complete'
+      ;; keep are flushed only by editing the input.
+      (setq completion-all-sorted-completions nil)
+      (dolist (function drover-completion-refresh-functions)
+        (with-demoted-errors "Drover completion refresh: %S"
+          (funcall function))))))
 
 (defun drover-read-model (&optional default directory)
   "Read a model among those the engines offer in DIRECTORY, or the default.
 The first candidate, \"Default\", stands for no choice and returns nil;
 it names DEFAULT, the model a new session would run without one, when
 known.  The others come from `drover-models', annotated with
-`drover-model-annotation', in the category `drover-model'.  Return the
-`drover-model' chosen, or nil."
-  (let* ((models (drover-model-candidates (drover-models directory)))
+`drover-model-annotation', in the category `drover-model'.  Models
+arriving while it reads (see `drover-models-changed') are offered as
+they come.  Return the `drover-model' chosen, or nil."
+  (let* ((directory (or directory default-directory))
          (default-label (if default
                             (format "Default (%s)" (drover-model-label default))
                           "Default"))
-         (candidates (cons (cons default-label nil) models))
-         (choice (completing-read "Model: "
-                                  (drover--completion-table
-                                   candidates 'drover-model
-                                   (lambda (label)
-                                     (when-let* ((model (cdr (assoc label candidates))))
-                                       (drover-model-annotation model))))
-                                  nil t nil nil default-label)))
-    (cdr (assoc choice candidates))))
+         (candidates nil)
+         (collect (lambda ()
+                    (setq candidates (cons (cons default-label nil)
+                                           (drover-model-candidates (drover-models directory))))))
+         (minibuffer nil)
+         (refresh (lambda (_engine)
+                    (funcall collect)
+                    (drover--refresh-completion minibuffer))))
+    (funcall collect)
+    (add-hook 'drover-models-changed-hook refresh)
+    (unwind-protect
+        (let ((choice (minibuffer-with-setup-hook (lambda () (setq minibuffer (current-buffer)))
+                        (completing-read "Model: "
+                                         (drover--completion-table
+                                          (lambda () candidates) 'drover-model
+                                          (lambda (label)
+                                            (when-let* ((model (cdr (assoc label candidates))))
+                                              (drover-model-annotation model))))
+                                         nil t nil nil default-label))))
+          (cdr (assoc choice candidates)))
+      (remove-hook 'drover-models-changed-hook refresh))))
 
 (defun drover-read-variant (model)
   "Read a variant of MODEL, a `drover-model', or the default.

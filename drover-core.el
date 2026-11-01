@@ -79,6 +79,19 @@
   :type 'number
   :group 'drover)
 
+(declare-function no-littering-expand-var-file-name "ext:no-littering" (file))
+
+(defcustom drover-state-directory
+  (if (fboundp 'no-littering-expand-var-file-name)
+      (no-littering-expand-var-file-name "drover/")
+    (locate-user-emacs-file "drover/"))
+  "Directory where drover keeps what it remembers between Emacs sessions.
+Such as the models live sessions offered (see `drover-remember-models').
+It is \"drover/\" in `user-emacs-directory', or in no-littering's
+\"var/\" directory when no-littering is loaded before drover."
+  :type 'directory
+  :group 'drover)
+
 (defconst drover-active-statuses '(waiting retrying working)
   "Statuses of the sessions in the middle of a turn.
 Such a session works, waits to retry, or waits for the user to answer

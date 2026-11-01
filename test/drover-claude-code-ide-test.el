@@ -76,6 +76,9 @@
 (defvar drover-claude-code-ide-test-warnings nil
   "Messages of `drover-warn', newest first.")
 
+(defvar drover-claude-code-ide-test-models-changed nil
+  "Engines `drover-models-changed' was told of, newest first.")
+
 (defvar drover-claude-code-ide-test-focused nil
   "Buffers in front of the user.")
 
@@ -123,9 +126,12 @@ It repeats every REPEAT seconds, when non-nil."
 (defmacro drover-claude-code-ide-test-isolated (&rest body)
   "Run BODY with drover's registries and the backend's global state isolated.
 Stubs stand for claude-code-ide's sessions, the CLI's records, timers,
-focus, warnings and change reports.  Terminals BODY makes are killed."
+focus, warnings and change reports, of sessions and of models.
+Terminals BODY makes are killed."
   (declare (indent 0) (debug t))
   `(let ((drover--backends nil)
+         (drover--model-sources drover--model-sources)
+         (drover-claude-code-ide-test-models-changed nil)
          (drover--started nil)
          (drover--running nil)
          (drover--change-timer nil)
@@ -165,6 +171,9 @@ focus, warnings and change reports.  Terminals BODY makes are killed."
                 (lambda () drover-claude-code-ide-test-focused))
                ((symbol-function 'drover-backend-changed)
                 (lambda (&rest arguments) (push arguments drover-claude-code-ide-test-changes)))
+               ;; Asking the models would read the CLI's own catalog.
+               ((symbol-function 'drover-models-changed)
+                (lambda (engine) (push engine drover-claude-code-ide-test-models-changed)))
                ((symbol-function 'drover-warn)
                 (lambda (format-string &rest arguments)
                   (push (apply #'format-message format-string arguments)
@@ -409,7 +418,9 @@ session of `buffer', a temporary buffer, active."
       (should (equal (buffer-local-value 'drover-claude-code-ide-session-id terminal) id))
       (should (numberp (buffer-local-value 'drover-claude-code-ide--created terminal)))
       (should-not drover-claude-code-ide-test-timers)
-      (should drover-claude-code-ide-test-changes))))
+      (should drover-claude-code-ide-test-changes)
+      ;; The CLI starting, its models are the catalog it caches.
+      (should (equal drover-claude-code-ide-test-models-changed '(claude-code))))))
 
 (ert-deftest drover-claude-code-ide-test-capture-new-transcript ()
   "An unnamed terminal learns the one transcript created after it started."
@@ -434,11 +445,13 @@ session of `buffer', a temporary buffer, active."
             (should-not (buffer-local-value 'drover-claude-code-ide-session-id terminal))
             (make-directory bucket)
             (drover-test-write (expand-file-name "fixture-session.jsonl" bucket) "{}\n")
-            (setq drover-claude-code-ide-test-changes nil)
+            (setq drover-claude-code-ide-test-changes nil
+                  drover-claude-code-ide-test-models-changed nil)
             (drover-claude-code-ide-test-fire)
             (should (equal (buffer-local-value 'drover-claude-code-ide-session-id terminal)
                            "fixture-session"))
             (should drover-claude-code-ide-test-changes)
+            (should (equal drover-claude-code-ide-test-models-changed '(claude-code)))
             (should-not (drover-claude-code-ide-test-pending))
             (should-not drover-claude-code-ide--watchers))
         (delete-directory projects t)))))
@@ -1202,6 +1215,30 @@ guess could hide another session of the directory."
       (should-not (drover-claude-code-ide-buffer-for-directory "/work/a/")))))
 
 ;;;; Installing
+
+(ert-deftest drover-claude-code-ide-test-models ()
+  "While a session runs, the catalog its CLI caches gives Claude Code's models."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (should (member '(claude-code -5 drover-claude-code-ide--models t) drover--model-sources))
+      (drover-test-write (expand-file-name "cache/model-catalog/org-cc.json" drover-claude-code-home)
+                         "{\"catalog\": {\"surface\": \"cc\", \"config\": {\"models\": [
+                            {\"id\": \"claude-opus-5-5\", \"name\": \"Opus 5.5\",
+                             \"thinking\": {\"effort_options\": [{\"id\": \"low\"}, {\"id\": \"high\"}]}},
+                            {\"id\": \"claude-haiku-4-5\", \"name\": \"Haiku 4.5\"}]}}}")
+      ;; No session runs.
+      (should-not (drover-claude-code-ide--models "/work/drover/"))
+      (let ((terminal (drover-claude-code-ide-test-terminal "*claude* models" :mcp-session t)))
+        (let ((models (drover-claude-code-ide--models "/work/drover/")))
+          (should (equal (mapcar #'drover-model-id models) '("claude-opus-5-5" "claude-haiku-4-5")))
+          (should (equal (drover-model-variants (car models)) '((low) (high))))
+          (should (equal (drover-model-engines (car models)) '(claude-code))))
+        (delete-process (get-buffer-process terminal))
+        (should-not (drover-claude-code-ide--models "/work/drover/")))
+      ;; Uninstalling removes the source.
+      (drover-claude-code-ide--uninstall)
+      (should-not (seq-find (lambda (source) (eq (nth 2 source) #'drover-claude-code-ide--models))
+                            drover--model-sources)))))
 
 (ert-deftest drover-claude-code-ide-test-backend ()
   "The backend offers the operations of a terminal, and runs Claude Code."
