@@ -28,6 +28,7 @@
                                    ;; Readable glyphs, whatever the defaults.
                                    (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
                                                            (retrying . "↻") (working . "◐") (idle . "·")))
+                                   (drover-attention-glyph "☺")
                                    (drover-attention-mode nil)
                                    (drover-attention-mode-line nil)
                                    (drover-attention--mode-string-origin nil)
@@ -76,6 +77,7 @@
 ;;;; Mode line
 
 (ert-deftest drover-attention-test-format-counts ()
+  "One count of every session needing the user, in the face of the most urgent."
   (drover-attention-test-with (list (drover-test-session "w1" :status 'waiting :since 1.0)
                                     (drover-test-session "d1" :status 'done :since 2.0)
                                     (drover-test-session "w2" :status 'waiting :since 3.0)
@@ -83,37 +85,43 @@
                                     (drover-test-session "i" :status 'idle))
     (drover-attention-mode 1)
     (let ((string drover-attention-mode-line))
-      (should (equal (substring-no-properties string) " ⚑2 ✓1"))
-      (should (eq (drover-attention-test-face-at string "⚑") 'drover-waiting))
-      (should (eq (drover-attention-test-face-at string "2") 'drover-waiting))
-      (should (eq (drover-attention-test-face-at string "✓") 'drover-done))
-      (should (eq (drover-attention-test-face-at string "1") 'drover-done))
+      (should (equal (substring-no-properties string) " ☺3"))
+      (should (eq (drover-attention-test-face-at string "☺") 'drover-waiting))
+      (should (eq (drover-attention-test-face-at string "3") 'drover-waiting))
       ;; The separating space is not clickable.
       (should-not (get-text-property 0 'local-map string))
       (should (eq (get-text-property 1 'local-map string) drover-attention-mode-line-map))
+      (should (eq (get-text-property 2 'local-map string) drover-attention-mode-line-map))
       (should (eq (get-text-property 1 'mouse-face string) 'mode-line-highlight)))))
 
-(ert-deftest drover-attention-test-format-every-status ()
+(ert-deftest drover-attention-test-format-most-urgent-face ()
+  "The count takes the face of the most urgent status among those it counts."
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
-                                    (drover-test-session "f" :status 'failed)
-                                    (drover-test-session "w" :status 'waiting))
+                                    (drover-test-session "f" :status 'failed))
     (drover-attention-mode 1)
-    (should (equal (substring-no-properties drover-attention-mode-line) " ⚑1 ✗1 ✓1"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "✗") 'drover-failed))))
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "☺") 'drover-failed))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-failed))
+    (setq drover-test-sessions (list (drover-test-session "d" :status 'done)))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "1") 'drover-done))))
 
 (ert-deftest drover-attention-test-format-follows-status-order ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
                                     (drover-test-session "w" :status 'waiting))
-    (let ((drover-attention-statuses '(done waiting)))
+    (let ((drover-attention-statuses '(done waiting))
+          (drover-status-order '(done waiting failed retrying working idle)))
       (drover-attention-mode 1)
-      (should (equal (substring-no-properties drover-attention-mode-line) " ⚑1 ✓1")))))
+      (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
+      (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-done)))))
 
 (ert-deftest drover-attention-test-format-honours-statuses ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
                                     (drover-test-session "w" :status 'waiting))
     (let ((drover-attention-statuses '(waiting)))
       (drover-attention-mode 1)
-      (should (equal (substring-no-properties drover-attention-mode-line) " ⚑1")))))
+      (should (equal (substring-no-properties drover-attention-mode-line) " ☺1")))))
 
 (ert-deftest drover-attention-test-format-empty ()
   (drover-attention-test-with (list (drover-test-session "r" :status 'working)
@@ -122,23 +130,57 @@
     (should-not drover-attention-mode-line)
     (should (memq 'drover-attention-mode-line global-mode-string))))
 
+(ert-deftest drover-attention-test-format-follows-subagent-mode ()
+  "The count is that of what lists show, and of every subagent waiting for the user."
+  (drover-attention-test-with (list (drover-test-session "root" :status 'working)
+                                    (drover-test-session "ended" :parent "root" :status 'done)
+                                    (drover-test-session "broke" :parent "root" :status 'failed)
+                                    (drover-test-session "asking" :parent "root" :status 'waiting)
+                                    (drover-test-session "alone" :status 'done))
+    (drover-attention-mode 1)
+    ;; Active subagents: those whose turn ended hide, so do not count.
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
+    (drover-set-show-subagents 'all)
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺4"))
+    ;; None: the subagent waiting for the user still counts.
+    (drover-set-show-subagents 'none)
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-waiting))
+    (let ((help (get-text-property 1 'help-echo drover-attention-mode-line)))
+      (should (string-match-p "Session asking" help))
+      (should-not (string-match-p "Session ended\\|Session broke" help)))
+    ;; A filter narrows lists, not the count.
+    (drover-set-filter :project "elsewhere")
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))))
+
 (ert-deftest drover-attention-test-help-echo-lists-sessions ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0
                                                          :project "drover" :branch "main"
                                                          :requests '((:kind permission :summary "bash: make")))
                                     (drover-test-session "d" :status 'done :since 2.0)
+                                    (drover-test-session "e" :status 'done :since 3.0)
                                     (drover-test-session "i" :status 'idle))
     (drover-attention-mode 1)
     (let ((help (get-text-property 1 'help-echo drover-attention-mode-line)))
-      (should (string-match-p "Session w  drover:main  permit: bash: make" help))
-      (should (string-match-p "✓ Session d" help))
-      (should-not (string-match-p "Session i" help))
-      ;; Most urgent first.
-      (should (< (string-search "Session w" help) (string-search "Session d" help))))))
+      (should (equal help (concat "Sessions that need you:\n"
+                                  "Needs you (1):\n"
+                                  "  ⚑ Session w  drover:main  permit: bash: make\n"
+                                  "Done (2):\n"
+                                  "  ✓ Session d\n"
+                                  "  ✓ Session e\n"
+                                  "\n"
+                                  "mouse-1: visit the most urgent\n"
+                                  "mouse-3: choose a session"))))))
 
 (ert-deftest drover-attention-test-mouse-bindings ()
   (should (eq (keymap-lookup drover-attention-mode-line-map "<mode-line> <mouse-1>") #'drover-next))
   (should (eq (keymap-lookup drover-attention-mode-line-map "<mode-line> <mouse-3>") #'drover-select)))
+
+(ert-deftest drover-attention-test-default-glyph ()
+  "The default glyph is a robot of its own, not one of the subagents'."
+  (let ((glyph (eval (car (get 'drover-attention-glyph 'standard-value)) t)))
+    (should (equal glyph "\U000F16A4"))
+    (should-not (rassoc glyph (eval (car (get 'drover-subagent-glyphs 'standard-value)) t)))))
 
 (ert-deftest drover-attention-test-mode-line-keeps-properties ()
   ;; The mode line drops the text properties of a variable not risky.
@@ -148,14 +190,14 @@
 (ert-deftest drover-attention-test-updates-on-change ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting))
     (drover-attention-mode 1)
-    (should (equal (substring-no-properties drover-attention-mode-line) " ⚑1"))
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺1"))
     (setq drover-test-sessions (list (drover-test-session "w" :status 'waiting)
                                      (drover-test-session "f" :status 'failed)))
     ;; Nothing changes until backends report it.
-    (should (equal (substring-no-properties drover-attention-mode-line) " ⚑1"))
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺1"))
     (drover-backend-changed 'fake "f")
     (drover-changed-now)
-    (should (equal (substring-no-properties drover-attention-mode-line) " ⚑1 ✗1"))
+    (should (equal (substring-no-properties drover-attention-mode-line) " ☺2"))
     (setq drover-test-sessions (list (drover-test-session "w" :status 'idle)))
     (drover-backend-changed 'fake "w")
     (drover-changed-now)
@@ -206,38 +248,37 @@ pixels; spaces displayed as stretches advance by their width."
     (nreverse spans)))
 
 (ert-deftest drover-attention-test-glyphs-leave-room-for-ink ()
-  "A count never goes under the ink of its glyph, which may reach past its advance."
+  "The count never goes under the ink of the glyph, which may reach past its advance."
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0)
                                     (drover-test-session "d" :status 'done :since 2.0))
-    ;; The flag draws 2 pixels left of its start and 16 right, past its
-    ;; advance of 10; the check stays within its own.
-    (drover-attention-test-with-font '(("⚑" 2 . 16))
+    ;; The robot draws 2 pixels left of its start and 16 right, past its
+    ;; advance of 10.
+    (drover-attention-test-with-font '(("☺" 2 . 16))
       (drover-attention-mode 1)
       (let ((string drover-attention-mode-line))
-        (should (equal (substring-no-properties string) "  ⚑ 1 ✓1"))
+        (should (equal (substring-no-properties string) "  ☺ 2"))
         (should (equal (get-text-property 1 'display string) '(space :width (2))))
         (should (equal (get-text-property 3 'display string) '(space :width (6))))
-        ;; Nothing overlaps, the space before the flag included.
+        ;; Nothing overlaps, the space before the robot included.
         (let ((spans (drover-attention-test-spans string ink)))
-          ;; The flag's ink, from 12 - 2 to 12 + 16.
-          (should (equal (car spans) '(10 28 "⚑")))
-          (should (equal (mapcar #'caddr spans) '("⚑" "1" "✓" "1")))
+          ;; The robot's ink, from 12 - 2 to 12 + 16.
+          (should (equal (car spans) '(10 28 "☺")))
+          (should (equal (mapcar #'caddr spans) '("☺" "2")))
           (seq-mapn (lambda (span next) (should (<= (nth 1 span) (car next))))
-                    spans (cdr spans))
-          (should (>= (car (car spans)) 10)))
-        ;; The pads belong to the counts: they click and show the tooltip.
+                    spans (cdr spans)))
+        ;; The pads belong to the count: they click and show the tooltip.
         (should (eq (get-text-property 3 'local-map string) drover-attention-mode-line-map))
         (should (get-text-property 3 'help-echo string))
         (should (eq (get-text-property 2 'face string) 'drover-waiting)))
       ;; Measured as the mode line draws: over its face.
-      (should (equal (get-text-property 0 'face (car (last drover-attention-test-measured)))
+      (should (equal (get-text-property 0 'face (car drover-attention-test-measured))
                      '(drover-waiting mode-line)))
-      (should (= (length drover-attention-test-measured) 2)))))
+      (should (= (length drover-attention-test-measured) 1)))))
 
 (ert-deftest drover-attention-test-glyphs-measured-once-per-font ()
-  "Glyphs are measured once per font, though the counts change often."
+  "The glyph is measured once per font and face, though the count changes often."
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0))
-    (drover-attention-test-with-font '(("⚑" 0 . 16))
+    (drover-attention-test-with-font '(("☺" 0 . 16))
       (drover-attention-mode 1)
       (should (= (length drover-attention-test-measured) 1))
       (dotimes (_ 3)
@@ -246,21 +287,27 @@ pixels; spaces displayed as stretches advance by their width."
                                          drover-test-sessions))
         (drover-backend-changed 'fake)
         (drover-changed-now))
-      (should (equal (substring-no-properties drover-attention-mode-line) " ⚑ 4"))
+      (should (equal (substring-no-properties drover-attention-mode-line) " ☺ 4"))
       (should (= (length drover-attention-test-measured) 1))
+      ;; In another face, as when the most urgent status changes: once.
+      (dotimes (_ 2)
+        (setq drover-test-sessions (list (drover-test-session "d" :status 'done)))
+        (drover-backend-changed 'fake)
+        (drover-changed-now))
+      (should (= (length drover-attention-test-measured) 2))
       ;; Another font for the mode line: measured again.
       (cl-letf (((symbol-function 'face-font) (lambda (&rest _) "-other-font-")))
         (drover-attention--update))
-      (should (= (length drover-attention-test-measured) 2))
+      (should (= (length drover-attention-test-measured) 3))
       ;; A font set, or a theme enabled, measures again, and redraws.
       (should (memq #'drover-attention--fonts-changed after-setting-font-hook))
       (should (memq #'drover-attention--fonts-changed enable-theme-functions))
-      (setq ink '(("⚑" 0 . 30)))
+      (setq ink '(("☺" 0 . 30)))
       (run-hooks 'after-setting-font-hook)
-      (should (= (length drover-attention-test-measured) 3))
+      (should (= (length drover-attention-test-measured) 4))
       (should (equal (get-text-property 2 'display drover-attention-mode-line) '(space :width (20))))
       (run-hook-with-args 'enable-theme-functions 'some-theme)
-      (should (= (length drover-attention-test-measured) 4))
+      (should (= (length drover-attention-test-measured) 5))
       ;; Off, the mode follows fonts no more.
       (drover-attention-mode -1)
       (should-not (memq #'drover-attention--fonts-changed after-setting-font-hook))
@@ -353,6 +400,18 @@ pixels; spaces displayed as stretches advance by their width."
   (drover-attention-test-with (drover-attention-test-sessions)
     (drover-next)
     (should (equal drover-test-calls '((:open "w" nil))))))
+
+(ert-deftest drover-attention-test-next-visits-what-it-counts ()
+  "The sessions visited are those counted: hidden subagents are not, but asking ones."
+  (drover-attention-test-with (list (drover-test-session "root" :status 'working)
+                                    (drover-test-session "ended" :parent "root" :status 'done :since 1.0)
+                                    (drover-test-session "asking" :parent "root" :status 'waiting :since 2.0)
+                                    (drover-test-session "alone" :status 'done :since 3.0))
+    (let ((drover-show-subagents 'none))
+      (drover-next)
+      (drover-attention-test-press)
+      (drover-attention-test-press))
+    (should (equal (drover-attention-test-opened) '("asking" "alone" "asking")))))
 
 (ert-deftest drover-attention-test-next-cycles-and-wraps ()
   (drover-attention-test-with (drover-attention-test-sessions)
@@ -546,11 +605,17 @@ what it received."
     (should (equal drover-test-calls '((:open "ses_1" nil))))))
 
 (ert-deftest drover-attention-test-select-other-window ()
+  "With a prefix argument, the session opens in another window than the selected one."
   (drover-attention-test-with (list (drover-test-session "a"))
-    (drover-attention-test-select "Session a"
-      (let ((current-prefix-arg '(4)))
-        (call-interactively #'drover-select)))
-    (should (equal drover-test-calls '((:open "a" (4)))))))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((origin (selected-window)))
+        (drover-attention-test-select "Session a"
+          (let ((current-prefix-arg '(4)))
+            (call-interactively #'drover-select)))
+        (should (equal drover-test-calls '((:open "a" nil))))
+        (should-not (eq (selected-window) origin))
+        (should (window-live-p origin))))))
 
 (ert-deftest drover-attention-test-select-visible-sessions ()
   (drover-attention-test-with (list (drover-test-session "root")
@@ -560,6 +625,24 @@ what it received."
       (drover-select)
       (should (equal (all-completions "" drover-attention-test-table)
                      '("Session asking" "Session root"))))))
+
+(ert-deftest drover-attention-test-select-follows-subagent-mode ()
+  "Subagents are offered as lists show them, but those waiting for you always."
+  (drover-attention-test-with (list (drover-test-session "root")
+                                    (drover-test-session "child" :parent "root")
+                                    (drover-test-session "working" :parent "root" :status 'working)
+                                    (drover-test-session "asking" :parent "root" :status 'waiting))
+    (let ((drover-show-subagents 'none))
+      (drover-attention-test-select "Session asking"
+        (drover-select)
+        (should (equal (all-completions "" drover-attention-test-table)
+                       '("Session asking" "Session root")))))
+    (should (equal drover-test-calls '((:open "asking" nil))))
+    (let ((drover-show-subagents 'all))
+      (drover-attention-test-select "Session root"
+        (drover-select)
+        (should (equal (all-completions "" drover-attention-test-table)
+                       '("Session asking" "Session working" "Session root" "Session child")))))))
 
 (ert-deftest drover-attention-test-select-nothing ()
   (drover-attention-test-with nil

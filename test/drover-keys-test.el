@@ -163,13 +163,31 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 ;;;; Opening sessions
 
 (ert-deftest drover-keys-test-open ()
+  "RET opens in the selected window, o and C-u RET in another window."
   (drover-keys-test-with (list (drover-test-session "s"))
-    (drover-keys-test-in 'view "s"
-      (call-interactively #'drover-open-other-window)
-      (call-interactively #'drover-open-at-point)
-      (let ((current-prefix-arg '(4)))
-        (call-interactively #'drover-open-at-point))
-      (should (equal (reverse drover-test-calls) '((:open "s" t) (:open "s" nil) (:open "s" (4))))))))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((origin (selected-window))
+            (opened nil))
+        (setf (alist-get 'fake drover--backends)
+              (append (list :open (lambda (session other-window)
+                                    (push (list (drover-session-id session) other-window (selected-window))
+                                          opened)))
+                      (alist-get 'fake drover--backends)))
+        (drover-keys-test-in 'view "s"
+          (let ((view (current-buffer)))
+            (call-interactively #'drover-open-at-point)
+            (should (equal (car opened) (list "s" nil origin)))
+            (call-interactively #'drover-open-other-window)
+            (let ((other (nth 2 (car opened))))
+              (should-not (eq other origin))
+              (should-not (nth 1 (car opened)))
+              (select-window origin)
+              (with-current-buffer view
+                (let ((current-prefix-arg '(4)))
+                  (call-interactively #'drover-open-at-point)))
+              (should (equal (car opened) (list "s" nil other)))
+              (should (= (length (window-list nil 'nomini)) 2)))))))))
 
 (ert-deftest drover-keys-test-open-parent ()
   (drover-keys-test-with (list (drover-test-session "root")
@@ -400,7 +418,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
       (should (equal (mapcar #'car groups) '("Global" "Session" "Prompt")))
       (should (equal (mapcar (lambda (group) (mapcar (lambda (column) (mapcar #'car column)) (cdr group)))
                              groups)
-                     '((("j" "b" "\"" "'") ("l" "L" "p") ("a" "m" "e" "d") ("C" "f" "." "O"))
+                     '((("j" "b" "\"" "n" "'") ("l" "L" "p") ("a" "m" "e" "d") ("C" "f" "." "O"))
                        (("o" "u" "c" "v") ("A" "K" "s" "+" "g") ("r" "x" "z") ("U" "V"))
                        (("RET" "S-<return>" "i" "k") ("/" "@" "y") ("t" "T")))))
       ;; One key, one command.
@@ -410,7 +428,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 (ert-deftest drover-keys-test-dispatch-commands ()
   "Each key of the menu runs the command of the shared key tables."
   (dolist (entry '(("j" . drover-next) ("b" . drover-select) ("\"" . drover-prompt-dwim)
-                   ("'" . drover-prompt-toggle) ("l" . drover-list)
+                   ("n" . drover-prompt-org-task) ("'" . drover-prompt-toggle) ("l" . drover-list)
                    ("L" . drover-list-side) ("p" . drover-select-project) ("a" . drover-prompt-agent)
                    ("m" . drover-prompt-model) ("e" . drover-prompt-effort)
                    ("d" . drover-prompt-directory) ("C" . drover-compact) ("f" . drover-fork)
@@ -445,9 +463,9 @@ agent, model, effort and directory of the next prompt are among them."
 (ert-deftest drover-keys-test-dispatch-prompt-entries ()
   "The prompt's entries open it from anywhere, but from the prompt itself."
   (should (equal (cdr (assoc "Global" (drover-keys-test-keys 'drover-dispatch)))
-                 '("j" "b" "\"" "'" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O")))
+                 '("j" "b" "\"" "n" "'" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O")))
   ;; Autoloaded: the menu opens without loading the prompt.
-  (dolist (command '(drover-prompt-dwim drover-prompt-toggle))
+  (dolist (command '(drover-prompt-dwim drover-prompt-org-task drover-prompt-toggle))
     (should (commandp command))
     (should (or (featurep 'drover-prompt)
                 (equal (cadr (symbol-function command)) "drover-prompt"))))
@@ -457,6 +475,17 @@ agent, model, effort and directory of the next prompt are among them."
       (let ((apt (drover-keys-test-apt 'drover-dispatch)))
         (should-not (member "\"" apt))
         (should (member "'" apt))))))
+
+(ert-deftest drover-keys-test-dispatch-task-prompt ()
+  "n starts a task prompt from an Org buffer, but drover's prompt."
+  (drover-keys-test-with nil
+    (with-temp-buffer
+      (should-not (member "n" (drover-keys-test-apt 'drover-dispatch)))
+      (let ((org-mode-hook nil))
+        (org-mode))
+      (should (member "n" (drover-keys-test-apt 'drover-dispatch)))
+      (setq-local drover-prompt-mode t)
+      (should-not (member "n" (drover-keys-test-apt 'drover-dispatch))))))
 
 (ert-deftest drover-keys-test-dispatch-in-view ()
   (drover-keys-test-with (list (drover-test-session "s" :status 'working :requests '((:kind question :summary "?"))
@@ -620,7 +649,8 @@ of sessions go after p, more prompt commands after O."
                         (equal (cadr (member before keys)) after)))
               (should (follows "b" "&"))
               (should (follows "&" "\""))
-              (should (follows "\"" "'"))
+              (should (follows "\"" "n"))
+              (should (follows "n" "'"))
               (should (follows "'" "#"))
               (should (follows "p" "!"))
               (should (follows "O" "P"))))))

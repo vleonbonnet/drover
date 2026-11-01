@@ -661,7 +661,7 @@ Each is (DIRECTORY CALLBACK)."
       (should (equal (buffer-local-value 'default-directory prompt) "/")))))
 
 (ert-deftest drover-prompt-test-dwim-on-heading ()
-  "A heading line starts the task's prompt, unless asked for plain context or a region is active."
+  "A heading line is quoted as any other line; the task prompt has a key of its own."
   (let (planned added)
     (cl-letf (((symbol-function 'drover-prompt-org-task) (lambda () (setq planned t)))
               ((symbol-function 'drover-prompt-add-context) (lambda () (setq added t))))
@@ -672,29 +672,33 @@ Each is (DIRECTORY CALLBACK)."
           (insert "* Task\nbody\n")
           (goto-char (point-min))
           (drover-prompt-dwim)
-          (should (and planned (not added)))
-          (setq planned nil)
-          (drover-prompt-dwim '(4))
           (should (and added (not planned)))
           (setq added nil)
-          (let ((drover-prompt-org-headings-start-tasks nil))
-            (drover-prompt-dwim))
-          (should (and added (not planned)))
-          (setq added nil)
-          (set-mark (point))
-          (end-of-line)
-          (activate-mark)
-          (drover-prompt-dwim)
-          (should (and added (not planned)))
-          (deactivate-mark)
-          (setq added nil)
-          (forward-line 1)
-          (drover-prompt-dwim)
+          ;; The former option changes nothing.
+          (with-suppressed-warnings ((obsolete drover-prompt-org-headings-start-tasks))
+            (let ((drover-prompt-org-headings-start-tasks t))
+              (drover-prompt-dwim)))
           (should (and added (not planned)))
           (setq added nil)
           (setq-local drover-prompt-mode t)
           (should-error (drover-prompt-dwim) :type 'user-error)
-          (should-not (or added planned)))))))
+          (should-not (or added planned)))))
+    ;; No prefix argument any more.
+    (should (equal (help-function-arglist 'drover-prompt-dwim) nil))
+    (should (get 'drover-prompt-org-headings-start-tasks 'byte-obsolete-variable))))
+
+(ert-deftest drover-prompt-test-dwim-quotes-heading ()
+  "The heading line goes into the prompt, linked and quoted."
+  (drover-prompt-test-with
+    (with-temp-buffer
+      (let ((org-mode-hook nil))
+        (org-mode)
+        (insert "* TODO Ship it\nbody\n")
+        (goto-char (point-min))
+        (drover-prompt-dwim)
+        (with-current-buffer (drover-prompt-buffer)
+          (should (string-match-p "\\`From buffer .* line 1:\n#\\+begin_src org\n,\\* TODO Ship it\n#\\+end_src\n\n\\'"
+                                  (buffer-string))))))))
 
 (ert-deftest drover-prompt-test-context-at-last-point ()
   "Context added while the prompt is hidden goes where the user left point, in order."
@@ -797,10 +801,56 @@ Each is (DIRECTORY CALLBACK)."
         (insert "text before\n* Heading\n")
         (goto-char (point-min))
         (should-error (drover-prompt-org-task) :type 'user-error)
+        ;; Narrowed to the text before the first heading, still none.
+        (narrow-to-region (point-min) (line-end-position))
+        (should-error (drover-prompt-org-task) :type 'user-error)
+        (widen)
         (goto-char (point-max))
         (setq-local drover-prompt-mode t)
         (should-error (drover-prompt-org-task) :type 'user-error)))
     (should-not (drover-prompt-buffer))))
+
+(ert-deftest drover-prompt-test-task-anywhere-in-entry ()
+  "The task is the heading point is under, from its body, folded or narrowed to it."
+  (drover-prompt-test-with
+    (let ((ids nil))
+      (cl-letf (((symbol-function 'org-id-get-create)
+                 (lambda (&rest _)
+                   (push (org-get-heading t t t t) ids)
+                   (concat "ID-" (car ids))))
+                ((symbol-function 'y-or-n-p) #'always))
+        (with-temp-buffer
+          (let ((org-mode-hook nil))
+            (org-mode)
+            (insert "* Parent\nparent body\n** Child\nchild body\nmore\n* Next\n")
+            (cl-flet ((task-at (text)
+                        (goto-char (point-min))
+                        (search-forward text)
+                        (drover-prompt-org-task)
+                        (with-current-buffer (drover-prompt-buffer)
+                          drover-prompt-title)))
+              (should (equal (task-at "parent body") "Parent"))
+              (should (equal (task-at "more") "Child"))
+              (should (equal (task-at "* Next") "Next"))
+              ;; Folded: point within the hidden body.
+              (goto-char (point-min))
+              (search-forward "** Child")
+              (org-fold-subtree t)
+              (search-forward "child body")
+              (should (invisible-p (point)))
+              (drover-prompt-org-task)
+              (should (equal (buffer-local-value 'drover-prompt-title (drover-prompt-buffer)) "Child"))
+              (org-fold-show-all)
+              ;; Narrowed to the body, the heading out of reach.
+              (goto-char (point-min))
+              (search-forward "child body")
+              (narrow-to-region (line-beginning-position) (line-end-position))
+              (drover-prompt-org-task)
+              (should (equal (buffer-substring (point-min) (point-max)) "child body"))
+              (should (equal (buffer-local-value 'drover-prompt-title (drover-prompt-buffer)) "Child"))
+              (should (equal (with-current-buffer (drover-prompt-buffer) (buffer-string))
+                             "Work on [[id:ID-Child][Child]]. Investigate fully and provide a plan."))
+              (widen))))))))
 
 (ert-deftest drover-prompt-test-attach ()
   "A buffer is quoted whole, a project file linked; the prompt's own region is refused."

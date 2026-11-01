@@ -139,12 +139,16 @@ their defaults; opencode.el's loads drover's OpenCode backend."
   :type '(choice (const :tag "None" nil) string)
   :group 'drover)
 
-(defcustom drover-prompt-org-headings-start-tasks t
-  "Whether `drover-prompt-dwim' on an Org heading starts a task prompt.
-When non-nil, `drover-prompt-dwim' on a heading line, without an
-active region nor a prefix argument, runs `drover-prompt-org-task'."
-  :type 'boolean
-  :group 'drover)
+(defvar drover-prompt-org-headings-start-tasks nil
+  "Whether `drover-prompt-dwim' on an Org heading started a task prompt.
+It no longer does, whatever this says: `drover-prompt-dwim' always
+quotes the line at point or the region, and `drover-prompt-org-task', n
+in `drover-dispatch', starts a prompt for the task from anywhere in
+its entry.")
+(make-obsolete-variable
+ 'drover-prompt-org-headings-start-tasks
+ "`drover-prompt-dwim' always quotes; `drover-prompt-org-task', n in `drover-dispatch', starts task prompts."
+ "0.1.0")
 
 (defcustom drover-prompt-quote-timeout 10
   "Seconds `drover-prompt-quote-sessions' waits for the replies it quotes.
@@ -575,31 +579,26 @@ buffer."
           (t (insert "\n\n")))))
 
 ;;;###autoload
-(defun drover-prompt-dwim (&optional plain)
+(defun drover-prompt-dwim ()
   "Open the prompt, or add to it the context at point.
 The first call from a buffer shows the prompt, begun in that buffer's
 directory, with a link to the line at point and the active region
 quoted in a code block; later calls add such a block at the point the
 user left the prompt at.  In a list of sessions, the context is the
 sessions the region selects, else the one at point, each linked and
-quoted with its last reply (see `drover-prompt-quote-sessions').  On
-an Org heading line, without an active region, start a prompt for that
-task instead (see `drover-prompt-org-task'), when
-`drover-prompt-org-headings-start-tasks' says so, unless PLAIN, the
-prefix argument, asks for the heading line as plain context.  Signal a
-`user-error' in the prompt buffer itself."
-  (interactive "P")
+quoted with its last reply (see `drover-prompt-quote-sessions').  An
+Org heading line is quoted as any other line: `drover-prompt-org-task'
+starts a prompt for an Org task.  Signal a `user-error' in the prompt
+buffer itself."
+  (interactive)
   (when drover-prompt-mode
     (user-error "Already in the prompt"))
-  (if (and drover-prompt-org-headings-start-tasks (not plain) (not (use-region-p))
-           (derived-mode-p 'org-mode) (org-at-heading-p))
-      (drover-prompt-org-task)
-    (drover-prompt-add-context)))
+  (drover-prompt-add-context))
 
 (defun drover-prompt-add-context ()
   "Open the prompt, or add to it the context at point.
-As `drover-prompt-dwim' does, without its Org task case.  The context
-is the active region, else the line at point, formatted by
+As `drover-prompt-dwim' does, which refuses the prompt buffer first.
+The context is the active region, else the line at point, formatted by
 `drover-prompt-format-context'.  In a list of sessions, it is the
 sessions selected, or the one at point, quoted with their last replies
 by `drover-prompt-quote-sessions'.  It goes at point in the prompt's
@@ -669,47 +668,52 @@ prompt begins in the current buffer's directory."
 
 ;;;###autoload
 (defun drover-prompt-org-task ()
-  "Start a prompt for the Org task at point, the heading point is under.
-The prompt replaces the prompt's text, after asking when some is being
-written: `drover-prompt-task-format' with an `id:' link to the task,
-the task's file saved so that the link resolves.  It picks the agent
-`drover-prompt-task-agent' and titles the new session after the
+  "Start a prompt for the Org task point is in, from anywhere in its entry.
+The task is the heading point is on or under, found with the buffer
+widened, so that an entry narrowed to its body, or folded, is found
+too.  The prompt replaces the prompt's text, after asking when some is
+being written: `drover-prompt-task-format' with an `id:' link to the
+task, the task's file saved so that the link resolves.  It picks the
+agent `drover-prompt-task-agent' and titles the new session after the
 heading; picks made on an empty prompt stay, a replaced draft's go."
   (interactive)
   (unless (derived-mode-p 'org-mode)
     (user-error "Not in Org mode"))
   (when drover-prompt-mode
     (user-error "Already in the prompt"))
-  (when (org-before-first-heading-p)
-    (user-error "Point is not under an Org heading"))
-  (let ((draft (drover-prompt-buffer)))
-    (when (and draft
-               (not (string-blank-p (with-current-buffer draft (buffer-string))))
-               (not (y-or-n-p "Replace the prompt being written with this task? ")))
-      (user-error "Prompt kept")))
-  (require 'org-id)
-  (let* ((id (save-excursion
-               (unless (org-at-heading-p) (org-back-to-heading t))
-               (org-id-get-create)))
-         (heading (save-excursion
-                    (unless (org-at-heading-p) (org-back-to-heading t))
-                    (org-get-heading t t t t)))
-         (text (format drover-prompt-task-format (format "[[id:%s][%s]]" id heading)))
-         (directory default-directory)
-         (buffer (drover-prompt-buffer t)))
-    ;; The new ID must reach the file for the link to resolve.
-    (when (and buffer-file-name (buffer-modified-p))
-      (save-buffer))
-    (with-current-buffer buffer
-      (if (string-blank-p (buffer-string))
-          (drover-prompt--begin directory)
-        (drover-prompt--reset directory))
-      (erase-buffer)
-      (insert text)
-      (setq drover-prompt-title heading)
-      (when drover-prompt-task-agent
-        (setq drover-prompt-picked-agent drover-prompt-task-agent)))
-    (drover-prompt--display buffer)))
+  (let ((task (org-with-wide-buffer
+               (when (org-before-first-heading-p)
+                 (user-error "Point is not under an Org heading"))
+               (org-back-to-heading t)
+               (point))))
+    (let ((draft (drover-prompt-buffer)))
+      (when (and draft
+                 (not (string-blank-p (with-current-buffer draft (buffer-string))))
+                 (not (y-or-n-p "Replace the prompt being written with this task? ")))
+        (user-error "Prompt kept")))
+    (require 'org-id)
+    (let* ((id (org-with-wide-buffer
+                (goto-char task)
+                (org-id-get-create)))
+           (heading (org-with-wide-buffer
+                     (goto-char task)
+                     (org-get-heading t t t t)))
+           (text (format drover-prompt-task-format (format "[[id:%s][%s]]" id heading)))
+           (directory default-directory)
+           (buffer (drover-prompt-buffer t)))
+      ;; The new ID must reach the file for the link to resolve.
+      (when (and buffer-file-name (buffer-modified-p))
+        (save-buffer))
+      (with-current-buffer buffer
+        (if (string-blank-p (buffer-string))
+            (drover-prompt--begin directory)
+          (drover-prompt--reset directory))
+        (erase-buffer)
+        (insert text)
+        (setq drover-prompt-title heading)
+        (when drover-prompt-task-agent
+          (setq drover-prompt-picked-agent drover-prompt-task-agent)))
+      (drover-prompt--display buffer))))
 
 ;;;; Quoting sessions
 

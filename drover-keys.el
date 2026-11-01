@@ -42,7 +42,7 @@
 ;; global key.  Other packages add their own global commands to the menu
 ;; with `transient-append-suffix' and `transient-insert-suffix', placed
 ;; relative to drover's keys: more ways to pick a session or prompt
-;; after "'", the last of drover's (the prompt's " and '); more lists of
+;; after "'", the last of drover's (the prompt's ", n and '); more lists of
 ;; sessions after "p", where `drover-opencode' appends its session
 ;; search; more prompt commands after "O".
 ;;
@@ -71,6 +71,7 @@
 (autoload 'drover-list-first-session "drover-list" nil t)
 (autoload 'drover-list-last-session "drover-list" nil t)
 (autoload 'drover-prompt-dwim "drover-prompt" nil t)
+(autoload 'drover-prompt-org-task "drover-prompt" nil t)
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 
 (defvar drover-prompt-mode)
@@ -81,13 +82,17 @@
 
 (defun drover-open-at-point (&optional other-window)
   "Display the session at point; with OTHER-WINDOW, in another window.
-Views bind it to RET."
+Views bind it to RET.  The session shows where the view sends
+sessions, see `drover-open'."
   (interactive "P")
   (drover-open (drover-session-at-point) other-window))
 
 (defun drover-open-other-window (session)
-  "Display SESSION in another window.
-Interactively, SESSION is the session at point."
+  "Display SESSION in another window than the one RET would show it in.
+From a list in a side window, that is another window than the one
+where you work, split from it when there is none; from a list in an
+ordinary window, another window than the list's.  Interactively,
+SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
   (drover-open session t))
 
@@ -157,18 +162,14 @@ Interactively, SESSION is the session at point."
 (defun drover--follow-target ()
   "Return the window in which `drover-follow-mode' shows a session.
 It is the one `drover-main-window-function' returns, else the one
-used last, else the most recently used other window that is not
-dedicated, else a new window."
+used last, else another window, as `drover-other-window' chooses it."
   (let ((own (selected-window)))
     (or (and drover-main-window-function (funcall drover-main-window-function))
         (and (window-live-p drover--follow-window)
              (not (eq drover--follow-window own))
              (eq (window-frame drover--follow-window) (selected-frame))
              drover--follow-window)
-        (get-mru-window nil nil t)
-        (split-window-sensibly own)
-        (ignore-errors (split-window own))
-        (user-error "No window to show sessions in"))))
+        (drover-other-window own))))
 
 (defun drover--follow (&optional force)
   "Show the session at point in another window if it changed since last time.
@@ -528,6 +529,12 @@ otherwise as `drover-dispatch-session' tells of the session at point."
   "Return non-nil when the dispatch menu acts on drover's own prompt buffer."
   (plist-get (drover--scope) :prompt))
 
+(defun drover-dispatch-org-task-p ()
+  "Return non-nil when the dispatch menu may start a prompt for an Org task.
+That is in an Org buffer other than drover's prompt, which is one too:
+`drover-prompt-org-task' finds the task point is under."
+  (and (derived-mode-p 'org-mode) (not (drover-dispatch-in-prompt-p))))
+
 (defun drover-dispatch-prompt-p (action)
   "Return non-nil when prompt ACTION applies from where the dispatch menu acts.
 For `compact' and `fork', a list's session at point whose backend
@@ -667,6 +674,7 @@ sends prompts, where RET stays Send."
    [("j" "Next" drover-next)
     ("b" "Select" drover-select)
     ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
+    ("n" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
     ("'" "Show prompt" drover-prompt-toggle)]
    [("l" "List" drover-list)
     ("L" "Side list" drover-list-side)

@@ -42,7 +42,11 @@
 ;; subagents show, all, the active ones or none, `drover-show-subagents'
 ;; says; whether shown or not, a session whose subagents work or wait
 ;; for you tells so beside its status (`drover-subagent-glyphs').  The
-;; title of a session open in a buffer is in `drover-open-session'.
+;; colour of a title tells where its session is in Emacs: in a buffer
+;; no window shows (`drover-open-session'), in a window
+;; (`drover-shown-session'), in the window you work in
+;; (`drover-active-session'); as windows change, only the titles whose
+;; place changed take another face.
 ;;
 ;; Working glyphs are animated (`drover-animations'): a timer changes
 ;; the display of their characters alone, every frame as wide as the
@@ -69,9 +73,8 @@
 ;;
 ;; A session whose provider still holds its prompt cache shows how much
 ;; of the cache's lifetime is left: as a short bar and the time left in
-;; columns, as the background of its line, filled from the left, in two
-;; lines.  Only the bar and the time left are redrawn as the cache runs
-;; out.
+;; columns, as a line under its line, from the left, in two lines.  Only
+;; the bar and the time left are redrawn as the cache runs out.
 ;;
 ;; An active region selects the sessions whose lines it spans, those
 ;; Magit highlights: marking seen, interrupting, archiving and deleting
@@ -106,15 +109,13 @@ It inherits `variable-pitch', which fits more in a line; inherit
 `fixed-pitch' instead for a monospaced list."
   :group 'drover-faces)
 
-(defface drover-list-current '((t :inherit highlight :extend t))
-  "Face of the session shown in the main window."
-  :group 'drover-faces)
-
 (defface drover-list-header '((t :inherit drover-list))
   "Face of the names of the columns, in the header line of the session list.
 It goes over the face `header-line'; inheriting `drover-list', it draws
 the names in the font of the columns they name."
   :group 'drover-faces)
+
+(define-obsolete-face-alias 'drover-list-current 'drover-active-session "0.1.0")
 
 (defconst drover-list-buffer-name "*drover sessions*"
   "Name of the session list buffer.")
@@ -700,18 +701,30 @@ the active subagents of each session."
             " "
             (and indicator (concat indicator " ")))))
 
-(defun drover-list--title-text (session depth)
+(defun drover-list--title-face (state)
+  "Return the face of a title whose session is in STATE, or nil.
+STATE is a value of `drover-list--title-state'."
+  (pcase state
+    ('active 'drover-active-session)
+    ('shown 'drover-shown-session)
+    ('open 'drover-open-session)))
+
+(defun drover-list--title-text (session depth state)
   "Return the title of SESSION, at DEPTH in its tree, as its line shows it.
 A subagent at the top of its tree, its parent not listed, starts with
-an arrow; an idle session is dimmed; the title of a session open in a
-buffer is in the face `drover-open-session', over the dimming."
+an arrow; an idle session is dimmed; the title of a session in STATE,
+open in a buffer, is in the face of that state (see
+`drover-list--title-face'), over the dimming.  The title, not the
+arrow, carries the session's key as its property `drover-list-title',
+so that its face may change in place."
   (let* ((title (drover-list--one-line (drover-session-display-title session)))
-         (faces (delq nil (list (and (drover-session-buffer session) 'drover-open-session)
+         (faces (delq nil (list (drover-list--title-face state)
                                 (and (eq (drover-session-status session) 'idle) 'drover-dim)))))
     (concat (if (and (zerop depth) (drover-session-parent session))
                 (drover-face "↳ " 'drover-dim)
               "")
-            (if faces (drover-face title (if (cdr faces) faces (car faces))) title))))
+            (propertize (if faces (drover-face title (if (cdr faces) faces (car faces))) title)
+                        'drover-list-title (drover-session-key session)))))
 
 (defun drover-list--bar (fraction pixels face)
   "Return a short bar PIXELS wide, FRACTION of it full in FACE.
@@ -812,10 +825,11 @@ character.  The prompt cache has no text: it is drawn apart."
   (icons nil :documentation "The glyphs before the title, and a space.")
   (title-start nil :documentation "Position of the title, in pixels.")
   (title nil :documentation "The title, without the glyph.")
+  (state nil :documentation "Where the session is in Emacs, see `drover-list--title-state'.")
   (texts nil :documentation "Alist (FIELD . TEXT) of the other fields.")
   (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil."))
 
-(defun drover-list--metrics (now &optional active)
+(defun drover-list--metrics (now &optional active places)
   "Return the measures lines of the list are drawn with at time NOW.
 The value is a plist of :now, :char, the width of an average character,
 :gap, the room between two columns, :space, the width of a space,
@@ -824,13 +838,14 @@ width lines may take, :status-cell and :subagent-cell, the cells of the
 status glyphs and of the glyphs of active subagents (see
 `drover-list--cell'), :frames, an alist (STATUS STRINGS WIDTHS WIDTH)
 of the animated status glyphs, their frames and widths (see
-`drover-list--frames') and the right of the status cell, and :active,
+`drover-list--frames') and the right of the status cell, :active,
 ACTIVE, the table of the active subagents of each session (see
-`drover-tree-active-subagents'), or nil.  The status cell holds every
-status glyph and frame, so that titles line up whatever the status; the
-subagent cell both glyphs of `drover-subagent-glyphs'.  Widths are in
-pixels; lines leave room for the ellipsis Magit adds to collapsed
-headings."
+`drover-tree-active-subagents'), or nil, and :places, PLACES, where
+buffers are shown (see `drover-list--places'), or nil.  The status cell
+holds every status glyph and frame, so that titles line up whatever
+the status; the subagent cell both glyphs of `drover-subagent-glyphs'.
+Widths are in pixels; lines leave room for the ellipsis Magit adds to
+collapsed headings."
   (let* ((char (drover-list--char-width))
          (statuses (seq-uniq (append drover-status-order (mapcar #'car drover-status-glyphs))))
          (frames (delq nil (mapcar (lambda (status)
@@ -850,17 +865,20 @@ headings."
           :status-cell status-cell
           :subagent-cell (drover-list--cell (mapcar #'drover-list--subagent-glyph '(waiting working)))
           :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
-          :active active)))
+          :active active
+          :places places)))
 
 (defun drover-list--row (session depth indent group metrics)
   "Return the row of SESSION at DEPTH in its tree, its glyph INDENT pixels in.
 GROUP is the group showing it, as (GROUPING . VALUE), or nil; METRICS
 are the measures of `drover-list--metrics'."
-  (let ((icons (drover-list--icons session metrics)))
+  (let ((icons (drover-list--icons session metrics))
+        (state (drover-list--title-state session (plist-get metrics :places))))
     (drover-list--row-create
      :session session :depth depth :indent indent :icons icons
      :title-start (+ indent (drover-list--pixel-width icons))
-     :title (drover-list--title-text session depth)
+     :title (drover-list--title-text session depth state)
+     :state state
      :texts (mapcar (lambda (field) (cons field (drover-list--text field session group metrics)))
                     '(location branch agent model provider context created age summary))
      :cache (drover-session-cache-fraction session (plist-get metrics :now)))))
@@ -1121,6 +1139,22 @@ the title's column does not come first."
           (drover-list--text-segment (drover-list--row-icons row) indent)
           (drover-list--text-segment title (+ shift (drover-list--row-title-start row))))))
 
+(defconst drover-list--cache-fill '((:inverse-video t) drover-cache-bar)
+  "Face of the full part of the short bar of a prompt cache.
+It fills the bar with the foreground of `drover-cache-bar', in inverse
+video, so that the highlight of the current line or of the region,
+which sets only a background, does not hide it.")
+
+(defun drover-list--cache-line-face ()
+  "Return the face drawing a prompt cache under a line, in two lines.
+It underlines the line, at its descent, in the foreground of
+`drover-cache-bar': the text keeps its colours, and the highlights of
+the current line and of the region, which set only a background, leave
+it visible.  The colour is that of the selected frame, read as the list
+is drawn, which a theme enabled draws anew."
+  `(:underline (:color ,(or (face-foreground 'drover-cache-bar nil t) 'foreground-color)
+                :position t)))
+
 (defun drover-list--cache-label (remaining)
   "Return the time left of a prompt cache, REMAINING seconds, as a field shows it.
 It is text, as copyable as the rest of the line, which the cache timer
@@ -1139,9 +1173,11 @@ change as time passes.  The tooltip tells how the cache stands when
 shown, see `drover-list--cache-help-echo'."
   (let* ((bar (* drover-list-cache-bar-width (plist-get layout :char)))
          (full (round (* bar fraction))))
-    (concat (propertize " " 'display `(space :width (,full)) 'face 'drover-cache-bar
+    (concat (propertize (drover-face " " drover-list--cache-fill)
+                        'display `(space :width (,full))
                         'drover-list-cache 'full 'help-echo #'drover-list--cache-help-echo)
-            (propertize " " 'display `(space :width (,(- bar full))) 'face 'drover-cache-trough
+            (propertize (drover-face " " 'drover-cache-trough)
+                        'display `(space :width (,(- bar full)))
                         'drover-list-cache 'trough 'help-echo #'drover-list--cache-help-echo)
             (propertize " " 'drover-list-cache 'space 'help-echo #'drover-list--cache-help-echo)
             (drover-list--cache-label remaining))))
@@ -1231,6 +1267,15 @@ else nil."
 
 (defvar-local drover-list--drawn nil
   "Hash table of the sessions drawn, by key, as records of the last drawing.")
+
+(defvar-local drover-list--title-states nil
+  "Hash table of the place of each session drawn, by key, as titles show it.
+Each value is a value of `drover-list--title-state'.")
+
+(defvar drover-list--session-buffers (make-hash-table :test #'eq :weakness 'key)
+  "Buffers of the sessions lists drew in them, as keys.
+Killing one of them changes the place of its session; killing another
+buffer, as `with-temp-buffer' does all the time, costs a lookup.")
 
 (defvar-local drover-list--caches nil
   "Prompt caches drawn, live when last drawn, as plists.
@@ -1784,14 +1829,18 @@ is noted in `drover-list--caches'."
       (magit-insert-section-body
         (drover-list--insert-details row layout)))
     (puthash (drover-session-key session) session drover-list--drawn)
+    (puthash (drover-session-key session) (drover-list--row-state row) drover-list--title-states)
+    (when (drover-list--row-state row)
+      (puthash (drover-session-buffer session) t drover-list--session-buffers))
     (when (nth 1 drawn)
       (push (list :session session :start (copy-marker start) :kind (nth 1 drawn) :spec (nth 2 drawn)
                   :width (plist-get layout :width)
                   :bar (* drover-list-cache-bar-width (plist-get layout :char))
                   :overlay (and (eq (nth 1 drawn) 'narrow)
                                 (let ((overlay (make-overlay start start)))
-                                  (overlay-put overlay 'face 'drover-cache-bar)
-                                  ;; Below the highlights of the current section and session.
+                                  (overlay-put overlay 'face (drover-list--cache-line-face))
+                                  ;; Under the highlights of the current section and
+                                  ;; the region, whose backgrounds leave its underline.
                                   (overlay-put overlay 'priority -50)
                                   overlay)))
             drover-list--caches))))
@@ -1998,7 +2047,8 @@ unless the user hides it.  In two lines, it does not show."
          (groups (and all (drover-view-groups all now)))
          ;; From every session, so that a parent tells its subagents
          ;; at work whether or not they are shown.
-         (metrics (drover-list--metrics now (drover-tree-active-subagents (drover-tree all))))
+         (metrics (drover-list--metrics now (drover-tree-active-subagents (drover-tree all))
+                                        (drover-list--places)))
          (grouped (mapcar (pcase-lambda (`(,group . ,nodes))
                             (cons group (drover-list--tree-rows nodes group metrics)))
                           groups))
@@ -2143,6 +2193,7 @@ second during a turn."
           magit-section-focused-sections nil
           drover-list--caches nil
           drover-list--drawn (make-hash-table :test #'equal)
+          drover-list--title-states (make-hash-table :test #'equal)
           drover-list--width (drover-list--line-width)
           drover-list--stale nil)
     (drover-list--measure-begin)
@@ -2169,7 +2220,6 @@ second during a turn."
           drover-list--prefetched (and (drover-list--prefetch-wanted-p)
                                        (make-hash-table :test #'equal)))
     (drover-list--prefetch)
-    (drover-list--update-current)
     (magit-section-update-highlight t)
     (set-buffer-modified-p nil)
     (push (current-buffer) magit-section--refreshed-buffers)
@@ -2201,11 +2251,10 @@ For `drover-changed-hook'."
 
 (defun drover-list--refresh-if-needed ()
   "Redraw the current list if it is stale or was drawn for another width.
-Otherwise bring the highlight of the main window's session and the
-timers up to date."
+Otherwise bring the faces of titles and the timers up to date."
   (if (or drover-list--stale (not (eql drover-list--width (drover-list--line-width))))
       (drover-list--render)
-    (drover-list--update-current)
+    (drover-list--restyle-titles)
     (drover-list--update-timers)))
 
 (defun drover-list--on-window-change (window)
@@ -2346,47 +2395,164 @@ sessions open in the main window; from an ordinary one, as usual."
     (and window (window-parameter window 'window-side)
          (drover-list--main-window (window-frame window)))))
 
-(defvar-local drover-list--current-overlays nil
-  "Overlays highlighting the session shown in the main window.")
+;;;; Where sessions are
 
-(defun drover-list--session-of-buffer (buffer)
-  "Return the section of the session BUFFER shows, or nil."
-  (when (and buffer drover-list--drawn)
-    (seq-some (lambda (container)
-                (seq-find (lambda (section)
-                            (when-let* ((session (gethash (oref section value) drover-list--drawn)))
-                              (eq (drover-session-buffer session) buffer)))
-                          (drover-list--session-sections container)))
-              (drover-list--containers))))
+;; The colour of a title tells where its session is in Emacs.  Windows
+;; and the selection change far more often than sessions, so a change
+;; of windows gives new faces to the titles whose place changed, in
+;; place, without drawing the list anew; buffers opening or closing are
+;; changes their backends report, and redraw it.
 
-(defun drover-list--update-current ()
-  "Highlight, in each window showing the list, the main window's session.
-The main window is that of `drover-list--main-window' on the window's
-frame; the heading of the session its buffer shows is highlighted."
-  (mapc #'delete-overlay drover-list--current-overlays)
-  (setq drover-list--current-overlays nil)
-  (dolist (window (get-buffer-window-list (current-buffer) nil t))
-    (when-let* ((main (drover-list--main-window (window-frame window)))
-                (section (drover-list--session-of-buffer (window-buffer main))))
-      (let ((overlay (make-overlay (oref section start)
-                                   (or (oref section content) (oref section end)))))
-        (overlay-put overlay 'face 'drover-list-current)
-        (overlay-put overlay 'window window)
-        (push overlay drover-list--current-overlays)))))
+(defvar drover-list--restyle-timer nil
+  "Timer giving titles their faces, once a session buffer killed is gone.")
+
+(defun drover-list--view-window-p (window)
+  "Return non-nil when WINDOW shows one of drover's views."
+  (buffer-local-value 'drover-view-p (window-buffer window)))
+
+(defun drover-list--active-window ()
+  "Return the window the user works in, or nil.
+It is the selected window, but a list's or the minibuffer's: then the
+window selected before the minibuffer, else the window of the frame
+used most recently that shows no list."
+  (let ((window (selected-window)))
+    (when (window-minibuffer-p window)
+      (setq window (or (minibuffer-selected-window) window)))
+    (if (not (or (window-minibuffer-p window) (drover-list--view-window-p window)))
+        window
+      (let (best)
+        (dolist (other (window-list (window-frame window) 'nomini))
+          (unless (or (drover-list--view-window-p other)
+                      (and best (<= (window-use-time other) (window-use-time best))))
+            (setq best other)))
+        best))))
+
+(defun drover-list--places ()
+  "Return where buffers are shown now, as (ACTIVE . SHOWN).
+ACTIVE is the buffer of `drover-list--active-window', or nil; SHOWN a
+hash table of the buffers shown in windows of visible frames, as keys."
+  (let ((shown (make-hash-table :test #'eq))
+        (active (drover-list--active-window)))
+    (dolist (window (window-list-1 nil 'nomini 'visible))
+      (puthash (window-buffer window) t shown))
+    (cons (and active (window-buffer active)) shown)))
+
+(defun drover-list--title-state (session places)
+  "Return where SESSION is in Emacs, given PLACES, for its title, or nil.
+PLACES is a value of `drover-list--places'.  The value is `active' when
+the buffer of SESSION is that of the window the user works in, `shown'
+when a window of a visible frame shows it, `open' when it has a buffer
+no window shows, and nil without a buffer."
+  (when-let* ((places)
+              (buffer (drover-session-buffer session)))
+    (cond ((eq buffer (car places)) 'active)
+          ((gethash buffer (cdr places)) 'shown)
+          (t 'open))))
+
+(defun drover-list--title-runs (keys)
+  "Return the titles of the sessions whose keys KEYS holds, as (KEY START END).
+KEYS is a hash table, whose values may be nil; titles are found by
+their property `drover-list-title', their ellipsis included when cut."
+  (let ((position (point-min))
+        (runs nil))
+    (while (setq position (text-property-not-all position (point-max) 'drover-list-title nil))
+      (let ((key (get-text-property position 'drover-list-title))
+            (end (next-single-property-change position 'drover-list-title nil (point-max))))
+        (unless (eq (gethash key keys 'absent) 'absent)
+          (push (list key position end) runs))
+        (setq position end)))
+    (nreverse runs)))
+
+(defun drover-list--title-faces (face state)
+  "Return FACE, the face of a title, with the face of STATE in place of its own.
+FACE is a value of the property `face'; the face of a state comes
+first, over the others, as `drover-list--title-text' puts it."
+  (let* ((others (seq-remove (lambda (face)
+                               (memq face '(drover-active-session drover-shown-session
+                                                                  drover-open-session)))
+                             (ensure-list face)))
+         (faces (delq nil (cons (drover-list--title-face state) others))))
+    (if (cdr faces) faces (car faces))))
+
+(defun drover-list--reface (start end state)
+  "Give the title between START and END the face of STATE, in place.
+Every character of a title has the same faces, the ellipsis of a cut
+title included."
+  (let ((face (drover-list--title-faces (get-text-property start 'face) state)))
+    (put-text-property start end 'face face)
+    (put-text-property start end 'font-lock-face face)))
+
+(defun drover-list--restyle-titles ()
+  "Give the titles of the current list the faces of where their sessions are now.
+Only the titles whose session changed place change, in place: the list
+is not drawn anew, but when a face would change the width of a title,
+as a bold one would, whose line was laid out in the other one."
+  (when (and drover-list--drawn drover-list--title-states)
+    (let ((places (drover-list--places))
+          (changed (make-hash-table :test #'equal)))
+      (maphash (lambda (key session)
+                 (let ((state (drover-list--title-state session places)))
+                   (unless (eq state (gethash key drover-list--title-states))
+                     (puthash key state changed))
+                   (when state
+                     (puthash (drover-session-buffer session) t drover-list--session-buffers))))
+               drover-list--drawn)
+      (unless (zerop (hash-table-count changed))
+        (let ((runs (drover-list--title-runs changed)))
+          (if (seq-some (pcase-lambda (`(,key ,start ,end))
+                          (let ((text (buffer-substring start end)))
+                            (/= (drover-list--pixel-width text)
+                                (drover-list--pixel-width
+                                 (propertize text 'face (drover-list--title-faces
+                                                         (get-text-property 0 'face text)
+                                                         (gethash key changed)))))))
+                        runs)
+              (drover-list--render)
+            (let ((inhibit-read-only t)
+                  (deactivate-mark nil))
+              (with-silent-modifications
+                (pcase-dolist (`(,key ,start ,end) runs)
+                  (drover-list--reface start end (gethash key changed)))))
+            (maphash (lambda (key state) (puthash key state drover-list--title-states))
+                     changed)))))))
 
 (defun drover-list--windows-changed (&optional _frame)
-  "Update the highlight of the main window's session in displayed lists.
+  "Give the titles of displayed lists the faces of where their sessions are.
 For `window-buffer-change-functions' and
 `window-selection-change-functions'."
+  (when (timerp drover-list--restyle-timer)
+    (cancel-timer drover-list--restyle-timer))
+  (setq drover-list--restyle-timer nil)
   (dolist (buffer (drover-list--shown-buffers))
     (with-current-buffer buffer
-      (drover-list--update-current))))
+      (drover-list--restyle-titles))))
+
+(defun drover-list--buffer-killed ()
+  "Give titles new faces once the session buffer being killed is gone.
+For `kill-buffer-hook', which runs while the buffer still lives."
+  (when (gethash (current-buffer) drover-list--session-buffers)
+    (remhash (current-buffer) drover-list--session-buffers)
+    (unless (timerp drover-list--restyle-timer)
+      (setq drover-list--restyle-timer (run-at-time 0 nil #'drover-list--windows-changed)))))
+
+(defun drover-list--theme-changed (&rest _)
+  "Measure text anew and redraw lists, a theme having been enabled or disabled.
+A theme may change fonts, which widths depend on, and the colour of
+`drover-cache-bar', which the lines of prompt caches are drawn in.  For
+`enable-theme-functions' and `disable-theme-functions'."
+  (dolist (buffer (drover-list--buffers))
+    (with-current-buffer buffer
+      (setq drover-list--widths nil))
+    (drover-list--update buffer)))
 
 (defun drover-list--watch ()
   "Follow sessions and windows while a list buffer lives."
   (add-hook 'drover-changed-hook #'drover-list--on-change)
   (add-hook 'window-buffer-change-functions #'drover-list--windows-changed)
-  (add-hook 'window-selection-change-functions #'drover-list--windows-changed))
+  (add-hook 'window-selection-change-functions #'drover-list--windows-changed)
+  (add-hook 'kill-buffer-hook #'drover-list--buffer-killed)
+  (add-hook 'enable-theme-functions #'drover-list--theme-changed)
+  (add-hook 'disable-theme-functions #'drover-list--theme-changed))
 
 (defun drover-list--on-kill ()
   "Stop following sessions and windows once the last list is killed.
@@ -2398,6 +2564,10 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
     (remove-hook 'drover-changed-hook #'drover-list--on-change)
     (remove-hook 'window-buffer-change-functions #'drover-list--windows-changed)
     (remove-hook 'window-selection-change-functions #'drover-list--windows-changed)
+    (remove-hook 'kill-buffer-hook #'drover-list--buffer-killed)
+    (remove-hook 'enable-theme-functions #'drover-list--theme-changed)
+    (remove-hook 'disable-theme-functions #'drover-list--theme-changed)
+    (drover-list--stop-timer 'drover-list--restyle-timer)
     (drover-list--stop-timer 'drover-list--age-timer)
     (drover-list--stop-timer 'drover-list--cache-timer)
     (drover-list--stop-timer 'drover-list--frame-timer)))
@@ -2556,15 +2726,14 @@ side window, sessions open in the window where you work."
 
 (defun drover-list-display ()
   "Show the session at point in another window, the list staying selected.
-From a side window, that is the window where you work."
+From a side window, that is the window where you work, where RET opens
+it; from an ordinary window, another window, as
+`drover-open-other-window' chooses it."
   (interactive nil drover-list-mode)
   (let ((session (drover-session-at-point)))
-    (if-let* ((main (drover-list--target-window)))
-        (with-selected-window main
-          (drover-open session))
-      (save-selected-window
-        (drover-open session t)))
-    (drover-list--update-current)))
+    (save-selected-window
+      (drover-open session (not (drover-list--target-window))))
+    (drover-list--restyle-titles)))
 
 ;;;; Moving between sessions
 
@@ -2718,8 +2887,11 @@ session's last turn, \\[drover-open-at-point] opens the session at point and
 What a line shows depends on the window's width: see
 `drover-list-fields'.  In columns, the header line names them; hover
 a name to read what its column shows.  In a side window, opened by
-`drover-list-side', sessions open in the window where you work, and
-the session it shows is highlighted.  The keys of `drover-session-map'
+`drover-list-side', sessions open in the window where you work.  The
+colour of a title tells where its session is: in a buffer no window
+shows, in a window, or in the window you work in, the faces
+`drover-open-session', `drover-shown-session' and
+`drover-active-session'.  The keys of `drover-session-map'
 act on the session at point; \\[drover-toggle-subagents] shows every subagent, the active ones or
 none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 `drover-list'.

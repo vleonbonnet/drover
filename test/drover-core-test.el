@@ -61,16 +61,63 @@
                                   (drover-test-session "waiting" :status 'waiting :since 3.0))
     (should (equal (drover-test-ids (drover-attention-sessions)) '("waiting" "done")))))
 
+(defun drover-test-subagent-family ()
+  "Return a parent with subagents of every kind, as lists see them.
+\"ended\" finished unseen, \"asking\" waits for the user under a quiet
+subagent, \"busy\" works, under a subagent whose turn ended unseen."
+  (list (drover-test-session "root" :status 'idle)
+        (drover-test-session "ended" :parent "root" :status 'done :since 1.0)
+        (drover-test-session "quiet" :parent "root" :status 'idle)
+        (drover-test-session "asking" :parent "quiet" :status 'waiting :since 2.0)
+        (drover-test-session "path" :parent "root" :status 'failed :since 3.0)
+        (drover-test-session "busy" :parent "path" :status 'working)
+        (drover-test-session "alone" :status 'done :since 4.0)))
+
+(ert-deftest drover-test-surfaced-sessions ()
+  "Sessions surface as lists show them, and subagents waiting for the user always."
+  (drover-test-with-backend (drover-test-subagent-family)
+    ;; Active: the way to an active subagent shows, the failed one on it
+    ;; included, as in lists.
+    (should (equal (drover-test-ids (drover-surfaced-sessions))
+                   '("root" "quiet" "asking" "path" "busy" "alone")))
+    (let ((drover-show-subagents 'all))
+      (should (equal (drover-test-ids (drover-surfaced-sessions))
+                     (drover-test-ids drover-test-sessions))))
+    ;; None: a subagent waiting for the user blocks its parent.
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-ids (drover-surfaced-sessions)) '("root" "asking" "alone"))))
+    ;; The filter narrows lists only.
+    (let ((drover-filter '(:project "elsewhere")))
+      (should (equal (drover-test-ids (drover-surfaced-sessions))
+                     '("root" "quiet" "asking" "path" "busy" "alone"))))
+    ;; Given sessions, those.
+    (should (equal (drover-test-ids (drover-surfaced-sessions (last drover-test-sessions)))
+                   '("alone")))))
+
+(ert-deftest drover-test-attention-sessions-follow-subagent-mode ()
+  "The sessions needing the user are those lists show, and every subagent asking."
+  (drover-test-with-backend (drover-test-subagent-family)
+    (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "path" "alone")))
+    (let ((drover-show-subagents 'all))
+      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "path" "ended" "alone"))))
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "alone"))))))
+
 (ert-deftest drover-test-actions-reach-backend ()
   (drover-test-with-backend (list (drover-test-session "s"))
-    (let ((session (drover-find 'fake "s")))
-      (drover-open session t)
-      (drover-respond session)
-      (drover-interrupt session)
-      (drover-archive session)
-      (drover-mark-seen session)
-      (should (equal (reverse drover-test-calls)
-                     '((:open "s" t) (:respond "s") (:interrupt "s") (:archive "s") (:mark-seen "s")))))))
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((session (drover-find 'fake "s")))
+        (drover-open session t)
+        (drover-respond session)
+        (drover-interrupt session)
+        (drover-archive session)
+        (drover-mark-seen session)
+        ;; The window is drover's to choose: the backend shows the
+        ;; session in the one selected.
+        (should (equal (reverse drover-test-calls)
+                       '((:open "s" nil) (:respond "s") (:interrupt "s") (:archive "s")
+                         (:mark-seen "s"))))))))
 
 (ert-deftest drover-test-recap ()
   "A recap comes from the backend once; a missing or failing :recap is a failure."
@@ -416,31 +463,126 @@ REMAPPING the face remapping in force."
     (let ((drover-show-subagents 'all))
       (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'done)))))
 
+(defun drover-test--record-windows ()
+  "Make the fake backend's :open record the window selected, as (:open ID OTHER WINDOW).
+It shows a buffer of its own for the session there, as front ends do."
+  (setf (alist-get 'fake drover--backends)
+        (append (list :open (lambda (session other-window)
+                              (push (list :open (drover-session-id session) other-window (selected-window))
+                                    drover-test-calls)
+                              (switch-to-buffer (get-buffer-create
+                                                 (format " *session %s*" (drover-session-id session)))))
+                      :buffer (lambda (session)
+                                (get-buffer (format " *session %s*" (drover-session-id session)))))
+                (alist-get 'fake drover--backends))))
+
+(defmacro drover-test-in-windows (&rest body)
+  "Run BODY with the selected window alone in its frame, restoring windows after.
+The buffers of sessions shown are killed afterwards."
+  (declare (indent 0) (debug t))
+  `(unwind-protect
+       (save-window-excursion
+         (delete-other-windows)
+         (set-window-dedicated-p (selected-window) nil)
+         ,@body)
+     (dolist (buffer (buffer-list))
+       (when (string-prefix-p " *session " (buffer-name buffer))
+         (kill-buffer buffer)))))
+
 (ert-deftest drover-test-open-in-main-window ()
-  "A list naming its main window opens sessions there, selected."
+  "A list naming its main window opens sessions there, selected; o in another one."
   (drover-test-with-backend (list (drover-test-session "a"))
-    (save-window-excursion
-      (delete-other-windows)
+    (drover-test--record-windows)
+    (drover-test-in-windows
       (let* ((list-window (selected-window))
-             (main (split-window list-window))
-             (session (car drover-test-sessions)))
-        (with-temp-buffer
-          (set-window-buffer list-window (current-buffer))
-          (setq-local drover-main-window-function (lambda () main))
-          (drover-open session t)
-          (should (eq (selected-window) main))
-          (should (equal (car drover-test-calls) '(:open "a" nil))))
-        ;; Without one, OTHER-WINDOW reaches the backend as given.
+             (main (split-window list-window nil 'right))
+             (session (car drover-test-sessions))
+             (list-buffer (get-buffer-create " *session list*")))
+        (set-window-buffer list-window list-buffer)
+        (with-current-buffer list-buffer
+          (setq-local drover-view-p t
+                      drover-main-window-function (lambda () main))
+          (drover-open session))
+        (should (eq (selected-window) main))
+        (should (equal (car drover-test-calls) (list :open "a" nil main)))
+        ;; Another window than the main window: there is none, so the
+        ;; main window splits, and the list keeps its window and buffer.
         (select-window list-window)
+        (with-current-buffer list-buffer
+          (drover-open session t))
+        (let ((other (selected-window)))
+          (should-not (memq other (list main list-window)))
+          (should (equal (car drover-test-calls) (list :open "a" nil other)))
+          (should (= (length (window-list nil 'nomini)) 3))
+          (should (eq (window-buffer list-window) list-buffer))
+          ;; A window showing the session wins over one used later.
+          (set-window-buffer main (get-buffer-create " *session main*"))
+          (let ((fourth (split-window main nil 'below)))
+            (set-window-buffer fourth (get-buffer-create " *session fourth*"))
+            (select-window fourth)
+            (select-window list-window)
+            (with-current-buffer list-buffer
+              (drover-open session t))
+            (should (eq (selected-window) other))
+            ;; Without one, the window used last.
+            (set-window-buffer other (get-buffer-create " *session other*"))
+            (select-window fourth)
+            (select-window list-window)
+            (with-current-buffer list-buffer
+              (drover-open session t))
+            (should (eq (selected-window) fourth))
+            (should (= (length (window-list nil 'nomini)) 4))
+            (should (eq (window-buffer list-window) list-buffer))))))))
+
+(ert-deftest drover-test-open-without-main-window ()
+  "Without a main window, sessions open in the selected window, or another one."
+  (drover-test-with-backend (list (drover-test-session "a"))
+    (drover-test--record-windows)
+    (drover-test-in-windows
+      (let ((origin (selected-window))
+            (session (car drover-test-sessions)))
         (with-temp-buffer
-          (drover-open session t)
-          (should (eq (selected-window) list-window))
-          (should (equal (car drover-test-calls) '(:open "a" t))))
-        ;; A dead window is no main window.
+          (drover-open session))
+        (should (equal (car drover-test-calls) (list :open "a" nil origin)))
+        ;; A dead or missing main window is no main window either: the
+        ;; session's own window is not another window, so ORIGIN splits.
         (with-temp-buffer
-          (setq-local drover-main-window-function (lambda () nil))
+          (setq-local drover-main-window-function #'ignore)
+          (drover-open session t))
+        (let ((other (selected-window)))
+          (should-not (eq other origin))
+          (should (equal (car drover-test-calls) (list :open "a" nil other)))
+          ;; From the new window, the other one is ORIGIN again.
+          (select-window origin)
+          (switch-to-buffer (get-buffer-create " *session b*"))
+          (select-window other)
           (drover-open session t)
-          (should (equal (car drover-test-calls) '(:open "a" t))))))))
+          (should (eq (selected-window) origin))
+          (should (= (length (window-list nil 'nomini)) 2)))))))
+
+(ert-deftest drover-test-other-window-never-takes-a-list ()
+  "Side windows, dedicated windows and drover's views are never another window."
+  (drover-test-with-backend nil
+    (drover-test-in-windows
+      (let* ((origin (selected-window))
+             (view (split-window origin nil 'right))
+             (dedicated (split-window origin nil 'below))
+             (view-buffer (get-buffer-create " *session view*"))
+             (side (display-buffer-in-side-window (get-buffer-create " *session side*")
+                                                  '((side . left)))))
+        (with-current-buffer view-buffer
+          (setq-local drover-view-p t))
+        (set-window-buffer view view-buffer)
+        (set-window-buffer dedicated (get-buffer-create " *session dedicated*"))
+        (set-window-dedicated-p dedicated t)
+        ;; The only windows besides ORIGIN cannot be taken: ORIGIN splits.
+        (let ((other (drover-other-window origin)))
+          (should-not (memq other (list origin view dedicated side)))
+          (should (eq (window-frame other) (selected-frame)))
+          (delete-window other))
+        (set-window-dedicated-p dedicated nil)
+        (should (eq (drover-other-window origin) dedicated))
+        (delete-window side)))))
 
 (ert-deftest drover-test-group-trees-by-status ()
   "Trees group by status in `drover-status-order', unknown statuses last."

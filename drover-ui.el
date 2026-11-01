@@ -68,20 +68,41 @@
   "Face of secondary details, such as directories and ages."
   :group 'drover-faces)
 
+;; The title of a session tells where it is in Emacs: in no buffer, in a
+;; buffer no window shows, in a window, or in the window the user works
+;; in.  The three faces inherit sibling faces of font lock, which themes
+;; tell apart from one another and from the default foreground, and
+;; which no status takes but `drover-working', a glyph rather than a
+;; title: `success', `warning' and `error' would read as a status.
+
 (defface drover-open-session '((t :inherit font-lock-keyword-face))
-  "Face of the titles of sessions open in an Emacs buffer.
+  "Face of the titles of sessions open in a buffer no window shows.
 It goes over the other faces of a title, such as the dimming of idle
-sessions, which keep the attributes it does not set."
+sessions, which keep the attributes it does not set.  See also
+`drover-shown-session' and `drover-active-session'."
   :group 'drover-faces)
 
-(defface drover-cache-bar
-  '((((class color) (min-colors 88) (background light)) :background "#e4ecf5")
-    (((class color) (min-colors 88) (background dark)) :background "#26323f")
-    (((class color)) :background "blue")
-    (t :underline t))
+(defface drover-shown-session '((t :inherit font-lock-type-face))
+  "Face of the titles of sessions shown in a window of a visible frame.
+As `drover-open-session', it goes over the other faces of a title."
+  :group 'drover-faces)
+
+(defface drover-active-session '((t :inherit font-lock-function-name-face))
+  "Face of the title of the session of the window the user works in.
+That is the selected window, or, while a list of sessions or the
+minibuffer is selected, the window selected before.  It inherits the
+face `which-function-mode' names the definition point is in with: where
+the user is.  As `drover-open-session', it goes over the other faces of
+a title."
+  :group 'drover-faces)
+
+(defface drover-cache-bar '((t :inherit success))
   "Face of the part of a prompt cache's lifetime still left.
-Session lists draw it as the background of a session's line, or as a
-short bar, so it stays subtle: only a background."
+Its foreground draws the bar: short bars fill with it, in inverse video,
+and the line of a session in two lines is underlined in it, so that the
+bar shows over the highlight of the current line and the region, which
+change only the background.  It inherits `success': the cache is still
+there to save the next turn's cost."
   :group 'drover-faces)
 
 (defface drover-cache-trough '((t :inherit drover-dim :underline t))
@@ -95,8 +116,9 @@ It shows how long the bar would be, without drawing attention."
     (((class color)) :background "magenta")
     (t :underline t))
   "Face of the part of a model's context a session's context fills, in short bars.
-Only a background, as `drover-cache-bar', in another hue so that the
-two bars of a line are told apart."
+Only a background, subtle beside the prompt cache's bar, which takes
+the colour of `drover-cache-bar', so that the two bars of a line are
+told apart."
   :group 'drover-faces)
 
 (defface drover-context-near '((t :inherit warning))
@@ -142,6 +164,16 @@ not: `waiting' when subagents wait for you, `working' when subagents
 work or wait to retry.  They stay still and tell no number, which their
 tooltip tells.  Nerd Font icons by default."
   :type '(alist :key-type (choice (const waiting) (const working)) :value-type string)
+  :group 'drover)
+
+(defcustom drover-attention-glyph "\U000F16A4" ; nf-md-robot_excited_outline
+  "Glyph before the count of sessions needing you, in the mode line.
+`drover-attention-mode' shows it in the face of the most urgent status
+counted.  A Nerd Font icon by default: an excited robot, calling for
+you, in outline, so that it is told from the solid robots of
+`drover-subagent-glyphs', at work under a session, at the size of a
+mode line too, where the faces of the solid robots blur together."
+  :type 'string
   :group 'drover)
 
 (defcustom drover-animations

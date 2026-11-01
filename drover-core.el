@@ -629,7 +629,11 @@ PROPERTIES is a plist of:
              opening its connection; run once by `drover-start'.
  :sessions   Function of no argument returning the backend's sessions
              as `drover-session' records, from what it already knows.
- :open       Function of a session and OTHER-WINDOW displaying it.
+ :open       Function of a session and OTHER-WINDOW displaying it, in
+             the selected window, or in another window when
+             OTHER-WINDOW is non-nil.  `drover-open' chooses the window
+             and selects it first, giving no OTHER-WINDOW, so that the
+             sessions of every backend show in the same windows.
  :respond    Function of a session answering its oldest request.
  :interrupt  Function of a session stopping its running turn.
  :archive    Function of a session archiving it.
@@ -922,9 +926,30 @@ the middle of a turn, or none."
                       (_ (drover-session-active-p session)))))
               (or sessions (drover-sessions))))
 
+(defun drover-surfaced-sessions (&optional sessions)
+  "Return SESSIONS, or the live sessions, that drover points the user to.
+They are the sessions lists show under `drover-show-subagents', every
+subagent of `all', those in the middle of a turn and the way to them in
+`active', none in `none' (see `drover-tree-visible'), and every
+subagent waiting for the user, whatever the mode: it blocks its parent
+until answered.  `drover-filter', which narrows lists only, does not
+apply.  The mode-line count, `drover-next' and `drover-select' offer
+them.  They keep their order in SESSIONS."
+  (let ((sessions (or sessions (drover-sessions)))
+        (shown (make-hash-table :test #'equal)))
+    (dolist (session (drover-tree-sessions (drover-tree-visible (drover-tree sessions))))
+      (puthash (drover-session-key session) t shown))
+    (seq-filter (lambda (session)
+                  (or (gethash (drover-session-key session) shown)
+                      (eq (drover-session-status session) 'waiting)))
+                sessions)))
+
 (defun drover-attention-sessions ()
-  "Return the sessions that need the user, most urgent first."
-  (drover-sort (seq-filter #'drover-session-attention-p (drover-sessions))))
+  "Return the sessions that need the user, most urgent first.
+They are those of `drover-surfaced-sessions' whose status is one of
+`drover-attention-statuses': the subagents lists hide do not count, but
+those waiting for the user."
+  (drover-sort (seq-filter #'drover-session-attention-p (drover-surfaced-sessions))))
 
 (defun drover-find (backend id)
   "Return the session ID of BACKEND, or nil.
@@ -1710,17 +1735,50 @@ A list in a side window, such as `drover-list-side', sets it to the
 window where the user works: `drover-open' displays sessions there, and
 `drover-follow-mode' shows them there.")
 
+(defun drover--session-window-p (window)
+  "Return non-nil when WINDOW may be given a session to show.
+Side windows, windows dedicated to their buffer and windows showing
+one of drover's views may not: a session must never replace a list."
+  (and (window-live-p window)
+       (not (window-minibuffer-p window))
+       (not (window-parameter window 'window-side))
+       (not (window-dedicated-p window))
+       (not (buffer-local-value 'drover-view-p (window-buffer window)))))
+
+(defun drover-other-window (window &optional buffer)
+  "Return a window other than WINDOW in which to show a session.
+It is a window of WINDOW's frame showing BUFFER, the session's buffer,
+if one does, else the one of them used most recently, else a new
+window split from WINDOW.  Side windows, windows dedicated to their
+buffer and those showing one of drover's views are never chosen.
+Signal a `user-error' when WINDOW cannot be split either."
+  (let ((candidates (seq-filter (lambda (other)
+                                  (and (not (eq other window)) (drover--session-window-p other)))
+                                (window-list (window-frame window) 'nomini))))
+    (or (and buffer (seq-find (lambda (other) (eq (window-buffer other) buffer)) candidates))
+        (car (sort candidates (lambda (a b) (> (window-use-time a) (window-use-time b)))))
+        (split-window-sensibly window)
+        (ignore-errors (split-window window))
+        (user-error "No window to show the session in"))))
+
 (defun drover-open (session &optional other-window)
-  "Display SESSION, in another window when OTHER-WINDOW is non-nil.
-When the current buffer's `drover-main-window-function' returns a
-window, SESSION is displayed in that window, which is selected, whatever
-OTHER-WINDOW."
-  (let ((window (and drover-main-window-function
-                     (drover-supports-p session :open)
-                     (funcall drover-main-window-function))))
-    (when (window-live-p window)
-      (select-window window))
-    (drover-backend-call session :open (and (not (window-live-p window)) other-window))))
+  "Display SESSION and select its window; with OTHER-WINDOW, in another one.
+SESSION shows where the current buffer sends sessions: in the window
+its `drover-main-window-function' returns, such as the window where the
+user works beside a list in a side window, else in the selected window.
+With OTHER-WINDOW, it shows in another window than that one, chosen by
+`drover-other-window', never in a list.  The window is chosen here and
+selected before the backend's :open runs, given no OTHER-WINDOW, so
+that sessions of every backend show in the same windows."
+  (if (not (drover-supports-p session :open))
+      (drover-backend-call session :open nil)
+    (let* ((main (and drover-main-window-function (funcall drover-main-window-function)))
+           (window (if (window-live-p main) main (selected-window))))
+      (when other-window
+        (setq window (drover-other-window window (drover-session-buffer session))))
+      (unless (eq window (selected-window))
+        (select-window window))
+      (drover-backend-call session :open nil))))
 
 (defun drover-respond (session)
   "Answer the oldest request of SESSION.

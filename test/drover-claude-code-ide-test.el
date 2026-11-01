@@ -1171,6 +1171,15 @@ guess could hide another session of the directory."
         (drover-open session)
         (should (eq (window-buffer (selected-window)) terminal))
         (should (numberp (claude-code-ide-mcp-session-last-used mcp-session))))
+      ;; In another window, the one selected keeping its buffer.
+      (save-window-excursion
+        (delete-other-windows)
+        (switch-to-buffer "*scratch*")
+        (let ((origin (selected-window)))
+          (drover-open session t)
+          (should-not (eq (selected-window) origin))
+          (should (eq (window-buffer (selected-window)) terminal))
+          (should (eq (window-buffer origin) (get-buffer "*scratch*")))))
       (save-window-excursion
         (drover-respond session)
         (should (eq (window-buffer (selected-window)) terminal)))

@@ -1485,8 +1485,12 @@ The cache holds 120k tokens of a prompt of 130k."
       (drover-list-test-goto "c")
       (let* ((full (text-property-any (point) (line-end-position) 'drover-list-cache 'full))
              (label (text-property-any (point) (line-end-position) 'drover-list-cache 'label)))
-        (should (eq (get-text-property full 'face) 'drover-cache-bar))
+        ;; The bar fills in the colour of `drover-cache-bar', in inverse
+        ;; video, which highlights setting a background leave alone.
+        (should (equal (get-text-property full 'face) '((:inverse-video t) drover-cache-bar)))
+        (should (equal (get-text-property full 'font-lock-face) '((:inverse-video t) drover-cache-bar)))
         (should (eq (get-text-property (1+ full) 'face) 'drover-cache-trough))
+        (should (eq (get-text-property (1+ full) 'font-lock-face) 'drover-cache-trough))
         ;; The time left is text, which copying the line keeps.
         (should (string-suffix-p "4m" (buffer-substring-no-properties (point) (line-end-position))))
         (should-not (get-text-property label 'display))
@@ -1586,7 +1590,7 @@ START and END bound its overlay."
     (list (overlay-start overlay) (overlay-end overlay))))
 
 (ert-deftest drover-list-test-cache-background ()
-  "In two lines, a live cache colours its line from the left, shrinking."
+  "In two lines, a live cache underlines its line from the left, shrinking."
   (drover-list-test-with
       (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 60)
                                  :requests '((:kind question :summary "Go?"))
@@ -1609,7 +1613,11 @@ START and END bound its overlay."
           (should (= (nth 3 (car (last spec))) 293))
           (should (equal (car (last (seq-filter (lambda (item) (eq (nth 1 item) 'text)) spec)))
                          (list (nth 0 (car (last spec 2))) 'text 274 19 (drover-face "1m" 'drover-dim))))
-          (should (eq (overlay-get (plist-get (car drover-list--caches) :overlay) 'face) 'drover-cache-bar))
+          ;; A line under the line, in the colour of `drover-cache-bar'.
+          (should (equal (overlay-get (plist-get (car drover-list--caches) :overlay) 'face)
+                         `(:underline (:color ,(or (face-foreground 'drover-cache-bar nil t)
+                                                   'foreground-color)
+                                       :position t))))
           ;; The line's tooltip tells of the cache too, as it stands when
           ;; shown, on both lines.
           (should (equal (drover-list-test-help-at start)
@@ -2101,10 +2109,12 @@ body beginning with an aligned space would push the next line right."
       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
                 ((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
         (drover-list-test-goto "s")
+        ;; Opening selects a window, and its buffer: each key goes to the list.
         (dolist (key '("RET" "o" "A" "s" "K" "z" "x" "v"))
-          (drover-list-test-press key))))
+          (with-current-buffer buffer
+            (drover-list-test-press key)))))
     (should (equal (reverse drover-test-calls)
-                   '((:open "s" nil) (:open "s" t) (:respond "s") (:mark-seen "s")
+                   '((:open "s" nil) (:open "s" nil) (:respond "s") (:mark-seen "s")
                      (:interrupt "s") (:archive "s") (:delete "s") (:preview "s"))))))
 
 (ert-deftest drover-list-test-declined-confirmation ()
@@ -2190,7 +2200,16 @@ Redraws keep point on the session."
                           (should (= (- (point) (line-beginning-position)) offset))
                           (reverse drover-test-calls)))
                 (should (equal (type "RET") '((:open "s" nil))))
-                (should (equal (type "o") '((:open "s" t))))
+                ;; o opens in another window, which it selects.
+                (let ((list-window (selected-window)))
+                  (setq drover-test-calls nil)
+                  (execute-kbd-macro (kbd "o"))
+                  (should (equal drover-test-calls '((:open "s" nil))))
+                  (should-not (eq (selected-window) list-window))
+                  (should (eq (window-buffer list-window) buffer))
+                  (delete-window (selected-window))
+                  (select-window list-window)
+                  (set-buffer buffer))
                 (should (equal (type "A") '((:respond "s"))))
                 (should (equal (type "K y") '((:interrupt "s"))))
                 (should (equal (type "s") '((:mark-seen "s"))))
@@ -2852,32 +2871,73 @@ Each shows its own buffer."
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
         (should (eq (window-buffer side) buffer))))))
 
-(ert-deftest drover-list-test-side-o-opens-in-main-window ()
-  "From the side window, the other window o opens a session in is the main window."
+(ert-deftest drover-list-test-side-o-opens-beside-main-window ()
+  "From the side window, o opens a session in another window than the main window."
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-test--register-buffers)
     (pcase-let ((`(,first ,second) (drover-list-test--main)))
       (let ((side (drover-list-side '(4))))
         (drover-list-test-goto "done")
         (execute-kbd-macro (kbd "o"))
-        (should (equal (car drover-test-calls) (list :open "done" nil first)))
-        (should (eq (selected-window) first))
-        (should (equal (buffer-name (window-buffer first)) "*session done*"))
-        (should (equal (buffer-name (window-buffer second)) "*other 2*"))
+        (should (equal (car drover-test-calls) (list :open "done" nil second)))
+        (should (eq (selected-window) second))
+        (should (equal (buffer-name (window-buffer second)) "*session done*"))
+        (should (equal (buffer-name (window-buffer first)) "*other 1*"))
         (should (eq (window-buffer side) buffer))
         (should (= (length (window-list nil 'nomini)) 3))))))
+
+(ert-deftest drover-list-test-side-o-splits-main-window ()
+  "With the main window alone beside the list, o splits it, and RET keeps to it."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (let ((main (selected-window))
+          (side nil))
+      (switch-to-buffer (get-buffer-create "*other 1*"))
+      (setq side (drover-list-side '(4)))
+      (drover-list-test-goto "done")
+      (execute-kbd-macro (kbd "o"))
+      (let ((other (selected-window)))
+        (should-not (memq other (list main side)))
+        (should (equal (car drover-test-calls) (list :open "done" nil other)))
+        (should (equal (buffer-name (window-buffer main)) "*other 1*"))
+        (should (eq (window-buffer side) buffer))
+        (should (= (length (window-list nil 'nomini)) 3))
+        ;; RET opens in the main window, the one used last beside the list.
+        (select-window main)
+        (select-window side)
+        (drover-list-test-goto "work")
+        (execute-kbd-macro (kbd "RET"))
+        (should (equal (car drover-test-calls) (list :open "work" nil main)))
+        (should (equal (buffer-name (window-buffer other)) "*session done*"))))))
 
 (ert-deftest drover-list-test-ordinary-window-opens-as-usual ()
   "From an ordinary window, RET opens in the same window and o in another."
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-test--register-buffers)
-    (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+    (pcase-let ((`(,first ,second) (drover-list-test--main)))
       (drover-list)
       (should-not (drover-list--target-window))
       (drover-list-test-goto "done")
+      (execute-kbd-macro (kbd "o"))
+      (should (equal (car drover-test-calls) (list :open "done" nil second)))
+      (should (eq (window-buffer first) buffer))
+      (should (equal (buffer-name (window-buffer second)) "*session done*"))
+      (select-window first)
       (execute-kbd-macro (kbd "RET"))
       (should (equal (car drover-test-calls) (list :open "done" nil first)))
       (should (equal (buffer-name (window-buffer first)) "*session done*")))))
+
+(ert-deftest drover-list-test-ordinary-window-alone-o-splits ()
+  "A list alone in its frame splits its window for o, and stays."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (drover-list)
+    (let ((window (selected-window)))
+      (drover-list-test-goto "done")
+      (execute-kbd-macro (kbd "o"))
+      (should-not (eq (selected-window) window))
+      (should (eq (window-buffer window) buffer))
+      (should (equal (buffer-name (window-buffer (selected-window))) "*session done*")))))
 
 (ert-deftest drover-list-test-display-keeps-list-selected ()
   (drover-list-test-with (drover-list-test-side-sample)
@@ -2891,8 +2951,8 @@ Each shows its own buffer."
         (should (eq (current-buffer) (window-buffer side)))
         (should (equal (buffer-name (window-buffer first)) "*session work*"))
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
-        ;; The session it shows is highlighted at once.
-        (should (equal (drover-list-test-current) '("work")))))))
+        ;; The title of the session it shows tells so at once.
+        (should (eq (drover-list-test-title-face "work") 'drover-active-session))))))
 
 (ert-deftest drover-list-test-open-unsupported ()
   (drover-list-test-with nil
@@ -2941,59 +3001,97 @@ Each shows its own buffer."
         (should (equal (funcall shown) "*session fail*"))
         (should (eq (selected-window) side))
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
-        ;; The main window stays the same, and its session is highlighted.
+        ;; The main window stays the same, and its session is the active one.
         (should (eq (drover-list--main-window) first))
         (drover-list--windows-changed)
-        (should (equal (drover-list-test-current) '("fail")))
+        (should (eq (drover-list-test-title-face "fail") 'drover-active-session))
         (execute-kbd-macro (kbd "V F C-g"))
         (should-not drover-follow-mode)
         (execute-kbd-macro (kbd "n"))
         (should (equal (funcall shown) "*session fail*"))))))
 
-;;;; The session in the main window
+;;;; Where sessions are
 
-(defun drover-list-test-current ()
-  "Return the sessions highlighted as shown in the main window."
-  (mapcar (lambda (overlay)
-            (save-excursion
-              (goto-char (overlay-start overlay))
-              (drover-list-test-id-at-point)))
-          drover-list--current-overlays))
+(defun drover-list-test-title-face (id)
+  "Return the face of the title of session ID, the same over the whole title."
+  (save-excursion
+    (drover-list-test-goto id)
+    (let* ((start (text-property-not-all (point) (line-end-position) 'drover-list-title nil))
+           (end (next-single-property-change start 'drover-list-title nil (line-end-position))))
+      (should (equal (get-text-property start 'face) (get-text-property start 'font-lock-face)))
+      (should (= (next-single-property-change start 'face nil end) end))
+      (get-text-property start 'face))))
 
-(ert-deftest drover-list-test-highlights-current-session ()
+(defun drover-list-test-places (&rest ids)
+  "Return the faces of the titles of the sessions IDS, as a list."
+  (mapcar #'drover-list-test-title-face ids))
+
+(defmacro drover-list-test-counting-refaces (&rest body)
+  "Run BODY counting the titles given another face in place, and return the count."
+  (declare (indent 0) (debug t))
+  `(let ((count 0)
+         (reface (symbol-function 'drover-list--reface)))
+     (cl-letf (((symbol-function 'drover-list--reface)
+                (lambda (&rest arguments)
+                  (cl-incf count)
+                  (apply reface arguments))))
+       ,@body)
+     count))
+
+(ert-deftest drover-list-test-title-places ()
+  "A title's colour tells where its session is, changing in place with windows."
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-test--register-buffers)
-    (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+    (setq drover-list-collapsed-groups nil)
+    (pcase-let ((`(,first ,second) (drover-list-test--main)))
+      (set-window-buffer first (get-buffer-create "*session work*"))
+      (set-window-buffer second (get-buffer-create "*session ask*"))
+      (get-buffer-create "*session done*")
       (let ((side (drover-list--show-side)))
         (with-current-buffer (window-buffer side)
-          (should-not drover-list--current-overlays)
-          (set-window-buffer first (get-buffer-create "*session work*"))
-          (drover-list--windows-changed)
-          (let ((overlay (car drover-list--current-overlays))
-                (section (drover-list-test-section "work")))
-            (should (= (length drover-list--current-overlays) 1))
-            (should (eq (overlay-get overlay 'face) 'drover-list-current))
-            (should (eq (overlay-get overlay 'window) side))
-            (should (equal (drover-list-test-current) '("work")))
-            ;; Its heading, one line.
-            (should (= (overlay-start overlay) (oref section start)))
-            (should (= (overlay-end overlay) (oref section content))))
-          ;; A session with a second line is highlighted whole.
-          (set-window-buffer first (get-buffer-create "*session ask*"))
-          (drover-list--windows-changed)
-          (let ((overlay (car drover-list--current-overlays)))
-            (should (equal (drover-list-test-current) '("ask")))
-            (should (= (overlay-end overlay)
-                       (save-excursion (goto-char (overlay-start overlay)) (forward-line 2) (point)))))
-          ;; The highlight survives redraws.
-          (drover-list--render)
-          (should (equal (drover-list-test-current) '("ask")))
-          (set-window-buffer first (get-buffer "*other 1*"))
-          (drover-list--windows-changed)
-          (should-not drover-list--current-overlays))))))
+          ;; The selected window's, another window's, a buffer's no
+          ;; window shows, and no buffer.
+          (should (equal (drover-list-test-places "work" "ask" "done" "fail" "idle")
+                         '(drover-active-session drover-shown-session drover-open-session nil
+                                                 drover-dim)))
+          (let ((root magit-root-section))
+            ;; Selecting another window changes two titles, in place.
+            (select-window second)
+            (set-buffer (window-buffer side))
+            (should (= (drover-list-test-counting-refaces (drover-list--windows-changed)) 2))
+            (should (eq magit-root-section root))
+            (should (equal (drover-list-test-places "work" "ask")
+                           '(drover-shown-session drover-active-session)))
+            ;; Selecting the list keeps the window selected before.
+            (select-window side)
+            (should (= (drover-list-test-counting-refaces (drover-list--windows-changed)) 0))
+            (should (equal (drover-list-test-places "work" "ask")
+                           '(drover-shown-session drover-active-session)))
+            ;; A buffer leaving its window stays open; one coming shows.
+            (set-window-buffer first (get-buffer "*session done*"))
+            (should (= (drover-list-test-counting-refaces (drover-list--windows-changed)) 2))
+            (should (equal (drover-list-test-places "work" "done")
+                           '(drover-open-session drover-shown-session)))
+            ;; Killing a buffer no window shows, after the kill.
+            (kill-buffer "*session work*")
+            (should (timerp drover-list--restyle-timer))
+            (funcall (timer--function drover-list--restyle-timer))
+            (should-not (drover-list-test-title-face "work"))
+            ;; Over the dimming of an idle session, which lends what it
+            ;; lacks: the window used last beside the list shows it.
+            (set-window-buffer second (get-buffer-create "*session idle*"))
+            (drover-list--windows-changed)
+            (should (equal (drover-list-test-places "ask" "idle")
+                           '(drover-open-session (drover-active-session drover-dim))))
+            (should (eq magit-root-section root))
+            ;; A redraw finds the same places.
+            (drover-list--render)
+            (should (equal (drover-list-test-places "work" "ask" "done" "idle")
+                           '(nil drover-open-session drover-shown-session
+                                 (drover-active-session drover-dim))))))))))
 
-(ert-deftest drover-list-test-highlights-in-ordinary-window ()
-  "In an ordinary window, the session of the window beside it is highlighted."
+(ert-deftest drover-list-test-title-places-in-ordinary-window ()
+  "In an ordinary window, the session of the window beside it is the active one."
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-test--register-buffers)
     (pcase-let ((`(,first ,second) (drover-list-test--main)))
@@ -3001,38 +3099,81 @@ Each shows its own buffer."
       (should (eq (window-buffer first) buffer))
       (set-window-buffer second (get-buffer-create "*session done*"))
       (drover-list--windows-changed)
-      (should (equal (drover-list-test-current) '("done"))))))
+      (should (eq (drover-list-test-title-face "done") 'drover-active-session))
+      ;; Selected, the session's window is.
+      (select-window second)
+      (set-buffer buffer)
+      (drover-list--windows-changed)
+      (should (eq (drover-list-test-title-face "done") 'drover-active-session)))))
 
-(ert-deftest drover-list-test-highlights-nested-session ()
+(ert-deftest drover-list-test-title-places-nested-and-cut ()
+  "A subagent's title, and a title cut to fit, change face whole, ellipsis included."
   (drover-list-test-with
-      (list (drover-test-session "busy" :status 'working)
-            (drover-test-session "parent" :status 'done :since (drover-list-test-ago 50))
-            (drover-test-session "asking" :parent "parent" :status 'waiting
-                                 :since (drover-list-test-ago 30)
-                                 :requests '((:kind question :summary "Which file?"))))
+      (list (drover-test-session "parent" :status 'done :since (drover-list-test-ago 50))
+            (drover-list-test-titled "asking" "A subagent asking with a long, long title"
+                                     :parent "parent" :status 'waiting :since (drover-list-test-ago 30)
+                                     :requests '((:kind question :summary "Which file?"))))
     (drover-list-test--register-buffers)
     (pcase-let ((`(,first ,_second) (drover-list-test--main)))
       (with-current-buffer (window-buffer (drover-list--show-side))
-        ;; The parent alone, not the subagent below it.
-        (set-window-buffer first (get-buffer-create "*session parent*"))
-        (drover-list--windows-changed)
-        (let ((overlay (car drover-list--current-overlays)))
-          (should (= (overlay-start overlay) (oref (drover-list-test-section "parent") start)))
-          (should (= (overlay-end overlay) (oref (drover-list-test-section "asking") start))))
-        ;; The subagent with its second line.
         (set-window-buffer first (get-buffer-create "*session asking*"))
         (drover-list--windows-changed)
-        (let ((overlay (car drover-list--current-overlays)))
-          (should (= (overlay-start overlay) (oref (drover-list-test-section "asking") start)))
-          (should (= (overlay-end overlay)
-                     (save-excursion (goto-char (overlay-start overlay)) (forward-line 2) (point)))))))))
+        (should (equal (drover-list-test-places "parent" "asking") '(nil drover-active-session)))
+        (save-excursion
+          (drover-list-test-goto "asking")
+          (search-forward (truncate-string-ellipsis) (line-end-position))
+          (should (eq (get-text-property (match-beginning 0) 'face) 'drover-active-session)))
+        (set-window-buffer first (get-buffer-create "*session parent*"))
+        (drover-list--windows-changed)
+        (should (equal (drover-list-test-places "parent" "asking")
+                       '(drover-active-session drover-open-session)))))))
 
-(ert-deftest drover-list-test-no-highlight-without-buffers ()
+(ert-deftest drover-list-test-title-place-changing-width-redraws ()
+  "A face changing the width of a title redraws the list, so that lines fit."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+      (with-current-buffer (window-buffer (drover-list--show-side))
+        (let ((root magit-root-section)
+              (width (symbol-function 'drover-list--pixel-width)))
+          ;; A bold face for the active session, say: wider.
+          (cl-letf (((symbol-function 'drover-list--pixel-width)
+                     (lambda (string)
+                       (+ (funcall width string)
+                          (if (seq-some (lambda (index)
+                                          (memq 'drover-active-session
+                                                (ensure-list (get-text-property index 'face string))))
+                                        (number-sequence 0 (1- (length string))))
+                              5 0)))))
+            (set-window-buffer first (get-buffer-create "*session work*"))
+            (drover-list--windows-changed)
+            (should-not (eq magit-root-section root))
+            (should (eq (drover-list-test-title-face "work") 'drover-active-session))))))))
+
+(ert-deftest drover-list-test-active-window ()
+  "The window worked in is the selected one, else the one used last before."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (pcase-let ((`(,first ,second) (drover-list-test--main)))
+      (let ((side (drover-list--show-side)))
+        (should (eq (drover-list--active-window) first))
+        (select-window second)
+        (should (eq (drover-list--active-window) second))
+        (select-window side)
+        (should (eq (drover-list--active-window) second))
+        ;; From the minibuffer, the window selected before it.
+        (cl-letf (((symbol-function 'selected-window) (lambda (&rest _) (minibuffer-window)))
+                  ((symbol-function 'minibuffer-selected-window) (lambda () first)))
+          (should (eq (drover-list--active-window) first)))
+        (cl-letf (((symbol-function 'selected-window) (lambda (&rest _) (minibuffer-window)))
+                  ((symbol-function 'minibuffer-selected-window) (lambda () side)))
+          (should (eq (drover-list--active-window) second)))))))
+
+(ert-deftest drover-list-test-no-place-without-buffers ()
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-test--main)
     (with-current-buffer (window-buffer (drover-list--show-side))
       (drover-list--windows-changed)
-      (should-not drover-list--current-overlays))))
+      (should-not (seq-some #'drover-list-test-title-face '("work" "ask" "done" "fail"))))))
 
 (ert-deftest drover-list-test-side-refresh-keeps-point-on-session ()
   (drover-list-test-with (drover-list-test-side-sample)
@@ -3342,6 +3483,48 @@ The subagent's glyph stands under its parent's title."
           (should (equal (get-text-property (match-beginning 0) 'face)
                          '(drover-open-session drover-dim))))))))
 
+;;;; Places
+
+(ert-deftest drover-list-test-current-face-obsolete ()
+  "The face of the former highlight of the main window's session stands for the active title."
+  (should (eq (get 'drover-list-current 'face-alias) 'drover-active-session))
+  (should (get 'drover-list-current 'obsolete-face)))
+
+(ert-deftest drover-list-test-title-faces-are-themes ()
+  "The faces of places inherit sibling faces of font lock, none of a status."
+  (should (equal (face-attribute 'drover-open-session :inherit nil t) 'font-lock-keyword-face))
+  (should (equal (face-attribute 'drover-shown-session :inherit nil t) 'font-lock-type-face))
+  (should (equal (face-attribute 'drover-active-session :inherit nil t) 'font-lock-function-name-face))
+  (dolist (status drover-status-order)
+    (should-not (memq (face-attribute (drover-status-face status) :inherit nil t)
+                      '(font-lock-type-face font-lock-function-name-face)))))
+
+(ert-deftest drover-list-test-cache-line-follows-theme ()
+  "The line of a prompt cache takes the colour of `drover-cache-bar', anew with a theme."
+  (drover-list-test-with
+      (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 60)
+                                 :requests '((:kind question :summary "Go?"))
+                                 :cache-expires (+ drover-test-now 300) :cache-ttl 300))
+    (unwind-protect
+        (drover-list-test-with-font
+          (let ((drover-list-test-width 300))
+            (drover-list-test-shown
+              (set-face-attribute 'drover-cache-bar nil :foreground "red")
+              (revert-buffer)
+              (should (eq drover-list--layout 'narrow))
+              (cl-flet ((color ()
+                          (plist-get (plist-get (overlay-get (plist-get (car drover-list--caches) :overlay)
+                                                             'face)
+                                                :underline)
+                                     :color)))
+                (should (equal (color) "red"))
+                (set-face-attribute 'drover-cache-bar nil :foreground "blue")
+                ;; A theme enabled redraws the list in the new colour.
+                (should (memq #'drover-list--theme-changed enable-theme-functions))
+                (run-hook-with-args 'enable-theme-functions 'some-theme)
+                (should (equal (color) "blue"))))))
+      (set-face-attribute 'drover-cache-bar nil :foreground 'unspecified))))
+
 ;;;; Animated glyphs
 
 (ert-deftest drover-list-test-animated-glyphs ()
@@ -3551,15 +3734,15 @@ The subagent's glyph stands under its parent's title."
 (defmacro drover-list-test-elsewhere (&rest body)
   "Run BODY in a code buffer, the list in a side window beside it.
 The side sample is served, sessions open in buffers; `first' is the
-window of the code buffer, selected, `side' the list's, its point on
-\"ask\", `code' the code buffer."
+window of the code buffer, selected, `second' another one, `side' the
+list's, its point on \"ask\", `code' the code buffer."
   (declare (indent 0) (debug t))
   `(drover-list-test-with (drover-list-test-side-sample)
      (drover-list-test--register-buffers)
-     (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+     (pcase-let ((`(,first ,second) (drover-list-test--main)))
        (let ((side (drover-list--show-side))
              (code (drover-list-test-code-buffer)))
-         (ignore first side code)
+         (ignore first second side code)
          (with-selected-window side
            (drover-list-test-goto "ask"))
          (set-window-buffer first code)
@@ -3610,10 +3793,12 @@ window of the code buffer, selected, `side' the list's, its point on
       ;; The user stays where they work.
       (should (eq (selected-window) first))
       (should (eq (window-buffer first) code))
+      ;; o opens in another window than the one worked in, and goes there.
       (execute-kbd-macro (kbd "C-' o"))
-      (should (equal (car drover-test-calls) (list :open "ask" nil first)))
-      (should (equal (buffer-name (window-buffer first)) "*session ask*"))
-      (should (eq (selected-window) first)))))
+      (should (equal (car drover-test-calls) (list :open "ask" nil second)))
+      (should (equal (buffer-name (window-buffer second)) "*session ask*"))
+      (should (eq (window-buffer first) code))
+      (should (eq (selected-window) second)))))
 
 (ert-deftest drover-list-test-dispatch-own-session-wins ()
   "A buffer telling its own session acts on it, not on the list beside it."
@@ -3667,7 +3852,7 @@ window of the code buffer, selected, `side' the list's, its point on
       (should (= sent 1))
       (should-not (eq (car (car drover-test-calls)) :open))
       (execute-kbd-macro (kbd "C-' o"))
-      (should (equal (car drover-test-calls) (list :open "ask" nil first))))))
+      (should (equal (car drover-test-calls) (list :open "ask" nil second))))))
 
 ;;;; Moving in the list from the menu
 
@@ -3808,7 +3993,7 @@ window of the code buffer, selected, `side' the list's, its point on
             ;; C-u stays the prefix argument: RET opens in another window.
             (execute-kbd-macro (kbd "C-u RET"))
             (should-not transient--prefix)
-            (should (equal (seq-take (car drover-test-calls) 3) '(:open "fail" (4))))
+            (should (equal (car drover-test-calls) (list :open "fail" nil second)))
             (should (eq (window-buffer first) buffer))
             (should (equal (buffer-name (window-buffer second)) "*session fail*")))
         (use-local-map drover-list-mode-map)))))

@@ -764,17 +764,24 @@ nothing is fetched."
 ;;;; Actions
 
 (ert-deftest drover-opencode-test-open ()
+  "A session opens in the window drover selects, or in another one it chooses."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
     (let ((session (drover-opencode-test-session "ses_1"))
           (buffer (generate-new-buffer " ses_1")))
       (unwind-protect
-          (progn
-            (puthash "ses_1" buffer opencode-session-buffers)
-            (drover-open session)
-            (drover-open session t)
-            (should (equal (reverse drover-opencode-test-calls)
-                           '((opencode-session-open-by-id "ses_1" :other-window nil)
-                             (opencode-session-open-by-id "ses_1" :other-window t)))))
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((origin (selected-window)))
+              (puthash "ses_1" buffer opencode-session-buffers)
+              (drover-open session)
+              (should (eq (selected-window) origin))
+              (drover-open session t)
+              (should-not (eq (selected-window) origin))
+              (should (= (length (window-list nil 'nomini)) 2))
+              ;; opencode.el shows it in the window selected, whichever.
+              (should (equal (reverse drover-opencode-test-calls)
+                             '((opencode-session-open-by-id "ses_1" :other-window nil)
+                               (opencode-session-open-by-id "ses_1" :other-window nil))))))
         (kill-buffer buffer)))))
 
 (ert-deftest drover-opencode-test-open-fetches-unopened-session ()
@@ -790,21 +797,22 @@ nothing is fetched."
                      `(opencode-session-open "ses_1" ,origin :other-window nil))))))
 
 (ert-deftest drover-opencode-test-open-shows-from-the-asking-window ()
+  "A session fetched first shows in the window chosen for it, wherever the user went."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
-    (let* ((session (drover-opencode-test-session "ses_1"))
-           (drover-opencode-test-fetched nil)
-           (origin (selected-window))
-           (other (split-window)))
-      (unwind-protect
-          (progn
-            (drover-open session t)
-            ;; The user moved to another window before the session arrived.
-            (select-window other)
-            (funcall drover-opencode-test-fetched '((id . "ses_1")))
-            (should (equal (car drover-opencode-test-calls)
-                           `(opencode-session-open "ses_1" ,origin :other-window t)))
-            (should (eq (selected-window) other)))
-        (delete-window other)))))
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((session (drover-opencode-test-session "ses_1"))
+             (drover-opencode-test-fetched nil)
+             (origin (selected-window))
+             (other (split-window)))
+        (drover-open session t)
+        (should (eq (selected-window) other))
+        ;; The user moved back before the session arrived.
+        (select-window origin)
+        (funcall drover-opencode-test-fetched '((id . "ses_1")))
+        (should (equal (car drover-opencode-test-calls)
+                       `(opencode-session-open "ses_1" ,other :other-window nil)))
+        (should (eq (selected-window) origin))))))
 
 (ert-deftest drover-opencode-test-buffer ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))

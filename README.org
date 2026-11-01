@@ -47,7 +47,7 @@ Subagent sessions show under their parent, their icon under its title. Which of 
 | =active= | the subagents in the middle of a turn: working, waiting to retry, or waiting for you (default) |
 | =none=   | no subagent                                                                                    |
 
-The list's header tells how many subagents are hidden, such as =17 sessions, 89 subagents hidden=; the mode is the View menu's to show, and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count and =drover-next= count every session, subagents included, whatever the mode.
+The list's header tells how many subagents are hidden, such as =17 sessions, 89 subagents hidden=; the mode is the View menu's to show, and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count, =drover-next= and =drover-select= follow the mode too, the filter aside: they count, visit and offer the sessions the list would show without a filter, and every subagent waiting for you whatever the mode, since it blocks its parent until you answer (=drover-surfaced-sessions=).
 
 Shown or not, a session whose subagents (at any depth) are active says so beside its status icon:
 
@@ -60,10 +60,10 @@ The icons stay still and tell no number: their tooltip names the subagents and t
 
 * Attention
 
-=drover-attention-mode= shows one count per status that needs you in the mode line, one icon and count per status, and nothing when no session needs you. Each icon takes the room its font draws it in, measured once per font, so that no count is drawn on an icon's ink. Its tooltip lists the sessions; clicking it runs =drover-next=, the right button =drover-select=.
+=drover-attention-mode= shows how many sessions need you in the mode line: one count, after a robot (=drover-attention-glyph=, =nf-md-robot_excited_outline=), in the face of the most urgent status among them, and nothing when no session needs you. It counts the sessions the list shows under its subagent mode, and the subagents waiting for you whatever the mode (see [[*Statuses][Statuses]]). The robot takes the room its font draws it in, measured once per font, so that the count is not drawn on its ink. Its tooltip lists the sessions by status; clicking it runs =drover-next=, the right button =drover-select=.
 
-- =drover-next= visits the most urgent session. Pressed again at once, it moves to the next one in the order of the first press, so a session changing status meanwhile does not reshuffle the round.
-- =drover-select= picks any session with completion, grouped by status and annotated with its project, branch, age and what it waits for. With a prefix argument it opens the session in another window.
+- =drover-next= visits the most urgent session, among those counted. Pressed again at once, it moves to the next one in the order of the first press, so a session changing status meanwhile does not reshuffle the round.
+- =drover-select= picks any session the list shows under its subagent mode, and any subagent waiting for you, with completion, grouped by status and annotated with its project, branch, age and what it waits for. With a prefix argument it opens the session in another window.
 - =drover-mark-all-seen= marks every Done and Failed session seen after confirming how many (=drover-catch-up-statuses=); with a numeric prefix argument, only those that ended at least that many hours ago. Useful to start from a clean slate, or after a day away.
 
 * Keys
@@ -81,7 +81,8 @@ or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in thre
    j Next          l List              a Agent       C Compact
    b Select        L Side list         m Model       f Fork
    " Prompt        p Project           e Effort      . Last answer
-   ' Show prompt   S Search sessions   d Directory   O Open link
+   n Task prompt   S Search sessions   d Directory   O Open link
+   ' Show prompt
 
   Session
    o Other window   A Answer        r Rename    U Subagents
@@ -103,7 +104,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 
 | Key | Command                    | Action                                            |
 |-----+----------------------------+---------------------------------------------------|
-| =o= | =drover-open-other-window= | open it in another window                         |
+| =o= | =drover-open-other-window= | open it in another window than =RET= would        |
 | =A= | =drover-respond=           | answer its question or permission request         |
 | =K= | =drover-interrupt=         | interrupt its turn, after confirmation            |
 | =s= | =drover-mark-seen=         | mark its ended turn seen                          |
@@ -118,7 +119,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =U= | =drover-toggle-subagents=  | show all, active or no subagents, in turn (lists) |
 | =V= | =drover-view=              | the View menu (drover's list)                     |
 
-=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
+=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or the list itself. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 
 =s=, =K=, =z= and =x= act on every session selected, when a region selects several (see [[*Selecting sessions][Selecting sessions]]): =K= on those that run a turn, =s= on those whose turn ended unseen, with one confirmation naming them all, such as =Archive 3 sessions: A, B, C?=, and one report, such as =Archived 3 sessions=, naming those that failed without stopping the others.
 
@@ -128,7 +129,7 @@ To store an Org link to the session at point, use Org's own =org-store-link= (=C
 
 The session keys of the menu act on the session the current buffer tells: the one at point in a list, the buffer's own in a session buffer. In a buffer telling no session, such as the prompt, =*drover*=, or a file you edit, while drover's list shows in a window of the frame (the most recently used, if several), they act on that list instead: on the session at point of the list's window, as if typed there, and so do the list's own entries, =v=, =U= and =V=. A session buffer keeps acting on its own session. The global and prompt keys keep to the current buffer.
 
-The List group, whether the menu opened in the list or beside it, moves the point of the list's window, the menu staying open and following the new session at point: its title names it, and what applies to it is greyed out anew. Follow mode shows each session as you go, and the list highlights it, as moving in the list would.
+The List group, whether the menu opened in the list or beside it, moves the point of the list's window, the menu staying open and following the new session at point: its title names it, and what applies to it is greyed out anew. Follow mode shows each session as you go, its title taking the colour of the session you work in, as moving in the list would.
 
 *** The List group
 
@@ -182,6 +183,7 @@ Everywhere, through the menu.
 | =j= | =drover-next=               | visit the most urgent session                                  |
 | =b= | =drover-select=             | choose a session                                               |
 | ="= | =drover-prompt-dwim=        | write a prompt, with the context at point                      |
+| =n= | =drover-prompt-org-task=    | write a prompt for the Org task point is in                    |
 | ='= | =drover-prompt-toggle=      | show or hide the prompt                                        |
 | =l= | =drover-list=               | the list of sessions, in a window                              |
 | =L= | =drover-list-side=          | the list of sessions beside your work, shown or hidden         |
@@ -196,7 +198,7 @@ Everywhere, through the menu.
 | =.= | =drover-prompt-last-answer= | show the start of the last answer                              |
 | =O= | =drover-prompt-open-link=   | open the link at point                                         |
 
-=S= comes with the OpenCode backend. ="= is greyed out in the prompt itself. =p= offers the projects of the sessions drover knows, and lists those of the one you choose, through the filter. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns, drover's prompt by default; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
+=S= comes with the OpenCode backend. ="= is greyed out in the prompt itself, =n= outside Org buffers and in the prompt. =p= offers the projects of the sessions drover knows, and lists those of the one you choose, through the filter. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns, drover's prompt by default; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
 
 ** Adding to the menu
 
@@ -219,7 +221,7 @@ Add your own commands with =transient-append-suffix= and =transient-insert-suffi
 
 The buffer shows sessions and how many need you, nothing else: which subagents show, the filter, the sort and the keys are the View menu's to show (=V=), and the mode line's to hint at, such as =by status filtered=. A filter leaving every session out says =No session matches the filter.=; the View menu tells which, and clears it.
 
-From the side window, =RET= and =o= open the session at point in the window where you work, =C-o= shows it there and leaves you in the list, and follow mode shows each session there as point reaches it. Wherever the list is, the session shown in the window beside it is highlighted.
+From the side window, =RET= opens the session at point in the window where you work, =o= in another window than that one, split from it when there is none, =C-o= shows it where =RET= would and leaves you in the list, and follow mode shows each session there as point reaches it. Wherever the list is, the colour of a title tells where its session is (see [[*Where sessions are][Where sessions are]]).
 
 ** What a line shows
 
@@ -253,7 +255,20 @@ The model's effort is green when chosen (=drover-prompt-picked=) and dim when it
 
 Each icon takes the room its font draws it in, which may be wider than the room the font gives it: the Nerd Fonts but their Mono variants draw icons up to half a cell past their advance, and drover measures that ink in the fonts of the list's window, so no text is drawn on an icon. Every status icon takes the room of the widest, so titles line up whatever the status. A subagent's icon stands under its parent's title, past the icons of the parent's active subagents.
 
-The title of a session open in an Emacs buffer, such as an OpenCode session you visit, is in the face =drover-open-session=, which inherits =font-lock-keyword-face=, a light blue in many dark themes; over an idle session's dimming, it lends the dimming what it does not set. The list redraws as such buffers open and close.
+** Where sessions are
+
+The colour of a session's title tells where the session is in Emacs:
+
+| Face                    | Inherits                       | The session                                                                                              |
+|-------------------------+--------------------------------+----------------------------------------------------------------------------------------------------------|
+| none                    |                                | has no buffer                                                                                            |
+| =drover-open-session=   | =font-lock-keyword-face=       | has a buffer no window of a visible frame shows                                                          |
+| =drover-shown-session=  | =font-lock-type-face=          | shows in a window of a visible frame                                                                     |
+| =drover-active-session= | =font-lock-function-name-face= | shows in the window you work in: the selected one, or the one selected before the list or the minibuffer |
+
+The three faces inherit sibling faces of font lock, which themes tell apart from one another and from the default foreground; none of them is a status's, so a title never reads as a status: the faces of =success=, =warning= and =error= colour the Done, Needs you and Failed icons. =font-lock-function-name-face= names where you are elsewhere too: =which-function-mode= shows the function point is in with it. Over an idle session's dimming, they lend the dimming what they do not set.
+
+As you select windows and show buffers in them, only the titles whose session changed place take their new face, in place; the list is not drawn anew, but when a face would change the width of a title, as a bold one would. A buffer opening or closing is a change its backend reports, which redraws the list. =drover-list-current=, the face of the former highlight of the session beside the list, is an obsolete alias of =drover-active-session=.
 
 ** The last turn
 
@@ -277,7 +292,7 @@ The recap is fetched as the session expands, without waiting: =loading…= shows
 
 ** Prompt caches
 
-A session whose provider still holds its prompt cache, so that its next turn costs less if sent before the cache expires, shows how much of the cache's lifetime is left: in columns, as a short bar and the time left, such as =4m=, text you may copy; in two lines, as the background of its line (the face =drover-cache-bar=), filled from the left and shrinking as the cache runs out. Its tooltip tells how the cache stands as you read it, such as =Prompt cache: expires in 4m (1h window), 120k of 130k tokens cached=: the window is how long the provider keeps it after each turn, and the tokens what share of the conversation the next turn reads from it. An expired or unknown cache shows nothing. While the list is shown and a cache is live, a timer redraws the caches alone, every =drover-list-cache-interval= seconds.
+A session whose provider still holds its prompt cache, so that its next turn costs less if sent before the cache expires, shows how much of the cache's lifetime is left: in columns, as a short bar and the time left, such as =4m=, text you may copy; in two lines, as a line under its line, drawn from the left and shrinking as the cache runs out. Both take the colour of =drover-cache-bar=, which inherits =success=: the short bar fills with it, and the line is underlined in it, so that both show over the highlight of the current line and the region, which set only a background. Its tooltip tells how the cache stands as you read it, such as =Prompt cache: expires in 4m (1h window), 120k of 130k tokens cached=: the window is how long the provider keeps it after each turn, and the tokens what share of the conversation the next turn reads from it. An expired or unknown cache shows nothing. While the list is shown and a cache is live, a timer redraws the caches alone, every =drover-list-cache-interval= seconds.
 
 ** Animated icons
 
@@ -320,7 +335,7 @@ An active region selects the sessions whose lines it spans, those the list highl
 
 * The prompt
 
-=C-' "= (=drover-prompt-dwim=) opens =*drover*=, an Org buffer, with a link to the line at point and the region quoted in a code block; called again from elsewhere, it adds that context where you left point in the prompt. On an Org heading it starts a planning prompt for that task instead (=drover-prompt-task-format=, =drover-prompt-task-agent=), asking before it replaces a draft. =C-' '= (=drover-prompt-toggle=) shows or hides the prompt.
+=C-' "= (=drover-prompt-dwim=) opens =*drover*=, an Org buffer, with a link to the line at point and the region quoted in a code block, an Org heading's line as any other; called again from elsewhere, it adds that context where you left point in the prompt. =C-' n= (=drover-prompt-org-task=) starts a planning prompt for the Org task point is in, from anywhere in its entry, folded or narrowed (=drover-prompt-task-format=, =drover-prompt-task-agent=), asking before it replaces a draft. =C-' '= (=drover-prompt-toggle=) shows or hides the prompt.
 
 In the list, =C-' "= quotes the sessions selected, or the one at point, for an agent to read: an item per session, its Org link, titled after it, how it stands, and its last reply in a Markdown block, cut to =drover-prompt-quote-reply-lines= lines and =drover-prompt-quote-reply-characters= characters with a note telling how much is left out. The replies are fetched from the backends all at once, the echo area counting them as they arrive; a backend not answering within =drover-prompt-quote-timeout= seconds leaves its session quoted without one:
 

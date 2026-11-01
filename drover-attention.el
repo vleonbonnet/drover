@@ -23,8 +23,10 @@
 ;; Keeping up with sessions without opening their list:
 ;;
 ;; - `drover-attention-mode' counts the sessions that need you in the
-;;   mode line, one count per status, such as "⚑2 ✓1".  mouse-1 on it
-;;   visits the most urgent, mouse-3 chooses one.
+;;   mode line, as one count after a robot (`drover-attention-glyph'),
+;;   in the face of the most urgent of them.  It counts what lists show
+;;   under `drover-show-subagents', and every subagent waiting for you.
+;;   mouse-1 on it visits the most urgent, mouse-3 chooses one.
 ;; - `drover-next' visits the most urgent session that needs you;
 ;;   repeating it walks through the others, in the order of the first
 ;;   press, and wraps around.
@@ -91,17 +93,26 @@ out."
             (and summary (concat "  " summary)))))
 
 (defun drover-attention--help (sessions)
-  "Return the help text of the mode line counts of SESSIONS."
-  (concat "Sessions that need you:\n"
-          (mapconcat #'drover-attention--describe sessions "\n")
+  "Return the help text of the mode line count of SESSIONS, by status."
+  (concat "Sessions that need you:"
+          (mapconcat (pcase-lambda (`(,status . ,count))
+                       (concat "\n" (drover-status-label status) (format " (%d):" count)
+                               (mapconcat (lambda (session)
+                                            (concat "\n  " (drover-attention--describe session)))
+                                          (seq-filter (lambda (session)
+                                                        (eq (drover-session-status session) status))
+                                                      sessions)
+                                          "")))
+                     (drover-attention--counts sessions) "")
           "\n\nmouse-1: visit the most urgent\nmouse-3: choose a session"))
 
 (defvar drover-attention--pads (make-hash-table :test #'equal)
-  "Room around the status glyphs of the mode line, measured.
+  "Room around the glyph of the mode line, measured.
 Keys are (GLYPH FACE FONT), FONT being `drover-attention--font-key';
 values are (LEFT . RIGHT), the pixels to leave before GLYPH and after
-its advance.  The counts are computed whenever sessions change, so a
-glyph is measured once per font; a change of fonts empties the table.")
+its advance.  The count is computed whenever sessions change, so the
+glyph is measured once per font and face; a change of fonts empties
+the table.")
 
 (defun drover-attention--font-key ()
   "Return what the fonts of the mode line of the selected frame depend on.
@@ -126,31 +137,32 @@ icons up to half a cell past their advance, onto the count after them."
       (propertize " " 'display `(space :width (,pixels)))
     ""))
 
-(defun drover-attention--glyph (status)
-  "Return the glyph of STATUS in its face, with the room its ink takes.
+(defun drover-attention--glyph (face)
+  "Return `drover-attention-glyph' in FACE, with the room its ink takes.
 The room is measured once per font, see `drover-attention--pads'."
-  (let* ((glyph (drover-status-glyph status))
-         (face (drover-status-face status))
+  (let* ((glyph (propertize drover-attention-glyph 'face face))
          (key (list (substring-no-properties glyph) face (drover-attention--font-key)))
          (pads (or (gethash key drover-attention--pads)
                    (puthash key (drover-attention--measure glyph face) drover-attention--pads))))
     (concat (drover-attention--space (car pads)) glyph (drover-attention--space (cdr pads)))))
 
 (defun drover-attention--format (sessions)
-  "Return the mode line counts of SESSIONS, the sessions that need the user.
-Return nil when SESSIONS is empty.  Each glyph takes the room its ink
-does, so that it is never drawn over its count."
-  (when-let* ((counts (drover-attention--counts sessions)))
-    (concat " "
-            (propertize
-             (mapconcat (pcase-lambda (`(,status . ,count))
-                          (concat (drover-attention--glyph status)
-                                  (propertize (number-to-string count)
-                                              'face (drover-status-face status))))
-                        counts " ")
-             'help-echo (drover-attention--help sessions)
-             'mouse-face 'mode-line-highlight
-             'local-map drover-attention-mode-line-map))))
+  "Return the mode line count of SESSIONS, the sessions that need the user.
+It is their number after `drover-attention-glyph', both in the face of
+the most urgent status among them, or nil when SESSIONS is empty.  The
+glyph takes the room its ink does, so that it is never drawn over the
+count; the tooltip lists SESSIONS by status."
+  (when sessions
+    (let ((face (drover-status-face
+                 (car (seq-sort-by #'drover-status-rank #'<
+                                   (mapcar #'drover-session-status sessions))))))
+      (concat " "
+              (propertize
+               (concat (drover-attention--glyph face)
+                       (propertize (number-to-string (length sessions)) 'face face))
+               'help-echo (drover-attention--help sessions)
+               'mouse-face 'mode-line-highlight
+               'local-map drover-attention-mode-line-map)))))
 
 (defun drover-attention--update ()
   "Compute the mode line counts again and redraw every mode line."
@@ -195,11 +207,15 @@ For `after-setting-font-hook' and `enable-theme-functions'."
 ;;;###autoload
 (define-minor-mode drover-attention-mode
   "Show in the mode line how many sessions need you.
-The mode line holds one count per status of
-`drover-attention-statuses', such as \"⚑2 ✓1\", and nothing when no
-session needs you.  Its tooltip lists the sessions; clicking it visits
-the most urgent (`drover-next'), and clicking it with the right button
-chooses one (`drover-select').  Enabling the mode starts the backends."
+The mode line holds one count of the sessions whose status is one of
+`drover-attention-statuses' after `drover-attention-glyph', in the face
+of the most urgent of them, and nothing when no session needs you.  It
+counts the sessions lists show under `drover-show-subagents', and every
+subagent waiting for you, which blocks its parent (see
+`drover-surfaced-sessions').  Its tooltip lists them by status;
+clicking it visits the most urgent (`drover-next'), and clicking it
+with the right button chooses one (`drover-select').  Enabling the mode
+starts the backends."
   :global t
   :group 'drover
   (if drover-attention-mode
@@ -342,11 +358,12 @@ Their completion category is `drover-session'."
 ;;;###autoload
 (defun drover-select (&optional other-window)
   "Choose a session with completion and display it.
-Sessions are the visible ones (see `drover-visible-sessions'), most
-urgent first.  With a prefix argument OTHER-WINDOW, display it in
-another window."
+Sessions are those lists show, under `drover-show-subagents', and the
+subagents waiting for you, whatever it says (see
+`drover-surfaced-sessions'), most urgent first.  With a prefix argument
+OTHER-WINDOW, display it in another window."
   (interactive "P")
-  (let ((sessions (drover-sort (drover-visible-sessions))))
+  (let ((sessions (drover-sort (drover-surfaced-sessions))))
     (unless sessions
       (user-error "No sessions"))
     (drover-open (drover-read-session "Session: " sessions) other-window)))
