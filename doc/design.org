@@ -134,15 +134,15 @@ Cutting a text to its column measured candidates by bisection, about seven per r
 
 ** Measures
 
-=make bench= (=test/drover-bench.el=) draws a list of 2510 fake sessions shaped as the registry above, in each subagent mode, and follows the changes of a turn, checking that what was drawn in place is what a drawing whole draws.  In a graphical Emacs, with FiraCode Nerd Font and a theme, at 200 columns, garbage collections included:
+=make bench= (=test/drover-bench.el=) draws a list of 2510 fake sessions shaped as the registry above, in each subagent mode, and follows the changes of a turn, checking that what was drawn in place is what a drawing whole draws.  In a graphical Emacs, with FiraCode Nerd Font and a theme, at 200 columns, averages per run, garbage collections included:
 
-| Subagents | Rows | Refresh | Redraw | Another width | A step of a turn | Two taking turns | To idle and back | One coming |
-|-----------+------+---------+--------+---------------+------------------+------------------+------------------+------------|
-| all       | 2510 | 48 ms   | 48 ms  | 77 ms         | 0.6 ms           | 0.7 ms           | 9 ms (two)       | 1.2 ms     |
-| active    |  979 | 34 ms   | 34 ms  | 46 ms         | 1.6 ms           | 1.8 ms           | 7 ms (two)       | 1.1 ms     |
-| none      |  990 | 34 ms   | 33 ms  | 43 ms         | 1.8 ms           | 1.6 ms           | 7 ms (two)       | 1.2 ms     |
+| Subagents | Rows | Refresh | Redraw | Another width | A step of a turn | Two taking turns | To idle and back (two changes) | One coming |
+|-----------+------+---------+--------+---------------+------------------+------------------+--------------------------------+------------|
+| all       | 2510 | 46 ms   | 46 ms  | 78 ms         | 0.7 ms           | 0.7 ms           | 9.1 ms                         | 9.5 ms     |
+| active    |  979 | 33 ms   | 33 ms  | 43 ms         | 1.7 ms           | 1.6 ms           | 7.2 ms                         | 1.1 ms     |
+| none      |  990 | 33 ms   | 35 ms  | 44 ms         | 1.7 ms           | 1.6 ms           | 6.6 ms                         | 1.2 ms     |
 
-Drawing it whole was 1.7 s, 0.6 s and 0.6 s; changes are drawn in a time independent of the number of sessions.  What still costs: the first drawing, which measures every text (0.4 s for 2510 sessions, 0.2 s for 980), with every group expanded (0.28 s and 0.13 s), and the 2400 sessions of Idle drawn while idle, 13 ms per 50 trees.  Most of it is text properties: inserting text copies the property list of each of its runs, about twenty per line, and Magit adds two properties to each run.
+Drawing the list whole used to take 1.7 s, 0.7 s and 0.7 s there, and every change drew it whole.  A change costs the same whatever the number of sessions; Emacs then redisplays the list's window, about 8 ms whatever changed in it, once per redisplay however many changes came.  What still costs: the first drawing, which measures every text (0.4 s for 2510 sessions, 0.2 s for 980), a drawing with every group expanded (0.27 s and 0.13 s), and the 2400 sessions of Idle drawn while idle, 13 ms per 50 trees.  Most of it is text properties: inserting text copies the property list of each of its runs, about twenty per line, and Magit adds two properties to each run; and collecting that garbage, which in a graphical Emacs costs 20 to 30 ms a collection.
 
 * Measuring in pixels
 

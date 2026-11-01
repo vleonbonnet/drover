@@ -440,6 +440,34 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (setq drover-opencode-test-entries nil)
     (should-not (drover-sessions))))
 
+(ert-deftest drover-opencode-test-session-by-id ()
+  "A session reported changed is read from its registry entry alone, as the registry lists it."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1" :title "One")
+                                   (drover-opencode-test-entry "ses_2" :title "Two"))
+    (drover-index)
+    ;; Registering reported the backend changed.
+    (drover-changed-now)
+    (let ((listed 0))
+      (cl-letf* ((sessions (symbol-function 'opencode-state-sessions))
+                 ((symbol-function 'opencode-state-sessions)
+                  (lambda (&rest arguments) (cl-incf listed) (apply sessions arguments))))
+        (setq drover-opencode-test-entries (list (drover-opencode-test-entry "ses_1" :title "Renamed")
+                                                 (drover-opencode-test-entry "ses_2" :title "Two")))
+        (drover-opencode--updated "ses_1")
+        (drover-changed-now)
+        (should (zerop listed))
+        (should (equal (drover-session-title (drover-index-session '(opencode . "ses_1"))) "Renamed"))
+        ;; Archived, it leaves the sessions listed.
+        (setq drover-opencode-test-entries (list (drover-opencode-test-entry "ses_1" :archived 1.0)
+                                                 (drover-opencode-test-entry "ses_2" :title "Two")))
+        (drover-opencode--updated "ses_1")
+        (drover-changed-now)
+        (should-not (drover-index-session '(opencode . "ses_1")))
+        (should (equal (mapcar #'drover-session-key (drover-index-sessions))
+                       (mapcar #'drover-session-key (drover-sessions))))
+        ;; A session the registry no longer holds is gone.
+        (should-not (drover-opencode--session-by-id "ses_3"))))))
+
 (ert-deftest drover-opencode-test-model-in-session-location ()
   "Catalogs belong to a location: a session's own, else the current directory."
   (drover-opencode-test-with

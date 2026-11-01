@@ -144,9 +144,11 @@ for its own garbage, not for that of the measure before."
                                   (+ 40000 (* 1000 (% drover-bench-tick 50)))))))
 
 (defun drover-bench-text ()
-  "Return the text of the list, without its sections, which belong to one drawing."
+  "Return the text of the list, without its sections, which belong to one drawing.
+Nor the `face' properties font lock removes from what it displayed, as
+`font-lock-face' gives the same, nor its marks of what it displayed."
   (let ((text (buffer-string)))
-    (remove-list-of-text-properties 0 (length text) '(magit-section) text)
+    (remove-list-of-text-properties 0 (length text) '(magit-section face fontified) text)
     text))
 
 (defun drover-bench-row (label result target)
@@ -241,6 +243,8 @@ for its own garbage, not for that of the measure before."
                                   (drover-bench-measure (lambda () (drover-bench-step top)) 21)))
                      (step-sub (drover-bench-measure (lambda () (drover-bench-step sub)) 21))
                      (shown (drover-bench-measure (lambda () (drover-bench-step top) (redisplay t)) 21))
+                     (unchanged (drover-bench-measure (lambda () (force-window-update) (redisplay t)) 21))
+
                      (rename (drover-bench-measure
                               (lambda ()
                                 (drover-bench-change idle (lambda (session)
@@ -292,8 +296,12 @@ for its own garbage, not for that of the measure before."
                                   (drover-bench-row "a step" step 10)
                                   (drover-bench-row "a subagent's step" step-sub 10)
                                   (drover-bench-row "an idle one renamed" rename 10))
-                (drover-bench-log "               %s"
-                                  (drover-bench-row "a step, redisplayed" shown 10))
+                (when (display-graphic-p)
+                  ;; Emacs redisplays the list's window after a change,
+                  ;; once per redisplay however many changes came.
+                  (drover-bench-log "               %s | %s"
+                                    (drover-bench-row "a step, then redisplay" shown 1000)
+                                    (drover-bench-row "redisplay of the window alone" unchanged 1000)))
                 (drover-bench-log "               %s | %s | %s"
                                   (drover-bench-row "two taking turns" turns 10)
                                   (drover-bench-row "to idle and back" back 10)
