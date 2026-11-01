@@ -54,10 +54,25 @@
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-claude-code)
-(require 'claude-code-ide)
 (require 'project)
 (require 'seq)
 (require 'subr-x)
+
+;; Drover does not require claude-code-ide, so this file compiles
+;; without it: what it uses of claude-code-ide is declared here, and
+;; claude-code-ide is loaded only when the backend activates
+;; (`drover-claude-code-ide--activate').  The accessors of its session
+;; structure are declared by file only, as `check-declare' finds no
+;; `cl-defstruct' accessor.
+(defvar claude-code-ide-cli-extra-flags)
+(declare-function claude-code-ide--get-working-directory "ext:claude-code-ide" ())
+(declare-function claude-code-ide--start-session "ext:claude-code-ide" (&optional continue resume))
+(declare-function claude-code-ide--touch-session "ext:claude-code-ide" (session))
+(declare-function claude-code-ide-mcp--active-sessions "ext:claude-code-ide-mcp" ())
+(declare-function claude-code-ide-mcp--mru-session "ext:claude-code-ide-mcp" (project-dir))
+(declare-function claude-code-ide-mcp-session-buffer "ext:claude-code-ide-mcp" (session) t)
+(declare-function claude-code-ide-mcp-session-process "ext:claude-code-ide-mcp" (session) t)
+(declare-function claude-code-ide-mcp-session-project-dir "ext:claude-code-ide-mcp" (session) t)
 
 ;; Terminals are optional: none of them is required.
 (defvar ghostel-program-status)
@@ -66,14 +81,14 @@
 (defvar vterm-buffer-name-string)
 (defvar vterm-copy-mode)
 (defvar eat-terminal)
-(declare-function ghostel-paste-string "ghostel" (string))
-(declare-function ghostel-send-string "ghostel" (string))
-(declare-function ghostel-send-key "ghostel" (key-name &optional mods))
-(declare-function vterm-send-string "vterm" (string &optional paste-p))
-(declare-function vterm-send-return "vterm" ())
-(declare-function vterm-send-escape "vterm" ())
-(declare-function vterm-copy-mode "vterm" (&optional arg))
-(declare-function eat-term-send-string "eat" (terminal string))
+(declare-function ghostel-paste-string "ext:ghostel" (string))
+(declare-function ghostel-send-string "ext:ghostel" (string))
+(declare-function ghostel-send-key "ext:ghostel" (key-name &optional mods))
+(declare-function vterm-send-string "ext:vterm" (string &optional paste-p))
+(declare-function vterm-send-return "ext:vterm" ())
+(declare-function vterm-send-escape "ext:vterm" ())
+(declare-function vterm-copy-mode "ext:vterm" (&optional arg))
+(declare-function eat-term-send-string "ext:eat" (terminal string))
 
 ;;;; Options
 
@@ -891,7 +906,7 @@ Claude Code or no terminal starts."
   (let ((buffer (drover-claude-code-ide--live-buffer session)))
     ;; The most recently used session is the one claude-code-ide picks.
     (when-let* ((mcp-session (drover-claude-code-ide--mcp-session buffer)))
-      (setf (claude-code-ide-mcp-session-last-used mcp-session) (float-time)))
+      (claude-code-ide--touch-session mcp-session))
     (if other-window
         (pop-to-buffer buffer t)
       (pop-to-buffer-same-window buffer))))
@@ -1088,7 +1103,16 @@ claude-code-ide starts sessions."
     (with-current-buffer buffer
       (drover-claude-code-ide--teardown-terminal))))
 
-(drover-claude-code-ide--install)
+(defun drover-claude-code-ide--activate ()
+  "Load claude-code-ide, register the backend and follow its terminals.
+claude-code-ide is loaded here rather than when this file compiles,
+which drover does without claude-code-ide.  `drover' loads this file
+once claude-code-ide is loaded; an autoloaded function of this file
+may load it first, and claude-code-ide with it."
+  (require 'claude-code-ide)
+  (drover-claude-code-ide--install))
+
+(drover-claude-code-ide--activate)
 
 (defun drover-claude-code-ide-unload-function ()
   "Forget the `claude-code-ide' backend and stop following terminals."

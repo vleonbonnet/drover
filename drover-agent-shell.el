@@ -53,10 +53,49 @@
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-claude-code)
-(require 'agent-shell)
 (require 'map)
 (require 'seq)
 (require 'subr-x)
+
+;; Drover does not require agent-shell, so this file compiles without
+;; it: what it uses of agent-shell and shell-maker is declared here, and
+;; agent-shell is loaded only when the backend activates
+;; (`drover-agent-shell--activate').  Its functions of keyword arguments
+;; are declared without an arglist, which the byte compiler would check
+;; as positional.
+(defvar agent-shell--state)
+(defvar agent-shell-viewport--suffix)
+(declare-function agent-shell--config-option-by-category "ext:agent-shell-config" (state category))
+(declare-function agent-shell--config-option-set-mode-id "ext:agent-shell" t)
+(declare-function agent-shell--config-option-set-model-id "ext:agent-shell" t)
+(declare-function agent-shell--config-option-set-thought-level-id "ext:agent-shell" t)
+(declare-function agent-shell--current-mode-id "ext:agent-shell-config" (state))
+(declare-function agent-shell--current-model-id "ext:agent-shell-config" (state))
+(declare-function agent-shell--current-thought-level-id "ext:agent-shell-config" (state))
+(declare-function agent-shell--display-buffer "ext:agent-shell" (shell-buffer))
+(declare-function agent-shell--get-available-models "ext:agent-shell-config" (state))
+(declare-function agent-shell--get-available-thought-levels "ext:agent-shell-config" (state))
+(declare-function agent-shell--project-name "ext:agent-shell-project" ())
+(declare-function agent-shell--start "ext:agent-shell" t)
+(declare-function agent-shell--state "ext:agent-shell" ())
+(declare-function agent-shell--stop-reason-description "ext:agent-shell" (stop-reason))
+(declare-function agent-shell-buffers "ext:agent-shell" ())
+(declare-function agent-shell-get-config "ext:agent-shell" (buffer))
+(declare-function agent-shell-get-model-name "ext:agent-shell" (state))
+(declare-function agent-shell-initialized-p "ext:agent-shell" t)
+(declare-function agent-shell-insert "ext:agent-shell" t)
+(declare-function agent-shell-interrupt "ext:agent-shell" (&optional force))
+(declare-function agent-shell-jump-to-latest-permission-button-row "ext:agent-shell" ())
+(declare-function agent-shell-last-activity-time "ext:agent-shell" t)
+(declare-function agent-shell-prompt-queue "ext:agent-shell-prompt-queue" (prompt))
+(declare-function agent-shell-status "ext:agent-shell" t)
+(declare-function agent-shell-subscribe-to "ext:agent-shell" t)
+(declare-function agent-shell-unsubscribe "ext:agent-shell" t)
+(declare-function agent-shell-viewport--buffer "ext:agent-shell-viewport" t)
+(declare-function agent-shell-viewport--shell-buffer "ext:agent-shell-viewport" (&optional viewport-buffer))
+(declare-function shell-maker-busy "ext:shell-maker" ())
+(declare-function shell-maker-last-output "ext:shell-maker" ())
+(declare-function shell-maker-set-buffer-name "ext:shell-maker" (buffer new-name))
 
 ;;;; Options
 
@@ -1012,8 +1051,16 @@ whose creation time is unknown."
   (remove-hook 'window-buffer-change-functions #'drover-agent-shell--window-changed)
   (remove-function after-focus-change-function #'drover-agent-shell--window-changed))
 
-(drover-agent-shell--register)
-(drover-agent-shell--install)
+(defun drover-agent-shell--activate ()
+  "Load agent-shell, register the backend and follow agent-shell's shells.
+agent-shell is loaded here rather than when this file compiles, which
+drover does without agent-shell; `drover' loads this file once
+agent-shell is loaded."
+  (require 'agent-shell)
+  (drover-agent-shell--register)
+  (drover-agent-shell--install))
+
+(drover-agent-shell--activate)
 
 (defun drover-agent-shell-unload-function ()
   "Forget the `agent-shell' backend and stop following agent-shell's shells."

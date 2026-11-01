@@ -6,7 +6,7 @@
 ;; Maintainer: Valentin Leon <valentin@leon.click>
 ;; Keywords: tools, llm, convenience
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "30.1") (magit-section "4.0") (transient "0.13"))
+;; Package-Requires: ((emacs "31.1") (magit-section "4.0") (transient "0.13") (opencode "2.0.0"))
 ;; URL: https://github.com/vleonbonnet/drover
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -27,7 +27,8 @@
 ;; Drover gathers the sessions of every coding agent front end into one
 ;; place: which ones need you, which run, which finished while you were
 ;; elsewhere.  Front ends plug in as backends (see `drover-core'):
-;; opencode.el, agent-shell and claude-code-ide, each loaded with its
+;; opencode.el, which drover requires, and agent-shell and
+;; claude-code-ide, which it does not; each backend is loaded with its
 ;; package.  `drover-attention-mode' shows how many sessions need you in
 ;; the mode line and `drover-next' visits the most urgent; `drover-list'
 ;; lists every session in a window, and `drover-list-side' beside your
