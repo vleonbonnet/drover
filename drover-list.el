@@ -2463,10 +2463,11 @@ They are sorted as `drover-sort-trees' sorts them, by
         (setq head tree)))
     head))
 
-(defun drover-list--build (sessions now)
+(defun drover-list--build (sessions now &optional indexed)
   "Return the model of the list of SESSIONS at NOW, not drawn yet.
-Rows of the last drawing made of the same inputs are reused (see
-`drover-list--row')."
+INDEXED non-nil tells that SESSIONS are those of the index (see
+`drover-index-sessions'), whose order it keeps.  Rows of the last
+drawing made of the same inputs are reused (see `drover-list--row')."
   (let* ((trees (drover-tree sessions))
          ;; From every session, so that a parent tells its subagents
          ;; at work whether or not they are shown.
@@ -2485,9 +2486,12 @@ Rows of the last drawing made of the same inputs are reused (see
          (cuts (make-hash-table :test #'equal))
          (summary (drover-list--summary-create))
          (drover-list--reuse (and old (drover-list--model-rows old))))
+    ;; Sessions of the index keep its serial numbers, which trees drawn
+    ;; in place later compare with.
     (let ((index 0))
       (dolist (session sessions)
-        (puthash (drover-session-key session) (cl-incf index) serials)))
+        (let ((key (drover-session-key session)))
+          (puthash key (if indexed (drover-index-serial key) (cl-incf index)) serials))))
     (dolist (node trees)
       (puthash (drover-session-key (drover-node-session node)) node fulls))
     (dolist (node (cdr view))
@@ -2556,10 +2560,9 @@ Rows of the last drawing made of the same inputs are reused (see
   "Insert every section of the list at point, from what backends report now.
 The model of the drawing goes to `drover-list--model'."
   (let* ((now (drover-list--now))
-         (all (if (or drover-show-history drover-show-archived)
-                  (drover-known-sessions)
-                (drover-index-sessions)))
-         (model (drover-list--build all now))
+         (indexed (not (or drover-show-history drover-show-archived)))
+         (all (if indexed (drover-index-sessions) (drover-known-sessions)))
+         (model (drover-list--build all now indexed))
          (layout (drover-list--model-layout model)))
     (setq drover-list--model model
           drover-list--layout (plist-get layout :layout)
@@ -2782,38 +2785,6 @@ second during a turn."
 ;; list is drawn anew.  The lines then drawn are those a drawing anew
 ;; would draw, so that the two are the same, which the tests check.
 
-(defun drover-list--hold (positions sections)
-  "Return POSITIONS, held across the redrawing of SECTIONS, as markers or anchors.
-A position within one of SECTIONS, whose text goes, is held as
-\(SECTION LINE . COLUMN): its line within the section and its place in
-that line, in characters; any other as a marker."
-  (mapcar (lambda (position)
-            (when position
-              (let ((section (seq-find (lambda (section)
-                                         (and (<= (oref section start) position)
-                                              (< position (or (oref section end) position))))
-                                       sections)))
-                (if section
-                    (save-excursion
-                      (goto-char position)
-                      (cons section (cons (count-lines (oref section start) (line-beginning-position))
-                                          (- position (line-beginning-position)))))
-                  (copy-marker position)))))
-          positions))
-
-(defun drover-list--release (held)
-  "Return the position HELD stands for, as `drover-list--hold' held it, or nil."
-  (cond ((markerp held) (prog1 (marker-position held) (set-marker held nil)))
-        ((consp held)
-         (pcase-let ((`(,section ,line . ,column) held))
-           (save-excursion
-             (goto-char (oref section start))
-             (forward-line line)
-             (when (>= (point) (oref section end))
-               (goto-char (oref section start)))
-             (drover-list--move-in-line column)
-             (point))))))
-
 (defun drover-list--replace-text (section start end text)
   "Replace the text of SECTION from START to END with TEXT, starting at START.
 TEXT goes in before the old text goes, so that what begins where it
@@ -2902,12 +2873,6 @@ be drawn once expanded, as a drawing anew leaves a collapsed section."
     (magit-section--set-section-properties section)
     (setf (drover-list--model-header-text model) text)))
 
-(defun drover-list--grouped-by-trees-p ()
-  "Return non-nil when groups come in the order of their most urgent trees.
-So do groups of a project, branch, agent, model or provider; those of a
-status or a time come in an order of their own."
-  (memq drover-group-by '(project branch agent model provider)))
-
 (defun drover-list--follow (keys &optional bodies)
   "Draw in place what the change of the sessions KEYS changes, if it can.
 The sessions are those of `drover-changed-sessions', as the index has
@@ -2928,200 +2893,429 @@ must then be drawn anew."
            (drover-list--follow-1 model keys bodies)
            t))))
 
+(defun drover-list--plan (root now places layout rows-table)
+  "Return the tree of session ROOT as the list would draw it now, or nil.
+The value is a `drover-list--tree' of its rows, not drawn, its group
+slot holding the value of the group it goes in; nil when ROOT tops no
+tree any more, or the filter leaves none of it.  Rows of ROWS-TABLE
+made of the same inputs are reused; NOW, PLACES and LAYOUT give the
+measures.  The active subagents LAYOUT holds follow the tree.  Throw
+`redraw' for a tree in a group the list cannot place."
+  (when (and (drover-index-session root) (null (drover-index-parent root)))
+    (let ((trees (drover-tree (drover-index-tree-sessions root))))
+      (unless (and trees (null (cdr trees))
+                   (equal (drover-session-key (drover-node-session (car trees))) root))
+        (throw 'redraw nil))
+      (let* ((active (drover-tree-active-subagents trees))
+             (view (drover--view-trees nil trees))
+             (arranged (drover-view-arrange (car view) now))
+             (global (plist-get layout :active)))
+        (when global
+          (dolist (session (drover-tree-sessions trees))
+            (let ((key (drover-session-key session)))
+              (if-let* ((subagents (gethash key active)))
+                  (puthash key subagents global)
+                (remhash key global)))))
+        (when arranged
+          (when (or (cdr arranged) (cdr (cdar arranged))
+                    (null (drover-list--group-rank (caar arranged))))
+            (throw 'redraw nil))
+          (let* ((value (caar arranged))
+                 (node (cadar arranged))
+                 (metrics (append (list :now now :active active :places places) layout)))
+            (drover-list--tree-create
+             :root root :node node :full (car trees)
+             :cut (and (drover-filter-active-p) (car (cdr view)))
+             :serial (drover-index-serial root) :group value
+             :shown (let ((drover-list--reuse rows-table))
+                      (drover-list--tree-rows (list node) value metrics))
+             :hidden (- (length (drover-tree-sessions (cdr view)))
+                        (length (drover-tree-sessions (car view)))))))))))
+
+(defun drover-list--group-rank (value)
+  "Return where the group of VALUE goes among groups, or nil when unknown.
+For groups of a status or a time, a number; for groups placed by their
+most urgent tree, and the one group of sessions not grouped, t."
+  (pcase (car value)
+    ('status (seq-position (append drover-status-order '(archived)) (cdr value)))
+    ('updated (seq-position drover-activity-buckets (cdr value)))
+    (_ t)))
+
+(defun drover-list--group-before-p (a b)
+  "Return non-nil when group A, a `drover-list--group', comes before group B."
+  (let ((rank-a (drover-list--group-rank (drover-list--group-value a)))
+        (rank-b (drover-list--group-rank (drover-list--group-value b))))
+    (if (numberp rank-a)
+        (< rank-a rank-b)
+      (drover-list--before-p (drover-list--group-head a) (drover-list--group-head b)))))
+
+(defun drover-list--place (vector tree)
+  "Return VECTOR, of trees in the order drawn, with TREE in its place."
+  (let ((low 0)
+        (high (length vector)))
+    (while (< low high)
+      (let ((middle (/ (+ low high) 2)))
+        (if (drover-list--drawn-before-p (aref vector middle) tree)
+            (setq low (1+ middle))
+          (setq high middle))))
+    (vconcat (substring vector 0 low) (vector tree) (substring vector low))))
+
 (defun drover-list--follow-1 (model keys bodies)
-  "Draw in place in MODEL the change of the sessions KEYS, or throw `redraw'.
-BODIES are as for `drover-list--follow'."
+  "Draw in MODEL the change of the sessions KEYS, or throw `redraw'.
+BODIES are as for `drover-list--follow'.  Each tree a session changed
+in is made anew; one that keeps its rows and its place has the lines
+that changed drawn again in place, the others leave their place and
+are drawn in the new one.  Groups come and go likewise."
   (let* ((now (drover-list--now))
          (places (drover-list--places))
          (rows-table (drover-list--model-rows model))
+         (trees-table (drover-list--model-trees model))
          (layout (drover-list--model-layout model))
-         (roots nil)
-         (changes nil))
+         (roots nil))
     (dolist (key (append keys bodies))
-      (let ((row (gethash key rows-table)))
-        (cond ((drover-index-session key)
-               (let ((root (drover-index-root key)))
-                 (when (and row (not (equal root (drover-list--tree-root (drover-list--row-tree row)))))
-                   (throw 'redraw nil))
-                 (cl-pushnew root roots :test #'equal)))
-              (row (throw 'redraw nil)))))
-    ;; Each tree touched is made anew: it must keep its shape and group.
-    (dolist (root roots)
-      (let* ((trees (drover-tree (drover-index-tree-sessions root)))
-             (old (gethash root (drover-list--model-trees model))))
-        (unless (and trees (null (cdr trees))
-                     (equal (drover-session-key (drover-node-session (car trees))) root))
-          (throw 'redraw nil))
-        (let* ((active (drover-tree-active-subagents trees))
-               (view (drover--view-trees nil trees))
-               (arranged (drover-view-arrange (car view) now)))
-          (cond
-           ((and (null arranged) (null old)))
-           ((or (null arranged) (null old) (cdr arranged) (cdr (cdar arranged)))
-            (throw 'redraw nil))
-           (t
-            (let* ((group (drover-list--tree-group old))
-                   (value (caar arranged))
-                   (node (cadar arranged))
-                   (metrics (append (list :now now :active active :places places) layout))
-                   (rows (let ((drover-list--reuse rows-table))
-                           (drover-list--tree-rows (list node) value metrics)))
-                   (old-rows (drover-list--tree-shown old)))
-              (unless (and (equal value (drover-list--group-value group))
-                           (or (not (eq (car value) 'status))
-                               (memq (cdr value) (cons 'archived drover-status-order)))
-                           (= (length rows) (length old-rows))
-                           (cl-every (lambda (new old)
-                                       (and (equal (drover-list--row-key new) (drover-list--row-key old))
-                                            (eql (drover-list--row-depth new) (drover-list--row-depth old))))
-                                     rows old-rows))
-                (throw 'redraw nil))
-              (let ((global (plist-get layout :active)))
-                (when global
-                  (dolist (session (drover-tree-sessions trees))
-                    (let ((key (drover-session-key session)))
-                      (if-let* ((subagents (gethash key active)))
-                          (puthash key subagents global)
-                        (remhash key global))))))
-              (push (list old node (car trees) (and (drover-filter-active-p) (car (cdr view))) rows
-                          (- (length (drover-tree-sessions (cdr view)))
-                             (length (drover-tree-sessions (car view)))))
-                    changes)))))))
-    ;; The trees take their new state, then must stand where they stood.
-    (let ((groups nil))
-      (pcase-dolist (`(,tree ,node ,full ,cut ,_ ,hidden) changes)
-        (cl-incf (drover-list--model-hidden model) (- hidden (drover-list--tree-hidden tree)))
-        (setf (drover-list--tree-node tree) node
-              (drover-list--tree-full tree) full
-              (drover-list--tree-cut tree) cut
-              (drover-list--tree-hidden tree) hidden)
-        (cl-pushnew (drover-list--tree-group tree) groups))
-      (pcase-dolist (`(,tree . ,_) changes)
-        (let* ((trees (drover-list--group-trees (drover-list--tree-group tree)))
-               (position (drover-list--tree-position tree)))
-          (unless (and (or (zerop position)
-                           (drover-list--drawn-before-p (aref trees (1- position)) tree))
-                       (or (= (1+ position) (length trees))
-                           (drover-list--drawn-before-p tree (aref trees (1+ position)))))
-            (throw 'redraw nil))))
-      (when (drover-list--grouped-by-trees-p)
-        (dolist (group groups)
-          (let ((head (drover-list--group-head group)))
-            (setf (drover-list--group-head group)
-                  (if (and (eq drover-sort-by 'urgency) (not drover-sort-descending))
-                      (aref (drover-list--group-trees group) 0)
-                    (let ((changed (mapcar #'car changes)))
-                      (if (memq head changed)
-                          (drover-list--head group)
-                        (seq-reduce (lambda (head tree)
-                                      (if (and (eq (drover-list--tree-group tree) group)
-                                               (drover-list--before-p tree head))
-                                          tree
-                                        head))
-                                    changed head)))))))
-        (let ((all (drover-list--model-groups model)))
-          (dolist (group groups)
-            (let* ((position (seq-position all group #'eq))
-                   (previous (and (> position 0) (nth (1- position) all)))
-                   (next (nth (1+ position) all))
-                   (head (drover-list--group-head group)))
-              (unless (and (or (null previous)
-                               (drover-list--before-p (drover-list--group-head previous) head))
-                           (or (null next)
-                               (drover-list--before-p head (drover-list--group-head next))))
-                (throw 'redraw nil))))))
-      ;; Rows changed take their place in the summary and counts; the
-      ;; layout must stay.
-      (let ((summary (drover-list--model-summary model))
-            (replaced nil))
-        (pcase-dolist (`(,tree ,_ ,_ ,_ ,rows ,_) changes)
-          (let ((group (drover-list--tree-group tree)))
-            (cl-mapc (lambda (new old)
-                       (if (eq new old)
-                           (when (member (drover-list--row-key new) bodies)
-                             (push (cons new old) replaced))
-                         (drover-list--summary-add summary old -1)
-                         (drover-list--summary-add summary new 1)
-                         (dolist (counts (list (drover-list--group-counts group)
-                                               (drover-list--model-counts model)))
-                           (drover-list--count-row counts old -1)
-                           (drover-list--count-row counts new 1))
-                         (setf (drover-list--row-tree new) tree
-                               (drover-list--row-section new) (drover-list--row-section old))
-                         (puthash (drover-list--row-key new) new rows-table)
-                         (push (cons new old) replaced)))
-                     rows (drover-list--tree-shown tree))
-            (setf (drover-list--tree-shown tree) rows)))
-        (unless (equal (drover-list--layout-key (drover-list--layout-of summary layout))
-                       (plist-get layout :key))
-          (throw 'redraw nil))
-        (plist-put layout :now now)
-        (drover-list--redraw-in-place model (nreverse replaced) groups bodies)))))
+      (when (drover-index-session key)
+        (cl-pushnew (drover-index-root key) roots :test #'equal))
+      (when-let* ((row (gethash key rows-table)))
+        (cl-pushnew (drover-list--tree-root (drover-list--row-tree row)) roots :test #'equal)))
+    (let ((plans nil)
+          (touched nil))
+      ;; Each plan is (OLD NEW OLD-ROWS OLD-HIDDEN IN-PLACE): a tree
+      ;; keeping its group and rows stays the same object, so that its
+      ;; neighbours tell whether it moved.
+      (dolist (root roots)
+        (let* ((old (gethash root trees-table))
+               (new (drover-list--plan root now places layout rows-table))
+               (old-rows (and old (drover-list--tree-shown old)))
+               (old-hidden (and old (drover-list--tree-hidden old)))
+               (same (and old new
+                          (equal (drover-list--tree-group new)
+                                 (drover-list--group-value (drover-list--tree-group old)))
+                          (= (length old-rows) (length (drover-list--tree-shown new)))
+                          (cl-every (lambda (a b)
+                                      (and (equal (drover-list--row-key a) (drover-list--row-key b))
+                                           (eql (drover-list--row-depth a) (drover-list--row-depth b))))
+                                    old-rows (drover-list--tree-shown new)))))
+          (when old
+            (cl-pushnew (drover-list--tree-group old) touched))
+          (when same
+            (setf (drover-list--tree-node old) (drover-list--tree-node new)
+                  (drover-list--tree-full old) (drover-list--tree-full new)
+                  (drover-list--tree-cut old) (drover-list--tree-cut new)
+                  (drover-list--tree-shown old) (drover-list--tree-shown new)
+                  (drover-list--tree-hidden old) (drover-list--tree-hidden new)
+                  (drover-list--tree-group new) (drover-list--tree-group old)
+                  new old))
+          (push (list old new old-rows old-hidden same) plans)))
+      (setq plans (nreverse plans))
+      (pcase-let ((`(,touched . ,vectors) (drover-list--follow-model model plans touched now)))
+        (drover-list--follow-buffer model plans touched vectors bodies)))))
 
-(defun drover-list--redraw-in-place (model replaced groups bodies)
-  "Draw in MODEL the rows of REPLACED, the headings of GROUPS and the header.
-REPLACED is a list of (NEW . OLD) rows; GROUPS the groups holding them;
-BODIES the sessions whose details are drawn again.  Each is drawn only
-where its text changed.  Point, the mark and the windows showing the
-list keep their places."
+(defun drover-list--follow-model (model plans touched now)
+  "Take the trees of PLANS into MODEL at NOW: groups, order, rows, counts, layout.
+TOUCHED lists the groups the old trees of PLANS were in; the groups the
+new ones go in, made if need be, join it.  Return (TOUCHED . VECTORS):
+VECTORS is an alist of the trees of each group before.  Throw `redraw'
+when the groups would come in another order, or the layout change."
+  (let ((rows-table (drover-list--model-rows model))
+        (trees-table (drover-list--model-trees model))
+        (summary (drover-list--model-summary model))
+        (layout (drover-list--model-layout model))
+        (removed (mapcar #'car plans))
+        (vectors (mapcar (lambda (group) (cons group (drover-list--group-trees group)))
+                         (drover-list--model-groups model))))
+    (dolist (group touched)
+      (setf (drover-list--group-trees group)
+            (cl-remove-if (lambda (tree) (memq tree removed)) (drover-list--group-trees group))))
+    (pcase-dolist (`(,old ,_ ,old-rows ,old-hidden ,_) plans)
+      (when old
+        (remhash (drover-list--tree-root old) trees-table)
+        (cl-decf (drover-list--model-hidden model) old-hidden)
+        (let ((group (drover-list--tree-group old)))
+          (dolist (row old-rows)
+            (remhash (drover-list--row-key row) rows-table)
+            (drover-list--summary-add summary row -1)
+            (drover-list--count-row (drover-list--group-counts group) row -1)
+            (drover-list--count-row (drover-list--model-counts model) row -1)
+            (cl-decf (drover-list--group-size group))
+            (cl-decf (drover-list--model-size model))))))
+    (pcase-dolist (`(,_ ,new ,_ ,_ ,same) plans)
+      (when new
+        (let ((group (if same
+                         (drover-list--tree-group new)
+                       (let ((value (drover-list--tree-group new)))
+                         (or (seq-find (lambda (group) (equal (drover-list--group-value group) value))
+                                       (drover-list--model-groups model))
+                             (drover-list--group-create :value value :trees []
+                                                        :counts (make-hash-table :test #'eq)))))))
+          (cl-pushnew group touched)
+          (setf (drover-list--tree-group new) group
+                (drover-list--group-trees group) (drover-list--place (drover-list--group-trees group) new))
+          (puthash (drover-list--tree-root new) new trees-table)
+          (cl-incf (drover-list--model-hidden model) (drover-list--tree-hidden new))
+          (dolist (row (drover-list--tree-shown new))
+            (setf (drover-list--row-tree row) new)
+            (puthash (drover-list--row-key row) row rows-table)
+            (drover-list--summary-add summary row 1)
+            (drover-list--count-row (drover-list--group-counts group) row 1)
+            (drover-list--count-row (drover-list--model-counts model) row 1)
+            (cl-incf (drover-list--group-size group))
+            (cl-incf (drover-list--model-size model))))))
+    (when (zerop (drover-list--model-size model))
+      (throw 'redraw nil))
+    (dolist (group touched)
+      (let ((position -1))
+        (seq-doseq (tree (drover-list--group-trees group))
+          (setf (drover-list--tree-position tree) (cl-incf position))))
+      (setf (drover-list--group-head group) (drover-list--head group)))
+    ;; Groups come and go, in their place; those staying keep theirs.
+    (let ((groups (seq-remove (lambda (group) (zerop (drover-list--group-size group)))
+                              (drover-list--model-groups model))))
+      (dolist (group touched)
+        (unless (or (zerop (drover-list--group-size group)) (memq group groups))
+          (let ((before nil)
+                (after groups))
+            (while (and after (drover-list--group-before-p (car after) group))
+              (push (pop after) before))
+            (setq groups (append (nreverse before) (list group) after)))))
+      (cl-loop for (a b) on groups while b
+               unless (drover-list--group-before-p a b)
+               do (throw 'redraw nil))
+      (setf (drover-list--model-groups model) groups))
+    (unless (equal (drover-list--layout-key (drover-list--layout-of summary layout))
+                   (plist-get layout :key))
+      (throw 'redraw nil))
+    (plist-put layout :now now)
+    (cons touched vectors)))
+
+(defun drover-list--stable-p (old-vector new-vector plans)
+  "Return non-nil when the trees of a group staying in place keep their order.
+OLD-VECTOR and NEW-VECTOR are the trees of the group before and after
+the change of PLANS.  Those staying are the trees no plan changed, and
+those changed in place, which are the same objects before and after."
+  (let ((moving (mapcan (pcase-lambda (`(,old ,new ,_ ,_ ,same))
+                          (unless same (delq nil (list old new))))
+                        plans)))
+    (cl-flet ((staying (vector)
+                (cl-remove-if (lambda (tree) (memq tree moving)) (append vector nil))))
+      (let ((before (staying old-vector))
+            (after (staying new-vector)))
+        (and (= (length before) (length after))
+             (cl-every #'eq before after))))))
+
+(defun drover-list--delete-rows (rows)
+  "Delete the sections of ROWS, consecutive, from the buffer."
+  (let* ((first (drover-list--row-section (car rows)))
+         (last (drover-list--row-section (car (last rows))))
+         (start (marker-position (oref first start)))
+         (end (marker-position (oref last end))))
+    (drover-list--forget-marks start end)
+    (delete-region start end)
+    (dolist (row rows)
+      (let ((section (drover-list--row-section row)))
+        (dolist (position (list (oref section start) (oref section content) (oref section end)))
+          (when (markerp position)
+            (set-marker position nil)))))))
+
+(defun drover-list--delete-section (section)
+  "Delete SECTION, its text and its markers, from the buffer."
+  (let ((start (marker-position (oref section start)))
+        (end (marker-position (oref section end))))
+    (drover-list--forget-marks start end)
+    (delete-region start end)
+    (magit-map-sections
+     (lambda (child)
+       (dolist (position (list (oref child start) (oref child content) (oref child end)))
+         (when (markerp position)
+           (set-marker position nil))))
+     section)))
+
+(defun drover-list--apply-visibility (section)
+  "Give SECTION, inserted, the visibility its slot tells, as a drawing does."
+  (if (oref section hidden)
+      (magit-section-hide section)
+    (magit-section-show section)))
+
+(defun drover-list--insert-rows (tree container position layout)
+  "Insert the sections of the rows of TREE in CONTAINER at POSITION, in LAYOUT."
+  (goto-char position)
+  (let ((magit-insert-section--parent container))
+    (dolist (row (drover-list--tree-shown tree))
+      (drover-list--insert-session row layout)
+      (let ((section (drover-list--row-section row)))
+        (setq drover-list--animated
+              (append drover-list--animated
+                      (drover-list--collect-animated (oref section start) (oref section content))))
+        (unless (and (not (eq container magit-root-section)) (oref container hidden))
+          (drover-list--apply-visibility section)))))
+  ;; A container ending here ends after them.
+  (when (< (oref container end) (point))
+    (set-marker (oref container end) (point)))
+  (when (< (oref magit-root-section end) (point))
+    (set-marker (oref magit-root-section end) (point))))
+
+(defun drover-list--follow-buffer (model plans touched vectors bodies)
+  "Draw in the buffer the change of PLANS that MODEL took in.
+TOUCHED lists the groups the change touched, VECTORS their trees
+before it, as an alist; BODIES are as for `drover-list--follow'.  Point,
+the mark and the windows showing the list keep their places as a
+drawing anew keeps them."
   (let* ((layout (drover-list--model-layout model))
-         (edits (mapcar (pcase-lambda (`(,new . ,old))
-                          (let ((heading (drover-list--heading new layout)))
-                            ;; A heading the same as the one drawn is not drawn again.
-                            (list new
-                                  (unless (and (drover-list--row-heading old)
-                                               (equal-including-properties
-                                                (car heading) (car (drover-list--row-heading old))))
-                                    heading)
-                                  (or (not (eq new old))
-                                      (member (drover-list--row-key new) bodies)))))
-                        replaced))
-         (group-texts (delq nil
-                            (mapcar (lambda (group)
-                                      (when (drover-list--group-value group)
-                                        (let ((text (drover-list--group-heading group layout)))
-                                          (unless (equal-including-properties
-                                                   text (drover-list--group-heading-text group))
-                                            (cons group text)))))
-                                    groups)))
-         (header (let ((text (drover-list--header-text model)))
-                   (unless (equal-including-properties text (drover-list--model-header-text model))
-                     text)))
-         (sections (append (mapcar (lambda (edit) (drover-list--row-section (car edit))) edits)
-                           (mapcar (lambda (entry) (drover-list--group-container (car entry))) group-texts)
-                           (and header (list (drover-list--model-header model)))))
+         (root magit-root-section)
+         (groups (drover-list--model-groups model))
+         (grouped (drover-list--group-value (car groups)))
          (windows (get-buffer-window-list nil nil t))
-         (held (drover-list--hold (append (list (point) (and (region-active-p) (mark)))
-                                          (mapcan (lambda (window)
-                                                    (list (window-point window) (window-start window)))
-                                                  windows))
-                                  sections))
+         (anchor (drover-list--anchor (point)))
+         (mark (and (region-active-p) (drover-list--anchor (mark))))
+         (placements (mapcar (lambda (window)
+                               (list window
+                                     (drover-list--anchor (window-point window))
+                                     (line-number-at-pos (window-start window))))
+                             windows))
          (inhibit-read-only t)
-         (deactivate-mark nil))
-    (when sections
-      (save-excursion
-        (pcase-dolist (`(,row ,heading ,body) edits)
-          (drover-list--redraw-row row heading body))
-        (pcase-dolist (`(,group . ,text) group-texts)
-          (drover-list--redraw-group group text))
-        (when header
-          (drover-list--redraw-header model header)))
-      (goto-char (drover-list--release (pop held)))
-      (let ((mark (drover-list--release (pop held))))
-        (when mark
-          (set-marker (mark-marker) mark)))
-      (dolist (window windows)
-        (set-window-point window (drover-list--release (pop held)))
-        (set-window-start window (drover-list--release (pop held)) t))
-      (when (eq (window-buffer) (current-buffer))
-        (goto-char (window-point)))
-      (drover-list--draw-caches)
-      (magit-section-update-highlight t)
-      (set-buffer-modified-p nil)
-      (push (current-buffer) magit-section--refreshed-buffers))
-    (dolist (position held)
-      (when (markerp position)
-        (set-marker position nil)))
+         (deactivate-mark nil)
+         (fresh nil)
+         (gone nil))
+    ;; Trees in place in a group whose order changed move as the others.
+    (dolist (group touched)
+      (unless (drover-list--stable-p (or (alist-get group vectors) [])
+                                     (drover-list--group-trees group) plans)
+        (dolist (plan plans)
+          (when (and (nth 4 plan) (eq (drover-list--tree-group (nth 1 plan)) group))
+            (setf (nth 4 plan) nil)))))
+    ;; Rows of trees in place take the sections of those they replace.
+    (pcase-dolist (`(,_ ,new ,old-rows ,_ ,same) plans)
+      (when same
+        (cl-mapc (lambda (row old-row)
+                   (unless (eq row old-row)
+                     (setf (drover-list--row-section row) (drover-list--row-section old-row))))
+                 (drover-list--tree-shown new) old-rows)))
+    (save-excursion
+      ;; Trees leaving their place, and groups emptied, go first.
+      (pcase-dolist (`(,old ,_ ,old-rows ,_ ,same) plans)
+        (when (and old (not same) old-rows (drover-list--row-section (car old-rows)))
+          (drover-list--delete-rows old-rows)))
+      (dolist (group touched)
+        (when (and (zerop (drover-list--group-size group)) (drover-list--group-container group)
+                   (drover-list--group-value group))
+          (drover-list--delete-section (drover-list--group-container group))
+          (setf (drover-list--group-container group) nil)))
+      ;; Groups coming, whole, in their place.
+      (let ((next nil))
+        (dolist (group (reverse groups))
+          (unless (drover-list--group-container group)
+            (goto-char (if next
+                           (oref (drover-list--group-container next) start)
+                         (oref root end)))
+            (let ((magit-insert-section--parent root))
+              (drover-list--insert-group group layout))
+            (when (< (oref root end) (point))
+              (set-marker (oref root end) (point)))
+            (let ((container (drover-list--group-container group)))
+              (drover-list--apply-visibility container)
+              (seq-doseq (tree (drover-list--group-trees group))
+                (dolist (row (drover-list--tree-shown tree))
+                  (push row fresh)))
+              (setq drover-list--animated
+                    (append drover-list--animated
+                            (drover-list--collect-animated (oref container start) (oref container end))))))
+          (setq next group)))
+      ;; Trees coming, each before the next one drawn in its group.
+      (dolist (group touched)
+        (when-let* (((> (drover-list--group-size group) 0))
+                    (container (drover-list--group-container group)))
+          (let ((next nil)
+                (trees (drover-list--group-trees group)))
+            (cl-loop for index from (1- (length trees)) downto 0
+                     do (let* ((tree (aref trees index))
+                               (row (car (drover-list--tree-shown tree)))
+                               (section (drover-list--row-section row)))
+                          (unless (and section (oref section start)
+                                       (markerp (oref section start))
+                                       (marker-buffer (oref section start))
+                                       (eq (oref section parent) container))
+                            (drover-list--insert-rows
+                             tree container
+                             (cond (next (oref (drover-list--row-section
+                                                (car (drover-list--tree-shown next)))
+                                               start))
+                                   ((drover-list--group-value group) (1- (oref container end)))
+                                   (t (oref container end)))
+                             layout)
+                            (dolist (row (drover-list--tree-shown tree))
+                              (push row fresh)))
+                          (setq next tree)))
+            (oset container children
+                  (append (and (not (drover-list--group-value group)) (list (drover-list--model-header model)))
+                          (mapcan (lambda (tree) (mapcar #'drover-list--row-section (drover-list--tree-shown tree)))
+                                  (append trees nil)))))))
+      (when grouped
+        (oset root children (cons (drover-list--model-header model)
+                                  (mapcar #'drover-list--group-container groups))))
+      ;; Trees in place: the lines that changed.
+      (pcase-dolist (`(,old ,new ,old-rows ,_ ,same) plans)
+        (when same
+          (cl-mapc (lambda (row old-row)
+                     (let* ((heading (drover-list--heading row layout))
+                            (changed (not (and (drover-list--row-heading old-row)
+                                               (equal-including-properties
+                                                (car heading) (car (drover-list--row-heading old-row))))))
+                            (body (or (not (eq row old-row)) (member (drover-list--row-key row) bodies))))
+                       (when (or changed body)
+                         (drover-list--redraw-row row (and changed heading) body))
+                       (when (not (eq row old-row))
+                         (push row fresh))))
+                   (drover-list--tree-shown new) old-rows)
+          (ignore old)))
+      ;; What tells of them: group headings, the header.
+      (dolist (group touched)
+        (when-let* (((drover-list--group-value group))
+                    ((> (drover-list--group-size group) 0))
+                    (text (drover-list--group-heading group layout))
+                    ((not (equal-including-properties text (drover-list--group-heading-text group)))))
+          (drover-list--redraw-group group text)))
+      (let ((text (drover-list--header-text model)))
+        (unless (equal-including-properties text (drover-list--model-header-text model))
+          (drover-list--redraw-header model text))))
+    ;; Sessions gone are forgotten.
+    (pcase-dolist (`(,_ ,_ ,old-rows ,_ ,_) plans)
+      (dolist (row old-rows)
+        (let ((key (drover-list--row-key row)))
+          (unless (gethash key (drover-list--model-rows model))
+            (push key gone)
+            (remhash key drover-list--drawn)
+            (remhash key drover-list--title-states)
+            (remhash (cons 'session key) drover-list--visibility)
+            (when drover-list--recaps
+              (remhash key drover-list--recaps))))))
+    (goto-char (drover-list--resolve anchor))
+    (pcase-dolist (`(,window ,window-anchor ,start-line) placements)
+      (set-window-point window (drover-list--resolve window-anchor))
+      (set-window-start window
+                        (save-excursion
+                          (goto-char (point-min))
+                          (forward-line (1- start-line))
+                          (point))
+                        t))
+    (when (eq (window-buffer) (current-buffer))
+      (goto-char (window-point)))
+    (when mark
+      (set-marker (mark-marker) (drover-list--resolve mark)))
+    (drover-list--draw-caches)
+    ;; What the sessions drawn lack is asked for, if they show.
+    (when drover-list--prefetched
+      (let ((sessions nil))
+        (dolist (row fresh)
+          (let ((group (drover-list--tree-group (drover-list--row-tree row))))
+            (unless (and (drover-list--group-value group)
+                         (oref (drover-list--group-container group) hidden))
+              (puthash (drover-list--row-key row) t drover-list--prefetched)
+              (push (drover-list--row-session row) sessions))))
+        (when sessions
+          (drover-prefetch sessions))))
+    (magit-section-update-highlight t)
+    (set-buffer-modified-p nil)
+    (push (current-buffer) magit-section--refreshed-buffers)
+    (ignore gone)
     (drover-list--update-timers)))
 
 (defun drover-list--visible-p (buffer)
@@ -3216,38 +3410,35 @@ changed; with IGNORE-AUTO nil, as with a prefix argument to
 
 (defun drover-list--refresh-times ()
   "Draw again the rows of the current list whose times read otherwise now.
-Those are their ages, and whether their prompt caches live: rows of
-sessions that did not change are drawn in place, as the time passes.
-Groups of last activity a tree leaves draw the list anew."
+Those are their ages, and whether their prompt caches live, and the
+trees that go to another group of last activity: rows of sessions that
+did not change are drawn in place, as the time passes."
   (when-let* ((model drover-list--model))
     (let ((now (drover-list--now))
           (keys nil))
-      (if (and (eq drover-group-by 'updated)
-               (seq-some (lambda (group)
-                           (seq-some (lambda (tree)
-                                       (not (eq (drover-activity-bucket
-                                                 (drover-node-updated (drover-list--tree-node tree)) now)
-                                                (cdr (drover-list--group-value group)))))
-                                     (drover-list--group-trees group)))
-                         (drover-list--model-groups model)))
-          (drover-list--render)
-        (maphash (lambda (key row)
-                   (let ((inputs (drover-list--row-inputs row))
-                         (session (drover-list--row-session row)))
-                     (unless (and inputs
-                                  (equal (aref inputs 6)
-                                         (drover-format-age (drover-list--age-time session) now))
-                                  (equal (aref inputs 7)
-                                         (drover-format-age (drover-session-created session) now))
-                                  (eq (aref inputs 8)
-                                      (and (drover-session-cache-fraction session now) t))
-                                  (equal (aref inputs 10)
-                                         (let ((archived (drover-session-archived session)))
-                                           (and (numberp archived) (drover-format-age archived now)))))
-                       (push key keys))))
-                 (drover-list--model-rows model))
-        (when keys
-          (drover-list--update-sessions (current-buffer) keys))))))
+      (when (eq drover-group-by 'updated)
+        (dolist (group (drover-list--model-groups model))
+          (seq-doseq (tree (drover-list--group-trees group))
+            (unless (eq (drover-activity-bucket (drover-node-updated (drover-list--tree-node tree)) now)
+                        (cdr (drover-list--group-value group)))
+              (push (drover-list--tree-root tree) keys)))))
+      (maphash (lambda (key row)
+                 (let ((inputs (drover-list--row-inputs row))
+                       (session (drover-list--row-session row)))
+                   (unless (and inputs
+                                (equal (aref inputs 6)
+                                       (drover-format-age (drover-list--age-time session) now))
+                                (equal (aref inputs 7)
+                                       (drover-format-age (drover-session-created session) now))
+                                (eq (aref inputs 8)
+                                    (and (drover-session-cache-fraction session now) t))
+                                (equal (aref inputs 10)
+                                       (let ((archived (drover-session-archived session)))
+                                         (and (numberp archived) (drover-format-age archived now)))))
+                     (push key keys))))
+               (drover-list--model-rows model))
+      (when keys
+        (drover-list--update-sessions (current-buffer) keys)))))
 
 ;;;; Timers
 

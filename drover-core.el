@@ -1239,7 +1239,8 @@ without ID, listing all its sessions anew.  Without BACKEND either,
 views draw everything anew."
   (cond ((and backend id) (push (cons backend id) drover--changed-keys))
         (backend (push backend drover--changed-backends))
-        (t (setq drover--changed-all t)))
+        (t (setq drover--changed-all t
+                 drover--changed-backends (append (drover-backends) drover--changed-backends))))
   (drover--schedule-changed))
 
 (defun drover-changed-now ()
@@ -1516,6 +1517,12 @@ records of several backends make one session."
 (defun drover-index-session (key)
   "Return the record of the session whose key is KEY in the index, or nil."
   (gethash key (drover--index-records (drover-index))))
+
+(defun drover-index-serial (key)
+  "Return the place of the session KEY in the order of the index, a number, or nil.
+Sessions first listed earlier have lower numbers, as
+`drover-index-sessions' orders them."
+  (gethash key (drover--index-serials (drover-index))))
 
 (defun drover-index-parent (key)
   "Return the key of the parent of the session KEY in the index, or nil.

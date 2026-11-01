@@ -2641,11 +2641,13 @@ The value is (SESSIONS . IDS), IDS the sessions changed, came or went."
   "Whatever sessions change, the list drawn in place is the list drawn anew.
 Its text and properties, its sections and their places, its header
 line, after each of many random changes, in every subagent mode, in
-columns and in two lines, grouped by status or by project, sorted by
-urgency or by activity, some sessions expanded."
+columns and in two lines, grouped by status, project or activity or
+not at all, sorted by urgency, activity or title, some sessions
+expanded.  Most changes are drawn in place."
   (pcase-dolist (`(,mode ,width ,grouping ,sort)
                  '((all 1000 status urgency) (active 300 status urgency)
-                   (none 1000 project updated) (all 1000 project urgency)))
+                   (none 1000 project updated) (all 1000 project urgency)
+                   (all 1000 updated title) (active 1000 nil urgency)))
     (random (format "drover %s %s %s %s" mode width grouping sort))
     (drover-list-test-with (drover-list-test-random-sessions 40)
       (drover-list-test-with-font
@@ -2675,69 +2677,74 @@ urgency or by activity, some sessions expanded."
                   (should (equal (list mode width step (nth 1 drawn) (nth 2 drawn))
                                  (list mode width step (nth 1 fresh) (nth 2 fresh))))
                   (should (equal-including-properties (car drawn) (car fresh))))))
-            ;; Many changes are drawn in place.
-            (should (> in-place 6))))))))
+            (should (> in-place 15))))))))
+
+(defun drover-list-test-is-fresh ()
+  "Check that the list is the list drawn anew, text, properties and sections."
+  (let ((drawn (drover-list-test-drawn))
+        (fresh (drover-list-test-fresh)))
+    (should (equal (cdr drawn) (cdr fresh)))
+    (should (equal-including-properties (car drawn) (car fresh)))))
 
 (ert-deftest drover-list-test-in-place-changes ()
-  "A session changing within its place redraws its line alone, in place."
+  "Sessions changing, moving, coming and going are drawn in place; a new layout anew."
   (drover-list-test-with (list (drover-list-test-titled "a" "Alpha" :status 'working
                                                         :updated (drover-list-test-ago 10)
                                                         :context-tokens 1000 :context-limit 200000)
                                (drover-list-test-titled "b" "Bravo" :status 'working
                                                         :updated (drover-list-test-ago 20)
                                                         :context-tokens 1000 :context-limit 200000)
-                               (drover-list-test-titled "c" "Charlie" :status 'done
+                               (drover-list-test-titled "c" "Cee" :status 'done
                                                         :since (drover-list-test-ago 30)))
     (drover-list-test-shown
       (let ((root magit-root-section)
             (section (drover-list-test-section "a")))
-        ;; As wide as it was, its context leaves the columns as they are.
-        (setf (drover-session-context-tokens (drover-list-test-find "a")) 5000)
-        (drover-backend-changed 'fake "a")
-        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
-        (should (eq magit-root-section root))
-        (should (eq (drover-list-test-section "a") section))
-        (should (string-match-p "5k" (drover-list-test-heading "a")))
-        ;; Wider than any, it widens its column: the list is drawn anew.
-        (setf (drover-session-context-tokens (drover-list-test-find "a")) 50000)
-        (drover-backend-changed 'fake "a")
-        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
-        (should (string-match-p "50k" (drover-list-test-heading "a")))
-        ;; Its newer activity keeps it first among those working.
-        (setf (drover-session-updated (drover-list-test-find "a")) (drover-list-test-ago 1))
-        (drover-backend-changed 'fake "a")
-        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
-        ;; Another passing it moves a line: the list is drawn anew.
-        (setf (drover-session-updated (drover-list-test-find "b")) (drover-list-test-ago 0))
-        (drover-backend-changed 'fake "b")
-        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
-        (should (equal (drover-list-test-order) '("c" "b" "a")))
-        ;; So does a session going to another group, coming or going.
-        (setf (drover-session-status (drover-list-test-find "a")) 'done)
-        (drover-backend-changed 'fake "a")
-        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
-        (should (equal (drover-list-test-groups) '((done "c" "a") (working "b"))))
-        (setq drover-test-sessions (append drover-test-sessions
-                                           (list (drover-test-session "d" :status 'idle))))
-        (drover-backend-changed 'fake "d")
-        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
-        (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "c"))
-                                               drover-test-sessions))
-        (drover-backend-changed 'fake "c")
-        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
-        (should (equal (drover-list-test-groups) '((done "a") (working "b") (idle "d"))))
-        ;; A hidden subagent changing redraws what tells of it: its
-        ;; parent's line, in place.
-        (setq drover-test-sessions (append drover-test-sessions
-                                           (list (drover-test-session "q" :parent "b" :status 'idle))))
-        (drover-backend-changed 'fake "q")
-        (drover-changed-now)
-        (setf (drover-session-status (drover-list-test-find "q")) 'working)
-        (let ((drover-show-subagents 'none))
-          (drover-list--render)
-          (drover-backend-changed 'fake "q")
-          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
-          (should (string-match-p "\\*" (drover-list-test-heading "b"))))))))
+        (cl-flet ((change (id function)
+                    (when function
+                      (funcall function (drover-list-test-find id)))
+                    (drover-backend-changed 'fake id)
+                    (prog1 (drover-list-test-counting-redraws (drover-changed-now))
+                      (drover-list-test-is-fresh))))
+          ;; As wide as it was, its context leaves the columns as they
+          ;; are: its line alone is drawn again.
+          (should (zerop (change "a" (lambda (session) (setf (drover-session-context-tokens session) 5000)))))
+          (should (eq magit-root-section root))
+          (should (eq (drover-list-test-section "a") section))
+          (should (string-match-p "5k" (drover-list-test-heading "a")))
+          ;; Another passing it moves a line, in place.
+          (should (zerop (change "b" (lambda (session)
+                                       (setf (drover-session-updated session) (drover-list-test-ago 0))))))
+          (should (equal (drover-list-test-order) '("c" "b" "a")))
+          ;; So do a session going to another group, coming or going,
+          ;; and groups coming and going with them.
+          (should (zerop (change "a" (lambda (session) (setf (drover-session-status session) 'done)))))
+          (should (equal (drover-list-test-groups) '((done "c" "a") (working "b"))))
+          (setq drover-test-sessions (append drover-test-sessions
+                                             (list (drover-list-test-titled "d" "Delta" :status 'idle))))
+          (should (zerop (change "d" nil)))
+          (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "c"))
+                                                 drover-test-sessions))
+          (should (zerop (change "c" nil)))
+          (should (equal (drover-list-test-groups) '((done "a") (working "b") (idle "d"))))
+          (should (zerop (change "b" (lambda (session) (setf (drover-session-status session) 'waiting)))))
+          (should (equal (drover-list-test-groups) '((waiting "b") (done "a") (idle "d"))))
+          (should (eq magit-root-section root))
+          ;; Wider than any, a context widens its column: the list is
+          ;; drawn anew.
+          (should (= (change "a" (lambda (session) (setf (drover-session-context-tokens session) 50000))) 1))
+          (should (string-match-p "50k" (drover-list-test-heading "a")))
+          ;; A hidden subagent changing redraws what tells of it: its
+          ;; parent's line, in place.
+          (setq drover-test-sessions (append drover-test-sessions
+                                             (list (drover-test-session "q" :parent "d" :status 'working))))
+          (change "q" nil)
+          (let ((drover-show-subagents 'none))
+            (drover-list--render)
+            (should (string-match-p "\\*" (drover-list-test-heading "d")))
+            (should (zerop (change "q" (lambda (session) (setf (drover-session-title session) "Quebec")))))
+            (save-excursion
+              (drover-list-test-goto "d")
+              (should (string-match-p "Quebec" (get-text-property (+ (point) 2) 'help-echo))))))))))
 
 (ert-deftest drover-list-test-in-place-keeps-point ()
   "Lines drawn in place keep point, the mark and window starts where they were."
@@ -4771,12 +4778,16 @@ Confirmations answer yes, their prompts pushed to `asked', newest first."
     (drover-list-test-type "C-SPC C-n")
     (setq deactivate-mark nil)
     (setf (drover-session-since (drover-list-test-find "c")) (drover-list-test-ago 40))
-    (drover-list--on-change)
-    (should-not deactivate-mark)
-    (should (region-active-p))
-    (should (equal (mapcar #'cdr (drover-list-test-groups)) '(("c" "a" "b") ("w"))))
-    (should (equal (drover-list-test-selected) '("a" "b")))
-    (should (equal (drover-list-test-highlighted) '("a" "b")))
+    ;; Moved in place, then drawn anew.
+    (drover-backend-changed 'fake "c")
+    (drover-changed-now)
+    (dotimes (_ 2)
+      (should-not deactivate-mark)
+      (should (region-active-p))
+      (should (equal (mapcar #'cdr (drover-list-test-groups)) '(("c" "a" "b") ("w"))))
+      (should (equal (drover-list-test-selected) '("a" "b")))
+      (should (equal (drover-list-test-highlighted) '("a" "b")))
+      (drover-list--render))
     (drover-list--draw-caches)
     (should-not deactivate-mark)))
 
