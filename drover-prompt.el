@@ -644,7 +644,8 @@ An Org heading line is quoted as any other line:
 (defun drover-prompt-add-context ()
   "Open the prompt, or add to it the context at point.
 As `drover-prompt-dwim' does, which refuses the prompt buffer first.
-The context is the active region, else the line at point, formatted by
+The context is the active region, else the line at point, whole even
+where fields, such as a Comint prompt, divide it, formatted by
 `drover-prompt-format-context'.  In drover's own lists, those setting
 `drover-view-p', it is the sessions selected, or the one at point,
 quoted with their last replies by `drover-prompt-quote-sessions'; a
@@ -656,9 +657,11 @@ where the user left point."
             (sessions (drover-selected-sessions t)))
       (drover-prompt-quote-sessions sessions)
     (let* ((source (current-buffer))
+           ;; The whole line: `line-beginning-position' stops at fields,
+           ;; such as a Comint prompt's.
            (region (if (use-region-p)
                        (buffer-substring-no-properties (region-beginning) (region-end))
-                     (buffer-substring-no-properties (line-beginning-position) (line-end-position))))
+                     (buffer-substring-no-properties (pos-bol) (pos-eol))))
            (block (drover-prompt-format-context source region (drover-prompt-language major-mode))))
       (drover-prompt--add block default-directory))))
 

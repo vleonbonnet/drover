@@ -822,6 +822,89 @@ another front end, its session keys on: neither quotes a session."
           (drover-prompt-add-context))
         (should (equal recaps '("s")))))))
 
+(defun drover-prompt-test--quoted-from (positions)
+  "Return what the context at each of POSITIONS quotes, as (POSITION . TEXT).
+TEXT is the content of the code block the prompt got, unescaped, or
+the whole prompt when it holds no block.  The prompt is emptied after
+each."
+  (mapcar (lambda (position)
+            (goto-char position)
+            (drover-prompt-add-context)
+            (with-current-buffer (drover-prompt-buffer)
+              (prog1 (cons position
+                           (if (string-match "\n#\\+begin_src [^\n]*\n\\(\\(?:.\\|\n\\)*\\)\n#\\+end_src\n\n\\'"
+                                             (buffer-string))
+                               (org-unescape-code-in-string (match-string 1 (buffer-string)))
+                             (buffer-string)))
+                (erase-buffer))))
+          positions))
+
+(defun drover-prompt-test--line-positions (line)
+  "Return the positions on line number LINE that quoting is tried from.
+Its start, its second and third characters, which are in and after a
+prompt such as \"> \", its middle and its end."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (let ((start (pos-bol))
+          (end (pos-eol)))
+      (list start (min (1+ start) end) (min (+ start 2) end) (/ (+ start end) 2) end))))
+
+(defun drover-prompt-test--quotes-whole (line text)
+  "Check that the context anywhere on LINE, a line number, quotes TEXT."
+  (let ((positions (drover-prompt-test--line-positions line)))
+    (should (equal (drover-prompt-test--quoted-from positions)
+                   (mapcar (lambda (position) (cons position text)) positions)))))
+
+(ert-deftest drover-prompt-test-quotes-whole-line-across-fields ()
+  "The line at point is quoted whole, though fields divide it.
+Comint marks its prompts and output with the `field' property, which
+`line-beginning-position' and `line-end-position' stop at: from the
+start of a sent input's line, the quote held the prompt alone.  Here
+Comint writes the output and takes the input itself, as opencode.el
+writes its transcripts.  Plain, Org and terminal buffers, without
+fields, quote their lines whole too."
+  (drover-prompt-test-with
+    (with-temp-buffer
+      (setq default-directory "/")
+      (comint-mode)
+      (let ((process (make-pipe-process :name "drover-prompt-test" :buffer (current-buffer)
+                                        :noquery t))
+            (comint-input-sender #'ignore))
+        (unwind-protect
+            (progn
+              (comint-output-filter process "Welcome\n> ")
+              (goto-char (point-max))
+              (insert "Please investigate: https://example.com/x")
+              (comint-send-input)
+              (comint-output-filter process "An answer\n> ")
+              ;; The fields the quote must cross.
+              (should (eq (get-text-property 9 'field) 'output))
+              (should-not (get-text-property 11 'field))
+              (should (eq (get-text-property (save-excursion (goto-char 9) (pos-eol)) 'field)
+                          'boundary))
+              (drover-prompt-test--quotes-whole 2 "> Please investigate: https://example.com/x")
+              (drover-prompt-test--quotes-whole 3 "An answer"))
+          (delete-process process))))
+    (with-temp-buffer
+      (setq default-directory "/")
+      (insert "first\nthe line at point\nlast\n")
+      (drover-prompt-test--quotes-whole 2 "the line at point"))
+    (with-temp-buffer
+      (setq default-directory "/")
+      (org-mode)
+      (insert "* TODO Ship it\n- an item, see [[https://example.com][there]]\n")
+      (drover-prompt-test--quotes-whole 1 "* TODO Ship it")
+      (drover-prompt-test--quotes-whole 2 "- an item, see [[https://example.com][there]]"))
+    (dolist (mode '(vterm-mode eat-mode))
+      (with-temp-buffer
+        (setq default-directory "/"
+              major-mode mode)
+        ;; Terminals pad lines to their width.
+        (insert "$ ls -la          \nfile          \n$           \n")
+        (drover-prompt-test--quotes-whole 1 "$ ls -la")
+        (drover-prompt-test--quotes-whole 2 "file")))))
+
 (ert-deftest drover-prompt-test-task-keeps-draft ()
   "Starting a task's prompt asks before replacing a draft, and keeps picks made on an empty prompt."
   (drover-prompt-test-with

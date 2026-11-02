@@ -1094,6 +1094,49 @@ nothing is fetched."
         (when-let* ((buffer (get-buffer drover-prompt-buffer-name)))
           (kill-buffer buffer))))))
 
+(ert-deftest drover-opencode-test-session-buffer-quotes-sent-prompt ()
+  "A sent prompt's line is quoted whole, its \"> \" too, from anywhere on it.
+opencode.el writes the prompt as Comint output, a field of its own,
+and the input after it, which `line-beginning-position' and
+`line-end-position' stop at: from the start of the line, the quote
+held \">\" alone.  The transcript is written by opencode.el's own
+rendering of a prompt and of output."
+  (require 'drover-prompt)
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((drover-prompt-buffer-name "*drover opencode quote test*")
+          (drover-prompt-require-features nil)
+          (org-mode-hook nil)
+          (prompt "Please investigate: https://example.slack.com/archives/C1/p2"))
+      (unwind-protect
+          (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                    ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
+                    ((symbol-function 'drover-prompt--schedule-refresh) #'ignore))
+            (with-temp-buffer
+              (opencode-session-mode)
+              (setq opencode-session-id "ses_1")
+              (let ((process (opencode--make-process (current-buffer)))
+                    (name (buffer-name)))
+                (unwind-protect
+                    (progn
+                      (opencode--render-user-prompt prompt)
+                      (opencode-output "An answer of the agent\n")
+                      (goto-char (point-min))
+                      (should (looking-at-p (regexp-quote (concat "> " prompt "\n"))))
+                      (should (eq (get-text-property 1 'field) 'output))
+                      (should-not (get-text-property 3 'field))
+                      (dolist (position (list 1 2 3 20 (pos-eol)))
+                        (goto-char position)
+                        (drover-prompt-dwim)
+                        (with-current-buffer drover-prompt-buffer-name
+                          (should (equal (cons position (buffer-string))
+                                         (cons position
+                                               (format "From buffer %s line 1:\n#+begin_src markdown\n> %s\n#+end_src\n\n"
+                                                       name prompt))))
+                          (erase-buffer))))
+                  (delete-process process)))))
+        (when-let* ((buffer (get-buffer drover-prompt-buffer-name)))
+          (kill-buffer buffer))))))
+
 (ert-deftest drover-opencode-test-session-buffer-outside-registry ()
   "A session the registry does not hold is described by its buffer."
   (drover-opencode-test-with nil
