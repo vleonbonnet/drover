@@ -29,7 +29,7 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test lint clean bench real-data
+.PHONY: all compile compile-standalone test lint clean bench bench-idle real-data
 
 all: compile test
 
@@ -92,6 +92,25 @@ bench: compile
 	  else \
 	    $(EMACS) -Q --batch -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) $(BENCH_FILES) || status=1; \
 	  fi; \
+	fi; \
+	rm -rf "$$opencode"; exit $$status
+
+# Measures what drover costs in a graphical Emacs while nothing happens,
+# while a session streams, and once Emacs lost focus: processor time,
+# allocation, redisplays, the minute's refresh.  Not part of test; it
+# needs EMACS_GUI, and takes a few minutes.  See test/drover-idle-bench.el.
+IDLE_BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-idle-bench.el --eval '(drover-idle-bench-main)'
+bench-idle: compile
+	@if [ -z "$(EMACS_GUI)" ]; then echo "bench-idle needs EMACS_GUI, a graphical Emacs"; exit 1; fi; \
+	opencode=$$(mktemp -d); status=0; \
+	cp $(OPENCODE_EL)/opencode*.el "$$opencode" && \
+	(cd "$$opencode" && $(EMACS) -Q --batch -L . $(OPENCODE_DEPS) -f batch-byte-compile opencode*.el \
+	   > /dev/null 2>&1) || { echo "Could not compile opencode.el from $(OPENCODE_EL)"; status=1; }; \
+	if [ $$status -eq 0 ]; then \
+	  out=$$(mktemp -d)/idle.txt; \
+	  DROVER_BENCH_OUTPUT=$$out timeout 600 $(EMACS_GUI) -Q --chdir $(CURDIR) \
+	    -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) $(IDLE_BENCH_FILES) -ApplePersistenceIgnoreState YES || status=1; \
+	  cat $$out; echo "Profiles: $$(dirname $$out)"; \
 	fi; \
 	rm -rf "$$opencode"; exit $$status
 
