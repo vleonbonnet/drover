@@ -76,7 +76,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 3))
   (load "drover-core" nil t))
 
 ;; Recent additions to opencode.el.
@@ -86,6 +86,14 @@
 (declare-function opencode-session-compact "opencode-session" (id))
 (declare-function opencode-session-last-turn "opencode-session" (id callback))
 (declare-function opencode-agent-display "opencode-display" (id &optional directory))
+
+;; Scheduling is drover's, loaded as the user schedules.
+(declare-function drover-schedule-load "drover-schedule" ())
+(declare-function drover-schedule-target "drover-schedule" (&optional buffer))
+(declare-function drover-schedule-read-when "drover-schedule" (&optional turn))
+(declare-function drover-schedule-read-prompt "drover-schedule" ())
+(declare-function drover-schedule-enqueue "drover-schedule" (target chosen text))
+(defvar opencode--attachments)
 
 ;;;; The OpenCode engine
 
@@ -347,7 +355,8 @@ times of the database files stand in.  The engine's :last-used."
                           :resolve #'drover-opencode--resolve
                           :agents #'drover-opencode--agents
                           :last-used #'drover-opencode--last-used
-                          :model-resets-variant t)
+                          :model-resets-variant t
+                          :directory #'drover-opencode--directory)
   (drover-register-model-source 'opencode #'drover-opencode--catalog-source 0))
 
 (drover-opencode--register-engine)
@@ -360,6 +369,47 @@ model sources then stay, with the engine's label alone."
   (if (drover-engine-model-sources 'opencode)
       (drover-register-engine 'opencode :label "OpenCode")
     (drover-unregister-engine 'opencode)))
+
+;;;; Conversations by identifier
+
+(defun drover-opencode--directory (id then else)
+  "Call THEN with the directory OpenCode session ID runs in, as the service tells.
+ELSE gets a message when the service has no such session.  The
+engine's :directory (see `drover-register-engine')."
+  (opencode-session-fetch
+   id
+   (lambda (info)
+     (drover-with-reporting "OpenCode session"
+       (let ((directory (alist-get 'directory (alist-get 'location info))))
+         (if (and (stringp directory) (not (string-empty-p directory)))
+             (funcall then (file-name-as-directory directory))
+           (funcall else (format "The service tells no directory of OpenCode session %s"
+                                 (drover-bound-line id)))))))
+   nil
+   (lambda (error)
+     (drover-with-reporting "OpenCode session"
+       (funcall else (format "No OpenCode session %s: %s" (drover-bound-line id)
+                             (opencode-error-describe error)))))))
+
+(defun drover-opencode-resume (id _directory &optional then else)
+  "Open OpenCode session ID in the selected window, as the service has it.
+The service finds a session by its identifier alone.  THEN gets its
+buffer once its transcript is loaded, ELSE a message when the service
+cannot open it, which is otherwise reported.  opencode.el follows the
+session live as it opens it.  A resumer of `drover-register-resumer'."
+  (opencode-session-open-by-id
+   id :other-window nil
+   :callback (lambda (_info)
+               (when then
+                 (let ((buffer (current-buffer)))
+                   (drover-with-reporting "OpenCode session"
+                     (funcall then buffer)))))
+   :else (lambda (error)
+           (drover-with-reporting "OpenCode session"
+             (if else
+                 (funcall else (opencode-error-describe error))
+               (opencode-report-error (format "No OpenCode session %s: %s" (drover-bound-line id)
+                                              (opencode-error-describe error))))))))
 
 ;;;; Projects
 
@@ -909,6 +959,73 @@ idle.  The backend's :send."
      (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
                   (drover-session-display-title session) message))))
 
+(defun drover-opencode--blocker (session)
+  "Say why the buffer of SESSION cannot take a prompt now, or nil once it can.
+The service queues or steers a prompt past a draft and a running turn,
+so the buffer needs only be loaded and connected.  The backend's
+:blocker."
+  (if-let* ((buffer (drover-opencode--buffer session)))
+      (with-current-buffer buffer
+        (unless (opencode-session-ready-p)
+          "the session is not loaded or not connected to OpenCode"))
+    "the session has no buffer"))
+
+(defun drover-opencode--submit (session text then else)
+  "Send TEXT as a prompt of SESSION now, then call THEN, or ELSE with a message.
+TEXT goes literally, a leading slash included, past any draft, and shows
+once delivered.  It consents to the service replacing stale thinking with
+its text, since no one is there to be asked.  The backend's :submit."
+  (if-let* ((buffer (drover-opencode--buffer session)))
+      (with-current-buffer buffer
+        (opencode-session-send
+         text :show t :accept-thinking-loss t
+         :then (lambda (_item) (drover-with-reporting "OpenCode prompt" (funcall then)))
+         :else (lambda (error)
+                 (drover-with-reporting "OpenCode prompt"
+                   (funcall else (opencode-error-describe error))))))
+    (funcall else "the session has no buffer")))
+
+(defun drover-opencode--ready ()
+  "Return non-nil once the registry lists the sessions the service runs.
+The backend's :ready."
+  (opencode-state-ready-p))
+
+;;;; Scheduling the input
+
+(defun drover-opencode-schedule-input ()
+  "Schedule the input of this session buffer for a later turn of its session.
+Ask when (see `drover-schedule-read-when'), the end of the running turn
+first while one runs: that queues the input after the turn through
+opencode.el, which shows it in the buffer, where it can still be edited
+or withdrawn, outside drover's queue.  At another time, the input is
+the prompt, cleared once scheduled; with nothing typed, the prompt is
+read.  Input attaching files cannot be scheduled.  The prompt action
+`schedule' of OpenCode session buffers."
+  (interactive)
+  (require 'drover-schedule)
+  (drover-schedule-load)
+  (let* ((target (drover-schedule-target))
+         (input (and (get-buffer-process (current-buffer))
+                     (buffer-substring-no-properties (opencode-pmark) (point-max))))
+         (typed (and input (not (string-blank-p input))))
+         (chosen (drover-schedule-read-when (eq opencode-session-status 'busy))))
+    (cond
+     ((eq (car chosen) 'turn-end)
+      (unless typed
+        (let ((text (drover-schedule-read-prompt)))
+          (delete-region (opencode-pmark) (point-max))
+          (goto-char (point-max))
+          (insert text)))
+      (goto-char (point-max))
+      (opencode-queue-input))
+     ((and typed opencode--attachments)
+      (user-error "The input attaches files, which a scheduled prompt cannot carry"))
+     (t
+      (drover-schedule-enqueue target chosen
+                               (if typed (string-trim input) (drover-schedule-read-prompt)))
+      (when typed
+        (delete-region (opencode-pmark) (point-max)))))))
+
 (defun drover-opencode--new-session-model (defaults agent model variant)
   "Return the model reference a new session starts on, or nil.
 Nil lets `opencode-session-create' choose: the model AGENT pins, AGENT
@@ -1035,7 +1152,11 @@ unknown.  The backend's :options."
    :check #'drover-opencode--check
    :apply-options #'drover-opencode--apply-options
    :send #'drover-opencode--send
-   :options #'drover-opencode--options))
+   :options #'drover-opencode--options
+   :blocker #'drover-opencode--blocker
+   :submit #'drover-opencode--submit
+   :ready #'drover-opencode--ready)
+  (drover-register-resumer 'opencode 'opencode #'drover-opencode-resume :by-id t :async t))
 
 (drover-opencode--register)
 
@@ -1100,7 +1221,8 @@ Everything after the process mark goes; \\[undo] brings it back."
     (compact . drover-opencode--compact-session)
     (fork . opencode-fork-session)
     (last-answer . opencode-scroll-to-last-response-start)
-    (open-link . opencode-open-link-at-point))
+    (open-link . opencode-open-link-at-point)
+    (schedule . drover-opencode-schedule-input))
   "The prompt actions of OpenCode session buffers, as (ACTION . COMMAND).")
 
 (defun drover-opencode--setup-session-buffer ()
@@ -1114,7 +1236,7 @@ Everything after the process mark goes; \\[undo] brings it back."
   "Undo `drover-opencode--setup-session-buffer' in this buffer."
   (when (eq drover-session-at-point-function #'drover-opencode--buffer-session)
     (kill-local-variable 'drover-session-at-point-function))
-  ;; Actions others defined in the buffer, such as `schedule', stay.
+  ;; Actions others defined in the buffer stay.
   (pcase-dolist (`(,action . ,command) drover-opencode--prompt-actions)
     (when (eq (alist-get action drover-prompt-actions) command)
       (drover-prompt-define action nil))))
@@ -1200,6 +1322,7 @@ commands of opencode.el."
     (cancel-timer drover-opencode--refetch-timer))
   (drover-opencode--uninstall)
   (drover-unregister-backend 'opencode)
+  (drover-unregister-resumer 'opencode 'opencode)
   (drover-opencode--unregister-engine)
   nil)
 

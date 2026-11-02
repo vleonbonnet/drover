@@ -150,6 +150,7 @@ Terminals BODY makes are killed."
          (drover-claude-code-project-directory-function nil)
          (drover-claude-code-ide--watchers nil)
          (drover--resumers nil)
+         (drover--resumer-properties nil)
          (drover-claude-code-transcripts--users nil)
          (drover-claude-code-transcripts--index nil)
          (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
@@ -1519,6 +1520,74 @@ guess could hide another session of the directory."
   (should-not (boundp 'ghostel-program-status-functions))
   (should-not (boundp 'eat-mode-hook))
   (should-not (boundp 'vterm-exit-functions)))
+
+;;;; Prompts sent later
+
+(ert-deftest drover-claude-code-ide-test-input-empty ()
+  "The live cursor in an empty input box takes a prompt; old screens and drafts do not.
+The pill of the context Claude Code attaches is no draft; what follows it is."
+  (drover-claude-code-ide-test-isolated
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* input"))
+          (cursor nil))
+      (with-current-buffer terminal
+        (insert "old transcript\n> \nold answer\n───\n>" (string #xa0) "\n───\nfooter\n")
+        (goto-char (point-min))
+        (search-forward "old answer")
+        (setq cursor (point))
+        (cl-letf (((symbol-function 'ghostel-cursor-point) (lambda () cursor)))
+          (should-not (drover-claude-code-ide-input-empty-p terminal))
+          (goto-char (point-max))
+          (search-backward (string #xa0))
+          (forward-char 1)
+          (setq cursor (point))
+          (should (drover-claude-code-ide-input-empty-p terminal))
+          (insert "unfinished draft")
+          (should-not (drover-claude-code-ide-input-empty-p terminal))
+          (delete-region cursor (line-end-position))
+          (insert "[⧉ In Emacs buffer '*claude* fixture'] ")
+          (setq cursor (point))
+          (should (drover-claude-code-ide-input-empty-p terminal))
+          (insert "unfinished draft")
+          (should-not (drover-claude-code-ide-input-empty-p terminal))))
+      ;; vterm tells its cursor too; a terminal without one is not ready.
+      (with-current-buffer terminal
+        (setq major-mode 'eat-mode))
+      (should-not (drover-claude-code-ide-input-empty-p terminal)))))
+
+(ert-deftest drover-claude-code-ide-test-scheduled-prompt ()
+  "A scheduled prompt waits for an empty input box, then is pasted and submitted."
+  (drover-claude-code-ide-test-with
+    (drover-claude-code-ide-test-typing
+      (let* ((terminal (drover-claude-code-ide-test-terminal "*claude* later"))
+             (session (drover-claude-code-ide-test-session terminal))
+             (ready nil) (outcome nil))
+        (should (eq (drover-backend-property 'claude-code-ide :blocker) #'drover-claude-code-ide--blocker))
+        (should (eq (drover-backend-property 'claude-code-ide :submit) #'drover-claude-code-ide--deliver))
+        (cl-letf (((symbol-function 'drover-claude-code-ide-input-empty-p) (lambda (_) ready)))
+          (should (equal (drover-claude-code-ide--blocker session) "the cursor is not in an empty input box"))
+          (setq ready t)
+          (should-not (drover-claude-code-ide--blocker session))
+          (drover-claude-code-ide--deliver session "Line 1\nLine 2"
+                                           (lambda () (setq outcome 'sent))
+                                           (lambda (message) (setq outcome message)))
+          (should (equal (drover-claude-code-ide-test-called 'ghostel-paste-string) '(("Line 1\nLine 2"))))
+          ;; While it is submitted, no other prompt goes.
+          (should (equal (drover-claude-code-ide--blocker session) "another prompt is being submitted"))
+          (should-not outcome)
+          (drover-claude-code-ide-test-fire)
+          (should (equal (drover-claude-code-ide-test-called 'ghostel-send-key) '(("return"))))
+          (should (eq outcome 'sent))
+          (should-not (drover-claude-code-ide--blocker session))
+          ;; A terminal exiting before the return interrupts the prompt.
+          (setq outcome nil)
+          (drover-claude-code-ide--deliver session "again" (lambda () (setq outcome 'sent))
+                                           (lambda (message) (setq outcome message)))
+          (delete-process (get-buffer-process terminal))
+          (drover-claude-code-ide-test-fire)
+          (should (equal outcome "the session exited before its prompt was submitted"))
+          (should (= 1 (length (drover-claude-code-ide-test-called 'ghostel-send-key)))))
+        (kill-buffer terminal)
+        (should (equal (drover-claude-code-ide--blocker session) "the terminal is gone"))))))
 
 (ert-deftest drover-claude-code-ide-test-registered-on-load ()
   "Loading the backend registers it and follows terminals; unloading undoes it."

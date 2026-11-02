@@ -102,6 +102,7 @@
 (declare-function agent-shell--get-available-models "ext:agent-shell-config" (state))
 (declare-function agent-shell--get-available-thought-levels "ext:agent-shell-config" (state))
 (declare-function agent-shell--project-name "ext:agent-shell-project" ())
+(declare-function agent-shell--prompt-input-start "ext:agent-shell-prompt" ())
 (declare-function agent-shell--start "ext:agent-shell" t)
 (declare-function agent-shell--state "ext:agent-shell" ())
 (declare-function agent-shell--stop-reason-description "ext:agent-shell" (stop-reason))
@@ -461,6 +462,33 @@ a ready one takes it at once, without taking the focus."
       (drover-agent-shell-send-text buffer text)
     (drover-warn "%s is gone; the prompt is in the kill ring"
                  (drover-session-display-title session))))
+
+;;;; Prompts sent later
+
+(defun drover-agent-shell--blocker (session)
+  "Say why the shell of SESSION cannot take a prompt now, or nil once it can.
+It can once initialized, idle, with nothing typed at its prompt, so
+that no draft is touched.  The backend's :blocker."
+  (if-let* ((buffer (drover-session-buffer session)))
+      (with-current-buffer buffer
+        (cond ((not (drover-agent-shell--initialized-p buffer)) "the shell has not initialized")
+              ((shell-maker-busy) "the agent is still busy")
+              ((let ((start (agent-shell--prompt-input-start)))
+                 (cond ((not start) "the shell shows no prompt")
+                       ((not (string-blank-p (buffer-substring-no-properties start (point-max))))
+                        "the input holds a draft"))))))
+    "the shell is gone"))
+
+(defun drover-agent-shell--deliver (session text then else)
+  "Submit TEXT to the shell of SESSION now, then call THEN, or ELSE with a message.
+The backend's :submit."
+  (if-let* ((buffer (drover-session-buffer session)))
+      (let ((failure (condition-case err
+                         (progn (agent-shell-insert :shell-buffer buffer :text text :submit t :no-focus t)
+                                nil)
+                       (error (drover-error-message err)))))
+        (if failure (funcall else failure) (funcall then)))
+    (funcall else "the shell is gone")))
 
 ;;;; Options of running shells
 
@@ -1263,7 +1291,9 @@ whose creation time is unknown."
    :apply-options #'drover-agent-shell--apply-options
    :send #'drover-agent-shell--send
    :options #'drover-agent-shell--options
-   :settable #'drover-agent-shell--settable)
+   :settable #'drover-agent-shell--settable
+   :blocker #'drover-agent-shell--blocker
+   :submit #'drover-agent-shell--deliver)
   ;; Another package may describe Gemini CLI better: keep its registration.
   (unless (memq 'gemini-cli (drover-engines))
     (drover-register-engine 'gemini-cli :label "Gemini CLI")

@@ -595,6 +595,17 @@ serves and a model without effort.")
                    (concat (drover-claude-code-encode-directory root) "-missing")))
       (should-not (drover-claude-code-decode-bucket "relative")))))
 
+(ert-deftest drover-claude-code-test-conversation-directory ()
+  "The engine's :directory tells the directory of a transcript, or that none holds it."
+  (should (eq (drover-engine-property 'claude-code :directory) #'drover-claude-code--directory))
+  (let (found failed)
+    (cl-letf (((symbol-function 'drover-claude-code-session-directory)
+               (lambda (id) (and (equal id "id-a") "/work/a/"))))
+      (drover-claude-code--directory "id-a" (lambda (directory) (setq found directory)) #'ignore)
+      (drover-claude-code--directory "id-b" #'ignore (lambda (message) (setq failed message))))
+    (should (equal found "/work/a/"))
+    (should (equal failed "No project directory holds Claude Code session id-b"))))
+
 (ert-deftest drover-claude-code-test-session-directory ()
   "A session's directory is decoded from the bucket holding its transcript."
   (drover-test-with-homes

@@ -40,6 +40,7 @@
              (drover-codex-include-non-interactive nil)
              (drover-codex-history-days nil)
              (drover--resumers nil)
+             (drover--resumer-properties nil)
              (drover-resume-front-ends nil))
          (setq drover--backends nil)
          (drover-codex-rollouts-install 'test)

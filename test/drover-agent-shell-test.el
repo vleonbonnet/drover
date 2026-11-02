@@ -76,6 +76,7 @@ isolated, engines read their local state from the throwaway homes of
            (drover--model-memory-stamp 'unread)
            (drover-agent-shell--gemini-registered nil)
            (drover--resumers nil)
+           (drover--resumer-properties nil)
            (drover-claude-code-transcripts--users nil)
            (drover-claude-code-transcripts--index nil)
            (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
@@ -599,6 +600,44 @@ the shell started with."
                              (list (list 'agent-shell-insert :shell-buffer shell :text "hello"
                                          :submit t :no-focus t)))))
             (should-not drover-agent-shell-test--warnings)))))))
+
+(ert-deftest drover-agent-shell-test-scheduled-prompt ()
+  "A scheduled prompt waits for an initialized, idle shell with nothing typed, then is submitted."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let* ((shell (drover-agent-shell-test-shell 'codex "later"))
+             (start nil)
+             (session (with-current-buffer shell
+                        (drover-agent-shell--setup t)
+                        (drover-session-at-point)))
+             (outcome nil))
+        (cl-letf (((symbol-function 'agent-shell--prompt-input-start) (lambda () start)))
+          (should (equal (drover-agent-shell--blocker session) "the shell has not initialized"))
+          (drover-agent-shell-test-initialize shell)
+          (with-current-buffer shell
+            (setq-local shell-maker--busy t))
+          (should (equal (drover-agent-shell--blocker session) "the agent is still busy"))
+          (with-current-buffer shell
+            (setq-local shell-maker--busy nil))
+          (should (equal (drover-agent-shell--blocker session) "the shell shows no prompt"))
+          (with-current-buffer shell
+            (goto-char (point-max))
+            (insert "> ")
+            (setq start (point))
+            (insert "a draft"))
+          (should (equal (drover-agent-shell--blocker session) "the input holds a draft"))
+          (with-current-buffer shell
+            (delete-region start (point-max)))
+          (should-not (drover-agent-shell--blocker session))
+          (drover-agent-shell--deliver session "hello" (lambda () (setq outcome 'sent)) #'ignore)
+          (should (eq outcome 'sent))
+          (should (equal (drover-agent-shell-test--calls-of 'agent-shell-insert)
+                         (list (list :shell-buffer shell :text "hello" :submit t :no-focus t))))
+          (cl-letf (((symbol-function 'agent-shell-insert) (lambda (&rest _) (error "No prompt"))))
+            (drover-agent-shell--deliver session "again" #'ignore (lambda (message) (setq outcome message))))
+          (should (equal outcome "No prompt"))
+          (kill-buffer shell)
+          (should (equal (drover-agent-shell--blocker session) "the shell is gone")))))))
 
 (ert-deftest drover-agent-shell-test-send-failures ()
   "A prompt a shell cannot take is reported as in the kill ring."

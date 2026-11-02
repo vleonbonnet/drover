@@ -109,6 +109,8 @@
 (declare-function vterm-send-escape "ext:vterm" ())
 (declare-function vterm-copy-mode "ext:vterm" (&optional arg))
 (declare-function eat-term-send-string "ext:eat" (terminal string))
+(declare-function ghostel-cursor-point "ext:ghostel" ())
+(declare-function vterm--get-cursor-point "ext:vterm" ())
 
 ;;;; Options
 
@@ -749,6 +751,75 @@ kill ring."
     (drover-warn "%s died before the prompt was sent; it is in the kill ring"
                  (drover-session-display-title session))))
 
+;;;; Prompts sent later
+
+(defun drover-claude-code-ide--cursor ()
+  "Return the position of the current terminal's cursor, or nil."
+  (cond ((derived-mode-p 'ghostel-mode) (ghostel-cursor-point))
+        ((and (derived-mode-p 'vterm-mode) (fboundp 'vterm--get-cursor-point))
+         (vterm--get-cursor-point))))
+
+(defun drover-claude-code-ide-input-empty-p (buffer)
+  "Return non-nil when the cursor of terminal BUFFER sits in an empty input box.
+The box is one line, between two rules, starting with the input caret
+\(see `drover-claude-code-ide-input-regexp').  The live cursor tells,
+not the caret of an older screen still in the scrollback.  The context
+Claude Code attaches to the next prompt, the file or lines selected in
+Emacs, shows as a pill, [⧉ In NAME], at the start of the box: it is not
+a draft, though what follows it is."
+  (with-current-buffer buffer
+    (let ((cursor (drover-claude-code-ide--cursor)))
+      (and cursor (<= cursor (point-max))
+           (save-excursion
+             (goto-char cursor)
+             (beginning-of-line)
+             (and (looking-at (concat drover-claude-code-ide-input-regexp
+                                      "\\(?:\\[⧉ [^]\n]+\\]\\)?[ \t]*$"))
+                  (progn (forward-line -1) (looking-at "[─━-]\\{3,\\}"))
+                  (progn (forward-line 2) (looking-at "[─━-]\\{3,\\}"))))))))
+
+(defun drover-claude-code-ide--blocker (session)
+  "Say why the terminal of SESSION cannot take a prompt now, or nil once it can.
+It can once its cursor sits in an empty input box, so that no draft is
+touched.  The backend's :blocker."
+  (let ((buffer (drover-claude-code-ide--buffer session)))
+    (cond ((not buffer) "the terminal is gone")
+          ((buffer-local-value 'drover-claude-code-ide--submitting buffer)
+           "another prompt is being submitted")
+          ((not (drover-claude-code-ide-input-empty-p buffer))
+           "the cursor is not in an empty input box"))))
+
+(defun drover-claude-code-ide--deliver (session text then else)
+  "Paste TEXT in the terminal of SESSION, submit it, then call THEN.
+ELSE gets a message instead when the paste fails, or the terminal
+exits before the return that submits it.  The backend's :submit."
+  (let ((buffer (drover-claude-code-ide--buffer session))
+        (failure nil))
+    (if (not buffer)
+        (funcall else "the terminal is gone")
+      (with-current-buffer buffer
+        (setq-local drover-claude-code-ide--submitting t)
+        (condition-case err
+            (drover-claude-code-ide--paste text)
+          (error (setq-local drover-claude-code-ide--submitting nil)
+                 (setq failure (drover-error-message err)))))
+      (if failure
+          (funcall else failure)
+        (run-at-time
+         drover-claude-code-ide--submit-delay nil
+         (lambda ()
+           (drover-with-reporting "Claude terminal"
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (setq-local drover-claude-code-ide--submitting nil)))
+             (if (not (and (buffer-live-p buffer) (process-live-p (get-buffer-process buffer))))
+                 (funcall else "the session exited before its prompt was submitted")
+               (with-current-buffer buffer
+                 (condition-case err
+                     (drover-claude-code-ide--press 'return)
+                   (error (setq failure (drover-error-message err)))))
+               (if failure (funcall else failure) (funcall then))))))))))
+
 (defun drover-claude-code-ide--apply-options (session options then)
   "Apply explicit OPTIONS to the running SESSION, then call THEN.
 A model is switched by typing /model once the interface reads input;
@@ -1126,7 +1197,9 @@ With several, the most recently used."
    :apply-options #'drover-claude-code-ide--apply-options
    :send #'drover-claude-code-ide--send
    :options #'drover-claude-code-ide--options
-   :settable #'drover-claude-code-ide--settable)
+   :settable #'drover-claude-code-ide--settable
+   :blocker #'drover-claude-code-ide--blocker
+   :submit #'drover-claude-code-ide--deliver)
   ;; After live agent-shell shells, whose model identifiers their ACP
   ;; agent takes.
   (drover-register-model-source 'claude-code #'drover-claude-code-ide--models -5 t))

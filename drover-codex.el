@@ -328,6 +328,44 @@ the one Codex reported last.  Only the end of FILE is read."
                      (nreverse merged))
           :error (and (stringp error) error))))
 
+;;;; Where conversations ran
+
+(defconst drover-codex--meta-limit 1048576
+  "Bytes of a rollout read for its first record, which tells its directory.
+The record holds the instructions the session started with, tens of
+kilobytes.")
+
+(defun drover-codex-rollout-file (id)
+  "Return the rollout of Codex conversation ID, archived or not, or nil.
+Rollouts are named rollout-TIME-ID.jsonl, under a directory per day."
+  (let ((regexp (concat "\\`rollout-.*-" (regexp-quote id) "\\.jsonl\\'")))
+    (seq-some (lambda (root)
+                (and (file-directory-p root)
+                     (car (directory-files-recursively root regexp))))
+              (list (expand-file-name "sessions" drover-codex-home)
+                    (expand-file-name "archived_sessions" drover-codex-home)))))
+
+(defun drover-codex-session-directory (id)
+  "Return the directory Codex conversation ID ran in, or nil.
+It is the cwd of the session_meta record that begins its rollout."
+  (when-let* ((file (drover-codex-rollout-file id)))
+    (with-temp-buffer
+      (insert-file-contents file nil 0 drover-codex--meta-limit)
+      (goto-char (point-min))
+      (let* ((meta (ignore-errors (json-parse-buffer :object-type 'alist :null-object nil
+                                                     :false-object nil)))
+             (payload (and (consp meta) (alist-get 'payload meta)))
+             (cwd (and (consp payload) (alist-get 'cwd payload))))
+        (and (stringp cwd) (not (string-empty-p cwd)) (file-name-as-directory cwd))))))
+
+(defun drover-codex--directory (id then else)
+  "Call THEN with the directory Codex conversation ID ran in, else ELSE.
+The engine's :directory (see `drover-register-engine')."
+  (if-let* ((directory (drover-codex-session-directory id)))
+      (funcall then directory)
+    (funcall else (format "No rollout of Codex conversation %s tells its directory"
+                          (drover-bound-line id)))))
+
 ;;;; Registration
 
 (defun drover-codex--register ()
@@ -337,7 +375,8 @@ the one Codex reported last.  Only the end of FILE is read."
                           :defaults #'drover-codex--fetch-defaults
                           :volatile t
                           :resolve #'drover-codex--resolve
-                          :last-used #'drover-codex--last-used))
+                          :last-used #'drover-codex--last-used
+                          :directory #'drover-codex--directory))
 
 (drover-codex--register)
 

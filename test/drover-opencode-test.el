@@ -966,7 +966,7 @@ nothing is fetched."
 
 (defvar drover-opencode-test-prompt-actions
   '(send clear attach slash mention revert revert-cancel copy-block agent model effort directory
-         compact fork last-answer open-link)
+         compact fork last-answer open-link schedule)
   "The prompt actions OpenCode session buffers define.")
 
 (ert-deftest drover-opencode-test-session-cache ()
@@ -2437,6 +2437,80 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
         (create nil)
         (should (plist-member created :agent))
         (should-not (plist-get created :agent))))))
+
+;;;; Conversations by identifier, and prompts sent later
+
+(ert-deftest drover-opencode-test-conversation-directory ()
+  "The engine finds where a session runs from the service, or tells it has none."
+  (drover-opencode-test-with nil
+    (should (eq (drover-engine-property 'opencode :directory) #'drover-opencode--directory))
+    (let (found failed)
+      (drover-opencode--directory "ses_1" (lambda (directory) (setq found directory)) #'ignore)
+      (should (equal (car drover-opencode-test-calls) '(opencode-session-fetch "ses_1" nil)))
+      (funcall drover-opencode-test-fetched '((id . "ses_1") (location (directory . "/work/drover"))))
+      (should (equal found "/work/drover/"))
+      (drover-opencode--directory "ses_2" #'ignore (lambda (message) (setq failed message)))
+      (funcall drover-opencode-test-fetched '((id . "ses_2")))
+      (should (string-match-p "tells no directory" failed))
+      (cl-letf (((symbol-function 'opencode-session-fetch)
+                 (lambda (_id _callback &optional _directory else) (funcall else "HTTP 404")))
+                ((symbol-function 'opencode-error-describe) #'identity))
+        (drover-opencode--directory "ses_gone" #'ignore (lambda (message) (setq failed message))))
+      (should (equal failed "No OpenCode session ses_gone: HTTP 404")))))
+
+(ert-deftest drover-opencode-test-resume-by-id ()
+  "opencode.el resumes a conversation by identifier, in the selected window, its buffer told once loaded."
+  (drover-opencode-test-with nil
+    (should (memq 'opencode (drover-resumer-front-ends 'opencode)))
+    (should (drover-resumer-property 'opencode 'opencode :by-id))
+    (should (drover-resumer-property 'opencode 'opencode :async))
+    (let (opened got reported)
+      (cl-letf (((symbol-function 'opencode-session-open-by-id)
+                 (lambda (id &rest keys) (setq opened (cons id keys))))
+                ((symbol-function 'opencode-error-describe) #'identity)
+                ((symbol-function 'opencode-report-error) (lambda (text) (setq reported text))))
+        (with-temp-buffer
+          (drover-resume-with 'opencode 'opencode "ses_1" nil (lambda (buffer) (setq got buffer)))
+          (should (equal (car opened) "ses_1"))
+          (should (equal (plist-get (cdr opened) :other-window) nil))
+          (funcall (plist-get (cdr opened) :callback) '((id . "ses_1")))
+          (should (eq got (current-buffer))))
+        ;; Without ELSE, a failure is reported.
+        (drover-opencode-resume "ses_gone" nil)
+        (funcall (plist-get (cdr opened) :else) "HTTP 404")
+        (should (equal reported "No OpenCode session ses_gone: HTTP 404"))))))
+
+(ert-deftest drover-opencode-test-scheduled-prompt ()
+  "A scheduled prompt goes out literally and shown, consenting to drop stale thinking."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((session (drover-opencode-test-session "ses_1"))
+          (ready nil))
+      (should (equal (drover-opencode--blocker session) "the session has no buffer"))
+      (with-temp-buffer
+        (puthash "ses_1" (current-buffer) opencode-session-buffers)
+        (cl-letf (((symbol-function 'opencode-session-ready-p) (lambda () ready)))
+          (should (equal (drover-opencode--blocker session)
+                         "the session is not loaded or not connected to OpenCode"))
+          (setq ready t)
+          (should-not (drover-opencode--blocker session)))
+        (dolist (success '(t nil))
+          (let (outcome)
+            (cl-letf (((symbol-function 'opencode-session-send)
+                       (lambda (text &rest arguments)
+                         (should (equal text "/literal prompt"))
+                         (should (plist-get arguments :show))
+                         (should (plist-get arguments :accept-thinking-loss))
+                         (if success
+                             (funcall (plist-get arguments :then) nil)
+                           (funcall (plist-get arguments :else) "Connection lost"))))
+                      ((symbol-function 'opencode-error-describe) #'identity)
+                      ((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "Never asks"))))
+              (drover-opencode--submit session "/literal prompt"
+                                       (lambda () (setq outcome 'sent))
+                                       (lambda (message) (setq outcome message))))
+            (should (equal outcome (if success 'sent "Connection lost")))))))
+    (cl-letf (((symbol-function 'opencode-state-ready-p) #'always))
+      (should (funcall (drover-backend-property 'opencode :ready))))))
 
 (provide 'drover-opencode-test)
 ;;; drover-opencode-test.el ends here

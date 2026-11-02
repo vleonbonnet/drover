@@ -443,6 +443,7 @@ holds the identifiers its :session was asked for."
 (ert-deftest drover-test-resumers ()
   "A conversation resumes in the front end preferred, else the one it ran in, else the first."
   (let ((drover--resumers nil)
+        (drover--resumer-properties nil)
         (drover-resume-front-ends nil)
         (calls nil))
     (should-not (drover-resumer 'fake))
@@ -462,6 +463,50 @@ holds the identifiers its :session was asked for."
     (should (equal (car (drover-resumer 'fake)) 'terminal))
     (drover-unregister-resumer 'fake 'terminal)
     (should (eq (car (drover-resumer 'fake)) 'shell))))
+
+(ert-deftest drover-test-resume-with ()
+  "A front end chosen resumes there: by identifier, or later, with THEN and ELSE."
+  (let ((drover--resumers nil)
+        (drover--resumer-properties nil)
+        (drover-resume-front-ends '((fake shell)))
+        (buffer (generate-new-buffer " resumed"))
+        (calls nil)
+        (later nil))
+    (unwind-protect
+        (progn
+          (drover-register-resumer 'fake 'terminal
+                                   (lambda (id directory) (push (list 'terminal id directory) calls) buffer))
+          (drover-register-resumer 'fake 'shell (lambda (&rest _) (push 'shell calls) nil))
+          (drover-register-resumer 'fake 'service
+                                   (lambda (id directory then else)
+                                     (push (list 'service id directory) calls)
+                                     (setq later (list then else))
+                                     'not-a-buffer)
+                                   :by-id t :async t)
+          (should (equal (drover-resumer-front-ends 'fake) '(terminal shell service)))
+          (should (drover-resumer-property 'fake 'service :by-id))
+          (should-not (drover-resumer-property 'fake 'terminal :by-id))
+          ;; The front end chosen, not the one preferred.
+          (let (got)
+            (should (eq (drover-resume-with 'terminal 'fake "x" "/work/" (lambda (b) (setq got b))) buffer))
+            (should (eq got buffer))
+            (should (equal (car calls) '(terminal "x" "/work/"))))
+          ;; A synchronous front end opening nothing tells ELSE.
+          (let (failed)
+            (drover-resume-with 'shell 'fake "x" "/work/" #'ignore (lambda (message) (setq failed message)))
+            (should (stringp failed)))
+          ;; A directory is needed, but by a front end finding conversations by identifier.
+          (should-error (drover-resume-with 'terminal 'fake "x" nil) :type 'user-error)
+          (let (got)
+            (drover-resume-with 'service 'fake "y" nil (lambda (b) (setq got b)) #'ignore)
+            (should (equal (car calls) '(service "y" nil)))
+            (should-not got)
+            (funcall (car later) buffer)
+            (should (eq got buffer)))
+          (should-error (drover-resume-with 'unknown 'fake "x" "/work/") :type 'user-error)
+          (drover-unregister-resumer 'fake 'service)
+          (should-not (drover-resumer-property 'fake 'service :by-id)))
+      (kill-buffer buffer))))
 
 (ert-deftest drover-test-archive-what-the-backend-does-not ()
   "A session its backend's archive does not take, drover archives itself."

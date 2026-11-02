@@ -221,5 +221,31 @@
           (set-file-times history (seconds-to-time 3000000))
           (should (eq (drover-last-used-engine) 'claude-code)))))))
 
+;;;; Where conversations ran
+
+(ert-deftest drover-codex-test-session-directory ()
+  "A conversation's directory is the cwd its rollout begins with, archived or not."
+  (drover-test-with-homes
+    (let ((id "019a0b1c-2d3e-7f40-8123-456789abcdef")
+          (meta (lambda (cwd)
+                  (concat "{\"timestamp\":\"2026-10-31T12:00:00Z\",\"type\":\"session_meta\","
+                          "\"payload\":{\"id\":\"x\",\"cwd\":\"" cwd "\",\"instructions\":\""
+                          (make-string 70000 ?i) "\"}}\n{\"type\":\"event_msg\"}\n"))))
+      (should-not (drover-codex-session-directory id))
+      (drover-test-write (expand-file-name (concat "sessions/2026/10/31/rollout-2026-10-31T12-00-00-" id ".jsonl")
+                                           drover-codex-home)
+                         (funcall meta "/work/drover"))
+      (should (equal (drover-codex-session-directory id) "/work/drover/"))
+      (let (found failed)
+        (drover-codex--directory id (lambda (directory) (setq found directory)) #'ignore)
+        (should (equal found "/work/drover/"))
+        (drover-codex--directory "unknown" #'ignore (lambda (message) (setq failed message)))
+        (should (string-match-p "No rollout" failed)))
+      (drover-test-write (expand-file-name "archived_sessions/rollout-2026-10-30T12-00-00-other.jsonl"
+                                           drover-codex-home)
+                         (funcall meta "/work/old"))
+      (should (equal (drover-codex-session-directory "other") "/work/old/"))
+      (should (eq (drover-engine-property 'codex :directory) #'drover-codex--directory)))))
+
 (provide 'drover-codex-test)
 ;;; drover-codex-test.el ends here

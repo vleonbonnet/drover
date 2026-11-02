@@ -304,6 +304,14 @@ NAME is the agent program sessions run, such as `opencode',
              Non-nil when a session switched to a model without naming
              a variant runs that model's default variant, rather than
              keeping its variant.
+ :directory  Function of a conversation's ID, THEN and ELSE, finding
+             the directory the conversation ran in, from what the
+             engine recorded: it calls THEN with the directory, or ELSE
+             with a message when it cannot, at most one of them once,
+             possibly before returning.  Org links name the
+             conversations of the engines that have it (see
+             `drover-links'), since front ends resume a conversation in
+             its directory.
 
 Every property is optional.  Registering NAME again replaces its
 properties and keeps its place."

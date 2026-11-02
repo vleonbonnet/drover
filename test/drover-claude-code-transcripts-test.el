@@ -42,6 +42,7 @@ empty; `home' is the homes' directory, and `index' the index."
              (drover-claude-code-agents-interval nil)
              (drover-claude-code-history-days nil)
              (drover--resumers nil)
+             (drover--resumer-properties nil)
              (drover-resume-front-ends nil))
          (setq drover--backends nil)
          (drover-claude-code-transcripts-install 'test)

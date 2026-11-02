@@ -256,6 +256,14 @@ transcript."
                      (drover-claude-code-decode-bucket (file-name-nondirectory bucket))))
               (and (file-directory-p root) (directory-files root t "\\`[^.]")))))
 
+(defun drover-claude-code--directory (session-id then else)
+  "Call THEN with the directory session SESSION-ID ran in, else ELSE.
+The engine's :directory (see `drover-register-engine')."
+  (if-let* ((directory (drover-claude-code-session-directory session-id)))
+      (funcall then directory)
+    (funcall else (format "No project directory holds Claude Code session %s"
+                          (drover-bound-line session-id)))))
+
 (defun drover-claude-code-pid-session-id (pid)
   "Return the identifier of the session the Claude Code process PID runs, or nil.
 The CLI records it, by PID, under `drover-claude-code-sessions-directory'."
@@ -905,7 +913,8 @@ those of every conversation recorded, which only grow when run."
                           :volatile t
                           :resolve #'drover-claude-code--resolve
                           :agents #'drover-claude-code--agents
-                          :last-used #'drover-claude-code--last-used))
+                          :last-used #'drover-claude-code--last-used
+                          :directory #'drover-claude-code--directory))
 
 (drover-claude-code--register)
 

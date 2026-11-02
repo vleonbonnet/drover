@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 2
+(defconst drover-core-generation 3
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1350,6 +1350,24 @@ as `drover-model' describes them: explicit choices (:agent :model
  :settable   Function of a SESSION returning which of :agent, :model
              and :variant the running SESSION can change; without it,
              all three.
+
+Scheduled prompts (`drover-schedule') are delivered through the
+following operations, all optional; a backend without :submit takes
+no scheduled prompt.
+
+ :blocker    Function of a SESSION whose buffer is live, returning why
+             that buffer cannot take a prompt now without touching
+             what the user typed there, a short string, or nil once it
+             can: a draft, a turn running, a session still loading.
+ :submit     Function of a SESSION, a TEXT, THEN and ELSE, submitting
+             TEXT as a prompt now, :blocker having allowed it: THEN with
+             no argument once the front end took it, ELSE with a message
+             otherwise, at most one of them once.
+ :ready      Function of no argument returning non-nil once :sessions
+             lists every session the backend runs, as a service's
+             registry does once loaded: a session it then no longer
+             lists ran its last turn.  A backend whose sessions run in
+             their buffers (:runs-in-buffer) needs none.
 
 A session's parent and subagents need no operation: drover finds them
 among the sessions through `drover-session-parent'.
@@ -3856,11 +3874,15 @@ finds, else in a list the session at point."
 
 ;; A backend listing conversations as their engine records them shows
 ;; none itself: opening one resumes it in a front end able to, which
-;; registers how (`drover-register-resumer').
+;; registers how (`drover-register-resumer').  Org links and scheduled
+;; prompts resume conversations the same way, in a front end chosen.
 
 (defvar drover--resumers nil
   "Front ends resuming conversations, an alist ((ENGINE . FRONT-END) . FUNCTION).
 In the order they registered.")
+
+(defvar drover--resumer-properties nil
+  "Properties of the resumers, an alist ((ENGINE . FRONT-END) . PLIST).")
 
 (defcustom drover-resume-front-ends nil
   "The front ends conversations of each engine resume in, by preference.
@@ -3873,18 +3895,45 @@ it and that front end is loaded, else in the one loaded first."
                 :value-type (repeat (symbol :tag "Front end")))
   :group 'drover)
 
-(defun drover-register-resumer (engine front-end function)
+(defun drover-register-resumer (engine front-end function &rest properties)
   "Let FRONT-END resume the conversations of ENGINE with FUNCTION.
-FUNCTION takes the engine's identifier of a conversation and the
-directory it ran in, starts a session of FRONT-END continuing it,
-displays it in the selected window and returns its buffer.  Registering
-again replaces FUNCTION and keeps its place."
-  (setf (alist-get (cons engine front-end) drover--resumers nil nil #'equal) function))
+FRONT-END is the name of the backend showing what it resumes.  FUNCTION
+takes the engine's identifier of a conversation and the directory it
+ran in, starts a session of FRONT-END continuing it, displays it in the
+selected window and returns its buffer.  PROPERTIES is a plist of:
+
+ :by-id   Non-nil when FUNCTION finds the conversation by its
+          identifier alone: it may be given nil for the directory.
+ :async   Non-nil when the buffer comes later: FUNCTION then takes
+          THEN and ELSE after the directory, calls THEN with the buffer
+          once the session is loaded, or ELSE with a message, at most
+          one of them once, and reports a failure itself when ELSE is
+          nil.  What it returns is not its buffer.
+
+Registering again replaces FUNCTION and its properties and keeps its
+place."
+  (let ((key (cons engine front-end)))
+    (setf (alist-get key drover--resumers nil nil #'equal) function)
+    (setf (alist-get key drover--resumer-properties nil nil #'equal) properties)))
 
 (defun drover-unregister-resumer (engine front-end)
   "Forget how FRONT-END resumes the conversations of ENGINE."
-  (setq drover--resumers (seq-remove (lambda (entry) (equal (car entry) (cons engine front-end)))
-                                     drover--resumers)))
+  (let ((key (cons engine front-end)))
+    (setq drover--resumers (seq-remove (lambda (entry) (equal (car entry) key)) drover--resumers)
+          drover--resumer-properties (seq-remove (lambda (entry) (equal (car entry) key))
+                                                 drover--resumer-properties))))
+
+(defun drover-resumer-property (engine front-end property)
+  "Return PROPERTY of the resumer of FRONT-END for ENGINE, or nil.
+See `drover-register-resumer' for the properties."
+  (plist-get (alist-get (cons engine front-end) drover--resumer-properties nil nil #'equal)
+             property))
+
+(defun drover-resumer-front-ends (engine)
+  "Return the front ends resuming conversations of ENGINE, as registered.
+In the order they registered."
+  (delq nil (mapcar (lambda (entry) (and (eq (caar entry) engine) (cdar entry)))
+                    (reverse drover--resumers))))
 
 (defun drover-resumer (engine &optional front-end)
   "Return (FRONT-END . FUNCTION) resuming conversations of ENGINE, or nil.
@@ -3900,17 +3949,52 @@ known, then those registered, in the order they registered."
                       (and front-end (list front-end))
                       (mapcar #'cdar registered)))))
 
+(defun drover--call-resumer (engine front-end function id directory then else)
+  "Resume conversation ID of ENGINE in DIRECTORY through FUNCTION, FRONT-END's.
+Return what FUNCTION returns.  THEN, when non-nil, gets the buffer once
+there is one, ELSE a message otherwise, at most one of them once; an
+asynchronous resumer gets them, a synchronous one has THEN called with
+the buffer it returned."
+  (if (drover-resumer-property engine front-end :async)
+      (funcall function id directory then else)
+    (let ((buffer (funcall function id directory)))
+      (cond ((buffer-live-p buffer) (when then (funcall then buffer)))
+            (else (funcall else (format "%s did not open the conversation"
+                                        (drover-backend-label front-end)))))
+      buffer)))
+
+(defun drover--engine-name (engine)
+  "Return the display name of ENGINE, its label once its engine is loaded."
+  (or (and (fboundp 'drover-engine-label) (drover-engine-label engine)) engine))
+
 (defun drover-resume (engine id directory &optional front-end)
   "Resume conversation ID of ENGINE, run in DIRECTORY, and return its buffer.
 FRONT-END is the front end it ran in, when known; the one resuming it
 is chosen by `drover-resumer'.  Signal a `user-error' when no front end
-loaded can resume it."
-  (pcase-let ((`(,_ . ,function) (or (drover-resumer engine front-end)
-                                     (user-error "No front end loaded resumes %s conversations"
-                                                 (or (and (fboundp 'drover-engine-label)
-                                                          (drover-engine-label engine))
-                                                     engine)))))
-    (funcall function id directory)))
+loaded can resume it.  A front end showing it later, as one asking a
+service does, returns nil."
+  (pcase-let ((`(,chosen . ,function)
+               (or (drover-resumer engine front-end)
+                   (user-error "No front end loaded resumes %s conversations"
+                               (drover--engine-name engine)))))
+    (drover--call-resumer engine chosen function id directory nil nil)))
+
+(defun drover-resume-with (front-end engine id directory &optional then else)
+  "Resume conversation ID of ENGINE, run in DIRECTORY, in FRONT-END.
+Return its buffer, or nil when FRONT-END shows it later.  THEN, when
+non-nil, gets the buffer once there is one, ELSE a message when the
+conversation did not open; at most one of them is called, once,
+possibly before this returns.  DIRECTORY may be nil when FRONT-END
+finds conversations by their identifier (see `drover-register-resumer').
+Signal a `user-error' when FRONT-END does not resume ENGINE's
+conversations."
+  (let ((function (or (alist-get (cons engine front-end) drover--resumers nil nil #'equal)
+                      (user-error "%s does not resume %s conversations"
+                                  (drover-backend-label front-end) (drover--engine-name engine)))))
+    (unless (or directory (drover-resumer-property engine front-end :by-id))
+      (user-error "%s needs the directory of the conversation to resume it"
+                  (drover-backend-label front-end)))
+    (drover--call-resumer engine front-end function id directory then else)))
 
 (provide 'drover-core)
 ;;; drover-core.el ends here
