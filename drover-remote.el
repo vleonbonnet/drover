@@ -51,7 +51,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 7))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -1905,8 +1905,7 @@ host.  Opening it there comes in a later step."
         (pcase-dolist (`(,label . ,value)
                        `(("Host" . ,(drover-remote--label peer))
                          ("Status" . ,(opencode-session-status-label (drover-session-status session)))
-                         ("Front end" . ,(and (drover-session-origin session)
-                                              (symbol-name (drover-session-origin session))))
+                         ("Harness" . ,(drover-harness-name (drover-session-harness session)))
                          ("Engine" . ,(and (drover-session-engine session)
                                            (symbol-name (drover-session-engine session))))
                          ("Directory" . ,(drover-session-directory session))
@@ -2032,6 +2031,12 @@ whose write failed, as those offering `spyglass-reconnect' do."
         (error (setq drover-remote-mode nil)
                (signal (car err) (cdr err))))
     (drover-remote--stop)))
+
+;; Loaded anew, as reloading drover does, the peers' backends take
+;; this file's properties.
+(when (bound-and-true-p drover-remote-mode)
+  (drover-with-reporting "remote reload"
+    (mapc #'drover-remote--register (drover-remote--peers))))
 
 (defun drover-remote-unload-function ()
   "Stop the remote layer before its file is unloaded."

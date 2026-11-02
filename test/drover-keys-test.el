@@ -663,8 +663,8 @@ B applies while a quiet session has a buffer."
     ("Conversation" ("t" "T" "C" "f" "." "O"))
     ("Session" ("o" "u" "c" "v" "A" "K" "s") ("+" "g" "r" "x" "z" "Z"))
     ("View" ("= o" "= r" "= g" "U" "- o" "- z" "- f"))
-    ("Filter" ("= p" "= s" "= a" "= m") ("= v" "= d" "= f" "= c"))
-    ("Columns" ("- h" "- l" "- b" "- a") ("- m" "- r" "- x" "- c") ("- t" "- p" "- s")))
+    ("Filter" ("= p" "= s" "= a" "= m" "= v") ("= H" "= d" "= f" "= c"))
+    ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.")
 
 (ert-deftest drover-keys-test-dispatch-layout ()
@@ -766,6 +766,7 @@ the prefix of the other's, which would hide it."
                    ("-f" . drover-view--follow) ("=p" . drover-view--filter-project)
                    ("=s" . drover-view--filter-statuses) ("=a" . drover-view--filter-agent)
                    ("=m" . drover-view--filter-model) ("=v" . drover-view--filter-provider)
+                   ("=H" . drover-view--filter-harness) ("-H" . drover-view--column-harness)
                    ("=h" . drover-view--filter-host) ("=d" . drover-view--filter-since)
                    ("=f" . drover-view--filter-search) ("=c" . drover-filter-clear)
                    ("-l" . drover-view--column-location) ("-s" . drover-view--column-summary)))
@@ -822,8 +823,8 @@ agent, model, effort and directory of the next prompt are among them."
       (should-not (member "n" (drover-keys-test-apt 'drover-dispatch))))))
 
 (defconst drover-keys-test-view-keys
-  '("= o" "= r" "= g" "U" "= p" "= s" "= a" "= m" "= v" "= d" "= f" "= c"
-    "- h" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s")
+  '("= o" "= r" "= g" "U" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c"
+    "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s")
   "The keys of the view settings that apply in one of drover's views.
 Older and archived sessions need a backend keeping them, and follow mode
 a list in a window.")
@@ -1141,22 +1142,25 @@ The value is (PLAN . LINES)."
             (should (seq-set-equal-p (drover-keys-test-render 'drover-view)
                                      '(" =o sort urgency" " =r order [ascending|descending]" " =g group status"
                                        " =p project any" " =s status any" " =a agent any"
-                                       " =m model any" " =v provider any" " =d updated any"
+                                       " =m model any" " =v provider any" " =H harness any"
+                                       " =d updated any"
                                        " =f text any" " =c clear"
                                        " -f follow [off|on]" " U subagents [all|active|none]"
                                        " -o older [hidden|shown]"
                                        " -z archived [hidden|shown]"
-                                       " -h host" " -l location" " -b branch" " -a agent" " -m model" " -r provider"
+                                       " -h host" " -H harness" " -l location" " -b branch" " -a agent"
+                                       " -m model" " -r provider"
                                        " -x context" " -c created"
                                        " -t age" " -p cache" " -s summary")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
-                                      :provider "Anthropic" :since (- (float-time) 7200))
+                                      :provider "Anthropic" :harness 'fake :since (- (float-time) 7200))
                   drover-sort-by 'updated
                   drover-sort-descending t
                   drover-group-by nil)
             (let ((view (drover-keys-test-render 'drover-view)))
               (dolist (line '(" =o sort last activity" " =g group nothing" " =p project drover"
                               " =s status needs you or done" " =a agent build" " =v provider Anthropic"
+                              " =H harness Fake"
                               " =d updated since 2h"
                               " =f text any"))
                 (should (member line view)))
@@ -1203,8 +1207,8 @@ MENU is `drover-view' by default."
       (setq-local drover-view-p t)
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("View" "= o" "= r" "= g" "U" "- o" "- z" "- f")
-                       ("Filter" "= p" "= s" "= a" "= m" "= v" "= d" "= f" "= c")
-                       ("Columns" "- h" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
+                       ("Filter" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c")
+                       ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
       ;; Hosts are filtered once there are others.
       (let ((drover-hosts-function (lambda () '("core"))))
         (should (member "= h" (cdr (assoc "Filter" (drover-keys-test-keys 'drover-view))))))
@@ -1379,6 +1383,50 @@ MENU is `drover-view' by default."
         (should (equal (drover-filter-description) "provider OpenAI"))
         (should (= runs 3))))))
 
+(ert-deftest drover-keys-test-view-harness ()
+  "The View menu sorts, groups and filters sessions by their harness.
+A session of another host is of its owner's harness, the proxy of the
+host standing for none."
+  (drover-keys-test-with (list (drover-test-session "f"))
+    (drover-test-register-simple 'claude-code-ide (list (drover-session-create :backend 'claude-code-ide :id "i")))
+    (drover-test-register-simple 'agent-shell (list (drover-session-create :backend 'agent-shell :id "s")))
+    (drover-test-register-simple 'remote:core (list (drover-session-create :backend 'remote:core :id "r"
+                                                                           :host "core" :origin 'opencode)))
+    (drover-changed-now)
+    (with-temp-buffer
+      (setq-local drover-view-p t)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt candidates &rest _)
+                   (should (member "harness" candidates))
+                   "harness")))
+        (drover-keys-test-choose "=o")
+        (should (eq drover-sort-by 'harness))
+        (setq drover-group-by nil
+              drover-sort-descending nil)
+        ;; By name: agent-shell, Claude IDE, Fake, OpenCode.
+        (should (equal (mapcar #'car (drover-test-tree-shape (cdar (drover-view-groups))))
+                       '("s" "i" "f" "r")))
+        (drover-keys-test-choose "=g"))
+      (should (eq drover-group-by 'harness))
+      (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=g")) '("harness")))
+      (should (equal (sort (mapcar (lambda (group) (cons (cdar group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                                   (drover-view-groups))
+                           (lambda (a b) (string< (symbol-name (car a)) (symbol-name (car b)))))
+                     '((agent-shell "s") (claude-code-ide "i") (fake "f") (opencode "r"))))
+      (should (equal (drover-group-label 'harness 'claude-code-ide) "Claude IDE"))
+      ;; The harnesses of the sessions, by name.
+      (should (equal (drover-keys-test-value "=H") "any"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt candidates &rest _)
+                   (should (equal prompt "Harness (empty for any): "))
+                   (should (equal candidates '("agent-shell" "Claude IDE" "Fake" "OpenCode")))
+                   "OpenCode")))
+        (drover-keys-test-choose "=H"))
+      (should (equal drover-filter '(:harness opencode)))
+      (should (equal (drover-keys-test-value "=H") "OpenCode"))
+      (should (equal (mapcar #'car (drover-test-tree-shape (drover-view-trees))) '("r")))
+      (should (equal (drover-filter-description) "harness OpenCode")))))
+
 (ert-deftest drover-keys-test-view-toggles ()
   (drover-keys-test-with (list (drover-test-session "a"))
     (let ((fetched 0))
@@ -1446,7 +1494,7 @@ MENU is `drover-view' by default."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 27))
+      (should (= (length suffixes) 29))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 

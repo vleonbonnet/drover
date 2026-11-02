@@ -827,11 +827,12 @@ The backend's :start."
 (defun drover-claude-code-transcripts-install (front-end)
   "List Claude Code's conversations, for FRONT-END to resume them.
 FRONT-END is a symbol, such as `claude-code-ide'; the backend stays
-until every front end that installed it uninstalled it."
+until every front end that installed it uninstalled it.  Installed
+again, as a front end loaded anew installs it, it is registered anew,
+so that its registration has this file's properties."
   (unless (drover-claude-code-transcripts--current-index)
     (setq drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index)))
-  (unless (assq 'claude-code drover--backends)
-    (drover-claude-code-transcripts--register))
+  (drover-claude-code-transcripts--register)
   (cl-pushnew front-end drover-claude-code-transcripts--users)
   (add-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save))
 
@@ -852,6 +853,11 @@ The backend goes once no front end needs it."
     (drover-command-cancel drover-claude-code-transcripts--agents-job)
     (remove-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save)
     (drover-unregister-backend 'claude-code)))
+
+;; Loaded anew, as reloading drover does, the backend a front end
+;; installed takes this file's properties.
+(when (eq (drover-backend-property 'claude-code :sessions) #'drover-claude-code-transcripts--sessions)
+  (drover-claude-code-transcripts--register))
 
 (provide 'drover-claude-code-transcripts)
 ;;; drover-claude-code-transcripts.el ends here

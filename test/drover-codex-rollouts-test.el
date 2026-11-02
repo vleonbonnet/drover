@@ -323,5 +323,24 @@ entry or a record leading back to the index would print it all again."
                                                           drover-codex-rollouts--index))))
                (cons "a record" (drover-find 'codex "019f0000-0000-7000-8000-000000000001"))))))
 
+(ert-deftest drover-codex-rollouts-test-registered-anew ()
+  "Installed again, or its file loaded again, the backend takes this file's properties."
+  (drover-codex-rollouts-test-with
+    (let ((index drover-codex-rollouts--index)
+          (stale (lambda ()
+                   (drover-register-backend 'codex :label "Codex" :recorded '(codex)
+                                            :sessions #'drover-codex-rollouts--sessions))))
+      (funcall stale)
+      (should-not (drover-backend-property 'codex :recorded-times))
+      (drover-codex-rollouts-install 'other)
+      (should (eq (drover-backend-property 'codex :recorded-times) #'drover-codex-rollouts--times))
+      (should (equal drover-codex-rollouts--users '(other test)))
+      (should (eq drover-codex-rollouts--index index))
+      (drover-codex-rollouts-uninstall 'other)
+      (funcall stale)
+      (load "drover-codex-rollouts" nil t)
+      (should (eq (drover-backend-property 'codex :recorded-times) #'drover-codex-rollouts--times))
+      (should (eq drover-codex-rollouts--index index)))))
+
 (provide 'drover-codex-rollouts-test)
 ;;; drover-codex-rollouts-test.el ends here

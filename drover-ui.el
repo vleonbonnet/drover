@@ -37,7 +37,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
   (load "drover-core" nil t))
 
 (defgroup drover-faces nil
@@ -57,6 +57,10 @@
 
 (defface drover-dim '((t :inherit shadow))
   "Face of secondary details, such as directories and ages."
+  :group 'drover-faces)
+
+(defface drover-harness '((t :inherit drover-dim))
+  "Face of the harness of a session, its icon and name (see `drover-harnesses')."
   :group 'drover-faces)
 
 (defcustom drover-attention-glyph "\U0001F916" ; robot face
@@ -166,6 +170,7 @@ Grouping by status, the group `archived' holds the archived sessions."
   (pcase grouping
     ('status (if (eq value 'archived) "Archived" (opencode-session-status-label value)))
     ('updated (or (alist-get value drover-activity-labels) "No activity"))
+    ('harness (replace-regexp-in-string "[\n\r\t]+" " " (drover-harness-name value)))
     ('host (replace-regexp-in-string
             "[\n\r\t]+" " "
             (concat (drover-host-label value)
@@ -181,6 +186,13 @@ Grouping by status, the group `archived' holds the archived sessions."
     (cond ((and project branch) (format "%s:%s" project branch))
           (project project)
           (branch branch))))
+
+;;;; Harnesses
+
+(defun drover-harness-glyph (harness)
+  "Return the icon of HARNESS, a backend name, in the face `drover-harness'.
+See `drover-harnesses'."
+  (drover-face (drover-harness-icon harness) 'drover-harness))
 
 ;;;; Agents
 
@@ -437,9 +449,9 @@ Such as \"on reaver or core\": `local' names this host."
 (defun drover-filter-description (&optional filter now)
   "Return FILTER, `drover-filter' by default, described for headers, or nil.
 The description lists each member set, such as \"project drover,
-needs you, agent build, provider Anthropic, since 2d, \"auth\", on
-core\".  Ages count up to NOW, the current time by default.  Return
-nil when FILTER lists every session."
+needs you, agent build, provider Anthropic, harness Claude IDE, since
+2d, \"auth\", on core\".  Ages count up to NOW, the current time by
+default.  Return nil when FILTER lists every session."
   (let ((filter (or filter drover-filter)))
     (when (drover-filter-active-p filter)
       (let ((project (drover--filter-value filter :project))
@@ -447,6 +459,7 @@ nil when FILTER lists every session."
             (agent (drover--filter-value filter :agent))
             (model (drover--filter-value filter :model))
             (provider (drover--filter-value filter :provider))
+            (harness (drover--filter-value filter :harness))
             (since (drover--filter-value filter :since))
             (search (drover--filter-value filter :search))
             (hosts (drover--filter-value filter :host)))
@@ -456,6 +469,7 @@ nil when FILTER lists every session."
                                    (and agent (concat "agent " agent))
                                    (and model (concat "model " model))
                                    (and provider (concat "provider " provider))
+                                   (and harness (concat "harness " (drover-harness-name harness)))
                                    (and since (drover-filter-since-label since now))
                                    (and search (format "\"%s\"" search))
                                    (and hosts (drover-filter-hosts-label hosts))))

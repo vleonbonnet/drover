@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 10
+(defconst drover-core-generation 11
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -790,6 +790,113 @@ A waiting session shows its oldest request, another its detail."
               (plist-get request :summary))
     (drover-session-detail session)))
 
+;;;; Harnesses
+
+;; The harness of a session is what runs it for the user: the front end
+;; showing it, OpenCode's service, a Claude Code terminal, a shell over
+;; ACP, or the CLI that recorded a conversation drover lists.  It is the
+;; backend, but for a session of another host, whose harness is its
+;; owner's backend.
+
+(defconst drover--former-harnesses
+  '((opencode :name "OpenCode" :icon "\U000F0C8C"
+              :description "OpenCode's service, through opencode.el")
+    (claude-code-ide :name "Claude IDE" :icon "\U000F018D"
+                     :description "Claude Code in a terminal, through claude-code-ide")
+    (agent-shell :name "agent-shell" :icon "\U000F07B7"
+                 :description "a shell of agent-shell, over ACP")
+    (claude-code :name "Claude Code" :icon "\U000F0BC3"
+                 :description "Claude Code's transcript, of a conversation no front end shows")
+    (codex :name "Codex" :icon "\U000F1174"
+           :description "Codex's rollout, of a conversation no front end shows"))
+  "The standard value of `drover-harnesses' before the vendors' logos.")
+
+;; Loaded over a drover of the former standard value, which `defcustom'
+;; would keep, views take the new one.
+(when (and (boundp 'drover-harnesses) (equal drover-harnesses drover--former-harnesses))
+  (makunbound 'drover-harnesses))
+
+(defcustom drover-harnesses
+  '((opencode :name "OpenCode" :icon "\U000F0C8C" ; nf-md-application_brackets_outline
+              :description "OpenCode's service, through opencode.el")
+    (claude-code-ide :name "Claude IDE" :provider "anthropic"
+                     :description "Claude Code in a terminal, through claude-code-ide")
+    (agent-shell :name "agent-shell" :icon "\U000F07B7" ; nf-md-console_line
+                 :description "a shell of agent-shell, over ACP")
+    (claude-code :name "Claude Code" :provider "anthropic"
+                 :description "Claude Code's transcript, of a conversation no front end shows")
+    (codex :name "Codex" :provider "openai"
+           :description "Codex's rollout, of a conversation no front end shows"))
+  "How views show the harness of a session, by backend.
+The harness is what runs the session for you: the front end showing
+it, or the CLI that recorded a conversation drover lists from its
+files (see `drover-session-harness').  Each entry is (BACKEND . PLIST):
+:name names it, short; :icon is a compact display, such as a Nerd Font
+icon, which lists show before the name, or alone where room is short;
+:provider, without :icon, takes the icon `opencode-provider-icons'
+gives a provider of that identifier, such as \"anthropic\", the
+vendor's logo, so that a harness of a vendor's CLI shows the logo its
+models do; :description, what tooltips tell of it.  A backend without
+an icon is named by its label, after `drover-harness-default-icon'.
+Nerd Font icons by default, Claude's logo for Claude Code, in a
+terminal or as its transcripts, and OpenAI's for Codex."
+  :type '(alist :key-type symbol
+                :value-type (plist :options ((:name string) (:icon string) (:provider string)
+                                             (:description string))))
+  :group 'drover)
+
+(defcustom drover-harness-default-icon "\U000F0614" ; nf-md-application_outline
+  "Icon of a harness `drover-harnesses' gives none."
+  :type 'string
+  :group 'drover)
+
+(defun drover-session-harness (session)
+  "Return the harness of SESSION, a backend name.
+That is its backend, but for a session of another host, whose harness
+is its owner's backend (see `drover-session-origin'), the proxy of that
+host standing for none."
+  (or (drover-session-origin session) (drover-session-backend session)))
+
+(defun drover-harness-name (harness)
+  "Return the name of HARNESS, a backend name, as `drover-harnesses' gives it.
+A harness without one is named by its backend's label, if registered,
+else by its own name."
+  (or (plist-get (alist-get harness drover-harnesses) :name)
+      (drover-backend-property harness :label)
+      (symbol-name harness)))
+
+(defun drover-harness-icon (harness)
+  "Return the icon of HARNESS, a backend name, without faces.
+See `drover-harnesses': its :icon, else the icon of its :provider in
+`opencode-provider-icons', else `drover-harness-default-icon'."
+  (let ((entry (alist-get harness drover-harnesses)))
+    (or (plist-get entry :icon)
+        (when-let* ((provider (plist-get entry :provider)))
+          (cdr (seq-find (lambda (icon) (string-match-p (car icon) provider)) opencode-provider-icons)))
+        drover-harness-default-icon)))
+
+(declare-function drover-engine-label "drover-model" (engine))
+
+(defun drover-session-harness-description (session)
+  "Return what runs SESSION, for tooltips and details.
+Such as \"agent-shell: a shell of agent-shell, over ACP, running Codex\":
+the name of its harness, its description, the engine of a harness
+running several, and the host of a session of another."
+  (let* ((harness (drover-session-harness session))
+         (description (plist-get (alist-get harness drover-harnesses) :description))
+         (engine (drover-session-engine session))
+         (engine-name (and engine (if (fboundp 'drover-engine-label)
+                                      (drover-engine-label engine)
+                                    (symbol-name engine))))
+         (host (drover-session-host session)))
+    (concat (drover-harness-name harness)
+            (and description (concat ": " description))
+            (and engine-name
+                 (not (string-search (downcase engine-name)
+                                     (downcase (concat description " " (drover-harness-name harness)))))
+                 (concat ", running " engine-name))
+            (and host (concat ", on " (drover-host-label host))))))
+
 (defun drover-session-cache-remaining (session &optional now)
   "Return the seconds left before the prompt cache of SESSION expires, or nil.
 It is nil when the expiry is unknown or past at NOW, the current time
@@ -1209,7 +1316,7 @@ that groups of last activity follow the order of that sort."
         'today
       (drover-activity-bucket (cdr activity) now))))
 
-(defconst drover-groupings '(status project branch agent model provider host updated nil)
+(defconst drover-groupings '(status project branch agent model provider harness host updated nil)
   "The values `drover-group-by' may take.")
 
 (defun drover-group-trees (nodes grouping &optional now)
@@ -1224,6 +1331,8 @@ GROUPING is one of `drover-groupings':
           before another when its most urgent tree does.
  provider VALUE is the provider name of the root session (see
           `drover-session-provider-name'), or nil, likewise.
+ harness  VALUE is the harness of the root session (see
+          `drover-session-harness'), likewise.
  host     VALUE is the host of the root session, nil for this host,
           whose group comes first, then the other hosts in the order
           of `drover-hosts' (see `drover-host-rank').
@@ -1236,11 +1345,12 @@ Within a group, trees keep their order in NODES."
   (pcase grouping
     ('status (drover-group-trees-by-status nodes))
     ('project (drover-group-trees-by-project nodes))
-    ((or 'branch 'agent 'model 'provider)
+    ((or 'branch 'agent 'model 'provider 'harness)
      (let ((field (pcase grouping
                     ('branch #'drover-session-branch)
                     ('agent #'drover-session-agent)
                     ('model #'drover-session-model)
+                    ('harness #'drover-session-harness)
                     (_ #'drover-session-provider-name))))
        (drover--group-trees-by nodes (lambda (node) (funcall field (drover-node-session node))))))
     ('host
@@ -1255,14 +1365,15 @@ Within a group, trees keep their order in NODES."
 
 ;;;; Sorting trees
 
-(defconst drover-sort-fields '(urgency title project branch agent model provider updated created)
+(defconst drover-sort-fields '(urgency title project branch agent model provider harness updated created)
   "The values `drover-sort-by' may take.")
 
 (defcustom drover-sort-by 'updated
   "What session views sort sessions by, within each group.
 The value is one of `drover-sort-fields': `urgency', the most urgent
-first; `title', `project', `branch', `agent', `model' or `provider',
-the provider's name, in alphabetical order; `updated', the last
+first; `title', `project', `branch', `agent', `model', `provider',
+the provider's name, or `harness', the harness's name (see
+`drover-harness-name'), in alphabetical order; `updated', the last
 activity, or `created', the time of creation, oldest first.
 `drover-sort-descending' reverses the order.  Subagents stay under
 their parent whatever the order.
@@ -1283,6 +1394,7 @@ the most recently active first."
                  (const :tag "Agent" agent)
                  (const :tag "Model" model)
                  (const :tag "Provider" provider)
+                 (const :tag "Harness" harness)
                  (const :tag "Last activity" updated)
                  (const :tag "Creation" created))
   :group 'drover)
@@ -1310,6 +1422,7 @@ compared ignoring case; times are those of the root session, but for
                               ('agent (drover-session-agent session))
                               ('model (drover-session-model session))
                               ('provider (drover-session-provider-name session))
+                              ('harness (drover-harness-name (drover-session-harness session)))
                               (_ (error "Unknown sort field %S" field))))
                      (text (format "%s" value))
                      ((not (string-empty-p text))))
@@ -1577,9 +1690,14 @@ A session's parent and subagents need no operation: drover finds them
 among the sessions through `drover-session-parent'.
 
 Only :label and :sessions are required.  Registering NAME again
-replaces its properties and keeps its place: backends registered first
-win over later ones showing the same session (see `drover-sessions').
-A backend registered after `drover-start' ran is started at once."
+replaces its properties, those it no longer gives going, and keeps its
+place, backends registered first winning over later ones showing the
+same session (see `drover-sessions'), and what drover holds of it: it
+is not started again, the older and archived sessions fetched stay, and
+its sessions are listed anew with its new properties.  So a backend
+whose file is loaded anew, as reloading drover does, registers again
+with the properties of that file.  A backend registered after
+`drover-start' ran is started at once."
   (unless (functionp (plist-get properties :sessions))
     (error "Backend %s has no :sessions function" name))
   (setf (alist-get name drover--backends) properties)
@@ -2666,8 +2784,9 @@ something changed."
 (defcustom drover-group-by nil
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
-first; `project', `branch', `agent', `model' or `provider', the
-provider's name, of the session at the top of each tree; `host', this
+first; `project', `branch', `agent', `model', `provider', the
+provider's name, or `harness' (see `drover-session-harness'), of the
+session at the top of each tree; `host', this
 host's sessions first, then each other host's; `updated', the last
 activity, as today, yesterday, this week and older; or nil for no
 groups, the default.  See `drover-group-trees'."
@@ -2677,6 +2796,7 @@ groups, the default.  See `drover-group-trees'."
                  (const :tag "By agent" agent)
                  (const :tag "By model" model)
                  (const :tag "By provider" provider)
+                 (const :tag "By harness" harness)
                  (const :tag "By host" host)
                  (const :tag "By last activity" updated)
                  (const :tag "No groups" nil))
@@ -2692,6 +2812,7 @@ Its members are:
  :model     A model name, as `drover-session-model' returns it.
  :provider  A provider name, as `drover-session-provider-name' returns
             it.
+ :harness   A harness, as `drover-session-harness' returns it.
  :since     A float time: sessions last updated then or later.
  :search    A string found, ignoring case, in the title, summary,
             project or branch of the session.
@@ -2705,7 +2826,7 @@ session.  Change it with `drover-set-filter' so that views follow.")
   "Non-nil in the buffers of drover's own session views.
 Those follow `drover-filter', `drover-group-by' and `drover-sort-by'.")
 
-(defconst drover--filter-keys '(:project :statuses :agent :model :provider :since :search :host)
+(defconst drover--filter-keys '(:project :statuses :agent :model :provider :harness :since :search :host)
   "The members of `drover-filter', in the order they are described.")
 
 (defun drover--filter-value (filter key)
@@ -2728,6 +2849,7 @@ SESSION must satisfy every member of FILTER that is set."
          (agent (drover--filter-value filter :agent))
          (model (drover--filter-value filter :model))
          (provider (drover--filter-value filter :provider))
+         (harness (drover--filter-value filter :harness))
          (since (drover--filter-value filter :since))
          (search (drover--filter-value filter :search))
          (hosts (drover--filter-value filter :host)))
@@ -2736,6 +2858,7 @@ SESSION must satisfy every member of FILTER that is set."
          (or (null agent) (equal (drover-session-agent session) agent))
          (or (null model) (equal (drover-session-model session) model))
          (or (null provider) (equal (drover-session-provider-name session) provider))
+         (or (null harness) (eq (drover-session-harness session) harness))
          (or (null hosts)
              (let ((host (drover-session-host session)))
                (seq-some (lambda (wanted) (if (eq wanted 'local) (null host) (equal wanted host)))
@@ -2859,8 +2982,8 @@ lines, which hint at the settings, are drawn again, and only theirs."
 
 (defun drover-set-filter (key value)
   "Set member KEY of `drover-filter' to VALUE, nil removing it, and redraw views.
-KEY is one of :project, :statuses, :agent, :model, :provider, :since,
-:search and :host."
+KEY is one of :project, :statuses, :agent, :model, :provider, :harness,
+:since, :search and :host."
   (unless (memq key drover--filter-keys)
     (error "Unknown filter member %S" key))
   (let ((filter (copy-sequence drover-filter)))

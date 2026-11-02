@@ -623,11 +623,11 @@ An error is reported, and lets Emacs exit."
 (defun drover-codex-rollouts-install (front-end)
   "List Codex's conversations, for FRONT-END to resume them.
 The backend stays until every front end that installed it uninstalled
-it."
+it.  Installed again, as a front end loaded anew installs it, it is
+registered anew, so that its registration has this file's properties."
   (unless (drover-codex-rollouts--current-index)
     (setq drover-codex-rollouts--index (drover-codex-rollouts--make-index)))
-  (unless (assq 'codex drover--backends)
-    (drover-codex-rollouts--register))
+  (drover-codex-rollouts--register)
   (cl-pushnew front-end drover-codex-rollouts--users)
   (add-hook 'kill-emacs-hook #'drover-codex-rollouts--save))
 
@@ -640,6 +640,11 @@ The backend goes once no front end needs it."
       (drover-transcript-stop (drover-codex-rollouts--current-index)))
     (remove-hook 'kill-emacs-hook #'drover-codex-rollouts--save)
     (drover-unregister-backend 'codex)))
+
+;; Loaded anew, as reloading drover does, the backend a front end
+;; installed takes this file's properties.
+(when (eq (drover-backend-property 'codex :sessions) #'drover-codex-rollouts--sessions)
+  (drover-codex-rollouts--register))
 
 (provide 'drover-codex-rollouts)
 ;;; drover-codex-rollouts.el ends here
