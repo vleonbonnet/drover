@@ -209,7 +209,8 @@ effort for a model without effort."
   (dolist (variable '(agent-shell--state agent-shell-viewport--suffix agent-shell-mode-hook))
     (should (boundp variable)))
   (let ((usage (car (help-split-fundoc (documentation 'agent-shell--start t) 'agent-shell--start))))
-    (dolist (key '("CONFIG" "NO-FOCUS" "NEW-SESSION" "SESSION-STRATEGY"))
+    ;; Resuming starts a shell loading a session, in a directory.
+    (dolist (key '("CONFIG" "NO-FOCUS" "NEW-SESSION" "SESSION-STRATEGY" "SESSION-ID" "CWD"))
       (should (string-match-p (concat "&key .*\\_<" key "\\_>") usage))))
   ;; The start effort relies on default config options, applied after the model.
   (should (assq :default-config-options (agent-shell-make-agent-config)))
