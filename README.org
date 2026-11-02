@@ -38,7 +38,7 @@ The OpenCode backend loads with opencode.el, which drover does not load before y
 
 =drover-status-glyphs= changes them; the icons need a Nerd Font. In the list, the icons of Working and Retrying are animated (see [[*Animated icons][Animated icons]]).
 
-The first three need you (=drover-attention-statuses=). Sessions are ranked by =drover-status-order=, and among those that need you the longest wait comes first. Whether you saw a finished turn is the backend's to know: OpenCode records it in the service, so a turn read in any client, the TUI, the desktop app or Emacs, is no longer Done.
+The first three need you (=drover-attention-statuses=). Sessions are ranked by =drover-status-order=, and among those that need you the longest wait comes first; among the others, the newest turn or the latest activity, as the order of last activity places them. Whether you saw a finished turn is the backend's to know: OpenCode records it in the service, so a turn read in any client, the TUI, the desktop app or Emacs, is no longer Done.
 
 Subagent sessions show under their parent, their icon under its title. Which of them show, =drover-show-subagents= says, and =U= in the list cycles it:
 
@@ -321,13 +321,21 @@ The icons of Working and Retrying sessions are animated in the list: each shows 
    -l location  -b branch  -a agent  -m model  -r provider  -x context  -c created  -t age  -p cache  -s summary
 #+end_example
 
-- Sort by urgency, the most urgent first, by title, project, branch, agent, model, provider, last activity or creation, either way. Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
+- Sort by urgency, the most urgent first, by title, project, branch, agent, model, provider, last activity (see [[*The order of last activity][The order of last activity]]) or creation, either way. Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
 - Group by status, project, branch, agent, model, provider (each group named after the provider, behind its icon), last activity (today, yesterday, this week, older), or nothing.
 - Filter by project, status, agent, model, provider (by name, among the providers of the sessions drover knows), last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. An empty answer removes a filter; =c= clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
 - Toggle follow mode, which subagents show (all, the active ones, none: =U= cycles them, as in the list), older sessions: those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session, and archived sessions (see [[*Archived sessions][Archived sessions]]). Both are fetched when shown, and again by =g=.
 - Choose the columns: each switch lets a field show, highlighted, or hides it, dimmed, at once; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
 
 The lists follow sessions as they change while they are displayed; hidden, a list notes which sessions changed, draws nothing meanwhile, and draws them in place once shown again, or whole when many did. Only what changed is drawn: the lines of the sessions that changed, in place, and a session moving, coming or going alone, so that a list of thousands of sessions follows a running turn in a millisecond or two; with the sidebar and the other list both shown, each draws its own lines, but what a change makes is made once for both. A list is drawn whole only when its columns change width, a setting changes, or =g= refreshes it; =g= draws from what the backends reported, then lists every session anew, for what they change without telling, such as a branch, and draws what changed. The sessions of a collapsed group, such as Idle, often most of them, are drawn once it is expanded, searched with Isearch, copied or selected, and otherwise a few at a time while Emacs is idle and the list shown, stopping as you type (=drover-list-deferred-delay=), so that Occur or Consult find them too.
+
+** The order of last activity
+
+Sorted by last activity, a session running a turn, working or retrying, is active now, whatever event of its turn came last: running sessions come before the others, and among themselves in the order their turns started, which the events of a turn do not change. So sessions working together keep their places, rather than taking the first one in turn at every step of their turns, many times a second. A session moves when its status does: a turn starting puts it on top, a turn ending or a question puts it first among those not running. A subagent starting under its running parent moves neither its parent nor its tree, and subagents are ordered alike under their parent. The Age column of a running session tells its last event, a few seconds ago, as it is active now.
+
+The others come in the order of their last activity, the time the Age column counts from: the end of their turn, the question they ask, their last event. A session moves only once its activity moved more than =drover-sort-activity-tolerance= seconds, a minute by default, from where it was placed: reading a finished turn, which takes its session from Done to Idle, or a rename moves no session by a few seconds. Sessions whose activity is within a minute of one another keep their order, unless one of them moves by more than a minute: that one moves, wherever the others are. A running session of a front end that does not tell when its turn started is placed at its last event, held alike. Both lists show the same order, whether drawn whole or following changes. Set the tolerance to nil to sort by the exact times.
+
+Ascending, oldest first, the running sessions come last. The order of urgency among sessions of one status, and the groups of last activity, a running session being active today, follow the same times.
 
 ** Archived sessions
 

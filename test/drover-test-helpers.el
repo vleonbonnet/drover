@@ -205,6 +205,8 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--changed-all nil)
          (drover--changed-applied nil)
          (drover--index nil)
+         (drover--activity-times (make-hash-table :test #'equal))
+         (drover-sort-activity-tolerance 60)
          (drover-changed-hook nil)
          (drover--closing nil)
          (drover-show-subagents 'active)

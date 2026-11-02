@@ -26,16 +26,17 @@
 ;; may show at once, each laid out for its own width.  Each keeps its
 ;; point, its expanded sessions and collapsed groups; both list the
 ;; sessions `drover-filter' keeps, grouped as `drover-group-by' says and
-;; sorted as `drover-sort-by' says; the View menu, \\`V', changes all
-;; three, for both.  Each
-;; group is a section that \\`TAB' collapses, and each session a section
-;; whose body recaps its last turn: what it waits for, the error that
-;; ended it, the prompt, the agent's reply and the files it changed, as
-;; its backend tells them (`drover-recap'), fetched as it expands, and
-;; what its line leaves out.  The keys of `drover-session-map' act on
-;; the session at point.  The buffer shows sessions, and how many each
-;; group holds; settings and keys are the View menu's to show, how many
-;; sessions need you the mode line's (`drover-attention-mode').
+;; sorted as `drover-sort-by' says, none moving as a turn streams; the
+;; View menu, \\`V', changes all three, for both.
+;; Each group is a section that \\`TAB' collapses, and each session a
+;; section whose body recaps its last turn: what it waits for, the
+;; error that ended it, the prompt, the agent's reply and the files it
+;; changed, as its backend tells them (`drover-recap'), fetched as it
+;; expands, and what its line leaves out.  The keys of
+;; `drover-session-map' act on the session at point.  The buffer shows
+;; sessions, and how many each group holds; settings and keys are the
+;; View menu's to show, how many sessions need you the mode line's
+;; (`drover-attention-mode').
 ;;
 ;; A subagent is listed under its parent, its glyph under its parent's
 ;; title, and a parent and its subagents stay together: they go in the
@@ -661,11 +662,11 @@ The list reads the clock through it, so that tests may stop the clock."
 
 (defun drover-list--age-time (session)
   "Return the time from which the age of SESSION counts, or nil.
-A session needing the user ages from when its status began, the others
-from their last activity, matching the order of `drover-sort'."
-  (if (drover-session-attention-p session)
-      (or (drover-session-since session) (drover-session-updated session))
-    (or (drover-session-updated session) (drover-session-since session))))
+That is its last activity (see `drover-session-last-activity'): a
+session needing the user ages from when its status began, the others
+from their last activity, what the order of last activity places them
+by, but for running sessions, whose activity is now."
+  (drover-session-last-activity session))
 
 (defun drover-list--field-spec (field)
   "Return the properties of FIELD in `drover-list-fields', or nil."
@@ -2685,7 +2686,8 @@ unless the user hides it.  In two lines, it does not show."
 
 (defun drover-list--settings ()
   "Return the settings a drawing depends on, besides sessions and width."
-  (list drover-group-by drover-sort-by drover-sort-descending (copy-tree drover-filter)
+  (list drover-group-by drover-sort-by drover-sort-descending drover-sort-activity-tolerance
+        (copy-tree drover-filter)
         drover-show-subagents drover-show-history drover-show-archived
         drover-list-hidden-fields (copy-tree drover-list-fields)
         drover-status-order drover-attention-statuses))
@@ -3798,7 +3800,7 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
       (when (eq drover-group-by 'updated)
         (dolist (group (drover-list--model-groups model))
           (seq-doseq (tree (drover-list--group-trees group))
-            (unless (eq (drover-activity-bucket (drover-node-updated (drover-list--tree-node tree)) now)
+            (unless (eq (drover-tree-activity-bucket (drover-list--tree-node tree) now)
                         (cdr (drover-list--group-value group)))
               (push (drover-list--tree-root tree) keys)))))
       (maphash (lambda (key row)
