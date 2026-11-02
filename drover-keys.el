@@ -67,7 +67,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 9))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -259,6 +259,168 @@ buffer."
           (buffer (with-current-buffer buffer
                     (call-interactively #'revert-buffer)))
           (t (user-error "%s has no buffer to refresh" (drover-session-display-title session))))))
+
+;;;; Burying quiet sessions
+
+(defun drover--own-buffer-p (buffer)
+  "Return non-nil when BUFFER is one of drover's lists or its prompt."
+  (with-current-buffer buffer
+    (or drover-view-p (bound-and-true-p drover-prompt-mode))))
+
+(defun drover--quiet-buffers ()
+  "Return the buffers of the quiet sessions of this host, in the backends' order.
+A quiet session is one that does not need the user, its status not one
+of `drover-attention-statuses': idle, working or retrying.  Its buffer
+is the one its backend shows it in (see `drover-session-buffer').  A
+buffer showing a session that needs the user too is left out, and so
+are the buffers of a conversation one backend tells needs the user,
+whatever another backend showing it tells.  Sessions of other hosts
+have no buffer here, and drover's lists and prompt are never among
+them."
+  (let ((busy (make-hash-table :test #'eq))
+        (conversations (make-hash-table :test #'equal))
+        (seen (make-hash-table :test #'eq))
+        (candidates nil)
+        (quiet nil))
+    (dolist (session (drover--live-sessions))
+      (unless (drover-session-host session)
+        (let ((buffer (drover-session-buffer session))
+              (key (drover-session-engine-key session)))
+          (cond ((drover-session-attention-p session)
+                 (when buffer (puthash buffer t busy))
+                 (when key (puthash key t conversations)))
+                (buffer (push (cons buffer key) candidates))))))
+    (pcase-dolist (`(,buffer . ,key) (nreverse candidates))
+      (unless (or (gethash buffer busy)
+                  (and key (gethash key conversations))
+                  (gethash buffer seen)
+                  (drover--own-buffer-p buffer))
+        (puthash buffer t seen)
+        (push buffer quiet)))
+    (nreverse quiet)))
+
+(defun drover--made-for-p (window buffer)
+  "Return non-nil when the frame or tab of WINDOW was made to show BUFFER.
+As the `quit-restore' parameter of WINDOW records it, from which
+`quit-restore-window' deletes that frame or closes that tab."
+  (let ((quit-restore (window-parameter window 'quit-restore)))
+    (and (memq (nth 1 quit-restore) '(frame tab))
+         (eq (nth 3 quit-restore) buffer))))
+
+(defun drover--restores-p (window buffer)
+  "Return non-nil when quitting WINDOW shows a buffer BUFFER replaced there.
+That is when its `quit-restore-prev' or `quit-restore' parameter records
+a buffer still live that WINDOW showed before BUFFER, which
+`quit-restore-window' then shows again."
+  (seq-some (lambda (parameter)
+              (let ((value (window-parameter window parameter)))
+                (and (consp (nth 1 value))
+                     (buffer-live-p (car (nth 1 value)))
+                     (eq (nth 3 value) buffer))))
+            '(quit-restore-prev quit-restore)))
+
+(defun drover--forget-shown-views (window buffer)
+  "Keep WINDOW from showing again a view of drover's shown in another window.
+Its `quit-restore-prev' and `quit-restore' parameters naming such a
+view as the buffer BUFFER replaced are cleared: `quit-restore-window'
+would show it again from them, whatever `switch-to-prev-buffer-skip'
+says.  A view is a buffer whose `drover-view-p' is set."
+  (dolist (parameter '(quit-restore-prev quit-restore))
+    (let* ((value (window-parameter window parameter))
+           (shown (and (consp (nth 1 value)) (car (nth 1 value)))))
+      (when (and (eq (nth 3 value) buffer)
+                 (buffer-live-p shown)
+                 (drover--view-shown-elsewhere-p shown window))
+        (set-window-parameter window parameter nil)))))
+
+(defun drover--quit-window (window bury-or-kill)
+  "Quit WINDOW as `quit-restore-window' does with BURY-OR-KILL, sparing frames.
+The functions of `quit-window-hook' run first, in its buffer, as
+`quit-window' runs them.  WINDOW then goes as its `quit-restore'
+parameters tell, a frame made for its buffer deleted rather than hidden
+as `frame-auto-hide-function' would, but never the last frame.  The
+last window of a frame or tab not made for its buffer is never deleted,
+nor that frame or tab: it shows the buffer it showed before, or
+another, or stays as it is when there is none.  A view of drover's
+shown in another window is not shown there again (see
+`drover--forget-shown-views')."
+  (let ((buffer (window-buffer window)))
+    (with-current-buffer buffer
+      (drover-run-hook-reporting 'quit-window-hook))
+    (when (and (window-live-p window) (eq (window-buffer window) buffer))
+      (drover--forget-shown-views window buffer)
+      (if (or (not (frame-root-window-p window)) (drover--made-for-p window buffer))
+          (let ((frame-auto-hide-function (lambda (frame)
+                                            (drover-with-reporting "deleting a frame"
+                                              (delete-frame frame)))))
+            (quit-restore-window window bury-or-kill))
+        ;; `quit-restore-window' deletes a dedicated window, or one with no
+        ;; other buffer, closing its tab without asking
+        ;; `window-deletable-functions': here it only restores.
+        (let ((dedicated (window-dedicated-p window)))
+          (unless (eq dedicated 'side)
+            (set-window-dedicated-p window nil))
+          (if (drover--restores-p window buffer)
+              (let ((quit-restore-window-no-switch nil))
+                (quit-restore-window window bury-or-kill))
+            (unless (switch-to-prev-buffer window bury-or-kill)
+              (set-window-dedicated-p window dedicated))))))))
+
+(defun drover--bury-window (window quiet selected)
+  "Quit WINDOW until it shows none of the buffers QUIET holds, or is gone.
+QUIET is a hash table of buffers.  WINDOW is quit as `quit-window'
+would (see `drover--quit-window'), and again when it then shows another
+buffer of QUIET, at most once a buffer.  Unless SELECTED, WINDOW is not
+the selected window, and the selected windows stay selected.  Return
+non-nil when WINDOW went or shows another buffer."
+  (let ((rounds (hash-table-count quiet))
+        (changed nil))
+    (while (and (> rounds 0) (window-live-p window) (gethash (window-buffer window) quiet))
+      (let ((buffer (window-buffer window)))
+        (if selected
+            (drover--quit-window window 'bury)
+          ;; As `quit-windows-on' quits them, the buffer buried apart.
+          (save-selected-window
+            (drover--quit-window window 'burying)))
+        (if (and (window-live-p window) (eq (window-buffer window) buffer))
+            (setq rounds 0)
+          (setq changed t
+                rounds (1- rounds)))))
+    changed))
+
+(defun drover-bury-quiet-sessions ()
+  "Bury the buffers of the sessions of this host that do not need you.
+Those are the sessions whose status is not one of
+`drover-attention-statuses', idle, working or retrying, of every
+backend (see `drover--quiet-buffers').  Each buffer goes to the end of
+the buffer list, as `bury-buffer' puts it.  A window showing one is quit
+as `quit-window' quits it, but burying the buffer, never killing it:
+as its `quit-restore' parameters tell, a window or frame made for the
+buffer is deleted, and another window shows what it showed before, its
+previous buffer, or the one before when that is a quiet session's too.
+The last window of a frame not made for the buffer is never deleted,
+nor the last frame.  Drover's lists and prompt stay as they are, and
+while a list shows, no window shows it a second time.  The selected
+window is quit last, so that selection goes where quitting it sends it.
+Tell how many sessions were buried and how many windows restored."
+  (interactive)
+  (let ((buffers (or (drover--quiet-buffers)
+                     (user-error "No quiet session has a buffer")))
+        (quiet (make-hash-table :test #'eq))
+        (restored 0))
+    (dolist (buffer buffers)
+      (puthash buffer t quiet)
+      (bury-buffer buffer))
+    (let* ((selected (selected-window))
+           (windows (seq-filter (lambda (window) (gethash (window-buffer window) quiet))
+                                (window-list-1 nil 'nomini t)))
+           (switch-to-prev-buffer-skip (drover--prev-buffer-skip)))
+      (dolist (window (append (remq selected windows) (and (memq selected windows) (list selected))))
+        (when (drover--bury-window window quiet (eq window selected))
+          (cl-incf restored))))
+    (drover-message "Buried %d session%s (%d window%s restored)"
+                    (length buffers) (if (= (length buffers) 1) "" "s")
+                    restored (if (= restored 1) "" "s"))))
 
 ;;;; New sessions
 
@@ -481,7 +643,8 @@ sessions, :view non-nil in one of drover's views, :shown non-nil when
 one of drover's views is current or shows on a visible frame (see
 `drover--view-shown-p'), :prompt non-nil in drover's own prompt buffer
 \(see `drover-prompt-mode'), :window the window of a list the menu acts
-on in place of the current buffer, or nil.
+on in place of the current buffer, or nil, :quiet non-nil when a session
+not needing the user has a buffer to bury (see `drover--quiet-buffers').
 
 The menu acts on the current buffer when it is a list of sessions, or
 when it tells a session at point, as a session buffer does.  Otherwise,
@@ -521,7 +684,10 @@ sessions a region selects, or nil."
           :view view
           :shown (and (or view (drover--view-shown-p)) t)
           :prompt (and prompt t)
-          :window window)))
+          :window window
+          :quiet (and (drover-with-reporting "quiet sessions"
+                        (drover--quiet-buffers))
+                      t))))
 
 (defun drover--context-again (scope)
   "Return the context of the dispatch menu, which acted on SCOPE, now.
@@ -616,6 +782,11 @@ subagents itself (see `drover-toggle-subagents-function')."
 It does in a list of another front end showing its subagents itself,
 and wherever the view settings apply."
   (or (drover--dispatch-foreign-subagents-p) (drover-dispatch-view-shown-p)))
+
+(defun drover-dispatch-quiet-p ()
+  "Return non-nil when the dispatch menu may bury the buffers of quiet sessions.
+See `drover-bury-quiet-sessions'."
+  (plist-get (drover--scope) :quiet))
 
 (defun drover-dispatch-in-prompt-p ()
   "Return non-nil when the dispatch menu acts on drover's own prompt buffer."
@@ -1654,6 +1825,7 @@ sends prompts, where RET stays Send."
   [:class drover--menu-flow
    ["Sessions"
     ("j" "Next" drover-next)
+    ("B" "Bury quiet" drover-bury-quiet-sessions :inapt-if-not drover-dispatch-quiet-p)
     ("b" "Select" drover-select)
     ("l" "List" drover-list)
     ("L" "Side list" drover-list-side)

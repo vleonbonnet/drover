@@ -88,6 +88,7 @@ A value a former option was given before drover loaded goes to opencode.el's whe
 - =drover-next= visits the most urgent session, among those counted. Pressed again at once, it moves to the next one in the order of the first press, so a session changing status meanwhile does not reshuffle the round.
 - =drover-select= picks any session the list shows under its subagent mode, and any subagent waiting for you, with completion, grouped by status and annotated with its project, branch, age and what it waits for. With a prefix argument it opens the session in another window.
 - =drover-mark-all-seen= marks every Done and Failed session seen after confirming how many (=drover-catch-up-statuses=); with a numeric prefix argument, only those that ended at least that many hours ago. Useful to start from a clean slate, or after a day away.
+- =drover-bury-quiet-sessions=, =B= in the menu, puts away the buffers of the sessions that do not need you, idle, working or retrying, leaving at hand those that do (see [[*Global keys][Global keys]]).
 
 * Keys
 
@@ -108,18 +109,18 @@ The menu has no fixed shape: its groups fill columns of balanced height as wide 
 #+begin_example
   Sessions            Prompt runs                Conversation      Session          View                                  Columns
    j Next              a Agent plan               t Revert here     o Other window   =o sort urgency                       -h host
-   b Select            m Model Opus 5.5           T Cancel revert   u Parent         =r order [ascending|descending]       -l location
-   l List              e Effort max               C Compact         c Subagent       =g group status                       -b branch
-   L Side list         d Directory ~/src/drover   f Fork            v Peek           U subagents [all|active|none]         -a agent
-   p Project                                      . Last answer     A Answer         -o older [hidden|shown]               -m model
-   S Search sessions  Input                       O Open link       K Interrupt      -z archived [hidden|shown]            -r provider
-                       RET Send                                     s Mark seen      -f follow [off|on]                    -x context
-  Prompt               S-<return> Schedule                          + New session                                          -c created
-   " Prompt            i Attach                                     g Refresh       Filter                                 -t age
-   n Task prompt       k Clear                                      r Rename         =p project drover   =v provider any   -p cache
-   ' Show prompt       / Slash command                              x Delete         =s status any       =d updated any    -s summary
-   # Scheduled         @ Mention                                    z Archive        =a agent any        =f text any
-                       y Copy block                                 Z Unarchive      =m model any        =c clear
+   B Bury quiet        m Model Opus 5.5           T Cancel revert   u Parent         =r order [ascending|descending]       -l location
+   b Select            e Effort max               C Compact         c Subagent       =g group status                       -b branch
+   l List              d Directory ~/src/drover   f Fork            v Peek           U subagents [all|active|none]         -a agent
+   L Side list                                    . Last answer     A Answer         -o older [hidden|shown]               -m model
+   p Project          Input                       O Open link       K Interrupt      -z archived [hidden|shown]            -r provider
+   S Search sessions   RET Send                                     s Mark seen      -f follow [off|on]                    -x context
+                       S-<return> Schedule                          + New session                                          -c created
+  Prompt               i Attach                                     g Refresh       Filter                                 -t age
+   " Prompt            k Clear                                      r Rename         =p project drover   =v provider any   -p cache
+   n Task prompt       / Slash command                              x Delete         =s status any       =d updated any    -s summary
+   ' Show prompt       @ Mention                                    z Archive        =a agent any        =f text any
+   # Scheduled         y Copy block                                 Z Unarchive      =m model any        =c clear
 #+end_example
 
 ** Session keys
@@ -209,26 +210,29 @@ Send names where the prompt goes when the functions of =drover-dispatch-send-tar
 
 Everywhere, through the menu.
 
-| Key | Command                     | Action                                                         |
-|-----+-----------------------------+----------------------------------------------------------------|
-| =j= | =drover-next=               | visit the most urgent session                                  |
-| =b= | =drover-select=             | choose a session                                               |
-| =l= | =drover-list=               | the list of sessions, in a window                              |
-| =L= | =drover-list-side=          | the sidebar, a list of sessions beside your work, or hide it   |
-| =p= | =drover-select-project=     | the list of the sessions of a project                          |
-| =S= | =opencode-consult-sessions= | search the OpenCode session buffers                            |
-| ="= | =drover-prompt-dwim=        | write a prompt, with the context at point                      |
-| =n= | =drover-prompt-org-task=    | write a prompt for the Org task point is in                    |
-| ='= | =drover-prompt-toggle=      | show or hide the prompt                                        |
-| =#= | =drover-schedule-list=      | the prompts scheduled for later (see [[*Scheduled prompts][Scheduled prompts]])        |
-| =a= | =drover-prompt-agent=       | choose the agent                                               |
-| =m= | =drover-prompt-model=       | choose the model                                               |
-| =e= | =drover-prompt-effort=      | choose the reasoning effort                                    |
-| =d= | =drover-prompt-directory=   | move the session to another directory                          |
-| =C= | =drover-compact=            | compact the conversation, or the session at point in a list    |
-| =f= | =drover-fork=               | fork the conversation at point, or the whole session in a list |
-| =.= | =drover-prompt-last-answer= | show the start of the last answer                              |
-| =O= | =drover-prompt-open-link=   | open the link at point                                         |
+| Key | Command                      | Action                                                         |
+|-----+------------------------------+----------------------------------------------------------------|
+| =j= | =drover-next=                | visit the most urgent session                                  |
+| =B= | =drover-bury-quiet-sessions= | bury the buffers of the sessions that do not need you          |
+| =b= | =drover-select=              | choose a session                                               |
+| =l= | =drover-list=                | the list of sessions, in a window                              |
+| =L= | =drover-list-side=           | the sidebar, a list of sessions beside your work, or hide it   |
+| =p= | =drover-select-project=      | the list of the sessions of a project                          |
+| =S= | =opencode-consult-sessions=  | search the OpenCode session buffers                            |
+| ="= | =drover-prompt-dwim=         | write a prompt, with the context at point                      |
+| =n= | =drover-prompt-org-task=     | write a prompt for the Org task point is in                    |
+| ='= | =drover-prompt-toggle=       | show or hide the prompt                                        |
+| =#= | =drover-schedule-list=       | the prompts scheduled for later (see [[*Scheduled prompts][Scheduled prompts]])        |
+| =a= | =drover-prompt-agent=        | choose the agent                                               |
+| =m= | =drover-prompt-model=        | choose the model                                               |
+| =e= | =drover-prompt-effort=       | choose the reasoning effort                                    |
+| =d= | =drover-prompt-directory=    | move the session to another directory                          |
+| =C= | =drover-compact=             | compact the conversation, or the session at point in a list    |
+| =f= | =drover-fork=                | fork the conversation at point, or the whole session in a list |
+| =.= | =drover-prompt-last-answer=  | show the start of the last answer                              |
+| =O= | =drover-prompt-open-link=    | open the link at point                                         |
+
+=B= buries the buffers of this host's sessions that do not need you, those idle, working or retrying, of every backend, so that only those waiting for you, failed or done stay at hand: a buffer no window shows goes to the end of the buffer list; a window showing one goes back to what it showed before, as =quit-window= does, the window or frame made for it deleted, another showing its previous buffer, or the one before when that is a quiet session too. It never kills a buffer, never deletes the last window of a frame unless the frame was made for the session, nor the last frame, leaves drover's lists and prompt alone, and quits the selected window last. It tells how many it buried, such as =Buried 3 sessions (1 window restored)=, and is greyed out while no quiet session has a buffer.
 
 =S= comes with the OpenCode backend. ="= is greyed out in the prompt itself, =n= outside Org buffers and in the prompt. =p= offers the projects of the sessions drover knows, and lists those of the one you choose, through the filter. =a=, =m=, =e= and =d= act on the current prompt buffer, in a list on the open buffer of the session at point, else on the one =drover-default-prompt-buffer-function= returns, drover's prompt by default; =.= likewise, else on the prompt buffer you visited last. The prompt keys, and =O=, apply only in the prompt buffer itself, since they work on what you see there.
 

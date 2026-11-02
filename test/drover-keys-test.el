@@ -302,6 +302,240 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
             (should (equal (reverse reverted) '(list session session))))
         (kill-buffer session-buffer)))))
 
+;;;; Burying quiet sessions
+
+(defvar drover-keys-test-said nil
+  "The messages shown, newest first.")
+
+(defun drover-keys-test-buffer (id)
+  "Return the buffer of the fake session ID, named after it between stars."
+  (get-buffer (format "*%s*" id)))
+
+(defmacro drover-keys-test-burying (sessions &rest body)
+  "Run BODY with the fake backend serving SESSIONS, each with a buffer.
+The buffer of a session is named after its identifier between stars
+\(see `drover-keys-test-buffer'), and \"*work*\" and \"*other*\" are
+two more buffers.  BODY runs in the one window of the frame, showing
+\"*work*\", a frame large enough to split it a few times, its
+messages going to `drover-keys-test-said'.  The buffers go afterwards,
+and the windows and the size of the frame are restored."
+  (declare (indent 1) (debug t))
+  (let ((made (make-symbol "made"))
+        (size (make-symbol "size")))
+    `(drover-keys-test-with ,sessions
+       (let ((,made nil)
+             (,size (cons (frame-width) (frame-height)))
+             (drover-keys-test-said nil)
+             (split-height-threshold 0)
+             (split-width-threshold nil))
+         (unwind-protect
+             (save-window-excursion
+               (set-frame-size (selected-frame) 100 60)
+               (dolist (name (append (mapcar (lambda (session) (format "*%s*" (drover-session-id session)))
+                                             drover-test-sessions)
+                                     '("*work*" "*other*")))
+                 (push (get-buffer-create name) ,made))
+               (setf (alist-get 'fake drover--backends)
+                     (append (list :buffer (lambda (session) (drover-keys-test-buffer (drover-session-id session))))
+                             (alist-get 'fake drover--backends)))
+               (delete-other-windows)
+               (switch-to-buffer "*work*")
+               (cl-letf (((symbol-function 'message)
+                          (lambda (format &rest arguments)
+                            (push (apply #'format-message format arguments) drover-keys-test-said))))
+                 ,@body))
+           (set-frame-size (selected-frame) (car ,size) (cdr ,size))
+           (dolist (buffer ,made)
+             (when (buffer-live-p buffer)
+               (kill-buffer buffer))))))))
+
+(ert-deftest drover-keys-test-bury-hidden ()
+  "Buffers no window shows go to the end of the buffer list, windows untouched.
+Those of the sessions that need you stay where they are."
+  (drover-keys-test-burying (list (drover-test-session "idle" :status 'idle)
+                                  (drover-test-session "working" :status 'working)
+                                  (drover-test-session "retrying" :status 'retrying)
+                                  (drover-test-session "waiting" :status 'waiting)
+                                  (drover-test-session "failed" :status 'failed)
+                                  (drover-test-session "done" :status 'done))
+    (let ((attention (mapcar #'drover-keys-test-buffer '("waiting" "failed" "done")))
+          (quiet (mapcar #'drover-keys-test-buffer '("idle" "working" "retrying")))
+          (window (selected-window)))
+      (dolist (buffer attention)
+        (bury-buffer buffer))
+      (should (equal (drover--quiet-buffers) quiet))
+      (call-interactively #'drover-bury-quiet-sessions)
+      (should (equal (last (buffer-list) 6) (append attention quiet)))
+      (should (equal (window-list nil 'nomini) (list window)))
+      (should (eq (window-buffer window) (get-buffer "*work*")))
+      (should (equal drover-keys-test-said '("Buried 3 sessions (0 windows restored)"))))))
+
+(ert-deftest drover-keys-test-bury-shown ()
+  "A window showing a quiet session goes back to what it showed before.
+A window made for it goes, one reused shows its previous buffer, and one
+showing a session that needs you stays."
+  (drover-keys-test-burying (list (drover-test-session "idle" :status 'idle)
+                                  (drover-test-session "working" :status 'working)
+                                  (drover-test-session "waiting" :status 'waiting))
+    (let* ((selected (selected-window))
+           (made (display-buffer (drover-keys-test-buffer "idle") '(display-buffer-pop-up-window)))
+           (reused (split-window selected))
+           (asking (split-window selected)))
+      (should (window-live-p made))
+      (set-window-buffer asking (drover-keys-test-buffer "waiting"))
+      (with-selected-window reused
+        (switch-to-buffer "*other*")
+        (display-buffer (drover-keys-test-buffer "working") '(display-buffer-same-window)))
+      (should (eq (window-buffer reused) (drover-keys-test-buffer "working")))
+      (call-interactively #'drover-bury-quiet-sessions)
+      (should-not (window-live-p made))
+      (should (eq (window-buffer reused) (get-buffer "*other*")))
+      (should (eq (window-buffer asking) (drover-keys-test-buffer "waiting")))
+      (should (eq (selected-window) selected))
+      (should (eq (window-buffer selected) (get-buffer "*work*")))
+      (should (equal drover-keys-test-said '("Buried 2 sessions (2 windows restored)"))))))
+
+(ert-deftest drover-keys-test-bury-selected ()
+  "The selected window is quit last, and stays selected.
+A window quit while another is selected does not take the selection to
+the window selected when it was made, nor does the selected window,
+quit once that one is gone.  No window shows a quiet session after: one
+that showed another before goes back further."
+  (drover-keys-test-burying (list (drover-test-session "idle" :status 'idle)
+                                  (drover-test-session "working" :status 'working)
+                                  (drover-test-session "retrying" :status 'retrying))
+    (let* ((selected (selected-window))
+           (other (split-window selected))
+           (made nil))
+      (with-selected-window other
+        (switch-to-buffer "*other*")
+        (display-buffer (drover-keys-test-buffer "working") '(display-buffer-same-window))
+        (display-buffer (drover-keys-test-buffer "idle") '(display-buffer-same-window))
+        (setq made (display-buffer (drover-keys-test-buffer "retrying") '(display-buffer-pop-up-window))))
+      (should (eq (nth 2 (window-parameter made 'quit-restore)) other))
+      (should (eq (window-buffer other) (drover-keys-test-buffer "idle")))
+      ;; Shown in the selected window while the one made was selected.
+      (with-selected-window made
+        (display-buffer (drover-keys-test-buffer "working")
+                        `(display-buffer-in-previous-window (previous-window . ,selected))))
+      (should (eq (window-buffer selected) (drover-keys-test-buffer "working")))
+      (should (memq made (mapcar (lambda (parameter) (nth 2 (window-parameter selected parameter)))
+                                 '(quit-restore quit-restore-prev))))
+      (call-interactively #'drover-bury-quiet-sessions)
+      (should-not (window-live-p made))
+      (should (eq (window-buffer other) (get-buffer "*other*")))
+      (should (eq (selected-window) selected))
+      (should (eq (window-buffer selected) (get-buffer "*work*")))
+      (should (equal drover-keys-test-said '("Buried 3 sessions (3 windows restored)"))))))
+
+(ert-deftest drover-keys-test-bury-spares-lists-and-prompt ()
+  "Drover's lists and prompt stay, and a list shows no second time.
+A backend telling the prompt shows one of its sessions does not get it
+buried."
+  (drover-keys-test-burying (list (drover-test-session "idle" :status 'idle)
+                                  (drover-test-session "prompted" :status 'idle))
+    (let* ((list (selected-window))
+           (prompt (split-window list))
+           (session (split-window list))
+           (list-buffer (get-buffer-create " drover list")))
+      (unwind-protect
+          (progn
+            (with-current-buffer list-buffer
+              (setq-local drover-view-p t))
+            (with-current-buffer (drover-keys-test-buffer "prompted")
+              (setq-local drover-prompt-mode t))
+            (set-window-buffer list list-buffer)
+            (set-window-buffer prompt (drover-keys-test-buffer "prompted"))
+            ;; The session replaced the list there.
+            (set-window-buffer session list-buffer)
+            (set-window-prev-buffers session nil)
+            (with-selected-window session
+              (switch-to-buffer (drover-keys-test-buffer "idle")))
+            (should (equal (drover--quiet-buffers) (list (drover-keys-test-buffer "idle"))))
+            (bury-buffer (drover-keys-test-buffer "prompted"))
+            (call-interactively #'drover-bury-quiet-sessions)
+            (should (eq (window-buffer list) list-buffer))
+            (should (eq (window-buffer prompt) (drover-keys-test-buffer "prompted")))
+            (should (window-live-p session))
+            (should-not (memq (window-buffer session) (list list-buffer (drover-keys-test-buffer "idle"))))
+            (should (equal (last (buffer-list) 2)
+                           (list (drover-keys-test-buffer "prompted") (drover-keys-test-buffer "idle"))))
+            (should (equal drover-keys-test-said '("Buried 1 session (1 window restored)"))))
+        (kill-buffer list-buffer)))))
+
+(ert-deftest drover-keys-test-bury-last-window ()
+  "The last window of a frame not made for the session stays, as the last frame.
+It shows what it showed before, or another buffer, even dedicated; a
+frame made for the session is deleted, but the last one."
+  (drover-keys-test-burying (list (drover-test-session "idle" :status 'idle))
+    (let ((window (selected-window))
+          (idle (drover-keys-test-buffer "idle"))
+          (deleted nil))
+      ;; Shown in place of another buffer.
+      (display-buffer idle '(display-buffer-same-window))
+      (should (eq (window-buffer window) idle))
+      (call-interactively #'drover-bury-quiet-sessions)
+      (should (equal (window-list nil 'nomini) (list window)))
+      (should (eq (window-buffer window) (get-buffer "*work*")))
+      (cl-flet ((show ()
+                  (set-window-dedicated-p window nil)
+                  (set-window-buffer window idle)
+                  (set-window-prev-buffers window nil)
+                  (set-window-next-buffers window nil)))
+        ;; Dedicated, without another buffer shown before, even when the
+        ;; frame could go.
+        (cl-letf (((symbol-function 'frame-deletable-p) (lambda (&optional _) t))
+                  ((symbol-function 'delete-frame) (lambda (&optional frame _) (push frame deleted))))
+          (show)
+          (set-window-parameter window 'quit-restore nil)
+          (set-window-dedicated-p window t)
+          (call-interactively #'drover-bury-quiet-sessions)
+          (should (equal (window-list nil 'nomini) (list window)))
+          (should-not (eq (window-buffer window) idle))
+          (should-not deleted)
+          ;; A frame made for the session goes.
+          (show)
+          (set-window-parameter window 'quit-restore (list 'frame 'frame window idle))
+          (call-interactively #'drover-bury-quiet-sessions)
+          (should (equal deleted (list (selected-frame)))))
+        ;; Not the last one.
+        (show)
+        (set-window-parameter window 'quit-restore (list 'frame 'frame window idle))
+        (call-interactively #'drover-bury-quiet-sessions)
+        (should (equal (window-list nil 'nomini) (list window)))
+        (should-not (eq (window-buffer window) idle))))))
+
+(ert-deftest drover-keys-test-bury-local-quiet-only ()
+  "Only this host's sessions are buried, and none needing you.
+Not a session of another host, nor a buffer a session needing you
+shows too, nor one of a conversation another backend tells needs you.
+B applies while a quiet session has a buffer."
+  (drover-keys-test-burying (list (drover-test-session "idle" :status 'idle)
+                                  (drover-test-session "remote" :status 'idle :host "core")
+                                  (drover-test-session "shared" :status 'idle)
+                                  (drover-test-session "asking" :status 'waiting :parent "shared")
+                                  (drover-test-session "terminal" :status 'idle :engine 'fake :engine-id "x"))
+    (setf (alist-get 'fake drover--backends)
+          (append (list :buffer (lambda (session)
+                                  (drover-keys-test-buffer (if (equal (drover-session-id session) "asking")
+                                                               "shared"
+                                                             (drover-session-id session)))))
+                  (alist-get 'fake drover--backends)))
+    (drover-test-register-simple 'other (list (drover-session-create :backend 'other :id "o" :status 'waiting
+                                                                     :engine 'fake :engine-id "x")))
+    (should (equal (drover--quiet-buffers) (list (drover-keys-test-buffer "idle"))))
+    (with-temp-buffer
+      (should (member "B" (drover-keys-test-apt 'drover-dispatch))))
+    (call-interactively #'drover-bury-quiet-sessions)
+    (should (equal drover-keys-test-said '("Buried 1 session (0 windows restored)")))
+    ;; Nothing quiet left with a buffer: B does not apply.
+    (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "idle"))
+                                           drover-test-sessions))
+    (should-not (drover--quiet-buffers))
+    (with-temp-buffer
+      (should-not (member "B" (drover-keys-test-apt 'drover-dispatch))))
+    (should-error (call-interactively #'drover-bury-quiet-sessions) :type 'user-error)))
+
 (ert-deftest drover-keys-test-new-session ()
   (drover-keys-test-with (list (drover-test-session "s" :directory "/work/s/")
                                (drover-test-session "nowhere")
@@ -422,7 +656,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 ;;;; The dispatch menu
 
 (defconst drover-keys-test-dispatch-layout
-  '(("Sessions" ("j" "b" "l" "L" "p"))
+  '(("Sessions" ("j" "B" "b" "l" "L" "p"))
     ("Prompt" ("\"" "n" "'" "#"))
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
@@ -511,7 +745,8 @@ the prefix of the other's, which would hide it."
 
 (ert-deftest drover-keys-test-dispatch-commands ()
   "Each key of the menu runs the command of the shared key tables."
-  (dolist (entry '(("j" . drover-next) ("b" . drover-select) ("\"" . drover-prompt-dwim)
+  (dolist (entry '(("j" . drover-next) ("B" . drover-bury-quiet-sessions) ("b" . drover-select)
+                   ("\"" . drover-prompt-dwim)
                    ("n" . drover-prompt-org-task) ("'" . drover-prompt-toggle) ("l" . drover-list)
                    ("L" . drover-list-side) ("p" . drover-select-project) ("a" . drover-prompt-agent)
                    ("m" . drover-prompt-model) ("e" . drover-prompt-effort)

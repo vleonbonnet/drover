@@ -1563,7 +1563,7 @@ A refusal is told on one line, as a warning, the session staying archived."
   ;; After drover's lists, in their column.
   (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                          (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                 '("j" "b" "l" "L" "p" "S")))
+                 '("j" "B" "b" "l" "L" "p" "S")))
   ;; The keys opencode.el's lists had are gone.
   (dolist (key '("1" "2" "3"))
     (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
@@ -1629,7 +1629,7 @@ A refusal is told on one line, as a warning, the session staying archived."
             (drover-opencode--install)
             (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                                    (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                           '("j" "b" "l" "L" "p" "S"))))
+                           '("j" "B" "b" "l" "L" "p" "S"))))
         (kill-buffer session-buffer)
         (drover-opencode--install)))))
 
