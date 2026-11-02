@@ -418,7 +418,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
       (should (equal (mapcar #'car groups) '("Global" "Session" "Prompt")))
       (should (equal (mapcar (lambda (group) (mapcar (lambda (column) (mapcar #'car column)) (cdr group)))
                              groups)
-                     '((("j" "b" "\"" "n" "'") ("l" "L" "p") ("a" "m" "e" "d") ("C" "f" "." "O"))
+                     '((("j" "b" "\"" "n" "'" "#") ("l" "L" "p") ("a" "m" "e" "d") ("C" "f" "." "O"))
                        (("o" "u" "c" "v") ("A" "K" "s" "+" "g") ("r" "x" "z" "Z") ("U" "V"))
                        (("RET" "S-<return>" "i" "k") ("/" "@" "y") ("t" "T")))))
       ;; One key, one command.
@@ -454,16 +454,16 @@ With drover's prompt as the default prompt buffer, as by default, the
 agent, model, effort and directory of the next prompt are among them."
   (drover-keys-test-with (list (drover-test-session "s"))
     (with-temp-buffer
-      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "\"" "'" "l" "L" "p")))
+      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "\"" "'" "#" "l" "L" "p")))
       (setq drover-default-prompt-buffer-function
             (eval (car (get 'drover-default-prompt-buffer-function 'standard-value)) t))
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "\"" "'" "l" "L" "p" "a" "m" "e" "d"))))))
+                     '("j" "b" "\"" "'" "#" "l" "L" "p" "a" "m" "e" "d"))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-entries ()
   "The prompt's entries open it from anywhere, but from the prompt itself."
   (should (equal (cdr (assoc "Global" (drover-keys-test-keys 'drover-dispatch)))
-                 '("j" "b" "\"" "n" "'" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O")))
+                 '("j" "b" "\"" "n" "'" "#" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O")))
   ;; Autoloaded: the menu opens without loading the prompt.
   (dolist (command '(drover-prompt-dwim drover-prompt-org-task drover-prompt-toggle))
     (should (commandp command))
@@ -494,13 +494,13 @@ agent, model, effort and directory of the next prompt are among them."
                                (drover-test-session "sub" :parent "s"))
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "\"" "'" "l" "L" "p" "C" "f"
+                     '("j" "b" "\"" "'" "#" "l" "L" "p" "C" "f"
                        "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "U" "V"
                        "C-n" "C-p" "M-n" "M-p" "M-<" "M->" "RET"))))
     ;; Off a session, only what needs none.
     (drover-keys-test-in 'view nil
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "\"" "'" "l" "L" "p" "+" "g" "U" "V"
+                     '("j" "b" "\"" "'" "#" "l" "L" "p" "+" "g" "U" "V"
                        "C-n" "C-p" "M-n" "M-p" "M-<" "M->")))
       ;; Moving between groups needs groups.
       (setq drover-group-by nil)
@@ -566,7 +566,7 @@ agent, model, effort and directory of the next prompt are among them."
   (drover-keys-test-with (list (drover-test-session "s" :status 'working))
     (drover-keys-test-in 'prompt "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "\"" "'" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O"
+                     '("j" "b" "\"" "'" "#" "l" "L" "p" "a" "m" "e" "d" "C" "f" "." "O"
                        "o" "K" "+" "g" "r" "x" "z"
                        "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T"))))))
 
@@ -617,7 +617,7 @@ shows, so they apply only there."
             (setq drover-default-prompt-buffer-function (lambda () default))
             (with-temp-buffer
               (should (equal (drover-keys-test-apt 'drover-dispatch)
-                             '("j" "b" "\"" "'" "l" "L" "p" "a" "m" "e" "d")))
+                             '("j" "b" "\"" "'" "#" "l" "L" "p" "a" "m" "e" "d")))
               (call-interactively #'drover-prompt-model)
               (should (equal drover-keys-test-actions (list (list 'model default)))))
             ;; Deciding what applies never calls the function, which may
@@ -660,12 +660,12 @@ shows, so they apply only there."
 
 (ert-deftest drover-keys-test-dispatch-extension-points ()
   "Others place their commands relative to drover's keys.
-Ways to pick a session or prompt chain after ', drover's last of
-them (the user's configuration adds # there), or after b; other lists
-of sessions go after p, more prompt commands after O."
+Ways to pick a session or prompt chain after ', the prompt's last,
+before the scheduled prompts of #, or after b; other lists of sessions
+go after p, more prompt commands after O."
   (unwind-protect
       (progn
-        (transient-append-suffix 'drover-dispatch "'" '("#" "Hash" ignore))
+        (transient-append-suffix 'drover-dispatch "'" '("%" "Percent" ignore))
         (transient-append-suffix 'drover-dispatch "b" '("&" "Pick" ignore))
         (transient-append-suffix 'drover-dispatch "p" '("!" "Lists" ignore))
         (transient-append-suffix 'drover-dispatch "O" '("P" "Other" ignore))
@@ -677,10 +677,11 @@ of sessions go after p, more prompt commands after O."
               (should (follows "&" "\""))
               (should (follows "\"" "n"))
               (should (follows "n" "'"))
-              (should (follows "'" "#"))
+              (should (follows "'" "%"))
+              (should (follows "%" "#"))
               (should (follows "p" "!"))
               (should (follows "O" "P"))))))
-    (dolist (key '("#" "&" "!" "P"))
+    (dolist (key '("%" "&" "!" "P"))
       (transient-remove-suffix 'drover-dispatch key))))
 
 (ert-deftest drover-keys-test-dispatch-scope-computed-once ()

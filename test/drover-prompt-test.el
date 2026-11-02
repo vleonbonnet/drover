@@ -226,8 +226,11 @@ names of the latest call, and `metadata' its completion metadata."
                        (file-name-as-directory (expand-file-name temporary-file-directory))))))))
 
 (ert-deftest drover-prompt-test-defines-drover-actions ()
-  "The mode defines the prompt's actions, `clear' and not `schedule', which a hook may add."
+  "The mode defines the prompt's actions, `clear' and `schedule' among them, which a hook may redefine."
   (drover-prompt-test-with
+    (with-current-buffer (drover-prompt-buffer t)
+      (should (eq (alist-get 'schedule drover-prompt-actions) #'drover-schedule-prompt)))
+    (kill-buffer (drover-prompt-buffer))
     (let ((drover-prompt-mode-hook
            (list (lambda () (when drover-prompt-mode (drover-prompt-define 'schedule #'ignore))))))
       (with-current-buffer (drover-prompt-buffer t)
@@ -267,9 +270,11 @@ names of the latest call, and `metadata' its completion metadata."
                        (keymap-set map "C-'" #'drover-dispatch)
                        map))
       (let ((header (substring-no-properties (drover-prompt--header-line))))
-        (should (string-prefix-p "C-' RET send  C-' i attach  |  C-' d cwd" header))
-        (should (string-match-p "  a agent  m model  e effort\\'" header))
-        (should-not (string-match-p "schedule" header)))
+        (should (string-prefix-p "C-' RET send  C-' S-<return> schedule  C-' i attach  |  C-' d cwd" header))
+        (should (string-match-p "  a agent  m model  e effort\\'" header)))
+      ;; A buffer not scheduling names no key for it.
+      (drover-prompt-define 'schedule nil)
+      (should-not (string-match-p "schedule" (drover-prompt--header-line)))
       (drover-prompt-define 'schedule #'ignore)
       (setq drover-prompt-picked-agent "plan")
       (let ((header (drover-prompt--header-line)))

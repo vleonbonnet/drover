@@ -42,7 +42,8 @@
 ;; global key.  Other packages add their own global commands to the menu
 ;; with `transient-append-suffix' and `transient-insert-suffix', placed
 ;; relative to drover's keys: more ways to pick a session or prompt
-;; after "'", the last of drover's (the prompt's ", n and '); more lists of
+;; after "'", the prompt's last key (", n and '), before the scheduled
+;; prompts of "#"; more lists of
 ;; sessions after "p", where `drover-opencode' appends its session
 ;; search; more prompt commands after "O".
 ;;
@@ -78,6 +79,7 @@
 (autoload 'drover-prompt-dwim "drover-prompt" nil t)
 (autoload 'drover-prompt-org-task "drover-prompt" nil t)
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
+(autoload 'drover-schedule-list "drover-schedule" nil t)
 
 (defvar drover-prompt-mode)
 
@@ -682,7 +684,8 @@ sends prompts, where RET stays Send."
     ("b" "Select" drover-select)
     ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
     ("n" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
-    ("'" "Show prompt" drover-prompt-toggle)]
+    ("'" "Show prompt" drover-prompt-toggle)
+    ("#" "Scheduled" drover-schedule-list)]
    [("l" "List" drover-list)
     ("L" "Side list" drover-list-side)
     ("p" "Project" drover-select-project)]

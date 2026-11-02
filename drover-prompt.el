@@ -231,8 +231,11 @@ other comes in order.")
     (effort . drover-prompt-choose-effort)
     (directory . drover-prompt-choose-directory)
     (copy-block . drover-prompt-copy-src-block)
-    (open-link . org-open-at-point))
+    (open-link . org-open-at-point)
+    (schedule . drover-schedule-prompt))
   "Prompt actions `drover-prompt-mode' defines, as (ACTION . COMMAND).")
+
+(autoload 'drover-schedule-prompt "drover-schedule" nil t)
 
 (defvar-keymap drover-prompt-mode-map
   :doc "Keymap of `drover-prompt-mode', empty: prompt keys go through `drover-dispatch'.")
@@ -250,11 +253,11 @@ prompt is hidden goes where the user last left point instead."
 (define-minor-mode drover-prompt-mode
   "Minor mode of drover's prompt buffer.
 It defines the prompt actions of the buffer (see `drover-prompt-actions'):
-`send', `clear', `attach', `copy-block', `open-link', `agent', `model',
-`effort' and `directory', and remembers the point the user leaves the
-buffer at.  Other packages define more actions from
-`drover-prompt-mode-hook', such as `schedule'.  It binds no key: the
-prompt keys are in `drover-dispatch'."
+`send', `schedule', `clear', `attach', `copy-block', `open-link',
+`agent', `model', `effort' and `directory', and remembers the point the
+user leaves the buffer at.  Other packages define more actions from
+`drover-prompt-mode-hook'.  It binds no key: the prompt keys are in
+`drover-dispatch'."
   :lighter " Drover"
   :keymap drover-prompt-mode-map
   :group 'drover

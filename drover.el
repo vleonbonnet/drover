@@ -37,7 +37,10 @@
 ;; beside your work, both at once if you like, each laid out for its
 ;; window's width.
 ;; `drover-prompt-dwim' writes a prompt with context from where you work,
-;; for any session or a new one of any engine (see `drover-model').
+;; for any session or a new one of any engine (see `drover-model'), and
+;; `drover-schedule-prompt' sends it later (see `drover-schedule').  Org
+;; links of the type agent-session name any session's conversation, and
+;; open it again, live or resumed (see `drover-links').
 ;; `drover-dispatch' is a menu of every command, on sessions and on the
 ;; prompt you write to an agent; bind it globally, for instance:
 ;;

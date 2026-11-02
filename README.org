@@ -211,6 +211,7 @@ Everywhere, through the menu.
 | ="= | =drover-prompt-dwim=        | write a prompt, with the context at point                      |
 | =n= | =drover-prompt-org-task=    | write a prompt for the Org task point is in                    |
 | ='= | =drover-prompt-toggle=      | show or hide the prompt                                        |
+| =#= | =drover-schedule-list=      | the prompts scheduled for later (see [[*Scheduled prompts][Scheduled prompts]])        |
 | =l= | =drover-list=               | the list of sessions, in a window                              |
 | =L= | =drover-list-side=          | the sidebar, a list of sessions beside your work, or hide it   |
 | =p= | =drover-select-project=     | the list of the sessions of a project                          |
@@ -230,13 +231,13 @@ Everywhere, through the menu.
 
 Add your own commands with =transient-append-suffix= and =transient-insert-suffix=, placed relative to a key of the menu. These places stay put:
 
-- after ='=, the last of drover's ways to pick a session or prompt, more of them, chained one after the other: =#= after ='=, and so on (after =b= too, before the prompt's);
+- after ='=, the last of the prompt's keys, more ways to pick a session or prompt, chained one after the other before the scheduled prompts of =#= (after =b= too, before the prompt's);
 - after =p=, more lists of sessions: the OpenCode backend appends =S= there;
 - after =O=, more prompt commands.
 
 #+begin_src emacs-lisp
   (transient-append-suffix 'drover-dispatch "'"
-    '("#" "Scheduled prompts" my-scheduled-prompts))
+    '("%" "My sessions" my-sessions))
 #+end_src
 
 =drover-dispatch-session=, =drover-dispatch-list-p=, =drover-dispatch-view-p= and =drover-dispatch-prompt-p= are predicates for the =:inapt-if-not= of such entries.
@@ -426,6 +427,57 @@ The header line shows what the prompt would run: directory, agent, model and eff
 
 =C-' RET= sends: it asks for the target among the running sessions, then the new sessions of =drover-prompt-new-targets=, each labelled with what it would run; in that picker =C-'= changes the options. Explicit choices are applied to the target before the prompt goes out. With an active region, only the region is sent and the rest stays for another send. A send that sends nothing, cancelled by a check, leaves the prompt as it was. =C-' k= clears the text and keeps the choices; =C-' i= attaches a buffer, quoted, or a project file, linked.
 
+* Org links
+
+=org-store-link= (=C-c l=) stores a link to the session of the current buffer, whichever front end shows it, or to the session at point in the list, once its engine knows the conversation's identifier: =[[agent-session:opencode/ses_1][Fix the login redirect]]=, =agent-session:ENGINE/ID=, ENGINE the engine (=opencode=, =claude-code=, =codex=), ID the engine's own identifier, which survives the buffer and Emacs. The list's copy (=M-w=) copies the same links. A link is described by the buffer's name, or in the list by the session's title. =C-c C-l= completes over the sessions drover knows; exported, a link shows its description.
+
+Following one shows the conversation where drover finds it in a live buffer, in any front end; otherwise it is resumed in a front end able to: Claude Code's in claude-code-ide or agent-shell, OpenCode's in opencode.el or agent-shell, Codex's in agent-shell (=drover-links-front-ends=). With several installed, drover asks which, the one =drover-resume-front-ends= prefers first; =drover-links-ask-front-end= nil takes that one without asking. Front ends resume in the conversation's directory, which its engine tells: Claude Code's transcripts, Codex's rollouts, the OpenCode service; opencode.el opens a session by its identifier alone.
+
+** Link types of front ends
+
+=drover-links-front-end-types= adds link types opening their conversations in one front end, without asking, such as =claude-code-ide:ID= or =agent-shell:ENGINE/ID=, or reading the links of an earlier configuration:
+
+#+begin_src emacs-lisp
+  (setopt drover-links-front-end-types
+          '(("claude-code" nil claude-code)               ; asks, as agent-session links do
+            ("claude-code-ide" claude-code-ide claude-code)
+            ("agent-shell" agent-shell claude-code)      ; ID alone is a Claude Code conversation
+            ("opencode" opencode opencode)))
+#+end_src
+
+A link may name the host a conversation runs on, =agent-session://HOST/ENGINE/ID=; drover reads such links, and refuses to open them for now.
+
+* Scheduled prompts
+
+=C-' S-RET= (=drover-schedule-prompt=) in the prompt asks for a running session, then when, and sends the prompt, or its region, then: with the agent, model and effort chosen in the prompt, applied as a send applies them, the prompt leaving the buffer as a send does. In an OpenCode session buffer it schedules the input, cleared once scheduled; in another session's buffer it reads the prompt. When is read locally, never by a model, what it resolves to showing as you type, and unreadable or past input asked again:
+
+| You type                                      | It means                                                                |
+|-----------------------------------------------+-------------------------------------------------------------------------|
+| =in 90m=, =in 2 hours=, =in 3d=, =in 1 week=   | after that long; days and weeks keep the time of day across a DST change |
+| =tomorrow=, =monday 5pm=, =11/4 2pm=, =tonight= | the next such day, 9:00 when no time is given, =tonight= at 21:00       |
+| =5:30pm=, =17:30=, =evening=                     | today, or tomorrow once past                                            |
+| =when turn ends=                              | once the session's running turn ends, offered first while one runs     |
+| =after LABEL=                                 | after an event your configuration defines (below)                      |
+
+=RET= takes what you typed, never a candidate it completes to. The prompts wait in =scheduled-prompts.eld= of =drover-state-directory=, survive the session's buffer and Emacs, and =drover-schedule-restore= arms them again, run once Emacs started, after your session buffers are restored, such as with =(add-hook 'after-init-hook #'drover-schedule-restore 95)=: those that fell due meanwhile go then; scheduling or listing them arms them too. At delivery, the session's buffer, or its front end resuming the conversation, shows in a new frame (=drover-schedule-display-function=); the prompt is submitted once the session takes it without touching a draft: an empty input box, an idle shell, a loaded OpenCode session. Sent means submitted to the front end, not answered; a submission Emacs stopped in the middle of is kept as interrupted, since whether it went out is not known. =drover-schedule-wait-seconds= (600) bounds the wait.
+
+=C-' #= (=drover-schedule-list=) lists them: =k= cancels one, =r= retries one that failed or sends now one still waiting, =RET= shows it whole.
+
+** Events
+
+Your configuration may define events prompts wait for, such as a restart, and tell drover when they happen:
+
+#+begin_src emacs-lisp
+  (drover-schedule-define-trigger 'emacs-restart "Emacs restart"
+    :request #'my-ask-for-restart     ; returns a key naming what it asked
+    :release #'my-withdraw-restart)   ; called with the key once nothing waits
+  ;; Once Emacs restarted, or the restart was called off:
+  (drover-schedule-fire key)
+  (drover-schedule-fire key "dismissed")
+#+end_src
+
+=after Emacs restart= is then offered and read; =drover-schedule-waiting-count= tells how many prompts wait for a key. =drover-schedule-former-files= takes in the queue of an earlier configuration once, renaming its file with =.migrated= appended.
+
 * Engines
 
 An engine is the agent program a session runs: =opencode=, =claude-code=, =codex= or =gemini-cli=. Engines, not front ends, know what a new session runs: their models, their startup defaults (read from Claude Code's settings layers, Codex's =config.toml=, OpenCode's catalogs), their agents, and when they last took a prompt, which picks the engine the header shows. Each front end registers the engines it runs, so agent-shell can run any of them while claude-code-ide runs Claude Code only.
@@ -436,7 +488,7 @@ Two front ends may show one conversation, such as an OpenCode session open in op
 
 * Backends
 
-A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, unarchive, mark seen, preview, start, rename, delete, fork, compact), tell which of them apply to a session (=:supports=), fetch its older sessions (=:history=), its archived ones (=:archived=) and the recap of a session's last turn (=:recap=, see =drover-recap=); a backend listing conversations as their engine recorded them says so (=:recorded=), and yields to a front end following one. It reports changes with =drover-backend-changed=, naming the session when it can: with =:session=, a function returning the record of one session, drover then asks for that record alone rather than for every session, and lists draw that session alone. Drover archives the sessions of a backend without =:archive= itself. A record names its engine and the engine's identifier of the conversation (=engine=, =engine-id=), whether and when it was archived (=archived=), and may tell when the session's prompt cache expires, how long it lasts and how much of the prompt it holds (=cache-expires=, =cache-ttl=, =cache-tokens=, =cache-prompt-tokens=), and what the session runs: its agent as lists show it, in its faces (=agent-display=), its model, compact, its effort and whether that is the model's default (=model=, =effort=, =effort-default=), its provider (=provider=, a compact display such as an icon, and =provider-name=), and its context (=context-tokens=, =context-limit=, =context-tier=, and =context-estimated= when the size is the service's estimate after a compaction). What costs a request to know, such as the context, a backend fetches when asked by =:prefetch=, for the sessions a view shows. For the prompt it may offer =:engines=, =:create=, =:check=, =:apply-options=, =:send=, =:options= and =:settable=; an engine registers with =drover-register-engine= and its models with =drover-register-model-source=, and a front end how it resumes an engine's conversations with =drover-register-resumer=. See =doc/design.org=.
+A backend registers with =drover-register-backend=, giving functions that list its sessions as =drover-session= records and act on them (open, answer, interrupt, archive, unarchive, mark seen, preview, start, rename, delete, fork, compact), tell which of them apply to a session (=:supports=), fetch its older sessions (=:history=), its archived ones (=:archived=) and the recap of a session's last turn (=:recap=, see =drover-recap=); a backend listing conversations as their engine recorded them says so (=:recorded=), and yields to a front end following one. It reports changes with =drover-backend-changed=, naming the session when it can: with =:session=, a function returning the record of one session, drover then asks for that record alone rather than for every session, and lists draw that session alone. Drover archives the sessions of a backend without =:archive= itself. A record names its engine and the engine's identifier of the conversation (=engine=, =engine-id=), whether and when it was archived (=archived=), and may tell when the session's prompt cache expires, how long it lasts and how much of the prompt it holds (=cache-expires=, =cache-ttl=, =cache-tokens=, =cache-prompt-tokens=), and what the session runs: its agent as lists show it, in its faces (=agent-display=), its model, compact, its effort and whether that is the model's default (=model=, =effort=, =effort-default=), its provider (=provider=, a compact display such as an icon, and =provider-name=), and its context (=context-tokens=, =context-limit=, =context-tier=, and =context-estimated= when the size is the service's estimate after a compaction). What costs a request to know, such as the context, a backend fetches when asked by =:prefetch=, for the sessions a view shows. For the prompt it may offer =:engines=, =:create=, =:check=, =:apply-options=, =:send=, =:options= and =:settable=, for scheduled prompts =:blocker=, =:submit= and =:ready=; an engine registers with =drover-register-engine= and its models with =drover-register-model-source=, and a front end how it resumes an engine's conversations with =drover-register-resumer=; an engine telling where its conversations ran (=:directory=) has Org links. See =doc/design.org=.
 
 A front end also fits its buffers into the keys. A list of sessions sets =drover-session-at-point-function= and turns on =drover-session-keys-mode=; a prompt buffer sets =drover-session-at-point-function= to its own session and declares the prompt actions it implements with =drover-prompt-define=, such as =(drover-prompt-define 'send #'my-send)=.
 
