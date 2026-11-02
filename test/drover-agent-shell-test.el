@@ -65,6 +65,7 @@ isolated, engines read their local state from the throwaway homes of
            (drover--changed-applied nil)
            (drover--index nil)
            (drover-changed-hook nil)
+           (drover--closing nil)
            (drover-show-history nil)
            (drover--history nil)
            (drover-show-archived nil)
@@ -193,13 +194,15 @@ effort for a model without effort."
                       agent-shell--project-name agent-shell--stop-reason-description
                       agent-shell-viewport--buffer agent-shell-viewport--shell-buffer
                       shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output
-                      agent-shell-fork acp-send-request acp-make-session-delete-request))
+                      agent-shell-fork acp-send-request acp-make-session-delete-request
+                      agent-shell-viewport-edit-mode))
     (should (fboundp function)))
   ;; What its state tells of a session drover reads.
   (let ((state (agent-shell--make-state :agent-config nil :buffer nil)))
-    (dolist (key '(:client :supports-session-fork :available-commands))
+    (dolist (key '(:client :supports-session-fork :available-commands :pending-prompts))
       (should (assq key state))))
-  (dolist (variable '(agent-shell--state agent-shell-viewport--suffix agent-shell-mode-hook))
+  (dolist (variable '(agent-shell--state agent-shell-viewport--suffix agent-shell-mode-hook
+                      agent-shell-viewport--compose-snapshot))
     (should (boundp variable)))
   (let ((usage (car (help-split-fundoc (documentation 'agent-shell--start t) 'agent-shell--start))))
     (dolist (key '("CONFIG" "NO-FOCUS" "NEW-SESSION" "SESSION-STRATEGY"))
@@ -1463,6 +1466,93 @@ A Claude model goes by its compact name, as in opencode.el's mode line."
             ;; Deleted: the shell goes.
             (funcall (plist-get request :on-success) nil)
             (should-not (buffer-live-p shell))))))))
+
+(defun drover-agent-shell-test-type-input (shell text)
+  "Give SHELL a process, as shell-maker does, and type TEXT at its prompt."
+  (with-current-buffer shell
+    (let ((process (make-pipe-process :name "drover-test-shell" :buffer shell :noquery t)))
+      (goto-char (point-max))
+      (set-marker (process-mark process) (point))
+      (insert text))))
+
+(ert-deftest drover-agent-shell-test-archive-closes-shell ()
+  "Archiving closes an idle shell at once, without asking, keeping what its agent never got."
+  (drover-agent-shell-test-with
+    (drover-test-with-state
+      (let ((editing (drover-agent-shell-test-followed 'claude-code "editing"))
+            (viewing (drover-agent-shell-test-followed 'codex "viewing"))
+            (kill-ring nil)
+            (interprogram-cut-function nil)
+            (messages nil))
+        (drover-agent-shell-test-initialize editing "acp-editing")
+        (drover-agent-shell-test-initialize viewing "acp-viewing")
+        (drover-agent-shell-test-type-input editing "Typed, not sent")
+        (with-current-buffer editing
+          (map-put! agent-shell--state :pending-prompts '("Queued after a cancel"))
+          ;; As agent-shell sets a shell up as it starts: it cleans up as
+          ;; the shell goes, and asks about queued prompts, interactively.
+          (add-hook 'kill-buffer-hook #'agent-shell--clean-up nil t)
+          (add-hook 'kill-buffer-query-functions (lambda () (error "Asked")) nil t))
+        (let ((composing (generate-new-buffer "editing [viewport]"))
+              (reading (generate-new-buffer "viewing [viewport]")))
+          (push composing drover-agent-shell-test--buffers)
+          (push reading drover-agent-shell-test--buffers)
+          (with-current-buffer composing
+            (setq major-mode 'agent-shell-viewport-edit-mode)
+            (insert "Composed in the viewport"))
+          (with-current-buffer reading
+            (setq major-mode 'agent-shell-viewport-view-mode)
+            (insert "An answer read")
+            (setq-local agent-shell-viewport--compose-snapshot
+                        '((:content . "Composed, then put aside") (:location . 1))))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format &rest arguments)
+                       (push (apply #'format-message format arguments) messages))))
+            (drover-archive (drover-agent-shell-test-session editing))
+            (should-not (buffer-live-p editing))
+            (should-not (buffer-live-p composing))
+            (should (equal kill-ring '("Typed, not sent\n\nQueued after a cancel\n\nComposed in the viewport")))
+            (should (equal messages '("Archived editing; its unsent input is in the kill ring")))
+            (drover-archive (drover-agent-shell-test-session viewing))
+            (should-not (buffer-live-p viewing))
+            (should (equal (car kill-ring) "Composed, then put aside"))))
+        ;; Their shells gone, drover keeps them among the archived sessions.
+        (let ((drover-show-archived t))
+          (should (equal (sort (mapcar #'drover-session-engine-id (drover-archived-sessions)) #'string<)
+                         '("acp-editing" "acp-viewing"))))))))
+
+(ert-deftest drover-agent-shell-test-archive-closes-after-turn ()
+  "A busy shell archived closes once its turn ended; restored first, it stays."
+  (drover-agent-shell-test-with
+    (drover-test-with-state
+      (let ((busy (drover-agent-shell-test-followed 'claude-code "busy"))
+            (restored (drover-agent-shell-test-followed 'claude-code "restored"))
+            (messages nil))
+        (drover-agent-shell-test-initialize busy "acp-busy")
+        (drover-agent-shell-test-initialize restored "acp-restored")
+        (dolist (shell (list busy restored))
+          (with-current-buffer shell
+            (setq-local shell-maker--busy t))
+          (drover-agent-shell-test-emit shell 'input-submitted :prompt "Work"))
+        (drover-changed-now)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format &rest arguments)
+                     (push (apply #'format-message format arguments) messages))))
+          (drover-archive (drover-agent-shell-test-session busy))
+          (should (equal messages '("Archived busy; its buffer closes once its turn ends")))
+          (drover-archive (drover-agent-shell-test-session restored))
+          (drover-unarchive (drover-agent-shell-test-session restored))
+          (should (buffer-live-p busy))
+          ;; The turn ends.
+          (dolist (shell (list busy restored))
+            (with-current-buffer shell
+              (setq-local shell-maker--busy nil))
+            (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn"))
+          (drover-changed-now))
+        (should-not (buffer-live-p busy))
+        (should (equal (car messages) "Closed busy, archived, now that its turn ended"))
+        (should (buffer-live-p restored))
+        (should-not drover--closing)))))
 
 (ert-deftest drover-agent-shell-test-recap ()
   "A shell's recap is what its events told of its last turn."

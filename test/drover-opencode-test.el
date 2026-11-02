@@ -102,6 +102,7 @@ This follows the `opencode-state' contract."
          (drover--changed-applied nil)
          (drover--index nil)
          (drover-changed-hook nil)
+         (drover--closing nil)
          (drover-show-subagents 'active)
          (drover-show-history nil)
          (drover--history nil)
@@ -1186,6 +1187,51 @@ nothing is fetched."
                      '(opencode-session-archive "ses_live")))
       (drover-set-show-archived nil)
       (should-not drover--archived))))
+
+(ert-deftest drover-opencode-test-archive-closes-buffer ()
+  "Archiving closes the session's buffer at once, mid-turn too, asking nothing, its input kept."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1" :running t)
+                                   (drover-opencode-test-entry "ses_2"))
+    (let ((buffers (list (generate-new-buffer "*drover-opencode-test-ses_1*")
+                         (generate-new-buffer "*drover-opencode-test-ses_2*")))
+          (kill-ring nil)
+          (interprogram-cut-function nil)
+          (messages nil))
+      (unwind-protect
+          (progn
+            (cl-mapc (lambda (buffer id input)
+                       (with-current-buffer buffer
+                         (opencode-session-mode)
+                         (setq-local opencode-session-id id)
+                         (let ((process (make-pipe-process :name "drover-test-archive" :buffer buffer
+                                                           :noquery t)))
+                           (let ((inhibit-read-only t))
+                             (insert "An answer\n"))
+                           (set-marker (process-mark process) (point))
+                           (insert input))
+                         (add-hook 'kill-buffer-query-functions (lambda () (error "Asked")) nil t))
+                       (puthash id buffer opencode-session-buffers))
+                     buffers '("ses_1" "ses_2") '("A follow-up half typed" ""))
+            (should (eq (drover-session-status (drover-opencode-test-session "ses_1")) 'working))
+            (cl-letf (((symbol-function 'message)
+                       (lambda (format &rest arguments)
+                         (push (apply #'format-message format arguments) messages))))
+              (drover-archive (drover-opencode-test-session "ses_1"))
+              (drover-archive (drover-opencode-test-session "ses_2")))
+            (should (equal (seq-filter (lambda (call) (eq (car call) 'opencode-session-archive))
+                                       drover-opencode-test-calls)
+                           '((opencode-session-archive "ses_2") (opencode-session-archive "ses_1"))))
+            (should-not (seq-some #'buffer-live-p buffers))
+            (should (zerop (hash-table-count opencode-session-buffers)))
+            (should (equal kill-ring '("A follow-up half typed")))
+            (should (equal messages '("Archived Title ses_2"
+                                      "Archived Title ses_1; its unsent input is in the kill ring")))
+            (should-not drover--closing))
+        (dolist (buffer buffers)
+          (when (buffer-live-p buffer)
+            (with-current-buffer buffer
+              (let ((kill-buffer-query-functions nil))
+                (kill-buffer buffer)))))))))
 
 (ert-deftest drover-opencode-test-archived-buffer-session ()
   "The buffer of a session the registry knows archived tells it is."

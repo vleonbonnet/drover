@@ -206,6 +206,7 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--changed-applied nil)
          (drover--index nil)
          (drover-changed-hook nil)
+         (drover--closing nil)
          (drover-show-subagents 'active)
          (drover-filter nil)
          (drover-group-by 'status)

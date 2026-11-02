@@ -141,6 +141,7 @@ Terminals BODY makes are killed."
          (drover--changed-applied nil)
          (drover--index nil)
          (drover-changed-hook nil)
+         (drover--closing nil)
          (drover-show-history nil)
          (drover--history nil)
          (drover-show-archived nil)
@@ -428,6 +429,43 @@ session of `buffer', a temporary buffer, active."
           (should-not (buffer-live-p terminal))
           (should-not (file-exists-p transcript))
           (should-not (file-exists-p beside)))))))
+
+(ert-deftest drover-claude-code-ide-test-archive-closes-terminal ()
+  "Archiving closes an idle terminal at once, a working one once its turn ended, asking nothing."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (drover-test-with-state
+        (let ((idle (drover-claude-code-ide-test-terminal "*claude* idle"))
+              (working (drover-claude-code-ide-test-terminal "*claude* working"))
+              (messages nil))
+          (pcase-dolist (`(,terminal . ,id) `((,idle . "66666666-6666-4666-8666-666666666666")
+                                              (,working . "77777777-7777-4777-8777-777777777777")))
+            (with-current-buffer terminal
+              (setq-local drover-claude-code-ide-session-id id)
+              (drover-claude-code-ide--setup-terminal)
+              ;; As a terminal running its program asks before it goes.
+              (add-hook 'kill-buffer-query-functions (lambda () (error "Asked")) nil t)))
+          (drover-claude-code-ide-test-status working '(("" :state working)))
+          (cl-letf (((symbol-function 'message)
+                     (lambda (format &rest arguments)
+                       (push (apply #'format-message format arguments) messages))))
+            (drover-archive (drover-claude-code-ide-test-session idle))
+            (should-not (buffer-live-p idle))
+            (should (equal messages '("Archived idle")))
+            (drover-archive (drover-claude-code-ide-test-session working))
+            (should (buffer-live-p working))
+            (should (equal (car messages) "Archived working; its buffer closes once its turn ends"))
+            ;; Waiting for an answer, the turn goes on.
+            (drover-claude-code-ide-test-status working '(("" :state blocked :kind permission :title "Bash")))
+            (run-hooks 'drover-changed-hook)
+            (should (buffer-live-p working))
+            (drover-claude-code-ide-test-status working '(("" :state done)))
+            (run-hooks 'drover-changed-hook)
+            (should-not (buffer-live-p working))
+            (should (equal (car messages) "Closed working, archived, now that its turn ended")))
+          ;; Their terminals gone, drover keeps them among the archived sessions.
+          (let ((drover-show-archived t))
+            (should (= (length (drover-archived-sessions)) 2))))))))
 
 (ert-deftest drover-claude-code-ide-test-archived-without-terminal ()
   "A session whose terminal is gone, as drover keeps one archived, offers what needs none."

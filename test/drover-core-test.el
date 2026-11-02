@@ -824,13 +824,14 @@ The buffers of sessions shown are killed afterwards."
         (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push (cons 'y prompt) asked) nil))
                   ((symbol-function 'yes-or-no-p) (lambda (prompt) (push (cons 'yes prompt) asked) nil)))
           (should-error (call-interactively #'drover-interrupt) :type 'user-error)
-          (should-error (call-interactively #'drover-archive) :type 'user-error)
-          (should-error (call-interactively #'drover-delete) :type 'user-error))
-        (should-not drover-test-calls)
+          (should-error (call-interactively #'drover-delete) :type 'user-error)
+          (should-not drover-test-calls)
+          ;; Archiving asks nothing.
+          (call-interactively #'drover-archive))
+        (should (equal drover-test-calls '((:archive "s"))))
         ;; Deleting is for good, so the answer is typed in full.
         (should (equal (reverse asked)
-                       '((y . "Interrupt Session s? ") (y . "Archive Session s? ")
-                         (yes . "Delete Session s for good? "))))))))
+                       '((y . "Interrupt Session s? ") (yes . "Delete Session s for good? "))))))))
 
 (ert-deftest drover-test-rename-needs-a-title ()
   (drover-test-with-backend (list (drover-test-session "s"))
@@ -1880,6 +1881,237 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
           (should-not (drover-archived-sessions))
           (should-not (drover--archive)))))))
 
+;;;; Closing the buffers of archived sessions
+
+(defvar drover-test-closed nil
+  "Sessions whose buffers the test backends' :close closed, newest first.")
+
+(defun drover-test-term-buffer (id)
+  "Return the buffer of the session ID of a test backend, made if need be.
+Its text stands for the input typed and not sent."
+  (get-buffer-create (format "*session %s*" id)))
+
+(defun drover-test--close (session)
+  "Close the buffer of SESSION as backends do: its text to the kill ring."
+  (when-let* ((buffer (get-buffer (format "*session %s*" (drover-session-id session)))))
+    (push (drover-session-id session) drover-test-closed)
+    (prog1 (drover-keep-unsent (list (with-current-buffer buffer (buffer-string))))
+      (drover-kill-buffer buffer))))
+
+(defmacro drover-test-with-terms (sessions &rest body)
+  "Run BODY with the backends `term' and `view' serving SESSIONS, a variable.
+A `term' session's buffer runs its agent, as a terminal does, and drover
+archives it; a `view' session's buffer shows a session running
+elsewhere, which its backend archives.  Their buffers, made by
+`drover-test-term-buffer', are killed afterwards; nothing may ask."
+  (declare (indent 1) (debug t))
+  `(drover-test-with-backend nil
+     (drover-test-with-state
+       (let ((drover-test-closed nil)
+             (kill-ring nil)
+             (interprogram-cut-function nil)
+             (messages nil))
+         (cl-flet ((buffer (session)
+                     (get-buffer (format "*session %s*" (drover-session-id session)))))
+           (drover-test-register-simple
+            'term (lambda () (seq-filter (lambda (session) (eq (drover-session-backend session) 'term))
+                                         ,sessions))
+            :buffer #'buffer :close #'drover-test--close :runs-in-buffer t)
+           (drover-test-register-simple
+            'view (lambda () (seq-filter (lambda (session) (eq (drover-session-backend session) 'view))
+                                         ,sessions))
+            :buffer #'buffer :close #'drover-test--close
+            :archive (drover-test--recorder :archive)))
+         (unwind-protect
+             (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked")))
+                       ((symbol-function 'yes-or-no-p) (lambda (&rest _) (error "Asked")))
+                       ((symbol-function 'message)
+                        (lambda (format &rest arguments)
+                          (push (apply #'format-message format arguments) messages))))
+               ,@body)
+           (dolist (buffer (buffer-list))
+             (when (string-prefix-p "*session " (buffer-name buffer))
+               (with-current-buffer buffer
+                 (let ((kill-buffer-query-functions nil))
+                   (kill-buffer buffer))))))))))
+
+(defun drover-test-term (id &rest properties)
+  "Return a session ID of the backend `term', with PROPERTIES, and make its buffer."
+  (drover-test-term-buffer id)
+  (apply #'drover-session-create
+         (append properties (list :backend 'term :id id :title (concat "Term " id)
+                                  :engine 'claude-code :engine-id (concat "conv-" id)))))
+
+(defun drover-test-view (id &rest properties)
+  "Return a session ID of the backend `view', with PROPERTIES, and make its buffer."
+  (drover-test-term-buffer id)
+  (apply #'drover-session-create
+         (append properties (list :backend 'view :id id :title (concat "View " id)))))
+
+(ert-deftest drover-test-archive-closes-buffers ()
+  "Archiving closes the session's buffer at once, without asking, keeping what was typed."
+  (let ((sessions (list (drover-test-view "v" :status 'working)
+                        (drover-test-term "t" :status 'idle))))
+    (drover-test-with-terms sessions
+      (with-current-buffer (drover-test-term-buffer "v")
+        (insert "A prompt half typed")
+        ;; Whatever the buffer would ask, it asks nothing.
+        (add-hook 'kill-buffer-query-functions (lambda () (error "Asked")) nil t))
+      ;; A session running elsewhere closes even mid-turn.
+      (drover-test-at-point "v"
+        (setq-local drover-session-at-point-function (lambda () (drover-find 'view "v")))
+        (call-interactively #'drover-archive))
+      (should (equal drover-test-calls '((:archive "v"))))
+      (should-not (get-buffer "*session v*"))
+      (should (equal kill-ring '("A prompt half typed")))
+      (should (equal messages '("Archived View v; its unsent input is in the kill ring")))
+      ;; A buffer running its idle agent closes at once too.
+      (setq messages nil)
+      (drover-archive (drover-find 'term "t"))
+      (should-not (get-buffer "*session t*"))
+      (should (equal kill-ring '("A prompt half typed")))
+      (should (equal messages '("Archived Term t")))
+      (should (equal drover-test-closed '("t" "v")))
+      ;; Its buffer gone, it stays among the archived sessions.
+      (setq sessions nil)
+      (let ((drover-show-archived t))
+        (should (equal (mapcar #'drover-session-key (drover-archived-sessions))
+                       '((term . "conv-t"))))))))
+
+(ert-deftest drover-test-archive-closes-after-turn ()
+  "A buffer running its agent mid-turn closes once the turn ended, wherever the user is."
+  (let ((sessions (list (drover-test-term "t" :status 'working))))
+    (drover-test-with-terms sessions
+      (with-current-buffer (drover-test-term-buffer "t")
+        (insert "Next question"))
+      (drover-archive (drover-find 'term "t"))
+      (should (equal messages '("Archived Term t; its buffer closes once its turn ends")))
+      (should (get-buffer "*session t*"))
+      (should (drover-session-archived-p (drover-find 'term "t")))
+      (should (memq #'drover--close-pending drover-changed-hook))
+      ;; Waiting for an answer, the turn goes on.
+      (setq sessions (list (drover-test-term "t" :status 'waiting)))
+      (drover-backend-changed 'term)
+      (drover-changed-now)
+      (should (get-buffer "*session t*"))
+      ;; Ended: it closes, what was typed kept.
+      (setq messages nil
+            sessions (list (drover-test-term "t" :status 'done)))
+      (drover-backend-changed 'term)
+      (drover-changed-now)
+      (should-not (get-buffer "*session t*"))
+      (should (equal kill-ring '("Next question")))
+      (should (equal messages '("Closed Term t, archived, now that its turn ended; its unsent input is in the kill ring")))
+      (should-not drover--closing)
+      (should-not (memq #'drover--close-pending drover-changed-hook))
+      (should (drover-session-archived-p (car sessions))))))
+
+(ert-deftest drover-test-archive-waiting-keeps-buffer ()
+  "A turn waiting for the user keeps its buffer until it ends, and says so."
+  (let ((sessions (list (drover-test-term "t" :status 'waiting
+                                          :requests '((:kind question :summary "Go?"))))))
+    (drover-test-with-terms sessions
+      (drover-archive (drover-find 'term "t"))
+      (should (equal messages '("Archived Term t; it waits for you: its buffer closes once its turn ends")))
+      (should (get-buffer "*session t*"))
+      (setq sessions (list (drover-test-term "t" :status 'idle)))
+      (drover-backend-changed 'term)
+      (drover-changed-now)
+      (should-not (get-buffer "*session t*")))))
+
+(ert-deftest drover-test-archive-close-cancelled ()
+  "Restored before its turn ended, a session keeps its buffer; one killed is forgotten."
+  (let ((sessions (list (drover-test-term "t" :status 'working)
+                        (drover-test-term "u" :status 'working))))
+    (drover-test-with-terms sessions
+      (drover-archive (list (drover-find 'term "t") (drover-find 'term "u")))
+      (should (equal (car messages)
+                     "Archived 2 sessions; the buffer of Term t closes once its turn ends; the buffer of Term u closes once its turn ends"))
+      (should (= (length drover--closing) 2))
+      (drover-unarchive (drover-find 'term "t"))
+      (should (equal (mapcar #'car drover--closing) '((term . "u"))))
+      ;; The other's buffer killed meanwhile, nothing is left to close.
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer "*session u*"))
+      (setq sessions (list (drover-test-term "t" :status 'done)))
+      (drover-backend-changed 'term)
+      (drover-changed-now)
+      (should (get-buffer "*session t*"))
+      (should-not drover--closing)
+      (should-not (memq #'drover--close-pending drover-changed-hook))
+      (should-not drover-test-closed))))
+
+(ert-deftest drover-test-archive-close-failure ()
+  "A buffer failing to close leaves the session archived, and says why."
+  (let ((sessions (list (drover-test-term "t" :status 'idle))))
+    (drover-test-with-terms sessions
+      (setf (plist-get (alist-get 'term drover--backends) :close)
+            (lambda (_session) (error "Busy elsewhere")))
+      (drover-archive (drover-find 'term "t"))
+      (should (equal messages '("Archived Term t; its buffer stays open: Busy elsewhere")))
+      (should (drover-session-archived-p (drover-find 'term "t"))))))
+
+(ert-deftest drover-test-archive-without-close ()
+  "A backend closing no buffer keeps it."
+  (let ((sessions (list (drover-test-term "t" :status 'idle))))
+    (drover-test-with-terms sessions
+      (setf (plist-get (alist-get 'term drover--backends) :close) nil)
+      (drover-archive (drover-find 'term "t"))
+      (should (equal messages '("Archived Term t")))
+      (should (get-buffer "*session t*")))))
+
+(ert-deftest drover-test-archive-from-its-buffer ()
+  "Archived from its own buffer, shown, a session closes it; its window shows another."
+  (let ((sessions (list (drover-test-view "v"))))
+    (drover-test-with-terms sessions
+      (save-window-excursion
+        (delete-other-windows)
+        (switch-to-buffer (get-buffer-create "*drover test before*"))
+        (switch-to-buffer (drover-test-term-buffer "v"))
+        (setq-local drover-session-at-point-function (lambda () (drover-find 'view "v")))
+        (call-interactively #'drover-archive)
+        (should-not (get-buffer "*session v*"))
+        (should (equal (buffer-name (window-buffer)) "*drover test before*"))
+        (should (equal messages '("Archived View v")))
+        (kill-buffer "*drover test before*")))))
+
+(ert-deftest drover-test-kill-buffer-windows ()
+  "A buffer closing leaves dedicated and side windows as Emacs does, and lists alone."
+  (let ((sessions (list (drover-test-view "a") (drover-test-view "b") (drover-test-view "c"))))
+    (drover-test-with-terms sessions
+      (let ((list (get-buffer-create "*drover test list*")))
+        (unwind-protect
+            (save-window-excursion
+              (delete-other-windows)
+              (with-current-buffer list
+                (setq-local drover-view-p t))
+              (let* ((list-window (selected-window))
+                     (main (split-window list-window nil 'right))
+                     (dedicated (split-window main nil 'below))
+                     (side (display-buffer-in-side-window (drover-test-term-buffer "c")
+                                                          '((side . bottom)))))
+                (set-window-buffer list-window list)
+                ;; The list showed in the main window before the session.
+                (set-window-buffer main list)
+                (set-window-buffer main (drover-test-term-buffer "a"))
+                (set-window-buffer dedicated (drover-test-term-buffer "b"))
+                (set-window-dedicated-p dedicated t)
+                (drover-archive (mapcar (lambda (id) (drover-find 'view id)) '("a" "b" "c")))
+                (should (equal drover-test-closed '("c" "b" "a")))
+                ;; The list's window still shows it, selected.
+                (should (eq (window-buffer list-window) list))
+                (should (eq (selected-window) list-window))
+                ;; The main window shows something else than the list, shown
+                ;; already.
+                (should (window-live-p main))
+                (should-not (eq (window-buffer main) list))
+                (should-not (string-prefix-p "*session " (buffer-name (window-buffer main))))
+                ;; The dedicated window and the side window, which showed
+                ;; nothing else, are gone.
+                (should-not (window-live-p dedicated))
+                (should-not (window-live-p side))))
+          (kill-buffer list))))))
+
 (ert-deftest drover-test-write-data ()
   "State files are written whole, through a file renamed over them."
   (drover-test-with-state
@@ -2261,9 +2493,9 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
                        '((:mark-seen "a") (:interrupt "b")
                          (:archive "a") (:archive "b") (:archive "c")
                          (:delete "a") (:delete "b") (:delete "c"))))
+        ;; Archiving asks nothing.
         (should (equal (reverse asked)
                        '("Interrupt Session b? "
-                         "Archive 3 sessions: Session a, Session b, Session c? "
                          "Delete 3 sessions for good: Session a, Session b, Session c? ")))
         (should (equal (reverse messages)
                        '("Marked Session a seen" "Interrupted Session b"

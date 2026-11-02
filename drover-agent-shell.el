@@ -52,7 +52,9 @@
 ;; session/fork), compacts it (the command /compact, sent as a prompt)
 ;; and deletes it (ACP's session/delete, after which the shell closes),
 ;; as far as it advertises it can, which :supports tells.  agent-shell
-;; has no archive: drover archives shells' sessions itself.
+;; has no archive: drover archives shells' sessions itself, closing their
+;; shells once no turn runs (:close, :runs-in-buffer), what the agent
+;; never got, typed, queued or composed, going to the kill ring.
 ;;
 ;; `drover' loads this file once agent-shell.el is loaded.
 
@@ -74,6 +76,7 @@
 ;; are declared without an arglist, which the byte compiler would check
 ;; as positional.
 (defvar agent-shell--state)
+(defvar agent-shell-viewport--compose-snapshot)
 (defvar agent-shell-viewport--suffix)
 (declare-function agent-shell--config-option-by-category "ext:agent-shell-config" (state category))
 (declare-function agent-shell--config-option-set-mode-id "ext:agent-shell" t)
@@ -1075,10 +1078,37 @@ while the shell is busy.  The backend's :compact."
   (drover-agent-shell-send-text (drover-agent-shell--live-buffer session) "/compact"))
 
 (defun drover-agent-shell--close (buffer)
-  "Kill the shell of BUFFER without asking: drover asked already.
+  "Kill the shell of BUFFER without asking, as deleting and archiving do.
 agent-shell shuts its agent down as the buffer goes."
-  (let ((kill-buffer-query-functions nil))
-    (kill-buffer buffer)))
+  (drover-kill-buffer buffer))
+
+(defun drover-agent-shell--unsent (buffer)
+  "Return what the shell of BUFFER holds that its agent never got, as strings.
+That is the input typed at its prompt, the prompts it queued, which a
+turn ending sends but a failed or cancelled one leaves, and a prompt
+composed in its viewport, or kept there while it shows an answer."
+  (with-current-buffer buffer
+    (let ((process (get-buffer-process buffer))
+          (viewport (ignore-errors
+                      (agent-shell-viewport--buffer :shell-buffer buffer :existing-only t))))
+      (append (list (and process (buffer-substring-no-properties (process-mark process) (point-max))))
+              (seq-filter #'stringp (map-elt agent-shell--state :pending-prompts))
+              (list (and (buffer-live-p viewport)
+                         (with-current-buffer viewport
+                           (if (derived-mode-p 'agent-shell-viewport-edit-mode)
+                               (buffer-substring-no-properties (point-min) (point-max))
+                             (map-elt agent-shell-viewport--compose-snapshot :content)))))))))
+
+(defun drover-agent-shell--close-session (session)
+  "Close the shell of SESSION without asking, as archiving does.
+Drover calls it once no turn runs, as closing ends the turn.  What the
+agent never got goes to the kill ring first (see
+`drover-agent-shell--unsent'); the value is non-nil when there was
+some.  Its queued prompts kept, agent-shell has nothing to ask before
+the shell goes.  The backend's :close."
+  (when-let* ((buffer (drover-agent-shell--buffer session)))
+    (prog1 (drover-keep-unsent (drover-agent-shell--unsent buffer))
+      (drover-agent-shell--close buffer))))
 
 (defun drover-agent-shell--delete (session)
   "Delete SESSION for good, through its agent, then close its shell.
@@ -1176,6 +1206,8 @@ whose creation time is unknown."
    :recap #'drover-agent-shell--recap
    :new #'drover-agent-shell--new
    :buffer #'drover-agent-shell--buffer
+   :close #'drover-agent-shell--close-session
+   :runs-in-buffer t
    :rename #'drover-agent-shell--rename
    :fork #'drover-agent-shell--fork
    :compact #'drover-agent-shell--compact

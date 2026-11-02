@@ -45,7 +45,9 @@
 ;; on demand (:history): every unarchived session, of every project;
 ;; so do the archived ones (:archived), which :unarchive restores.  Both
 ;; are fetched again as sessions are archived, restored or deleted, and
-;; as the event stream reconnects, while lists show them.
+;; as the event stream reconnects, while lists show them.  Archiving a
+;; session closes its buffer at once (:close), as the session runs in
+;; the service, input typed and not sent going to the kill ring.
 ;; The recap of a session's last turn (:recap), which the list shows as
 ;; a session expands, is opencode.el's `opencode-session-last-turn'.
 ;;
@@ -667,6 +669,20 @@ the answer."
   "Restore SESSION from the service's archive."
   (opencode-session-archive (drover-session-id session) t))
 
+(defun drover-opencode--close (session)
+  "Close the buffer of SESSION without asking, as archiving does.
+The session lives in the service: closing its buffer ends nothing, not
+even a turn in progress, so it closes at once.  Input typed at its
+prompt and not sent, which opencode.el keeps nowhere else, goes to the
+kill ring; the value is non-nil when there was some.  The backend's
+:close."
+  (when-let* ((buffer (drover-opencode--buffer session)))
+    (prog1 (drover-keep-unsent
+            (list (when-let* ((process (get-buffer-process buffer)))
+                    (with-current-buffer buffer
+                      (buffer-substring-no-properties (process-mark process) (point-max))))))
+      (drover-kill-buffer buffer))))
+
 (defun drover-opencode--mark-seen (session)
   "Mark the ended turn of SESSION viewed on the service, for every client."
   (opencode-session-view (drover-session-id session)))
@@ -981,6 +997,7 @@ unknown.  The backend's :options."
    :recap #'drover-opencode--recap
    :new #'drover-opencode--new
    :buffer #'drover-opencode--buffer
+   :close #'drover-opencode--close
    :rename #'drover-opencode--rename
    :delete #'drover-opencode--delete
    :fork #'drover-opencode--fork

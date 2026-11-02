@@ -706,6 +706,18 @@ PROPERTIES is a plist of:
  :new        Function of a directory starting a session there.
  :buffer     Function of a session returning the live buffer showing
              it, or nil.
+ :close      Function of a session closing its buffer, if it has one,
+             without asking: archiving closes the buffer of the session
+             archived (see `drover-archive-session').  What the buffer
+             holds that the agent never got, such as input typed at its
+             prompt, it first puts in the kill ring (see
+             `drover-keep-unsent'), and returns non-nil when it did.
+             Without it, archiving leaves the buffer open.
+ :runs-in-buffer
+             Non-nil when a session's buffer runs its agent, as a
+             terminal or a shell does, rather than show a session that
+             runs elsewhere: closing it would end a turn in progress, so
+             archiving closes it only once no turn runs.
  :rename     Function of a session and a TITLE, a string, renaming it.
  :delete     Function of a session deleting it for good, without asking:
              drover asks the user first.
@@ -2145,7 +2157,10 @@ A backend without an archive of its own has its sessions archived by
 drover, by conversation, so that they leave every list until restored
 with `drover-unarchive-session', which they show among while
 `drover-show-archived' is set.  Signal a `user-error' when SESSION is
-archived already, or cannot be."
+archived already, or cannot be.
+
+Archived, SESSION's buffer closes (see `drover--close-archived'): the
+value tells how, for `drover--archive-note'."
   (let ((title (drover-session-display-title session)))
     (cond
      ((drover-session-archived-p session) (user-error "%s is archived already" title))
@@ -2169,7 +2184,8 @@ archived already, or cannot be."
                            :updated (drover-session-updated session))))
           (setf (alist-get (drover-session-engine-key session) archive nil nil #'equal) entry)
           (drover--archive-write archive)
-          (drover-backend-changed (drover-session-backend session))))))))
+          (drover-backend-changed (drover-session-backend session)))))))
+  (drover--close-archived session))
 
 (defun drover-unarchive-session (session)
   "Restore SESSION from the archive, drover's own or its backend's.
@@ -2177,16 +2193,19 @@ Signal a `user-error' when SESSION is not archived, and when drover
 archived it and no front end follows its conversation any more, such
 as a Claude Code conversation whose terminal is gone: restored, it
 would leave every list, since drover lists no closed conversation, so
-it stays archived, and listed among the archived sessions."
+it stays archived, and listed among the archived sessions.  A buffer
+archiving was to close once its turn ended stays open."
   (cond
    ((drover--archive-entry session)
     (unless (drover--followed-p session)
       (user-error "%s stays archived: its terminal or shell is closed, and drover does not list closed conversations yet; restore it once resumed in its front end"
                   (drover-session-display-title session)))
     (drover--archive-forget session)
+    (drover--close-cancel session)
     (drover-backend-changed (drover-session-backend session)))
    ((drover-session-archived session)
-    (drover-backend-call session :unarchive))
+    (drover-backend-call session :unarchive)
+    (drover--close-cancel session))
    (t (user-error "%s is not archived" (drover-session-display-title session)))))
 
 (defun drover--followed-p (session)
@@ -2204,6 +2223,142 @@ again."
               ((assoc key (drover--archive))))
     (drover--archive-write (seq-remove (lambda (entry) (equal (car entry) key))
                                        (drover--archive)))))
+
+;;;; Closing the buffers of archived sessions
+
+;; Archiving a session closes its buffer: the user is done with it.  A
+;; buffer showing a session that runs elsewhere, as an OpenCode session
+;; runs in the service, closes at once, ending nothing.  A buffer that
+;; runs its agent, a terminal or a shell, would end a turn in progress:
+;; it closes once the turn ended, which `drover-changed-hook' tells,
+;; whether or not a list shows, unless the session is restored first.
+;; A turn waiting for the user's answer cannot end before it: the buffer
+;; stays, for the answer, rather than lose the turn's work.
+
+(defvar drover--closing nil
+  "Buffers of archived sessions to close once their turns end.
+An alist (KEY . BUFFER): KEY is the key of the session archived (see
+`drover-session-key'), BUFFER its buffer, which runs its agent.")
+
+(defun drover-keep-unsent (texts)
+  "Put TEXTS in the kill ring, as one entry, unless every one is blank.
+TEXTS are strings, or nil: what a buffer about to close holds that its
+agent never got, such as input typed at its prompt.  Return non-nil
+when they went to the kill ring."
+  (when-let* ((texts (seq-remove (lambda (text) (or (null text) (string-blank-p text))) texts)))
+    (kill-new (mapconcat #'string-trim texts "\n\n"))
+    t))
+
+(defun drover--skip-shown-views (skip)
+  "Return a value of `switch-to-prev-buffer-skip' skipping drover's views shown.
+A view, a buffer whose `drover-view-p' is set, shown in another window
+already, is skipped, as are the buffers SKIP, the value the user set,
+skips."
+  (let ((skip (cond ((or (functionp skip) (memq skip '(nil t visible 0))) skip)
+                    (t 'frame))))
+    (lambda (window buffer bury-or-kill)
+      (or (and (buffer-local-value 'drover-view-p buffer)
+               (seq-some (lambda (other) (not (eq other window)))
+                         (get-buffer-window-list buffer nil t)))
+          (switch-to-prev-buffer-skip-p (if (eq skip 'frame) (window-frame window) skip)
+                                        window buffer bury-or-kill)))))
+
+(defun drover-kill-buffer (buffer)
+  "Kill BUFFER without asking.
+The caller kept first what killing would lose, such as input not sent,
+with `drover-keep-unsent': `kill-buffer-query-functions', which would
+ask about a live process or work in progress, are not run.  Its windows
+show what Emacs shows in place of a killed buffer, a dedicated window
+going as usual, but while one of drover's views shows, none of them
+shows that view a second time."
+  (let ((switch-to-prev-buffer-skip
+         (if (seq-some (lambda (window) (buffer-local-value 'drover-view-p (window-buffer window)))
+                       (window-list-1 nil 'nomini t))
+             (drover--skip-shown-views switch-to-prev-buffer-skip)
+           switch-to-prev-buffer-skip)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        ;; Bound in BUFFER: buffers ask through local values too, as
+        ;; agent-shell's do about prompts queued.
+        (let ((kill-buffer-query-functions nil))
+          (kill-buffer buffer))))))
+
+(defun drover--close (session)
+  "Close the buffer of SESSION through its backend's :close.
+Return `kept' when what the buffer held unsent went to the kill ring,
+`closed' otherwise, or (failed . MESSAGE) when closing failed."
+  (condition-case err
+      (if (funcall (drover-backend-property session :close) session) 'kept 'closed)
+    (error (cons 'failed (error-message-string err)))))
+
+(defun drover--close-archived (session)
+  "Close the buffer of SESSION, just archived, now or once its turn ends.
+Return how it went, for `drover--archive-note': nil without a buffer,
+or for a backend closing none (without :close); `closed' or `kept', as
+`drover--close' returns them, or (failed . MESSAGE); `later' when its
+buffer runs its agent (see :runs-in-buffer) in the middle of a turn,
+which closing would end, so that it closes once the turn ended, and
+`waiting' when that turn waits for the user."
+  (when-let* (((functionp (drover-backend-property session :close)))
+              (buffer (drover-session-buffer session)))
+    ;; The record as the backend tells it now: SESSION may be the one a
+    ;; list drew a while ago.
+    (if-let* (((drover-backend-property session :runs-in-buffer))
+              (current (or (drover-find (drover-session-backend session) (drover-session-id session))
+                           session))
+              ((drover-session-active-p current)))
+        (progn
+          (setf (alist-get (drover-session-key session) drover--closing nil nil #'equal) buffer)
+          (add-hook 'drover-changed-hook #'drover--close-pending)
+          (if (eq (drover-session-status current) 'waiting) 'waiting 'later))
+      (drover--close session))))
+
+(defun drover--close-cancel (session)
+  "Keep open the buffer of SESSION, restored before its turn ended."
+  (setq drover--closing (seq-remove (lambda (entry) (equal (car entry) (drover-session-key session)))
+                                    drover--closing))
+  (unless drover--closing
+    (remove-hook 'drover-changed-hook #'drover--close-pending)))
+
+(defun drover--close-pending ()
+  "Close the buffers of archived sessions whose turns ended, and say so.
+For `drover-changed-hook', while buffers wait (see `drover--closing').
+A buffer killed meanwhile, or showing another session, or whose session
+was restored, is forgotten."
+  (dolist (entry (copy-sequence drover--closing))
+    (pcase-let* ((`(,key . ,buffer) entry)
+                 (record (and (buffer-live-p buffer) (drover-find (car key) (cdr key))))
+                 (still (and record
+                             (eq (drover-session-buffer record) buffer)
+                             (drover-session-archived-p record))))
+      (unless (and still (drover-session-active-p record))
+        (setq drover--closing (delq entry drover--closing))
+        (when still
+          (let ((title (drover-session-display-title record))
+                (outcome (drover--close record)))
+            (if (eq (car-safe outcome) 'failed)
+                (drover-warn "Could not close the buffer of %s, archived: %s" title (cdr outcome))
+              (message "%s" (concat (format "Closed %s, archived, now that its turn ended" title)
+                                    (if (eq outcome 'kept)
+                                        "; its unsent input is in the kill ring"
+                                      "")))))))))
+  (unless drover--closing
+    (remove-hook 'drover-changed-hook #'drover--close-pending)))
+
+(defun drover--archive-note (outcome title)
+  "Return the note on closing the buffer of a session archived, or nil.
+OUTCOME is what `drover-archive-session' returned; TITLE the session's
+title, or nil for a session acted on alone, which the report names."
+  (pcase outcome
+    ('kept (if title
+               (format "the unsent input of %s is in the kill ring" title)
+             "its unsent input is in the kill ring"))
+    ('later (if title
+                (format "the buffer of %s closes once its turn ends" title)
+              "its buffer closes once its turn ends"))
+    ('waiting (format "%s waits for you: its buffer closes once its turn ends" (or title "it")))
+    (`(failed . ,message)
+     (format "%s stays open: %s" (if title (format "the buffer of %s" title) "its buffer") message))))
 
 ;;;; Warnings and asynchronous steps
 
@@ -2456,27 +2611,35 @@ answer is typed in full."
                                (or suffix ""))))
       (user-error "Abort"))))
 
-(defun drover--act (sessions operation done)
+(defun drover--act (sessions operation done &optional note)
   "Perform OPERATION on SESSIONS, a session or a list, and say so.
 OPERATION is a keyword, the backend operation, or a function of a
 session.  DONE is a format string for what was done, given the title of
 a session or a count of sessions, such as \"Archived %s\".  A session
 alone failing signals, as `drover-backend-call' does; of a list, each
 session is acted on whatever happens to the others, and those failing
-are named after how many were acted on.  Acting on a list in a buffer
-selecting sessions ends its selection."
+are named after how many were acted on.  NOTE, if any, is a function of
+what OPERATION returned for a session and of its title, nil for a
+session acted on alone, returning a note on the outcome, or nil: the
+notes follow what was done.  Acting on a list in a buffer selecting
+sessions ends its selection."
   (cl-flet ((perform (session)
               (if (keywordp operation)
                   (drover-backend-call session operation)
-                (funcall operation session))))
+                (funcall operation session)))
+            (notes (texts)
+              (mapconcat (lambda (text) (concat "; " text)) (delq nil texts) "")))
     (if (drover-session-p sessions)
-        (progn
-          (perform sessions)
-          (message done (drover-session-display-title sessions)))
-      (let ((failures nil))
+        (let ((value (perform sessions)))
+          (message "%s" (concat (format done (drover-session-display-title sessions))
+                                (notes (list (and note (funcall note value nil)))))))
+      (let ((failures nil)
+            (noted nil))
         (dolist (session sessions)
           (condition-case err
-              (perform session)
+              (let ((value (perform session)))
+                (when note
+                  (push (funcall note value (drover-session-display-title session)) noted)))
             (error (push (format "%s (%s)" (drover--session-names (list session))
                                  (error-message-string err))
                          failures))))
@@ -2485,13 +2648,14 @@ selecting sessions ends its selection."
         (when drover-selected-sessions-function
           (deactivate-mark))
         (let ((count (- (length sessions) (length failures))))
-          (message "%s%s"
-                   (format done (if (and (= count 1) (null failures))
-                                    (drover-session-display-title (car sessions))
-                                  (format "%d session%s" count (if (= count 1) "" "s"))))
-                   (if failures
-                       (format "; failed for %s" (string-join (nreverse failures) ", "))
-                     "")))))))
+          (message "%s" (concat
+                         (format done (if (and (= count 1) (null failures))
+                                          (drover-session-display-title (car sessions))
+                                        (format "%d session%s" count (if (= count 1) "" "s"))))
+                         (notes (nreverse noted))
+                         (if failures
+                             (format "; failed for %s" (string-join (nreverse failures) ", "))
+                           ""))))))))
 
 ;;;; Prompt actions
 
@@ -2714,15 +2878,15 @@ the session at point (see `drover--selected-for'), after confirmation."
   (drover--act sessions :interrupt "Interrupted %s"))
 
 (defun drover-archive (sessions)
-  "Archive SESSIONS, a session or a list of sessions.
-Each is archived by its backend, else by drover (see
-`drover-archive-session').  Interactively, SESSIONS are the selected
-sessions that may be archived, or the session at point (see
-`drover--selected-for'), after confirmation."
-  (interactive (let ((sessions (drover--selected-for nil #'drover-archivable-p "can be archived")))
-                 (drover--confirm "Archive" sessions)
-                 (list sessions)))
-  (drover--act sessions #'drover-archive-session "Archived %s"))
+  "Archive SESSIONS, a session or a list of sessions, and close their buffers.
+Each is archived by its backend, else by drover, then its buffer closes,
+without asking, at once or, for a buffer running its agent, once its
+turn ends (see `drover-archive-session').  Interactively, SESSIONS are
+the selected sessions that may be archived, or the session at point, as
+`drover--selected-for' tells, without confirmation: the conversations
+stay, and what a buffer holds unsent goes to the kill ring."
+  (interactive (list (drover--selected-for nil #'drover-archivable-p "can be archived")))
+  (drover--act sessions #'drover-archive-session "Archived %s" #'drover--archive-note))
 
 (defun drover-unarchive (sessions)
   "Restore SESSIONS from the archive, a session or a list of sessions.
@@ -2795,6 +2959,7 @@ and its conversation in drover's own archive."
   (drover-backend-call session :delete)
   (drover--forget-fetched session)
   (drover--archive-forget session)
+  (drover--close-cancel session)
   (drover-backend-changed (drover-session-backend session)))
 
 (defun drover-delete (sessions)

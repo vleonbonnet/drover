@@ -51,7 +51,8 @@
 ;; --fork-session, compacted by typing /compact, and deleted by closing
 ;; its terminal, then deleting the files Claude Code keeps of it (see
 ;; `drover-claude-code-session-files').  claude-code-ide has no archive:
-;; drover archives terminals' sessions itself, and keeps them listed,
+;; drover archives terminals' sessions itself, closing their terminals
+;; once no turn runs (:close, :runs-in-buffer), and keeps them listed,
 ;; while archived, once their terminal is gone, which forking, deleting
 ;; and recapping need not.
 ;;
@@ -963,10 +964,21 @@ The backend's :recap."
 
 (defun drover-claude-code-ide--close (buffer)
   "Kill terminal BUFFER, and the Claude Code it runs, without asking.
-Drover asked already; claude-code-ide cleans its session up as the
-buffer goes, as when it stops a session itself."
-  (let ((kill-buffer-query-functions nil))
-    (kill-buffer buffer)))
+Deleting and archiving close terminals so.  claude-code-ide cleans its
+session up as the buffer goes, as when it stops a session itself.  An
+archived session's conversation stays, which the CLI recorded as it
+went."
+  (drover-kill-buffer buffer))
+
+(defun drover-claude-code-ide--close-session (session)
+  "Close the terminal of SESSION without asking, as archiving does.
+Drover calls it once no turn runs, as closing ends the turn.  What its
+input box holds goes with it: it is the CLI's screen, which drover
+cannot tell from the box's placeholder.  The value is nil: nothing goes
+to the kill ring.  The backend's :close."
+  (when-let* ((buffer (drover-claude-code-ide--buffer session)))
+    (drover-claude-code-ide--close buffer)
+    nil))
 
 (defun drover-claude-code-ide--delete (session)
   "Delete SESSION for good: close its terminal, then delete its conversation.
@@ -1083,6 +1095,8 @@ With several, the most recently used."
    :recap #'drover-claude-code-ide--recap
    :new #'drover-claude-code-ide--new
    :buffer #'drover-claude-code-ide--buffer
+   :close #'drover-claude-code-ide--close-session
+   :runs-in-buffer t
    :rename #'drover-claude-code-ide--rename
    :delete #'drover-claude-code-ide--delete
    :fork #'drover-claude-code-ide--fork
