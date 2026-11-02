@@ -29,7 +29,9 @@
 ;; elsewhere.  Front ends plug in as backends (see `drover-core'):
 ;; opencode.el, which drover requires, and agent-shell and
 ;; claude-code-ide, which it does not; each backend is loaded with its
-;; package.  `drover-attention-mode' shows how many sessions need you in
+;; package.  With claude-code-ide or agent-shell, the conversations
+;; Claude Code and Codex recorded are listed too, closed ones included,
+;; and resumed as they open.  `drover-attention-mode' shows how many sessions need you in
 ;; the mode line and `drover-next' visits the most urgent; `drover-list'
 ;; lists every session in a window, and `drover-list-side' in a sidebar
 ;; beside your work, both at once if you like, each laid out for its

@@ -34,7 +34,10 @@
 ;; A session runs an engine, the agent program such as Claude Code,
 ;; which `drover-model' registers with its models and defaults; a
 ;; backend is the front end showing it.  Two backends may show one
-;; conversation of an engine: drover lists it once.
+;; conversation of an engine: drover lists it once.  A backend may list
+;; the conversations an engine recorded instead (:recorded), which a
+;; front end following one replaces, and which open by resuming them in
+;; a front end (`drover-resume').
 ;;
 ;; Every session has one status.  `waiting' means a permission request
 ;; or question waits for the user; `failed' and `done' are turns that

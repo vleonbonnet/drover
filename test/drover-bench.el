@@ -30,6 +30,12 @@
 ;; again after changes while hidden.  It checks that what was drawn in
 ;; place is what a drawing anew draws.
 ;;
+;; Then it writes 2000 Claude Code transcripts, 20 of 3 MB, and 600
+;; Codex rollouts, and times their indexes: reading every file, looking
+;; at them unchanged, after a turn appended, keeping what was read and
+;; reading it again; the list drawn whole with them, listing them anew,
+;; and terminals opening and closing them, drawn in place.
+;;
 ;; It runs in batch, or in a graphical Emacs, where measuring text and
 ;; collecting garbage cost what they cost the user:
 ;;
