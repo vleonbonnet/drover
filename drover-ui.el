@@ -228,9 +228,9 @@ mentioned in a prompt is spelt."
 (defun drover-session-link (session)
   "Return an Org link to SESSION, described by its title, or nil.
 It is the link `org-store-link' would store with SESSION at point in a
-list of sessions: drover defines no link type of its own, so the link
-comes from the first type whose store function knows the session at
-point (see `drover-session-at-point'), such as one of your own.  Nil
+list of sessions: the link comes from the first type whose store
+function knows the session at point (see `drover-session-at-point'),
+drover's agent-session (see `drover-links') or one of your own.  Nil
 when no type does."
   (require 'ol)
   (let ((drover-session-at-point-function (lambda () session))
