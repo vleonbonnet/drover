@@ -1774,7 +1774,10 @@ For `drover-host-state-function'."
 (defun drover-remote-peer-stats (name)
   "Return what the peer NAME counted and measured, a plist, or nil.
 Records and messages applied, slices and the longest, snapshots,
-subscriptions and gaps; for this host serving it, under :serving."
+subscriptions and gaps; for this host serving it, under :serving, among
+its counts, :held, the revision of this host the peer holds, which each
+change of a session raises while a peer is subscribed, not a count of
+sessions, and :dirty, how many sessions changed since are still to send."
   (when-let* ((state (drover-remote--current))
               (peer (drover-remote--peer name)))
     (append (list :state (drover-remote--peer-state peer)

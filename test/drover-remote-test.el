@@ -910,6 +910,46 @@ registration; the agent, if BODY starts one, is stopped after."
       (should (drover-attention--needs-p (drover-session-key live) live))
       (should-not (drover-attention--needs-p (drover-session-key stale) stale)))))
 
+(ert-deftest drover-remote-test-held-is-a-revision ()
+  "What a subscriber holds, :held, is a revision of this host, which every change raises.
+It is no count of sessions: a peer stopped while 2549 sessions changed
+some 3000 times held, resumed, the revision 5474, and was sent the 1712
+sessions that changed meanwhile, once each.  Without a subscriber,
+changes are not counted, and a session changed many times meanwhile is
+one revision."
+  (drover-remote-test-with (list (drover-test-session "a") (drover-test-session "b") (drover-test-session "c"))
+    (drover-remote-test-connect (drover-remote-test-start-agent dir "agent" "viewer"))
+    (cl-flet ((serving () (plist-get (drover-remote-test-stats) :serving))
+              (rev () (plist-get (drover-remote-owner-stats) :rev))
+              (change (id times)
+                (dotimes (i times)
+                  (setf (drover-session-title (drover-find 'fake id)) (format "Change %d of %s" i id))
+                  (drover-backend-changed 'fake id)
+                  (drover-changed-now))))
+      (drover-remote-test-wait (lambda () (eql (plist-get (serving) :held) 3)))
+      (should (= (rev) 3))
+      (should (= (plist-get (serving) :records) 3))
+      ;; Subscribed, a session changing ten times raises the revision ten
+      ;; times, and is sent once, as it stands.
+      (change "a" 10)
+      (should (= (rev) 13))
+      (drover-remote-test-wait (lambda () (eql (plist-get (serving) :held) 13)))
+      (should (= (plist-get (serving) :held) 13))
+      (should (= (plist-get (serving) :records) 4))
+      ;; The agent's streams drop; another session changes ten times
+      ;; meanwhile.  Back, the peer resumes from the revision it held,
+      ;; and is sent that session, once.
+      (drover-remote-test-command "drop")
+      (drover-remote-test-wait (lambda () (not (serving))) 5)
+      (should-not (serving))
+      (change "b" 10)
+      (drover-remote-test-wait (lambda () (eql (plist-get (serving) :held) 14)))
+      (should (= (rev) 14))
+      (should (= (plist-get (serving) :held) 14))
+      (should (= (plist-get (serving) :resumes) 1))
+      (should (= (plist-get (serving) :records) 1))
+      (should (= (plist-get (serving) :dirty) 0)))))
+
 (ert-deftest drover-remote-test-frozen-peer ()
   "A peer that stops answering goes stale within its heartbeat's timeout, and back after.
 Its Emacs stopped by SIGSTOP, its connection stays open to the system:
