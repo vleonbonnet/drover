@@ -99,6 +99,16 @@ empty; `home' is the homes' directory, and `index' the index."
         (should-not (drover-session-agent b))
         (should-not (drover-session-buffer b))))))
 
+(ert-deftest drover-claude-code-transcripts-test-not-prompts ()
+  "Commands, their output and the note of an interruption title no conversation."
+  (dolist (text '("<command-name>/plugin</command-name>" "<local-command-stdout>ok</local-command-stdout>"
+                  "[Request interrupted by user]" "[Request interrupted by user for tool use]"))
+    (should-not (drover-claude-code--prompt-p
+                 `((type . "user") (message (content ((type . "text") (text . ,text))))))))
+  (should (equal (drover-claude-code--prompt-p
+                  '((type . "user") (message (content . "Why was the request interrupted?"))))
+                 "Why was the request interrupted?")))
+
 (ert-deftest drover-claude-code-transcripts-test-titles ()
   "The title the user gave wins over the one the CLI generated, the newest of each."
   (drover-claude-code-transcripts-test-with

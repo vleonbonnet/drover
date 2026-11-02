@@ -390,10 +390,16 @@ line cut by that, or that is not a JSON object, is left out."
     (setq text (string-trim (or text "")))
     (unless (string-empty-p text) text)))
 
+(defconst drover-claude-code--not-prompt-regexp
+  "\\`\\(?:<\\(?:command-\\|local-command-\\|bash-\\)\\|\\[Request interrupted by user\\)"
+  "Regexp matching the start of a text of the user that is no prompt.
+Commands Claude Code runs and their output, and the note it records
+when the user interrupts a turn, \"[Request interrupted by user]\".")
+
 (defun drover-claude-code--prompt-p (record)
   "Return the text RECORD gives as a prompt of the user, or nil.
-Tool results, notes Claude Code adds for itself, and the commands it
-runs, such as /model, are no prompt."
+Tool results, notes Claude Code adds for itself, the commands it runs,
+such as /model, and its note of an interruption are no prompt."
   (when (and (equal (alist-get 'type record) "user")
              (not (alist-get 'isMeta record))
              (not (alist-get 'toolUseResult record)))
@@ -404,7 +410,7 @@ runs, such as /model, are no prompt."
                                     (equal (alist-get 'type block) "tool_result")))
                              content))
         (when-let* ((text (drover-claude-code--texts content))
-                    ((not (string-match-p "\\`<\\(command-\\|local-command-\\|bash-\\)" text))))
+                    ((not (string-match-p drover-claude-code--not-prompt-regexp text))))
           text)))))
 
 (defun drover-claude-code--change (record)
