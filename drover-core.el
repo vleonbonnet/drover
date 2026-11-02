@@ -151,7 +151,9 @@ The value is one of `drover-subagent-modes':
  none    No subagent.
 
 Whatever the value, a subagent matching `drover-filter' shows when it
-explains why its tree is listed (see `drover-view-trees').  A hidden
+explains why its tree is listed (see `drover-view-trees').  A subagent
+whose parent is not listed, archived, deleted or not loaded, shows as
+any subagent does, at the top of a tree of its own.  A hidden
 subagent never places its parent in a group; whether a parent has
 active subagents, shown or not, its line tells.  Change it for every
 view with `drover-toggle-subagents', U in lists, or with
@@ -1020,7 +1022,8 @@ backend, listed or not."
   "Return SESSIONS as trees, each subagent under its parent, most urgent first.
 A tree ranks by the most urgent status within it, so a parent whose
 subagent waits for the user comes with the sessions that need the user.
-A subagent whose parent is not among SESSIONS is a tree of its own.
+A subagent whose parent is not among SESSIONS is a tree of its own,
+which views show as they show any subagent (see `drover-tree-visible').
 Trees and siblings that rank alike keep the order of SESSIONS."
   (let* ((size (length sessions))
          (by-key (make-hash-table :test #'equal :size size))
@@ -1081,23 +1084,29 @@ It does as `drover-show-subagents' says."
   "Return trees NODES without the subtrees of subagents to hide.
 A subagent tree is kept as `drover-show-subagents' says: always, when a
 session in it is in the middle of a turn, or never; or when SHOWN, a
-function of a tree, returns non-nil for it.  Each tree ranks by what
-remains visible, so a hidden subagent never places its parent in a
-group its own status does not explain.  NODES are ranked, as
-`drover-tree' returns them."
+function of a tree, returns non-nil for it.  A subagent whose parent is
+not among the sessions, at the top of a tree of its own (see
+`drover-tree'), is no exception: its parent archived, deleted or not
+loaded, it is a subagent still.  Each tree ranks by what remains
+visible, so a hidden subagent never places its parent in a group its
+own status does not explain.  NODES are ranked, as `drover-tree'
+returns them."
   (if (and (eq drover-show-subagents 'all) (not shown))
       ;; Every subagent shows: the trees as they are, ranked alike.
       nodes
-    (sort (mapcar (lambda (node)
-                    (let ((children nil))
-                      (dolist (child (drover-node-children node))
-                        (when (or (drover--subagent-shown-p child)
-                                  (and shown (funcall shown child)))
-                          (push child children)))
-                      (drover--node (drover-node-session node)
-                                    (drover-tree-visible (nreverse children) shown))))
-                  nodes)
-          #'drover--node-before-p)))
+    (cl-labels ((kept-p (node)
+                  (or (drover--subagent-shown-p node)
+                      (and shown (funcall shown node))))
+                (visible (nodes)
+                  (sort (mapcar (lambda (node)
+                                  (drover--node (drover-node-session node)
+                                                (visible (seq-filter #'kept-p (drover-node-children node)))))
+                                nodes)
+                        #'drover--node-before-p)))
+      (visible (seq-filter (lambda (node)
+                             (or (null (drover-session-parent (drover-node-session node)))
+                                 (kept-p node)))
+                           nodes)))))
 
 (defun drover-tree-hidden-count (nodes)
   "Return how many subagent sessions of trees NODES are hidden.
@@ -2730,12 +2739,14 @@ listed without listing every subagent of a matching session."
 (defun drover-view-subagent-counts (&optional sessions)
   "Return how many subagents of SESSIONS a view could show, and hides.
 SESSIONS defaults to the sessions lists show.  The value is (COUNT
-. HIDDEN): COUNT is the number of subagents under the sessions of the
-trees `drover-filter' leaves, HIDDEN how many of them
+. HIDDEN): COUNT is the number of subagents in the trees
+`drover-filter' leaves, those at the top of a tree of their own, their
+parent not listed, included; HIDDEN how many of them
 `drover-view-trees' leaves out."
   (pcase-let ((`(,visible . ,kept) (drover--view-trees (or sessions (drover-known-sessions)))))
     (let ((all (length (drover-tree-sessions kept))))
-      (cons (- all (length kept))
+      (cons (- all (seq-count (lambda (node) (null (drover-session-parent (drover-node-session node))))
+                              kept))
             (- all (length (drover-tree-sessions visible)))))))
 
 (defun drover-view-hidden-count (&optional sessions)

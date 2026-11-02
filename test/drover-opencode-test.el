@@ -134,6 +134,7 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (drover-opencode--refetch-timer nil)
          (drover-opencode--projects nil)
          (drover-opencode--made nil)
+         (drover-opencode--hiding (make-hash-table :test #'equal))
          (drover-opencode--projects-fetching nil)
          (drover-opencode--projects-stale nil)
          (opencode-state-updated-functions nil)
@@ -152,6 +153,17 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
                 (lambda (id)
                   (seq-find (lambda (entry) (equal (plist-get entry :id) id))
                             drover-opencode-test-entries)))
+               ((symbol-function 'opencode-state-descendants)
+                (lambda (id)
+                  (let ((descendants nil)
+                        (queue (list id)))
+                    (while queue
+                      (let ((parent (pop queue)))
+                        (dolist (entry drover-opencode-test-entries)
+                          (when (equal (plist-get entry :parent-id) parent)
+                            (setq descendants (append descendants (list entry))
+                                  queue (append queue (list (plist-get entry :id))))))))
+                    descendants)))
                ((symbol-function 'opencode-state-status) #'drover-opencode-test--status)
                ((symbol-function 'opencode-state-since) #'drover-opencode-test--since)
                ((symbol-function 'opencode-state-cache)
@@ -1572,6 +1584,97 @@ The service's event fetches them again later; the registry tells first."
         (setq drover--changed-backends nil)
         (drover-opencode--updated "ses_b")
         (should-not (memq 'opencode drover--changed-backends)))))))
+
+(defun drover-opencode-test--as-registry ()
+  "Return the entries `opencode-state-sessions' lists, as the registry does.
+Archived sessions are left out, unless their buffer is open."
+  (seq-remove (lambda (entry)
+                (and (plist-get entry :archived)
+                     (not (buffer-live-p (gethash (plist-get entry :id) opencode-session-buffers)))))
+              drover-opencode-test-entries))
+
+(defun drover-opencode-test--set-entry (id &rest properties)
+  "Make the registry entry of ID that of `drover-opencode-test-entry' with PROPERTIES."
+  (setq drover-opencode-test-entries
+        (mapcar (lambda (entry)
+                  (if (equal (plist-get entry :id) id) (apply #'drover-opencode-test-entry id properties) entry))
+                drover-opencode-test-entries)))
+
+(ert-deftest drover-opencode-test-archived-parent-takes-subagents ()
+  "The subagents of a session archived alone go with it, into the archive.
+The service archives a session alone: its subagents, unarchived, stayed
+among the sessions in use, at the top of trees of their own.  They go
+whether or not a buffer is open, as an archived session does; a parent
+the registry does not hold, deleted or not fetched, archives nothing."
+  (drover-opencode-test-with
+      (list (drover-opencode-test-entry "ses_live")
+            (drover-opencode-test-entry "ses_root" :archived 5.0)
+            (drover-opencode-test-entry "ses_sub" :parent-id "ses_root")
+            (drover-opencode-test-entry "ses_deep" :parent-id "ses_sub")
+            (drover-opencode-test-entry "ses_orphan" :parent-id "ses_deleted")
+            (drover-opencode-test-entry "ses_open" :archived 6.0)
+            (drover-opencode-test-entry "ses_kept" :parent-id "ses_open"))
+    (let ((buffer (generate-new-buffer " *drover-opencode-test-open*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'opencode-state-sessions)
+                     (lambda (&optional _) (drover-opencode-test--as-registry))))
+            (puthash "ses_open" buffer opencode-session-buffers)
+            (puthash "ses_kept" buffer opencode-session-buffers)
+            (drover-index)
+            (drover-changed-now)
+            (cl-flet ((listed () (sort (mapcar #'drover-session-id (drover-index-sessions)) #'string<)))
+              (should (equal (listed) '("ses_live" "ses_orphan")))
+              (should (equal (listed) (sort (mapcar #'drover-session-id (drover-sessions)) #'string<)))
+              (dolist (id '("ses_sub" "ses_deep" "ses_kept"))
+                (should-not (drover-opencode--session-by-id id)))
+              (should (drover-opencode--session-by-id "ses_orphan"))
+              ;; Restored, its subagents come back with it, told one by one.
+              (drover-opencode-test--set-entry "ses_root")
+              (drover-opencode--updated "ses_root")
+              (drover-changed-now)
+              (should (equal (listed) '("ses_deep" "ses_live" "ses_orphan" "ses_root" "ses_sub")))
+              (should (equal (drover-index-parent '(opencode . "ses_sub")) '(opencode . "ses_root")))
+              ;; Archived again, they leave with it.
+              (drover-opencode-test--set-entry "ses_root" :archived 7.0)
+              (drover-opencode--updated "ses_root")
+              (drover-changed-now)
+              (should (equal (listed) '("ses_live" "ses_orphan")))
+              ;; Deleted, it leaves them at the top of trees of their own.
+              (setq drover-opencode-test-entries
+                    (seq-remove (lambda (entry) (equal (plist-get entry :id) "ses_root"))
+                                drover-opencode-test-entries))
+              (drover-opencode--updated "ses_root")
+              (drover-changed-now)
+              (should (equal (listed) '("ses_deep" "ses_live" "ses_orphan" "ses_sub")))
+              (should-not (drover-index-parent '(opencode . "ses_sub")))
+              (should (equal (listed) (sort (mapcar #'drover-session-id (drover-sessions)) #'string<)))))
+        (kill-buffer buffer)))))
+
+(ert-deftest drover-opencode-test-archived-subagents-in-archive ()
+  "The subagents of an archived session show with it, among the archived ones, never older.
+Lists show them under it, in the archived group."
+  (drover-opencode-test-with
+      (list (drover-opencode-test-entry "ses_live")
+            (drover-opencode-test-entry "ses_root" :archived 3000.0)
+            (drover-opencode-test-entry "ses_sub" :parent-id "ses_root"))
+    (drover-opencode-test-with-history
+      (cl-letf (((symbol-function 'opencode-state-sessions)
+                 (lambda (&optional _) (drover-opencode-test--as-registry))))
+        (let ((drover-show-subagents 'all))
+          (drover-set-show-archived t)
+          (funcall (plist-get drover-opencode-test-history-fetch :callback)
+                   (drover-opencode-test--archived-infos "ses_root"))
+          (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("ses_root" "ses_sub")))
+          (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("ses_live" "ses_root" "ses_sub")))
+          (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
+                                 (drover-group-trees (drover-view-trees) 'status))
+                         '((idle ("ses_live")) (archived ("ses_root" ("ses_sub"))))))
+          (drover-set-show-archived nil)
+          (drover-set-show-history t)
+          (funcall (plist-get drover-opencode-test-history-fetch :callback)
+                   '(((id . "ses_sub") (parentID . "ses_root")) ((id . "ses_old"))))
+          (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("ses_live" "ses_old")))
+          (drover-set-show-history nil))))))
 
 (ert-deftest drover-opencode-test-unarchive-confirmed ()
   "Restoring an archived session drops it from the archived ones once the service took it.

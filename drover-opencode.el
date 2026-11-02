@@ -45,7 +45,10 @@
 ;;
 ;; Older sessions, beyond those of the registry, come from the service
 ;; on demand (:history): every unarchived session, of every project;
-;; so do the archived ones (:archived), which :unarchive restores.  Both
+;; so do the archived ones (:archived), which :unarchive restores.  The
+;; service archives a session alone, its subagents staying unarchived:
+;; they go with it, left out of the sessions in use and listed with the
+;; archived ones (`drover-opencode--archived-above').  Both
 ;; are fetched again as sessions are archived, restored or deleted, and
 ;; as the event stream reconnects, while lists show them.  Archiving a
 ;; session closes its buffer (:close) once the service confirmed the
@@ -609,10 +612,52 @@ the same record."
         (puthash id (cons (drover-opencode--inputs entry) record) table)
         record))))
 
+(defvar drover-opencode--hiding (make-hash-table :test #'equal)
+  "Sessions above subagents left out with an archived session, a hash table.
+It maps the IDs of the sessions on the way from such a subagent up to
+the archived session, that one included, to t.  Whether the subagent
+is left out changes with them: restored or deleted (see
+`drover-opencode--updated').")
+
+(defun drover-opencode--archived-above (entry)
+  "Return the ID of the archived session registry ENTRY goes with, or nil.
+The service archives a session alone: its subagents, unarchived, stay
+among the sessions in use while their parent leaves them, in lists at
+the top of trees of their own.  A subagent goes with the archived
+session above it, at any depth, into the archive, as an archived
+session goes there whether or not its buffer is open (see
+`drover-archived-sessions').  A parent the registry does not hold,
+deleted or never fetched, archives nothing.  The sessions on the way
+are noted in `drover-opencode--hiding'."
+  (when (plist-get entry :parent-id)
+    (let ((current entry)
+          (way nil)
+          (found nil))
+      (while current
+        (let ((id (plist-get current :id)))
+          (cond ((member id way)
+                 (setq current nil))
+                ((and way (plist-get current :archived))
+                 (setq found id current nil))
+                (t
+                 (push id way)
+                 (setq current (when-let* ((parent (plist-get current :parent-id)))
+                                 (opencode-state-get parent)))))))
+      (when found
+        (dolist (id (cons found (cdr (reverse way))))
+          (puthash id t drover-opencode--hiding)))
+      found)))
+
 (defun drover-opencode--sessions ()
   "Return the sessions of the `opencode-state' registry.
-The records of sessions gone are forgotten."
-  (let ((records (mapcar #'drover-opencode--listed (opencode-state-sessions))))
+The subagents of an archived session are left out, as it is (see
+`drover-opencode--archived-above').  The records of sessions gone are
+forgotten."
+  (clrhash drover-opencode--hiding)
+  (let ((records (delq nil (mapcar (lambda (entry)
+                                     (unless (drover-opencode--archived-above entry)
+                                       (drover-opencode--listed entry)))
+                                   (opencode-state-sessions)))))
     (when-let* ((table (cdr drover-opencode--made))
                 ((> (hash-table-count table) (length records))))
       (let ((listed (make-hash-table :test #'equal :size (length records))))
@@ -625,13 +670,15 @@ The records of sessions gone are forgotten."
   "Return the session ID of the `opencode-state' registry, or nil.
 It is nil for a session `opencode-state-sessions' leaves out, as an
 archived one: whether it does, it alone tells, an archived session's
-buffer keeping it there in some versions.  The backend's :session,
-which drover calls for each session the registry reports changed: a
-registry of thousands of sessions is then not listed whole on every
-change."
+buffer keeping it there in some versions; and for the subagent of an
+archived session (see `drover-opencode--archived-above').  The
+backend's :session, which drover calls for each session the registry
+reports changed: a registry of thousands of sessions is then not listed
+whole on every change."
   (when-let* ((entry (opencode-state-get id))
               ((or (not (plist-get entry :archived))
-                   (memq entry (opencode-state-sessions)))))
+                   (memq entry (opencode-state-sessions))))
+              ((not (drover-opencode--archived-above entry))))
     (drover-opencode--listed entry)))
 
 (defun drover-opencode--prefetch (sessions)
@@ -691,8 +738,17 @@ WHAT was fetched, and CALLBACK not called."
 
 (defun drover-opencode--history (callback)
   "Fetch every unarchived session of every project, and call CALLBACK with them.
-See `drover-opencode--fetch'.  The backend's :history."
-  (drover-opencode--fetch nil "older" callback))
+The subagents of archived sessions are left out, as they go with them:
+see `drover-opencode--archived-above'.  See `drover-opencode--fetch'.
+The backend's :history."
+  (drover-opencode--fetch nil "older"
+                          (lambda (sessions)
+                            (funcall callback
+                                     (seq-remove (lambda (session)
+                                                   (drover-opencode--archived-above
+                                                    (list :id (drover-session-id session)
+                                                          :parent-id (drover-session-parent session))))
+                                                 sessions)))))
 
 (defvar drover-opencode--archived-ids nil
   "Identifiers of the sessions last fetched as archived, a hash table, or nil.
@@ -701,15 +757,24 @@ show (see `drover-opencode--left-archive').")
 
 (defun drover-opencode--archived (callback)
   "Fetch every archived session of every project, and call CALLBACK with them.
-Their records tell when they were archived.  See
-`drover-opencode--fetch'.  The backend's :archived."
+Their records tell when they were archived.  The subagents of archived
+sessions the service lists unarchived, which lists of the sessions in
+use leave out (see `drover-opencode--archived-above'), come with them,
+from the registry.  See `drover-opencode--fetch'.  The backend's
+:archived."
   (drover-opencode--fetch t "archived"
                           (lambda (sessions)
                             (let ((ids (make-hash-table :test #'equal :size (length sessions))))
                               (dolist (session sessions)
                                 (puthash (drover-session-id session) t ids))
-                              (setq drover-opencode--archived-ids ids))
-                            (funcall callback sessions))))
+                              (setq drover-opencode--archived-ids ids)
+                              (funcall callback
+                                       (append sessions
+                                               (delq nil (mapcar (lambda (entry)
+                                                                   (and (not (gethash (plist-get entry :id) ids))
+                                                                        (drover-opencode--archived-above entry)
+                                                                        (drover-opencode--listed entry)))
+                                                                 (opencode-state-sessions)))))))))
 
 (defun drover-opencode--left-archive (id)
   "Forget session ID among the archived ones fetched, once restored.
@@ -758,10 +823,20 @@ of events: they are fetched again once, half a second after the last."
 ;;;; Changes
 
 (defun drover-opencode--updated (id)
-  "Report a change of session ID to drover, a restore from the archive included."
+  "Report a change of session ID to drover, a restore from the archive included.
+The subagents below ID are reported too when ID may take them into the
+archive or out of it (see `drover-opencode--archived-above'): when it
+is archived, or on the way from them to an archived session, its
+change then maybe a restore or a deletion."
   (drover-with-reporting "OpenCode changes"
     (drover-opencode--left-archive id)
-    (drover-backend-changed 'opencode id)))
+    (drover-backend-changed 'opencode id)
+    (when (and id (or (gethash id drover-opencode--hiding)
+                      (plist-get (opencode-state-get id) :archived)))
+      ;; Noted again as the subagents are looked at, if still on the way.
+      (remhash id drover-opencode--hiding)
+      (dolist (entry (opencode-state-descendants id))
+        (drover-backend-changed 'opencode (plist-get entry :id))))))
 
 (defun drover-opencode--catalog-changed (_kind _directory)
   "Report that sessions may read otherwise, now that a catalog changed.
