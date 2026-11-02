@@ -79,7 +79,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
   (load "drover-core" nil t))
 
 ;; Drover does not require agent-shell, so this file compiles without
@@ -169,6 +169,15 @@ when there are several."
 
 (defvar-local drover-agent-shell--turn-start nil
   "When the running turn of this shell was submitted, as a float time.")
+
+(defvar-local drover-agent-shell--in-turn nil
+  "Non-nil from a prompt this shell submitted until its turn ends.")
+
+(defvar-local drover-agent-shell--activity nil
+  "When a turn of this shell's conversation last did something here, or nil.
+A float time: a prompt submitted, a request to the user, a turn ending.
+Not what the agent sends as the shell loads a conversation again, which
+the conversation did not do now.")
 
 (defvar-local drover-agent-shell--outcome nil
   "How the last turn of this shell ended while the user was elsewhere, or nil.
@@ -870,12 +879,27 @@ OpenCode's, tell it."
     (and (stringp value)
          (car (drover-agent-shell--split-model-id (drover-agent-shell--engine) value)))))
 
+(defun drover-agent-shell--last-activity ()
+  "Return when a turn of the current shell last did something, or nil.
+While a turn of its own runs, the shell's last activity, which every
+notification of the agent moves; otherwise the time
+`drover-agent-shell--activity' noted: a shell loading a conversation
+again receives it whole, which is no activity of the conversation."
+  (let ((activity (and drover-agent-shell--in-turn
+                       (ignore-errors (agent-shell-last-activity-time)))))
+    (if (and activity drover-agent-shell--activity)
+        (max drover-agent-shell--activity (float-time activity))
+      (or drover-agent-shell--activity (and activity (float-time activity))))))
+
 (defun drover-agent-shell--session (buffer)
   "Return the `drover-session' of the shell of BUFFER."
   (with-current-buffer buffer
     (let* ((state agent-shell--state)
            (status (drover-agent-shell--status state))
-           (activity (ignore-errors (agent-shell-last-activity-time)))
+           (engine (drover-agent-shell--engine))
+           (engine-id (map-nested-elt state '(:session :id)))
+           (times (drover-followed-times engine engine-id drover-agent-shell--created
+                                         (drover-agent-shell--last-activity)))
            (effort (drover-agent-shell--effort state)))
       (drover-session-create
        :backend 'agent-shell
@@ -887,16 +911,16 @@ OpenCode's, tell it."
        :status (plist-get status :status)
        :requests (plist-get status :requests)
        :since (plist-get status :since)
-       :updated (and activity (float-time activity))
-       :created drover-agent-shell--created
+       :updated (cdr times)
+       :created (car times)
        :agent (ignore-errors (agent-shell--current-mode-id state))
        :model (drover-model-short-name (ignore-errors (agent-shell-get-model-name state)))
        :effort (car effort)
        :effort-default (cdr effort)
        :provider-name (drover-agent-shell--provider state)
        :detail (plist-get status :detail)
-       :engine (drover-agent-shell--engine)
-       :engine-id (map-nested-elt state '(:session :id))))))
+       :engine engine
+       :engine-id engine-id))))
 
 (defun drover-agent-shell--sessions ()
   "Return the sessions of the live shells."
@@ -954,6 +978,8 @@ success."
         ('input-submitted
          (setq drover-agent-shell--outcome nil
                drover-agent-shell--turn-start (float-time)
+               drover-agent-shell--in-turn t
+               drover-agent-shell--activity drover-agent-shell--turn-start
                drover-agent-shell--prompt (map-elt data :prompt)
                drover-agent-shell--reply nil
                drover-agent-shell--reply-open nil
@@ -975,6 +1001,7 @@ success."
          (drover-agent-shell--note-change (map-elt data :path)))
         ('turn-complete
          (setq drover-agent-shell--request-times nil)
+         (drover-agent-shell--end-activity)
          (let ((reason (map-elt data :stop-reason)))
            (pcase reason
              ("end_turn" (drover-agent-shell--end-turn 'done nil))
@@ -984,16 +1011,27 @@ success."
          (let ((message (or (map-elt data :message) "Agent request failed")))
            (unless (drover-agent-shell--initialized-p (current-buffer))
              (setq drover-agent-shell--start-error message))
+           (when drover-agent-shell--in-turn
+             (drover-agent-shell--end-activity))
            (drover-agent-shell--end-turn 'failed message)))
         ((or 'permission-request 'elicitation-request)
+         (setq drover-agent-shell--activity (float-time))
          (when request
            (setf (alist-get request drover-agent-shell--request-times nil nil #'equal) (float-time))))
         ((or 'permission-response 'elicitation-response)
+         (setq drover-agent-shell--activity (float-time))
          (when request
            (setf (alist-get request drover-agent-shell--request-times nil t #'equal) nil)))
-        ((or 'session-selected 'clean-up)
+        ('session-selected
+         ;; Another conversation, whose activity is its own.
          (setq drover-agent-shell--outcome nil
-               drover-agent-shell--request-times nil)))
+               drover-agent-shell--request-times nil
+               drover-agent-shell--in-turn nil
+               drover-agent-shell--activity nil))
+        ('clean-up
+         (setq drover-agent-shell--outcome nil
+               drover-agent-shell--request-times nil
+               drover-agent-shell--in-turn nil)))
       ;; Initialization went on, so it had not failed for good.
       (when (string-prefix-p "init-" (symbol-name kind))
         (setq drover-agent-shell--start-error nil))
@@ -1004,6 +1042,11 @@ success."
         (drover-backend-changed 'agent-shell drover-agent-shell--id))
       (when (memq kind drover-agent-shell--model-events)
         (drover-agent-shell--models-changed)))))
+
+(defun drover-agent-shell--end-activity ()
+  "Note that the turn of the current shell ended now."
+  (setq drover-agent-shell--activity (float-time)
+        drover-agent-shell--in-turn nil))
 
 (defun drover-agent-shell--note-change (file)
   "Note that the agent of the current shell changed FILE, a file name or nil."

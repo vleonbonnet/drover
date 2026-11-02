@@ -34,8 +34,10 @@
 ;; the session's directory, creation, origin and first prompt (its first
 ;; record, session_meta, may be longer than the window: its members are
 ;; found without parsing it); its tail the model and effort of the
-;; newest turn and the last activity.  A conversation's name is the one
-;; session_index.jsonl gave it last, else its first prompt.  Sessions
+;; newest turn and the last activity, the time of its newest event of a
+;; turn, not of the records Codex keeps of its own.  A conversation's
+;; name is the one session_index.jsonl gave it last, else its first
+;; prompt.  Sessions
 ;; run by `codex exec' are left out, as the CLI's own picker leaves them
 ;; out, unless `drover-codex-include-non-interactive' says otherwise; a
 ;; subagent's rollout names its parent.
@@ -179,6 +181,50 @@ start of an event on a line too long to parse."
     (and (re-search-forward "\"type\":\"\\(?:user_message\\|agent_message\\)\"\\|\"role\":\"\\(?:user\\|assistant\\)\"" end t)
          t)))
 
+(defconst drover-codex-rollouts--turn-items
+  '("message" "agent_message" "reasoning" "local_shell_call" "function_call" "function_call_output"
+    "tool_search_call" "tool_search_output" "custom_tool_call" "custom_tool_call_output"
+    "web_search_call" "image_generation_call")
+  "The types of the items of a turn's exchange Codex records, as response_item.
+Not those of its own, as the tools or the configuration it updates.")
+
+(defconst drover-codex-rollouts--turn-events
+  '("user_message" "agent_message" "agent_reasoning" "agent_reasoning_raw_content"
+    "task_started" "turn_started" "task_complete" "turn_complete" "turn_aborted" "item_completed"
+    "exec_command_end" "patch_apply_end" "mcp_tool_call_end" "web_search_end" "image_generation_end"
+    "entered_review_mode" "exited_review_mode" "context_compacted" "sub_agent_activity")
+  "The types of the events of a turn Codex records, as event_msg.
+Not those of its own, as the tokens counted or the settings applied.")
+
+(defun drover-codex-rollouts--event-p (record)
+  "Return non-nil when RECORD, parsed, is an event of a turn of the conversation.
+That is a message of the user or the agent, or what a turn did, not a
+record Codex keeps of its own, as the session's metadata, the context of
+a turn, the state of the world or the tokens counted, which it may
+record as it resumes the conversation; nor what it tells the model of
+its own, the messages of the developer role."
+  (let ((payload (alist-get 'payload record)))
+    (and (drover-json-object-p payload)
+         (pcase (alist-get 'type record)
+           ("response_item"
+            (let ((type (alist-get 'type payload)))
+              (and (member type drover-codex-rollouts--turn-items)
+                   (or (not (equal type "message"))
+                       (member (alist-get 'role payload) '("user" "assistant"))))))
+           ("event_msg" (member (alist-get 'type payload) drover-codex-rollouts--turn-events)))
+         t)))
+
+(defun drover-codex-rollouts--activity (beg end)
+  "Return the time of the newest event of a turn between BEG and END, or nil.
+See `drover-codex-rollouts--event-p'."
+  (when-let* ((record (drover-transcript-last
+                       "\"timestamp\":\""
+                       (lambda (record)
+                         (and (drover-codex-rollouts--event-p record)
+                              (drover-transcript-time (alist-get 'timestamp record))))
+                       beg end)))
+    (drover-transcript-time (alist-get 'timestamp record))))
+
 (defun drover-codex-rollouts--read-head (beg end)
   "Return what the records between BEG and END tell of the session's start.
 A plist of its directory, creation time, origin, source, parent, branch,
@@ -203,6 +249,9 @@ first prompt and first model; members not told are left out."
       (pcase-let ((`(,model ,effort) (drover-codex-rollouts--turn beg end)))
         (add :model model)
         (add :effort effort))
+      ;; A tail of other records leaves the head's newest event as the
+      ;; last activity.
+      (add :updated (drover-codex-rollouts--activity beg end))
       (add :messages (drover-codex-rollouts--messages-p beg end)))
     data))
 
@@ -214,16 +263,17 @@ A plist of the newest model, effort and activity there."
       (pcase-let ((`(,model ,effort) (drover-codex-rollouts--turn beg end)))
         (add :model model)
         (add :effort effort))
-      (add :updated (save-excursion
-                      (goto-char end)
-                      (drover-transcript-time (drover-transcript-sniff "timestamp" t beg))))
+      (add :updated (drover-codex-rollouts--activity beg end))
       (add :messages (drover-codex-rollouts--messages-p beg end)))
     data))
 
 (defun drover-codex-rollouts--read (file attributes old)
   "Return what rollout FILE, of ATTRIBUTES, tells of its conversation.
 OLD is the entry read before, or nil: a rollout only appended to since,
-the same file grown past its head, is read from where it ended.  For
+the same file grown past its head, is read from where it ended.  Its
+last activity is its newest event of a turn's (see
+`drover-codex-rollouts--event-p'), looked for further back than the
+tail when the tail holds none, never the file's modification time.  For
 the index of `drover-transcript'."
   (let* ((size (file-attribute-size attributes))
          (before (and old (drover-transcript-data old)))
@@ -238,16 +288,21 @@ the index of `drover-transcript'."
                      (drover-codex-rollouts--read-head (point-min) (if (= tail (point-min))
                                                                        (point-max)
                                                                      tail)))))
-        (let ((recent (drover-codex-rollouts--read-tail tail (point-max))))
+        (let* ((recent (drover-codex-rollouts--read-tail tail (point-max)))
+               (updated (or (plist-get recent :updated)
+                            (drover-transcript-look-before-tail
+                             file size tail grown #'drover-codex-rollouts--activity))))
           (while recent
-            (setq data (plist-put data (pop recent) (pop recent)))))
+            (setq data (plist-put data (pop recent) (pop recent))))
+          (when updated
+            (setq data (plist-put data :updated updated))))
         (setq data (plist-put data :id (drover-codex-rollouts--id file)))
         (setq data (plist-put data :archived (drover-codex-rollouts--archived-file-p file)))
         (let ((directory (plist-get data :cwd)))
           (setq data (plist-put data :directory (and directory (file-name-as-directory directory))))
           (setq data (plist-put data :project (drover-transcript-project (plist-get data :directory)))))
         (unless (plist-get data :updated)
-          (setq data (plist-put data :updated (float-time (file-attribute-modification-time attributes)))))
+          (setq data (plist-put data :updated (plist-get data :created))))
         data))))
 
 ;;;; Names
@@ -390,6 +445,13 @@ now."
   (when-let* ((file (drover-codex-rollouts--file id)))
     (drover-transcript-lookup (drover-codex-rollouts--current-index) file)))
 
+(defun drover-codex-rollouts--times (id)
+  "Return (CREATED . UPDATED) of conversation ID, as its rollout tells.
+UPDATED is the time of its newest event of a turn; nil when the
+rollout was not read.  The backend's :recorded-times."
+  (when-let* ((data (drover-codex-rollouts--data id)))
+    (cons (plist-get data :created) (plist-get data :updated))))
+
 (defun drover-codex-rollouts--session (id)
   "Return the record of conversation ID, as :sessions lists it, or nil.
 Its rollout is looked at again soon when it changed since it was read.
@@ -422,6 +484,11 @@ The backend's :session."
     (list (list (expand-file-name "sessions" drover-codex-home) 3 regexp)
           (list (drover-codex-rollouts--archived-directory) 0 regexp))))
 
+(defconst drover-codex-rollouts--reader-version 2
+  "Version of `drover-codex-rollouts--read'.
+Raised when it reads anew what it read before, so that what an older
+one read and kept between Emacs sessions is read again.")
+
 (defun drover-codex-rollouts--make-index ()
   "Return a new index of Codex's rollouts."
   (drover-transcript-index-create 'codex-rollouts
@@ -429,7 +496,8 @@ The backend's :session."
                                   #'drover-codex-rollouts--read
                                   #'drover-codex-rollouts--changed
                                   #'drover-codex-rollouts--looked
-                                  #'drover-transcript-id))
+                                  #'drover-transcript-id
+                                  drover-codex-rollouts--reader-version))
 
 ;;;; Actions
 
@@ -531,6 +599,7 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
    'codex
    :label "Codex"
    :recorded '(codex)
+   :recorded-times #'drover-codex-rollouts--times
    :start #'drover-codex-rollouts--start
    :sessions #'drover-codex-rollouts--sessions
    :session #'drover-codex-rollouts--session

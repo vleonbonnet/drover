@@ -159,7 +159,9 @@ killed after."
       (should (> (file-attribute-size (file-attributes file)) 3000000))
       (let ((read (car (drover-claude-code-transcripts-test-counting-reads
                          (drover-claude-code-transcripts-test-scan)))))
-        (should (<= read (* 2 drover-transcript-window))))
+        ;; Its tail holds no message: its last one is looked for before,
+        ;; through the blobs, as far as the look back goes.
+        (should (<= read (+ (* 2 drover-transcript-window) drover-transcript-look-back))))
       (let ((session (drover-find 'claude-code "big")))
         (should (equal (drover-session-title session) "Big one"))
         (should (eql (drover-session-updated session) 1790000002.0)))
@@ -186,6 +188,69 @@ killed after."
       (drover-fixture-claude "big" project :ai-title "Started over")
       (drover-claude-code-transcripts-test-scan)
       (should (equal (drover-session-title (drover-find 'claude-code "big")) "Started over")))))
+
+(ert-deftest drover-claude-code-transcripts-test-reopened ()
+  "A conversation reopened is as old as its newest message, whatever the CLI appends.
+The CLI appends records of its own as it resumes a conversation, some
+with the time of now, and the file changes: its age and its place in the
+sort stay those of its newest message, until a new one moves them."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (start 1790000000.0)
+           (reopened (+ start (* 14 86400)))
+           (file (drover-fixture-claude "r1" project :start start :ai-title "Keep the login page")))
+      (drover-fixture-claude "r2" project :start (+ start 86400))
+      (drover-claude-code-transcripts-test-scan)
+      (drover-index)
+      (apply #'drover-fixture-claude-append file (drover-fixture-claude-reopened "r1" project reopened))
+      (set-file-times file (seconds-to-time reopened))
+      (drover-claude-code-transcripts-test-scan)
+      (cl-flet ((order () (mapcar #'drover-session-id (drover-sort (drover-index-sessions)))))
+        (let ((session (drover-index-session '(claude-code . "r1"))))
+          (should (eql (drover-session-updated session) (+ start 2)))
+          (should (eql (drover-list--age-time session) (+ start 2)))
+          (should (eql (drover--sort-time session) (+ start 2)))
+          (should (equal (drover-session-title session) "Keep the login page")))
+        (should (equal (order) '("r2" "r1")))
+        ;; Read whole again, it tells the same.
+        (should (eql (plist-get (drover-claude-code-transcripts--read file (file-attributes file) nil)
+                                :updated)
+                     (+ start 2)))
+        ;; A new exchange is activity.
+        (drover-fixture-claude-append file
+                                      (drover-fixture-claude-user "r1" project (+ reopened 60) "Go on")
+                                      (drover-fixture-claude-assistant "r1" project (+ reopened 61) "Done."))
+        (drover-claude-code-transcripts-test-scan)
+        (let ((session (drover-index-session '(claude-code . "r1"))))
+          (should (eql (drover-session-updated session) (+ reopened 61)))
+          (should (eql (drover--sort-time session) (+ reopened 61))))
+        (should (equal (order) '("r1" "r2")))))))
+
+(ert-deftest drover-claude-code-transcripts-test-reopened-large ()
+  "The newest message is looked for before a tail the CLI's own records fill.
+Records longer than the tail's window, as the attachments of a turn,
+may follow it, read whole or appended."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (start 1790000000.0)
+           (file (drover-fixture-claude "l1" project :start start :filler 200000)))
+      (drover-fixture-claude-append file (drover-fixture-claude-user "l1" project (+ start 100) "More")
+                                    (drover-fixture-claude-assistant "l1" project (+ start 101) "Here."))
+      (apply #'drover-fixture-claude-append file
+             (drover-fixture-line :type "attachment" :timestamp (drover-fixture-time (+ start 102))
+                                  :attachment (list :content (make-string (* 2 drover-transcript-window) ?a)))
+             (drover-fixture-claude-reopened "l1" project (+ start 86400)))
+      (drover-claude-code-transcripts-test-scan)
+      (should (eql (drover-session-updated (drover-find 'claude-code "l1")) (+ start 101)))
+      ;; Appended to: what came after the size read is looked at, not before.
+      (let ((read (car (drover-claude-code-transcripts-test-counting-reads
+                         (apply #'drover-fixture-claude-append file
+                                (drover-fixture-line :type "attachment"
+                                                     :attachment (list :content (make-string 100000 ?b)))
+                                (drover-fixture-claude-reopened "l1" project (+ start 90000)))
+                         (drover-claude-code-transcripts-test-scan)))))
+        (should (< read 200000)))
+      (should (eql (drover-session-updated (drover-find 'claude-code "l1")) (+ start 101))))))
 
 (ert-deftest drover-claude-code-transcripts-test-short-head-read-again ()
   "A transcript read before its first prompt was written is read whole once it grew."
@@ -369,6 +434,62 @@ killed after."
                        '((claude-code . "x2") (claude-code . "x1"))))))))
 
 ;;;; Opening
+
+(ert-deftest drover-claude-code-transcripts-test-front-end-reopens ()
+  "A front end reopening a conversation shows it as old as its newest message.
+Its own session began as of now, but the conversation began and was
+last active when its transcript tells, until a turn of the front end;
+the conversation's new messages, read as they are recorded, move it, the
+front end's session taken again."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (start 1790000000.0)
+           (opened (+ start (* 14 86400)))
+           (file (drover-fixture-claude "y1" project :start start))
+           (open nil)
+           (activity nil))
+      (drover-fixture-claude "y2" project :start (+ start 86400))
+      (cl-flet ((terminal ()
+                  (let ((times (drover-followed-times 'claude-code "y1" opened activity)))
+                    (drover-session-create :backend 'term :id "terminal-y1" :title "Terminal y1"
+                                           :status 'idle :engine 'claude-code :engine-id "y1"
+                                           :created (car times) :updated (cdr times))))
+                (order () (mapcar #'drover-session-id (drover-sort (drover-index-sessions)))))
+        (drover-test-register-simple 'term (lambda () (and open (list (terminal))))
+                                     :session (lambda (id) (and open (equal id "terminal-y1") (terminal))))
+        (drover-claude-code-transcripts-test-scan)
+        (drover-index)
+        (setq open t)
+        (drover-backend-changed 'term "terminal-y1")
+        (drover-changed-now)
+        (let ((session (drover-index-session '(term . "terminal-y1"))))
+          (should (eql (drover-session-created session) start))
+          (should (eql (drover-session-updated session) (+ start 2)))
+          (should (eql (drover--sort-time session) (+ start 2))))
+        (should (equal (order) '("y2" "terminal-y1")))
+        ;; What the CLI appends as it resumes changes nothing.
+        (apply #'drover-fixture-claude-append file (drover-fixture-claude-reopened "y1" project opened))
+        (set-file-times file (seconds-to-time opened))
+        (drover-claude-code-transcripts-test-scan)
+        (should (eql (drover-session-updated (drover-index-session '(term . "terminal-y1"))) (+ start 2)))
+        (should (equal (order) '("y2" "terminal-y1")))
+        ;; A new exchange, recorded, moves it, the front end saying nothing.
+        (drover-fixture-claude-append file
+                                      (drover-fixture-claude-user "y1" project (+ opened 60) "Go on")
+                                      (drover-fixture-claude-assistant "y1" project (+ opened 61) "Done."))
+        (drover-claude-code-transcripts-test-scan)
+        (let ((session (drover-index-session '(term . "terminal-y1"))))
+          (should (eql (drover-session-updated session) (+ opened 61)))
+          (should (eql (drover--sort-time session) (+ opened 61))))
+        (should (equal (order) '("terminal-y1" "y2")))
+        ;; The front end's turn, before its transcript tells it.
+        (setq activity (+ opened 300))
+        (drover-backend-changed 'term "terminal-y1")
+        (drover-changed-now)
+        (should (eql (drover-session-updated (drover-index-session '(term . "terminal-y1"))) (+ opened 300)))
+        ;; A relisting agrees.
+        (drover-index-refresh)
+        (should (eql (drover-session-updated (drover-index-session '(term . "terminal-y1"))) (+ opened 300)))))))
 
 (ert-deftest drover-claude-code-transcripts-test-open-resumes ()
   "Opening a closed conversation resumes it, in the front end it ran in first."

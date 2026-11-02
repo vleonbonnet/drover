@@ -67,7 +67,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)

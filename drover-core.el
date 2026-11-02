@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 10
+(defconst drover-core-generation 11
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1580,6 +1580,17 @@ PROPERTIES is a plist of:
              listed, the other backend's session standing for it.  Its
              session identifiers are the engine's identifiers, and its
              :session, and its :history if any, answer at once.
+ :recorded-times
+             Function of an engine identifier returning (CREATED .
+             UPDATED), float times or nil, of that conversation as a
+             backend with :recorded read it, or nil when it knows none:
+             when it began, and its newest message, not what its engine
+             records of its own as the conversation is opened again.
+             It must answer at once.  A front end showing the
+             conversation again counts its activity from there until a
+             turn of its own (see `drover-recorded-times'); a change of
+             the conversation reported for such a backend is reported
+             for the front ends following it too.
 
 The prompt (`drover-prompt') sends to sessions and starts them through
 the following operations, all optional.  Callbacks are called at most
@@ -1838,6 +1849,48 @@ one, with the same engine key, among SESSIONS."
                     (and (drover--recorded-p (drover-session-backend session))
                          (gethash (drover-session-engine-key session) followed)))
                   sessions))))
+
+;; A front end opening a conversation again, such as a terminal running
+;; "claude --resume", shows it as of now, and its engine appends records
+;; of its own to it: the conversation did nothing for all that.  Until a
+;; turn of the front end's own, its session counts its activity from
+;; the conversation's newest message, as the backends recording it read
+;; it, and its start from the conversation's.
+
+(defun drover-recorded-times (engine engine-id)
+  "Return (CREATED . UPDATED) of ENGINE's conversation ENGINE-ID, as recorded.
+Nil when not recorded.  The backends recording the conversations of
+ENGINE tell them (see :recorded-times in `drover-register-backend'):
+when it began, the earliest they know, and its newest message, the
+latest; either may be nil."
+  (when (and engine engine-id)
+    (let ((created nil)
+          (updated nil))
+      (dolist (backend (drover--recording-backends engine))
+        (when-let* ((function (plist-get (alist-get backend drover--backends) :recorded-times))
+                    (times (drover-with-reporting "recorded times"
+                             (funcall function engine-id)))
+                    ((consp times)))
+          (when (numberp (car times))
+            (setq created (if created (min created (car times)) (car times))))
+          (when (numberp (cdr times))
+            (setq updated (if updated (max updated (cdr times)) (cdr times))))))
+      (and (or created updated) (cons created updated)))))
+
+(defun drover-followed-times (engine engine-id created activity)
+  "Return (CREATED . UPDATED) of a front end's session of ENGINE-ID of ENGINE.
+CREATED is when the front end's session began, and ACTIVITY the last
+activity of the turns it ran, or nil before one.  A conversation opened
+again began when it began, and was last active at its newest message
+as recorded (see `drover-recorded-times'), or at the front end's turn,
+when later; one recorded nowhere yet, as of now, at CREATED."
+  (let* ((recorded (drover-recorded-times engine engine-id))
+         (began (car recorded))
+         (last (cdr recorded)))
+    (cons (if (and began created) (min began created) (or began created))
+          (cond ((and activity last) (max activity last))
+                ((or activity last))
+                (t created)))))
 
 (defun drover--live-sessions ()
   "Return the sessions every registered backend follows, as they report them.
@@ -2489,15 +2542,31 @@ backend no longer registered go."
           (setq moved (append (drover--index-put index key (copy-sequence record)) moved)))))
     (cons changed moved)))
 
+(defun drover--index-followers (index keys)
+  "Return the keys of the sessions following the conversations of KEYS in INDEX.
+Those of KEYS of a backend recording conversations (see :recorded in
+`drover-register-backend') may be followed by front ends, whose records
+take the times of the conversation as recorded (see
+`drover-followed-times'): their sessions with the engine key of one."
+  (let ((followers nil))
+    (dolist (key keys)
+      (dolist (engine (plist-get (alist-get (car key) drover--backends) :recorded))
+        (dolist (follower (gethash (cons engine (cdr key)) (drover--index-engines index)))
+          (unless (drover--recorded-p (car follower))
+            (push follower followers)))))
+    (nreverse followers)))
+
 (defun drover--index-take (index keys backends)
   "Bring INDEX up to date with the sessions KEYS and BACKENDS reported.
 Each key is looked up with its backend's :session, or its backend is
-listed anew when it has none, as BACKENDS are.  Return (CHANGED .
-MOVED), as `drover--index-relist' does, CHANGED in the order taken."
+listed anew when it has none, as BACKENDS are; so are the sessions
+following a conversation of KEYS as recorded (see
+`drover--index-followers').  Return (CHANGED . MOVED), as
+`drover--index-relist' does, CHANGED in the order taken."
   (let ((relist (delete-dups (copy-sequence backends)))
         (changed nil)
         (moved nil))
-    (dolist (key (delete-dups (copy-sequence keys)))
+    (dolist (key (delete-dups (append keys (drover--index-followers index keys))))
       (let* ((properties (alist-get (car key) drover--backends))
              (function (plist-get properties :session)))
         (if (and properties (not (functionp function)))

@@ -37,8 +37,10 @@
 ;; the user gave (custom-title), else the one the CLI generated
 ;; (ai-title), else the first prompt; the directory, branch and
 ;; creation time of its first records; the model, effort and permission
-;; mode of its newest turn; its last activity.  Its subagents'
-;; transcripts beside it, under ID/subagents/, are its subagents.
+;; mode of its newest turn; its last activity, the time of its newest
+;; message, not of the records the CLI appends of its own as the
+;; conversation is opened again.  Its subagents' transcripts beside it,
+;; under ID/subagents/, are its subagents.
 ;;
 ;; Opening a conversation resumes it in a front end (`drover-resume'):
 ;; claude-code-ide runs \"claude --resume ID\" in a terminal, agent-shell
@@ -195,11 +197,25 @@ prompt of the user, on one line, or nil."
           (and (stringp (alist-get 'effort record)) (alist-get 'effort record))
           (drover-transcript-time (alist-get 'timestamp record)))))
 
+(defun drover-claude-code-transcripts--message-p (record)
+  "Return non-nil when RECORD is a message of the conversation, parsed.
+That is a prompt, a reply or a tool's result, not what the CLI records
+of its own as it opens the conversation again: a note (isMeta), a
+record kept for the transcript only, and the reply it makes up for a
+prompt left without one.  Its API errors are messages: they end a turn."
+  (pcase (alist-get 'type record)
+    ("user" (not (or (alist-get 'isMeta record) (alist-get 'queueTranscriptOnly record))))
+    ("assistant" (or (alist-get 'isApiErrorMessage record)
+                     (not (equal (alist-get 'model (alist-get 'message record)) "<synthetic>"))))))
+
 (defun drover-claude-code-transcripts--activity (beg end)
-  "Return the time of the newest message between BEG and END, or nil."
+  "Return the time of the newest message between BEG and END, or nil.
+See `drover-claude-code-transcripts--message-p'."
   (when-let* ((record (drover-transcript-last
                        "\"timestamp\":\""
-                       (lambda (record) (member (alist-get 'type record) '("user" "assistant")))
+                       (lambda (record)
+                         (and (drover-claude-code-transcripts--message-p record)
+                              (drover-transcript-time (alist-get 'timestamp record))))
                        beg end)))
     (drover-transcript-time (alist-get 'timestamp record))))
 
@@ -210,6 +226,7 @@ A turn running starts there."
                        "\"type\":\"user\""
                        (lambda (record)
                          (and (not (alist-get 'isSidechain record))
+                              (drover-claude-code-transcripts--message-p record)
                               (drover-claude-code--prompt-p record)))
                        beg end)))
     (drover-transcript-time (alist-get 'timestamp record))))
@@ -265,27 +282,64 @@ told are left out."
                        (and (re-search-forward "\"type\":\"\\(?:user\\|assistant\\)\"" end t) t))))
     data))
 
-(defun drover-claude-code-transcripts--subagents (file)
+(defun drover-claude-code-transcripts--last-message (file size tail old-size)
+  "Return the time of the newest message of transcript FILE, of SIZE bytes, or nil.
+The current buffer holds what `drover-transcript-insert-ends' inserted
+of it with OLD-SIZE, the tail from TAIL: the newest message of the tail,
+else of the lines before it, read as needed (see
+`drover-transcript-look-before-tail'), else, without OLD-SIZE, of the
+head."
+  (or (drover-claude-code-transcripts--activity tail (point-max))
+      (drover-transcript-look-before-tail file size tail old-size
+                                          #'drover-claude-code-transcripts--activity)
+      (and (not old-size) (> tail (point-min))
+           (drover-claude-code-transcripts--activity (point-min) tail))))
+
+(defun drover-claude-code-transcripts--subagent-times (transcript size)
+  "Return (CREATED . UPDATED) of the subagent whose TRANSCRIPT is SIZE bytes long.
+CREATED is the time of its first record, UPDATED that of its newest
+message, or CREATED without one."
+  (with-temp-buffer
+    (let* ((tail (drover-transcript-insert-ends transcript size))
+           (created (save-excursion
+                      (goto-char (point-min))
+                      (drover-transcript-time (drover-transcript-sniff "timestamp")))))
+      (cons created (or (drover-claude-code-transcripts--last-message transcript size tail nil)
+                        created)))))
+
+(defun drover-claude-code-transcripts--subagents (file &optional old)
   "Return the subagents of the conversation transcript FILE records.
 Their transcripts are beside it, under ID/subagents/, each with a
 description in a .meta.json; each is a plist of :agent, its name, :title,
-:type, :created and :updated."
+:type, :created and :updated, and the :size and :mtime of its transcript
+when read.  OLD are the subagents read before: one whose transcript did
+not change since is not read again."
   (let ((directory (expand-file-name "subagents" (file-name-sans-extension file))))
     (when (file-directory-p directory)
       (delq nil
             (mapcar (lambda (entry)
                       (let* ((transcript (car entry))
                              (agent (file-name-base transcript))
-                             (meta (drover-read-json (concat (file-name-sans-extension transcript)
-                                                             ".meta.json")))
-                             (meta (and (drover-json-object-p meta) meta)))
-                        (list :agent agent
-                              :title (drover-transcript-text (alist-get 'description meta))
-                              :type (drover-transcript-text (alist-get 'agentType meta))
-                              :created (with-temp-buffer
-                                         (drover-transcript-insert transcript 0 4096)
-                                         (drover-transcript-time (drover-transcript-sniff "timestamp")))
-                              :updated (float-time (file-attribute-modification-time (cdr entry))))))
+                             (size (file-attribute-size (cdr entry)))
+                             (mtime (float-time (file-attribute-modification-time (cdr entry))))
+                             (before (seq-find (lambda (subagent)
+                                                 (equal (plist-get subagent :agent) agent))
+                                               old)))
+                        (if (and before (eql (plist-get before :size) size)
+                                 (eql (plist-get before :mtime) mtime))
+                            before
+                          (let ((meta (drover-read-json (concat (file-name-sans-extension transcript)
+                                                                ".meta.json")))
+                                (times (drover-claude-code-transcripts--subagent-times transcript size)))
+                            (list :agent agent
+                                  :title (drover-transcript-text
+                                          (alist-get 'description (and (drover-json-object-p meta) meta)))
+                                  :type (drover-transcript-text
+                                         (alist-get 'agentType (and (drover-json-object-p meta) meta)))
+                                  :created (car times)
+                                  :updated (cdr times)
+                                  :size size
+                                  :mtime mtime)))))
                     (ignore-errors
                       (directory-files-and-attributes directory t "\\`agent-.*\\.jsonl\\'" t)))))))
 
@@ -294,7 +348,11 @@ description in a .meta.json; each is a plist of :agent, its name, :title,
 OLD is the entry read before, or nil: a transcript only appended to
 since, the same file grown, is read from where it ended, what its new
 records tell replacing what the old ones told.  Otherwise its head and
-tail are read.  For the index of `drover-transcript'."
+tail are read.  Its last activity is its newest message's (see
+`drover-claude-code-transcripts--message-p'), looked for further back
+than the tail when the tail holds none, never the file's modification
+time, which the CLI's records of its own move as it opens the
+conversation again.  For the index of `drover-transcript'."
   (let* ((size (file-attribute-size attributes))
          (before (and old (drover-transcript-data old)))
          ;; A head shorter than its window may lack the first prompt.
@@ -309,9 +367,14 @@ tail are read.  For the index of `drover-transcript'."
                      (drover-claude-code-transcripts--read-head (point-min) (if (= tail (point-min))
                                                                                 (point-max)
                                                                               tail)))))
-        (let ((recent (drover-claude-code-transcripts--read-tail tail (point-max))))
+        (let* ((recent (drover-claude-code-transcripts--read-tail tail (point-max)))
+               (updated (or (plist-get recent :updated)
+                            (drover-transcript-look-before-tail
+                             file size tail grown #'drover-claude-code-transcripts--activity))))
           (while recent
-            (setq data (plist-put data (pop recent) (pop recent)))))
+            (setq data (plist-put data (pop recent) (pop recent))))
+          (when updated
+            (setq data (plist-put data :updated updated))))
         (setq data (plist-put data :id (drover-claude-code-transcripts--id file)))
         (let ((directory (or (plist-get data :cwd)
                              (drover-claude-code-decode-bucket
@@ -320,8 +383,9 @@ tail are read.  For the index of `drover-transcript'."
           (setq data (plist-put data :project (drover-transcript-project
                                                (plist-get data :directory)))))
         (unless (plist-get data :updated)
-          (setq data (plist-put data :updated (float-time (file-attribute-modification-time attributes)))))
-        (plist-put data :subagents (drover-claude-code-transcripts--subagents file))))))
+          (setq data (plist-put data :updated (plist-get data :created))))
+        (plist-put data :subagents (drover-claude-code-transcripts--subagents
+                                    file (plist-get before :subagents)))))))
 
 ;;;; Records
 
@@ -482,6 +546,13 @@ See `drover-claude-code-history-days'.  The backend's :history."
   (when-let* ((file (drover-claude-code-transcripts--file id)))
     (drover-transcript-lookup (drover-claude-code-transcripts--current-index) file)))
 
+(defun drover-claude-code-transcripts--times (id)
+  "Return (CREATED . UPDATED) of conversation ID, as its transcript tells.
+UPDATED is the time of its newest message; nil when the transcript was
+not read.  The backend's :recorded-times."
+  (when-let* ((data (drover-claude-code-transcripts--data id)))
+    (cons (plist-get data :created) (plist-get data :updated))))
+
 (defun drover-claude-code-transcripts--split (id)
   "Return (CONVERSATION . AGENT) of ID, AGENT nil for a conversation."
   (if (string-match "\\`\\([^/]+\\)/\\(.+\\)\\'" id)
@@ -543,6 +614,11 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
   "Return where Claude Code's transcripts are, for the index."
   (list (list (drover-claude-code-projects-directory) 1 "\\.jsonl\\'")))
 
+(defconst drover-claude-code-transcripts--reader-version 2
+  "Version of `drover-claude-code-transcripts--read'.
+Raised when it reads anew what it read before, so that what an older
+one read and kept between Emacs sessions is read again.")
+
 (defun drover-claude-code-transcripts--make-index ()
   "Return a new index of Claude Code's transcripts."
   (drover-transcript-index-create 'claude-code-transcripts
@@ -550,7 +626,8 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
                                   #'drover-claude-code-transcripts--read
                                   #'drover-claude-code-transcripts--changed
                                   #'drover-claude-code-transcripts--looked
-                                  #'drover-transcript-id))
+                                  #'drover-transcript-id
+                                  drover-claude-code-transcripts--reader-version))
 
 ;;;; Sessions Claude Code runs elsewhere
 
@@ -734,6 +811,7 @@ The backend's :start."
    'claude-code
    :label "Claude Code"
    :recorded '(claude-code)
+   :recorded-times #'drover-claude-code-transcripts--times
    :start #'drover-claude-code-transcripts--start
    :sessions #'drover-claude-code-transcripts--sessions
    :session #'drover-claude-code-transcripts--session

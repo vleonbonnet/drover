@@ -34,6 +34,7 @@
 ;; agent-shell first: drover loads the backend once agent-shell is loaded.
 (require 'agent-shell)
 (require 'drover-agent-shell)
+(require 'drover-transcript-fixtures)
 
 (drover-agent-shell-unload-function)
 
@@ -1169,13 +1170,63 @@ learnt, gives the model; nothing when unknown."
               (should (equal (drover-session-provider-name session) "anthropic"))
               (should-not (drover-session-provider session))
               (should-not (drover-session-context-tokens session))
-              (should (= (drover-session-updated session) 1000.0))
+              ;; What the agent sent as it loaded the conversation is no
+              ;; activity of the conversation: no turn ran here.
+              (should-not (drover-session-updated session))
               ;; The identifier is a token of the buffer, stable while it lives.
               (should (equal (drover-session-id session)
                              (drover-session-id (drover-agent-shell-test-session shell))))
               (should (eq (drover-session-buffer session) shell))
               (should (eq (drover-backend-call session :buffer) shell))))
         (delete-directory directory t)))))
+
+(ert-deftest drover-agent-shell-test-resumed-conversation ()
+  "A shell loading a conversation shows it as old as its newest event.
+What the agent sends as the shell loads it is no activity of the
+conversation; a turn is, from its prompt to its end."
+  (drover-agent-shell-test-with
+    (drover-codex-rollouts-install 'test)
+    (unwind-protect
+        (let* ((project (file-name-as-directory (expand-file-name "work" home)))
+               (id "019f0000-0000-7000-8000-0000000000c1")
+               (other "019f0000-0000-7000-8000-0000000000c2")
+               (start 1790000000.0)
+               (opened (+ start (* 14 86400)))
+               (clock opened)
+               (float-time (symbol-function 'float-time))
+               (shell (drover-agent-shell-test-followed 'codex)))
+          (drover-fixture-codex id project :start start)
+          (drover-fixture-codex other project :start (+ start 86400))
+          (drover-transcript-scan drover-codex-rollouts--index)
+          (cl-letf (((symbol-function 'float-time)
+                     (lambda (&optional time) (if time (funcall float-time time) clock))))
+            (cl-flet ((session () (drover-agent-shell-test-session shell)))
+              (with-current-buffer shell
+                (setq drover-agent-shell--created opened)
+                (map-put! (map-elt agent-shell--state :session) :id id)
+                ;; The conversation replayed as it loads.
+                (map-put! agent-shell--state :last-activity-time (seconds-to-time (+ opened 3))))
+              (drover-agent-shell-test-emit shell 'agent-message-chunk :text-chunk "The export…")
+              (should (eql (drover-session-created (session)) start))
+              (should (eql (drover-session-updated (session)) (+ start 5)))
+              ;; A turn.
+              (setq clock (+ opened 60))
+              (drover-agent-shell-test-emit shell 'input-submitted :prompt "Go on")
+              (should (eql (drover-session-updated (session)) (+ opened 60)))
+              (with-current-buffer shell
+                (map-put! agent-shell--state :last-activity-time (seconds-to-time (+ opened 70))))
+              (should (eql (drover-session-updated (session)) (+ opened 70)))
+              (setq clock (+ opened 80))
+              (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+              (should (eql (drover-session-updated (session)) (+ opened 80)))
+              ;; Another conversation loaded is as old as it is.
+              (setq clock (+ opened 900))
+              (with-current-buffer shell
+                (map-put! (map-elt agent-shell--state :session) :id other)
+                (map-put! agent-shell--state :last-activity-time (seconds-to-time (+ opened 900))))
+              (drover-agent-shell-test-emit shell 'session-selected)
+              (should (eql (drover-session-updated (session)) (+ start 86405))))))
+      (drover-codex-rollouts-uninstall 'test))))
 
 (ert-deftest drover-agent-shell-test-session-runs ()
   "A shell of an engine naming models bare tells no provider; without levels, no effort.
