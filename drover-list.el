@@ -47,16 +47,18 @@
 ;; parent's details must neither hide nor reveal its subagents.  Which
 ;; subagents show, all, the active ones or none, `drover-show-subagents'
 ;; says; whether shown or not, a session whose subagents work or wait
-;; for you tells so beside its status (`drover-subagent-glyphs').  The
+;; for you tells so beside its status (`opencode-subagent-icons').  The
 ;; colour of a title tells where its session is in Emacs: in a buffer
-;; no window shows (`drover-open-session'), in a window
-;; (`drover-shown-session'), in the window you work in
-;; (`drover-active-session'); as windows change, only the titles whose
-;; place changed take another face.
+;; no window shows (`opencode-session-open'), in a window
+;; (`opencode-session-shown'), in the window you work in
+;; (`opencode-session-active'); as windows change, only the titles whose
+;; place changed take another face.  Glyphs and faces are opencode.el's
+;; (opencode-look.el), which its mode line and pickers draw with too.
 ;;
-;; Working glyphs are animated (`drover-animations'): a timer changes
-;; the display of their characters alone, every frame as wide as the
-;; widest, while a displayed list shows one.  Every glyph takes the room
+;; Working glyphs are animated (`opencode-session-status-animations'): a
+;; timer changes the display of their characters alone, every frame as
+;; wide as the widest, while a displayed list shows one, the same frame
+;; as opencode.el's mode lines at a time.  Every glyph takes the room
 ;; its font draws it in, which an icon font may draw wider than the
 ;; advance it gives it, so that no text is drawn on an icon.
 ;;
@@ -91,7 +93,7 @@
 ;; replies.
 ;;
 ;; With `drover-show-archived', the list shows archived sessions too,
-;; dimmed, after `drover-archived-glyph', in a group of their own when
+;; dimmed, after `opencode-archived-icon', in a group of their own when
 ;; grouped by status.
 ;;
 ;; A buffer follows the changes backends report, but only while it is
@@ -116,9 +118,10 @@
 (require 'subr-x)
 (require 'magit-section)
 (require 'drover)
+(require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 2))
   (load "drover-core" nil t))
 
 (defgroup drover-list nil
@@ -138,7 +141,7 @@ It goes over the face `header-line'; inheriting `drover-list', it draws
 the names in the font of the columns they name."
   :group 'drover-faces)
 
-(define-obsolete-face-alias 'drover-list-current 'drover-active-session "0.1.0")
+(define-obsolete-face-alias 'drover-list-current 'opencode-session-active "0.1.0")
 
 (defconst drover-list-buffer-name "*drover sessions*"
   "Name of the buffer of the list of `drover-list', in an ordinary window.")
@@ -217,20 +220,10 @@ them only when needed."
   :type '(choice (const :tag "Only when needed" nil) (number :tag "Seconds"))
   :group 'drover-list)
 
-(defcustom drover-list-animation-interval 0.15
-  "Seconds between two frames of the animated glyphs of a displayed list.
-Working sessions and those waiting to retry show the frames of
-`drover-animations' in turn.  A value of nil shows still glyphs, those
-of `drover-status-glyphs'.
-
-A frame changes only the display of the animated characters, as the
-prompt cache bars do, so it costs a redisplay of their lines in the
-windows showing the list.  The default turns the eight phases of the
-moon in 1.2 seconds, quick enough to read as busy rather than as a slow
-blink; a slower pace costs fewer redisplays.  The timer runs only while
-a displayed list shows an animated glyph."
-  :type '(choice (const :tag "Still glyphs" nil) (number :tag "Seconds"))
-  :group 'drover-list)
+;; The pace of every animated icon, opencode.el's mode line's too.
+(drover--adopt-option 'drover-list-animation-interval 'opencode-session-status-animation-interval)
+(define-obsolete-variable-alias 'drover-list-animation-interval
+  'opencode-session-status-animation-interval "0.2.0")
 
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
@@ -725,23 +718,15 @@ Spaces as wide as needed come before and after it."
   "Return STRING in a cell of its own, so that no text is drawn on its ink."
   (drover-list--in-cell string (drover-list--cell (list string))))
 
-(defun drover-list--frame-index (count now)
-  "Return which of COUNT frames of an animation shows at NOW, a float time.
-Every animated glyph shows its frame of the same instant, so that a
-redraw keeps the pace."
-  (mod (floor now drover-list-animation-interval) count))
-
 (defun drover-list--frames (status)
   "Return the frames of the glyph of STATUS, measured, or nil.
-The value is (STRINGS WIDTHS): the frames of `drover-animations' in the
-face of STATUS, and their widths in pixels.  It is nil when the list
-does not animate, `drover-list-animation-interval' being nil, and when
-STATUS has no frame."
-  (when-let* ((drover-list-animation-interval)
-              (frames (seq-remove (lambda (frame) (or (not (stringp frame)) (string-empty-p frame)))
-                                  (alist-get status drover-animations))))
-    (let ((strings (mapcar (lambda (frame) (drover-face frame (drover-status-face status))) frames)))
-      (list strings (mapcar #'drover-list--pixel-width strings)))))
+The value is (STRINGS WIDTHS): the frames of
+`opencode-session-status-animations' in the face of STATUS, and their
+widths in pixels.  It is nil when icons do not animate,
+`opencode-session-status-animation-interval' being nil, and when STATUS
+has no frame."
+  (when-let* ((strings (opencode-session-status-frames status)))
+    (list strings (mapcar #'drover-list--pixel-width strings))))
 
 (defun drover-list--status-glyph (status metrics)
   "Return the glyph of STATUS in the status cell of METRICS, animated as they say.
@@ -753,24 +738,19 @@ character displays the frame of the time of METRICS, the next one a
 space reaching the end of the cell, so that what follows never moves.
 Their properties `drover-list-frame' and `drover-list-frame-pad' name
 STATUS: from frame to frame, only their display changes."
-  (let ((glyph (drover-status-glyph status))
+  (let ((glyph (opencode-session-status-glyph status))
         (cell (plist-get metrics :status-cell)))
     (if-let* ((frames (alist-get status (plist-get metrics :frames))))
         (pcase-let* ((`(,strings ,widths ,width) frames)
-                     (index (drover-list--frame-index (length strings) (plist-get metrics :now))))
+                     (index (opencode-session-status-frame-index (length strings) (plist-get metrics :now))))
           (concat (drover-list--pad (car cell))
-                  (propertize (if (string-empty-p glyph) (drover-face " " (drover-status-face status))
+                  (propertize (if (string-empty-p glyph)
+                                  (drover-face " " (opencode-session-status-face status))
                                 (substring glyph 0 1))
                               'display (nth index strings) 'drover-list-frame status)
                   (propertize " " 'display `(space :width (,(- width (nth index widths))))
                               'drover-list-frame-pad status)))
       (drover-list--in-cell glyph cell))))
-
-(defun drover-list--subagent-glyph (kind)
-  "Return the glyph of subagents of KIND, `waiting' or `working', in its face.
-See `drover-subagent-glyphs'."
-  (drover-face (or (alist-get kind drover-subagent-glyphs) "?")
-               (if (eq kind 'waiting) 'drover-waiting 'drover-working)))
 
 (defun drover-list--subagents-help (subagents)
   "Return the tooltip naming SUBAGENTS, active sessions, by what they do.
@@ -792,7 +772,7 @@ It tells how many do each, which their glyphs do not."
 (defun drover-list--indicator (subagents metrics)
   "Return the glyphs telling that SUBAGENTS are in the middle of a turn, or nil.
 SUBAGENTS are the active subagents of a session, at any depth (see
-`drover-tree-active-subagents').  The glyph of `drover-subagent-glyphs'
+`drover-tree-active-subagents').  The glyph of `opencode-subagent-icons'
 for those waiting for the user comes first, then that for those working
 or waiting to retry, a space between, each in the subagent cell of
 METRICS.  They stay still and tell no number: their tooltip names the
@@ -803,19 +783,19 @@ subagents and tells how many."
            (working (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))
                               subagents))
            (cell (plist-get metrics :subagent-cell)))
-      (propertize (mapconcat (lambda (kind) (drover-list--in-cell (drover-list--subagent-glyph kind) cell))
+      (propertize (mapconcat (lambda (kind) (drover-list--in-cell (opencode-subagent-glyph kind) cell))
                              (append (and waiting '(waiting)) (and working '(working)))
                              " ")
                   'help-echo (drover-list--subagents-help subagents)))))
 
 (defun drover-list--archived-glyph (session now)
   "Return the glyph telling that SESSION is archived, in a cell of its own, or nil.
-See `drover-archived-glyph'.  Its tooltip tells how long ago, at NOW,
+See `opencode-archived-icon'.  Its tooltip tells how long ago, at NOW,
 when known."
   (when-let* ((archived (drover-session-archived session)))
-    (propertize (drover-list--icon (drover-face drover-archived-glyph 'drover-dim))
+    (propertize (drover-list--icon (opencode-archived-glyph))
                 'help-echo (if (numberp archived)
-                               (format "Archived %s ago" (drover-format-age archived now))
+                               (format "Archived %s ago" (opencode-format-age archived now))
                              "Archived"))))
 
 (defun drover-list--icons (session metrics)
@@ -837,11 +817,9 @@ of each session and the time."
 
 (defun drover-list--title-face (state)
   "Return the face of a title whose session is in STATE, or nil.
-STATE is a value of `drover-list--title-state'."
-  (pcase state
-    ('active 'drover-active-session)
-    ('shown 'drover-shown-session)
-    ('open 'drover-open-session)))
+STATE is a value of `drover-list--title-state', which names the places
+of `opencode-session-place-face'."
+  (opencode-session-place-face state))
 
 (defun drover-list--title-text (session depth state)
   "Return the title of SESSION, at DEPTH in its tree, as its line shows it.
@@ -865,16 +843,16 @@ so that its face may change in place."
 (defun drover-list--bar (fraction pixels face)
   "Return a short bar PIXELS wide, FRACTION of it full in FACE.
 It is two stretched spaces, the full part and the trough, the trough
-in `drover-cache-trough'."
+in `opencode-cache-trough'."
   (let ((full (round (* pixels (max 0 (min 1 fraction))))))
     (concat (drover-face (propertize " " 'display `(space :width (,full))) face)
             (drover-face (propertize " " 'display `(space :width (,(- pixels full))))
-                         'drover-cache-trough))))
+                         'opencode-cache-trough))))
 
 (defun drover-list--model-text (session)
   "Return the model of SESSION and the effort it runs, as its column shows them.
-The effort is in `drover-prompt-picked' when chosen, in
-`drover-prompt-inherited' when it is the model's default; its tooltip
+The effort is in `opencode-setting-chosen' when chosen, in
+`opencode-setting-inherited' when it is the model's default; its tooltip
 says which.  A column too narrow cuts the model's name and keeps the
 effort, which the property `drover-list-keep' marks (see
 `drover-list--truncate')."
@@ -886,7 +864,7 @@ effort, which the property `drover-list-keep' marks (see
            (list (and model (drover-face (drover-list--one-line model) 'drover-dim))
                  (and effort
                       (propertize (drover-face (drover-list--one-line effort)
-                                               (if default 'drover-prompt-inherited 'drover-prompt-picked))
+                                               (if default 'opencode-setting-inherited 'opencode-setting-chosen))
                                   'help-echo (format "Effort: %s, %s" effort
                                                      (if default "the model's default" "chosen"))
                                   'drover-list-keep (and model t)))))
@@ -905,23 +883,21 @@ its name; the tooltip names it."
 A short bar of how much of the model's context it fills comes first,
 `drover-list-context-bar-width' characters CHAR pixels wide, then the
 size, after a \"~\" when the service estimated it after a compaction.
-Near a long-context price tier, the size is in `drover-context-near'
+Near a long-context price tier, the size is in `opencode-context-near'
 and the bar's full part in its inverse video, past it in
-`drover-context-over'.  Without the model's context size, an empty
+`opencode-context-over'.  Without the model's context size, an empty
 space takes the bar's place, so that sizes line up."
   (when-let* ((tokens (drover-session-context-tokens session)))
     (let* ((fraction (drover-session-context-fraction session))
            (pixels (* drover-list-context-bar-width char))
-           (face (pcase (car (drover-session-context-tier session))
-                   ('over 'drover-context-over)
-                   ('near 'drover-context-near))))
+           (face (opencode-context-face (drover-session-context-tier session))))
       (propertize
        (concat (if fraction
-                   (drover-list--bar fraction pixels (if face (list '(:inverse-video t) face) 'drover-context-bar))
+                   (drover-list--bar fraction pixels (if face (list '(:inverse-video t) face) 'opencode-context-bar))
                  (drover-list--pad pixels))
                " "
                (drover-face (concat (and (drover-session-context-estimated session) "~")
-                                    (drover-format-tokens tokens))
+                                    (opencode-format-tokens tokens))
                             (or face 'drover-dim)))
        'help-echo (concat "Context: " (drover-session-context-description session))))))
 
@@ -950,8 +926,8 @@ character.  The prompt cache has no text: it is drawn apart."
           ('model (drover-list--model-text session))
           ('provider (drover-list--provider-text session))
           ('context (drover-list--context-text session (plist-get metrics :char)))
-          ('created (drover-face (drover-format-age (drover-session-created session) now) 'drover-dim))
-          ('age (drover-face (drover-format-age (drover-list--age-time session) now) 'drover-dim))
+          ('created (drover-face (opencode-format-age (drover-session-created session) now) 'drover-dim))
+          ('age (drover-face (opencode-format-age (drover-list--age-time session) now) 'drover-dim))
           ('summary (drover-list--one-line (drover-session-summary session))))
         "")))
 
@@ -987,17 +963,17 @@ ACTIVE, the table of the active subagents of each session (see
 `drover-tree-active-subagents'), or nil, and :places, PLACES, where
 buffers are shown (see `drover-list--places'), or nil.  The status cell
 holds every status glyph and frame, so that titles line up whatever
-the status; the subagent cell both glyphs of `drover-subagent-glyphs'.
+the status; the subagent cell both glyphs of `opencode-subagent-icons'.
 Widths are in pixels; lines leave room for the ellipsis Magit adds to
 collapsed headings."
   (let* ((char (drover-list--char-width))
-         (statuses (seq-uniq (append drover-status-order (mapcar #'car drover-status-glyphs))))
+         (statuses (seq-uniq (append drover-status-order (mapcar #'car opencode-session-status-icons))))
          (frames (delq nil (mapcar (lambda (status)
                                      (when-let* ((frames (drover-list--frames status)))
                                        (cons status frames)))
                                    '(working retrying))))
          (status-cell (drover-list--cell
-                       (append (mapcar #'drover-status-glyph statuses)
+                       (append (mapcar #'opencode-session-status-glyph statuses)
                                (mapcan (lambda (entry) (copy-sequence (nth 1 entry))) frames)))))
     (let ((metrics (list :now now
                          :char char
@@ -1007,7 +983,7 @@ collapsed headings."
                          :width (- (drover-list--line-width)
                                    (drover-list--pixel-width (truncate-string-ellipsis)))
                          :status-cell status-cell
-                         :subagent-cell (drover-list--cell (mapcar #'drover-list--subagent-glyph
+                         :subagent-cell (drover-list--cell (mapcar #'opencode-subagent-glyph
                                                                    '(waiting working)))
                          :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
                          :active active
@@ -1022,8 +998,8 @@ place, is the same row; see `drover-list--inputs'."
         (plist-get metrics :status-cell) (plist-get metrics :subagent-cell)
         (mapcar (lambda (entry) (list (car entry) (nth 2 entry) (nth 3 entry)))
                 (plist-get metrics :frames))
-        drover-status-glyphs drover-subagent-glyphs drover-animations drover-archived-glyph
-        drover-list-animation-interval drover-list-context-bar-width
+        opencode-session-status-icons opencode-subagent-icons opencode-session-status-animations
+        opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
         drover-list--measuring))
 
 (defvar drover-list--reuse nil
@@ -1047,11 +1023,11 @@ of its archiving, and the stamp of METRICS (see
             (and (plist-get metrics :active)
                  (gethash (drover-session-key session) (plist-get metrics :active)))
             state
-            (drover-format-age (drover-list--age-time session) now)
-            (drover-format-age (drover-session-created session) now)
+            (opencode-format-age (drover-list--age-time session) now)
+            (opencode-format-age (drover-session-created session) now)
             (and (drover-list--cache-fraction session now) t)
-            (and frames (drover-list--frame-index (length (car frames)) now))
-            (and (numberp archived) (drover-format-age archived now))
+            (and frames (opencode-session-status-frame-index (length (car frames)) now))
+            (and (numberp archived) (opencode-format-age archived now))
             (plist-get metrics :stamp))))
 
 (defun drover-list--same-inputs-p (a b &optional any-stamp)
@@ -1505,20 +1481,20 @@ the title's column does not come first."
           (drover-list--text-segment (drover-list--row-icons row) indent)
           (drover-list--text-segment title (+ shift (drover-list--row-title-start row))))))
 
-(defconst drover-list--cache-fill '((:inverse-video t) drover-cache-bar)
+(defconst drover-list--cache-fill '((:inverse-video t) opencode-cache-bar)
   "Face of the full part of the short bar of a prompt cache.
-It fills the bar with the foreground of `drover-cache-bar', in inverse
+It fills the bar with the foreground of `opencode-cache-bar', in inverse
 video, so that the highlight of the current line or of the region,
 which sets only a background, does not hide it.")
 
 (defun drover-list--cache-line-face ()
   "Return the face drawing a prompt cache under a line, in two lines.
 It underlines the line, at its descent, in the foreground of
-`drover-cache-bar': the text keeps its colours, and the highlights of
+`opencode-cache-bar': the text keeps its colours, and the highlights of
 the current line and of the region, which set only a background, leave
 it visible.  The colour is that of the selected frame, read as the list
 is drawn, which a theme enabled draws anew."
-  `(:underline (:color ,(or (face-foreground 'drover-cache-bar nil t) 'foreground-color)
+  `(:underline (:color ,(or (face-foreground 'opencode-cache-bar nil t) 'foreground-color)
                 :position t)))
 
 (defun drover-list--cache-label (remaining)
@@ -1526,7 +1502,7 @@ is drawn, which a theme enabled draws anew."
 It is text, as copyable as the rest of the line, which the cache timer
 replaces as time passes: its characters tell their part in the
 property `drover-list-cache', as `label'."
-  (propertize (drover-face (drover-format-duration remaining) 'drover-dim)
+  (propertize (drover-face (opencode-format-duration remaining) 'drover-dim)
               'drover-list-cache 'label 'help-echo #'drover-list--cache-help-echo))
 
 (defun drover-list--cache-cell (fraction remaining layout)
@@ -1542,7 +1518,7 @@ shown, see `drover-list--cache-help-echo'."
     (concat (propertize (drover-face " " drover-list--cache-fill)
                         'display `(space :width (,full))
                         'drover-list-cache 'full 'help-echo #'drover-list--cache-help-echo)
-            (propertize (drover-face " " 'drover-cache-trough)
+            (propertize (drover-face " " 'opencode-cache-trough)
                         'display `(space :width (,(- bar full)))
                         'drover-list-cache 'trough 'help-echo #'drover-list--cache-help-echo)
             (propertize " " 'drover-list-cache 'space 'help-echo #'drover-list--cache-help-echo)
@@ -1755,7 +1731,7 @@ properties it had, the section it belongs to included."
         (setq position (1+ position))))
     (when label
       (let* ((label-end (next-single-property-change label 'drover-list-cache nil end))
-             (text (if fraction (drover-format-duration remaining) "")))
+             (text (if fraction (opencode-format-duration remaining) "")))
         (unless (equal (buffer-substring-no-properties label label-end) text)
           (let ((properties (text-properties-at label)))
             (save-excursion
@@ -1802,7 +1778,7 @@ STATUS, their widths and the right of the cell they are drawn in.")
   "Animated glyphs drawn, as a list of (POSITION . KIND).
 POSITION is a marker at the character displaying the frame, the next
 one its pad: the time left of a prompt cache before it may change
-length.  KIND is their animation, of `drover-animations'.")
+length.  KIND is their animation, of `opencode-session-status-animations'.")
 
 (defun drover-list--collect-animated (&optional start end)
   "Return the animated glyphs of the current list, between START and END.
@@ -1823,14 +1799,14 @@ characters changes, and only where the frame did: neither the text nor
 the sections.  Glyphs out of sight, in a collapsed group, are left as
 they are until they show."
   (when (drover-list--current-p)
-    (when drover-list-animation-interval
+    (when opencode-session-status-animation-interval
       (let ((now (or now (drover-list--now)))
             (inhibit-read-only t))
         (with-silent-modifications
           (pcase-dolist (`(,position . ,kind) drover-list--animated)
             (pcase-let ((`(,strings ,widths ,width) (alist-get kind drover-list--frames)))
               (when strings
-                (let* ((index (drover-list--frame-index (length strings) now))
+                (let* ((index (opencode-session-status-frame-index (length strings) now))
                        (frame (nth index strings)))
                   (unless (or (invisible-p position)
                               (eq (get-text-property position 'display) frame))
@@ -2197,10 +2173,10 @@ branch's column leaves out."
       (fact 'context "Context" (when-let* ((context (drover-session-context-description session)))
                                  (string-replace "\n" "; " context))
             (pcase (car (drover-session-context-tier session))
-              ('over 'drover-context-over)
-              ('near 'drover-context-near)))
+              ('over 'opencode-context-over)
+              ('near 'opencode-context-near)))
       (fact 'created "Created" (when-let* ((created (drover-session-created session)))
-                                 (concat (drover-format-age created now) " ago")))
+                                 (concat (opencode-format-age created now) " ago")))
       (fact 'cache "Prompt cache" (and (not (drover-session-parent session))
                                        (drover-session-cache-description session now))))
     (nreverse facts)))
@@ -2226,8 +2202,8 @@ to one, cut.  FACE, if any, is that of TEXT."
                   (push (list label text (and part (drover-list--recap-lines part)) face) details))))
       (dolist (request (drover-session-requests session))
         (add (if (eq (plist-get request :kind) 'question) "Question" "Permission")
-             (plist-get request :summary) 'request 'drover-waiting))
-      (add (if (eq status 'retrying) "Retrying" "Error") problem 'error (drover-status-face status))
+             (plist-get request :summary) 'request 'opencode-session-status-waiting))
+      (add (if (eq status 'retrying) "Retrying" "Error") problem 'error (opencode-session-status-face status))
       (add "Prompt" (plist-get recap :prompt) 'prompt)
       (add "Reply" (plist-get recap :reply) 'reply)
       (when-let* ((changes (plist-get recap :changes)))
@@ -2402,9 +2378,9 @@ COUNTS is a hash table of the sessions of each status, see
                            (mapcar (lambda (status)
                                      (let ((count (gethash status counts 0)))
                                        (when (> count 0)
-                                         (concat (drover-list--icon (drover-status-glyph status))
+                                         (concat (drover-list--icon (opencode-session-status-glyph status))
                                                  (drover-face (format "%d" count)
-                                                              (drover-status-face status))))))
+                                                              (opencode-session-status-face status))))))
                                    drover-attention-statuses))))
     (string-join parts " ")))
 
@@ -2435,7 +2411,7 @@ whole."
                   (drover-list--group-icon (drover-list--group-value group)
                                            (drover-list--group-trees group)))
              (drover-face (drover-group-label grouping value)
-                          (cond ((eq grouping 'status) (list (drover-status-face value) 'drover-heading))
+                          (cond ((eq grouping 'status) (list (opencode-session-status-face value) 'drover-heading))
                                 ((and (null value) (not (eq grouping 'updated))) '(italic drover-heading))
                                 (t 'drover-heading)))
              (drover-list--count (drover-list--group-size group))
@@ -3891,14 +3867,14 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
                        (session (drover-list--row-session row)))
                    (unless (and inputs
                                 (equal (aref inputs 6)
-                                       (drover-format-age (drover-list--age-time session) now))
+                                       (opencode-format-age (drover-list--age-time session) now))
                                 (equal (aref inputs 7)
-                                       (drover-format-age (drover-session-created session) now))
+                                       (opencode-format-age (drover-session-created session) now))
                                 (eq (aref inputs 8)
                                     (and (drover-list--cache-fraction session now) t))
                                 (equal (aref inputs 10)
                                        (let ((archived (drover-session-archived session)))
-                                         (and (numberp archived) (drover-format-age archived now)))))
+                                         (and (numberp archived) (opencode-format-age archived now)))))
                      (push key keys))))
                (drover-list--model-rows model))
       (when (or keys bodies)
@@ -3973,19 +3949,12 @@ display, and the text of a cache's time left, never the sections."
                              (seq-some (lambda (buffer) (buffer-local-value 'drover-list--caches buffer))
                                        shown)
                              #'drover-list--cache-tick)
-    (drover-list--keep-timer 'drover-list--frame-timer drover-list-animation-interval
+    (drover-list--keep-timer 'drover-list--frame-timer opencode-session-status-animation-interval
                              (seq-some (lambda (buffer) (buffer-local-value 'drover-list--animated buffer))
                                        shown)
                              #'drover-list--frame-tick
-                             (and drover-list-animation-interval
-                                  (drover-list--frame-delay (drover-list--now))))))
-
-(defun drover-list--frame-delay (now)
-  "Return the seconds from NOW to the middle of the next frame.
-Ticking mid-frame, the timer never shows a frame twice or skips one
-when it runs a little late or early."
-  (let ((interval drover-list-animation-interval))
-    (- (* (+ (floor now interval) 1.5) interval) now)))
+                             (and opencode-session-status-animation-interval
+                                  (opencode-session-status-frame-delay (drover-list--now))))))
 
 ;;;; Windows
 
@@ -4093,8 +4062,8 @@ heading, its ellipsis included when cut."
 FACE is a value of the property `face'; the face of a state comes
 first, over the others, as `drover-list--title-text' puts it."
   (let* ((others (seq-remove (lambda (face)
-                               (memq face '(drover-active-session drover-shown-session
-                                                                  drover-open-session)))
+                               (memq face '(opencode-session-active opencode-session-shown
+                                                                    opencode-session-open)))
                              (ensure-list face)))
          (faces (delq nil (cons (drover-list--title-face state) others))))
     (if (cdr faces) faces (car faces))))
@@ -4175,7 +4144,7 @@ For `kill-buffer-hook', which runs while the buffer still lives."
 (defun drover-list--theme-changed (&rest _)
   "Measure text anew and redraw lists, a theme having been enabled or disabled.
 A theme may change fonts, which widths depend on, and the colour of
-`drover-cache-bar', which the lines of prompt caches are drawn in.  For
+`opencode-cache-bar', which the lines of prompt caches are drawn in.  For
 `enable-theme-functions' and `disable-theme-functions'."
   (drover-with-reporting "list theme"
     (dolist (buffer (drover-list--buffers))
@@ -4559,8 +4528,8 @@ show beside this one: each keeps its point and its expanded sessions;
 from it, sessions open in the window where you work.  The
 colour of a title tells where its session is: in a buffer no window
 shows, in a window, or in the window you work in, the faces
-`drover-open-session', `drover-shown-session' and
-`drover-active-session'.  The keys of `drover-session-map'
+`opencode-session-open', `opencode-session-shown' and
+`opencode-session-active'.  The keys of `drover-session-map'
 act on the session at point; \\[drover-toggle-subagents] shows every subagent, the active ones or
 none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 `drover-list'.

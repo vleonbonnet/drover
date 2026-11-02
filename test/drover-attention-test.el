@@ -26,7 +26,7 @@
   `(drover-test-with-backend ,sessions
                              (let ((global-mode-string nil)
                                    ;; Readable glyphs, whatever the defaults.
-                                   (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
+                                   (opencode-session-status-icons '((waiting . "⚑") (failed . "✗") (done . "✓")
                                                            (retrying . "↻") (working . "◐") (idle . "·")))
                                    (drover-attention-glyph "☺")
                                    (drover-attention-mode nil)
@@ -97,7 +97,7 @@
       ;; One face over the whole string, the space included, and the
       ;; whole of it clickable.
       (dotimes (index (length string))
-        (should (eq (get-text-property index 'face string) 'drover-waiting))
+        (should (eq (get-text-property index 'face string) 'opencode-session-status-waiting))
         (should (eq (get-text-property index 'local-map string) drover-attention-mode-line-map))
         (should (eq (get-text-property index 'mouse-face string) 'mode-line-highlight))
         (should (get-text-property index 'help-echo string))))))
@@ -108,12 +108,12 @@
                                     (drover-test-session "f" :status 'failed))
     (drover-attention-mode 1)
     (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "☺") 'drover-failed))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-failed))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "☺") 'opencode-session-status-failed))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-failed))
     (setq drover-test-sessions (list (drover-test-session "d" :status 'done)))
     (drover-backend-changed 'fake)
     (drover-changed-now)
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "1") 'drover-done))))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "1") 'opencode-session-status-done))))
 
 (ert-deftest drover-attention-test-format-follows-status-order ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
@@ -122,7 +122,7 @@
           (drover-status-order '(done waiting failed retrying working idle)))
       (drover-attention-mode 1)
       (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-      (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-done)))))
+      (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-done)))))
 
 (ert-deftest drover-attention-test-format-honours-statuses ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
@@ -167,7 +167,7 @@ count as it was; forcing every mode line costs tens of milliseconds."
           ;; Another status, the count the same, but in another face.
           (change "w" (lambda (session) (setf (drover-session-status session) 'failed)))
           (should (equal forced '(t)))
-          (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-failed))
+          (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-failed))
           ;; Nothing needing the user any more: the count goes.
           (setq drover-test-sessions nil)
           (setq forced nil)
@@ -196,7 +196,7 @@ count as it was; forcing every mode line costs tens of milliseconds."
     ;; None: the subagent waiting for the user still counts.
     (drover-set-show-subagents 'none)
     (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-waiting))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-waiting))
     (let ((help (drover-attention-test-help drover-attention-mode-line)))
       (should (string-match-p "Session asking" help))
       (should-not (string-match-p "Session ended\\|Session broke" help)))
@@ -232,7 +232,7 @@ count as it was; forcing every mode line costs tens of milliseconds."
   (let ((glyph (eval (car (get 'drover-attention-glyph 'standard-value)) t)))
     (should (equal glyph "\U0001F916"))
     (should (eq (get-char-code-property (aref glyph 0) 'general-category) 'So))
-    (should-not (rassoc glyph (eval (car (get 'drover-subagent-glyphs 'standard-value)) t)))))
+    (should-not (rassoc glyph (eval (car (get 'opencode-subagent-icons 'standard-value)) t)))))
 
 (ert-deftest drover-attention-test-mode-line-keeps-properties ()
   ;; The mode line drops the text properties of a variable not risky.
@@ -316,7 +316,7 @@ pixels; spaces displayed as stretches advance by their width."
           (should (equal spans '((0 16 "☺") (20 30 "2"))))))
       ;; Measured as the mode line draws: over its face.
       (should (equal (get-text-property 0 'face (car drover-attention-test-measured))
-                     '(drover-waiting mode-line)))
+                     '(opencode-session-status-waiting mode-line)))
       (should (= (length drover-attention-test-measured) 1))
       ;; Ink reaching 2 pixels left of its start and 25 past its advance,
       ;; more than a space: room before it, and a space as wide as needed.
@@ -330,7 +330,7 @@ pixels; spaces displayed as stretches advance by their width."
           (should (equal spans '((0 37 "☺") (37 47 "2")))))
         ;; The room belongs to the count: one face, clicks and tooltip.
         (dotimes (index (length string))
-          (should (eq (get-text-property index 'face string) 'drover-waiting))
+          (should (eq (get-text-property index 'face string) 'opencode-session-status-waiting))
           (should (eq (get-text-property index 'local-map string) drover-attention-mode-line-map))
           (should (get-text-property index 'help-echo string)))))))
 
@@ -634,7 +634,7 @@ what it received."
                                   (substring-no-properties waiting)))
           (should (string-match-p "· +2h\\'" (substring-no-properties idle)))
           (should (string-match-p "✗ dev +3[0-9]s  Boom\\'" (substring-no-properties failed)))
-          (should (eq (drover-attention-test-face-at waiting "⚑") 'drover-waiting))
+          (should (eq (drover-attention-test-face-at waiting "⚑") 'opencode-session-status-waiting))
           (should (eq (drover-attention-test-face-at waiting "drover:main") 'drover-dim))
           (should (eq (drover-attention-test-face-at waiting "5m") 'drover-dim))
           (should (eq (drover-attention-test-face-at waiting "permit") 'completions-annotations))

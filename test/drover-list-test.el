@@ -79,11 +79,11 @@ settings of the list are their defaults, and the clock stands still at
            (drover-status-order '(waiting failed done retrying working idle))
            ;; Readable glyphs, one column wide in every Emacs, whatever
            ;; the defaults, and still unless a test animates them.
-           (drover-status-glyphs '((waiting . "!") (failed . "✗") (done . "✓")
+           (opencode-session-status-icons '((waiting . "!") (failed . "✗") (done . "✓")
                                    (retrying . "↻") (working . "◐") (idle . "·")))
-           (drover-subagent-glyphs '((waiting . "?") (working . "*")))
-           (drover-animations '((working "1" "2" "3") (retrying "a" "b")))
-           (drover-list-animation-interval nil)
+           (opencode-subagent-icons '((waiting . "?") (working . "*")))
+           (opencode-session-status-animations '((working "1" "2" "3") (retrying "a" "b")))
+           (opencode-session-status-animation-interval nil)
            (drover-list-hidden-fields nil)
            (buffer nil))
        (cl-letf (((symbol-function 'drover-list--now) (lambda () drover-list-test-clock)))
@@ -778,7 +778,7 @@ sessions; which subagents show, the View menu tells."
     (let ((glyph (+ 2 (point))))
       (should (get-text-property (point) 'invisible))
       (should (equal (buffer-substring-no-properties glyph (1+ glyph)) "!"))
-      (should (eq (get-text-property glyph 'font-lock-face) 'drover-waiting)))
+      (should (eq (get-text-property glyph 'font-lock-face) 'opencode-session-status-waiting)))
     (search-forward "drover")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
     (search-forward "5m")
@@ -801,7 +801,7 @@ sessions; which subagents show, the View menu tells."
 (ert-deftest drover-list-test-wide-glyph-widens-every-cell ()
   "Every status glyph takes the room of the widest, so that titles line up."
   (drover-list-test-with (drover-list-test-family)
-    (setq-local drover-status-glyphs (cons '(waiting . "待") drover-status-glyphs))
+    (setq-local opencode-session-status-icons (cons '(waiting . "待") opencode-session-status-icons))
     (setq drover-show-subagents 'all)
     (revert-buffer)
     (should (equal (plist-get (drover-list--metrics 0) :status-cell) '(0 . 2)))
@@ -1181,7 +1181,7 @@ title; Magit's ellipsis takes 7 more."
       (let ((model (match-beginning 0))
             (effort (- (point) 4)))
         (should (eq (get-text-property model 'font-lock-face) 'drover-dim))
-        (should (eq (get-text-property effort 'font-lock-face) 'drover-prompt-picked))
+        (should (eq (get-text-property effort 'font-lock-face) 'opencode-setting-chosen))
         (should (equal (get-text-property effort 'help-echo) "Effort: high, chosen"))
         ;; The session's tooltip names them too.
         (should (equal (get-text-property model 'help-echo) "Alpha\nOpus 5.5 high"))))
@@ -1189,7 +1189,7 @@ title; Magit's ellipsis takes 7 more."
       (drover-list-test-goto "b")
       (search-forward "GPT-5.5 medium")
       (let ((effort (- (point) 6)))
-        (should (eq (get-text-property effort 'font-lock-face) 'drover-prompt-inherited))
+        (should (eq (get-text-property effort 'font-lock-face) 'opencode-setting-inherited))
         (should (equal (get-text-property effort 'help-echo) "Effort: medium, the model's default"))))
     ;; The line shows them: the details do not repeat them.
     (drover-list-test-goto "b")
@@ -1246,7 +1246,7 @@ and :help its tooltip."
                            (pcase (get-text-property index 'display text)
                              (`(space :width (,width)) width)))
                          (number-sequence 0 (1- (length text)))))
-         (bar (eq (get-text-property 1 'font-lock-face text) 'drover-cache-trough)))
+         (bar (eq (get-text-property 1 'font-lock-face text) 'opencode-cache-trough)))
     (list :x (car cell)
           :full (and bar (nth 0 widths)) :trough (and bar (nth 1 widths))
           :pad (and (not bar) (nth 0 widths))
@@ -1286,13 +1286,13 @@ and :help its tooltip."
         (should (equal (mapcar (lambda (cell) (plist-get cell :label)) (list a n o u))
                        '("50k" "186k" "1.2M" "8.4k")))
         (should (eq (plist-get a :label-face) 'drover-dim))
-        (should (eq (plist-get a :bar-face) 'drover-context-bar))
+        (should (eq (plist-get a :bar-face) 'opencode-context-bar))
         ;; Near the tier, in a warning; past it, in an error; the bar
         ;; in inverse video, the face's colour as its background.
-        (should (eq (plist-get n :label-face) 'drover-context-near))
-        (should (equal (plist-get n :bar-face) '((:inverse-video t) drover-context-near)))
-        (should (eq (plist-get o :label-face) 'drover-context-over))
-        (should (equal (plist-get o :bar-face) '((:inverse-video t) drover-context-over)))
+        (should (eq (plist-get n :label-face) 'opencode-context-near))
+        (should (equal (plist-get n :bar-face) '((:inverse-video t) opencode-context-near)))
+        (should (eq (plist-get o :label-face) 'opencode-context-over))
+        (should (equal (plist-get o :bar-face) '((:inverse-video t) opencode-context-over)))
         (should (equal (plist-get a :help) "Context: 50k of 200k tokens (25%)"))
         (should (equal (plist-get n :help)
                        "Context: 186k of 200k tokens (93%)\nNear 200k tokens, past which requests cost 2×"))
@@ -1503,12 +1503,12 @@ The cache holds 120k tokens of a prompt of 130k."
       (drover-list-test-goto "c")
       (let* ((full (text-property-any (point) (line-end-position) 'drover-list-cache 'full))
              (label (text-property-any (point) (line-end-position) 'drover-list-cache 'label)))
-        ;; The bar fills in the colour of `drover-cache-bar', in inverse
+        ;; The bar fills in the colour of `opencode-cache-bar', in inverse
         ;; video, which highlights setting a background leave alone.
-        (should (equal (get-text-property full 'face) '((:inverse-video t) drover-cache-bar)))
-        (should (equal (get-text-property full 'font-lock-face) '((:inverse-video t) drover-cache-bar)))
-        (should (eq (get-text-property (1+ full) 'face) 'drover-cache-trough))
-        (should (eq (get-text-property (1+ full) 'font-lock-face) 'drover-cache-trough))
+        (should (equal (get-text-property full 'face) '((:inverse-video t) opencode-cache-bar)))
+        (should (equal (get-text-property full 'font-lock-face) '((:inverse-video t) opencode-cache-bar)))
+        (should (eq (get-text-property (1+ full) 'face) 'opencode-cache-trough))
+        (should (eq (get-text-property (1+ full) 'font-lock-face) 'opencode-cache-trough))
         ;; The time left is text, which copying the line keeps.
         (should (string-suffix-p "4m" (buffer-substring-no-properties (point) (line-end-position))))
         (should-not (get-text-property label 'display))
@@ -1580,7 +1580,7 @@ The cache holds 120k tokens of a prompt of 130k."
 (ert-deftest drover-list-test-cache-label-keeps-glyphs-in-place ()
   "A time left changing length leaves the animated glyphs after it animated."
   (drover-list-test-with (drover-list-test-cached)
-    (setq drover-list-animation-interval 0.5)
+    (setq opencode-session-status-animation-interval 0.5)
     (revert-buffer)
     (let ((glyphs (mapcar (lambda (entry) (marker-position (car entry))) drover-list--animated)))
       (should (= (length glyphs) 3))
@@ -1593,7 +1593,7 @@ The cache holds 120k tokens of a prompt of 130k."
                      (cons (car glyphs) (mapcar #'1+ (cdr glyphs)))))
       ;; The next frame shows on the glyphs, not beside them.
       (let* ((time (+ drover-test-now 200.5))
-             (frame (nth (drover-list--frame-index 3 time) '("1" "2" "3"))))
+             (frame (nth (opencode-session-status-frame-index 3 time) '("1" "2" "3"))))
         (drover-list--draw-frames time)
         (dolist (entry drover-list--animated)
           (should (eq (get-text-property (car entry) 'drover-list-frame) 'working))
@@ -1631,9 +1631,9 @@ START and END bound its overlay."
           (should (= (nth 3 (car (last spec))) 293))
           (should (equal (car (last (seq-filter (lambda (item) (eq (nth 1 item) 'text)) spec)))
                          (list (nth 0 (car (last spec 2))) 'text 274 19 (drover-face "1m" 'drover-dim))))
-          ;; A line under the line, in the colour of `drover-cache-bar'.
+          ;; A line under the line, in the colour of `opencode-cache-bar'.
           (should (equal (overlay-get (plist-get (car drover-list--caches) :overlay) 'face)
-                         `(:underline (:color ,(or (face-foreground 'drover-cache-bar nil t)
+                         `(:underline (:color ,(or (face-foreground 'opencode-cache-bar nil t)
                                                    'foreground-color)
                                        :position t))))
           ;; The line's tooltip tells of the cache too, as it stands when
@@ -1945,7 +1945,7 @@ START and END bound its overlay."
     (search-forward "Permission")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
     (search-forward "bash: make")
-    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-waiting))
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'opencode-session-status-waiting))
     ;; Every line of the details begins with the invisible character.
     (should (get-text-property (line-beginning-position) 'invisible))
     ;; Point in the details still designates the session.
@@ -1987,7 +1987,7 @@ START and END bound its overlay."
                       "    Created   2h ago"))
         (should (string-match-p (concat "^" (regexp-quote line) "$") text))))
     (search-forward "Opus high")
-    (should (eq (get-text-property (- (point) 4) 'font-lock-face) 'drover-prompt-picked))))
+    (should (eq (get-text-property (- (point) 4) 'font-lock-face) 'opencode-setting-chosen))))
 
 (ert-deftest drover-list-test-details-in-a-narrow-window ()
   "With little room past the labels, texts go under their labels."
@@ -2086,7 +2086,7 @@ START and END bound its overlay."
       (should (string-match-p "^    Last turn +nothing to recap$" text)))
     (drover-list-test-goto "f")
     (search-forward "The provider")
-    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-failed))))
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'opencode-session-status-failed))))
 
 (ert-deftest drover-list-test-recap-fetched-once-per-change ()
   "A recap is fetched as its session expands, kept until the session changes."
@@ -2509,7 +2509,7 @@ Redraws keep point on the session."
   (drover-list-test-with (list (drover-test-session "live" :status 'working)
                                (drover-test-session "seen" :status 'idle :archived t))
     (let ((fetches nil)
-          (drover-archived-glyph "#"))
+          (opencode-archived-icon "#"))
       (setf (alist-get 'fake drover--backends)
             (append (list :archived (lambda (callback) (push callback fetches))
                           :unarchive (drover-test--recorder :unarchive))
@@ -3858,7 +3858,7 @@ Each shows its own buffer."
         (should (equal (buffer-name (window-buffer first)) "*session work*"))
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
         ;; The title of the session it shows tells so at once.
-        (should (eq (drover-list-test-title-face "work") 'drover-active-session))))))
+        (should (eq (drover-list-test-title-face "work") 'opencode-session-active))))))
 
 (ert-deftest drover-list-test-open-unsupported ()
   (drover-list-test-with nil
@@ -3910,7 +3910,7 @@ Each shows its own buffer."
         ;; The main window stays the same, and its session is the active one.
         (should (eq (drover-list--main-window) first))
         (drover-list--windows-changed)
-        (should (eq (drover-list-test-title-face "fail") 'drover-active-session))
+        (should (eq (drover-list-test-title-face "fail") 'opencode-session-active))
         (execute-kbd-macro (kbd "V F C-g"))
         (should-not drover-follow-mode)
         (execute-kbd-macro (kbd "n"))
@@ -3958,7 +3958,7 @@ Each shows its own buffer."
           ;; The selected window's, another window's, a buffer's no
           ;; window shows, and no buffer.
           (should (equal (drover-list-test-places "work" "ask" "done" "fail" "idle")
-                         '(drover-active-session drover-shown-session drover-open-session nil
+                         '(opencode-session-active opencode-session-shown opencode-session-open nil
                                                  drover-dim)))
           (let ((root magit-root-section))
             ;; Selecting another window changes two titles, in place.
@@ -3967,17 +3967,17 @@ Each shows its own buffer."
             (should (= (drover-list-test-counting-refaces (drover-list--windows-changed)) 2))
             (should (eq magit-root-section root))
             (should (equal (drover-list-test-places "work" "ask")
-                           '(drover-shown-session drover-active-session)))
+                           '(opencode-session-shown opencode-session-active)))
             ;; Selecting the list keeps the window selected before.
             (select-window side)
             (should (= (drover-list-test-counting-refaces (drover-list--windows-changed)) 0))
             (should (equal (drover-list-test-places "work" "ask")
-                           '(drover-shown-session drover-active-session)))
+                           '(opencode-session-shown opencode-session-active)))
             ;; A buffer leaving its window stays open; one coming shows.
             (set-window-buffer first (get-buffer "*session done*"))
             (should (= (drover-list-test-counting-refaces (drover-list--windows-changed)) 2))
             (should (equal (drover-list-test-places "work" "done")
-                           '(drover-open-session drover-shown-session)))
+                           '(opencode-session-open opencode-session-shown)))
             ;; Killing a buffer no window shows, after the kill.
             (kill-buffer "*session work*")
             (should (timerp drover-list--restyle-timer))
@@ -3988,13 +3988,13 @@ Each shows its own buffer."
             (set-window-buffer second (get-buffer-create "*session idle*"))
             (drover-list--windows-changed)
             (should (equal (drover-list-test-places "ask" "idle")
-                           '(drover-open-session (drover-active-session drover-dim))))
+                           '(opencode-session-open (opencode-session-active drover-dim))))
             (should (eq magit-root-section root))
             ;; A redraw finds the same places.
             (drover-list--render)
             (should (equal (drover-list-test-places "work" "ask" "done" "idle")
-                           '(nil drover-open-session drover-shown-session
-                                 (drover-active-session drover-dim))))))))))
+                           '(nil opencode-session-open opencode-session-shown
+                                 (opencode-session-active drover-dim))))))))))
 
 (ert-deftest drover-list-test-title-places-in-ordinary-window ()
   "In an ordinary window, the session of the window beside it is the active one."
@@ -4005,12 +4005,12 @@ Each shows its own buffer."
       (should (eq (window-buffer first) buffer))
       (set-window-buffer second (get-buffer-create "*session done*"))
       (drover-list--windows-changed)
-      (should (eq (drover-list-test-title-face "done") 'drover-active-session))
+      (should (eq (drover-list-test-title-face "done") 'opencode-session-active))
       ;; Selected, the session's window is.
       (select-window second)
       (set-buffer buffer)
       (drover-list--windows-changed)
-      (should (eq (drover-list-test-title-face "done") 'drover-active-session)))))
+      (should (eq (drover-list-test-title-face "done") 'opencode-session-active)))))
 
 (ert-deftest drover-list-test-title-places-nested-and-cut ()
   "A subagent's title, and a title cut to fit, change face whole, ellipsis included."
@@ -4024,15 +4024,15 @@ Each shows its own buffer."
       (with-current-buffer (window-buffer (drover-list--show-side))
         (set-window-buffer first (get-buffer-create "*session asking*"))
         (drover-list--windows-changed)
-        (should (equal (drover-list-test-places "parent" "asking") '(nil drover-active-session)))
+        (should (equal (drover-list-test-places "parent" "asking") '(nil opencode-session-active)))
         (save-excursion
           (drover-list-test-goto "asking")
           (search-forward (truncate-string-ellipsis) (line-end-position))
-          (should (eq (get-text-property (match-beginning 0) 'face) 'drover-active-session)))
+          (should (eq (get-text-property (match-beginning 0) 'face) 'opencode-session-active)))
         (set-window-buffer first (get-buffer-create "*session parent*"))
         (drover-list--windows-changed)
         (should (equal (drover-list-test-places "parent" "asking")
-                       '(drover-active-session drover-open-session)))))))
+                       '(opencode-session-active opencode-session-open)))))))
 
 (ert-deftest drover-list-test-title-place-changing-width-redraws ()
   "A face changing the width of a title redraws the list, so that lines fit."
@@ -4047,14 +4047,14 @@ Each shows its own buffer."
                      (lambda (string)
                        (+ (funcall width string)
                           (if (seq-some (lambda (index)
-                                          (memq 'drover-active-session
+                                          (memq 'opencode-session-active
                                                 (ensure-list (get-text-property index 'face string))))
                                         (number-sequence 0 (1- (length string))))
                               5 0)))))
             (set-window-buffer first (get-buffer-create "*session work*"))
             (drover-list--windows-changed)
             (should-not (eq magit-root-section root))
-            (should (eq (drover-list-test-title-face "work") 'drover-active-session))))))))
+            (should (eq (drover-list-test-title-face "work") 'opencode-session-active))))))))
 
 (ert-deftest drover-list-test-active-window ()
   "The window worked in is the selected one, else the one used last before."
@@ -4413,7 +4413,7 @@ activity first."
     (drover-list--windows-changed)
     (dolist (list (list sidebar buffer))
       (with-current-buffer list
-        (should (eq (drover-list-test-title-face "done") 'drover-active-session))))
+        (should (eq (drover-list-test-title-face "done") 'opencode-session-active))))
     ;; Another session shown, the user working in a list: the window
     ;; selected before stays the one worked in.
     (select-window side)
@@ -4422,8 +4422,8 @@ activity first."
     (drover-list--windows-changed)
     (dolist (list (list sidebar buffer))
       (with-current-buffer list
-        (should (eq (drover-list-test-title-face "fail") 'drover-active-session))
-        (should (eq (drover-list-test-title-face "done") 'drover-open-session))))))
+        (should (eq (drover-list-test-title-face "fail") 'opencode-session-active))
+        (should (eq (drover-list-test-title-face "done") 'opencode-session-open))))))
 
 (ert-deftest drover-list-test-two-lists-menu-targets ()
   "The menu acts on the list it opens in, else on the list used last."
@@ -4500,8 +4500,8 @@ The one waiting to retry is a subagent of the working one."
            (working (save-excursion (search-forward "*") (match-beginning 0)))
            (help (concat "1 subagent waiting for you: Session a\n"
                          "2 subagents working: Session r, Session w")))
-      (should (eq (get-text-property waiting 'font-lock-face) 'drover-waiting))
-      (should (eq (get-text-property working 'font-lock-face) 'drover-working))
+      (should (eq (get-text-property waiting 'font-lock-face) 'opencode-session-status-waiting))
+      (should (eq (get-text-property working 'font-lock-face) 'opencode-session-status-working))
       ;; Its tooltip names them, most urgent first, and counts them.
       (should (equal (get-text-property waiting 'help-echo) help))
       (should (equal (get-text-property working 'help-echo) help))
@@ -4679,15 +4679,15 @@ The subagent's glyph stands under its parent's title."
                     ;; One face over the whole title.
                     (should (= (next-single-property-change start 'face nil (point)) (point)))
                     (get-text-property start 'face)))))
-      (should (eq (title-face "work" "Session work") 'drover-open-session))
+      (should (eq (title-face "work" "Session work") 'opencode-session-open))
       ;; Over the dimming of idle sessions, which lends what it lacks.
-      (should (equal (title-face "idle" "Idle and open") '(drover-open-session drover-dim)))
+      (should (equal (title-face "idle" "Idle and open") '(opencode-session-open drover-dim)))
       (should-not (title-face "shut" "Session shut"))
       ;; Only the title: the glyph keeps the face of its status.
       (save-excursion
         (drover-list-test-goto "work")
         (search-forward "◐")
-        (should (eq (get-text-property (match-beginning 0) 'face) 'drover-working)))
+        (should (eq (get-text-property (match-beginning 0) 'face) 'opencode-session-status-working)))
       ;; Closing a buffer is a change its backend reports: the list,
       ;; shown, redraws.
       (drover-list-test-shown
@@ -4695,7 +4695,7 @@ The subagent's glyph stands under its parent's title."
         (drover-backend-changed 'fake "work")
         (drover-changed-now)
         (should-not (title-face "work" "Session work"))
-        (should (equal (title-face "idle" "Idle and open") '(drover-open-session drover-dim)))))
+        (should (equal (title-face "idle" "Idle and open") '(opencode-session-open drover-dim)))))
     ;; A title cut to fit keeps the face up to its ellipsis.
     (drover-list-test-with-font
       (let ((drover-list-test-width 150))
@@ -4704,26 +4704,26 @@ The subagent's glyph stands under its parent's title."
           (drover-list-test-goto "idle")
           (search-forward (truncate-string-ellipsis) (line-end-position))
           (should (equal (get-text-property (match-beginning 0) 'face)
-                         '(drover-open-session drover-dim))))))))
+                         '(opencode-session-open drover-dim))))))))
 
 ;;;; Places
 
 (ert-deftest drover-list-test-current-face-obsolete ()
   "The face of the former highlight of the main window's session stands for the active title."
-  (should (eq (get 'drover-list-current 'face-alias) 'drover-active-session))
+  (should (eq (get 'drover-list-current 'face-alias) 'opencode-session-active))
   (should (get 'drover-list-current 'obsolete-face)))
 
 (ert-deftest drover-list-test-title-faces-are-themes ()
   "The faces of places inherit sibling faces of font lock, none of a status."
-  (should (equal (face-attribute 'drover-open-session :inherit nil t) 'font-lock-keyword-face))
-  (should (equal (face-attribute 'drover-shown-session :inherit nil t) 'font-lock-type-face))
-  (should (equal (face-attribute 'drover-active-session :inherit nil t) 'font-lock-function-name-face))
+  (should (equal (face-attribute 'opencode-session-open :inherit nil t) 'font-lock-keyword-face))
+  (should (equal (face-attribute 'opencode-session-shown :inherit nil t) 'font-lock-type-face))
+  (should (equal (face-attribute 'opencode-session-active :inherit nil t) 'font-lock-function-name-face))
   (dolist (status drover-status-order)
-    (should-not (memq (face-attribute (drover-status-face status) :inherit nil t)
+    (should-not (memq (face-attribute (opencode-session-status-face status) :inherit nil t)
                       '(font-lock-type-face font-lock-function-name-face)))))
 
 (ert-deftest drover-list-test-cache-line-follows-theme ()
-  "The line of a prompt cache takes the colour of `drover-cache-bar', anew with a theme."
+  "The line of a prompt cache takes the colour of `opencode-cache-bar', anew with a theme."
   (drover-list-test-with
       (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 60)
                                  :requests '((:kind question :summary "Go?"))
@@ -4732,7 +4732,7 @@ The subagent's glyph stands under its parent's title."
         (drover-list-test-with-font
           (let ((drover-list-test-width 300))
             (drover-list-test-shown
-              (set-face-attribute 'drover-cache-bar nil :foreground "red")
+              (set-face-attribute 'opencode-cache-bar nil :foreground "red")
               (revert-buffer)
               (should (eq drover-list--layout 'narrow))
               (cl-flet ((color ()
@@ -4741,12 +4741,12 @@ The subagent's glyph stands under its parent's title."
                                                 :underline)
                                      :color)))
                 (should (equal (color) "red"))
-                (set-face-attribute 'drover-cache-bar nil :foreground "blue")
+                (set-face-attribute 'opencode-cache-bar nil :foreground "blue")
                 ;; A theme enabled redraws the list in the new colour.
                 (should (memq #'drover-list--theme-changed enable-theme-functions))
                 (run-hook-with-args 'enable-theme-functions 'some-theme)
                 (should (equal (color) "blue"))))))
-      (set-face-attribute 'drover-cache-bar nil :foreground 'unspecified))))
+      (set-face-attribute 'opencode-cache-bar nil :foreground 'unspecified))))
 
 ;;;; Animated glyphs
 
@@ -4759,8 +4759,8 @@ The subagent's glyph stands under its parent's title."
               (drover-list-test-titled "r" "Retry" :status 'retrying :project "q"
                                        :updated (drover-list-test-ago 7))
               (drover-list-test-titled "i" "Idle" :status 'idle :project "p"))
-      (let ((drover-list-animation-interval 1)
-            (drover-animations '((working "i" "m" "x") (retrying "ii" "m")))
+      (let ((opencode-session-status-animation-interval 1)
+            (opencode-session-status-animations '((working "i" "m" "x") (retrying "ii" "m")))
             (drover-list-collapsed-groups nil))
         ;; 1800000000 seconds: frame 0 of three, 0 of two.
         (revert-buffer)
@@ -4780,9 +4780,9 @@ The subagent's glyph stands under its parent's title."
                     (width (id) (drover-list-test-fake-width (cdr (car (drover-list-test-cells id))))))
             ;; The frame, then a stretch up to the widest frame, 12 pixels.
             (should (equal (frame "w") '("i" (space :width (9)) working)))
-            (should (eq (get-text-property 0 'face (car (frame "w"))) 'drover-working))
+            (should (eq (get-text-property 0 'face (car (frame "w"))) 'opencode-session-status-working))
             (should (equal (frame "r") '("ii" (space :width (6)) retrying)))
-            (should (eq (get-text-property 0 'face (car (frame "r"))) 'drover-retrying))
+            (should (eq (get-text-property 0 'face (car (frame "r"))) 'opencode-session-status-retrying))
             ;; Still glyphs stay still.
             (should-not (save-excursion (drover-list-test-goto "i")
                                         (text-property-not-all (point) (line-end-position)
@@ -4813,8 +4813,8 @@ The subagent's glyph stands under its parent's title."
                                (drover-test-session "a" :parent "p" :status 'waiting)
                                (drover-test-session "w" :parent "p" :status 'working))
     ;; Frames for subagents, as the option once took, animate nothing.
-    (let ((drover-list-animation-interval 1)
-          (drover-animations '((working "1" "2" "3") (subagents "+" "*")))
+    (let ((opencode-session-status-animation-interval 1)
+          (opencode-session-status-animations '((working "1" "2" "3") (subagents "+" "*")))
           (drover-show-subagents 'none))
       (revert-buffer)
       (should (string-prefix-p "  1 ? * Session p" (drover-list-test-heading "p")))
@@ -4826,13 +4826,13 @@ The subagent's glyph stands under its parent's title."
 
 (ert-deftest drover-list-test-default-animations ()
   "By default, only status glyphs move, each frame close to the one before."
-  (let ((animations (eval (car (get 'drover-animations 'standard-value)) t)))
+  (let ((animations (eval (car (get 'opencode-session-status-animations 'standard-value)) t)))
     (should (equal (mapcar #'car animations) '(working retrying)))
     ;; The phases of the moon in order; the hourglass blinked.
     (should (equal (alist-get 'working animations)
                    '("\U000F0F64" "\U000F0F67" "\U000F0F61" "\U000F0F68"
                      "\U000F0F62" "\U000F0F66" "\U000F0F63" "\U000F0F65")))
-    (should (= (eval (car (get 'drover-list-animation-interval 'standard-value)) t)
+    (should (= (eval (car (get 'opencode-session-status-animation-interval 'standard-value)) t)
                0.15))
     ;; Four filled clocks, the hand alone turning.
     (should (equal (alist-get 'retrying animations)
@@ -4846,8 +4846,8 @@ The subagent's glyph stands under its parent's title."
                                  :cache-expires (+ drover-test-now 300) :cache-ttl 300))
     (drover-list-test-with-font
       (let ((drover-list-test-width 300)
-            (drover-list-animation-interval 1)
-            (drover-animations '((working "i" "m"))))
+            (opencode-session-status-animation-interval 1)
+            (opencode-session-status-animations '((working "i" "m"))))
         (revert-buffer)
         (should (eq drover-list--layout 'narrow))
         (let* ((glyph (car (car drover-list--animated)))
@@ -4889,7 +4889,7 @@ The subagent's glyph stands under its parent's title."
 (ert-deftest drover-list-test-animation-skips-hidden-glyphs ()
   "Glyphs out of sight keep their frame until they show."
   (drover-list-test-with (list (drover-test-session "w" :status 'working))
-    (let ((drover-list-animation-interval 1))
+    (let ((opencode-session-status-animation-interval 1))
       (revert-buffer)
       (drover-list-test-goto-group 'working)
       (magit-section-hide (magit-current-section))
@@ -4905,7 +4905,7 @@ The subagent's glyph stands under its parent's title."
 (ert-deftest drover-list-test-animation-timer ()
   "The frame timer runs while a shown list animates a glyph, and only then."
   (drover-list-test-with (list (drover-test-session "w" :status 'working))
-    (let ((drover-list-animation-interval 0.5))
+    (let ((opencode-session-status-animation-interval 0.5))
       ;; Hidden: no timer.
       (drover-list-test-refresh)
       (should drover-list--animated)
@@ -4915,9 +4915,9 @@ The subagent's glyph stands under its parent's title."
         (should (timerp drover-list--frame-timer))
         (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
         ;; It ticks mid-frame, so that a late tick shows no frame twice.
-        (should (< (abs (- (drover-list--frame-delay 10.1) 0.65)) 1e-9))
-        (should (< (abs (- (drover-list--frame-delay 10.0) 0.75)) 1e-9))
-        (should (< (abs (- (drover-list--frame-delay 10.49) 0.26)) 1e-9))
+        (should (< (abs (- (opencode-session-status-frame-delay 10.1) 0.65)) 1e-9))
+        (should (< (abs (- (opencode-session-status-frame-delay 10.0) 0.75)) 1e-9))
+        (should (< (abs (- (opencode-session-status-frame-delay 10.49) 0.26)) 1e-9))
         ;; A tick shows the next frame.
         (setq drover-list-test-clock (+ drover-test-now 0.5))
         (drover-list--frame-tick)
@@ -5403,7 +5403,7 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
            (cut (drover-list--truncate text 70)))
       (should (string-suffix-p "… high" cut))
       (should (<= (drover-list-test-fake-width cut) 70))
-      (should (eq (get-text-property (1- (length cut)) 'font-lock-face cut) 'drover-prompt-picked))
+      (should (eq (get-text-property (1- (length cut)) 'font-lock-face cut) 'opencode-setting-chosen))
       ;; Too narrow even for that: cut as any text.
       (should (equal (drover-list--truncate text 21) "Cl…"))
       ;; An effort alone is cut as any text.
@@ -5485,7 +5485,7 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
             (drover-test-session "c" :status 'working :agent "Coder" :updated (drover-list-test-ago 20)
                                  :agent-display (propertize "Code" 'face '(bold (:foreground "#ff8800"))
                                                             'help-echo "Agent: Code")))
-    (let ((drover-agent-faces '(font-lock-keyword-face font-lock-type-face)))
+    (let ((opencode-agent-faces '(font-lock-keyword-face font-lock-type-face)))
       (revert-buffer)
       (should (string-match-p "Session b +@build +10s\\'" (drover-list-test-heading "b")))
       (should (string-match-p "Session c +@Code +20s\\'" (drover-list-test-heading "c")))
@@ -5494,7 +5494,7 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
         (search-forward "@build")
         (let ((face (get-text-property (match-beginning 0) 'font-lock-face)))
           (should (equal face (list 'bold (drover-agent-face "build"))))
-          (should (memq (cadr face) drover-agent-faces))
+          (should (memq (cadr face) opencode-agent-faces))
           ;; The @ and the name read as one word.
           (should (equal (get-text-property (1+ (match-beginning 0)) 'font-lock-face) face))
           (should (equal (get-text-property (match-beginning 0) 'help-echo) "Agent: build"))))

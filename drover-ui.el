@@ -22,17 +22,22 @@
 
 ;; Every view of sessions (the list, completion) draws them
 ;; with the same glyphs, faces and labels, measures text the same way,
-;; and describes the filter in force the same way.  The commands and
-;; keys every view shares are in `drover-keys'.
+;; and describes the filter in force the same way.  The glyphs, faces,
+;; animations and formats are opencode.el's (opencode-look.el), which
+;; its own mode line and pickers draw with: drover keeps no look of its
+;; own, for any backend, and its former options and faces are obsolete
+;; aliases of those.  The commands and keys every view shares are in
+;; `drover-keys'.
 
 ;;; Code:
 
 (require 'cl-lib)
 (require 'drover-core)
 (require 'face-remap)
+(require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 2))
   (load "drover-core" nil t))
 
 (defgroup drover-faces nil
@@ -40,29 +45,11 @@
   :group 'drover
   :group 'faces)
 
-(defface drover-waiting '((t :inherit warning :weight bold))
-  "Face of sessions waiting for the user."
-  :group 'drover-faces)
+;; Those of sessions are opencode.el's, which drover draws with.
+(custom-add-to-group 'drover-faces 'opencode-faces 'custom-group)
 
-(defface drover-failed '((t :inherit error))
-  "Face of sessions whose turn failed."
-  :group 'drover-faces)
-
-(defface drover-done '((t :inherit success))
-  "Face of sessions whose turn ended unseen."
-  :group 'drover-faces)
-
-(defface drover-retrying '((t :inherit warning))
-  "Face of sessions waiting to retry."
-  :group 'drover-faces)
-
-(defface drover-working '((t :inherit font-lock-keyword-face))
-  "Face of running sessions."
-  :group 'drover-faces)
-
-(defface drover-idle '((t :inherit shadow))
-  "Face of idle sessions."
-  :group 'drover-faces)
+;; Drover's own: the headings of groups and the secondary details of
+;; lists, which opencode.el has no list to show.
 
 (defface drover-heading '((t :inherit bold))
   "Face of group headings."
@@ -71,112 +58,6 @@
 (defface drover-dim '((t :inherit shadow))
   "Face of secondary details, such as directories and ages."
   :group 'drover-faces)
-
-;; The title of a session tells where it is in Emacs: in no buffer, in a
-;; buffer no window shows, in a window, or in the window the user works
-;; in.  The three faces inherit sibling faces of font lock, which themes
-;; tell apart from one another and from the default foreground, and
-;; which no status takes but `drover-working', a glyph rather than a
-;; title: `success', `warning' and `error' would read as a status.
-
-(defface drover-open-session '((t :inherit font-lock-keyword-face))
-  "Face of the titles of sessions open in a buffer no window shows.
-It goes over the other faces of a title, such as the dimming of idle
-sessions, which keep the attributes it does not set.  See also
-`drover-shown-session' and `drover-active-session'."
-  :group 'drover-faces)
-
-(defface drover-shown-session '((t :inherit font-lock-type-face))
-  "Face of the titles of sessions shown in a window of a visible frame.
-As `drover-open-session', it goes over the other faces of a title."
-  :group 'drover-faces)
-
-(defface drover-active-session '((t :inherit font-lock-function-name-face))
-  "Face of the title of the session of the window the user works in.
-That is the selected window, or, while a list of sessions or the
-minibuffer is selected, the window selected before.  It inherits the
-face `which-function-mode' names the definition point is in with: where
-the user is.  As `drover-open-session', it goes over the other faces of
-a title."
-  :group 'drover-faces)
-
-(defface drover-cache-bar '((t :inherit success))
-  "Face of the part of a prompt cache's lifetime still left.
-Its foreground draws the bar: short bars fill with it, in inverse video,
-and the line of a session in two lines is underlined in it, so that the
-bar shows over the highlight of the current line and the region, which
-change only the background.  It inherits `success': the cache is still
-there to save the next turn's cost."
-  :group 'drover-faces)
-
-(defface drover-cache-trough '((t :inherit drover-dim :underline t))
-  "Face of the part of a prompt cache's lifetime already gone, in short bars.
-It shows how long the bar would be, without drawing attention."
-  :group 'drover-faces)
-
-(defface drover-context-bar
-  '((((class color) (min-colors 88) (background light)) :background "#ebe3f2")
-    (((class color) (min-colors 88) (background dark)) :background "#382d45")
-    (((class color)) :background "magenta")
-    (t :underline t))
-  "Face of the part of a model's context a session's context fills, in short bars.
-Only a background, subtle beside the prompt cache's bar, which takes
-the colour of `drover-cache-bar', so that the two bars of a line are
-told apart."
-  :group 'drover-faces)
-
-(defface drover-context-near '((t :inherit warning))
-  "Face of a context size nearing a long-context price tier.
-Bars draw it in inverse video: its foreground as their background."
-  :group 'drover-faces)
-
-(defface drover-context-over '((t :inherit error))
-  "Face of a context size past a long-context price tier, whose requests cost more.
-Bars draw it in inverse video: its foreground as their background."
-  :group 'drover-faces)
-
-(defface drover-prompt-picked '((t :inherit success))
-  "Face of a setting the user chose, such as the model or the effort.
-The prompt's header and pickers show settings in it or in
-`drover-prompt-inherited', and session lists the effort a session runs."
-  :group 'drover-faces)
-
-(defface drover-prompt-inherited '((t :inherit shadow))
-  "Face of a setting inherited rather than chosen, such as a default effort.
-The prompt shows in it what a new session would inherit, and session
-lists the effort a session runs by default."
-  :group 'drover-faces)
-
-(defcustom drover-status-glyphs
-  '((waiting . "\U000F02D7")            ; nf-md-help_circle
-    (failed . "\uf057")                 ; nf-fa-times_circle
-    (done . "\U000F05E0")               ; nf-md-check_circle
-    (retrying . "\uf021")               ; nf-fa-refresh
-    (working . "\U000F051F")            ; nf-md-timer_sand
-    (idle . "\uf10c"))                  ; nf-fa-circle_o
-  "Glyph of each session status, Nerd Font icons by default.
-Session lists animate some of them; see `drover-animations'."
-  :type '(alist :key-type symbol :value-type string)
-  :group 'drover)
-
-(defcustom drover-subagent-glyphs
-  '((waiting . "\U000F169F")            ; nf-md-robot_confused
-    (working . "\U000F06A9"))           ; nf-md-robot
-  "Glyphs telling that subagents of a session are in the middle of a turn.
-Session lists show them beside the status of the session, shown or
-not: `waiting' when subagents wait for you, `working' when subagents
-work or wait to retry.  They stay still and tell no number, which their
-tooltip tells.  Nerd Font icons by default."
-  :type '(alist :key-type (choice (const waiting) (const working)) :value-type string)
-  :group 'drover)
-
-(defcustom drover-archived-glyph "\U000F003C" ; nf-md-archive
-  "Glyph telling that a session is archived.
-Session lists show archived sessions, while they show them at all (see
-`drover-show-archived'), with it after their status, their title
-dimmed.  A Nerd Font icon by default."
-  :type 'string
-  :group 'drover)
 
 (defcustom drover-attention-glyph "\U0001F916" ; robot face
   "Glyph before the count of sessions needing you, in the mode line.
@@ -190,109 +71,73 @@ off the count."
   :type 'string
   :group 'drover)
 
-(defcustom drover-animations
-  ;; nf-md-moon_new, waxing_crescent, first_quarter, waxing_gibbous,
-  ;; full, waning_gibbous, last_quarter, waning_crescent
-  '((working "\U000F0F64" "\U000F0F67" "\U000F0F61" "\U000F0F68"
-             "\U000F0F62" "\U000F0F66" "\U000F0F63" "\U000F0F65")
-    (retrying "\U000F144A" "\U000F1441" "\U000F1444" "\U000F1447")) ; nf-md-clock_time_twelve, three, six, nine
-  "Frames of the status glyphs session lists animate, shown in turn.
-Each entry is (KIND FRAME...), each FRAME a string.  KIND is `working'
-or `retrying': sessions of that status show the frames in place of
-their glyph of `drover-status-glyphs'.  A kind without frames stays
-still.  Each frame takes the room of the widest, so that nothing after
-it moves.  Nerd Font icons by default: the phases of the moon, and a
-clock whose hand turns.  Each frame differs little from the one before,
-so the cycle reads as motion; a lone frame much darker or lighter than
-the others, such as a full hourglass among outlined ones, reads as a
-blink.
-`drover-list-animation-interval' sets the pace, or stops every
-animation."
-  :type '(alist :key-type (choice (const working) (const retrying))
-                :value-type (repeat string))
-  :group 'drover)
+;;;; The look of opencode.el
+
+;; Drover's former options and faces name opencode.el's now.  A value
+;; one of them got before this file loaded, as a configuration setting
+;; them first does, or an older drover reloaded over left, would be
+;; lost to the alias: a customized one goes to opencode.el's first.
+
+(drover--adopt-option 'drover-status-glyphs 'opencode-session-status-icons)
+(define-obsolete-variable-alias 'drover-status-glyphs 'opencode-session-status-icons "0.2.0")
+(drover--adopt-option 'drover-animations 'opencode-session-status-animations)
+(define-obsolete-variable-alias 'drover-animations 'opencode-session-status-animations "0.2.0")
+(drover--adopt-option 'drover-subagent-glyphs 'opencode-subagent-icons)
+(define-obsolete-variable-alias 'drover-subagent-glyphs 'opencode-subagent-icons "0.2.0")
+(drover--adopt-option 'drover-archived-glyph 'opencode-archived-icon)
+(define-obsolete-variable-alias 'drover-archived-glyph 'opencode-archived-icon "0.2.0")
+;; Its standard value, nil, meant opencode.el's faces, the only ones now.
+(drover--adopt-option 'drover-agent-faces 'opencode-agent-faces)
+(define-obsolete-variable-alias 'drover-agent-faces 'opencode-agent-faces "0.2.0")
+(when (and (boundp 'drover-status-labels)
+           (not (eq (indirect-variable 'drover-status-labels) 'opencode-session-status-labels)))
+  (makunbound 'drover-status-labels))
+(define-obsolete-variable-alias 'drover-status-labels 'opencode-session-status-labels "0.2.0")
+
+(define-obsolete-face-alias 'drover-waiting 'opencode-session-status-waiting "0.2.0")
+(define-obsolete-face-alias 'drover-failed 'opencode-session-status-failed "0.2.0")
+(define-obsolete-face-alias 'drover-done 'opencode-session-status-done "0.2.0")
+(define-obsolete-face-alias 'drover-retrying 'opencode-session-status-retrying "0.2.0")
+(define-obsolete-face-alias 'drover-working 'opencode-session-status-working "0.2.0")
+(define-obsolete-face-alias 'drover-idle 'opencode-session-status-idle "0.2.0")
+(define-obsolete-face-alias 'drover-open-session 'opencode-session-open "0.2.0")
+(define-obsolete-face-alias 'drover-shown-session 'opencode-session-shown "0.2.0")
+(define-obsolete-face-alias 'drover-active-session 'opencode-session-active "0.2.0")
+(define-obsolete-face-alias 'drover-cache-bar 'opencode-cache-bar "0.2.0")
+(define-obsolete-face-alias 'drover-cache-trough 'opencode-cache-trough "0.2.0")
+(define-obsolete-face-alias 'drover-context-bar 'opencode-context-bar "0.2.0")
+(define-obsolete-face-alias 'drover-context-near 'opencode-context-near "0.2.0")
+(define-obsolete-face-alias 'drover-context-over 'opencode-context-over "0.2.0")
+(define-obsolete-face-alias 'drover-prompt-picked 'opencode-setting-chosen "0.2.0")
+(define-obsolete-face-alias 'drover-prompt-inherited 'opencode-setting-inherited "0.2.0")
+
+(define-obsolete-function-alias 'drover-status-face #'opencode-session-status-face "0.2.0")
+(define-obsolete-function-alias 'drover-status-label #'opencode-session-status-label "0.2.0")
+(define-obsolete-function-alias 'drover-status-glyph #'opencode-session-status-glyph "0.2.0")
+(define-obsolete-function-alias 'drover-format-duration #'opencode-format-duration "0.2.0")
+(define-obsolete-function-alias 'drover-format-age #'opencode-format-age "0.2.0")
+(define-obsolete-function-alias 'drover-format-tokens #'opencode-format-tokens "0.2.0")
 
 (defconst drover-subagent-mode-labels
   '((all . "all") (active . "active") (none . "none"))
   "Display name of each mode of `drover-subagent-modes'.")
 
-(defconst drover-status-labels
-  '((waiting . "Needs you") (failed . "Failed") (done . "Done") (retrying . "Retrying")
-    (working . "Working") (idle . "Idle"))
-  "Display name of each session status.")
-
-(defun drover-status-face (status)
-  "Return the face of STATUS."
-  (pcase status
-    ('waiting 'drover-waiting) ('failed 'drover-failed) ('done 'drover-done)
-    ('retrying 'drover-retrying) ('working 'drover-working) (_ 'drover-idle)))
-
-(defun drover-status-label (status)
-  "Return the display name of STATUS."
-  (or (alist-get status drover-status-labels) (capitalize (symbol-name status))))
-
-(defun drover-face (string face)
+(defalias 'drover-face #'opencode-face-string
   "Return STRING shown in FACE, whether or not font lock runs in its buffer.
 Font lock replaces `face' properties with its own in buffers where it
-runs, such as `magit-section-mode' ones, and keeps `font-lock-face'."
-  (propertize string 'face face 'font-lock-face face))
-
-(defun drover-status-glyph (status)
-  "Return the glyph of STATUS in its face."
-  (drover-face (or (alist-get status drover-status-glyphs) "?")
-               (drover-status-face status)))
-
-(defun drover-format-duration (seconds)
-  "Return SECONDS as \"42s\", \"5m\", \"3h\" or \"2d\", rounded down.
-A negative duration counts as none."
-  (let ((seconds (max 0 seconds)))
-    (cond ((< seconds 60) (format "%ds" seconds))
-          ((< seconds 3600) (format "%dm" (/ seconds 60)))
-          ((< seconds 86400) (format "%dh" (/ seconds 3600)))
-          (t (format "%dd" (/ seconds 86400))))))
-
-(defun drover-format-age (time &optional now)
-  "Return the age of TIME, a float time, as \"42s\", \"5m\", \"3h\" or \"2d\".
-NOW defaults to the current time.  Return \"\" for a nil TIME."
-  (if (null time)
-      ""
-    (drover-format-duration (- (or now (float-time)) time))))
-
-(defun drover-format-tokens (tokens)
-  "Return a count of TOKENS as \"950\", \"8.4k\", \"182k\" or \"1.2M\".
-Counts of thousands and millions keep one decimal below ten, none
-from ten on; a decimal of zero is dropped."
-  (cl-flet ((scaled (value unit)
-              (if (< value 9.95)
-                  (concat (string-remove-suffix ".0" (format "%.1f" value)) unit)
-                (format "%d%s" (round value) unit))))
-    (cond ((< tokens 1000) (format "%d" tokens))
-          ((< tokens 999500) (scaled (/ tokens 1000.0) "k"))
-          (t (scaled (/ tokens 1000000.0) "M")))))
+runs, such as `magit-section-mode' ones, and keeps `font-lock-face'.")
 
 (defun drover-session-context-description (session)
   "Return what the context of SESSION fills, for tooltips and details, or nil.
 Such as \"182k of 200k tokens (91%)\", then, on lines of their own,
-whether the size is an estimate and the price tier it nears or passes.
-A size the service estimated after a compaction, which the next step
-measures, begins with \"~\".  Nil when the size is unknown."
+whether the size is an estimate and the price tier it nears or passes,
+as `opencode-context-description' tells them for opencode.el's mode
+line.  A size the service estimated after a compaction, which the next
+step measures, begins with \"~\".  Nil when the size is unknown."
   (when-let* ((tokens (drover-session-context-tokens session)))
-    (let ((limit (drover-session-context-limit session))
-          (fraction (drover-session-context-fraction session))
-          (estimated (drover-session-context-estimated session)))
-      (concat (and estimated "~")
-              (drover-format-tokens tokens)
-              (and limit (concat " of " (drover-format-tokens limit)))
-              " tokens"
-              (and fraction (format " (%d%%)" (round (* 100 fraction))))
-              (and estimated "\nEstimated by the service after compaction; the next step measures it")
-              (pcase (drover-session-context-tier session)
-                (`(over ,size ,label)
-                 (format "\n%s %s tokens: requests cost %s"
-                         (if estimated "Estimated past" "Past") (drover-format-tokens size) label))
-                (`(near ,size ,label)
-                 (format "\n%s %s tokens, past which requests cost %s"
-                         (if estimated "Estimated near" "Near") (drover-format-tokens size) label)))))))
+    (opencode-context-description tokens (drover-session-context-limit session)
+                                  (drover-session-context-tier session)
+                                  (drover-session-context-estimated session))))
 
 (defun drover-session-cache-description (session &optional now)
   "Return how the prompt cache of SESSION stands at NOW, or nil when not live.
@@ -302,11 +147,11 @@ defaults to the current time."
     (let ((ttl (drover-session-cache-ttl session))
           (tokens (drover-session-cache-tokens session))
           (prompt (drover-session-cache-prompt-tokens session)))
-      (concat "expires in " (drover-format-duration remaining)
-              (and (numberp ttl) (format " (%s window)" (drover-format-duration ttl)))
+      (concat "expires in " (opencode-format-duration remaining)
+              (and (numberp ttl) (format " (%s window)" (opencode-format-duration ttl)))
               (and (numberp tokens)
-                   (concat ", " (drover-format-tokens tokens)
-                           (and (numberp prompt) (concat " of " (drover-format-tokens prompt)))
+                   (concat ", " (opencode-format-tokens tokens)
+                           (and (numberp prompt) (concat " of " (opencode-format-tokens prompt)))
                            " tokens cached"))))))
 
 (defconst drover-activity-labels
@@ -319,7 +164,7 @@ GROUPING is one of `drover-groupings'; groups without a value, nil, are
 named after what they lack.  Grouping by status, the group `archived'
 holds the archived sessions."
   (pcase grouping
-    ('status (if (eq value 'archived) "Archived" (drover-status-label value)))
+    ('status (if (eq value 'archived) "Archived" (opencode-session-status-label value)))
     ('updated (or (alist-get value drover-activity-labels) "No activity"))
     (_ (if value
            (replace-regexp-in-string "[\n\r\t]+" " " (format "%s" value))
@@ -335,28 +180,15 @@ holds the archived sessions."
 
 ;;;; Agents
 
-(defconst drover--agent-faces
-  '(font-lock-keyword-face font-lock-type-face font-lock-constant-face font-lock-string-face)
-  "Faces agents take without `drover-agent-faces' nor opencode.el.
-The defaults of `opencode-mode-line-agent-faces'.")
-
-(defcustom drover-agent-faces nil
-  "Faces in which lists show agents whose backend gives no display of its own.
-An agent takes one by its name, always the same.  Nil takes those of
-opencode.el's mode line, `opencode-mode-line-agent-faces', once it is
-loaded, so that agents of every backend draw from one set of faces;
-OpenCode's own sessions show their agent as that mode line does."
-  :type '(choice (const :tag "Those of opencode.el's mode line" nil) (repeat face))
-  :group 'drover-faces)
-
 (defun drover-agent-face (name)
-  "Return the face of the agent NAME, among `drover-agent-faces'.
+  "Return the face of the agent NAME, among `opencode-agent-faces', or nil.
 It is chosen by a digest of NAME, so that an agent keeps its face from
-one session, one list and one Emacs to the next."
-  (let ((faces (or drover-agent-faces
-                   (bound-and-true-p opencode-mode-line-agent-faces)
-                   drover--agent-faces)))
-    (nth (mod (string-to-number (substring (md5 name) 0 6) 16) (length faces)) faces)))
+one session, one list and one Emacs to the next.  OpenCode's own
+sessions show their agent as opencode.el's mode line does, its face
+chosen by its place among the agents of its location."
+  (when opencode-agent-faces
+    (nth (mod (string-to-number (substring (md5 name) 0 6) 16) (length opencode-agent-faces))
+         opencode-agent-faces)))
 
 (defun drover--lock-faces (string)
   "Return STRING with its `face' properties also as `font-lock-face'.
@@ -571,11 +403,11 @@ It is \"today\" for the start of the day of NOW, the current time by
 default, and otherwise the age of SINCE, such as \"2d\"."
   (if (= since (drover--start-of-day now))
       "today"
-    (concat "since " (drover-format-age since now))))
+    (concat "since " (opencode-format-age since now))))
 
 (defun drover-filter-statuses-label (statuses)
   "Return the display names of STATUSES as one string, such as \"done or failed\"."
-  (mapconcat (lambda (status) (downcase (drover-status-label status)))
+  (mapconcat (lambda (status) (downcase (opencode-session-status-label status)))
              statuses " or "))
 
 (defun drover-filter-description (&optional filter now)

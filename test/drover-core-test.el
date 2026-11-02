@@ -496,11 +496,11 @@ holds the identifiers its :session was asked for."
         (should-not (drover--archive))))))
 
 (ert-deftest drover-test-format-age ()
-  (should (equal (drover-format-age nil) ""))
-  (should (equal (drover-format-age (- drover-test-now 42) drover-test-now) "42s"))
-  (should (equal (drover-format-age (- drover-test-now 300) drover-test-now) "5m"))
-  (should (equal (drover-format-age (- drover-test-now 7200) drover-test-now) "2h"))
-  (should (equal (drover-format-age (- drover-test-now 172800) drover-test-now) "2d")))
+  (should (equal (opencode-format-age nil) ""))
+  (should (equal (opencode-format-age (- drover-test-now 42) drover-test-now) "42s"))
+  (should (equal (opencode-format-age (- drover-test-now 300) drover-test-now) "5m"))
+  (should (equal (opencode-format-age (- drover-test-now 7200) drover-test-now) "2h"))
+  (should (equal (opencode-format-age (- drover-test-now 172800) drover-test-now) "2d")))
 
 (ert-deftest drover-test-session-summary ()
   (should (equal (drover-session-summary
@@ -1441,7 +1441,7 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
     (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()
-  (should (equal (mapcar #'drover-format-tokens
+  (should (equal (mapcar #'opencode-format-tokens
                          '(0 950 999 1000 8400 9940 9960 182345 999499 999500 1200000 12345678))
                  '("0" "950" "999" "1k" "8.4k" "9.9k" "10k" "182k" "999k" "1M" "1.2M" "12M"))))
 

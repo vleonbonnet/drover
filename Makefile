@@ -69,20 +69,31 @@ test:
 	$(BATCH) -l test/drover-test-helpers.el $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit
 
 # Times the list over thousands of sessions, as compiled: not part of
-# test.  EMACS_GUI names a graphical Emacs to run it in instead, where
+# test.  opencode.el, whose look the list draws with, is compiled too,
+# as installed, in a copy of OPENCODE_EL's sources, which stay as they
+# are.  EMACS_GUI names a graphical Emacs to run it in instead, where
 # measuring text and collecting garbage cost what they cost the user;
 # DROVER_BENCH_FONT, DROVER_BENCH_THEME and DROVER_BENCH_THEME_DIRECTORY
 # choose its font and theme.  See test/drover-bench.el.
 EMACS_GUI ?=
 BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-bench.el --eval '(drover-bench-main)'
+OPENCODE_DEPS = -L $(DEPS)/plz -L $(DEPS)/transient -L $(DEPS)/cond-let -L $(DEPS)/compat -L $(DEPS)/llama
 bench: compile
-	@if [ -n "$(EMACS_GUI)" ]; then \
-	  out=$$(mktemp); \
-	  DROVER_BENCH_OUTPUT=$$out $(EMACS_GUI) -Q --chdir $(CURDIR) $(LOAD_PATH) $(PREFER_NEWER) $(BENCH_FILES); \
-	  cat $$out; rm -f $$out; \
-	else \
-	  $(BATCH) $(BENCH_FILES); \
-	fi
+	@opencode=$$(mktemp -d); status=0; \
+	cp $(OPENCODE_EL)/opencode*.el "$$opencode" && \
+	(cd "$$opencode" && $(EMACS) -Q --batch -L . $(OPENCODE_DEPS) -f batch-byte-compile opencode*.el \
+	   > /dev/null 2>&1) || { echo "Could not compile opencode.el from $(OPENCODE_EL)"; status=1; }; \
+	if [ $$status -eq 0 ]; then \
+	  if [ -n "$(EMACS_GUI)" ]; then \
+	    out=$$(mktemp); \
+	    DROVER_BENCH_OUTPUT=$$out $(EMACS_GUI) -Q --chdir $(CURDIR) -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) \
+	      $(BENCH_FILES); \
+	    cat $$out; rm -f $$out; \
+	  else \
+	    $(EMACS) -Q --batch -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) $(BENCH_FILES) || status=1; \
+	  fi; \
+	fi; \
+	rm -rf "$$opencode"; exit $$status
 
 # Indexes the user's own Claude Code transcripts and Codex rollouts,
 # ~/.claude and ~/.codex or DROVER_CLAUDE_HOME and DROVER_CODEX_HOME,

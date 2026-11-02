@@ -59,6 +59,7 @@
 (require 'transient)
 (require 'drover-core)
 (require 'drover-ui)
+(require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
@@ -842,11 +843,11 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
 
 (defun drover--read-filter-statuses (current)
   "Read the statuses to list, CURRENT being those listed now."
-  (let* ((labels (mapcar (lambda (status) (cons (drover-status-label status) status))
+  (let* ((labels (mapcar (lambda (status) (cons (opencode-session-status-label status) status))
                          drover-status-order))
          (chosen (completing-read-multiple
                   "Statuses (empty for any): " labels nil t
-                  (and current (mapconcat #'drover-status-label current ",")))))
+                  (and current (mapconcat #'opencode-session-status-label current ",")))))
     (delete-dups (delq nil (mapcar (lambda (label) (cdr (assoc label labels))) chosen)))))
 
 (defun drover--read-filter-since (_current)

@@ -87,7 +87,7 @@
                 (drover-codex-rollouts--names nil)
                 (drover-list-age-interval nil)
                 (drover-list-cache-interval nil)
-                (drover-list-animation-interval nil)
+                (opencode-session-status-animation-interval nil)
                 (drover-list-deferred-delay nil))
             (setq drover--backends nil)
             (drover-claude-code-transcripts-install 'real-data)

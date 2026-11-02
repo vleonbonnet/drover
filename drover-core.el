@@ -71,8 +71,9 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'opencode-look)
 
-(defconst drover-core-generation 1
+(defconst drover-core-generation 2
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -84,8 +85,24 @@ one lacks.")
   :group 'tools
   :prefix "drover-")
 
-(defcustom drover-status-order '(waiting failed done retrying working idle)
-  "Session statuses, most urgent first."
+(defun drover--adopt-option (old new)
+  "Give NEW the value of OLD, an option drover had, when the user changed it.
+OLD becomes an alias of NEW once this returns: a value it holds, set
+before the alias was made, would be lost.  A value other than OLD's
+standard one, or one set without a definition of OLD, is the user's,
+and goes to NEW; OLD is then unbound."
+  (when (and (boundp old) (not (eq (indirect-variable old) new)))
+    (let ((standard (get old 'standard-value)))
+      (unless (and standard
+                   (equal (default-value old)
+                          (ignore-errors (eval (car standard) t))))
+        (set-default new (default-value old))))
+    (makunbound old)))
+
+(defcustom drover-status-order (copy-sequence opencode-session-statuses)
+  "Session statuses, most urgent first.
+By default, the order of `opencode-session-statuses', the statuses of
+every display of sessions; this ranks them for drover's views."
   :type '(repeat symbol)
   :group 'drover)
 
@@ -529,7 +546,7 @@ CACHE-TOKENS of them are in the prompt cache: the share a next turn
 reads from the cache rather than sends anew.")
   (agent-display nil :documentation "The agent as lists show it, a string in its faces, or nil.
 Such as the name the agent's catalog gives it, in the agent's colour.
-Without it, lists show AGENT in a face of `drover-agent-faces'.  AGENT
+Without it, lists show AGENT in a face of `opencode-agent-faces'.  AGENT
 stays what views group, sort and filter by.")
   ;; New slots go last, so that code compiled against the record before
   ;; them keeps reading the others at their place.

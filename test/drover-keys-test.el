@@ -35,7 +35,7 @@
      ;; `dlet': the list, which declares it, may not be loaded.
      (dlet ((drover-list-hidden-fields nil))
        (let (;; Readable glyphs, whatever the defaults.
-             (drover-status-glyphs '((waiting . "⚑") (failed . "✗") (done . "✓")
+             (opencode-session-status-icons '((waiting . "⚑") (failed . "✗") (done . "✓")
                                      (retrying . "↻") (working . "◐") (idle . "·")))
              (drover-default-prompt-buffer-function nil)
              (drover-keys-test-actions nil))

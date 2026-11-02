@@ -62,6 +62,7 @@
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-ui)
+(require 'opencode-look)
 (require 'drover-keys)
 (require 'drover-claude-code)
 (require 'drover-codex)
@@ -476,10 +477,10 @@ resolved values are for display only: only the choices are applied."
 
 (defun drover-prompt-option-display (value explicit-p)
   "Return VALUE as a string in the face of a chosen or an inherited setting.
-The face is `drover-prompt-picked' when EXPLICIT-P, else
-`drover-prompt-inherited'."
+The face is `opencode-setting-chosen' when EXPLICIT-P, else
+`opencode-setting-inherited'."
   (propertize (format "%s" value)
-              'face (if explicit-p 'drover-prompt-picked 'drover-prompt-inherited)))
+              'face (if explicit-p 'opencode-setting-chosen 'opencode-setting-inherited)))
 
 (defun drover-prompt--header-option (value explicit-p)
   "Return VALUE in brackets for the header, its face telling EXPLICIT-P, or nil."
@@ -1477,7 +1478,7 @@ and why it has its status."
                (directory (plist-get entry :directory))
                (summary (and session (drover-session-summary session))))
           (concat (make-string (max 0 (- width (string-width name))) ?\s)
-                  "  " (if session (drover-status-glyph (drover-session-status session)) " ")
+                  "  " (if session (opencode-session-status-glyph (drover-session-status session)) " ")
                   " " (propertize (format "[%s]" (drover-prompt--target-label target))
                                   'face 'drover-dim)
                   (and options (concat "  " options))

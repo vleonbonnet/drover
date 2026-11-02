@@ -276,14 +276,14 @@ names of the latest call, and `metadata' its completion metadata."
         (should (string-match-p "C-' RET send  C-' S-<return> schedule  C-' i attach" header))
         (should (string-match-p "a agent \\[plan\\]" header))
         (should (eq (get-text-property (string-match "plan" header) 'face header)
-                    'drover-prompt-picked))))))
+                    'opencode-setting-chosen))))))
 
 (ert-deftest drover-prompt-test-option-display ()
   "Chosen settings show in one face, inherited ones in another."
   (should (equal-including-properties (drover-prompt-option-display 'high t)
-                                      (propertize "high" 'face 'drover-prompt-picked)))
+                                      (propertize "high" 'face 'opencode-setting-chosen)))
   (should (equal-including-properties (drover-prompt-option-display "plan" nil)
-                                      (propertize "plan" 'face 'drover-prompt-inherited))))
+                                      (propertize "plan" 'face 'opencode-setting-inherited))))
 
 ;;;; Defaults and what the prompt runs
 
@@ -487,12 +487,12 @@ Each is (DIRECTORY CALLBACK)."
       (let ((info (drover-prompt--minibuffer-info (current-buffer))))
         (should (string-suffix-p " [agent: plan] [model: Anthropic: opus/high]" info))
         (should (eq (get-text-property (string-match "Anthropic: opus" info) 'face info)
-                    'drover-prompt-picked))
+                    'opencode-setting-chosen))
         (should (eq (get-text-property (string-match "plan" info) 'face info)
-                    'drover-prompt-inherited))
+                    'opencode-setting-inherited))
         (should (eq (get-text-property (string-match "\\[cwd: \\(.\\)" info) 'face info)
                     'minibuffer-prompt))
-        (should (eq (get-text-property (match-beginning 1) 'face info) 'drover-prompt-picked))))))
+        (should (eq (get-text-property (match-beginning 1) 'face info) 'opencode-setting-chosen))))))
 
 (ert-deftest drover-prompt-test-picker-entry-options ()
   "Picker entries show what a send runs, choices applied the way sending applies them."
@@ -1224,7 +1224,7 @@ Each is (DIRECTORY CALLBACK)."
   "Candidates show their status, backend and engine, what they would run, directory and summary."
   (drover-prompt-test-with
     (let ((drover-prompt-new-targets '((:backend fake :engine other :label "Other session")))
-          (drover-status-glyphs '((waiting . "W") (idle . "I")))
+          (opencode-session-status-icons '((waiting . "W") (idle . "I")))
           (model (drover-test-model "gpt" :provider-id "openai" :engines '(fake other))))
       (drover-test-register-engine 'fake :label "Fake")
       (drover-test-register-engine 'other :label "Other")

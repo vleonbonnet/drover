@@ -39,6 +39,7 @@
 (require 'drover)
 (require 'drover-core)
 (require 'drover-ui)
+(require 'opencode-look)
 (require 'seq)
 (require 'subr-x)
 
@@ -94,7 +95,7 @@ It is cut to `drover-line-limit' characters, its summary on one line."
   (let ((location (drover-session-location session))
         (summary (drover-session-summary session)))
     (drover-bound-line
-     (concat (drover-status-glyph (drover-session-status session)) " "
+     (concat (opencode-session-status-glyph (drover-session-status session)) " "
              (format "%s" (drover-session-display-title session))
              (and location (concat "  " (propertize location 'face 'drover-dim)))
              (and summary (concat "  " (string-replace "\n" " " (drover-bound-line summary))))))))
@@ -108,7 +109,7 @@ It names `drover-attention--help-sessions' sessions of a status at
 most, and how many more: Emacs measures a tooltip whole to show it."
   (concat "Sessions that need you:"
           (mapconcat (pcase-lambda (`(,status . ,count))
-                       (concat "\n" (drover-status-label status) (format " (%d):" count)
+                       (concat "\n" (opencode-session-status-label status) (format " (%d):" count)
                                (mapconcat (lambda (session)
                                             (concat "\n  " (drover-attention--describe session)))
                                           (seq-take (seq-filter (lambda (session)
@@ -194,7 +195,7 @@ glyph's ink would reach the count or what comes before it (see
 `drover-attention--measure'); the tooltip lists the sessions needing
 the user by status, when shown (see `drover-attention--help-echo')."
   (when sessions
-    (let* ((face (drover-status-face
+    (let* ((face (opencode-session-status-face
                   (car (seq-sort-by #'drover-status-rank #'<
                                     (delete-dups (mapcar #'drover-session-status sessions))))))
            (glyph drover-attention-glyph)
@@ -437,12 +438,12 @@ status."
       (when-let* ((session (cdr (assoc name candidates))))
         (let ((summary (drover-session-summary session)))
           (concat (drover-attention--pad "" (- width (string-width name)))
-                  "  " (drover-status-glyph (drover-session-status session)) " "
+                  "  " (opencode-session-status-glyph (drover-session-status session)) " "
                   (propertize (drover-attention--pad (or (drover-session-location session) "")
                                                      location-width)
                               'face 'drover-dim)
                   "  "
-                  (propertize (string-pad (drover-format-age (or (drover-session-since session)
+                  (propertize (string-pad (opencode-format-age (or (drover-session-since session)
                                                                  (drover-session-updated session))
                                                              now)
                                           3 nil t)
@@ -460,7 +461,7 @@ Their completion category is `drover-session'."
          (group (lambda (name transform)
                   (if transform
                       name
-                    (drover-status-label (drover-session-status (cdr (assoc name candidates)))))))
+                    (opencode-session-status-label (drover-session-status (cdr (assoc name candidates)))))))
          (table (lambda (string predicate action)
                   (if (eq action 'metadata)
                       `(metadata (category . drover-session)
