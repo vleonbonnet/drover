@@ -245,11 +245,7 @@
           (drover-archive session)
           (drover-codex-rollouts--unarchive session)
           (drover-codex-rollouts--delete session)
-          (let ((deadline (+ (float-time) 10)))
-            (while (and (< (float-time) deadline)
-                        (seq-some (lambda (process) (string-prefix-p "drover-codex-" (process-name process)))
-                                  (process-list)))
-              (accept-process-output nil 0.05))))
+          (should (drover-test-wait-commands)))
         ;; Not in drover's archive: Codex's.
         (should-not (drover--archive))
         ;; The three ran at once, in any order.
