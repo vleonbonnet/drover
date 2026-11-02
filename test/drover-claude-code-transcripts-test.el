@@ -479,6 +479,10 @@ empty; `home' is the homes' directory, and `index' the index."
         (should (equal (drover-session-summary b1) "permit: waits in the background: claude attach bg000001"))
         (should (eq (drover-session-status b2) 'working))
         (should (equal (drover-session-detail b2) "working in another terminal"))
+        ;; A turn running elsewhere is placed at its prompt, which the
+        ;; events of its turn do not move; a wait at the newest message.
+        (should (equal (drover-session-since b2) 1790000001.0))
+        (should (equal (drover-session-since b1) 1790000002.0))
         (should (eq (drover-session-status b3) 'idle))
         ;; Running elsewhere, it is attached to there, not resumed here
         ;; nor deleted.

@@ -153,10 +153,22 @@ Records of subagents give none."
                        beg end)))
     (drover-transcript-time (alist-get 'timestamp record))))
 
+(defun drover-claude-code-transcripts--prompted (beg end)
+  "Return the time of the user's newest prompt between BEG and END, or nil.
+A turn running starts there."
+  (when-let* ((record (drover-transcript-last
+                       "\"type\":\"user\""
+                       (lambda (record)
+                         (and (not (alist-get 'isSidechain record))
+                              (drover-claude-code--prompt-p record)))
+                       beg end)))
+    (drover-transcript-time (alist-get 'timestamp record))))
+
 (defun drover-claude-code-transcripts--read-tail (beg end)
   "Return what the records between BEG and END tell of the conversation's end.
 A plist: the newest title, summary, last prompt, permission mode, model,
-effort, branch and activity there; members not told are left out."
+effort, branch, prompt's time and activity there; members not told are
+left out."
   (let ((turn (drover-claude-code-transcripts--turn beg end))
         (data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value)))))
@@ -167,6 +179,7 @@ effort, branch and activity there; members not told are left out."
       (add :mode (drover-claude-code-transcripts--member "\"type\":\"permission-mode\"" 'permissionMode beg end))
       (add :model (nth 0 turn))
       (add :effort (nth 1 turn))
+      (add :prompted (drover-claude-code-transcripts--prompted beg end))
       (add :updated (let ((activity (drover-claude-code-transcripts--activity beg end)))
                       (if (and activity (nth 2 turn)) (max activity (nth 2 turn)) (or activity (nth 2 turn)))))
       (add :branch (save-excursion
@@ -339,7 +352,11 @@ it once."
        :project (plist-get data :project)
        :branch (and branch (not (equal branch "HEAD")) branch)
        :status (nth 0 status) :requests (nth 1 status) :detail (nth 2 status)
-       :since (and (not (eq (nth 0 status) 'idle)) (plist-get data :updated))
+       ;; A turn runs from the newest prompt, a wait from the newest message.
+       :since (pcase (nth 0 status)
+                ('idle nil)
+                ('working (or (plist-get data :prompted) (plist-get data :updated)))
+                (_ (plist-get data :updated)))
        :updated (plist-get data :updated)
        :created (plist-get data :created)
        :agent (and mode (car (rassoc mode drover-claude-code-agent-modes)))
