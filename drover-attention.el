@@ -233,15 +233,21 @@ are looked at again too."
         (setq key (drover-index-parent key))))))
 
 (defun drover-attention--update (&optional keys)
-  "Compute the mode line counts again and redraw every mode line.
+  "Compute the mode line count again, and redraw mode lines if it changed.
 With KEYS, the sessions changed, look at those alone, and those above
-them, when the index can tell."
+them, when the index can tell.  Changes come many times a second while
+sessions work, most of them leaving the count as it was; forcing every
+mode line of every frame to be drawn again costs tens of milliseconds
+with many windows, so only a count that reads otherwise forces it.  Its
+tooltip is a function, made when shown: the string compares alike
+whatever the sessions it lists."
   (if (and keys drover-attention--sessions (drover-index-incremental-p))
       (drover-attention--follow keys)
     (drover-attention--recount))
-  (setq drover-attention-mode-line
-        (drover-attention--format (hash-table-values drover-attention--sessions)))
-  (force-mode-line-update t))
+  (let ((string (drover-attention--format (hash-table-values drover-attention--sessions))))
+    (unless (equal-including-properties string drover-attention-mode-line)
+      (setq drover-attention-mode-line string)
+      (force-mode-line-update t))))
 
 (defun drover-attention--fonts-changed (&rest _)
   "Measure the glyphs of the mode line again, the fonts having changed.

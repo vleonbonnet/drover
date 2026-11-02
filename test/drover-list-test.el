@@ -3115,6 +3115,18 @@ is the list drawn anew."
       (should (= (drover-list-test-counting-redraws (drover-list--on-window-change (selected-window))) 1))
       (should-not drover-list--stale))))
 
+(ert-deftest drover-list-test-settings-redraw-views-mode-lines ()
+  "A setting changed draws again the mode lines of views alone, which hint at it."
+  (drover-list-test-with (drover-list-test-sample)
+    (let ((forced nil)
+          (other (get-buffer-create "*other code*")))
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional all) (push (cons (current-buffer) all) forced))))
+        (drover-set-group-by 'project))
+      (should (member (cons buffer nil) forced))
+      (should-not (assq other forced))
+      (should-not (rassq t forced)))))
+
 (ert-deftest drover-list-test-mode-line ()
   (drover-list-test-with nil
     (should (equal (drover-list--mode-line-process) " by status"))

@@ -1225,8 +1225,12 @@ Vertico does when the minibuffer opens updates them after the command."
 (defun drover-prompt--refresh-display (buffer)
   "Show the choices just made in the prompt BUFFER.
 They show in its header and, while the target picker is open, in the
-picker's minibuffer and candidates."
-  (force-mode-line-update t)
+picker's minibuffer and candidates.  Only BUFFER's header and mode
+lines are drawn again: forcing every window's costs tens of
+milliseconds with many windows."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (force-mode-line-update)))
   (when-let* ((window (active-minibuffer-window))
               (minibuffer (window-buffer window))
               ((buffer-local-value 'drover-prompt--picker minibuffer)))

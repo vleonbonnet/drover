@@ -604,6 +604,23 @@ Each is (DIRECTORY CALLBACK)."
           (drover-prompt-choose-effort))
         (should (eq drover-prompt-picked-variant 'low))))))
 
+(ert-deftest drover-prompt-test-choice-redraws-its-header-only ()
+  "A choice draws again the header of the prompt it is made for, not every mode line."
+  (drover-prompt-test-with
+    (let ((bare (drover-test-model "bare"))
+          (forced nil))
+      (drover-test-register-engine 'fake)
+      (drover-register-model-source 'fake (lambda (_directory) (list bare)))
+      (with-current-buffer (drover-prompt-buffer t)
+        (cl-letf (((symbol-function 'force-mode-line-update)
+                   (lambda (&optional all) (push (cons (current-buffer) all) forced))))
+          (drover-prompt-test-choosing (lambda (_names) "bare")
+            (with-temp-buffer
+              (drover-prompt-choose-model))))
+        (should (eq drover-prompt-picked-model bare))
+        (should (member (cons (current-buffer) nil) forced))
+        (should-not (rassq t forced))))))
+
 (ert-deftest drover-prompt-test-choose-directory ()
   "A chosen directory stays chosen, and the engines' defaults are read again for it."
   (drover-prompt-test-with

@@ -138,6 +138,49 @@
     (should-not drover-attention-mode-line)
     (should (memq 'drover-attention-mode-line global-mode-string))))
 
+(ert-deftest drover-attention-test-redraws-mode-lines-on-change-only ()
+  "Mode lines are drawn again when the count reads otherwise, and only then.
+Sessions change many times a second while they work, mostly leaving the
+count as it was; forcing every mode line costs tens of milliseconds."
+  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0)
+                                    (drover-test-session "r" :status 'working :updated 1.0))
+    (drover-attention-mode 1)
+    (let ((forced nil))
+      (cl-letf (((symbol-function 'force-mode-line-update)
+                 (lambda (&optional all) (push all forced))))
+        (cl-flet ((change (id function)
+                    (setq forced nil)
+                    (funcall function (seq-find (lambda (session) (equal (drover-session-id session) id))
+                                                drover-test-sessions))
+                    (drover-backend-changed 'fake id)
+                    (drover-changed-now)))
+          ;; A working session's step: the count stays, nothing is forced.
+          (change "r" (lambda (session) (setf (drover-session-updated session) 2.0)))
+          (should-not forced)
+          ;; The session waiting longer: the same count, in the same face.
+          (change "w" (lambda (session) (setf (drover-session-since session) 0.5)))
+          (should-not forced)
+          ;; Its turn ending unseen: one more, every mode line drawn again.
+          (change "r" (lambda (session) (setf (drover-session-status session) 'done)))
+          (should (equal forced '(t)))
+          (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
+          ;; Another status, the count the same, but in another face.
+          (change "w" (lambda (session) (setf (drover-session-status session) 'failed)))
+          (should (equal forced '(t)))
+          (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-failed))
+          ;; Nothing needing the user any more: the count goes.
+          (setq drover-test-sessions nil)
+          (setq forced nil)
+          (drover-backend-changed 'fake)
+          (drover-changed-now)
+          (should (equal forced '(t)))
+          (should-not drover-attention-mode-line)
+          ;; And nothing again: nothing to draw.
+          (setq forced nil)
+          (drover-backend-changed 'fake)
+          (drover-changed-now)
+          (should-not forced))))))
+
 (ert-deftest drover-attention-test-format-follows-subagent-mode ()
   "The count is that of what lists show, and of every subagent waiting for the user."
   (drover-attention-test-with (list (drover-test-session "root" :status 'working)

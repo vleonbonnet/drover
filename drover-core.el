@@ -1764,12 +1764,16 @@ TREES are the trees of `drover-view-trees'; the value is that of
 
 (defun drover-view-settings-changed ()
   "Redraw every session view at once, after view settings changed.
-Views redraw from `drover-changed-hook', which runs now."
+Views redraw from `drover-changed-hook', which runs now; their mode
+lines, which hint at the settings, are drawn again, and only theirs."
   (when (timerp drover--change-timer)
     (cancel-timer drover--change-timer))
   (setq drover--changed-all t)
   (drover--run-changed)
-  (force-mode-line-update t))
+  (dolist (buffer (buffer-list))
+    (when (buffer-local-value 'drover-view-p buffer)
+      (with-current-buffer buffer
+        (force-mode-line-update)))))
 
 (defun drover-set-filter (key value)
   "Set member KEY of `drover-filter' to VALUE, nil removing it, and redraw views.
