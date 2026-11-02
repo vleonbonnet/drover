@@ -64,6 +64,7 @@
 (require 'drover-model)
 (require 'drover-claude-code)
 (require 'drover-transcript)
+(require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
@@ -123,8 +124,9 @@ A hash table, kept only while `drover-claude-code-history-days' is set.")
 (defvar drover-claude-code-transcripts--users nil
   "The front ends that installed the backend.")
 
-(defvar drover-claude-code-transcripts--agents-process nil
-  "The process listing the sessions Claude Code runs, while it runs.")
+(defvar drover-claude-code-transcripts--agents-job nil
+  "The command listing the sessions Claude Code runs.
+Its identifier, as `drover-command-run' returned it, or nil.")
 
 (defvar drover-claude-code-transcripts--agents-time 0
   "When \"claude agents\" last ran, as a float time.")
@@ -588,43 +590,28 @@ Those that changed are reported."
   "Run \"claude agents --json\" to learn what Claude Code runs elsewhere.
 Only while a list shows, every `drover-claude-code-agents-interval'
 seconds at most, one run at a time; FORCE runs it whether or not a list
-shows and the interval passed.  It never waits: the answer is followed
-as it comes."
+shows and the interval passed.  It never waits, not even for the CLI to
+start (see `drover-command-run'): the answer is followed as it comes."
   (when-let* ((interval drover-claude-code-agents-interval)
-              ((not (process-live-p drover-claude-code-transcripts--agents-process)))
+              ((not (drover-command-live-p drover-claude-code-transcripts--agents-job)))
               ((or force
                    (and (> (- (float-time) drover-claude-code-transcripts--agents-time) interval)
                         (drover-claude-code-transcripts--list-shown-p))))
               (program (executable-find drover-claude-code-program)))
     (setq drover-claude-code-transcripts--agents-time (float-time))
-    (let ((output (generate-new-buffer " *drover claude agents*"))
-          (errors (generate-new-buffer " *drover claude agents errors*")))
-      (condition-case err
-          (setq drover-claude-code-transcripts--agents-process
-                (make-process
-                 :name "drover-claude-agents"
-                 :buffer output
-                 :stderr errors
-                 :command (list program "agents" "--json")
-                 :connection-type 'pipe
-                 :noquery t
-                 :sentinel
-                 (lambda (process _event)
-                   (drover-with-reporting "claude agents"
-                     (unless (process-live-p process)
-                       (unwind-protect
-                           (when (and (eq (process-status process) 'exit)
-                                      (zerop (process-exit-status process))
-                                      (buffer-live-p output))
-                             (drover-claude-code-transcripts--agents-listed
-                              (drover-claude-code-transcripts--parse-agents
-                               (with-current-buffer output (buffer-string)))))
-                         (when (buffer-live-p output) (kill-buffer output))
-                         (when (buffer-live-p errors) (kill-buffer errors))))))))
-        (error
-         (kill-buffer output)
-         (kill-buffer errors)
-         (drover-report-failure "claude agents" err program))))))
+    (condition-case err
+        (setq drover-claude-code-transcripts--agents-job
+              (drover-command-run "claude agents" (list program "agents" "--json")
+                                  #'drover-claude-code-transcripts--agents-answered))
+      (error (drover-report-failure "claude agents" err program)))))
+
+(defun drover-claude-code-transcripts--agents-answered (result)
+  "Follow RESULT, of \"claude agents --json\" as `drover-command-run' tells it.
+An answer that failed or was cut changes nothing."
+  (when (and (eql (plist-get result :exit) 0)
+             (not (plist-get result :truncated)))
+    (drover-claude-code-transcripts--agents-listed
+     (drover-claude-code-transcripts--parse-agents (plist-get result :output)))))
 
 ;;;; Actions
 
@@ -784,8 +771,7 @@ The backend goes once no front end needs it."
   (unless drover-claude-code-transcripts--users
     (when (drover-claude-code-transcripts--current-index)
       (drover-transcript-stop (drover-claude-code-transcripts--current-index)))
-    (when (process-live-p drover-claude-code-transcripts--agents-process)
-      (delete-process drover-claude-code-transcripts--agents-process))
+    (drover-command-cancel drover-claude-code-transcripts--agents-job)
     (remove-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save)
     (drover-unregister-backend 'claude-code)))
 

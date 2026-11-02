@@ -180,13 +180,13 @@ came after: the accessors of today read past its end."
                               messages))))))
 
 (ert-deftest drover-robustness-test-sentinel ()
-  "A process sentinel of drover's reports its error briefly."
+  "What a command of drover's answered is followed, its error reported briefly."
   (drover-claude-code-transcripts-test-with
     (let* ((script (expand-file-name "claude" home))
            (drover-claude-code-program script)
            (drover-claude-code-agents-interval 30)
            (drover-claude-code-transcripts--agents-time 0)
-           (drover-claude-code-transcripts--agents-process nil)
+           (drover-claude-code-transcripts--agents-job nil)
            (big (drover-robustness-test-index 2000)))
       (drover-test-write script "#!/bin/sh\necho '[]'\n")
       (set-file-modes script #o755)
@@ -195,12 +195,7 @@ came after: the accessors of today read past its end."
                (cl-letf (((symbol-function 'drover-claude-code-transcripts--agents-listed)
                           (lambda (_) (signal 'args-out-of-range (list big 3)))))
                  (drover-claude-code-transcripts--ask-agents t)
-                 (let ((deadline (+ (float-time) 10)))
-                   (while (and (process-live-p drover-claude-code-transcripts--agents-process)
-                               (< (float-time) deadline))
-                     (accept-process-output drover-claude-code-transcripts--agents-process 0.05)))
-                 ;; The sentinel runs once the process is gone.
-                 (accept-process-output nil 0.1)))))
+                 (should (drover-test-wait-commands))))))
         (should (equal messages
                        '("Drover claude agents: args-out-of-range: Args out of range: #s(drover--index …), 3")))))))
 

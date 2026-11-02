@@ -535,27 +535,64 @@ killed after."
            (drover-claude-code-program script)
            (drover-claude-code-agents-interval 30)
            (drover-claude-code-transcripts--agents-time 0)
-           (drover-claude-code-transcripts--agents-process nil))
+           (drover-claude-code-transcripts--agents-job nil))
       (drover-test-write script (concat "#!/bin/sh\n[ \"$1 $2\" = \"agents --json\" ] || exit 2\ncat <<'EOF'\n"
                                         drover-claude-code-transcripts-test-agents "\nEOF\n"))
       (set-file-modes script #o755)
       ;; No list shows: nothing runs.
       (drover-claude-code-transcripts--ask-agents)
-      (should-not drover-claude-code-transcripts--agents-process)
+      (should-not drover-claude-code-transcripts--agents-job)
       (cl-letf (((symbol-function 'drover-claude-code-transcripts--list-shown-p) (lambda () t)))
         (drover-claude-code-transcripts--ask-agents)
-        (should (process-live-p drover-claude-code-transcripts--agents-process))
+        (should (drover-command-live-p drover-claude-code-transcripts--agents-job))
         ;; One at a time.
-        (let ((process drover-claude-code-transcripts--agents-process))
+        (let ((job drover-claude-code-transcripts--agents-job))
           (drover-claude-code-transcripts--ask-agents)
-          (should (eq process drover-claude-code-transcripts--agents-process))
-          (while (process-live-p process)
-            (accept-process-output process 1)))
-        (sleep-for 0.05)
+          (should (eq job drover-claude-code-transcripts--agents-job))
+          (should (drover-test-wait-commands)))
         (should (equal (plist-get (gethash "b1" drover-claude-code-transcripts--agents) :short) "bg000001"))
         ;; Not again before the interval.
         (drover-claude-code-transcripts--ask-agents)
-        (should-not (process-live-p drover-claude-code-transcripts--agents-process))))))
+        (should-not (drover-command-live-p drover-claude-code-transcripts--agents-job))))))
+
+(ert-deftest drover-claude-code-transcripts-test-agents-slow ()
+  "A slow \"claude agents\" never makes Emacs wait, nor piles up; its answer updates sessions.
+Not even where starting a process takes a second, as on a managed Mac."
+  (drover-claude-code-transcripts-test-with
+    (let* ((script (expand-file-name "bin/claude" home))
+           (count (expand-file-name "runs" home))
+           (drover-claude-code-program script)
+           (drover-claude-code-agents-interval 0)
+           (drover-claude-code-transcripts--agents-time 0)
+           (drover-claude-code-transcripts--agents-job nil))
+      (drover-fixture-claude "b1" (expand-file-name "work/" home))
+      (drover-claude-code-transcripts-test-scan)
+      (should (eq (drover-session-status (drover-find 'claude-code "b1")) 'idle))
+      (drover-test-write script (format "#!/bin/sh\necho run >> %s\nsleep 2\ncat <<'EOF'\n%s\nEOF\n"
+                                        (shell-quote-argument count)
+                                        drover-claude-code-transcripts-test-agents))
+      (set-file-modes script #o755)
+      (cl-letf (((symbol-function 'drover-claude-code-transcripts--list-shown-p) (lambda () t)))
+        (drover-test-with-slow-starts
+          ;; The runner's start takes its second, untimed.
+          (drover-command-run "warming" (list "/bin/echo") #'ignore)
+          (should (drover-test-wait-commands))
+          (let ((lag (drover-test-lag
+                      (lambda ()
+                        (drover-claude-code-transcripts--ask-agents)
+                        ;; Asked again and again while it runs: still one run.
+                        (dotimes (_ 5) (drover-claude-code-transcripts--ask-agents))
+                        (should (drover-command-live-p drover-claude-code-transcripts--agents-job))
+                        (let ((deadline (+ (float-time) 1)))
+                          (while (< (float-time) deadline)
+                            (drover-claude-code-transcripts--ask-agents)
+                            (accept-process-output nil 0.01)))
+                        (should (drover-command-live-p drover-claude-code-transcripts--agents-job))
+                        (should (drover-test-wait-commands))))))
+            (should (< lag 0.05))))
+        (should (equal (with-temp-buffer (insert-file-contents count) (buffer-string)) "run\n"))
+        (drover-changed-now)
+        (should (eq (drover-session-status (drover-find 'claude-code "b1")) 'waiting))))))
 
 ;;;; Encoding directories
 

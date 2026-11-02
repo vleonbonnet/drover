@@ -430,6 +430,9 @@ session live as it opens it.  A resumer of `drover-register-resumer'."
 (defvar drover-opencode--projects-stale nil
   "Non-nil when the projects changed during the fetch in progress.")
 
+(defvar drover-opencode--projects-known nil
+  "Non-nil once the projects were fetched, which events then keep current.")
+
 (defun drover-opencode--fetch-projects ()
   "Fetch the service's projects, then redraw sessions.
 A project change while a fetch is in progress fetches once more after
@@ -442,7 +445,8 @@ it, so a burst of changes costs at most two requests."
         (opencode-fetch-projects
          (lambda (projects)
            (drover-with-reporting "OpenCode projects"
-             (setq drover-opencode--projects projects)
+             (setq drover-opencode--projects projects
+                   drover-opencode--projects-known t)
              (drover-opencode--projects-fetched)
              (drover-backend-changed 'opencode)))
          ;; Project names only decorate sessions: keep the previous ones.
@@ -458,12 +462,53 @@ it, so a burst of changes costs at most two requests."
   (when drover-opencode--projects-stale
     (drover-opencode--fetch-projects)))
 
-(defun drover-opencode--projects-changed (_event)
-  "Fetch the projects again after EVENT.
-EVENT is a `project.updated' event, or `server.connected', after which
-changes missed while disconnected are fetched like the registry is."
+(defun drover-opencode--projects-changed (event)
+  "Follow EVENT, after which the projects may have changed.
+A `project.updated' event carries its project whole, which replaces the
+one of the same identifier without a request: each request starts a
+process, which may hold Emacs for as long as the system takes to start
+it.  The projects are fetched again when they were never fetched, while
+a fetch is under way, after an event without a whole project, and after
+`server.connected', after which changes missed while disconnected are
+fetched like the registry is."
   (drover-with-reporting "OpenCode events"
-    (drover-opencode--fetch-projects)))
+    (let ((project (and (equal (alist-get 'type event) "project.updated")
+                        (alist-get 'data event))))
+      (if (and drover-opencode--projects-known
+               (not drover-opencode--projects-fetching)
+               (drover-opencode--whole-project-p project))
+          (drover-opencode--project-updated project)
+        (drover-opencode--fetch-projects)))))
+
+(defun drover-opencode--whole-project-p (project)
+  "Return non-nil when PROJECT, of an event, holds what names sessions."
+  (and (drover-json-object-p project)
+       (stringp (alist-get 'id project))
+       (stringp (alist-get 'canonical project))
+       (listp (alist-get 'sandboxes project))
+       (seq-every-p #'stringp (alist-get 'sandboxes project))
+       (let ((name (alist-get 'name project)))
+         (or (null name) (stringp name)))))
+
+(defun drover-opencode--project-naming (project)
+  "Return what of PROJECT names sessions, to compare."
+  (list (alist-get 'id project) (alist-get 'name project)
+        (alist-get 'canonical project) (alist-get 'sandboxes project)))
+
+(defun drover-opencode--project-updated (project)
+  "Take PROJECT, which an event sent whole, among the projects.
+Sessions are drawn again only when what names them changed."
+  (let* ((id (alist-get 'id project))
+         (old (seq-find (lambda (known) (equal (alist-get 'id known) id))
+                        drover-opencode--projects)))
+    (unless (and old (equal (drover-opencode--project-naming old)
+                            (drover-opencode--project-naming project)))
+      ;; A new list: records compare the projects they were made of by `eq'.
+      (setq drover-opencode--projects
+            (if old
+                (mapcar (lambda (known) (if (eq known old) project known)) drover-opencode--projects)
+              (append drover-opencode--projects (list project))))
+      (drover-backend-changed 'opencode))))
 
 (defun drover-opencode--project-name (project-id directory)
   "Return the name of the project with PROJECT-ID or containing DIRECTORY, or nil."

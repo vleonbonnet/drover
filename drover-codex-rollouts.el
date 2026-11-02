@@ -58,6 +58,7 @@
 (require 'drover-model)
 (require 'drover-codex)
 (require 'drover-transcript)
+(require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
@@ -478,28 +479,23 @@ its identifier, which the CLI takes before names."
 DONE, a past participle such as \"archived\", tells the outcome once it
 ran; a failure is reported with what the CLI said.  The rollouts are
 looked at again either way."
-  (let* ((title (drover-session-display-title session))
-         (output (generate-new-buffer " *drover codex*")))
-    (make-process
-     :name (concat "drover-codex-" command)
-     :buffer output
-     :command (drover-codex-rollouts-command command (drover-session-id session))
-     :connection-type 'pipe
-     :noquery t
-     :sentinel (lambda (process _event)
-                 (drover-with-reporting (concat "codex " command)
-                   (unless (process-live-p process)
-                     (unwind-protect
-                         (if (and (eq (process-status process) 'exit)
-                                  (zerop (process-exit-status process)))
-                             (message "Codex %s %s" done title)
-                           (drover-warn "Codex could not %s %s: %s" command title
-                                        (if (buffer-live-p output)
-                                            (string-trim (with-current-buffer output (buffer-string)))
-                                          (process-status process))))
-                       (when (buffer-live-p output) (kill-buffer output))
-                       (when-let* ((index (drover-codex-rollouts--current-index)))
-                         (drover-transcript-look-soon index)))))))))
+  (let ((title (drover-session-display-title session)))
+    (drover-command-run
+     (concat "codex " command)
+     (drover-codex-rollouts-command command (drover-session-id session))
+     (lambda (result)
+       (unwind-protect
+           (if (eql (plist-get result :exit) 0)
+               (drover-message "Codex %s %s" done title)
+             (drover-warn "Codex could not %s %s: %s" command title
+                          (or (plist-get result :failure)
+                              (let ((said (string-trim (concat (plist-get result :errors) "\n"
+                                                               (plist-get result :output)))))
+                                (if (string-empty-p said)
+                                    (format "exit status %s" (plist-get result :exit))
+                                  said)))))
+         (when-let* ((index (drover-codex-rollouts--current-index)))
+           (drover-transcript-look-soon index)))))))
 
 (defun drover-codex-rollouts--archive (session)
   "Archive the conversation of SESSION with \"codex archive\".

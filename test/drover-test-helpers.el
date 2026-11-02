@@ -47,6 +47,7 @@
 (require 'drover-codex)
 (require 'drover-claude-code-transcripts)
 (require 'drover-codex-rollouts)
+(require 'drover-command)
 
 ;; No test may touch the user's state.  Models are not remembered unless
 ;; a test asks for it, so that tests of sources see their answers alone,
@@ -415,6 +416,47 @@ their version.")
   (make-directory (file-name-directory file) t)
   (with-temp-file file
     (insert content)))
+
+(defun drover-test-wait-commands (&optional seconds)
+  "Wait for the commands of `drover-command-run' to end, SECONDS at most.
+SECONDS defaults to 10.  Return non-nil when they all ended."
+  (let ((deadline (+ (float-time) (or seconds 10))))
+    (while (and (> (hash-table-count drover-command--jobs) 0)
+                (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (zerop (hash-table-count drover-command--jobs))))
+
+(defun drover-test-lag (function)
+  "Call FUNCTION, and return the longest Emacs went meanwhile without running timers.
+In seconds: a timer ticks every hundredth of a second, so that a call
+making Emacs wait, a process starting or a command running, shows."
+  (let* ((last (float-time))
+         (lag 0)
+         (timer (run-at-time 0 0.01 (lambda ()
+                                      (let ((now (float-time)))
+                                        (setq lag (max lag (- now last))
+                                              last now))))))
+    (unwind-protect
+        (progn (funcall function)
+               (max lag (- (float-time) last)))
+      (cancel-timer timer))))
+
+(defmacro drover-test-with-slow-starts (&rest body)
+  "Run BODY with every process Emacs starts taking a second to start.
+As on a managed Mac, where security agents hold each program's execution
+while `posix_spawn' makes Emacs wait.  Advising `make-process' may
+compile a trampoline for it first, which takes a while: what is timed
+runs within BODY."
+  (declare (indent 0) (debug t))
+  `(let ((slow (lambda (start &rest arguments)
+                 ;; Not `sleep-for', which runs timers meanwhile.
+                 (let ((end (+ (float-time) 1)))
+                   (while (< (float-time) end)))
+                 (apply start arguments))))
+     (advice-add 'make-process :around slow)
+     (unwind-protect
+         (progn ,@body)
+       (advice-remove 'make-process slow))))
 
 (defmacro drover-test-with-homes (&rest body)
   "Run BODY with the local state of every engine under a fresh directory.
