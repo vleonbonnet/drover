@@ -60,6 +60,9 @@
   (drover-list--stop-timer 'drover-list--cache-timer)
   (drover-list--stop-timer 'drover-list--frame-timer)
   (drover-list--stop-timer 'drover-list--focus-timer)
+  (drover-list--stop-timer 'drover-list--place-timer)
+  (set-frame-parameter nil 'drover-list-sidebar-aside nil)
+  (set-frame-parameter nil 'drover-list-sidebar-kept nil)
   (setq drover-list--age-due nil
         drover-list--frame-timer-pace nil
         drover-list--focused t))
@@ -4308,6 +4311,143 @@ Each shows its own buffer."
           ;; Named in the header line, which two lines lack.
           (should (equal (drover-list-test-displayed header-line-format) "Session      Harness  Age  Summary")))))))
 
+;;;; The sidebar beside the list
+
+(defmacro drover-list-test-beside (&rest body)
+  "Run BODY with the sidebar shown left of `first' and `second', ordinary windows.
+The frame is 160 columns wide; the sidebar's window is `side', `first'
+the selected window, above `second'.  Sidebars are placed as windows
+changed, as the timer would."
+  (declare (indent 0) (debug t))
+  `(drover-list-test-with (drover-list-test-side-sample)
+     (let ((size (cons (frame-width) (frame-height))))
+       (unwind-protect
+           (progn
+             (set-frame-size (selected-frame) 160 50)
+             (pcase-let ((`(,first ,second) (drover-list-test--main)))
+               (let ((side (drover-list-side)))
+                 (ignore first second side)
+                 ,@body)))
+         (set-frame-size (selected-frame) (car size) (cdr size))))))
+
+(defun drover-list-test-place ()
+  "Place the sidebars as windows changed, as the timer does."
+  (drover-list--place-soon)
+  (when-let* ((timer drover-list--place-timer))
+    (cancel-timer timer)
+    (funcall (timer--function timer))))
+
+(ert-deftest drover-list-test-sidebar-steps-aside ()
+  "The sidebar steps aside while the list shows beside it, and comes back where it was."
+  (drover-list-test-beside
+    (let ((width (window-total-width side)))
+      ;; Its place as the user left it.
+      (window-resize side 4 t nil t)
+      (setq width (window-total-width side))
+      (drover-list)
+      (should (eq (window-buffer first) buffer))
+      (should-not (drover-list--side-window))
+      (should (equal (frame-parameter nil 'drover-list-sidebar-aside)
+                     (list :side 'left :slot 0 :width width)))
+      ;; The list took the room: it is drawn for it.
+      (should (= drover-list--width (with-selected-window first (drover-list--line-width))))
+      ;; Its buffer replaced: the sidebar comes back, as it was.
+      (set-window-buffer first (get-buffer-create "*other 1*"))
+      (drover-list-test-place)
+      (let ((side (drover-list--side-window)))
+        (should side)
+        (should (eq (window-parameter side 'window-side) 'left))
+        (should (= (window-total-width side) width))
+        (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+        (should (eq (selected-window) first)))
+      ;; Its window deleted.
+      (drover-list)
+      (should-not (drover-list--side-window))
+      (delete-window first)
+      (drover-list-test-place)
+      (should (drover-list--side-window))
+      ;; Buried.
+      (select-window second)
+      (drover-list)
+      (should-not (drover-list--side-window))
+      (bury-buffer)
+      (should-not (eq (window-buffer second) buffer))
+      (drover-list-test-place)
+      (should (drover-list--side-window)))))
+
+(ert-deftest drover-list-test-sidebar-stays-unless-beside ()
+  "The list in a window not beside the sidebar leaves it: both show."
+  (drover-list-test-beside
+    (let ((right (split-window first nil 'right)))
+      (select-window right)
+      (drover-list)
+      (should (eq (window-buffer right) buffer))
+      (drover-list-test-place)
+      (should (eq (drover-list--side-window) side))
+      (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+      ;; Moved beside it, by the window left of it going: it steps aside.
+      (delete-window first)
+      (drover-list-test-place)
+      (should-not (drover-list--side-window))
+      ;; The list on the sidebar's other side, the sidebar on the right.
+      (let ((drover-list-side-window-side 'right))
+        (set-window-buffer right (get-buffer-create "*other 1*"))
+        (drover-list-test-place)
+        (should (eq (window-parameter (drover-list--side-window) 'window-side) 'left))))))
+
+(ert-deftest drover-list-test-sidebar-as-the-user-asks ()
+  "Shown beside the list by \\[drover-list-side], the sidebar stays; hidden, it does not come back."
+  (drover-list-test-beside
+    (drover-list)
+    (should-not (drover-list--side-window))
+    ;; Asked for, it shows beside the list, where it was, and stays.
+    (drover-list-side)
+    (should (drover-list--side-window))
+    (should (frame-parameter nil 'drover-list-sidebar-kept))
+    (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+    (drover-list-test-place)
+    (should (drover-list--side-window))
+    ;; Until the list leaves: beside it again, it steps aside.
+    (set-window-buffer first (get-buffer-create "*other 1*"))
+    (drover-list-test-place)
+    (should (drover-list--side-window))
+    (should-not (frame-parameter nil 'drover-list-sidebar-kept))
+    (select-window first)
+    (drover-list)
+    (should-not (drover-list--side-window))
+    ;; Asked for, then hidden as asked: it does not come back.
+    (drover-list-side)
+    (drover-list-side)
+    (should-not (drover-list--side-window))
+    (set-window-buffer first (get-buffer-create "*other 1*"))
+    (drover-list-test-place)
+    (should-not (drover-list--side-window))
+    (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+    ;; Nor once q hid it.
+    (drover-list-side)
+    (select-window first)
+    (drover-list)
+    (drover-list-side)
+    (with-selected-window (drover-list--side-window)
+      (call-interactively (key-binding (kbd "q"))))
+    (set-window-buffer first (get-buffer-create "*other 1*"))
+    (drover-list-test-place)
+    (should-not (drover-list--side-window))))
+
+(ert-deftest drover-list-test-sidebar-placed-as-windows-change ()
+  "Windows changing place the sidebars once they settled, through a timer."
+  (drover-list-test-beside
+    (should (memq #'drover-list--place-soon (default-value 'window-buffer-change-functions)))
+    (should (memq #'drover-list--place-soon (default-value 'window-configuration-change-hook)))
+    (set-window-buffer first (drover-list--buffer))
+    (drover-list--place-soon)
+    (drover-list--place-soon)
+    (should (timerp drover-list--place-timer))
+    (should (drover-list--side-window))
+    (drover-list-test-place)
+    (should-not drover-list--place-timer)
+    (should-not (drover-list--side-window))))
+
 ;;;; The sidebar and the list at once
 
 (defmacro drover-list-test-two-lists (&rest body)
@@ -4315,8 +4455,9 @@ Each shows its own buffer."
 The frame is 200 columns wide.  The side sample is served, sessions
 open in buffers; `side' is the sidebar's window and `sidebar' its
 buffer, `full' the window of the list in an ordinary window, `buffer',
-and `second' another ordinary window, below it.  The list's window is
-selected, the list current."
+right of another one, so that it is not beside the sidebar, which would
+step aside, and `second' another ordinary window, below them.  The
+list's window is selected, the list current."
   (declare (indent 0) (debug t))
   `(drover-list-test-with (drover-list-test-side-sample)
      (drover-list-test--register-buffers)
@@ -4325,13 +4466,14 @@ selected, the list current."
        (unwind-protect
            (progn
              (set-frame-size (selected-frame) 200 60)
-             (pcase-let ((`(,full ,second) (drover-list-test--main)))
+             (pcase-let ((`(,first ,second) (drover-list-test--main)))
                (let* ((side (drover-list-side))
-                      (sidebar (window-buffer side)))
+                      (sidebar (window-buffer side))
+                      (full (split-window first nil 'right)))
                  (select-window full)
                  (drover-list)
                  (should (eq (selected-window) full))
-                 (ignore second sidebar)
+                 (ignore first second sidebar)
                  ,@body)))
          (set-frame-size (selected-frame) (car size) (cdr size))))))
 
@@ -4542,8 +4684,8 @@ activity first."
     (drover-list-test-goto "done")
     (execute-kbd-macro (kbd "RET"))
     ;; Opened in the window where the user works, beside both lists.
-    (should (equal (buffer-name (window-buffer second)) "*session done*"))
-    (should (eq (selected-window) second))
+    (should (equal (buffer-name (window-buffer first)) "*session done*"))
+    (should (eq (selected-window) first))
     (should (eq (window-buffer full) buffer))
     (drover-list--windows-changed)
     (dolist (list (list sidebar buffer))

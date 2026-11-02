@@ -4671,6 +4671,8 @@ A theme may change fonts, which widths depend on, and the colour of
   (add-hook 'drover-changed-hook #'drover-list--on-change)
   (add-hook 'window-buffer-change-functions #'drover-list--windows-changed)
   (add-hook 'window-selection-change-functions #'drover-list--windows-changed)
+  (add-hook 'window-buffer-change-functions #'drover-list--place-soon)
+  (add-hook 'window-configuration-change-hook #'drover-list--place-soon)
   (add-hook 'kill-buffer-hook #'drover-list--buffer-killed)
   (add-hook 'enable-theme-functions #'drover-list--theme-changed)
   (add-hook 'disable-theme-functions #'drover-list--theme-changed)
@@ -4692,6 +4694,8 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
       (remove-hook 'drover-changed-hook #'drover-list--on-change)
       (remove-hook 'window-buffer-change-functions #'drover-list--windows-changed)
       (remove-hook 'window-selection-change-functions #'drover-list--windows-changed)
+      (remove-hook 'window-buffer-change-functions #'drover-list--place-soon)
+      (remove-hook 'window-configuration-change-hook #'drover-list--place-soon)
       (remove-hook 'kill-buffer-hook #'drover-list--buffer-killed)
       (remove-hook 'enable-theme-functions #'drover-list--theme-changed)
       (remove-hook 'disable-theme-functions #'drover-list--theme-changed)
@@ -4699,6 +4703,7 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
       (setq drover-list--windows nil)
       (drover-list--stop-timer 'drover-list--focus-timer)
       (drover-list--stop-timer 'drover-list--restyle-timer)
+      (drover-list--stop-timer 'drover-list--place-timer)
       (drover-list--stop-timer 'drover-list--relist-timer)
       (drover-list--stop-timer 'drover-list--age-timer)
       (drover-list--stop-timer 'drover-list--cache-timer)
@@ -4820,40 +4825,47 @@ ordinary window."
 It lists the sessions `drover-filter' keeps, grouped as
 `drover-group-by' says and sorted as `drover-sort-by' says; see
 `drover-list-mode' for the keys.  The sidebar of `drover-list-side' is
-a list of its own, which stays: both may show at once, each laid out
-for its width, with its own point and its own sessions expanded."
+a list of its own: both may show at once, each laid out for its width,
+with its own point, but side by side, where the sidebar steps aside
+until the list leaves (see `drover-list--place-sidebar')."
   (interactive)
   (drover-start)
   (let ((buffer (drover-list--buffer)))
     (pop-to-buffer buffer drover-list-display-action)
+    ;; Before drawing, for the width the sidebar leaves.
+    (drover-list--place-sidebar (selected-frame))
     (with-current-buffer buffer
       ;; Asked for, so drawn anew whatever its state.
       (setq drover-list--stale t))
     (drover-list--show (selected-window))))
 
-(defun drover-list--display-alist ()
-  "Return the action alist displaying the list in a side window."
-  `((side . ,drover-list-side-window-side)
-    (slot . ,drover-list-side-window-slot)
-    (window-width . ,drover-list-side-window-width)
+(defun drover-list--display-alist (&optional place)
+  "Return the action alist displaying the sidebar in a side window.
+PLACE is a plist of :side, :slot and :width, the place the sidebar had
+before it stepped aside (see `drover-list--place-sidebar'); without
+one, the options say."
+  `((side . ,(or (plist-get place :side) drover-list-side-window-side))
+    (slot . ,(or (plist-get place :slot) drover-list-side-window-slot))
+    (window-width . ,(or (plist-get place :width) drover-list-side-window-width))
     (preserve-size . (t . nil))
     ;; Strongly dedicated, so that `switch-to-buffer' never replaces it.
     (dedicated . t)
     (window-parameters . ((no-delete-other-windows . t)
                           (no-other-window . t)))))
 
-(defun drover-list--show-side ()
+(defun drover-list--show-side (&optional place)
   "Show the sidebar in a side window of the selected frame and return the window.
 An ordinary window of the frame showing the sidebar's buffer stops
 showing it, so that it is laid out for the side window's width; the
-list of `drover-list' stays where it is."
+list of `drover-list' stays where it is.  PLACE, if any, is where the
+sidebar was before it stepped aside (see `drover-list--display-alist')."
   (drover-start)
   (let ((buffer (drover-list--buffer t)))
     (dolist (window (get-buffer-window-list buffer nil (selected-frame)))
       (unless (window-parameter window 'window-side)
         (quit-window nil window)))
     (let ((window (or (drover-list--side-window)
-                      (display-buffer-in-side-window buffer (drover-list--display-alist))
+                      (display-buffer-in-side-window buffer (drover-list--display-alist place))
                       (user-error "No room for the drover list"))))
       ;; Before drawing, which is for the width the fringes leave.
       (drover-list--drop-fringes window)
@@ -4870,23 +4882,122 @@ you work instead, so that the same key moves back and forth.  From the
 side window, sessions open in the window where you work.  The sidebar
 is a list of its own, beside the one `drover-list' shows, if any, which
 folds nothing (see `drover-list-sidebar-mode'), in a side window
-without fringes."
+without fringes.
+
+While the list of `drover-list' shows beside it, the sidebar steps
+aside, and comes back once the list leaves (see
+`drover-list--place-sidebar'); shown with this command meanwhile, it
+stays beside the list, until the list leaves; hidden with it, it does
+not come back."
   (interactive "P")
-  (let ((window (drover-list--side-window)))
+  (let ((window (drover-list--side-window))
+        (aside (frame-parameter nil 'drover-list-sidebar-aside)))
     (cond (select
            (if (and window (eq window (selected-window)))
                (when-let* ((main (drover-list--main-window)))
                  (select-window main))
-             (select-window (drover-list--show-side))))
-          (window (delete-window window))
-          (t (drover-list--show-side)))))
+             (select-window (drover-list--show-side-asked aside))))
+          (window (drover-list--hide-side window))
+          (t (drover-list--show-side-asked aside)))))
+
+(defun drover-list--show-side-asked (aside)
+  "Show the sidebar as asked, where it was before stepping aside, ASIDE, if any.
+Asked for beside the list, it stays there, until the list leaves."
+  (set-frame-parameter nil 'drover-list-sidebar-aside nil)
+  (let ((window (drover-list--show-side aside)))
+    (set-frame-parameter nil 'drover-list-sidebar-kept
+                         (drover-list--beside-p (window-frame window)
+                                                (window-parameter window 'window-side)))
+    window))
+
+(defun drover-list--hide-side (window)
+  "Delete WINDOW, the sidebar's, as asked: it does not come back by itself."
+  (let ((frame (window-frame window)))
+    (set-frame-parameter frame 'drover-list-sidebar-aside nil)
+    (set-frame-parameter frame 'drover-list-sidebar-kept nil)
+    (delete-window window)))
 
 (defun drover-list-quit ()
   "Hide the list: delete its side window, or quit its ordinary window."
   (interactive nil drover-list-mode)
   (if (window-parameter nil 'window-side)
-      (delete-window)
+      (drover-list--hide-side (selected-window))
     (quit-window)))
+
+;;;; The sidebar beside the list
+
+;; The sidebar beside the list of `drover-list' shows the same sessions
+;; twice, side by side: it steps aside while the list shows next to it,
+;; and comes back once the list leaves, where it was.  Where it was is
+;; a parameter of the frame, as is whether the user asked for it there.
+
+(defun drover-list--beside-p (frame side)
+  "Return non-nil when a window of FRAME shows the list at its SIDE.
+That is a window, not a side window, showing the buffer of
+`drover-list' whose SIDE edge is that of the frame's main window: the
+sidebar, on SIDE, would be next to it."
+  (when-let* ((buffer (get-buffer drover-list-buffer-name))
+              (edge (pcase side ('left 0) ('top 1) ('right 2) ('bottom 3)))
+              (main (window-main-window frame)))
+    (let ((at (nth edge (window-pixel-edges main))))
+      (and (seq-some (lambda (window)
+                       (and (not (window-parameter window 'window-side))
+                            (= (nth edge (window-pixel-edges window)) at)))
+                     (get-buffer-window-list buffer 'nomini frame))
+           t))))
+
+(defun drover-list--place-sidebar (frame)
+  "Have the sidebar of FRAME step aside next to the list, or come back.
+The sidebar shown, the list beside it, its window goes, its place, side,
+slot and width, kept in the frame's `drover-list-sidebar-aside'; once
+no window shows the list beside where it was, as the list's window
+shows another buffer, is deleted or moved, or the list is buried, it
+comes back there.  Shown by `drover-list-side' beside the list, it stays
+until the list leaves (`drover-list-sidebar-kept'); hidden by it, it no
+longer comes back."
+  (let ((side-window (drover-list--side-window frame))
+        (aside (frame-parameter frame 'drover-list-sidebar-aside)))
+    (cond
+     (side-window
+      (if (drover-list--beside-p frame (window-parameter side-window 'window-side))
+          (unless (frame-parameter frame 'drover-list-sidebar-kept)
+            (set-frame-parameter frame 'drover-list-sidebar-aside
+                                 (list :side (window-parameter side-window 'window-side)
+                                       :slot (window-parameter side-window 'window-slot)
+                                       :width (window-total-width side-window)))
+            (delete-window side-window))
+        (set-frame-parameter frame 'drover-list-sidebar-kept nil)))
+     (aside
+      (unless (drover-list--beside-p frame (plist-get aside :side))
+        (set-frame-parameter frame 'drover-list-sidebar-aside nil)
+        (when (buffer-live-p (get-buffer drover-list-sidebar-buffer-name))
+          (with-selected-frame frame
+            (drover-list--show-side aside))))))))
+
+(defvar drover-list--place-timer nil
+  "Timer placing the sidebars once windows settled, or nil.")
+
+(defun drover-list--place-sidebars ()
+  "Have the sidebar of each frame step aside next to the list, or come back.
+See `drover-list--place-sidebar'."
+  (drover-with-reporting "sidebar place"
+    (setq drover-list--place-timer nil)
+    (when (get-buffer drover-list-sidebar-buffer-name)
+      (dolist (frame (frame-list))
+        (when (and (frame-live-p frame)
+                   (or (frame-parameter frame 'drover-list-sidebar-aside)
+                       (drover-list--side-window frame)))
+          (drover-list--place-sidebar frame))))))
+
+(defun drover-list--place-soon (&rest _)
+  "Place the sidebars once the windows changing now settled.
+For `window-buffer-change-functions' and
+`window-configuration-change-hook', which run many times as windows
+change: the sidebars are placed once, after."
+  (drover-with-reporting "sidebar place"
+    (unless (or (timerp drover-list--place-timer)
+                (not (get-buffer drover-list-sidebar-buffer-name)))
+      (setq drover-list--place-timer (run-at-time 0 nil #'drover-list--place-sidebars)))))
 
 (defun drover-list-display ()
   "Show the session at point in another window, the list staying selected.
