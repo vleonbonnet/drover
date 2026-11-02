@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 7
+(defconst drover-core-generation 8
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1415,6 +1415,14 @@ PROPERTIES is a plist of:
              closes only after THEN, and stays after ELSE.
  :unarchive  Function of a session, archived, restoring it from the
              archive.
+ :unarchive-confirms
+             Non-nil when :unarchive is told later whether the restore
+             took, as :archive-confirms tells of :archive: it is then
+             called with a session, THEN and ELSE, and calls THEN with
+             no argument once the session left the archive, or ELSE
+             with a message once the restore was refused, at most one
+             of them once.  The record of the session fetched among
+             the archived ones is forgotten after THEN.
  :archived   Function of a CALLBACK fetching the backend's archived
              sessions, and calling CALLBACK with them as
              `drover-session' records, their ARCHIVED set, as soon as
@@ -1513,6 +1521,9 @@ as `drover-model' describes them: explicit choices (:agent :model
              (nil without :check, or for a new session), submitting TEXT
              as a prompt once SESSION is ready.  A failure is reported
              with `drover-warn', saying the prompt is in the kill ring.
+             A session drover archived is restored before (see
+             `drover-unarchive-to-send'); one its backend archived, the
+             backend restores as it sends, telling a refusal so.
  :options    Function of a SESSION returning what it runs now, as a
              plist (:model MODEL :variant VARIANT), or nil.  It is
              called for every session a picker offers, so it must be
@@ -1532,7 +1543,10 @@ no scheduled prompt.
  :submit     Function of a SESSION, a TEXT, THEN and ELSE, submitting
              TEXT as a prompt now, :blocker having allowed it: THEN with
              no argument once the front end took it, ELSE with a message
-             otherwise, at most one of them once.
+             otherwise, at most one of them once.  ELSE gets a second
+             argument, non-nil, when nothing was sent for sure, as when
+             the session could not be restored from its archive: the
+             prompt then failed rather than was interrupted.
  :ready      Function of no argument returning non-nil once :sessions
              lists every session the backend runs, as a service's
              registry does once loaded: a session it then no longer
@@ -3249,19 +3263,99 @@ archived it and no backend lists its conversation any more, neither a
 front end following it nor one listing what its engine records, as for
 a Claude Code conversation whose transcript is gone: restored, it would
 leave every list, so it stays archived, and listed among the archived
-sessions.  A buffer archiving was to close once its turn ended stays open."
+sessions.  A buffer archiving was to close once its turn ended stays open.
+
+A backend whose restore is confirmed later (:unarchive-confirms) has
+SESSION's record fetched among the archived sessions forgotten once it
+took (see `drover-archived-left'), and a refusal told on one line, as a
+warning."
   (cond
    ((drover--archive-entry session)
-    (unless (drover--followed-p session)
-      (user-error "%s stays archived: no front end follows its conversation, and its engine keeps no record of it that drover lists"
-                  (drover-session-display-title session)))
+    (when-let* ((refusal (drover--unarchive-refusal session)))
+      (user-error "%s stays archived: %s" (drover-session-display-title session) refusal))
     (drover--archive-forget session)
     (drover--close-cancel session)
     (drover--archive-changed session))
+   ((and (drover-session-archived session) (drover-backend-property session :unarchive-confirms))
+    (let ((backend (drover-session-backend session))
+          (id (drover-session-id session))
+          (title (drover-bound-line (drover-session-display-title session))))
+      (drover-backend-call session :unarchive
+                           (lambda ()
+                             (drover-with-reporting "unarchive"
+                               (drover-archived-left backend id)))
+                           (lambda (message)
+                             (drover-with-reporting "unarchive"
+                               (drover-warn "Could not restore %s from the archive: %s" title
+                                            (or (drover-bound-line message drover-error-length)
+                                                "refused"))))))
+    (drover--close-cancel session))
    ((drover-session-archived session)
     (drover-backend-call session :unarchive)
     (drover--close-cancel session))
    (t (user-error "%s is not archived" (drover-session-display-title session)))))
+
+(defun drover--unarchive-refusal (session)
+  "Return why SESSION, which drover archived, cannot be restored, or nil.
+Restored while no backend lists its conversation, it would leave every
+list."
+  (unless (drover--followed-p session)
+    "no front end follows its conversation, and its engine keeps no record of it that drover lists"))
+
+(defun drover-unarchive-to-send (session)
+  "Restore SESSION from drover's own archive, so that a prompt may go to it.
+Return non-nil once restored, nil when drover did not archive its
+conversation: a backend archiving its sessions itself restores one as
+it takes a prompt, as opencode.el does.  Signal a `user-error' telling,
+on one line, why SESSION cannot be restored (see
+`drover-unarchive-session'): nothing is to be sent to it then."
+  (when (drover--archive-entry session)
+    (when-let* ((refusal (drover--unarchive-refusal session)))
+      (user-error "Could not restore %s from the archive: %s"
+                  (drover-bound-line (drover-session-display-title session)) refusal))
+    (drover-unarchive-session session)
+    t))
+
+(defun drover-archived-conversation (key)
+  "Return a session standing for the conversation of engine KEY drover archived.
+KEY is an engine key, (ENGINE . ENGINE-ID).  The session is the record
+of a backend following the conversation live, else of one listing what
+its engine records, else the record drover kept of it, when its backend
+is still registered.  Nil when drover did not archive it."
+  (when-let* ((entry (alist-get key (drover--archive) nil nil #'equal)))
+    (or (seq-find (lambda (session) (equal (drover-session-engine-key session) key))
+                  (drover--live-sessions))
+        (and (drover--recording-backends (car key))
+             (gethash key (drover--recorded-history)))
+        (and (assq (plist-get entry :backend) drover--backends)
+             (drover--archive-record key entry)))))
+
+(defun drover-archived-live-sessions ()
+  "Return the live sessions whose conversations drover archived itself.
+They are left out of `drover-sessions', yet have buffers a prompt may
+go to, restoring them (see `drover-unarchive-to-send').  Records of
+different backends showing one conversation are merged as
+`drover-sessions' merges them."
+  (when-let* ((archive (drover--archive)))
+    (drover--merge-duplicates
+     (seq-filter (lambda (session)
+                   (when-let* ((key (drover-session-engine-key session)))
+                     (assoc key archive)))
+                 (drover--live-sessions)))))
+
+(defun drover-archived-left (backend id)
+  "Forget the record of session ID of BACKEND fetched as archived: it left.
+For a backend learning that a session left its archive before its
+archived sessions are fetched again (see :archived in
+`drover-register-backend'): lists then no longer show it archived.
+Return non-nil when there was such a record, BACKEND then noted
+changed (see `drover-backend-changed')."
+  (when-let* ((records (alist-get backend drover--archived))
+              ((seq-find (lambda (record) (equal (drover-session-id record) id)) records)))
+    (setf (alist-get backend drover--archived)
+          (seq-remove (lambda (record) (equal (drover-session-id record) id)) records))
+    (drover-backend-changed backend)
+    t))
 
 (defun drover--followed-p (session)
   "Return non-nil when a backend lists the conversation of SESSION.

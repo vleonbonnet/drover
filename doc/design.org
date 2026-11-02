@@ -446,6 +446,16 @@ The OpenCode backend's archive is the service's, which may refuse it, and closin
 
 Archived this way, a shell's or terminal's session stays in drover's archive with its buffer gone, where =drover-unarchive-session= refuses it (see above) until its conversation is resumed in its front end.
 
+** A prompt restores the session it goes to
+
+Sending to an archived session means the user is not done with it: it is restored first, then the prompt goes, whichever way it goes.  An OpenCode session opencode.el restores itself (=opencode-session-send= restores before it posts, a PATCH of the session); what drover archived, drover restores, through =drover-unarchive-to-send=, which does nothing for a session it did not archive, and refuses, on one line, =Could not restore TITLE from the archive: WHY=, a conversation no backend would list restored (=drover--unarchive-refusal=, which =drover-unarchive-session= tells too).  A refusal sends nothing: the prompt stays, its text in the kill ring.
+
+- Drover's prompt offers the sessions it archived whose buffer is still open (=drover-archived-live-sessions=, as a turn's end or an answer awaited keeps one), and restores the one chosen once its checks passed, before the options are applied.
+- A scheduled prompt finds such a buffer as any other (=drover-schedule--sessions=), so that waiting for the end of a turn waits for that session's turn, which ended at once had it been left out.  Delivery restores the conversation as it begins (=drover-archived-conversation=), when a backend lists it, which keeps a buffer archiving was to close once the turn ended; one listed by nothing yet is resumed, then restored as the prompt goes, a refusal failing it before =sending=, nothing sent.  A backend's =:submit= telling nothing was sent for sure, a second argument to ELSE, fails the prompt rather than leave it interrupted: the OpenCode backend's does so for a session that did not open or a restore refused.  Its =:submit= opens a session without a buffer, unseen, as its =:send= does, since archiving closed the buffer the delivery found.
+- The OpenCode backend tells a refused restore from a refused prompt by the method of the request that failed, =patch=, rather than a message saying the session did not take the prompt.
+
+Restored, a session leaves the archived sessions fetched at once (=drover-archived-left=), before the event of the service fetches them again: a backend whose restore is confirmed (=:unarchive-confirms=) is given THEN and ELSE by =drover-unarchive-session=, THEN forgetting the record, ELSE warning on one line, as for =:archive-confirms=; and the OpenCode backend forgets a session it fetched as archived (=drover-opencode--archived-ids=) once the registry, on =opencode-state-updated-functions=, holds it unarchived, as a prompt restored it.  =drover-core-generation= is 8 since.
+
 ** What each front end can do to a conversation
 
 | Backend           | =:archive=, =:unarchive=                                                           | =:delete=                                                                              | =:fork=                                                                  | =:compact=                                                                  |

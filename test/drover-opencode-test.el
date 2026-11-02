@@ -129,6 +129,7 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (drover--history nil)
          (drover-show-archived nil)
          (drover--archived nil)
+         (drover-opencode--archived-ids nil)
          (drover-opencode--refetch-timer nil)
          (drover-opencode--projects nil)
          (drover-opencode--made nil)
@@ -1477,6 +1478,82 @@ closes then, and the close tells only of the input kept."
 
 ;;;; The dispatch menu
 
+(defun drover-opencode-test--archived-infos (&rest ids)
+  "Return the infos of archived sessions IDS, as the service lists them."
+  (mapcar (lambda (id)
+            `((id . ,id) (title . ,(concat "Put away " id)) (location (directory . "/work/drover/"))
+              (time (created . 1000000) (updated . 2000000) (archived . 3000000))))
+          ids))
+
+(ert-deftest drover-opencode-test-restored-leaves-archived ()
+  "A session the registry tells restored, as a prompt sent to it restores it, leaves the archived ones.
+The service's event fetches them again later; the registry tells first."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_live"))
+    (drover-opencode-test-with-history
+      (drover-set-show-archived t)
+      (funcall (plist-get drover-opencode-test-history-fetch :callback)
+               (drover-opencode-test--archived-infos "ses_a" "ses_b" "ses_c"))
+      (cl-letf (((symbol-function 'opencode-state-sessions)
+                 ;; As the registry lists them: archived ones left out.
+                 (lambda (&optional _)
+                   (seq-remove (lambda (entry) (plist-get entry :archived)) drover-opencode-test-entries))))
+        (cl-flet ((archived () (sort (mapcar #'drover-session-id (drover-archived-sessions)) #'string<))
+                (registry (id archived)
+                  (setq drover-opencode-test-entries
+                        (append (seq-remove (lambda (entry) (equal (plist-get entry :id) id))
+                                            drover-opencode-test-entries)
+                                (list (drover-opencode-test-entry id :archived archived))))))
+        (should (equal (archived) '("ses_a" "ses_b" "ses_c")))
+        ;; A buffer opened on it, the registry holds it, archived still.
+        (registry "ses_a" 3000.0)
+        (drover-opencode--updated "ses_a")
+        (should (equal (archived) '("ses_a" "ses_b" "ses_c")))
+        ;; Restored: it leaves the archived sessions, and lists show it live.
+        (registry "ses_a" nil)
+        (drover-opencode--updated "ses_a")
+        (should (equal (archived) '("ses_b" "ses_c")))
+        (should (memq 'opencode drover--changed-backends))
+        (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("ses_live" "ses_a" "ses_b" "ses_c")))
+        (should-not (drover-session-archived (drover-find 'opencode "ses_a")))
+        ;; Several changes told at once.
+        (registry "ses_c" nil)
+        (drover-opencode--updated nil)
+        (should (equal (archived) '("ses_b")))
+        ;; A session the registry does not hold tells nothing.
+        (drover-opencode--updated "ses_b")
+        (should (equal (archived) '("ses_b")))
+        ;; Archived sessions hidden, nothing is looked at.
+        (registry "ses_b" nil)
+        (drover-set-show-archived nil)
+        (setq drover--changed-backends nil)
+        (drover-opencode--updated "ses_b")
+        (should-not (memq 'opencode drover--changed-backends)))))))
+
+(ert-deftest drover-opencode-test-unarchive-confirmed ()
+  "Restoring an archived session drops it from the archived ones once the service took it.
+A refusal is told on one line, as a warning, the session staying archived."
+  (drover-opencode-test-with nil
+    (drover-opencode-test-with-history
+      (drover-set-show-archived t)
+      (funcall (plist-get drover-opencode-test-history-fetch :callback)
+               (drover-opencode-test--archived-infos "ses_a" "ses_b"))
+      (let ((warnings nil))
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (_type message &rest _) (push message warnings))))
+          (drover-unarchive (drover-find 'opencode "ses_a"))
+          (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("ses_a" "ses_b")))
+          (drover-opencode-test-answer-archive "ses_a")
+          (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("ses_b")))
+          (should-not warnings)
+          (drover-unarchive (drover-find 'opencode "ses_b"))
+          (drover-opencode-test-answer-archive "ses_b" (concat "Session is busy\n" (make-string 500000 ?x)))
+          (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("ses_b")))
+          (should (= (length warnings) 1))
+          (should (string-prefix-p "Could not restore Put away ses_b from the archive: PATCH /api/session/ses_b failed"
+                                   (car warnings)))
+          (should-not (string-search "\n" (car warnings)))
+          (should (< (length (car warnings)) 400)))))))
+
 (ert-deftest drover-opencode-test-dispatch ()
   (let ((keys (mapcar (lambda (key)
                         (plist-get (cdr (transient-get-suffix 'drover-dispatch key)) :command))
@@ -2261,6 +2338,91 @@ Return a function telling how many times the backend called back."
         (setq checked nil)
         (should-not (drover-backend-call session :check "go" nil))
         (should-not checked)))))
+
+(ert-deftest drover-opencode-test-send-restore-refused ()
+  "A prompt to an archived session the service will not restore says so, not that it was refused.
+opencode.el restores the session before sending, a PATCH whose error
+the send's ELSE gets: nothing was sent."
+  (drover-opencode-test-with-session
+    (let (sent)
+      (cl-letf (((symbol-function 'opencode-session-send)
+                 (lambda (text &rest keys) (setq sent (list text keys)))))
+        (drover-backend-call session :send "go" nil)
+        (funcall (plist-get (nth 1 sent) :else)
+                 (opencode-error--make :status 409 :method 'patch :path "/api/session/ses_1"
+                                       :message "Session is busy"))
+        (should (equal (car warnings)
+                       (concat "Could not restore Title ses_1 from the archive: PATCH /api/session/ses_1 "
+                               "failed (HTTP 409): Session is busy; it is in the kill ring")))
+        ;; The prompt itself refused is the buffer's not taking it.
+        (funcall (plist-get (nth 1 sent) :else)
+                 (opencode-error--make :status 400 :method 'post :path "/api/session/ses_1/prompt"
+                                       :message "Bad"))
+        (should (string-match-p "\\*opencode session\\* did not take the prompt: .*Bad; it is in the kill ring"
+                                (car warnings)))
+        ;; Not an error of a request: the prompt not taken.
+        (funcall (plist-get (nth 1 sent) :else) "Gone")
+        (should (string-match-p "did not take the prompt: Gone" (car warnings)))))))
+
+(ert-deftest drover-opencode-test-scheduled-prompt-opens-session ()
+  "A scheduled prompt to a session without a buffer opens it unseen, as archiving closed it.
+A restore the service refuses, or a session that does not open, sends
+nothing, which ELSE is told."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((session (drover-opencode-test-session "ses_1"))
+          (buffer (generate-new-buffer " *opencode reopened*"))
+          (opened nil)
+          (sent nil)
+          (answer nil)
+          outcome)
+      (unwind-protect
+          (cl-letf (((symbol-function 'opencode-session-open-by-id)
+                     (lambda (id &rest keys)
+                       (push (cons id keys) opened)
+                       (puthash id buffer opencode-session-buffers)
+                       (with-current-buffer buffer
+                         (funcall (plist-get keys :callback) `((id . ,id))))))
+                    ((symbol-function 'opencode-session-send)
+                     (lambda (text &rest keys)
+                       (push (list (current-buffer) text) sent)
+                       (funcall (if (eq answer 'refuse) (plist-get keys :else) (plist-get keys :then))
+                                (if (eq answer 'refuse)
+                                    (opencode-error--make :status 409 :method 'patch :path "/api/session/ses_1"
+                                                          :message "Session is busy")
+                                  nil)))))
+            (cl-flet ((submit ()
+                        (setq outcome nil)
+                        (drover-opencode--submit session "later"
+                                                 (lambda () (setq outcome 'sent))
+                                                 (lambda (&rest arguments) (setq outcome arguments)))))
+              (should-not (drover-opencode--buffer session))
+              (submit)
+              (should (eq outcome 'sent))
+              (should (equal (caar opened) "ses_1"))
+              (should (plist-get (cdar opened) :no-display))
+              (should (equal (car sent) (list buffer "later")))
+              ;; Its buffer open, it is used as it is.
+              (submit)
+              (should (eq outcome 'sent))
+              (should (= (length opened) 1))
+              ;; A refused restore: nothing sent, for sure.
+              (setq answer 'refuse)
+              (submit)
+              (should (equal outcome
+                             (list (concat "Could not restore Title ses_1 from the archive: PATCH "
+                                           "/api/session/ses_1 failed (HTTP 409): Session is busy")
+                                   t)))
+              ;; A session that does not open.
+              (remhash "ses_1" opencode-session-buffers)
+              (cl-letf (((symbol-function 'opencode-session-open-by-id)
+                         (lambda (_id &rest keys)
+                           (funcall (plist-get keys :else)
+                                    (opencode-error--make :method 'get :path "/api/session/ses_1"
+                                                          :message "Gone")))))
+                (submit))
+              (should (string-match-p "Gone" (car outcome)))
+              (should (eq (cadr outcome) t))))
+        (kill-buffer buffer)))))
 
 (ert-deftest drover-opencode-test-checks-the-switched-turn ()
   "A running session's checks run before any switch, for the agent and model it switches to."

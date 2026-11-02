@@ -76,7 +76,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 3))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 8))
   (load "drover-core" nil t))
 
 ;; Recent additions to opencode.el.
@@ -689,11 +689,38 @@ WHAT was fetched, and CALLBACK not called."
 See `drover-opencode--fetch'.  The backend's :history."
   (drover-opencode--fetch nil "older" callback))
 
+(defvar drover-opencode--archived-ids nil
+  "Identifiers of the sessions last fetched as archived, a hash table, or nil.
+One the registry then tells restored leaves the archived sessions lists
+show (see `drover-opencode--left-archive').")
+
 (defun drover-opencode--archived (callback)
   "Fetch every archived session of every project, and call CALLBACK with them.
 Their records tell when they were archived.  See
 `drover-opencode--fetch'.  The backend's :archived."
-  (drover-opencode--fetch t "archived" callback))
+  (drover-opencode--fetch t "archived"
+                          (lambda (sessions)
+                            (let ((ids (make-hash-table :test #'equal :size (length sessions))))
+                              (dolist (session sessions)
+                                (puthash (drover-session-id session) t ids))
+                              (setq drover-opencode--archived-ids ids))
+                            (funcall callback sessions))))
+
+(defun drover-opencode--left-archive (id)
+  "Forget session ID among the archived ones fetched, once restored.
+ID nil stands for every session fetched as archived.  opencode.el
+restores an archived session as it sends to it, telling the registry,
+which runs `opencode-state-updated-functions'; the service's event
+fetches the archived sessions again later (see
+`drover-opencode--sessions-moved').  A session the registry does not
+hold tells nothing."
+  (when-let* ((ids (and drover-show-archived drover-opencode--archived-ids)))
+    (dolist (id (if id (list id) (hash-table-keys ids)))
+      (when-let* (((gethash id ids))
+                  (entry (opencode-state-get id))
+                  ((not (plist-get entry :archived))))
+        (remhash id ids)
+        (drover-archived-left 'opencode id)))))
 
 (defvar drover-opencode--refetch-timer nil
   "Timer fetching again the older and archived sessions lists show.")
@@ -726,8 +753,9 @@ of events: they are fetched again once, half a second after the last."
 ;;;; Changes
 
 (defun drover-opencode--updated (id)
-  "Report a change of session ID to drover."
+  "Report a change of session ID to drover, a restore from the archive included."
   (drover-with-reporting "OpenCode changes"
+    (drover-opencode--left-archive id)
     (drover-backend-changed 'opencode id)))
 
 (defun drover-opencode--catalog-changed (_kind _directory)
@@ -799,9 +827,14 @@ the session's buffer closes only once the service archived it."
                             (and then (lambda (_info) (funcall then)))
                             (and else (lambda (error) (funcall else (opencode-error-describe error))))))
 
-(defun drover-opencode--unarchive (session)
-  "Restore SESSION from the service's archive."
-  (opencode-session-archive (drover-session-id session) t))
+(defun drover-opencode--unarchive (session &optional then else)
+  "Restore SESSION from the service's archive, then call THEN, or ELSE if refused.
+ELSE gets the refusal's description; without it, opencode.el reports
+the refusal.  The backend's :unarchive, which confirms
+\(:unarchive-confirms)."
+  (opencode-session-archive (drover-session-id session) t
+                            (and then (lambda (_info) (funcall then)))
+                            (and else (lambda (error) (funcall else (opencode-error-describe error))))))
 
 (defun drover-opencode--close (session)
   "Close the buffer of SESSION without asking, as archiving does.
@@ -1000,13 +1033,35 @@ THEN runs once they all settled, whatever happened.  The backend's
                       (drover-session-display-title session) message)
          (funcall then))))))
 
+(defun drover-opencode--restore-refused-p (error)
+  "Return non-nil when ERROR, of a send, is the refusal to restore its session.
+opencode.el restores an archived session before sending to it, through
+a PATCH of the session, whose error the send's ELSE then gets."
+  (and (opencode-error-p error) (eq (opencode-error-method error) 'patch)))
+
+(defun drover-opencode--restore-failure (session error)
+  "Return, on one line, that SESSION could not leave the archive, as ERROR tells."
+  (format "Could not restore %s from the archive: %s"
+          (drover-bound-line (drover-session-display-title session))
+          (opencode-error-describe error)))
+
+(defun drover-opencode--send-failure (session name error)
+  "Return, on one line, why sending to SESSION failed with ERROR.
+ERROR is an `opencode-error'.  A refused restore from the archive says
+SESSION could not be restored, nothing sent; another, that NAME, the
+session's buffer or title, did not take the prompt."
+  (if (drover-opencode--restore-refused-p error)
+      (drover-opencode--restore-failure session error)
+    (format "%s did not take the prompt: %s" name (opencode-error-describe error))))
+
 (defun drover-opencode--send (session text token)
   "Send TEXT as a prompt of SESSION, with the metadata TOKEN holds.
 TOKEN is what `drover-opencode--check' returned.  The prompt goes
 straight to the service, past any input half typed in the buffer; the
 transcript shows it once the service delivered it.  The service queues
 or steers a prompt sent while a turn runs, so the session needs not be
-idle.  The backend's :send."
+idle.  An archived session is restored first, by opencode.el, a refusal
+told as such.  The backend's :send."
   (drover-opencode--in-buffer
    session
    (lambda ()
@@ -1014,8 +1069,9 @@ idle.  The backend's :send."
        (opencode-session-send
         text :show t :metadata (and (consp token) token)
         :else (lambda (error)
-                (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
-                             (buffer-name buffer) (opencode-error-describe error))))))
+                (drover-with-reporting "OpenCode prompt"
+                  (drover-warn "%s; it is in the kill ring"
+                               (drover-opencode--send-failure session (buffer-name buffer) error)))))))
    (lambda (message)
      (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
                   (drover-session-display-title session) message))))
@@ -1035,16 +1091,28 @@ so the buffer needs only be loaded and connected.  The backend's
   "Send TEXT as a prompt of SESSION now, then call THEN, or ELSE with a message.
 TEXT goes literally, a leading slash included, past any draft, and shows
 once delivered.  It consents to the service replacing stale thinking with
-its text, since no one is there to be asked.  The backend's :submit."
-  (if-let* ((buffer (drover-opencode--buffer session)))
-      (with-current-buffer buffer
-        (opencode-session-send
-         text :show t :accept-thinking-loss t
-         :then (lambda (_item) (drover-with-reporting "OpenCode prompt" (funcall then)))
-         :else (lambda (error)
-                 (drover-with-reporting "OpenCode prompt"
-                   (funcall else (opencode-error-describe error))))))
-    (funcall else "the session has no buffer")))
+its text, since no one is there to be asked.  A session without a
+buffer, as one archiving closed, is opened first, not shown, as
+`drover-opencode--send' opens it; an archived session is restored by
+opencode.el first.  When nothing was sent, the session not opened or
+not restored, ELSE gets a second argument, t.  The backend's :submit."
+  (let ((settled nil))
+    (cl-flet ((settle (function &rest arguments)
+                (unless settled
+                  (setq settled t)
+                  (drover-with-reporting "OpenCode prompt"
+                    (apply function arguments)))))
+      (drover-opencode--in-buffer
+       session
+       (lambda ()
+         (opencode-session-send
+          text :show t :accept-thinking-loss t
+          :then (lambda (_item) (settle then))
+          :else (lambda (error)
+                  (if (drover-opencode--restore-refused-p error)
+                      (settle else (drover-opencode--restore-failure session error) t)
+                    (settle else (opencode-error-describe error))))))
+       (lambda (message) (settle else message t))))))
 
 (defun drover-opencode--ready ()
   "Return non-nil once the registry lists the sessions the service runs.
@@ -1197,6 +1265,7 @@ unknown.  The backend's :options."
    :archive #'drover-opencode--archive
    :archive-confirms t
    :unarchive #'drover-opencode--unarchive
+   :unarchive-confirms t
    :archived #'drover-opencode--archived
    :mark-seen #'drover-opencode--mark-seen
    :preview #'drover-opencode--preview

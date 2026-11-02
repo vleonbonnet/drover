@@ -68,7 +68,7 @@
 (require 'drover-codex)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 8))
   (load "drover-core" nil t))
 
 (declare-function org-id-get-create "org-id" (&optional force))
@@ -1014,8 +1014,11 @@ timer, so it signals nothing."
 (defun drover-prompt--send-to-session (session content buffer)
   "Send CONTENT of the prompt BUFFER to the running SESSION.
 Its backend's checks run first, for the options about to be applied:
-when they cancel, nothing is sent and the prompt stays.  Otherwise the
-options are applied, the text sent, and CONTENT leaves the prompt."
+when they cancel, nothing is sent and the prompt stays.  A session
+drover archived is restored then (see `drover-unarchive-to-send'):
+when it cannot be, a `user-error' says why, nothing is sent and the
+prompt stays.  Otherwise the options are applied, the text sent, and
+CONTENT leaves the prompt."
   (let* ((text (plist-get content :text))
          (target (drover-session-buffer session))
          (explicit (drover-prompt-explicit-options buffer))
@@ -1025,6 +1028,7 @@ options are applied, the text sent, and CONTENT leaves the prompt."
     (if (eq token 'cancel)
         (message "Not sent to %s; the prompt is in the kill ring"
                  (drover-session-display-title session))
+      (drover-unarchive-to-send session)
       (drover-prompt-apply-options session explicit
                                    (lambda () (drover-prompt--deliver session target text token)))
       (drover-prompt-consume content buffer))))
@@ -1355,7 +1359,9 @@ The key of `drover-dispatch' opens `drover-prompt-options-menu' there."
   "Return the running sessions the prompt may go to, with their buffers.
 The value is a list of (SESSION . BUFFER): the sessions whose backend
 takes prompts (:send) and that have a live buffer, the current
-buffer's first, then in the order of `buffer-list'."
+buffer's first, then in the order of `buffer-list'.  Those drover
+archived itself are among them, a buffer still showing them: sent a
+prompt, they are restored first (see `drover-unarchive-to-send')."
   (let ((ranks (make-hash-table :test #'eq))
         (rank 0)
         (current (current-buffer)))
@@ -1366,7 +1372,7 @@ buffer's first, then in the order of `buffer-list'."
                               (when-let* (((drover-supports-p session :send))
                                           (buffer (drover-session-buffer session)))
                                 (cons session buffer)))
-                            (drover-sessions)))
+                            (append (drover-sessions) (drover-archived-live-sessions))))
           (lambda (a b)
             (< (gethash (cdr a) ranks most-positive-fixnum)
                (gethash (cdr b) ranks most-positive-fixnum))))))

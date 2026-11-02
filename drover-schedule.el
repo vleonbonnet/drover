@@ -37,9 +37,12 @@
 ;; gives, applies the agent, model and effort the prompt was scheduled
 ;; with, as a send does, and submits the prompt once the session can
 ;; take it without touching a draft (its backend's :blocker and :submit,
-;; see `drover-register-backend').  "Sent" means submitted to the front
-;; end, not answered.  A submission Emacs stopped in the middle of is
-;; kept as interrupted: whether it went out is unknown.
+;; see `drover-register-backend').  A conversation drover archived is
+;; restored first, as a send restores it; one its front end archived,
+;; the front end restores as it takes the prompt.  "Sent" means
+;; submitted to the front end, not answered.  A submission Emacs
+;; stopped in the middle of is kept as interrupted: whether it went out
+;; is unknown.
 ;;
 ;; `drover-schedule-list' (# in `drover-dispatch') lists the prompts: k
 ;; cancels one, r retries it or sends it now, RET shows it whole.
@@ -58,7 +61,7 @@
 (require 'drover-prompt)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 3))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 8))
   (load "drover-core" nil t))
 
 (defvar vertico-preselect)
@@ -505,6 +508,12 @@ not loaded tells nothing yet."
                (funcall (drover-backend-property backend :ready)))
               (t t))))))
 
+(defun drover-schedule--sessions ()
+  "Return the sessions a scheduled prompt may go to, as drover lists them.
+Those drover archived itself, a buffer still showing them, are among
+them: delivery restores them first."
+  (append (drover-known-sessions) (drover-archived-live-sessions)))
+
 (defun drover-schedule--turn-check ()
   "Send the prompts waiting for a turn that ended, giving them the time now.
 On `drover-changed-hook', which runs once backends reported changes."
@@ -513,7 +522,7 @@ On `drover-changed-hook', which runs once backends reported changes."
       (when-let* ((waiting (and (drover-schedule--queue-loaded queue)
                                 (seq-filter #'drover-schedule--turn-waiting-p
                                             (drover-schedule--queue-jobs queue)))))
-        (let* ((sessions (drover-known-sessions))
+        (let* ((sessions (drover-schedule--sessions))
                (ended (seq-filter (lambda (job) (drover-schedule--turn-over-p job sessions)) waiting)))
           (when ended
             (dolist (job ended)
@@ -965,7 +974,22 @@ must run."
                             (buffer (drover-session-buffer session))
                             ((process-live-p (get-buffer-process buffer))))
                   buffer))
-              (drover-known-sessions))))
+              (drover-schedule--sessions))))
+
+(defun drover-schedule--restore (job &optional session)
+  "Restore the conversation of JOB from drover's own archive, if it is there.
+SESSION is the session JOB's buffer shows, once the conversation was
+resumed: signal a `user-error' when it cannot be restored (see
+`drover-unarchive-to-send'), so that nothing is sent.  Without SESSION,
+before the conversation is resumed, it is restored when a backend
+follows it, keeping a buffer archiving was to close; one no backend
+follows yet is left archived, for the resumed session to be restored."
+  (if session
+      (drover-unarchive-to-send session)
+    (when-let* ((archived (drover-archived-conversation (drover-schedule--key job))))
+      (condition-case nil
+          (drover-unarchive-to-send archived)
+        (user-error nil)))))
 
 (defun drover-schedule--blocker (job buffer)
   "Say why BUFFER cannot take JOB's prompt without touching a draft, or nil."
@@ -1055,16 +1079,18 @@ What the resume calls back with stays scoped to RUN."
              (lambda ()
                (drover-schedule--guard job run 'interrupted
                  (drover-schedule--finish job run 'sent)))
-             (lambda (message)
+             (lambda (message &optional not-sent)
                (drover-schedule--guard job run 'interrupted
-                 (drover-schedule--finish job run 'interrupted message))))))
+                 (drover-schedule--finish job run (if not-sent 'failed 'interrupted) message))))))
 
 (defun drover-schedule--send (job run)
   "Submit JOB to RUN's buffer, noting the handoff first.
-The agent, model and effort JOB was scheduled with are applied first,
-as a send applies them; a RUN cancelled or timed out meanwhile sends
-nothing."
+A conversation drover archived is restored first: when it cannot be,
+this signals, nothing sent.  The agent, model and effort JOB was
+scheduled with are applied first, as a send applies them; a RUN
+cancelled or timed out meanwhile sends nothing."
   (let ((buffer (plist-get run :buffer)))
+    (drover-schedule--restore job (drover-buffer-session buffer))
     (drover-schedule--status job 'sending)
     (if-let* ((options (plist-get job :options)))
         (drover-prompt-apply-options
@@ -1122,6 +1148,7 @@ From the prompt's timer."
                   (when-let* ((host (plist-get (drover-schedule-conversation job) :host)))
                     (error "Conversations of other hosts cannot be reached yet: %s" host))
                   (drover-links-load-front-end (plist-get job :backend))
+                  (drover-schedule--restore job)
                   (let ((buffer (drover-schedule--buffer job)))
                     (setf (plist-get run :window)
                           (funcall drover-schedule-display-function buffer (plist-get job :title)))

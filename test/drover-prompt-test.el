@@ -1538,6 +1538,50 @@ PROPERTIES are more of its properties.  Return the buffer."
       (should (equal warnings '("Broken did not take the prompt: Gone; it is in the kill ring"))))
     (should-not (drover-prompt-buffer))))
 
+(ert-deftest drover-prompt-test-send-restores-archived ()
+  "A session drover archived, its buffer still open, is offered, and restored before it is sent to.
+One that cannot be restored is sent nothing, the prompt kept, and the
+user told why on one line."
+  (drover-prompt-test-with
+    (drover-test-with-state
+      (let* ((session (drover-session-create :backend 'kept :id "k" :title "Kept"
+                                             :engine 'claude-code :engine-id "conv-k"))
+             (buffer (drover-prompt-test--register
+                      'kept "Kept"
+                      :send (lambda (session text _token)
+                              (push (list :send (drover-session-id session) text
+                                          (drover-session-archived-p session))
+                                    drover-test-calls)))))
+        ;; The backend serves this record, with its engine.
+        (drover-test-register-simple 'kept (list session) :buffer (lambda (_) buffer)
+                                     :send (drover-backend-property 'kept :send))
+        (drover-archive-session session)
+        (should (buffer-live-p buffer))
+        (should-not (drover-sessions))
+        (with-current-buffer (drover-prompt-test--prompt "Go on")
+          (drover-prompt-test-choosing (lambda (names)
+                                         (should (member "Kept" names))
+                                         "Kept")
+            (drover-prompt-submit)))
+        ;; Restored first, then sent.
+        (should (equal drover-test-calls '((:send "k" "Go on" nil))))
+        (should-not (drover-session-archived-p session))
+        (should (equal (mapcar #'drover-session-id (drover-sessions)) '("k")))
+        (should-not (drover-prompt-buffer))
+        ;; Archived again, and no backend would list it restored.
+        (setq drover-test-calls nil)
+        (drover-archive-session session)
+        (cl-letf (((symbol-function 'drover--followed-p) #'ignore))
+          (with-current-buffer (drover-prompt-test--prompt "Once more")
+            (let ((err (drover-prompt-test-choosing (lambda (_) "Kept")
+                         (should-error (drover-prompt-submit) :type 'user-error))))
+              (should (equal (cadr err)
+                             (concat "Could not restore Kept from the archive: no front end follows its "
+                                     "conversation, and its engine keeps no record of it that drover lists"))))
+            (should (equal (buffer-string) "Once more"))))
+        (should-not drover-test-calls)
+        (should (drover-session-archived-p session))))))
+
 (ert-deftest drover-prompt-test-send-new ()
   "A new session starts with the prompt's choices, title and engine defaults, then takes the text."
   (drover-prompt-test-with

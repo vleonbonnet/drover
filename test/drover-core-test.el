@@ -2141,6 +2141,73 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
             (should-not (drover-archived-available-p))
             (should (equal (mapcar #'drover-session-id (drover-sessions)) '("a" "b" "unknown")))))))))
 
+(ert-deftest drover-test-unarchive-to-send ()
+  "Before a prompt goes, what drover archived is restored; what its backend archived is left to it."
+  (let ((sessions (list (drover-test-shown "a") (drover-test-shown "b"))))
+    (drover-test-with-shown sessions
+      (let ((a (drover-find 'shown "a")))
+        ;; Not archived: nothing to do.
+        (should-not (drover-unarchive-to-send a))
+        (should-not (drover-archived-live-sessions))
+        (should-not (drover-archived-conversation '(claude-code . "conv-a")))
+        (drover-archive a)
+        ;; Its buffer open, it is live, archived.
+        (should (equal (mapcar #'drover-session-key (drover-archived-live-sessions)) '((shown . "a"))))
+        (should (equal (drover-session-key (drover-archived-conversation '(claude-code . "conv-a")))
+                       '(shown . "a")))
+        (should (drover-unarchive-to-send a))
+        (should-not (drover-session-archived-p a))
+        (should-not (drover-archived-live-sessions))
+        ;; Gone from every list, drover's record stands for it, and it
+        ;; cannot be restored: told on one line.
+        (drover-archive a)
+        (setq sessions (cdr sessions))
+        (let ((kept (drover-archived-conversation '(claude-code . "conv-a"))))
+          (should (equal (drover-session-key kept) '(shown . "conv-a")))
+          (let ((err (should-error (drover-unarchive-to-send kept) :type 'user-error)))
+            (should (equal (cadr err)
+                           (concat "Could not restore Shown a from the archive: no front end follows its "
+                                   "conversation, and its engine keeps no record of it that drover lists"))))
+          (should (drover-session-archived-p kept))))
+      ;; Archived by its backend: the backend restores it as it sends.
+      (let ((native (drover-test-session "n" :archived 1.0 :engine 'claude-code :engine-id "conv-n")))
+        (should-not (drover-unarchive-to-send native))))))
+
+(ert-deftest drover-test-unarchive-confirmed ()
+  "A backend confirming restores has the record fetched as archived forgotten once it took."
+  (drover-test-with-backend nil
+    (let ((drover-test-archived-calls nil)
+          (asked nil)
+          (warnings nil))
+      (drover-test-register-archived)
+      (setf (alist-get 'fake drover--backends)
+            (append (list :unarchive (lambda (session then else)
+                                       (push (list (drover-session-id session) then else) asked))
+                          :unarchive-confirms t)
+                    (alist-get 'fake drover--backends)))
+      (drover-set-show-archived t)
+      (funcall (car drover-test-archived-calls)
+               (list (drover-test-session "a" :archived 1.0) (drover-test-session "b" :archived 1.0)))
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (&rest arguments) (push (apply #'format arguments) warnings))))
+        (drover-unarchive (list (drover-find 'fake "a") (drover-find 'fake "b")))
+        (should (equal (mapcar #'car asked) '("b" "a")))
+        (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("a" "b")))
+        (funcall (nth 1 (cadr asked)))
+        (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("b")))
+        (funcall (nth 2 (car asked)) (concat "Refused\n" (make-string 1000 ?x)))
+        (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("b")))
+        (should (= (length warnings) 1))
+        (should (string-prefix-p "Could not restore Session b from the archive: Refused" (car warnings)))
+        (should-not (string-search "\n" (car warnings))))
+      ;; Forgetting a record not fetched changes nothing.
+      (setq drover--changed-backends nil)
+      (should-not (drover-archived-left 'fake "a"))
+      (should-not drover--changed-backends)
+      (should (drover-archived-left 'fake "b"))
+      (should (memq 'fake drover--changed-backends))
+      (should-not (drover-archived-sessions)))))
+
 (ert-deftest drover-test-drover-archive-file ()
   "Drover keeps what it archived in its state directory, read anew when it changes."
   (let ((sessions (list (drover-test-shown "a") (drover-test-shown "b"))))
