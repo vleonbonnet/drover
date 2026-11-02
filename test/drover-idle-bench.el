@@ -31,7 +31,9 @@
 ;;
 ;; - idle: nothing changes but the clock, for `drover-idle-bench-seconds';
 ;; - streaming: the working session takes a step every 100 ms;
-;; - unfocused: Emacs lost focus, as a focus-out event tells;
+;; - unfocused: Emacs lost focus, as a focus-out event tells, the glyphs
+;;   standing still (`drover-list-animation-unfocused-interval' nil),
+;;   then moving at the unfocused pace, by default;
 ;; - then, synchronously, a frame of the animation drawn and redisplayed,
 ;;   its lines reordered for display or not, against a redisplay
 ;;   changing nothing; a change followed, of a session and of the
@@ -230,7 +232,7 @@ Session 0 and its first subagent run turns."
   (cl-flet ((delta (key) (- (plist-get after key) (plist-get before key))))
     (let ((wall (delta :wall)))
       (drover-idle-bench-log
-       "%-34s %5.1f s: CPU %5.2f%% | %6.3f MB/s | %3d GCs %6.1f ms | %4d frame ticks | %5d redisplays | %4d steps"
+       "%-36s %5.1f s: CPU %5.2f%% | %6.3f MB/s | %3d GCs %6.1f ms | %4d frame ticks | %5d redisplays | %4d steps"
        label wall (/ (* 100 (delta :cpu)) wall) (/ (delta :bytes) wall 1e6)
        (delta :gcs) (* 1000 (delta :gc-time)) (delta :ticks) (delta :redisplays) (delta :steps)))))
 
@@ -396,7 +398,15 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
                 (cancel-timer drover-idle-bench-stepper)
                 (drover-idle-bench-write-profile "streaming"))
               t)
-        (list "unfocused, idle"
+        (list "unfocused, idle, glyphs still"
+              (lambda ()
+                (setq drover-list-animation-unfocused-interval nil)
+                (drover-idle-bench-set-focus nil))
+              (lambda ()
+                (drover-idle-bench-set-focus t)
+                (custom-reevaluate-setting 'drover-list-animation-unfocused-interval))
+              nil)
+        (list (format "unfocused, idle, glyphs every %s s" drover-list-animation-unfocused-interval)
               (lambda () (drover-idle-bench-set-focus nil))
               (lambda () (drover-idle-bench-set-focus t))
               nil)
@@ -424,7 +434,9 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
             (lambda ()
               (drover-idle-bench-report label before (drover-idle-bench-snapshot))
               (when teardown (funcall teardown))
-              (drover-idle-bench-run-phases (cdr phases))))))))))
+              ;; The focus is looked at once its events settled: the
+              ;; next phase's moving it again would go unseen.
+              (run-at-time 1 nil #'drover-idle-bench-run-phases (cdr phases))))))))))
 
 (defun drover-idle-bench-main ()
   "Set the bench up, and run its phases from the command loop."

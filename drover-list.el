@@ -187,14 +187,16 @@ sidebar and the list in an ordinary window, its own."
 (defcustom drover-list-age-interval 60
   "Seconds between redraws of a displayed list, keeping ages current.
 A value of nil disables these redraws: the list then redraws only when
-sessions change.  The timer runs only while a list is displayed."
+sessions change.  The timer runs only while a list is displayed, Emacs
+having focus or not."
   :type '(choice (const :tag "Never" nil) (number :tag "Seconds"))
   :group 'drover-list)
 
 (defcustom drover-list-cache-interval 5
   "Seconds between updates of the prompt cache bars of a displayed list.
 Only the bars are redrawn.  A value of nil leaves them as last drawn.
-The timer runs only while a displayed list shows a live cache."
+The timer runs only while a displayed list shows a live cache, Emacs
+having focus or not."
   :type '(choice (const :tag "Never" nil) (number :tag "Seconds"))
   :group 'drover-list)
 
@@ -224,6 +226,23 @@ them only when needed."
 (drover--adopt-option 'drover-list-animation-interval 'opencode-session-status-animation-interval)
 (define-obsolete-variable-alias 'drover-list-animation-interval
   'opencode-session-status-animation-interval "0.2.0")
+
+(defcustom drover-list-animation-unfocused-interval 1.0
+  "Seconds between two frames of the animated glyphs while Emacs has no focus.
+A list may show while the user works in another application, on another
+screen or beside it: its glyphs keep moving then, at this slower pace,
+rounded to a whole number of frames of
+`opencode-session-status-animation-interval', and never quicker than it.
+The frame shown is the one of the time, as while Emacs has focus, the
+same in every list and mode line; once Emacs has focus again, the glyphs
+show the frame of the time at once, and move at the pace of
+`opencode-session-status-animation-interval'.  A value of nil keeps
+them still while Emacs has no focus.
+
+Emacs has focus while any of its frames has: a list in a frame other
+than the one the user works in moves at the full pace."
+  :type '(choice (const :tag "Still while unfocused" nil) (number :tag "Seconds"))
+  :group 'drover-list)
 
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
@@ -3870,7 +3889,9 @@ other window, nor at any buffer."
     (nreverse shown)))
 
 (defvar drover-list--focused t
-  "Non-nil unless Emacs lost focus, as `drover-list--focus-state' told last.")
+  "Non-nil unless Emacs lost focus, as `drover-list--focus-state' told last.
+Another frame of Emacs having focus, it has: only the pace of the
+animated glyphs follows it.")
 
 (defun drover-list--focus-state ()
   "Return non-nil unless Emacs is known to have lost focus.
@@ -3894,9 +3915,12 @@ focus before telling that the other has it.  For
       (setq drover-list--focus-timer (run-at-time 0 nil #'drover-list--refocus)))))
 
 (defun drover-list--refocus ()
-  "Pause the timers of lists once Emacs lost focus, and run them once it has it.
-Regaining focus, the animated glyphs and prompt caches the lists show
-are drawn as they stand at once, rather than at the next tick."
+  "Follow the focus of Emacs, once its events settled.
+Losing focus, the animated glyphs the lists show move at the pace of
+`drover-list-animation-unfocused-interval'; regaining it, they show the
+frame of the time at once, rather than at the next tick, and move at
+the pace of `opencode-session-status-animation-interval'.  The other
+timers keep theirs."
   (drover-with-reporting "list focus"
     (setq drover-list--focus-timer nil)
     (let ((focused (drover-list--focus-state)))
@@ -3907,8 +3931,7 @@ are drawn as they stand at once, rather than at the next tick."
           (let ((now (drover-list--now)))
             (pcase-dolist (`(,buffer . ,ranges) (drover-list--showing))
               (with-current-buffer buffer
-                (drover-list--draw-frames now ranges)
-                (drover-list--draw-caches now ranges)))))
+                (drover-list--draw-frames now ranges)))))
         (drover-list--update-timers)))))
 
 (defun drover-list--drop-stale ()
@@ -4105,10 +4128,13 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
 (defvar drover-list--frame-timer nil
   "Timer showing the next frames of the animated glyphs of displayed lists.")
 
+(defvar drover-list--frame-timer-pace nil
+  "Seconds between the ticks of `drover-list--frame-timer', or nil.")
+
 (defvar drover-list--age-due nil
   "When the age timer is to tick next, as a float time, or nil before it ran.
-A timer started again, once a list shows again or Emacs has focus again,
-ticks then, or a second later when that time passed.")
+A timer started again, once a list shows again, ticks then, or a second
+later when that time passed.")
 
 (defun drover-list--age-tick ()
   "Keep displayed lists current; stop when none is shown.
@@ -4129,7 +4155,7 @@ that time passed, and draws those rows once shown."
 (defun drover-list--cache-tick ()
   "Redraw the prompt caches lists show; stop when none shows a live one."
   (drover-with-reporting "list timer"
-    (let ((showing (and drover-list--focused (drover-list--showing)))
+    (let ((showing (drover-list--showing))
           (now (drover-list--now)))
       (pcase-dolist (`(,buffer . ,ranges) showing)
         (when (buffer-local-value 'drover-list--caches buffer)
@@ -4142,9 +4168,11 @@ that time passed, and draws those rows once shown."
 (defun drover-list--frame-tick ()
   "Show the next frames of the glyphs lists show; stop when none animates.
 It looks at the windows found showing lists, not at every buffer nor
-window, and changes only the glyphs those windows show."
+window, and changes only the glyphs those windows show.  A tick due as
+its timer stopped, the glyphs standing still while Emacs has no focus,
+draws nothing."
   (drover-with-reporting "list timer"
-    (let ((showing (and drover-list--focused (drover-list--showing)))
+    (let ((showing (and (drover-list--frame-pace) (drover-list--showing)))
           (now (drover-list--now)))
       (pcase-dolist (`(,buffer . ,ranges) showing)
         (when (buffer-local-value 'drover-list--animated buffer)
@@ -4169,17 +4197,32 @@ default; stop it when INTERVAL or NEEDED is nil."
         (set symbol (run-at-time (or first interval) interval function)))
     (drover-list--stop-timer symbol)))
 
+(defun drover-list--frame-pace ()
+  "Return the seconds between two frames the lists show now, or nil for none.
+It is `opencode-session-status-animation-interval' while Emacs has
+focus, else `drover-list-animation-unfocused-interval' rounded to a
+whole number of those intervals: each tick then falls in the middle of
+a frame of the time (`opencode-session-status-frame-delay'), as it does
+at the full pace."
+  (when-let* ((interval opencode-session-status-animation-interval))
+    (if drover-list--focused
+        interval
+      (let ((slow drover-list-animation-unfocused-interval))
+        (and (numberp slow) (> slow 0)
+             (* interval (max 1 (round slow interval))))))))
+
 (defun drover-list--update-timers ()
   "Run the timers lists shown need, and only those.
-Every timer pauses while Emacs has no focus, and while no window of a
-visible frame shows a list: ages need redraws while a list shows;
-prompt caches while a list shown shows a live one; animated glyphs
-while a list shown shows one.  Caches and glyphs change only a few
-characters: their display, and the text of a cache's time left, never
-the sections."
+Every timer pauses while no window of a visible frame shows a list:
+ages need redraws while a list shows; prompt caches while a list shown
+shows a live one; animated glyphs while a list shown shows one, at the
+pace of `drover-list--frame-pace', slower or not at all while Emacs has
+no focus.  Caches and glyphs change only a few characters: their
+display, and the text of a cache's time left, never the sections."
   (drover-list--find-windows)
-  (let ((showing (and drover-list--focused (drover-list--showing)))
-        (now (float-time)))
+  (let ((showing (drover-list--showing))
+        (now (float-time))
+        (pace (drover-list--frame-pace)))
     (drover-list--keep-timer 'drover-list--age-timer drover-list-age-interval showing
                              #'drover-list--age-tick
                              (and drover-list-age-interval drover-list--age-due
@@ -4190,12 +4233,14 @@ the sections."
                              (seq-some (lambda (entry) (buffer-local-value 'drover-list--caches (car entry)))
                                        showing)
                              #'drover-list--cache-tick)
-    (drover-list--keep-timer 'drover-list--frame-timer opencode-session-status-animation-interval
+    (unless (eql pace drover-list--frame-timer-pace)
+      (drover-list--stop-timer 'drover-list--frame-timer))
+    (drover-list--keep-timer 'drover-list--frame-timer pace
                              (seq-some (lambda (entry) (buffer-local-value 'drover-list--animated (car entry)))
                                        showing)
                              #'drover-list--frame-tick
-                             (and opencode-session-status-animation-interval
-                                  (opencode-session-status-frame-delay (drover-list--now))))))
+                             (and pace (opencode-session-status-frame-delay (drover-list--now))))
+    (setq drover-list--frame-timer-pace (and (timerp drover-list--frame-timer) pace))))
 
 ;;;; Windows
 

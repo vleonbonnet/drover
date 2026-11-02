@@ -61,6 +61,7 @@
   (drover-list--stop-timer 'drover-list--frame-timer)
   (drover-list--stop-timer 'drover-list--focus-timer)
   (setq drover-list--age-due nil
+        drover-list--frame-timer-pace nil
         drover-list--focused t))
 
 (defmacro drover-list-test-with (sessions &rest body)
@@ -5022,10 +5023,12 @@ The subagent's glyph stands under its parent's title."
         (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))))))
 
 (ert-deftest drover-list-test-timers-follow-the-focus ()
-  "Timers pause once Emacs lost focus, and run again once it has it, drawing at once."
+  "Losing focus, glyphs move slower and the other timers keep their pace.
+Regaining it, the frame of the time shows at once, at the full pace."
   (drover-list-test-with (list (drover-test-session "w" :status 'working
                                                     :cache-expires (+ drover-test-now 240) :cache-ttl 300))
     (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval 2)
           (drover-list-cache-interval 5)
           (drover-list-age-interval 60)
           (focused t))
@@ -5034,43 +5037,163 @@ The subagent's glyph stands under its parent's title."
         (drover-list-test-shown
           (revert-buffer)
           (should (timerp drover-list--frame-timer))
+          (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
           (should (timerp drover-list--cache-timer))
           (should (timerp drover-list--age-timer))
-          ;; Focus moves out: looked at once the events settled.
+          (let ((cache-timer drover-list--cache-timer)
+                (age-timer drover-list--age-timer))
+            ;; Focus moves out: looked at once the events settled.
+            (setq focused nil)
+            (drover-list--focus-changed)
+            (should (timerp drover-list--focus-timer))
+            (drover-list--refocus)
+            (should-not drover-list--focus-timer)
+            (should-not drover-list--focused)
+            ;; The glyphs tick every 2 s, in the middle of a frame; the
+            ;; caches and ages keep their timers.
+            (should (timerp drover-list--frame-timer))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 2))
+            (should (<= (float-time (time-subtract (timer--time drover-list--frame-timer) nil)) 0.75))
+            (should (eq drover-list--cache-timer cache-timer))
+            (should (eq drover-list--age-timer age-timer))
+            ;; A tick shows the frame of the time, as at the full pace:
+            ;; 4.5 frames of 0.5 s later, the second of three.
+            (setq drover-list-test-clock (+ drover-test-now 2.25))
+            (drover-list--frame-tick)
+            (should (= (opencode-session-status-frame-index 3 drover-list-test-clock) 1))
+            (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
+            (setq drover-list-test-clock (+ drover-test-now 4.25))
+            (drover-list--frame-tick)
+            (should (string-prefix-p "  3 Session w" (drover-list-test-heading "w")))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 2))
+            ;; The caches keep moving.
+            (setq drover-list-test-clock (+ drover-test-now 90.5))
+            (drover-list--cache-tick)
+            (should (equal (drover-list-test-cache-field "w") '(2 3 "2m")))
+            (should (eq drover-list--cache-timer cache-timer))
+            ;; A change of windows meanwhile keeps the slow pace.
+            (let ((timer drover-list--frame-timer))
+              (drover-list--windows-changed)
+              (should (eq drover-list--frame-timer timer)))
+            ;; Focus back: the frame of the time shows at once, and the
+            ;; glyphs move at the full pace.
+            (setq focused t
+                  drover-list-test-clock (+ drover-test-now 100.75))
+            (drover-list--refocus)
+            (should drover-list--focused)
+            (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))
+            (should (timerp drover-list--frame-timer))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
+            (should (<= (float-time (time-subtract (timer--time drover-list--frame-timer) nil)) 0.75))
+            (should (eq drover-list--cache-timer cache-timer))
+            (should (eq drover-list--age-timer age-timer))))))))
+
+(ert-deftest drover-list-test-unfocused-pace ()
+  "The pace while Emacs has no focus is a whole number of frames, never quicker."
+  (let ((opencode-session-status-animation-interval 0.15)
+        (drover-list-animation-unfocused-interval 1.0)
+        (drover-list--focused nil))
+    ;; 6.67 frames, rounded to 7: ticks fall mid-frame.
+    (should (< (abs (- (drover-list--frame-pace) 1.05)) 1e-9))
+    (let ((drover-list-animation-unfocused-interval 0.05))
+      (should (= (drover-list--frame-pace) 0.15)))
+    (let ((drover-list-animation-unfocused-interval nil))
+      (should-not (drover-list--frame-pace)))
+    (let ((opencode-session-status-animation-interval nil))
+      (should-not (drover-list--frame-pace)))
+    (let ((drover-list--focused t))
+      (should (= (drover-list--frame-pace) 0.15)))))
+
+(ert-deftest drover-list-test-unfocused-animation-off ()
+  "Without an unfocused pace, glyphs stand still while Emacs has no focus.
+The caches and ages keep their timers; focus back, the frame of the
+time shows at once."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working
+                                                    :cache-expires (+ drover-test-now 240) :cache-ttl 300))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval nil)
+          (drover-list-cache-interval 5)
+          (drover-list-age-interval 60)
+          (focused t))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should (timerp drover-list--frame-timer))
           (setq focused nil)
-          (drover-list--focus-changed)
-          (should (timerp drover-list--focus-timer))
           (drover-list--refocus)
-          (should-not drover-list--focus-timer)
-          (should-not drover-list--focused)
           (should-not drover-list--frame-timer)
-          (should-not drover-list--cache-timer)
-          (should-not drover-list--age-timer)
+          (should (timerp drover-list--cache-timer))
+          (should (timerp drover-list--age-timer))
           ;; A tick already due draws nothing, and changes nothing.
           (setq drover-list-test-clock (+ drover-test-now 0.5))
           (let ((tick (buffer-modified-tick)))
             (drover-list--frame-tick)
-            (drover-list--cache-tick)
             (should (= tick (buffer-modified-tick))))
           (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))
-          (should (equal (drover-list-test-cache-field "w") '(4 1 "4m")))
           ;; A change of windows meanwhile starts nothing.
           (drover-list--windows-changed)
           (should-not drover-list--frame-timer)
-          ;; Focus back: the frame of the time and the cache as it
-          ;; stands show at once, and the timers run.
           (setq focused t
                 drover-list-test-clock (+ drover-test-now 90.5))
           (drover-list--refocus)
-          (should drover-list--focused)
           (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
-          (should (equal (drover-list-test-cache-field "w") '(2 3 "2m")))
           (should (timerp drover-list--frame-timer))
-          (should (timerp drover-list--cache-timer))
-          (should (timerp drover-list--age-timer))
-          ;; The age timer ticks when it was due, a second from now
-          ;; once that passed, rather than a whole interval later.
-          (should (<= (float-time (time-subtract (timer--time drover-list--age-timer) nil)) 61)))))))
+          (should (= (timer--repeat-delay drover-list--frame-timer) 0.5)))))))
+
+(ert-deftest drover-list-test-other-frame-focus ()
+  "Another frame of Emacs having focus, the list's glyphs keep the full pace.
+Emacs may tell the list's frame lost focus before telling the other has
+it: the focus is looked at once those events settled."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval 2)
+          (focused (selected-frame)))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-list) (lambda () (list (selected-frame) 'other)))
+                ((symbol-function 'frame-focus-state) (lambda (&optional frame) (eq frame focused))))
+        (drover-list-test-shown
+          (revert-buffer)
+          (let ((timer drover-list--frame-timer))
+            (should (timerp timer))
+            ;; The list's frame loses focus, then the other frame has it.
+            (setq focused nil)
+            (drover-list--focus-changed)
+            (setq focused 'other)
+            (drover-list--focus-changed)
+            (drover-list--refocus)
+            (should drover-list--focused)
+            (should (eq drover-list--frame-timer timer))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
+            ;; Then Emacs loses focus: the slow pace.
+            (setq focused nil)
+            (drover-list--refocus)
+            (should-not drover-list--focused)
+            (should (= (timer--repeat-delay drover-list--frame-timer) 2))))))))
+
+(ert-deftest drover-list-test-unfocused-hidden-frames ()
+  "A list on an iconified frame animates nothing, Emacs having focus or not."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval 2)
+          (focused nil))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (drover-list--refocus)
+          (should-not drover-list--focused)
+          (should (= (timer--repeat-delay drover-list--frame-timer) 2))
+          (cl-letf (((symbol-function 'frame-visible-p) (lambda (_frame) 'icon)))
+            (setq drover-list-test-clock (+ drover-test-now 2.25))
+            (let ((tick (buffer-modified-tick)))
+              (drover-list--frame-tick)
+              (should (= tick (buffer-modified-tick))))
+            (should-not drover-list--frame-timer)
+            (setq focused t)
+            (drover-list--refocus)
+            (should-not drover-list--frame-timer)
+            (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))))))))
 
 (ert-deftest drover-list-test-timers-stop-on-hidden-frames ()
   "A list on an iconified frame animates nothing; shown again, it does."
