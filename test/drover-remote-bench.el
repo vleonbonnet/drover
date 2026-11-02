@@ -80,6 +80,12 @@
   "Return SECONDS in milliseconds, for the table."
   (format "%.1f" (* 1000 (or seconds 0))))
 
+(defvar drover-remote-bench--spyglass-errors 0
+  "How many errors spyglass told of.")
+
+(defvar drover-remote-bench--warnings 0
+  "How many warnings drover gave.")
+
 (defvar drover-remote-bench--rows nil
   "Rows of the table, newest first.")
 
@@ -224,7 +230,11 @@ With BACK, the agent will be told to dial this host back."
                                        (message "bench: aborting at %d kB" rss)
                                        (kill-emacs 3))))))
          (failed nil))
-    (add-hook 'spyglass-error-functions (lambda (_c message) (message "bench: spyglass: %s" message)))
+    ;; What spyglass tells drover, which drover reports as the user would
+    ;; see it, a warning, if at all: the bench's drops are expected.
+    (add-hook 'spyglass-error-functions (lambda (_c _message) (cl-incf drover-remote-bench--spyglass-errors)))
+    (advice-add 'drover-warn :before (lambda (&rest _) (cl-incf drover-remote-bench--warnings))
+                '((name . drover-remote-bench)))
     (unwind-protect
         (condition-case err
             (drover-test-with-backend (mapcar (lambda (i) (drover-test-session (format "here%d" i)))
@@ -374,6 +384,14 @@ With BACK, the agent will be told to dial this host back."
                     (setq failed t))
                   (push (list "the same sessions on both hosts" (if (and (not failed) (zerop wrong)) "yes" "NO")
                               (format "%d" (length titles)) "-" "-" "-")
+                        drover-remote-bench--rows))
+                (let ((stats (drover-remote-test-stats)))
+                  (push (list "errors spyglass told / drover reported"
+                              (format "%d/%d" drover-remote-bench--spyglass-errors drover-remote-bench--warnings)
+                              "-" "-" "-" "-")
+                        drover-remote-bench--rows)
+                  (push (list "greetings received, 4 streams" (format "%d" (or (plist-get stats :hellos) 0))
+                              "-" "-" "-" "-")
                         drover-remote-bench--rows))
                 (let ((agent (drover-remote-test-command "stats")))
                   (push (list "resident memory, viewer/agent MB"

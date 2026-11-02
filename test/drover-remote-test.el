@@ -782,6 +782,118 @@ registration; the agent, if BODY starts one, is stopped after."
       (drover-changed-now)
       (should-not (drover-remote-test-remote)))))
 
+(ert-deftest drover-remote-test-greet-once ()
+  "Each host greets once per stream: a greeting answered is not answered back."
+  (drover-remote-test-with nil
+    (let ((greetings 0))
+      (advice-add 'drover-remote--on-hello :before (lambda (&rest _) (cl-incf greetings))
+                  '((name . drover-remote-test-greetings)))
+      (unwind-protect
+          (progn
+            (drover-remote-test-connect (drover-remote-test-start-agent dir))
+            (drover-remote-test-settle 1.0)
+            ;; One greeting each way, and one more when asked: not
+            ;; thousands a second, each answered back.
+            (should (<= greetings 2))
+            (should (= (plist-get (drover-remote-test-stats) :hellos) greetings))
+            (should (<= (plist-get (plist-get (drover-remote-test-command "stats" :peer "viewer") :peer) :hellos)
+                        2)))
+        (advice-remove 'drover-remote--on-hello 'drover-remote-test-greetings)))))
+
+(ert-deftest drover-remote-test-answers-survive-a-drop ()
+  "A request whose stream breaks before its answer is asked again once connected anew."
+  (drover-remote-test-with nil
+    (drover-remote-test-connect (drover-remote-test-start-agent dir))
+    (drover-remote-test-command "sessions" :n 3)
+    (drover-remote-test-synced 3)
+    (let ((session (drover-index-session '(remote:agent fake . "s1")))
+          (peer (drover-remote--peer "agent"))
+          (recap nil) (preview nil))
+      (drover-recap session (lambda (value) (setq recap value)))
+      (drover-preview session (lambda (value) (setq preview value)))
+      ;; Broken before the agent could answer.
+      (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+      (should-not recap)
+      (should (= (length (drover-remote--peer-asks peer)) 2))
+      (drover-remote-test-wait (lambda () (and recap preview)))
+      (should (equal recap '(:prompt "Prompt of s1" :reply "Reply of s1" :changes (("a.el" 3 1)))))
+      (should (equal preview "Preview of s1"))
+      (should-not (drover-remote--peer-asks peer))
+      ;; Asked while not connected, it fails at once; a peer gone for good
+      ;; fails what it was to be asked again.
+      (let ((answer nil))
+        (drover-remote--ask-later peer (list :op "recap") (lambda (_reply error) (setq answer error))
+                                  (+ (float-time) 60))
+        (drover-remote--close peer "gone")
+        (should (string-match-p "closed: gone" answer))))))
+
+(ert-deftest drover-remote-test-older-sessions-after-a-drop ()
+  "Older sessions shown are fetched again from a peer connected anew, whose messages a drop lost."
+  (drover-remote-test-with nil
+    (drover-remote-test-connect (drover-remote-test-start-agent dir))
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-synced 2)
+    (let ((fetches 0)
+          (peer (drover-remote--peer "agent")))
+      (advice-add 'drover-remote--fetch :before (lambda (&rest _) (cl-incf fetches))
+                  '((name . drover-remote-test-fetches)))
+      (unwind-protect
+          (progn
+            (drover-set-show-history t)
+            (should (= fetches 1))
+            (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+            (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state peer) 'open)))
+            (should (= fetches 2))
+            (drover-remote-test-wait (lambda () (seq-find (lambda (session)
+                                                            (equal (drover-session-id session) '(fake . "old2")))
+                                                          (drover-known-sessions))))
+            (should (seq-find (lambda (session) (equal (drover-session-id session) '(fake . "old2")))
+                              (drover-known-sessions))))
+        (advice-remove 'drover-remote--fetch 'drover-remote-test-fetches)
+        (drover-set-show-history nil)))))
+
+(ert-deftest drover-remote-test-spyglass-errors ()
+  "A write failing as its stream ends is quiet; one leaving the stream open is told once, and breaks it."
+  (skip-unless (drover-remote-test--available-p))
+  (drover-test-with-backend nil
+    (let* ((drover-remote--state (drover-remote--state-make :epoch "e1"))
+           (state drover-remote--state)
+           (peer (drover-remote-test--peer state "core"))
+           (live '(c1 c2))
+           (dropped nil)
+           (warnings nil)
+           (drover-remote--write-grace 0)
+           (drover--errors-reported (make-hash-table :test #'equal)))
+      (setf (drover-remote--peer-dialed peer) 'c1)
+      (puthash 'c2 (list :peer "core") (drover-remote--state-hellos state))
+      (cl-letf (((symbol-function 'spyglass-connection-live-p) (lambda (c) (memq c live)))
+                ((symbol-function 'spyglass-connection-drop-stream) (lambda (c) (push c dropped)))
+                ((symbol-function 'drover-warn) (lambda (&rest args) (push (apply #'format args) warnings))))
+        ;; The stream ends as the write fails: nothing told.
+        (drover-remote--spyglass-error 'c1 "Sending failed: Process spyglass no longer connected to pipe")
+        (setq live '(c2))
+        (drover-remote--next-stream state 'c1)
+        (drover-remote-test-settle 0.05)
+        (should-not warnings)
+        (should-not (drover-remote--peer-error peer))
+        (should-not dropped)
+        ;; Failing to connect is the peer's last error, no warning.
+        (drover-remote--spyglass-error 'c1 "Cannot connect to core: refused")
+        (drover-remote-test-settle 0.05)
+        (should (equal (drover-remote--peer-error peer) "Cannot connect to core: refused"))
+        (should-not warnings)
+        ;; A write lost on a stream that stays open: told once, the stream
+        ;; broken so that a new one resynchronizes.
+        (dotimes (_ 3)
+          (drover-remote--spyglass-error 'c2 "Sending failed: Connection reset by peer"))
+        (drover-remote-test-settle 0.05)
+        (should (equal warnings '("core: Sending failed: Connection reset by peer")))
+        (should (memq 'c2 dropped))
+        ;; A connection drover does not use is not its own to tell.
+        (drover-remote--spyglass-error 'c3 "Unknown message type \"x\"")
+        (drover-remote-test-settle 0.05)
+        (should (= (length warnings) 1))))))
+
 (ert-deftest drover-remote-test-stale-out-of-count ()
   "Sessions of a host not connected are listed but leave the mode-line count."
   (require 'drover-attention)
