@@ -551,12 +551,19 @@ remapping of the buffer, which draws its text in the face `drover-list'.
 On a text terminal, a pixel is a character cell."
   (if (zerop (length string))
       0
-    (drover-list--memo string (lambda () (drover-list--measure string)))))
+    (drover-list--memo string #'drover-list--measure string)))
 
-(defun drover-list--memo (key compute)
-  "Return what is known of KEY in `drover-list--widths', else what COMPUTE returns.
-COMPUTE is a function of no argument, whose value is then known for
-the current drawing.  KEY is compared with its text properties."
+(defvar drover-list--keep-widths t
+  "Non-nil when `drover-list--memo' keeps what it computes.
+Nil while texts measured once only are measured, such as the candidates
+of a cut.")
+
+(defun drover-list--memo (key compute argument)
+  "Return what is known of KEY in `drover-list--widths', else COMPUTE of ARGUMENT.
+COMPUTE is a function of one argument, whose value is then known for
+the current drawing, unless `drover-list--keep-widths' is nil.  KEY is
+compared with its text properties.  Nothing is allocated when KEY is
+known: a drawing asks for tens of thousands of widths."
   (unless (and drover-list--widths
                (let ((measurer (nth 3 (car drover-list--widths))))
                  (and (eq (car measurer) (symbol-function 'drover-list--pixel-width))
@@ -564,10 +571,12 @@ the current drawing.  KEY is compared with its text properties."
     (drover-list--measure-begin))
   (pcase-let ((`(,_ ,table ,known ,peers) drover-list--widths))
     (or (gethash key table)
-        (puthash key (or (and known (gethash key known))
-                         (seq-some (lambda (peer) (gethash key peer)) peers)
-                         (funcall compute))
-                 table))))
+        (let ((value (and known (gethash key known))))
+          (while (and peers (not value))
+            (setq value (gethash key (pop peers))))
+          (unless value
+            (setq value (funcall compute argument)))
+          (if drover-list--keep-widths (puthash key value table) value)))))
 
 (defun drover-list--char-width ()
   "Return the width in pixels of an average character, the letter x."
@@ -581,9 +590,11 @@ of `drover-list--window' with the face remapping of the buffer.
 Extents are kept as widths are, in `drover-list--widths'."
   (if (zerop (length string))
       (cons 0 0)
-    (drover-list--memo (cons 'extent string)
-                       (lambda ()
-                         (drover-text-ink-extent string face-remapping-alist (drover-list--window))))))
+    (drover-list--memo (cons 'extent string) #'drover-list--measure-extent string)))
+
+(defun drover-list--measure-extent (string)
+  "Return how far STRING reaches drawn in the current buffer, measured anew."
+  (drover-text-ink-extent string face-remapping-alist (drover-list--window)))
 
 (defun drover-list--line-width ()
   "Return the width in pixels that lines of the list may take.
@@ -620,24 +631,42 @@ the same text in the same room again measures nothing."
   (let ((pixels (max 0 pixels)))
     (if (<= (drover-list--pixel-width string) pixels)
         string
-      (drover-list--memo (list 'cut pixels string)
-                         (lambda () (drover-list--cut string pixels))))))
+      (drover-list--memo (list 'cut pixels string) #'drover-list--cut-cell (cons string pixels)))))
+
+(defun drover-list--cut-cell (cell)
+  "Return the string of CELL, (STRING . PIXELS), cut to fit PIXELS."
+  (drover-list--cut (car cell) (cdr cell)))
 
 (defun drover-list--cut (string pixels)
-  "Return STRING, wider than PIXELS, cut to fit, as `drover-list--truncate' does."
-  (let ((keep (drover-list--kept string)))
+  "Return STRING, wider than PIXELS, cut to fit, as `drover-list--truncate' does.
+The candidates measured on the way are not kept: what STRING is cut to
+in PIXELS is, by `drover-list--truncate'."
+  (let ((keep (drover-list--kept string))
+        (measure (lambda (candidate)
+                   (let ((drover-list--keep-widths (eq candidate string)))
+                     (drover-list--pixel-width candidate)))))
     (or (and keep
              (let* ((tail (concat " " (substring string keep)))
                     (head (drover-truncate-to-pixels (string-trim-right (substring string 0 keep))
                                                      (- pixels (drover-list--pixel-width tail))
-                                                     #'drover-list--pixel-width)))
+                                                     measure)))
                (unless (string-empty-p head)
                  (concat head tail))))
-        (drover-truncate-to-pixels string pixels #'drover-list--pixel-width))))
+        (drover-truncate-to-pixels string pixels measure))))
+
+(defvar drover-list--aligns (make-hash-table :test #'eql)
+  "Spaces reaching a position, as `drover-list--align' made them, by position.
+Lines draw thousands of them at a few positions, and insert copies.")
 
 (defun drover-list--align (x)
-  "Return a space reaching X pixels from the left of the text area."
-  (propertize " " 'display `(space :align-to (,x))))
+  "Return a space reaching X pixels from the left of the text area.
+The same string for the same X: it is copied where it goes, never
+changed."
+  (or (gethash x drover-list--aligns)
+      (progn
+        (when (> (hash-table-count drover-list--aligns) 4096)
+          (clrhash drover-list--aligns))
+        (puthash x (propertize " " 'display `(space :align-to (,x))) drover-list--aligns))))
 
 (defconst drover-list--line-start (propertize " " 'invisible t)
   "The character each line of a session's section begins with.
@@ -664,16 +693,21 @@ The list reads the clock through it, so that tests may stop the clock."
 (defun drover-list--one-line (string)
   "Return STRING, or \"\" for nil, on one line.
 It is cut to `drover-line-limit' characters, ending in an ellipsis: a
-line laid out in pixels costs as much as its text is long."
-  (let* ((string (format "%s" (or string "")))
-         (cut (> (length string) (* 2 drover-line-limit)))
-         (line (string-trim (replace-regexp-in-string
-                             "[\n\r\t]+" " "
-                             (if cut (substring string 0 (* 2 drover-line-limit)) string)))))
-    (cond ((> (length line) drover-line-limit)
-           (concat (string-trim-right (substring line 0 drover-line-limit)) "…"))
-          (cut (concat line "…"))
-          (t line))))
+line laid out in pixels costs as much as its text is long.  A string
+on one line already is returned itself: rows take thousands of texts."
+  (if (and (stringp string)
+           (<= (length string) drover-line-limit)
+           (not (string-match-p "[\n\r\t]\\|\\` \\| \\'" string)))
+      string
+    (let* ((string (format "%s" (or string "")))
+           (cut (> (length string) (* 2 drover-line-limit)))
+           (line (string-trim (replace-regexp-in-string
+                               "[\n\r\t]+" " "
+                               (if cut (substring string 0 (* 2 drover-line-limit)) string)))))
+      (cond ((> (length line) drover-line-limit)
+             (concat (string-trim-right (substring line 0 drover-line-limit)) "…"))
+            (cut (concat line "…"))
+            (t line)))))
 
 (defun drover-list--age-time (session)
   "Return the time from which the age of SESSION counts, or nil.
@@ -1571,49 +1605,52 @@ shown, see `drover-list--cache-help-echo'."
             (propertize " " 'drover-list-cache 'space 'help-echo #'drover-list--cache-help-echo)
             (drover-list--cache-label remaining))))
 
-(defun drover-list--column-line (row layout)
+(defun drover-list--column-line (row layout &optional prefix)
   "Return the heading line of ROW in the columns of LAYOUT, and its bar.
 The value is (LINE . CACHE): CACHE is non-nil when the line shows a
 prompt cache field.  Each cell begins with a space aligned to its
 column, so that columns line up whatever the widths of the characters
-before them."
-  (let ((segments nil)
+before them.  LINE begins with PREFIX, if any.  Its parts are joined
+once: a list drawn whole makes thousands of lines."
+  (let ((parts (and prefix (list prefix)))
         (cache nil)
         (session (drover-list--row-session row)))
     (pcase-dolist (`(,field ,x ,width ,align) (plist-get layout :columns))
       (pcase field
         ('title
+         ;; As `drover-list--title-segments' places them.
          (let ((shift (- x (plist-get layout :margin))))
-           (setq segments (append segments
-                                  (drover-list--title-segments
-                                   row (- (+ x width) shift (drover-list--row-title-start row))
-                                   shift)))))
+           (push (drover-list--align (+ shift (drover-list--row-indent row))) parts)
+           (push (drover-list--row-icons row) parts)
+           (push (drover-list--truncate (drover-list--row-title row)
+                                        (- (+ x width) shift (drover-list--row-title-start row)))
+                 parts)))
         ('cache
          (when-let* ((fraction (drover-list--row-cache row)))
-           (let ((cell (drover-list--cache-cell
-                        fraction (drover-session-cache-remaining session (plist-get layout :now))
-                        layout)))
-             (setq cache t
-                   segments (append segments (list (list 'align x)
-                                                   (list 'text cell (drover-list--cache-cell-width layout)
-                                                         x)))))))
+           (setq cache t)
+           (push (drover-list--align x) parts)
+           (push (drover-list--cache-cell
+                  fraction (drover-session-cache-remaining session (plist-get layout :now))
+                  layout)
+                 parts)))
         (_
          (let ((text (drover-list--truncate (alist-get field (drover-list--row-texts row)) width)))
            (unless (string-empty-p text)
-             (let* ((text-width (drover-list--pixel-width text))
-                    (start (if (eq align 'right) (- (+ x width) text-width) x)))
-               (setq segments (append segments (list (list 'align start)
-                                                     (list 'text text text-width start))))))))))
-    (cons (car (drover-list--assemble segments)) cache)))
+             (push (drover-list--align (if (eq align 'right)
+                                           (- (+ x width) (drover-list--pixel-width text))
+                                         x))
+                   parts)
+             (push text parts))))))
+    (cons (apply #'concat (nreverse parts)) cache)))
 
-(defun drover-list--narrow-line (row layout)
+(defun drover-list--narrow-line (row layout &optional prefix)
   "Return the heading of ROW in the narrow layout of LAYOUT, and its bar.
 The value is (HEADING . SPEC).  HEADING is one or two lines: the glyph,
 the title and the fields placed on its line, flush right, then, for a
-session that needs the user, the fields placed below, under the title.
-SPEC tells where the first line's segments lie, from
-`drover-list--assemble', when a prompt cache colours its background,
-else nil."
+session that needs the user, the fields placed below, under the title;
+it begins with PREFIX, if any.  SPEC tells where the first line's
+segments lie, from `drover-list--assemble', past PREFIX, when a prompt
+cache colours its background, else nil."
   (let* ((session (drover-list--row-session row))
          (width (plist-get layout :width))
          (space (plist-get layout :space))
@@ -1644,7 +1681,8 @@ else nil."
                                                 (mapcar (lambda (field) (or (alist-get field texts) ""))
                                                         (funcall narrow 'below)))
                                     "  "))))
-      (cons (concat (car line)
+      (cons (concat prefix
+                    (car line)
                     (when (and below (not (string-empty-p below)))
                       (let ((start (drover-list--row-title-start row)))
                         (concat "\n" drover-list--line-start (drover-list--align start)
@@ -1993,11 +2031,11 @@ SUBAGENTS, its active subagents, are named after them.  It is bounded
     "\n")
    10))
 
-(defun drover-list--with-help (string help)
-  "Return STRING with HELP as the tooltip of the characters without one.
-The glyphs of active subagents keep their own."
-  (let ((string (copy-sequence string))
-        (position 0))
+(defun drover-list--put-help (string help &optional start)
+  "Give HELP as their tooltip to the characters of STRING without one, in place.
+From START, 0 by default.  The glyphs of active subagents keep their
+own.  Return STRING."
+  (let ((position (or start 0)))
     (while (< position (length string))
       (let ((next (next-single-property-change position 'help-echo string (length string))))
         (unless (get-text-property position 'help-echo string)
@@ -2357,20 +2395,24 @@ the heading is kept in ROW, and drawn again only for another layout."
         heading
       (setf (drover-list--row-heading row)
             (let* ((session (drover-list--row-session row))
+                   ;; Their text is a string of their own, given its
+                   ;; tooltips in place: each copy of a heading copies the
+                   ;; properties of its runs.
                    (drawn (if (eq (plist-get layout :layout) 'columns)
-                              (let ((line (drover-list--column-line row layout)))
+                              (let ((line (drover-list--column-line row layout drover-list--line-start)))
                                 (list (car line) (and (cdr line) 'columns) nil))
-                            (let ((heading (drover-list--narrow-line row layout)))
+                            (let ((heading (drover-list--narrow-line row layout drover-list--line-start)))
                               (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
-                   (help (drover-list--help session (drover-list--row-subagents row layout))))
-              (list (concat drover-list--line-start
-                            (if (eq (nth 1 drawn) 'narrow)
-                                ;; The cache colours the line: its tooltip tells
-                                ;; of it too, as it stands when shown.
-                                (drover-list--with-help (propertize (car drawn) 'drover-list-help help)
-                                                        #'drover-list--cache-help-echo)
-                              (drover-list--with-help (car drawn) help)))
-                    (nth 1 drawn) (nth 2 drawn) key))))))
+                   (help (drover-list--help session (drover-list--row-subagents row layout)))
+                   (text (car drawn))
+                   (start (length drover-list--line-start)))
+              (if (eq (nth 1 drawn) 'narrow)
+                  ;; The cache colours the line: its tooltip tells of it
+                  ;; too, as it stands when shown.
+                  (progn (put-text-property start (length text) 'drover-list-help help text)
+                         (drover-list--put-help text #'drover-list--cache-help-echo start))
+                (drover-list--put-help text help start))
+              (list text (nth 1 drawn) (nth 2 drawn) key))))))
 
 (defun drover-list--note-row (row heading start layout)
   "Note ROW, drawn with HEADING from START, in the tables of the list.

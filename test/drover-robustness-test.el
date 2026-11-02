@@ -273,7 +273,12 @@ came after: the accessors of today read past its end."
   (should (equal (drover-bound-text "a\nb\nc\nd" 2) "a\nb…"))
   (should (equal (drover-bound-text "a\nb\nc\nd" 2 nil t) "…c\nd"))
   (should (equal (drover-bound-lines (concat "a\n" (make-string 500 ?y)) 5)
-                 (concat "a\n" (make-string drover-line-limit ?y) "…"))))
+                 (concat "a\n" (make-string drover-line-limit ?y) "…")))
+  ;; A tooltip within bounds is itself; a short line with a carriage
+  ;; return stays as it is.
+  (let ((tooltip "Title\nproject:main\nbuild (Opus 5.5)"))
+    (should (eq (drover-bound-lines tooltip) tooltip)))
+  (should (equal (drover-bound-lines "a\rb\nc") "a\rb\nc")))
 
 (ert-deftest drover-robustness-test-records-bounded ()
   "Records are bounded as drover takes them in, the backend's own left alone."

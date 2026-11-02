@@ -364,40 +364,53 @@ is cut to those first: no window shows more."
     (if (<= width pixels)
         string
       (let* ((ellipsis (truncate-string-ellipsis))
+             (ellipses nil)
              (cut (lambda (length)
-                    (concat (string-trim-right (substring string 0 length))
-                            (apply #'propertize ellipsis
-                                   (text-properties-at (max 0 (1- length)) string)))))
-             (fits (lambda (length) (<= (funcall measure (funcall cut length)) pixels)))
+                    (let ((properties (text-properties-at (max 0 (1- length)) string)))
+                      (concat (string-trim-right (substring string 0 length))
+                              ;; One ellipsis per properties: titles have one run.
+                              (or (cdr (assq properties ellipses))
+                                  (cdar (push (cons properties (apply #'propertize ellipsis properties))
+                                              ellipses)))))))
+             ;; The candidate that fits, of the longest length tried.
+             (best nil)
+             (fits (lambda (length)
+                     (let ((candidate (funcall cut length)))
+                       (when (<= (funcall measure candidate) pixels)
+                         (when (or (null best) (> length (car best)))
+                           (setq best (cons length candidate)))
+                         t))))
              (low 0)
              (high (1- (length string))))
-        (if (not (funcall fits 0))
-            ""
-          ;; Characters differ in width, so the longest prefix that fits
-          ;; is found by laying out candidates.  Each costs a layout:
-          ;; the search starts where the average width of a character
-          ;; puts the cut, and gallops away from it, before bisecting.
-          (let ((guess (max 0 (min high (floor (* (length string) pixels) (max 1 width)))))
-                (step 1))
-            (if (funcall fits guess)
-                (progn
-                  (setq low guess)
-                  (while (and (<= (+ low step) high) (funcall fits (+ low step)))
-                    (setq low (+ low step)
-                          step (* 2 step)))
-                  (setq high (min high (+ low step -1))))
-              (setq high (1- guess))
-              (while (and (> (- high step) low) (not (funcall fits (- high step))))
-                (setq high (- high step 1)
-                      step (* 2 step)))
-              (when (> (- high step) low)
-                (setq low (- high step)))))
-          (while (< low high)
-            (let ((middle (/ (+ low high 1) 2)))
-              (if (funcall fits middle)
-                  (setq low middle)
-                (setq high (1- middle)))))
-          (funcall cut low))))))
+        ;; Characters differ in width, so the longest prefix that fits is
+        ;; found by laying out candidates.  Each costs a layout: the
+        ;; search starts where the average width of a character puts the
+        ;; cut, and gallops away from it, before bisecting.  The empty
+        ;; prefix, assumed to fit, is checked last, when nothing longer
+        ;; does.
+        (let ((guess (max 0 (min high (floor (* (length string) pixels) (max 1 width)))))
+              (step 1))
+          (if (funcall fits guess)
+              (progn
+                (setq low guess)
+                (while (and (<= (+ low step) high) (funcall fits (+ low step)))
+                  (setq low (+ low step)
+                        step (* 2 step)))
+                (setq high (min high (+ low step -1))))
+            (setq high (1- guess))
+            (while (and (> (- high step) low) (not (funcall fits (- high step))))
+              (setq high (- high step 1)
+                    step (* 2 step)))
+            (when (> (- high step) low)
+              (setq low (- high step)))))
+        (while (< low high)
+          (let ((middle (/ (+ low high 1) 2)))
+            (if (funcall fits middle)
+                (setq low middle)
+              (setq high (1- middle)))))
+        (cond ((and best (= (car best) low)) (cdr best))
+              ((funcall fits low) (cdr best))
+              (t ""))))))
 
 ;;;; Filters
 

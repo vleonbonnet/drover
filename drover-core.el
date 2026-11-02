@@ -406,14 +406,27 @@ echo area or a tooltip, which it measures to size them."
   (when (stringp text)
     (let ((text (drover-bound-text text (or lines drover-text-lines)
                                    (* (or lines drover-text-lines) (1+ drover-line-limit)))))
-      (if (seq-some #'drover--unbounded-line-p (split-string text "\n"))
+      (if (drover--long-line-p text)
           (mapconcat (lambda (line)
-                       (if (drover--unbounded-line-p line)
+                       (if (> (length line) drover-line-limit)
                            (concat (substring line 0 drover-line-limit) "…")
                          line))
                      (split-string text "\n")
                      "\n")
         text))))
+
+(defun drover--long-line-p (text)
+  "Return non-nil when a line of TEXT is longer than `drover-line-limit'.
+Or holds a carriage return.  Nothing is allocated: tooltips are made by
+the thousand."
+  (or (string-search "\r" text)
+      (let ((start 0)
+            (long nil))
+        (while (and start (not long))
+          (let ((end (string-search "\n" text start)))
+            (setq long (> (- (or end (length text)) start) drover-line-limit)
+                  start (and end (1+ end)))))
+        long)))
 
 (defun drover-format-message (format-string &rest args)
   "Return FORMAT-STRING formatted with ARGS, as `format-message', bounded.

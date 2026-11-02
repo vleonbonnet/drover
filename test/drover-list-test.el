@@ -900,6 +900,40 @@ sessions; which subagents show, the View menu tells."
       (should (equal (drover-list--truncate "abc" -5) ""))
       (should (equal (drover-list--truncate "" 0) "")))))
 
+(ert-deftest drover-list-test-cut-measures-little ()
+  "A cut lays out few candidates, keeps none of them, and the one it returns."
+  (with-temp-buffer
+    (let ((drover-list--widths nil)
+          (measured nil))
+      (cl-letf (((symbol-function 'drover-list--measure)
+                 (lambda (string) (push (substring-no-properties string) measured) (string-width string))))
+        (let ((title (drover-face (make-string 40 ?m) 'drover-dim))
+              (cut (concat (make-string 9 ?m) "…")))
+          (should (equal (drover-list--truncate title 10) cut))
+          ;; The text whole, then ten, eight and nine characters: neither
+          ;; the empty prefix, which fits, nor the result is laid out again.
+          (should (equal (reverse measured)
+                         (list (make-string 40 ?m) (concat (make-string 10 ?m) "…")
+                               (concat (make-string 8 ?m) "…") cut)))
+          ;; No candidate is kept, but what the text is cut to is.
+          (should-not (gethash (drover-face cut 'drover-dim) (nth 1 drover-list--widths)))
+          (setq measured nil)
+          (should (equal (drover-list--truncate title 10) cut))
+          (should-not measured)
+          ;; Not even the ellipsis fits: nothing, found last.
+          (should (equal (drover-truncate-to-pixels "abc" 0 #'string-width) ""))
+          (should (equal (drover-truncate-to-pixels "abc" 1 #'string-width) "…")))))))
+
+(ert-deftest drover-list-test-lines-share-their-parts ()
+  "A text on one line is used as it is, and aligned spaces are made once per position."
+  (let ((text "Already one line"))
+    (should (eq (drover-list--one-line text) text))
+    (should (equal (drover-list--one-line " two\nlines ") "two lines"))
+    (should (equal (drover-list--one-line nil) ""))
+    (should (equal (drover-list--one-line 'symbol) "symbol")))
+  (should (eq (drover-list--align 120) (drover-list--align 120)))
+  (should (equal (get-text-property 0 'display (drover-list--align 120)) '(space :align-to (120)))))
+
 (ert-deftest drover-list-test-titles-truncated-in-pixels ()
   (drover-list-test-with-font
     (drover-list-test-with (list (drover-list-test-titled "s" (make-string 60 ?m) :status 'working))
