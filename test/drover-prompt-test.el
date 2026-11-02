@@ -1987,5 +1987,20 @@ user told why on one line."
                        '(fake . "a")))
         (should (equal (drover-session-key (drover-prompt-read-target "Send: ")) '(fake . "a")))))))
 
+(ert-deftest drover-prompt-test-edit-for-menu-send ()
+  "Send in the menu names the session chosen, until it is forgotten."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a")))
+      (drover-prompt-edit-for session "text")
+      (with-current-buffer (drover-prompt-buffer)
+        (should (seq-find (lambda (line) (string-prefix-p " RET Send Session a" line))
+                          (drover-keys-test-render 'drover-dispatch)))
+        (drover-prompt-forget-target)
+        (should (member " RET Send" (drover-keys-test-render 'drover-dispatch))))
+      (with-temp-buffer
+        (setq-local drover-prompt--chosen-session (list :key '(fake . "a") :title "Session a"))
+        (should-not (drover-prompt--menu-send-target))))))
+
 (provide 'drover-prompt-test)
 ;;; drover-prompt-test.el ends here

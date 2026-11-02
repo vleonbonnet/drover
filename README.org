@@ -204,7 +204,7 @@ In a prompt buffer, where you write to an agent, through the menu: the Input and
 | =t=     | =drover-prompt-revert=        | stage a revert of what follows point   |
 | =T=     | =drover-prompt-revert-cancel= | cancel the staged revert               |
 
-Send names where the prompt goes when the functions of =drover-dispatch-send-target-functions= tell it, called in the prompt buffer, the first string they return shown beside it.
+Send names where the prompt goes when the functions of =drover-dispatch-send-target-functions= tell it, called in the prompt buffer, the first string they return shown beside it; the prompt names there the session an earlier prompt was put in it for (see [[*The prompt][The prompt]]).
 
 ** Global keys
 

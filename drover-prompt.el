@@ -537,6 +537,15 @@ A click on the session's name forgets it."
                         'keymap drover-prompt-target-header-map)
             "]")))
 
+(defun drover-prompt--menu-send-target ()
+  "Return the title of the session the prompt goes to, or nil.
+For `drover-dispatch-send-target-functions': Send in the menu names the
+session `drover-prompt-edit-for' chose, as the header does."
+  (when-let* ((title (and drover-prompt-mode (plist-get drover-prompt--chosen-session :title))))
+    (format "%s" title)))
+
+(add-hook 'drover-dispatch-send-target-functions #'drover-prompt--menu-send-target)
+
 (defun drover-prompt--header-line ()
   "Return the header line of the prompt: its keys and what it runs.
 The keys are those of `drover-dispatch', after the key it is bound to;
