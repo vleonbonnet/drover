@@ -1784,10 +1784,31 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
                                  (drover-session-archived kept))
                            '("Shown a" "/work/a/" "a" "dev" "build" "Opus 5.5" "high" 10.0 20.0 idle 100.0)))
             (should (equal (drover-session-title (drover-find 'shown "conv-a")) "Shown a"))
-            ;; Restored, it goes: nothing follows it.
-            (drover-unarchive kept)
+            ;; Restored, nothing would list it: it stays archived, and
+            ;; says why.
+            (let ((err (should-error (drover-unarchive kept) :type 'user-error)))
+              (should (string-match-p "\\`Shown a stays archived: its terminal or shell is closed"
+                                      (cadr err))))
+            (should (equal (mapcar #'drover-session-key (drover-archived-sessions)) '((shown . "conv-a"))))
+            (should (drover-session-archived-p kept))
+            ;; Of several, it is named among those that failed; the
+            ;; others are restored.
+            (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 100.0)))
+              (drover-archive (drover-find 'shown "b")))
+            (let ((messages nil))
+              (cl-letf (((symbol-function 'message)
+                         (lambda (format &rest arguments) (push (apply #'format-message format arguments) messages))))
+                (drover-unarchive (list kept (drover-find 'shown "b"))))
+              (should (string-match-p "\\`Unarchived 1 session; failed for Shown a (Shown a stays archived"
+                                      (car messages))))
+            (should (equal (mapcar #'drover-session-key (drover-archived-sessions)) '((shown . "conv-a"))))
+            (should (equal (mapcar #'drover-session-id (drover-sessions)) '("b" "unknown")))
+            ;; Open again, it is restored.
+            (setq sessions (cons (drover-test-shown "a") sessions))
+            (drover-unarchive (car (drover-archived-sessions)))
             (should-not (drover-archived-sessions))
-            (should-not (drover-archived-available-p))))))))
+            (should-not (drover-archived-available-p))
+            (should (equal (mapcar #'drover-session-id (drover-sessions)) '("a" "b" "unknown")))))))))
 
 (ert-deftest drover-test-drover-archive-file ()
   "Drover keeps what it archived in its state directory, read anew when it changes."

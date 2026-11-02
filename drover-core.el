@@ -2173,14 +2173,30 @@ archived already, or cannot be."
 
 (defun drover-unarchive-session (session)
   "Restore SESSION from the archive, drover's own or its backend's.
-Signal a `user-error' when SESSION is not archived."
+Signal a `user-error' when SESSION is not archived, and when drover
+archived it and no front end follows its conversation any more, such
+as a Claude Code conversation whose terminal is gone: restored, it
+would leave every list, since drover lists no closed conversation, so
+it stays archived, and listed among the archived sessions."
   (cond
    ((drover--archive-entry session)
+    (unless (drover--followed-p session)
+      (user-error "%s stays archived: its terminal or shell is closed, and drover does not list closed conversations yet; restore it once resumed in its front end"
+                  (drover-session-display-title session)))
     (drover--archive-forget session)
     (drover-backend-changed (drover-session-backend session)))
    ((drover-session-archived session)
     (drover-backend-call session :unarchive))
    (t (user-error "%s is not archived" (drover-session-display-title session)))))
+
+(defun drover--followed-p (session)
+  "Return non-nil when a front end follows the conversation of SESSION.
+That is when a backend lists it, live or among the older sessions it
+fetched, whether drover's archive hides it or not: restored, it shows
+again."
+  (when-let* ((key (drover-session-engine-key session)))
+    (seq-some (lambda (record) (equal (drover-session-engine-key record) key))
+              (append (drover--live-sessions) (drover--fetched-sessions drover--history)))))
 
 (defun drover--archive-forget (session)
   "Remove SESSION's conversation from drover's archive, if there."
