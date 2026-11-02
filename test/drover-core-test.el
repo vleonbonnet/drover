@@ -723,6 +723,54 @@ REMAPPING the face remapping in force."
     (let ((drover-show-subagents 'bogus))
       (should (= (drover-tree-hidden-count nodes) 2)))))
 
+(ert-deftest drover-test-tree-visible-orphans ()
+  "A subagent whose parent is not listed shows as any subagent does.
+Its parent archived, deleted or not loaded, it is at the top of a tree
+of its own, a subagent still: an idle one hides in active mode, as it
+did under a session archived alone while its subagents stayed."
+  (let ((nodes (drover-tree
+                (list (drover-test-session "root")
+                      (drover-test-session "idle" :parent "archived" :status 'idle)
+                      (drover-test-session "ended" :parent "gone" :status 'done)
+                      (drover-test-session "busy" :parent "gone" :status 'working)
+                      (drover-test-session "quiet" :parent "gone" :status 'idle)
+                      (drover-test-session "deep" :parent "quiet" :status 'waiting)))))
+    (let ((drover-show-subagents 'all))
+      (should (equal (drover-tree-sessions (drover-tree-visible nodes))
+                     (drover-tree-sessions nodes)))
+      (should (= (drover-tree-hidden-count nodes) 0)))
+    (let ((drover-show-subagents 'active))
+      ;; The way to an active subagent shows, as under a listed parent.
+      (should (equal (drover-test-tree-shape (drover-tree-visible nodes))
+                     '(("quiet" ("deep")) ("busy") ("root"))))
+      (should (= (drover-tree-hidden-count nodes) 2)))
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-tree-shape (drover-tree-visible nodes)) '(("root"))))
+      (should (= (drover-tree-hidden-count nodes) 5)))))
+
+(ert-deftest drover-test-orphans-surface-as-shown ()
+  "Subagents whose parent is not listed surface, count and are counted as subagents."
+  (drover-test-with-backend (list (drover-test-session "root" :status 'idle)
+                                  (drover-test-session "idle" :parent "archived" :status 'idle)
+                                  (drover-test-session "ended" :parent "archived" :status 'done :since 1.0)
+                                  (drover-test-session "asking" :parent "gone" :status 'waiting :since 2.0))
+    (should (equal (drover-test-ids (drover-surfaced-sessions)) '("root" "asking")))
+    (should (equal (drover-test-ids (drover-attention-sessions)) '("asking")))
+    (should (equal (drover-test-tree-shape (drover-view-trees)) '(("asking") ("root"))))
+    (should (equal (drover-view-subagent-counts) '(3 . 2)))
+    (let ((drover-show-subagents 'all))
+      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "ended")))
+      (should (equal (drover-view-subagent-counts) '(3 . 0))))
+    ;; None: one waiting for the user still surfaces, not in lists.
+    (let ((drover-show-subagents 'none))
+      (should (equal (drover-test-ids (drover-surfaced-sessions)) '("root" "asking")))
+      (should (equal (drover-test-tree-shape (drover-view-trees)) '(("root"))))
+      (should (equal (drover-view-subagent-counts) '(3 . 3)))
+      ;; Matching a filter, it explains why it is listed.
+      (setq drover-filter '(:search "ended"))
+      (should (equal (drover-test-tree-shape (drover-view-trees)) '(("ended"))))
+      (should (equal (drover-view-subagent-counts) '(1 . 0))))))
+
 (ert-deftest drover-test-subagent-modes-cycle ()
   "The modes cycle all, active, none; setting one redraws the views."
   (drover-test-with-backend nil

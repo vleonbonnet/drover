@@ -204,6 +204,21 @@ count as it was; forcing every mode line costs tens of milliseconds."
     (drover-set-filter :project "elsewhere")
     (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
 
+(ert-deftest drover-attention-test-orphans-follow-subagent-mode ()
+  "A subagent whose parent is not listed counts as any subagent does.
+So it does as the count is made anew, and as it follows a change."
+  (drover-attention-test-with (list (drover-test-session "alone" :status 'done)
+                                    (drover-test-session "ended" :parent "archived" :status 'done))
+    (drover-attention-mode 1)
+    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (setq drover-test-sessions (list (drover-test-session "alone" :status 'done)
+                                     (drover-test-session "ended" :parent "archived" :status 'failed)))
+    (drover-backend-changed 'fake "ended")
+    (drover-changed-now)
+    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (drover-set-show-subagents 'all)
+    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
+
 (ert-deftest drover-attention-test-help-echo-lists-sessions ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0
                                                          :project "drover" :branch "main"

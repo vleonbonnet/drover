@@ -234,13 +234,13 @@ That is `drover-tree-active-p' of its tree, through the index."
 
 (defun drover-attention--needs-p (key session)
   "Return non-nil when SESSION, of KEY in the index, needs the user and shows.
-See `drover-surfaced-sessions': it shows at the top of its tree, or as
-a subagent `drover-show-subagents' shows, or waits for the user, and
-its host, if another, is connected."
+See `drover-surfaced-sessions': it is no subagent, or a subagent
+`drover-show-subagents' shows, at the top of its tree or not, or waits
+for the user, and its host, if another, is connected."
   (and (drover-session-attention-p session)
        (not (drover-session-stale session))
        (or (eq (drover-session-status session) 'waiting)
-           (null (drover-index-parent key))
+           (null (drover-session-parent session))
            (pcase drover-show-subagents
              ('all t)
              ('none nil)
