@@ -3846,7 +3846,7 @@ as drawing, so the list is drawn first, from what was reported."
           (run-at-time 0 nil (lambda ()
                                (setq drover-list--relist-timer nil)
                                (drover-with-reporting "list refresh"
-                                 (drover-index-refresh)))))))
+                                 (drover-index-refresh t)))))))
 
 (defun drover-list--refresh-times (&optional keys bodies)
   "Draw again the rows of the current list whose times read otherwise now.

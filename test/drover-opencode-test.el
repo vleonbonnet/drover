@@ -49,7 +49,7 @@
   "Registered event handlers, oldest first, as (TYPE . FUNCTION).")
 
 (defvar drover-opencode-test-branches '(("/work/drover/" . "main") ("/work/opencode/" . "dev"))
-  "Branches of the directories, for the stubbed `opencode-git-branch'.")
+  "Branches of the directories, for the stubbed `drover-git-branch'.")
 
 (defvar drover-opencode-test-projects
   '(((id . "prj_drover") (name . "Drover") (canonical . "/work/drover"))
@@ -154,7 +154,7 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
                ((symbol-function 'opencode-state-cache)
                 (lambda (id) (cdr (assoc id drover-opencode-test-caches))))
                ((symbol-function 'opencode-state-ensure) (drover-opencode-test--recorder 'opencode-state-ensure))
-               ((symbol-function 'opencode-git-branch)
+               ((symbol-function 'drover-git-branch)
                 (lambda (directory) (cdr (assoc directory drover-opencode-test-branches))))
                ((symbol-function 'opencode-model-display)
                 (lambda (model &optional directory)
@@ -361,7 +361,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
 
 (ert-deftest drover-opencode-test-maps-missing-fields ()
   (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0))
-    (cl-letf (((symbol-function 'opencode-git-branch) (lambda (_) (error "No directory to read")))
+    (cl-letf (((symbol-function 'drover-git-branch) (lambda (_) (error "No directory to read")))
               ((symbol-function 'opencode-model-display) (lambda (&rest _) (error "No model to show")))
               ((symbol-function 'opencode-variant-display) (lambda (&rest _) (error "No model to show")))
               ((symbol-function 'opencode-provider-display) (lambda (&rest _) (error "No provider")))

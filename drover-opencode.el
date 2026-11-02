@@ -529,7 +529,7 @@ after a compaction until the next step measures it:
            :title (plist-get entry :title)
            :directory directory
            :project (drover-opencode--project-name (plist-get entry :project-id) directory)
-           :branch (and directory (opencode-git-branch directory))
+           :branch (and directory (drover-git-branch directory))
            :parent (plist-get entry :parent-id)
            :status status
            :requests (mapcar (lambda (request)
@@ -1128,6 +1128,8 @@ unknown.  The backend's :options."
    :start #'drover-opencode--start
    :sessions #'drover-opencode--sessions
    :session #'drover-opencode--session-by-id
+   ;; Registry, buffers, catalogs and projects: all but the branches.
+   :reports-changes t
    :open #'drover-opencode--open
    :respond #'drover-opencode--respond
    :interrupt #'drover-opencode--interrupt
