@@ -239,6 +239,126 @@ nothing having changed since it was read."
               (should (= (string-bytes (buffer-string)) 10)))))
       (delete-file file))))
 
+(defun drover-transcript-test-write (file lines)
+  "Write LINES, strings, to FILE in UTF-8, as the CLIs write."
+  (let ((coding-system-for-write 'utf-8-unix))
+    (with-temp-buffer
+      (apply #'insert lines)
+      (write-region nil nil file nil 'silent))))
+
+(ert-deftest drover-transcript-test-look-back ()
+  "Looking back reads every line before a byte whole, in windows, back to a floor.
+A line a window cuts is read with the window before; one longer than a
+window is never whole; looking stops at the floor, at the bound, or
+once found."
+  (let ((file (make-temp-file "drover-transcript" nil ".jsonl"))
+        (drover-transcript-window 64)
+        (drover-transcript-look-back 4096))
+    (unwind-protect
+        (let ((lines (cl-loop for n below 30
+                              collect (format "{\"n\":%d,\"t\":\"%s\"}\n" n
+                                              (pcase (% n 7)
+                                                (0 (make-string 100 ?l))
+                                                (3 "é→ü")
+                                                (_ (make-string (% (* n 5) 23) ?x)))))))
+          (drover-transcript-test-write file lines)
+          (let* ((size (file-attribute-size (file-attributes file)))
+                 (offsets (let ((offset 0))
+                            (mapcar (lambda (line) (prog1 offset (cl-incf offset (string-bytes line))))
+                                    lines)))
+                 (seen nil)
+                 (collect (lambda (beg end)
+                            (dolist (record (drover-transcript-lines "\"n\":" nil beg end))
+                              (cl-pushnew (alist-get 'n record) seen))
+                            nil)))
+            (should-not (drover-transcript-look-back file size 0 collect))
+            ;; Every line short enough is read whole, the long ones never.
+            (should (equal (sort seen #'<)
+                           (cl-loop for n below 30 unless (zerop (% n 7)) collect n)))
+            ;; Not before the floor, a line's start.
+            (setq seen nil)
+            (drover-transcript-look-back file size (nth 10 offsets) collect)
+            (should (equal (sort seen #'<)
+                           (cl-loop for n from 10 below 30 unless (zerop (% n 7)) collect n)))
+            ;; Not further than the bound.
+            (setq seen nil)
+            (let ((drover-transcript-look-back 128))
+              (drover-transcript-look-back file size 0 collect))
+            (should (memq 29 seen))
+            (should-not (memq 5 seen))
+            ;; The newest line FUNCTION finds, which ends the look.
+            (should (equal (drover-transcript-look-back
+                            file size 0
+                            (lambda (beg end)
+                              (alist-get 'n (drover-transcript-last "\"t\":\"é" nil beg end))))
+                           24))))
+      (delete-file file))))
+
+(ert-deftest drover-transcript-test-look-before-tail ()
+  "The lines between a file's head and tail are read whole, the tail's first one too.
+Wherever the line looked for falls, in the head, between, across the
+tail's start or in the tail, it is found, by a full read or one of what
+was appended since a size."
+  (let ((file (make-temp-file "drover-transcript" nil ".jsonl"))
+        (drover-transcript-window 64)
+        (drover-transcript-look-back 4096))
+    (unwind-protect
+        (cl-flet ((found (beg end)
+                    (and (drover-transcript-last "\"k\":\"m\"" nil beg end) t))
+                  (other (n) (format "{\"k\":\"b\",\"n\":%d,\"é\":\"%s\"}\n" n (make-string (% n 5) ?ü))))
+          (dotimes (after 30)
+            (let* ((before (cl-loop for n below 12 collect (other n)))
+                   (wanted "{\"k\":\"m\",\"t\":\"é\"}\n")
+                   (rest (cl-loop for n below after collect (other (+ 100 n)))))
+              (drover-transcript-test-write file (append before (list wanted) rest))
+              (let ((size (file-attribute-size (file-attributes file))))
+                (with-temp-buffer
+                  (let ((tail (drover-transcript-insert-ends file size)))
+                    (should (or (found tail (point-max))
+                                (drover-transcript-look-before-tail file size tail nil #'found)
+                                (found (point-min) tail)))))
+                ;; Appended since the lines before it were written.
+                (let ((old (apply #'+ (mapcar #'string-bytes before))))
+                  (with-temp-buffer
+                    (let ((tail (drover-transcript-insert-ends file size old)))
+                      (should (or (found tail (point-max))
+                                  (drover-transcript-look-before-tail file size tail old #'found))))))))))
+      (delete-file file))))
+
+(ert-deftest drover-transcript-test-reader-version ()
+  "What another version of a reader read and kept is read again; its own is kept."
+  (drover-test-with-state
+    (let* ((root (file-name-as-directory (make-temp-file "drover-transcripts" t)))
+           (reads 0)
+           (make (lambda (version)
+                   (drover-transcript-index-create
+                    'test-transcripts
+                    (lambda () (list (list root 1 "\\.jsonl\\'")))
+                    (lambda (_file attributes _old)
+                      (cl-incf reads)
+                      (list :size (file-attribute-size attributes)))
+                    #'ignore nil nil version)))
+           (index (funcall make 1)))
+      (unwind-protect
+          (let ((file (expand-file-name "p/a.jsonl" root)))
+            (drover-test-write file "one\n")
+            (drover-transcript-scan index)
+            (should (equal (drover-transcript-lookup index file) '(:size 4 :reader 1)))
+            (drover-transcript-stop index)
+            (let ((same (funcall make 1)))
+              (setq reads 0)
+              (drover-transcript-scan same)
+              (should (zerop reads)))
+            (let ((newer (funcall make 2)))
+              (setq reads 0)
+              (drover-transcript-load newer)
+              (should-not (drover-transcript-lookup newer file))
+              (drover-transcript-scan newer)
+              (should (= reads 1))
+              (should (equal (drover-transcript-lookup newer file) '(:size 4 :reader 2)))))
+        (drover-transcript-stop index)
+        (delete-directory root t)))))
+
 (ert-deftest drover-transcript-test-text-and-time ()
   "Titles are their first line, cut; times are the CLIs' ISO 8601 ones."
   (should (equal (drover-transcript-text "\n  Fix the  build \nand test") "Fix the  build"))

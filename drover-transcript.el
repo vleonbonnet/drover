@@ -87,6 +87,12 @@ costs little, and is written again as Emacs exits.")
   "Bytes of the head and of the tail of a file engines' readers read.
 Claude Code's own list of conversations reads as much.")
 
+(defconst drover-transcript-look-back (* 16 drover-transcript-window)
+  "Bytes before a tail a reader reads at most looking for a record there.
+Engines append records of their own to a conversation, as they open it
+again or attach files to a turn, some longer than the tail's window:
+the conversation's last message may be further back.")
+
 (defconst drover-transcript-text-limit 300
   "Characters of a title or prompt kept of a conversation.")
 
@@ -123,6 +129,9 @@ is gone.")
   (key nil :documentation "Function of the DATA read of a file returning what names it, or nil.
 Its backend finds the file of a conversation by that name, such as its
 identifier, with `drover-transcript-keyed-file'.")
+  (version nil :documentation "The version of READ, a number, or nil.
+What another version read, kept between Emacs sessions, is read again:
+the data READ returns is noted with it, as :reader.")
   (entries (make-hash-table :test #'equal) :documentation "Entries by file.")
   (files (make-hash-table :test #'equal)
          :documentation "The files of the entries, by what KEY names them.")
@@ -151,13 +160,14 @@ One made before drover's files were loaded anew, of other slots, is to
 be dropped: its timers stop, and its backend makes another."
   (drover-layout-current-p index 'drover-transcript-index))
 
-(defun drover-transcript-index-create (name roots read on-change &optional on-cycle key)
+(defun drover-transcript-index-create (name roots read on-change &optional on-cycle key version)
   "Return an index NAME of the files ROOTS tells, read with READ.
-ON-CHANGE and ON-CYCLE are told of changes and of each look's end, and
-KEY names what was read of a file.  See `drover-transcript-index' for
-each."
+ON-CHANGE and ON-CYCLE are told of changes and of each look's end, KEY
+names what was read of a file, and VERSION is READ's.  See
+`drover-transcript-index' for each."
   (drover-transcript-index--create :name name :roots roots :read read
-                                   :on-change on-change :on-cycle on-cycle :key key))
+                                   :on-change on-change :on-cycle on-cycle :key key
+                                   :version version))
 
 (defun drover-transcript-entry (index file)
   "Return the entry INDEX keeps of FILE, or nil."
@@ -233,17 +243,20 @@ Of two files of one key, the one changed last keeps it."
 
 (defun drover-transcript-load (index)
   "Read what was kept of INDEX, unless read already.
-Entries read since are kept over those of the file."
+Entries read since are kept over those of the file, and those another
+version of its reader read are left out, to be read again."
   (unless (drover-transcript-index-loaded index)
     (setf (drover-transcript-index-loaded index) t)
     (let ((file (drover-transcript-cache-file index))
-          (entries (drover-transcript-index-entries index)))
+          (entries (drover-transcript-index-entries index))
+          (version (drover-transcript-index-version index)))
       (condition-case err
           (let ((kept (drover-read-data file drover-transcript--version :files)))
             (unless (seq-every-p #'drover-transcript--entry-p kept)
               (error "Malformed entries"))
             (pcase-dolist (`(,name ,size ,mtime ,inode ,data) kept)
-              (unless (gethash name entries)
+              (unless (or (gethash name entries)
+                          (and data (not (eql (plist-get data :reader) version))))
                 (puthash name (drover-transcript--create :file name :size size :mtime mtime
                                                          :inode inode :data data)
                          entries)
@@ -396,6 +409,9 @@ listed again only once its modification time tells files came or went."
                      (drover-report-failure (format "reading %s" (drover-transcript-index-name index)) err
                                           (abbreviate-file-name file))
                      nil))))
+        (when-let* ((version (drover-transcript-index-version index))
+                    ((consp data)))
+          (setq data (plist-put data :reader version)))
         (pcase-let ((`(,size ,mtime ,inode) (drover-transcript--stamp attributes)))
           (puthash file (drover-transcript--create :file file :size size :mtime mtime
                                                    :inode inode :data data)
@@ -564,6 +580,64 @@ start.  Head and tail are inserted once when they overlap."
         (let ((tail (point)))
           (drover-transcript-insert file (- size window) size)
           tail)))))
+
+(defun drover-transcript--bytes (beg end)
+  "Return how many bytes of its file the text from BEG to END took.
+It was decoded as UTF-8: the bytes of a character cut, left undecoded,
+count as they were."
+  (length (encode-coding-string (buffer-substring-no-properties beg end) 'utf-8-unix)))
+
+(defun drover-transcript-look-back (file end floor function)
+  "Return what FUNCTION finds in the lines of FILE before byte END, or nil.
+FUNCTION is called in a buffer holding lines of FILE with their bounds,
+BEG and END, and returns non-nil once it found what it looks for.  The
+lines are read in windows of `drover-transcript-window' bytes, the
+newest first, back to byte FLOOR, `drover-transcript-look-back' bytes
+at most: a line a window cuts is read whole with the lines before it,
+unless longer than a window, which no window holds whole."
+  (let ((left drover-transcript-look-back)
+        (found nil))
+    (with-temp-buffer
+      (while (and (not found) (> end floor) (> left 0))
+        (let ((beg (max floor (- end drover-transcript-window))))
+          (erase-buffer)
+          (drover-transcript-insert file beg end)
+          (setq left (- left (- end beg)))
+          (goto-char (point-min))
+          (cond ((= beg floor)
+                 (setq found (funcall function (point-min) (point-max))
+                       end floor))
+                ((search-forward "\n" nil t)
+                 (setq end (+ beg (drover-transcript--bytes (point-min) (1- (point))))
+                       found (funcall function (point) (point-max))))
+                (t (setq end beg))))))
+    found))
+
+(defun drover-transcript-look-before-tail (file size tail old-size function)
+  "Return what FUNCTION finds in the lines of FILE between its head and tail.
+The current buffer holds what `drover-transcript-insert-ends' inserted
+of FILE, of SIZE bytes, with OLD-SIZE, the tail from TAIL: the lines
+before the tail are those after the head, or with OLD-SIZE those
+appended after it that the tail does not hold, nil when there are
+none.  FUNCTION is as for `drover-transcript-look-back', which reads
+them, and the line the tail begins in, whole."
+  (let* ((window drover-transcript-window)
+         (start (if old-size (max old-size (- size window)) (- size window)))
+         (floor (cond (old-size)
+                      ((> size (* 2 window))
+                       ;; Where the head's last line begins, cut by its window.
+                       (save-excursion
+                         (goto-char (1- tail))
+                         (if (search-backward "\n" nil t)
+                             (drover-transcript--bytes (point-min) (1+ (point)))
+                           0))))))
+    (when (and floor (> start floor))
+      (let ((end (save-excursion
+                   (goto-char tail)
+                   (if (search-forward "\n" nil t)
+                       (+ start (drover-transcript--bytes tail (1- (point))))
+                     size))))
+        (drover-transcript-look-back file end floor function)))))
 
 (defun drover-transcript--string-scan (bound)
   "Scan the JSON string whose opening quote is at point, up to BOUND.

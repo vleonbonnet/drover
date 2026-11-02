@@ -75,7 +75,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
   (load "drover-core" nil t))
 
 ;; Drover does not require claude-code-ide, so this file compiles
@@ -434,8 +434,11 @@ conversation at once; otherwise it is looked for as it starts (see
 (defvar-local drover-claude-code-ide--since nil
   "Time, as a float, at which this terminal's state began, or nil.")
 
-(defvar-local drover-claude-code-ide--updated nil
-  "Time, as a float, of this terminal's last status change, or nil.")
+(defvar-local drover-claude-code-ide--activity nil
+  "Time, as a float, of the last status change of a turn of this terminal, or nil.
+A turn working, waiting for the user, ending, or the terminal leaving
+one; not the status the CLI tells as it starts, idle, which opening a
+conversation again tells too: the conversation did nothing then.")
 
 (defvar-local drover-claude-code-ide--seen nil
   "Non-nil when the user saw the turn this terminal's state ended.")
@@ -464,18 +467,21 @@ A `blocked' entry wins over an `error' one; without entries, `idle'."
 
 (defun drover-claude-code-ide--note-status (seen)
   "Note the program status of the current terminal, SEEN by the user or not.
-When the records its status follows changed, the time is noted, the
-state's start too when it changed, and the turn is unseen unless SEEN.
+When the records its status follows changed, the state's start is noted
+when it changed, the time of a turn's activity too (see
+`drover-claude-code-ide--activity'), and the turn is unseen unless SEEN.
 SEEN non-nil marks the state seen whatever changed."
   (let ((entries (drover-claude-code-ide--governing (drover-claude-code-ide--records))))
     (unless (equal entries drover-claude-code-ide--entries)
       (let ((state (drover-claude-code-ide--state-of entries))
+            (before (or drover-claude-code-ide--state 'idle))
             (now (float-time)))
-        (unless (eq state (or drover-claude-code-ide--state 'idle))
+        (unless (eq state before)
           (setq-local drover-claude-code-ide--since now))
+        (when (or (not (eq state 'idle)) (memq before '(working blocked)))
+          (setq-local drover-claude-code-ide--activity now))
         (setq-local drover-claude-code-ide--entries entries)
         (setq-local drover-claude-code-ide--state state)
-        (setq-local drover-claude-code-ide--updated now)
         (setq-local drover-claude-code-ide--seen nil)))
     (when seen
       (setq-local drover-claude-code-ide--seen t))))
@@ -602,7 +608,9 @@ what was read.  Nil without a turn."
       (unless drover-claude-code-ide--token
         (setq drover-claude-code-ide--token
               (format "terminal-%d" (cl-incf drover-claude-code-ide--counter))))
-      (let ((id (drover-claude-code-ide-live-session-id buffer)))
+      (let* ((id (drover-claude-code-ide-live-session-id buffer))
+             (times (drover-followed-times 'claude-code id drover-claude-code-ide--created
+                                           drover-claude-code-ide--activity)))
         (apply #'drover-session-create
                :backend 'claude-code-ide
                :id drover-claude-code-ide--token
@@ -614,8 +622,9 @@ what was read.  Nil without a turn."
                :requests (nth 1 status)
                :detail (nth 2 status)
                :since drover-claude-code-ide--since
-               :updated (or drover-claude-code-ide--updated drover-claude-code-ide--created)
-               :created drover-claude-code-ide--created
+               ;; A conversation resumed is as old as it is until a turn here.
+               :updated (cdr times)
+               :created (car times)
                :engine 'claude-code
                ;; Never a guess: drover merges sessions of one engine identifier.
                :engine-id id
