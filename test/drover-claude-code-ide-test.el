@@ -148,6 +148,13 @@ Terminals BODY makes are killed."
          (drover-claude-code-start-flags-function nil)
          (drover-claude-code-project-directory-function nil)
          (drover-claude-code-ide--watchers nil)
+         (drover--resumers nil)
+         (drover-claude-code-transcripts--users nil)
+         (drover-claude-code-transcripts--index nil)
+         (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
+         (drover-codex-rollouts--users nil)
+         (drover-codex-rollouts--index nil)
+         (drover-codex-rollouts--files (make-hash-table :test #'equal))
          (window-selection-change-functions window-selection-change-functions)
          (window-buffer-change-functions window-buffer-change-functions)
          (after-focus-change-function after-focus-change-function)
@@ -1345,7 +1352,11 @@ guess could hide another session of the directory."
 (ert-deftest drover-claude-code-ide-test-backend ()
   "The backend offers the operations of a terminal, and runs Claude Code."
   (drover-claude-code-ide-test-with
-    (should (equal (drover-backends) '(claude-code-ide)))
+    ;; With it, the backend listing Claude Code's transcripts, whose
+    ;; conversations it resumes.
+    (should (equal (sort (drover-backends) #'string<) '(claude-code claude-code-ide)))
+    (should (equal (drover-backend-property 'claude-code :recorded) '(claude-code)))
+    (should (eq (cdr (drover-resumer 'claude-code)) #'drover-claude-code-ide-resume))
     (should (equal (drover-backend-label 'claude-code-ide) "Claude Code IDE"))
     (should (equal (drover-backend-engines 'claude-code-ide) '(claude-code)))
     (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new :buffer

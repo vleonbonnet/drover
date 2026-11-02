@@ -1787,7 +1787,7 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
             ;; Restored, nothing would list it: it stays archived, and
             ;; says why.
             (let ((err (should-error (drover-unarchive kept) :type 'user-error)))
-              (should (string-match-p "\\`Shown a stays archived: its terminal or shell is closed"
+              (should (string-match-p "\\`Shown a stays archived: no front end follows its conversation"
                                       (cadr err))))
             (should (equal (mapcar #'drover-session-key (drover-archived-sessions)) '((shown . "conv-a"))))
             (should (drover-session-archived-p kept))

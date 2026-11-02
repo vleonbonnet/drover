@@ -148,15 +148,65 @@ See `drover-claude-code-agent-modes'."
   "Return the directory where Claude Code records its running sessions by PID."
   (file-name-as-directory (expand-file-name "sessions" drover-claude-code-home)))
 
+(defconst drover-claude-code--encoded-limit 200
+  "Length past which Claude Code cuts the name of a directory of transcripts.
+It then appends a hash of the whole name, as `drover-claude-code--hash'.")
+
+(defun drover-claude-code--utf-16 (name)
+  "Return the UTF-16 code units of NAME, as JavaScript counts its characters."
+  (mapcan (lambda (char)
+            (if (> char #xffff)
+                (let ((offset (- char #x10000)))
+                  (list (+ #xd800 (ash offset -10)) (+ #xdc00 (logand offset #x3ff))))
+              (list char)))
+          (string-to-list name)))
+
+(defun drover-claude-code--hash (name)
+  "Return the hash Claude Code appends to the encoded NAME it cuts, in base 36.
+It is the 32-bit string hash of JavaScript's code, h * 31 + c over the
+UTF-16 code units of NAME, as a signed number, made positive."
+  (let ((hash 0))
+    (dolist (unit (drover-claude-code--utf-16 name))
+      (setq hash (logand (+ (* hash 31) unit) #xffffffff)))
+    (let ((value (abs (if (>= hash #x80000000) (- hash #x100000000) hash)))
+          (digits nil))
+      (while (progn (push (aref "0123456789abcdefghijklmnopqrstuvwxyz" (% value 36)) digits)
+                    (setq value (/ value 36))
+                    (> value 0)))
+      (concat digits))))
+
 (defun drover-claude-code--encode (name)
-  "Return NAME with every character that is not alphanumeric replaced by \"-\"."
-  (replace-regexp-in-string "[^a-zA-Z0-9]" "-" name))
+  "Return NAME as Claude Code names a directory of transcripts after it.
+Every UTF-16 code unit that is not an ASCII letter or digit becomes
+\"-\", so a character beyond the Basic Multilingual Plane becomes two;
+a result longer than `drover-claude-code--encoded-limit' is cut there,
+followed by \"-\" and a hash of NAME."
+  (let ((encoded (mapconcat (lambda (unit)
+                              (if (or (<= ?a unit ?z) (<= ?A unit ?Z) (<= ?0 unit ?9))
+                                  (string unit)
+                                "-"))
+                            (drover-claude-code--utf-16 name) "")))
+    (if (<= (length encoded) drover-claude-code--encoded-limit)
+        encoded
+      (concat (substring encoded 0 drover-claude-code--encoded-limit) "-" (drover-claude-code--hash name)))))
+
+(defun drover-claude-code-native-directory (dir)
+  "Return DIR, absolute, as Claude Code's process sees its working directory.
+Without its trailing slash; on Windows with backslashes and an upper
+case drive letter, as Node reports the directory a terminal started it
+in, where Emacs may write \"c:/\"."
+  (let ((name (directory-file-name dir)))
+    (if (string-match "\\`\\([a-zA-Z]\\):\\(.*\\)\\'" name)
+        (concat (upcase (match-string 1 name)) ":"
+                (replace-regexp-in-string "/" "\\\\" (match-string 2 name)))
+      name)))
 
 (defun drover-claude-code-encode-directory (dir)
   "Return the name of the subdirectory of transcripts of sessions in DIR.
 Claude Code resolves symbolic links, drops the trailing slash and
-replaces every character that is not alphanumeric with \"-\"."
-  (drover-claude-code--encode (directory-file-name (file-truename (expand-file-name dir)))))
+encodes the name as `drover-claude-code--encode' does."
+  (drover-claude-code--encode
+   (drover-claude-code-native-directory (file-truename (expand-file-name dir)))))
 
 (defun drover-claude-code-decode-bucket (encoded)
   "Return the directory ENCODED, a subdirectory name of transcripts, stands for.
@@ -823,10 +873,12 @@ Code gives the model."
   "Return when Claude Code last took a prompt, as a float time, or nil.
 Interactive sessions append each prompt to history.jsonl; sessions run
 through the SDK, as agent-shell's are, write only their transcripts,
-so the transcripts of the sessions drover lists count too."
+so the transcripts of the sessions front ends follow count too, not
+those of every conversation recorded, which only grow when run."
   (let ((times (list (drover-file-mtime (expand-file-name "history.jsonl" drover-claude-code-home)))))
     (dolist (session (drover-sessions))
       (when-let* (((eq (drover-session-engine session) 'claude-code))
+                  ((not (drover-backend-property session :recorded)))
                   (id (drover-session-engine-id session))
                   (directory (drover-session-directory session)))
         (push (drover-file-mtime (drover-claude-code-transcript id directory)) times)))

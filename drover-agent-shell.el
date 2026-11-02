@@ -54,6 +54,13 @@
 ;; as far as it advertises it can, which :supports tells.  agent-shell
 ;; has no archive: drover archives shells' sessions itself.
 ;;
+;; A shell resumes a conversation of its engine by identifier
+;; (`drover-agent-shell-resume'), through ACP's session/load: drover
+;; opens the closed conversations of Claude Code and Codex this way, as
+;; the `claude-code' and `codex' backends list them from what the
+;; engines record, installed with this one (see
+;; `drover-claude-code-transcripts', `drover-codex-rollouts').
+;;
 ;; `drover' loads this file once agent-shell.el is loaded.
 
 ;;; Code:
@@ -62,7 +69,9 @@
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-claude-code)
+(require 'drover-claude-code-transcripts)
 (require 'drover-codex)
+(require 'drover-codex-rollouts)
 (require 'map)
 (require 'seq)
 (require 'subr-x)
@@ -365,6 +374,30 @@ The engine of the agent-shell session at point is the default."
   "Start a shell in DIRECTORY, of an engine read from the user, and display it."
   (drover-agent-shell--create directory (drover-agent-shell--read-engine) nil
                               #'ignore (lambda (message) (user-error "%s" message))))
+
+(defun drover-agent-shell-resume (engine session-id directory)
+  "Resume the conversation SESSION-ID of ENGINE in a new shell, and return it.
+The shell starts in DIRECTORY, the conversation's, and loads it through
+ACP (session/load, or session/resume), as agent-shell resumes a session
+by its identifier; it shows in the selected window."
+  (let* ((maker (alist-get engine drover-agent-shell-configs))
+         (directory (file-name-as-directory (expand-file-name directory))))
+    (unless (functionp maker)
+      (user-error "No agent-shell configuration for %s" (drover-engine-label engine)))
+    (let* ((default-directory directory)
+           (buffer (agent-shell--start :config (funcall maker) :no-focus t :new-session t
+                                       :session-strategy 'new :session-id session-id
+                                       :cwd directory)))
+      (pop-to-buffer-same-window buffer)
+      buffer)))
+
+(defun drover-agent-shell--resumers ()
+  "Return the engines whose conversations a shell resumes, with how.
+As (ENGINE . FUNCTION) for `drover-register-resumer'."
+  (mapcar (lambda (entry)
+            (let ((engine (car entry)))
+              (cons engine (lambda (id directory) (drover-agent-shell-resume engine id directory)))))
+          drover-agent-shell-configs))
 
 ;;;; Sending
 
@@ -1192,12 +1225,20 @@ whose creation time is unknown."
     (drover-register-engine 'gemini-cli :label "Gemini CLI")
     (setq drover-agent-shell--gemini-registered t))
   (pcase-dolist (`(,engine ,depth ,function) drover-agent-shell--model-sources)
-    (drover-register-model-source engine function depth t)))
+    (drover-register-model-source engine function depth t))
+  (pcase-dolist (`(,engine . ,function) (drover-agent-shell--resumers))
+    (drover-register-resumer engine 'agent-shell function))
+  (drover-claude-code-transcripts-install 'agent-shell)
+  (drover-codex-rollouts-install 'agent-shell))
 
 (defun drover-agent-shell--unregister ()
   "Undo `drover-agent-shell--register'."
   (pcase-dolist (`(,engine ,_depth ,function) drover-agent-shell--model-sources)
     (drover-unregister-model-source engine function))
+  (pcase-dolist (`(,engine . ,_) drover-agent-shell-configs)
+    (drover-unregister-resumer engine 'agent-shell))
+  (drover-claude-code-transcripts-uninstall 'agent-shell)
+  (drover-codex-rollouts-uninstall 'agent-shell)
   (when drover-agent-shell--gemini-registered
     (drover-unregister-engine 'gemini-cli)
     (setq drover-agent-shell--gemini-registered nil))

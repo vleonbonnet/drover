@@ -55,6 +55,12 @@
 ;; while archived, once their terminal is gone, which forking, deleting
 ;; and recapping need not.
 ;;
+;; A conversation whose terminal closed stays listed, idle, by the
+;; `claude-code' backend, which lists Claude Code's transcripts and is
+;; installed with this one (see `drover-claude-code-transcripts');
+;; opening it resumes it here (`drover-claude-code-ide-resume'), in the
+;; directory it ran in.
+;;
 ;; `drover' loads this file once claude-code-ide.el is loaded.
 
 ;;; Code:
@@ -62,6 +68,7 @@
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-claude-code)
+(require 'drover-claude-code-transcripts)
 (require 'project)
 (require 'seq)
 (require 'subr-x)
@@ -850,14 +857,19 @@ instance even where a session runs."
 
 (defun drover-claude-code-ide-resume (session-id directory)
   "Resume Claude Code session SESSION-ID in DIRECTORY, and return its terminal.
-See `drover-claude-code-ide-start'."
-  (when-let* ((buffer (drover-claude-code-ide-start
-                       directory
-                       (concat (or claude-code-ide-cli-extra-flags "")
-                               " --resume " (shell-quote-argument session-id)))))
-    (with-current-buffer buffer
-      (setq-local drover-claude-code-ide-session-id session-id))
-    buffer))
+The CLI finds a conversation among those of the directory it starts in,
+so it starts in DIRECTORY itself, as the conversation's project, though
+claude-code-ide would start in the root of a project around it.  See
+`drover-claude-code-ide-start'."
+  (let* ((directory (file-name-as-directory (expand-file-name directory)))
+         (project-find-functions (list (lambda (_directory) (cons 'transient directory)))))
+    (when-let* ((buffer (drover-claude-code-ide-start
+                         directory
+                         (concat (or claude-code-ide-cli-extra-flags "")
+                                 " --resume " (shell-quote-argument session-id)))))
+      (with-current-buffer buffer
+        (setq-local drover-claude-code-ide-session-id session-id))
+      buffer)))
 
 (defun drover-claude-code-ide--start-flags (options base)
   "Return the command line flags a new session started with OPTIONS takes.
@@ -1154,6 +1166,8 @@ Unless set already, `drover-claude-code-start-flags-function' and
 `drover-claude-code-project-directory-function' answer as
 claude-code-ide starts sessions."
   (drover-claude-code-ide--register)
+  (drover-register-resumer 'claude-code 'claude-code-ide #'drover-claude-code-ide-resume)
+  (drover-claude-code-transcripts-install 'claude-code-ide)
   (unless drover-claude-code-start-flags-function
     (setq drover-claude-code-start-flags-function #'drover-claude-code-ide--cli-flags))
   (unless drover-claude-code-project-directory-function
@@ -1174,6 +1188,8 @@ claude-code-ide starts sessions."
 (defun drover-claude-code-ide--uninstall ()
   "Undo `drover-claude-code-ide--install'."
   (drover-unregister-backend 'claude-code-ide)
+  (drover-unregister-resumer 'claude-code 'claude-code-ide)
+  (drover-claude-code-transcripts-uninstall 'claude-code-ide)
   (drover-unregister-model-source 'claude-code #'drover-claude-code-ide--models)
   (when (eq drover-claude-code-start-flags-function #'drover-claude-code-ide--cli-flags)
     (setq drover-claude-code-start-flags-function nil))

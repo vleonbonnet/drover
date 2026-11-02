@@ -26,10 +26,13 @@
 ;; only (see `drover-agent-shell'): the CLI has no command listing them.
 ;; Each model takes its name and reasoning levels from the models cache,
 ;; and from the levels Codex's ACP agent lists for each model
-;; (`drover-codex-acp-models').
+;; (`drover-codex-acp-models').  The rollouts Codex records of its
+;; conversations tell their prompts, replies and patches, of which
+;; `drover-codex-recap' tells the last turn.
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'drover-core)
@@ -192,6 +195,134 @@ started, and a session can outlive its day, so every one is checked."
           (when (or (null latest) (> time latest))
             (setq latest time)))))
     latest))
+
+;;;; Rollouts
+
+(defconst drover-codex--rollout-tail 262144
+  "Bytes at the end of a rollout `drover-codex-recap' reads.")
+
+(defconst drover-codex--context-regexp
+  "\\`[ \t\n]*\\(?:<[a-z_]+\\|# AGENTS\\.md instructions\\)"
+  "Regexp matching the text of a user message Codex adds itself.
+Such as its environment context and the instructions of AGENTS.md.")
+
+(defun drover-codex-message-text (payload)
+  "Return the text of the message PAYLOAD of a rollout, joined, or nil.
+Parts Codex adds itself to a user message are left out (see
+`drover-codex--context-regexp')."
+  (let ((content (alist-get 'content payload)))
+    (when-let* ((texts (delq nil (mapcar (lambda (part)
+                                           (let ((text (and (consp part) (alist-get 'text part))))
+                                             (and (stringp text)
+                                                  (not (string-match-p drover-codex--context-regexp text))
+                                                  text)))
+                                         (and (listp content) content))))
+                (text (string-trim (string-join texts "\n")))
+                ((not (string-empty-p text))))
+      text)))
+
+(defun drover-codex-prompt (record)
+  "Return the prompt of the user rollout RECORD gives, or nil.
+Codex records a prompt twice, as an event and as a message of the
+conversation: either tells it."
+  (let ((payload (alist-get 'payload record)))
+    (pcase (alist-get 'type record)
+      ("event_msg"
+       (when (equal (alist-get 'type payload) "user_message")
+         (let ((message (alist-get 'message payload)))
+           (and (stringp message)
+                (not (string-match-p drover-codex--context-regexp message))
+                (not (string-blank-p message))
+                (string-trim message)))))
+      ("response_item"
+       (when (and (equal (alist-get 'type payload) "message")
+                  (equal (alist-get 'role payload) "user"))
+         (drover-codex-message-text payload))))))
+
+(defun drover-codex-reply (record)
+  "Return the text of the agent's message rollout RECORD gives, or nil."
+  (let ((payload (alist-get 'payload record)))
+    (pcase (alist-get 'type record)
+      ("event_msg"
+       (when (equal (alist-get 'type payload) "agent_message")
+         (let ((message (alist-get 'message payload)))
+           (and (stringp message) (not (string-blank-p message)) (string-trim message)))))
+      ("response_item"
+       (when (and (equal (alist-get 'type payload) "message")
+                  (equal (alist-get 'role payload) "assistant"))
+         (drover-codex-message-text payload))))))
+
+(defun drover-codex--patch-changes (patch)
+  "Return the files PATCH, in Codex's apply_patch format, changes.
+A list of (FILE ADDITIONS DELETIONS), in its order."
+  (let ((changes nil)
+        (current nil))
+    (dolist (line (split-string patch "\n"))
+      (cond ((string-match "\\`\\*\\*\\* \\(?:Add\\|Update\\|Delete\\) File: \\(.+\\)\\'" line)
+             (setq current (list (string-trim (match-string 1 line)) 0 0))
+             (push current changes))
+            ((string-match "\\`\\*\\*\\* Move to: \\(.+\\)\\'" line)
+             (when current (setcar current (string-trim (match-string 1 line)))))
+            ((not current))
+            ((string-prefix-p "+" line) (cl-incf (nth 1 current)))
+            ((string-prefix-p "-" line) (cl-incf (nth 2 current)))))
+    (nreverse changes)))
+
+(defun drover-codex--changes (record)
+  "Return the files the patch of rollout RECORD applies change, or nil."
+  (let ((payload (alist-get 'payload record)))
+    (when (and (equal (alist-get 'type record) "response_item")
+               (member (alist-get 'type payload) '("custom_tool_call" "function_call"))
+               (equal (alist-get 'name payload) "apply_patch"))
+      (let ((input (or (alist-get 'input payload)
+                       (let ((arguments (alist-get 'arguments payload)))
+                         (and (stringp arguments)
+                              (let ((parsed (ignore-errors (json-parse-string arguments :object-type 'alist))))
+                                (or (and (consp parsed) (alist-get 'input parsed)) arguments)))))))
+        (and (stringp input) (drover-codex--patch-changes input))))))
+
+(defun drover-codex-recap (file)
+  "Return a recap of the last turn rollout FILE records, as `drover-recap' does.
+The turn begins at the newest prompt; its reply is the agent's newest
+message since, its changes the files its patches changed, and its error
+the one Codex reported last.  Only the end of FILE is read."
+  (let ((records nil)
+        prompt reply error changes)
+    (when (file-readable-p file)
+      (with-temp-buffer
+        (let ((size (file-attribute-size (file-attributes file)))
+              (coding-system-for-read 'utf-8-unix))
+          (insert-file-contents file nil (max 0 (- size drover-codex--rollout-tail)) size))
+        (goto-char (point-min))
+        (while (not (eobp))
+          (when-let* ((record (ignore-errors
+                                (json-parse-string (buffer-substring-no-properties (point) (line-end-position))
+                                                   :object-type 'alist :array-type 'list
+                                                   :null-object nil :false-object nil)))
+                      ((consp record)))
+            (push record records))
+          (forward-line 1))))
+    (catch 'turn
+      (dolist (record records)
+        (cond ((setq prompt (drover-codex-prompt record)) (throw 'turn nil))
+              ((drover-codex-reply record)
+               (unless reply (setq reply (drover-codex-reply record))))
+              ((drover-codex--changes record)
+               (setq changes (append (drover-codex--changes record) changes)))
+              ((and (equal (alist-get 'type record) "event_msg")
+                    (member (alist-get 'type (alist-get 'payload record)) '("error" "stream_error")))
+               (unless error
+                 (setq error (alist-get 'message (alist-get 'payload record))))))))
+    (list :prompt prompt
+          :reply reply
+          :changes (let ((merged nil))
+                     (dolist (change changes)
+                       (if-let* ((known (assoc (car change) merged)))
+                           (setcdr known (list (+ (nth 1 known) (nth 1 change))
+                                               (+ (nth 2 known) (nth 2 change))))
+                         (push (copy-sequence change) merged)))
+                     (nreverse merged))
+          :error (and (stringp error) error))))
 
 ;;;; Registration
 

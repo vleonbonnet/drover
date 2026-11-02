@@ -74,6 +74,13 @@ isolated, engines read their local state from the throwaway homes of
            (drover--model-memory nil)
            (drover--model-memory-stamp 'unread)
            (drover-agent-shell--gemini-registered nil)
+           (drover--resumers nil)
+           (drover-claude-code-transcripts--users nil)
+           (drover-claude-code-transcripts--index nil)
+           (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
+           (drover-codex-rollouts--users nil)
+           (drover-codex-rollouts--index nil)
+           (drover-codex-rollouts--files (make-hash-table :test #'equal))
            (drover-agent-shell-test--buffers nil)
            (drover-agent-shell-test--calls nil)
            (drover-agent-shell-test--warnings nil)
@@ -223,7 +230,10 @@ effort for a model without effort."
               (window-buffer-change-functions nil)
               (after-focus-change-function #'ignore))
           (load "drover-agent-shell" nil t)
-          (should (equal (drover-backends) '(agent-shell)))
+          ;; With it, the backends listing the conversations Claude Code
+          ;; and Codex recorded, which its shells resume.
+          (should (equal (sort (drover-backends) #'string<) '(agent-shell claude-code codex)))
+          (should (equal (car (drover-resumer 'codex)) 'agent-shell))
           (should (equal (drover-backend-label 'agent-shell) "agent-shell"))
           (let ((session (drover-session-create :backend 'agent-shell :id "shell-0")))
             (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new

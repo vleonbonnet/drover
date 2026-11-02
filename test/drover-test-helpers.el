@@ -45,6 +45,8 @@
 (require 'drover-model)
 (require 'drover-claude-code)
 (require 'drover-codex)
+(require 'drover-claude-code-transcripts)
+(require 'drover-codex-rollouts)
 
 ;; No test may touch the user's state.  Models are not remembered unless
 ;; a test asks for it, so that tests of sources see their answers alone,
@@ -53,6 +55,14 @@
       drover-state-directory (make-temp-file "drover-test-state" t))
 (let ((directory drover-state-directory))
   (add-hook 'kill-emacs-hook (lambda () (delete-directory directory t))))
+
+;; Nor the conversations the engines recorded: their homes are empty
+;; directories, but in the tests binding others.
+(let ((home (make-temp-file "drover-test-home" t)))
+  (setq drover-claude-code-home (expand-file-name "claude" home)
+        drover-codex-home (expand-file-name "codex" home)
+        drover-claude-code-agents-interval nil)
+  (add-hook 'kill-emacs-hook (lambda () (delete-directory home t))))
 
 ;;;; The fake backend
 
