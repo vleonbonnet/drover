@@ -45,10 +45,11 @@
 ;;
 ;; Views draw `drover-view-groups': the sessions as trees, filtered by
 ;; `drover-filter', grouped as `drover-group-by' says and sorted as
-;; `drover-sort-by' says, a session running a turn placed by the start
-;; of its turn rather than its every event (`drover-session-activity'),
-;; with the subagents `drover-show-subagents' shows.  Those settings
-;; are global, so every view shows the same sessions.  With
+;; `drover-sort-by' says, by default ungrouped, the most recently
+;; active first, a session running a turn placed by the start of its
+;; turn rather than its every event (`drover-session-activity'), with
+;; the subagents `drover-show-subagents' shows.  Those settings are
+;; global, so every view shows the same sessions.  With
 ;; `drover-show-history', views also list the older sessions backends
 ;; keep, and with `drover-show-archived' the archived ones
 ;; (`drover-known-sessions').  Backends without an archive of their own
@@ -688,7 +689,7 @@ Within a group, trees keep their order in NODES."
 (defconst drover-sort-fields '(urgency title project branch agent model provider updated created)
   "The values `drover-sort-by' may take.")
 
-(defcustom drover-sort-by 'urgency
+(defcustom drover-sort-by 'updated
   "What session views sort sessions by, within each group.
 The value is one of `drover-sort-fields': `urgency', the most urgent
 first; `title', `project', `branch', `agent', `model' or `provider',
@@ -703,9 +704,9 @@ among themselves in the order their turns started, so that the events
 of a turn do not move its session.  The others come in the order of
 their last activity, a session moving only once its activity moved
 further than `drover-sort-activity-tolerance' from where it was placed
-\(see `drover-session-activity').  Newest first lists the running
-sessions first, the turn started last on top, then the others, the most
-recently active first."
+\(see `drover-session-activity').  Newest first, the default, lists the
+running sessions first, the turn started last on top, then the others,
+the most recently active first."
   :type '(choice (const :tag "Urgency" urgency)
                  (const :tag "Title" title)
                  (const :tag "Project" project)
@@ -717,7 +718,7 @@ recently active first."
                  (const :tag "Creation" created))
   :group 'drover)
 
-(defcustom drover-sort-descending nil
+(defcustom drover-sort-descending t
   "Whether session views sort sessions in descending order of `drover-sort-by'."
   :type 'boolean
   :group 'drover)
@@ -1753,13 +1754,13 @@ Run `drover-changed-hook' when something changed."
 
 ;;;; View settings
 
-(defcustom drover-group-by 'status
+(defcustom drover-group-by nil
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
 first; `project', `branch', `agent', `model' or `provider', the
 provider's name, of the session at the top of each tree; `updated',
 the last activity, as today, yesterday, this week and older; or nil
-for no groups.  See `drover-group-trees'."
+for no groups, the default.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
                  (const :tag "By branch" branch)

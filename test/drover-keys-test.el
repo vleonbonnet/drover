@@ -809,6 +809,21 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
     (drover-session-keys-mode)
     (should-error (drover-view) :type 'user-error)))
 
+(ert-deftest drover-keys-test-view-defaults ()
+  "The View menu shows the default view: no groups, last activity first."
+  (drover-keys-test-with nil
+    (let ((drover-group-by (eval (car (get 'drover-group-by 'standard-value)) t))
+          (drover-sort-by (eval (car (get 'drover-sort-by 'standard-value)) t))
+          (drover-sort-descending (eval (car (get 'drover-sort-descending 'standard-value)) t)))
+      (with-temp-buffer
+        (setq-local drover-view-p t)
+        (let ((view (drover-keys-test-render 'drover-view)))
+          (dolist (line '(" o last activity" " r [ascending|descending]" " g nothing"))
+            (should (member line view))))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "o")) '("last activity")))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "r")) '("descending")))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "g")) '("nothing")))))))
+
 (ert-deftest drover-keys-test-view-sort-and-group ()
   (drover-keys-test-with nil
     (let ((runs 0))

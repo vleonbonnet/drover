@@ -1399,6 +1399,14 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (should (= runs 2))
       (should-error (drover-set-sort 'colour)))))
 
+(ert-deftest drover-test-view-defaults ()
+  "Views list sessions ungrouped, by last activity, newest first."
+  (cl-flet ((standard (symbol) (eval (car (get symbol 'standard-value)) t)))
+    (should (eq (standard 'drover-sort-by) 'updated))
+    (should (eq (standard 'drover-sort-descending) t))
+    (should-not (standard 'drover-group-by))
+    (should (eql (standard 'drover-sort-activity-tolerance) 60))))
+
 ;;;; Activity
 
 (ert-deftest drover-test-session-activity ()

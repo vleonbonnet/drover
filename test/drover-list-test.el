@@ -3118,6 +3118,25 @@ follows each in place, as a drawing anew draws it."
         (push (drover-list-test-order) orders)))
     (delete-dups (nreverse orders))))
 
+(ert-deftest drover-list-test-default-view ()
+  "By default, the list is ungrouped: sessions running first, newest turn first, then the most recently active."
+  (drover-list-test-with (append (drover-list-test-running)
+                                 (list (drover-list-test-titled "d" "Done" :status 'done
+                                                                :since (drover-list-test-ago 10)
+                                                                :updated (drover-list-test-ago 12))
+                                       (drover-list-test-titled "w" "Waiting" :status 'waiting
+                                                                :since (drover-list-test-ago 50)
+                                                                :updated (drover-list-test-ago 600))))
+    (cl-flet ((standard (symbol) (eval (car (get symbol 'standard-value)) t)))
+      (let ((drover-group-by (standard 'drover-group-by))
+            (drover-sort-by (standard 'drover-sort-by))
+            (drover-sort-descending (standard 'drover-sort-descending)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should-not (drover-list-test-groups))
+          (should (equal (drover-list-test-ungrouped) '("c" "b" "a" "d" "i" "w")))
+          (should (equal (drover-list--mode-line-process) " ungrouped, last activity ↓")))))))
+
 (ert-deftest drover-list-test-running-sessions-keep-their-places ()
   "Sessions streaming the events of their turns never swap, however they alternate.
 By last activity, newest first, they come before the others, newest turn

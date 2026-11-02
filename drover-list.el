@@ -26,8 +26,9 @@
 ;; may show at once, each laid out for its own width.  Each keeps its
 ;; point, its expanded sessions and collapsed groups; both list the
 ;; sessions `drover-filter' keeps, grouped as `drover-group-by' says and
-;; sorted as `drover-sort-by' says, none moving as a turn streams; the
-;; View menu, \\`V', changes all three, for both.
+;; sorted as `drover-sort-by' says, by default ungrouped, the sessions
+;; running turns first, then the most recently active, none moving as
+;; a turn streams; the View menu, \\`V', changes all three, for both.
 ;; Each group is a section that \\`TAB' collapses, and each session a
 ;; section whose body recaps its last turn: what it waits for, the
 ;; error that ended it, the prompt, the agent's reply and the files it
