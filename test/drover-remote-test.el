@@ -32,8 +32,8 @@
 (require 'spyglass nil t)
 
 (defun drover-remote-test--available-p ()
-  "Return non-nil when spyglass, with its channels, is loaded."
-  (featurep 'spyglass-channel))
+  "Return non-nil when spyglass, with its channels and `spyglass-reconnect', is loaded."
+  (and (featurep 'spyglass-channel) (fboundp 'spyglass-reconnect)))
 
 ;;;; Waiting
 
@@ -854,21 +854,24 @@ registration; the agent, if BODY starts one, is stopped after."
         (drover-set-show-history nil)))))
 
 (ert-deftest drover-remote-test-spyglass-errors ()
-  "A write failing as its stream ends is quiet; one leaving the stream open is told once, and breaks it."
+  "A write failing is quiet, spyglass dropping its stream; another error left open is told once.
+Drover breaks no stream itself: spyglass drops a stream whose write
+failed, and the subscription made anew resends what it lost."
   (skip-unless (drover-remote-test--available-p))
   (drover-test-with-backend nil
     (let* ((drover-remote--state (drover-remote--state-make :epoch "e1"))
            (state drover-remote--state)
            (peer (drover-remote-test--peer state "core"))
            (live '(c1 c2))
-           (dropped nil)
+           (broken nil)
            (warnings nil)
-           (drover-remote--write-grace 0)
+           (drover-remote--error-grace 0)
            (drover--errors-reported (make-hash-table :test #'equal)))
       (setf (drover-remote--peer-dialed peer) 'c1)
       (puthash 'c2 (list :peer "core") (drover-remote--state-hellos state))
       (cl-letf (((symbol-function 'spyglass-connection-live-p) (lambda (c) (memq c live)))
-                ((symbol-function 'spyglass-connection-drop-stream) (lambda (c) (push c dropped)))
+                ((symbol-function 'spyglass-connection-drop-stream) (lambda (c) (push c broken)))
+                ((symbol-function 'spyglass-reconnect) (lambda (c) (push c broken)))
                 ((symbol-function 'drover-warn) (lambda (&rest args) (push (apply #'format args) warnings))))
         ;; The stream ends as the write fails: nothing told.
         (drover-remote--spyglass-error 'c1 "Sending failed: Process spyglass no longer connected to pipe")
@@ -877,23 +880,82 @@ registration; the agent, if BODY starts one, is stopped after."
         (drover-remote-test-settle 0.05)
         (should-not warnings)
         (should-not (drover-remote--peer-error peer))
-        (should-not dropped)
         ;; Failing to connect is the peer's last error, no warning.
         (drover-remote--spyglass-error 'c1 "Cannot connect to core: refused")
         (drover-remote-test-settle 0.05)
         (should (equal (drover-remote--peer-error peer) "Cannot connect to core: refused"))
         (should-not warnings)
-        ;; A write lost on a stream that stays open: told once, the stream
-        ;; broken so that a new one resynchronizes.
+        ;; A write failing on a stream still open, which spyglass is to
+        ;; drop: counted, neither told nor broken by drover.
         (dotimes (_ 3)
           (drover-remote--spyglass-error 'c2 "Sending failed: Connection reset by peer"))
         (drover-remote-test-settle 0.05)
-        (should (equal warnings '("core: Sending failed: Connection reset by peer")))
-        (should (memq 'c2 dropped))
+        (should-not warnings)
+        (should (= (plist-get (drover-remote--peer-stats peer) :write-failures) 4))
+        (should (equal (drover-remote--peer-error peer) "Cannot connect to core: refused"))
+        ;; Another error the stream outlives: told once.
+        (dotimes (_ 3)
+          (drover-remote--spyglass-error 'c2 "Unknown message type \"x\""))
+        (drover-remote-test-settle 0.05)
+        (should (equal warnings '("core: Unknown message type \"x\"")))
+        (should (= (plist-get (drover-remote--peer-stats peer) :unexpected) 3))
+        (should-not broken)
         ;; A connection drover does not use is not its own to tell.
-        (drover-remote--spyglass-error 'c3 "Unknown message type \"x\"")
+        (drover-remote--spyglass-error 'c3 "Unknown message type \"y\"")
         (drover-remote-test-settle 0.05)
         (should (= (length warnings) 1))))))
+
+(ert-deftest drover-remote-test-needs-spyglass-dropping-failed-writes ()
+  "The remote layer refuses a spyglass that keeps a stream whose write failed."
+  (skip-unless (drover-remote-test--available-p))
+  (drover-test-with-backend nil
+    (let ((drover-remote-mode nil)
+          (drover-remote--state nil))
+      (cl-letf (((symbol-function 'spyglass-reconnect) nil))
+        (should-error (drover-remote-mode 1) :type 'user-error)
+        (should-not drover-remote-mode)
+        (should-not drover-remote--state)))))
+
+(ert-deftest drover-remote-test-failed-write-resumes ()
+  "A write failing drops its stream at once, quietly; the request it carried is answered after.
+Spyglass drops a stream whose write failed: the peer reconnects, its
+sessions resynchronized, without a warning nor an error kept."
+  (drover-remote-test-with nil
+    (drover-remote-test-connect (drover-remote-test-start-agent dir))
+    (drover-remote-test-command "sessions" :n 3)
+    (drover-remote-test-synced 3)
+    (let* ((peer (drover-remote--peer "agent"))
+           (connection (drover-remote--peer-connection peer))
+           (process (spyglass-connection-process connection))
+           (send (symbol-function 'process-send-string))
+           (session (drover-index-session '(remote:agent fake . "s1")))
+           (failed nil)
+           (warnings nil)
+           (recap nil))
+      (cl-letf (((symbol-function 'drover-warn) (lambda (&rest args) (push (apply #'format args) warnings))))
+        (cl-letf (((symbol-function 'process-send-string)
+                   (lambda (target string)
+                     (if (and (eq target process) (not failed))
+                         (progn (setq failed t)
+                                (signal 'file-error (list "Writing to process" "Input/output error")))
+                       (funcall send target string)))))
+          (drover-recap session (lambda (value) (setq recap value))))
+        (should failed)
+        ;; At once, not when the heartbeat times out.
+        (should-not (process-live-p process))
+        (should (= (plist-get (drover-remote-test-stats) :write-failures) 1))
+        (drover-remote-test-wait (lambda () recap))
+        (should (equal recap '(:prompt "Prompt of s1" :reply "Reply of s1" :changes (("a.el" 3 1)))))
+        (drover-remote-test-wait (lambda () (and (eq (drover-remote--peer-state peer) 'open)
+                                                 (not (drover-remote--peer-stale peer)))))
+        (should (eq (drover-remote--peer-state peer) 'open))
+        (should-not (drover-remote--peer-stale peer))
+        (drover-remote-test-command "sessions" :n 4)
+        (drover-remote-test-synced 4)
+        (drover-remote-test-settle 0.6)
+        (should-not warnings)
+        (should-not (drover-remote--peer-error peer))
+        (should-not (plist-get (drover-remote-test-stats) :unexpected))))))
 
 (ert-deftest drover-remote-test-stale-out-of-count ()
   "Sessions of a host not connected are listed but leave the mode-line count."

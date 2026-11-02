@@ -71,7 +71,6 @@
 (declare-function spyglass-connection-attempts "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-last-recv "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-set-heartbeat "ext:spyglass-conn" (connection interval timeout))
-(declare-function spyglass-connection-drop-stream "ext:spyglass-conn" (connection))
 (defvar spyglass-error-functions)
 (declare-function spyglass-file-transport "ext:spyglass-conn" (&optional file))
 (declare-function spyglass-ssh-transport "ext:spyglass-conn" (host &rest arguments))
@@ -961,8 +960,8 @@ show them, whose answers come in several messages, as when shown."
   (when peer
     (setf (drover-remote--peer-error peer) (drover-bound-line message))))
 
-(defvar drover-remote--write-grace 0.5
-  "Seconds a stream a write failed on has to end, ending as streams do.")
+(defvar drover-remote--error-grace 0.5
+  "Seconds a stream an error was told on has to end, ending as streams do.")
 
 (defun drover-remote--next-stream (state connection)
   "Note in STATE that a stream of CONNECTION began or ended."
@@ -972,13 +971,13 @@ show them, whose answers come in several messages, as when shown."
 (defun drover-remote--spyglass-error (connection message)
   "Follow MESSAGE, an error spyglass reports on CONNECTION, one of drover's.
 For `spyglass-error-functions'.  A write failing finds its stream gone,
-the peer gone or the stream dropped: the stream's end, which follows,
-tells it, stale rows and `drover-remote-status', and the subscription
-made anew resends what was lost; it is not reported.  Another error is
-the peer's last, which they tell.  One leaving its stream open, past
-`drover-remote--write-grace' seconds, is unexpected: it is reported on
-one line, once in `drover-error-interval' seconds, and the stream of a
-write lost is broken, so that a new one resynchronizes."
+the peer gone, or drops it, as spyglass drops a stream whose write
+failed: the stream's end, which follows, tells it, stale rows and
+`drover-remote-status', and the subscription made anew resends what was
+lost; it is counted, not reported.  Another error is the peer's last,
+which they tell.  One leaving its stream open, past
+`drover-remote--error-grace' seconds, is unexpected: it is reported on
+one line, once in `drover-error-interval' seconds."
   (drover-with-reporting "remote connection"
     (when-let* ((state (drover-remote--current))
                 (connection)
@@ -988,23 +987,21 @@ write lost is broken, so that a new one resynchronizes."
             (stream (gethash connection (drover-remote--state-streams state) 0)))
         (if (string-prefix-p "Sending failed" line)
             (drover-remote--stat peer :write-failures)
-          (drover-remote--fail peer line))
-        (when (spyglass-connection-live-p connection)
-          (run-at-time drover-remote--write-grace nil
-                       (let ((state-link (drover-link state))
-                             (peer-link (drover-link peer)))
-                         (lambda ()
-                           (drover-with-reporting "remote connection"
-                             (let ((state (drover-linked state-link))
-                                   (peer (drover-linked peer-link)))
-                               (when (and (eq state (drover-remote--current))
-                                          (eql stream (gethash connection (drover-remote--state-streams state) 0))
-                                          (spyglass-connection-live-p connection))
-                                 (drover-remote--stat peer :unexpected)
-                                 (when (drover--report-due-p (list "remote" (drover-remote--peer-name peer) line))
-                                   (drover-warn "%s: %s" (drover-remote--label peer) line))
-                                 (when (string-prefix-p "Sending failed" line)
-                                   (spyglass-connection-drop-stream connection)))))))))))))
+          (drover-remote--fail peer line)
+          (when (spyglass-connection-live-p connection)
+            (run-at-time drover-remote--error-grace nil
+                         (let ((state-link (drover-link state))
+                               (peer-link (drover-link peer)))
+                           (lambda ()
+                             (drover-with-reporting "remote connection"
+                               (let ((state (drover-linked state-link))
+                                     (peer (drover-linked peer-link)))
+                                 (when (and (eq state (drover-remote--current))
+                                            (eql stream (gethash connection (drover-remote--state-streams state) 0))
+                                            (spyglass-connection-live-p connection))
+                                   (drover-remote--stat peer :unexpected)
+                                   (when (drover--report-due-p (list "remote" (drover-remote--peer-name peer) line))
+                                     (drover-warn "%s: %s" (drover-remote--label peer) line))))))))))))))
 
 (defun drover-remote--attach (connection)
   "Greet the peer of CONNECTION, whose stream just opened."
@@ -2015,7 +2012,8 @@ spyglass connections; lists here show those of the peers too, under a
 backend per peer, their host in a column of its own, dimmed while that
 host is not connected.  This step is read-only: recaps and previews
 come through the peers, and opening a session shows what its host
-tells of it.  Needs spyglass, with its channels."
+tells of it.  Needs spyglass, with its channels, one dropping a stream
+whose write failed, as those offering `spyglass-reconnect' do."
   :global t
   :group 'drover-remote
   (if drover-remote-mode
@@ -2025,6 +2023,9 @@ tells of it.  Needs spyglass, with its channels."
               (user-error "`drover-remote-mode' needs spyglass, which is not installed"))
             (unless (featurep 'spyglass-channel)
               (user-error "`drover-remote-mode' needs a spyglass with channels"))
+            ;; Drover counts on spyglass to drop a stream a write failed on.
+            (unless (fboundp 'spyglass-reconnect)
+              (user-error "`drover-remote-mode' needs a newer spyglass, one dropping a stream whose write failed"))
             (when drover-remote--state (drover-remote--stop))
             (drover-start)
             (drover-remote--start))

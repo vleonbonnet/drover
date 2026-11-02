@@ -14,7 +14,8 @@ OPENCODE_EL ?= $(HOME)/.emacs.d/elpaca/sources/opencode
 AGENT_SHELL_EL ?= $(HOME)/.emacs.d/elpaca/sources/agent-shell
 CLAUDE_CODE_IDE_EL ?= $(HOME)/.emacs.d/elpaca/sources/claude-code-ide
 # Spyglass, which the remote layer loads as it starts: its checkout,
-# with channels.  Without it, the tests of the remote layer are skipped.
+# with channels and spyglass-reconnect.  Without it, the tests of the
+# remote layer are skipped.
 SPYGLASS_EL ?= $(HOME)/local/projects/spyglass
 # What drover's Package-Requires names, and what those need: a package
 # manager compiles drover with these alone, as elpaca does.

@@ -142,7 +142,7 @@ The proxy's =:history= and =:archived= ask the owner, which fetches from its bac
 | State          | Seen here                                                                           | Leaves for                                                                             |
 |----------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------|
 | =connecting=   | rows of the last snapshot, if any, stale                                            | =open= after both greetings, =reconnecting= on failure                                 |
-| =open=         | live rows; updates                                                                  | =reconnecting= as the stream ends or falls silent                                      |
+| =open=         | live rows; updates                                                                  | =reconnecting= as the stream ends, falls silent or a write on it fails                 |
 | =reconnecting= | stale rows, last heard from; =drover-remote-status= tells the attempt and the error | =open=, resynchronized; spyglass retries after 0.2, 1, 2, 5, 10, 30 s, then every 30 s |
 | =standby=      | the peer's rows through the connection it dialed                                    | dials again after =drover-remote-standby-delay= without that connection                |
 | =closed=       | rows dropped                                                                        | the peer removed from the configuration, or =bye=                                      |
