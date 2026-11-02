@@ -2741,17 +2741,47 @@ whole.  A group of a harness has the harness's icon."
 (defvar drover-list--drawing nil
   "Non-nil while the list is drawn whole: what is drawn is gathered after.")
 
+(defvar drover-list--rows-left nil
+  "Rows a drawing of the sidebar draws yet, before it leaves the others for later.
+Nil in a list that folds, which draws every row of the groups it shows.")
+
+(defvar-local drover-list--undrawn nil
+  "Groups of the sidebar some trees of which are drawn later, as keys, or nil.
+The sidebar draws at once the rows of a few screens, and the others
+while Emacs is idle, or as searching or copying needs them, as a list
+that folds draws the rows of its collapsed groups (see
+`drover-list--deferred-p').  A weak hash table.")
+
+(defun drover-list--first-rows ()
+  "Return how many rows the sidebar draws at once, before the others.
+Those of two windows' height, the tallest showing it, at least those of
+the frame's: rows take a line or two, and the window may grow."
+  (let ((window (drover-list--window)))
+    (* 2 (max (window-body-height window) (frame-height (window-frame window))))))
+
 (defun drover-list--insert-group (group layout)
   "Insert the section of GROUP, a `drover-list--group', in LAYOUT.
 Without a value, its rows go alone, in the current section.  The rows
 of a collapsed group are drawn later, as Magit draws a collapsed body:
 once expanded, searched, copied or selected, or a few at a time while
-Emacs is idle (see `drover-list--defer')."
+Emacs is idle (see `drover-list--defer').  So are the rows of the
+sidebar past the first screens, drawing it whole (see
+`drover-list--rows-left'), its trees drawn coming first."
   (let ((value (drover-list--group-value group)))
     (cl-flet ((rows ()
-                (seq-doseq (tree (drover-list--group-trees group))
-                  (dolist (row (drover-list--tree-shown tree))
-                    (drover-list--insert-session row layout)))))
+                (let ((left nil))
+                  (seq-doseq (tree (drover-list--group-trees group))
+                    (if (or left (and drover-list--rows-left (<= drover-list--rows-left 0)))
+                        (setq left t)
+                      (dolist (row (drover-list--tree-shown tree))
+                        (drover-list--insert-session row layout))
+                      (when drover-list--rows-left
+                        (cl-decf drover-list--rows-left (length (drover-list--tree-shown tree))))))
+                  (when left
+                    (unless drover-list--undrawn
+                      (setq drover-list--undrawn (make-hash-table :test #'eq :weakness 'key)))
+                    (puthash group t drover-list--undrawn))
+                  (not left))))
       (if (null value)
           (progn (setf (drover-list--group-container group) magit-insert-section--parent)
                  (rows))
@@ -2764,7 +2794,9 @@ Emacs is idle (see `drover-list--defer')."
           (magit-insert-heading (drover-list--group-heading-text group))
           (magit-insert-section-body
             (if drover-list--drawing
-                (progn (rows) (insert "\n"))
+                ;; A group drawn in part ends as its last trees come.
+                (when (rows)
+                  (insert "\n"))
               ;; Magit draws a body from where the section ends, as its
               ;; heading did; the rows drawn while idle come before.
               (let ((content (save-excursion (goto-char (oref section start)) (line-beginning-position 2))))
@@ -2819,9 +2851,12 @@ Their animated glyphs animate, their prompt caches are drawn."
 
 (defun drover-list--deferred-p (group)
   "Return non-nil when trees of GROUP, a `drover-list--group', are not drawn.
-Those drawn come first."
+Those drawn come first.  They are those of a collapsed group, which
+Magit draws as it expands, or of a group of the sidebar drawn in part
+\(see `drover-list--undrawn')."
   (when-let* ((container (drover-list--group-container group)))
-    (and (drover-list--group-value group) (oref container washer) t)))
+    (or (and (drover-list--group-value group) (oref container washer) t)
+        (and drover-list--undrawn (gethash group drover-list--undrawn) t))))
 
 (defun drover-list--draw-group (group)
   "Draw the rows of GROUP, a `drover-list--group', if they are not all drawn.
@@ -2830,8 +2865,11 @@ A collapsed group stays collapsed."
     (let ((section (drover-list--group-container group))
           (inhibit-read-only t)
           (deactivate-mark nil))
-      (save-excursion
-        (magit-section--opportunistic-wash section))
+      (if (oref section washer)
+          (save-excursion
+            (magit-section--opportunistic-wash section))
+        (while (drover-list--deferred-p group)
+          (drover-list--draw-some group)))
       (when (oref section hidden)
         (magit-section-hide section))
       (set-buffer-modified-p nil))))
@@ -2855,27 +2893,34 @@ and copying need their text."
 
 (defun drover-list--draw-some (group)
   "Draw some of the trees of GROUP, a `drover-list--group', not drawn yet.
-They go after those drawn, inside the collapsed group; once none is
-left, the group is drawn as a drawing draws it."
+They go after those drawn, inside the collapsed group, or the group of
+the sidebar drawn in part; once none is left, the group is drawn as a
+drawing draws it."
   (let* ((section (drover-list--group-container group))
          (root magit-root-section)
+         (collapsed (oref section washer))
          (inhibit-read-only t)
          (deactivate-mark nil))
     (save-excursion
       (goto-char (oref section end))
       (let ((left (drover-list--draw-trees group drover-list--deferred-chunk)))
         (when (zerop left)
-          (insert "\n")
-          (oset section washer nil))
-        (dolist (ancestor (list section root))
+          (when (drover-list--group-value group)
+            (insert "\n"))
+          (oset section washer nil)
+          (when drover-list--undrawn
+            (remhash group drover-list--undrawn)))
+        (dolist (ancestor (if (eq section root) (list root) (list section root)))
           (when (< (oref ancestor end) (point))
             (set-marker (oref ancestor end) (point))))
-        (when (zerop left)
+        (when (and (zerop left) (not (eq section root)))
           (magit-section--set-section-properties section)
           (magit-section-maybe-remove-visibility-indicator section))))
-    (if (oref section hidden)
-        (magit-section-hide section)
-      (magit-section-show section))
+    ;; The rows of a group shown show as they come.
+    (when collapsed
+      (if (oref section hidden)
+          (magit-section-hide section)
+        (magit-section-show section)))
     (set-buffer-modified-p nil)))
 
 (defvar-local drover-list--deferred-timer nil
@@ -3220,10 +3265,13 @@ The model of the drawing goes to `drover-list--model'."
                                   (drover-list--header-line layout)))
     (drover-list--forget-visibility all indexed)
     (drover-list--forget-recaps all)
+    (setq drover-list--undrawn nil)
     ;; Sections pushed, not appended to thousands of siblings each.
     (let ((magit-section-inhibit-markers t)
           (magit-section-insert-in-reverse t)
-          (drover-list--drawing t))
+          (drover-list--drawing t)
+          ;; The sidebar, which collapses no group, draws a few screens.
+          (drover-list--rows-left (and (not (plist-get layout :folds)) (drover-list--first-rows))))
       (drover-list--insert-model model all))
     (drover-list--use-markers)))
 
@@ -5023,7 +5071,10 @@ it; from an ordinary window, another window, as
 
 (defun drover-list--reachable-sessions ()
   "Return the session sections of the current list point may reach, in order.
-Those of collapsed groups are left out: their heading stands for them."
+Those of collapsed groups are left out: their heading stands for them.
+The sidebar draws first the sessions it left for later."
+  (unless drover-list--folds
+    (drover-list--draw-deferred))
   (mapcan (lambda (container)
             (unless (and (not (eq container magit-root-section)) (oref container hidden))
               (drover-list--session-sections container)))
