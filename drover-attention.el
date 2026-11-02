@@ -44,7 +44,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
@@ -91,11 +91,14 @@ out."
 
 (defun drover-attention--describe (session)
   "Return one line describing SESSION, for lists of sessions.
-It is cut to `drover-line-limit' characters, its summary on one line."
+It is cut to `drover-line-limit' characters, its summary on one line.
+A session of another host names it first."
   (let ((location (drover-session-location session))
-        (summary (drover-session-summary session)))
+        (summary (drover-session-summary session))
+        (host (drover-session-host session)))
     (drover-bound-line
      (concat (opencode-session-status-glyph (drover-session-status session)) " "
+             (and host (concat (propertize (drover-host-label host) 'face 'drover-dim) ": "))
              (format "%s" (drover-session-display-title session))
              (and location (concat "  " (propertize location 'face 'drover-dim)))
              (and summary (concat "  " (string-replace "\n" " " (drover-bound-line summary))))))))
@@ -232,8 +235,10 @@ That is `drover-tree-active-p' of its tree, through the index."
 (defun drover-attention--needs-p (key session)
   "Return non-nil when SESSION, of KEY in the index, needs the user and shows.
 See `drover-surfaced-sessions': it shows at the top of its tree, or as
-a subagent `drover-show-subagents' shows, or waits for the user."
+a subagent `drover-show-subagents' shows, or waits for the user, and
+its host, if another, is connected."
   (and (drover-session-attention-p session)
+       (not (drover-session-stale session))
        (or (eq (drover-session-status session) 'waiting)
            (null (drover-index-parent key))
            (pcase drover-show-subagents

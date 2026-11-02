@@ -5907,3 +5907,73 @@ The prompt shows nowhere; `prompt' returns its text."
 
 (provide 'drover-list-test)
 ;;; drover-list-test.el ends here
+
+;;;; Sessions of other hosts
+
+(defun drover-list-test-remote-line (key)
+  "Return the first line of the session KEY, of any backend, as a terminal draws it."
+  (drover-list--draw-deferred)
+  (save-excursion
+    (goto-char (oref (drover-list--find-session key) start))
+    (drover-list-test-line)))
+
+(defun drover-list-test-remote-animated-p (key)
+  "Return non-nil when the glyph of the session KEY, of any backend, is animated."
+  (let ((section (drover-list--find-session key)))
+    (text-property-any (oref section start) (oref section end) 'drover-list-frame 'working)))
+
+(ert-deftest drover-list-test-host-column ()
+  "The host shows only once a session of another host is listed, with its age while not connected."
+  (drover-list-test-with (drover-list-test-rich)
+    (drover-list-test-with-font
+      (should-not (memq 'host (cdr (drover-list-test-layout-at 1000))))
+      (let* ((remote (drover-session-create :backend 'remote:core :id '(fake . "r1") :host "core"
+                                            :origin 'fake :title "Remote" :status 'working
+                                            :since (drover-list-test-ago 60)
+                                            :updated (drover-list-test-ago 60)))
+             (records (list remote))
+             (key '(remote:core fake . "r1"))
+             (opencode-session-status-animation-interval 0.15))
+        (drover-test-register-simple 'remote:core (lambda () records) :remote "core")
+        (should (equal (cdr (drover-list-test-layout-at 1000))
+                       '(title host location agent model provider context created age cache summary)))
+        (should (string-match-p "Remote +core " (drover-list-test-remote-line key)))
+        ;; Animated while its host is connected.
+        (should (drover-list-test-remote-animated-p key))
+        ;; Not connected: dimmed, still, its host telling since when.
+        (setq remote (copy-sequence remote))
+        (setf (drover-session-stale remote) (drover-list-test-ago 300))
+        (setq records (list remote))
+        (drover-backend-changed 'remote:core)
+        (drover-changed-now)
+        (revert-buffer)
+        (should (string-match-p "Remote +core 5m " (drover-list-test-remote-line key)))
+        (should-not (drover-list-test-remote-animated-p key))
+        (goto-char (point-min))
+        (let ((title (text-property-search-forward 'drover-list-title key t)))
+          (should (memq 'drover-dim (ensure-list (get-text-property (prop-match-beginning title)
+                                                                     'font-lock-face)))))
+        ;; The narrow layout places it on the title's line.
+        (drover-list-test-layout-at 300)
+        (should (string-match-p "Remote.*core 5m" (drover-list-test-remote-line key)))))))
+
+(ert-deftest drover-list-test-group-by-host ()
+  "Grouped by host, this host comes first, then the others in order, each saying how it stands."
+  (drover-list-test-with (list (drover-test-session "a"))
+    (let ((drover-group-by 'host)
+          (drover-hosts-function (lambda () '("zed" "core")))
+          (drover-host-state-function (lambda (host) (and (equal host "core") "reconnecting")))
+          (drover-host "here"))
+      (drover-test-register-simple
+       'remote:core (list (drover-session-create :backend 'remote:core :id '(fake . "c") :host "core"
+                                                 :title "From core" :stale 1.0))
+       :remote "core")
+      (drover-test-register-simple
+       'remote:zed (list (drover-session-create :backend 'remote:zed :id '(fake . "z") :host "zed"
+                                                :title "From zed"))
+       :remote "zed")
+      (revert-buffer)
+      (should (equal (drover-list-test-groups) '((nil "a") ("zed" (fake . "z")) ("core" (fake . "c")))))
+      (should (string-match-p "\\`here" (drover-list-test-visible-text)))
+      (should (string-match-p "core (not connected)" (drover-list-test-visible-text)))
+      (should-not (string-match-p "zed (not connected)" (drover-list-test-visible-text))))))

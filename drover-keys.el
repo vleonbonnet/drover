@@ -63,7 +63,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -864,10 +864,22 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
   (let ((search (read-string "Search (empty for any): " current)))
     (unless (string-empty-p (string-trim search)) search)))
 
+(defun drover--read-filter-host (current)
+  "Read the hosts whose sessions to list, CURRENT being those listed now.
+This host is `local'; an empty answer lists every host's sessions."
+  (let* ((names (cons (cons (format "%s (this host)" drover-host) 'local)
+                      (mapcar (lambda (host) (cons host host)) (drover-hosts))))
+         (chosen (completing-read-multiple
+                  "Hosts (empty for any): " names nil t
+                  (and current (mapconcat (lambda (host) (car (rassoc host names))) current ",")))))
+    (delete-dups (delq nil (mapcar (lambda (name) (cdr (assoc name names))) chosen)))))
+
 (defun drover--filter-label (key value)
   "Return VALUE of the filter member KEY as the View menu shows it."
   (pcase key
     (:statuses (drover-filter-statuses-label value))
+    (:host (mapconcat (lambda (host) (drover-host-label (if (eq host 'local) nil host)))
+                      value ", "))
     (:since (drover-filter-since-label value))
     (:search (format "\"%s\"" value))
     (_ (format "%s" value))))
@@ -888,7 +900,8 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
 
 (defconst drover-grouping-labels
   '((status . "status") (project . "project") (branch . "branch") (agent . "agent")
-    (model . "model") (provider . "provider") (updated . "last activity") (nil . "nothing"))
+    (model . "model") (provider . "provider") (host . "host") (updated . "last activity")
+    (nil . "nothing"))
   "Display name of each grouping of `drover-groupings'.")
 
 (defclass drover--setting (transient-variable)
@@ -1040,6 +1053,14 @@ it, or \"any\" for nil.")
   :filter-key :provider
   :chooser #'drover--read-filter-provider)
 
+(transient-define-infix drover-view--filter-host ()
+  "List the sessions of some hosts in every view."
+  :class 'drover--filter-setting
+  :description "host"
+  :filter-key :host
+  :chooser #'drover--read-filter-host
+  :if #'drover-hosts)
+
 (transient-define-infix drover-view--filter-since ()
   "List the sessions active since a time in every view."
   :class 'drover--filter-setting
@@ -1110,7 +1131,7 @@ even when the dispatch menu opened it from another window."
 (defvar drover-list-hidden-fields)
 
 (defconst drover-list-field-labels
-  '((location . "location") (branch . "branch") (agent . "agent") (model . "model") (provider . "provider")
+  '((host . "host") (location . "location") (branch . "branch") (agent . "agent") (model . "model") (provider . "provider")
     (context . "context") (created . "created") (age . "age") (cache . "cache")
     (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
@@ -1167,6 +1188,7 @@ Before the list is loaded, any field is."
      :chooser #'not
      :if (lambda () (drover--list-field-p ',field))))
 
+(drover--define-column-switch host)
 (drover--define-column-switch location)
 (drover--define-column-switch branch)
 (drover--define-column-switch agent)
@@ -1199,6 +1221,7 @@ session (`drover-list-hidden-fields' keeps the choice)."
     ("a" drover-view--filter-agent)
     ("m" drover-view--filter-model)
     ("v" drover-view--filter-provider)
+    ("h" drover-view--filter-host)
     ("d" drover-view--filter-since)
     ("f" drover-view--filter-search)
     ("c" "clear" drover-filter-clear :transient t)]
@@ -1209,6 +1232,7 @@ session (`drover-list-hidden-fields' keeps the choice)."
     ("A" drover-view--archived :inapt-if-not drover-archived-available-p)]]
   ["Columns"
    :class transient-row
+   ("-h" drover-view--column-host)
    ("-l" drover-view--column-location)
    ("-b" drover-view--column-branch)
    ("-a" drover-view--column-agent)

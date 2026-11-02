@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 3
+(defconst drover-core-generation 4
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -427,6 +427,80 @@ a backend said may be of any length."
 As `message', through `drover-format-message'."
   (message "%s" (apply #'drover-format-message format-string args)))
 
+;;;; Hosts
+
+(defun drover--system-host ()
+  "Return the name of this host as the system names it, short and downcased.
+That is up to its first dot, as \"reaver\" of \"reaver.local\"."
+  (let ((name (downcase (or (car (split-string (system-name) "\\." t)) ""))))
+    (if (string-empty-p name) "localhost" name)))
+
+(defcustom drover-host (drover--system-host)
+  "The name of this host, as other hosts' drover know it.
+A short name, such as \"reaver\", by default the system's name up to
+its first dot, downcased.  Sessions of other hosts carry their host's
+name (see `drover-session-host'), and links naming this host or one of
+`drover-host-aliases' open sessions of this host (see `drover-links')."
+  :type 'string
+  :group 'drover)
+
+(defcustom drover-host-aliases nil
+  "Other names this host answers to in links, such as \"reaver.local\"."
+  :type '(repeat string)
+  :group 'drover)
+
+(defun drover-host-local-p (host)
+  "Return non-nil when HOST, a name, names this host.
+That is `drover-host' or one of `drover-host-aliases', ignoring case."
+  (and (stringp host)
+       (seq-some (lambda (name) (and (stringp name) (string-equal-ignore-case name host)))
+                 (cons drover-host drover-host-aliases))
+       t))
+
+(defvar drover-hosts-function nil
+  "Function of no argument returning the names of the other hosts, in order.
+The remote layer (`drover-remote') sets it: groups of hosts come in
+this order, after this host's.")
+
+(defvar drover-host-label-function nil
+  "Function of a host's name returning how views name it, or nil.
+The remote layer (`drover-remote') sets it, to the label of each peer.")
+
+(defvar drover-host-state-function nil
+  "Function of a host's name telling how it stands when not connected, or nil.
+It returns nil while the host is connected, else a line such as
+\"reconnecting, attempt 3, last heard from 5m ago\".  The remote layer
+\(`drover-remote') sets it.")
+
+(defun drover-hosts ()
+  "Return the names of the other hosts, in the order configured."
+  (and drover-hosts-function
+       (drover-with-reporting "hosts"
+         (funcall drover-hosts-function))))
+
+(defun drover-host-label (host)
+  "Return how views name HOST, a name, or this host for nil."
+  (or (and drover-host-label-function
+           (drover-with-reporting "host label"
+             (funcall drover-host-label-function host)))
+      (or host drover-host)))
+
+(defun drover-host-state (host)
+  "Return how HOST, a name, stands when it is not connected, a line, else nil.
+Nil for this host, always connected."
+  (and host drover-host-state-function
+       (drover-bound-line (drover-with-reporting "host state"
+                            (funcall drover-host-state-function host)))))
+
+(defun drover-host-rank (host)
+  "Return where the sessions of HOST, a name or nil for this one, go among hosts.
+This host comes first, then the others in the order of `drover-hosts',
+then those it does not name, by name."
+  (if (null host)
+      0
+    (let ((position (seq-position (drover-hosts) host)))
+      (if position (1+ position) (+ 1000 (length (drover-hosts)))))))
+
 ;;;; Layouts of long-lived structures
 
 ;; Drover keeps structures for as long as Emacs runs: the index of
@@ -554,7 +628,15 @@ stays what views group, sort and filter by.")
 The next step measures it.")
   (archived nil :documentation "Time, as a float, at which the session was archived, t when unknown, or nil.
 Archived sessions show only while `drover-show-archived' is set; see
-`drover-session-archived-p'."))
+`drover-session-archived-p'.")
+  (host nil :documentation "Name of the host owning the session, or nil for this one.
+A session of another host is its owner's record as last received, its
+backend a proxy of that host (see `drover-remote').")
+  (origin nil :documentation "The owner's backend of a session of another host, a symbol, or nil.
+Such as `opencode' or `claude-code-ide': it tells how the session opens.")
+  (stale nil :documentation "When the owner of a session of another host was last heard from, or nil.
+A float time, set while that host is not connected: the record is as it
+was then, its status perhaps past."))
 
 (drover-note-layout 'drover-session)
 
@@ -580,7 +662,8 @@ and `drover-text-limit' characters.  RECORD itself when within those."
         (line drover-session-provider)
         (line drover-session-provider-name)
         (line drover-session-project)
-        (line drover-session-branch))
+        (line drover-session-branch)
+        (line drover-session-host))
       (let ((detail (drover-session-detail record)))
         (when (and (stringp detail) (not (eq (drover-bound-text detail) detail)))
           (unless copy (setq copy (copy-sequence record)))
@@ -607,10 +690,20 @@ and `drover-text-limit' characters.  RECORD itself when within those."
 (defun drover-session-engine-key (session)
   "Return (ENGINE . ENGINE-ID) of SESSION, or nil unless both are known.
 It names the conversation across backends: two front ends may show the
-same conversation of one engine."
+same conversation of one engine.  A session of another host is a
+conversation of that host, never merged with one of this host, though
+a copy of it keeps its identifier: its key is (HOST ENGINE . ENGINE-ID)."
   (let ((engine (drover-session-engine session))
         (id (drover-session-engine-id session)))
-    (and engine id (cons engine id))))
+    (and engine id
+         (if-let* ((host (drover-session-host session)))
+             (cons host (cons engine id))
+           (cons engine id)))))
+
+(defun drover-session-stale-p (session)
+  "Return non-nil when SESSION is of a host not connected now.
+Its record is as that host last told it; see `drover-session-stale'."
+  (and (drover-session-stale session) t))
 
 (defun drover-session-attention-p (session)
   "Return non-nil when SESSION needs the user."
@@ -1045,7 +1138,7 @@ that groups of last activity follow the order of that sort."
         'today
       (drover-activity-bucket (cdr activity) now))))
 
-(defconst drover-groupings '(status project branch agent model provider updated nil)
+(defconst drover-groupings '(status project branch agent model provider host updated nil)
   "The values `drover-group-by' may take.")
 
 (defun drover-group-trees (nodes grouping &optional now)
@@ -1060,6 +1153,9 @@ GROUPING is one of `drover-groupings':
           before another when its most urgent tree does.
  provider VALUE is the provider name of the root session (see
           `drover-session-provider-name'), or nil, likewise.
+ host     VALUE is the host of the root session, nil for this host,
+          whose group comes first, then the other hosts in the order
+          of `drover-hosts' (see `drover-host-rank').
  updated  VALUE is the bucket of the tree's last activity at NOW (see
           `drover-tree-activity-bucket'), newest first.
  nil      One group, of VALUE nil, holding every tree; none without
@@ -1076,6 +1172,9 @@ Within a group, trees keep their order in NODES."
                     ('model #'drover-session-model)
                     (_ #'drover-session-provider-name))))
        (drover--group-trees-by nodes (lambda (node) (funcall field (drover-node-session node))))))
+    ('host
+     (sort (drover--group-trees-by nodes (lambda (node) (drover-session-host (drover-node-session node))))
+           :key (lambda (group) (drover-host-rank (car group)))))
     ('updated
      (let ((groups (drover--group-trees-by
                     nodes (lambda (node) (drover-tree-activity-bucket node now)))))
@@ -1761,15 +1860,18 @@ subagent of `all', those in the middle of a turn and the way to them in
 `active', none in `none' (see `drover-tree-visible'), and every
 subagent waiting for the user, whatever the mode: it blocks its parent
 until answered.  `drover-filter', which narrows lists only, does not
-apply.  The mode-line count, `drover-next' and `drover-select' offer
-them.  They keep their order in SESSIONS."
+apply.  The sessions of a host not connected, whose statuses may be
+past, are left out (see `drover-session-stale').  The mode-line count,
+`drover-next' and `drover-select' offer them.  They keep their order in
+SESSIONS."
   (let ((sessions (or sessions (drover-sessions)))
         (shown (make-hash-table :test #'equal)))
     (dolist (session (drover-tree-sessions (drover-tree-visible (drover-tree sessions))))
       (puthash (drover-session-key session) t shown))
     (seq-filter (lambda (session)
-                  (or (gethash (drover-session-key session) shown)
-                      (eq (drover-session-status session) 'waiting)))
+                  (and (not (drover-session-stale session))
+                       (or (gethash (drover-session-key session) shown)
+                           (eq (drover-session-status session) 'waiting))))
                 sessions)))
 
 (defun drover-attention-sessions ()
@@ -2362,15 +2464,17 @@ Run `drover-changed-hook' when something changed."
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
 first; `project', `branch', `agent', `model' or `provider', the
-provider's name, of the session at the top of each tree; `updated',
-the last activity, as today, yesterday, this week and older; or nil
-for no groups, the default.  See `drover-group-trees'."
+provider's name, of the session at the top of each tree; `host', this
+host's sessions first, then each other host's; `updated', the last
+activity, as today, yesterday, this week and older; or nil for no
+groups, the default.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
                  (const :tag "By branch" branch)
                  (const :tag "By agent" agent)
                  (const :tag "By model" model)
                  (const :tag "By provider" provider)
+                 (const :tag "By host" host)
                  (const :tag "By last activity" updated)
                  (const :tag "No groups" nil))
   :group 'drover)
@@ -2388,6 +2492,8 @@ Its members are:
  :since     A float time: sessions last updated then or later.
  :search    A string found, ignoring case, in the title, summary,
             project or branch of the session.
+ :host      A list of hosts: the sessions of one of them, each a name
+            of another host, or `local' for this host's.
 
 A nil or missing member, or an empty search string, matches every
 session.  Change it with `drover-set-filter' so that views follow.")
@@ -2396,7 +2502,7 @@ session.  Change it with `drover-set-filter' so that views follow.")
   "Non-nil in the buffers of drover's own session views.
 Those follow `drover-filter', `drover-group-by' and `drover-sort-by'.")
 
-(defconst drover--filter-keys '(:project :statuses :agent :model :provider :since :search)
+(defconst drover--filter-keys '(:project :statuses :agent :model :provider :since :search :host)
   "The members of `drover-filter', in the order they are described.")
 
 (defun drover--filter-value (filter key)
@@ -2420,12 +2526,17 @@ SESSION must satisfy every member of FILTER that is set."
          (model (drover--filter-value filter :model))
          (provider (drover--filter-value filter :provider))
          (since (drover--filter-value filter :since))
-         (search (drover--filter-value filter :search)))
+         (search (drover--filter-value filter :search))
+         (hosts (drover--filter-value filter :host)))
     (and (or (null project) (equal (drover-session-project session) project))
          (or (null statuses) (memq (drover-session-status session) statuses))
          (or (null agent) (equal (drover-session-agent session) agent))
          (or (null model) (equal (drover-session-model session) model))
          (or (null provider) (equal (drover-session-provider-name session) provider))
+         (or (null hosts)
+             (let ((host (drover-session-host session)))
+               (seq-some (lambda (wanted) (if (eq wanted 'local) (null host) (equal wanted host)))
+                         (if (listp hosts) hosts (list hosts)))))
          (or (null since)
              (let ((updated (drover-session-updated session)))
                (and updated (>= updated since))))
@@ -2543,8 +2654,8 @@ lines, which hint at the settings, are drawn again, and only theirs."
 
 (defun drover-set-filter (key value)
   "Set member KEY of `drover-filter' to VALUE, nil removing it, and redraw views.
-KEY is one of :project, :statuses, :agent, :model, :provider, :since
-and :search."
+KEY is one of :project, :statuses, :agent, :model, :provider, :since,
+:search and :host."
   (unless (memq key drover--filter-keys)
     (error "Unknown filter member %S" key))
   (let ((filter (copy-sequence drover-filter)))
@@ -2897,10 +3008,13 @@ whose buffer is gone: idle, identified by its engine identifier."
   "Return non-nil when SESSION may be archived: by its backend, else by drover.
 Drover archives a session of a backend without an archive of its own,
 or whose archive does not take it (see `drover-supports-p'), once its
-engine identifier is known, as it keeps it by conversation."
+engine identifier is known, as it keeps it by conversation; never a
+session of another host, which its host archives."
   (and (not (drover-session-archived-p session))
        (or (drover--native-archive-p session)
-           (and (drover-session-engine-key session) t))))
+           (and (not (drover-session-host session))
+                (drover-session-engine-key session)
+                t))))
 
 (defun drover-unarchivable-p (session)
   "Return non-nil when SESSION is archived and may be restored."
@@ -2939,6 +3053,8 @@ is, and the value is `confirming' when there is one to close."
      ((drover--native-archive-p session)
       (drover-backend-call session :archive)
       (drover--close-archived session))
+     ((drover-session-host session)
+      (user-error "%s is archived by its host, %s" title (drover-host-label (drover-session-host session))))
      ((not (drover-session-engine-key session))
       (user-error "%s cannot be archived before its conversation is known" title))
      (t

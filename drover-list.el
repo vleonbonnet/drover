@@ -121,7 +121,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 2))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
   (load "drover-core" nil t))
 
 (defgroup drover-list nil
@@ -227,20 +227,24 @@ them only when needed."
 
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
-    (location :priority 7 :min 10 :max 30 :label "Project")
-    (branch :priority 8 :min 6 :max 24 :label "Branch")
-    (agent :priority 9 :min 5 :max 14 :label "Agent")
-    (model :priority 4 :min 8 :max 22 :label "Model")
-    (provider :priority 6 :min 2 :max 12 :label "Provider")
-    (context :priority 5 :min 9 :label "Context")
-    (created :priority 10 :min 3 :align right :label "Created")
+    (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+    (location :priority 8 :min 10 :max 30 :label "Project")
+    (branch :priority 9 :min 6 :max 24 :label "Branch")
+    (agent :priority 10 :min 5 :max 14 :label "Agent")
+    (model :priority 5 :min 8 :max 22 :label "Model")
+    (provider :priority 7 :min 2 :max 12 :label "Provider")
+    (context :priority 6 :min 9 :label "Context")
+    (created :priority 11 :min 3 :align right :label "Created")
     (age :priority 1 :min 3 :align right :narrow line :label "Age")
-    (cache :priority 2 :min 9 :narrow background :label "Cache")
-    (summary :priority 3 :min 12 :narrow below :label "Summary"))
+    (cache :priority 3 :min 9 :narrow background :label "Cache")
+    (summary :priority 4 :min 12 :narrow below :label "Summary"))
   "Fields a line of the session list may show, in the order of columns.
 Each entry is (FIELD . PROPERTIES).  FIELD is one of:
 
  title     The status icon and the title; it is always shown.
+ host      The host of a session of another host, and how long ago it
+           was last heard from while it is not connected; nothing for
+           this host's, so that a list of them has no such column.
  location  The project.
  branch    The Git branch, unless it is the default branch of its
            repository (see `drover-session-default-branch-p').
@@ -293,7 +297,8 @@ the model keeps its effort, cutting its name."
 The list chooses among the other fields by the room they take; the
 title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
 changes it for the session, with one switch per field."
-  :type '(set (const :tag "Project" location)
+  :type '(set (const :tag "Host" host)
+              (const :tag "Project" location)
               (const :tag "Branch" branch)
               (const :tag "Agent" agent)
               (const :tag "Model and effort" model)
@@ -307,6 +312,7 @@ changes it for the session, with one switch per field."
 
 (defconst drover-list-field-descriptions
   '((title . "The status of the session, the subagents at work under it, and its title")
+    (host . "The host the session runs on, if another; and since when it is not connected")
     (location . "The project the session works in")
     (branch . "The branch the session works on, unless its repository's default one")
     (agent . "The agent the session runs")
@@ -652,7 +658,7 @@ The list reads the clock through it, so that tests may stop the clock."
 ;;;; Fields
 
 (defconst drover-list--text-fields
-  '(location branch agent model provider context created age summary)
+  '(host location branch agent model provider context created age summary)
   "The fields of `drover-list-fields' a row holds a text for.")
 
 (defun drover-list--one-line (string)
@@ -728,19 +734,20 @@ has no frame."
   (when-let* ((strings (opencode-session-status-frames status)))
     (list strings (mapcar #'drover-list--pixel-width strings))))
 
-(defun drover-list--status-glyph (status metrics)
+(defun drover-list--status-glyph (status metrics &optional still)
   "Return the glyph of STATUS in the status cell of METRICS, animated as they say.
 Every status glyph takes the room of the one drawn widest, so that
 titles line up whatever the status (see `drover-list--metrics').
 
-When METRICS hold frames for STATUS, the glyph is animated: one
-character displays the frame of the time of METRICS, the next one a
-space reaching the end of the cell, so that what follows never moves.
-Their properties `drover-list-frame' and `drover-list-frame-pad' name
-STATUS: from frame to frame, only their display changes."
+When METRICS hold frames for STATUS, the glyph is animated, unless
+STILL: one character displays the frame of the time of METRICS, the
+next one a space reaching the end of the cell, so that what follows
+never moves.  Their properties `drover-list-frame' and
+`drover-list-frame-pad' name STATUS: from frame to frame, only their
+display changes."
   (let ((glyph (opencode-session-status-glyph status))
         (cell (plist-get metrics :status-cell)))
-    (if-let* ((frames (alist-get status (plist-get metrics :frames))))
+    (if-let* ((frames (and (not still) (alist-get status (plist-get metrics :frames)))))
         (pcase-let* ((`(,strings ,widths ,width) frames)
                      (index (opencode-session-status-frame-index (length strings) (plist-get metrics :now))))
           (concat (drover-list--pad (car cell))
@@ -800,7 +807,8 @@ when known."
 
 (defun drover-list--icons (session metrics)
   "Return what comes before the title of SESSION: its glyphs and a space.
-The glyph of its status comes first, then, when subagents of SESSION are
+The glyph of its status comes first, still for a session of a host not
+connected, whose status may be past, then, when subagents of SESSION are
 in the middle of a turn, the glyphs telling so, then, when SESSION is
 archived, the glyph telling so; one space separates each.  METRICS give
 the cells of glyphs, the frames of animated ones, the active subagents
@@ -810,7 +818,8 @@ of each session and the time."
                          (gethash (drover-session-key session) (plist-get metrics :active)))
                     metrics))
         (archived (drover-list--archived-glyph session (plist-get metrics :now))))
-    (concat (drover-list--status-glyph (drover-session-status session) metrics)
+    (concat (drover-list--status-glyph (drover-session-status session) metrics
+                                       (drover-session-stale session))
             " "
             (and indicator (concat indicator " "))
             (and archived (concat archived " ")))))
@@ -824,7 +833,8 @@ of `opencode-session-place-face'."
 (defun drover-list--title-text (session depth state)
   "Return the title of SESSION, at DEPTH in its tree, as its line shows it.
 A subagent at the top of its tree, its parent not listed, starts with
-an arrow; an idle or archived session is dimmed; the title of a
+an arrow; an idle or archived session is dimmed, and so is one of a
+host not connected; the title of a
 session in STATE, open in a buffer, is in the face of that state (see
 `drover-list--title-face'), over the dimming.  The title, not the
 arrow, carries the session's key as its property `drover-list-title',
@@ -832,7 +842,8 @@ so that its face may change in place."
   (let* ((title (drover-list--one-line (drover-session-display-title session)))
          (faces (delq nil (list (drover-list--title-face state)
                                 (and (or (eq (drover-session-status session) 'idle)
-                                         (drover-session-archived session))
+                                         (drover-session-archived session)
+                                         (drover-session-stale session))
                                      'drover-dim)))))
     (concat (if (and (zerop depth) (drover-session-parent session))
                 (drover-face "↳ " 'drover-dim)
@@ -910,14 +921,48 @@ Nil for the default branch of its repository, which a column of
               ((not (drover-session-default-branch-p session))))
     (drover-face (drover-list--one-line branch) 'drover-dim)))
 
+(defun drover-list--host-age (session now)
+  "Return how long ago the host of SESSION was last heard from at NOW, or nil.
+Nil while the host is connected, or for a session of this host."
+  (when-let* ((stale (drover-session-stale session))
+              ((numberp stale)))
+    (opencode-format-age stale now)))
+
+(defun drover-list--host-help-echo (_window object position)
+  "Return the tooltip of the host drawn at POSITION in OBJECT.
+It names the host and tells how it stands, as when shown.  For
+`help-echo'."
+  (drover-with-reporting "list tooltip"
+    (when-let* ((host (and (or (bufferp object) (stringp object))
+                           (get-text-property position 'drover-list-host object))))
+      (drover-bound-lines
+       (concat "Host: " (drover-host-label host)
+               (when-let* ((state (drover-host-state host)))
+                 (concat "\nNot connected: " state)))))))
+
+(defun drover-list--host-text (session now)
+  "Return the host of SESSION as its column shows it at NOW, or nil if this host's.
+The host's label, dimmed, then, while it is not connected, how long ago
+it was last heard from; the tooltip tells how it stands."
+  (when-let* ((host (drover-session-host session)))
+    (propertize (drover-face (concat (drover-list--one-line (drover-host-label host))
+                                     (when-let* ((age (drover-list--host-age session now)))
+                                       (concat " " age)))
+                             'drover-dim)
+                'drover-list-host host
+                'help-echo #'drover-list--host-help-echo)))
+
 (defun drover-list--text (field session group metrics)
   "Return the text of FIELD for SESSION, or \"\" when it has none.
 GROUP is the group showing SESSION, as (GROUPING . VALUE), or nil: a
 group of a project or a branch names it, so its sessions do not repeat
-it.  METRICS give the time ages count up to and the width of a
-character.  The prompt cache has no text: it is drawn apart."
+it, nor do those of a group of a host.  METRICS give the time ages
+count up to and the width of a character.  The prompt cache has no
+text: it is drawn apart."
   (let ((now (plist-get metrics :now)))
     (or (pcase field
+          ('host (unless (eq (car group) 'host)
+                   (drover-list--host-text session now)))
           ('location (unless (equal group (cons 'project (drover-session-project session)))
                        (drover-face (drover-list--one-line (drover-session-project session)) 'drover-dim)))
           ('branch (unless (equal group (cons 'branch (drover-session-branch session)))
@@ -1012,13 +1057,14 @@ one drawing to the next.")
   "Return what the row of SESSION is made of, as a vector.
 That is SESSION itself, the record, its DEPTH, INDENT and GROUP, its
 active subagents and STATE, what changes with time, its ages, whether
-its prompt cache is live, the frame of its animated glyph and the age
-of its archiving, and the stamp of METRICS (see
-`drover-list--metrics-stamp')."
+its prompt cache is live, the frame of its animated glyph, the age of
+its archiving and since when its host is not connected, and the stamp
+of METRICS (see `drover-list--metrics-stamp')."
   (let* ((now (plist-get metrics :now))
          (status (drover-session-status session))
          (archived (drover-session-archived session))
-         (frames (alist-get status (plist-get metrics :frames))))
+         (frames (and (not (drover-session-stale session))
+                      (alist-get status (plist-get metrics :frames)))))
     (vector session depth indent group
             (and (plist-get metrics :active)
                  (gethash (drover-session-key session) (plist-get metrics :active)))
@@ -1028,6 +1074,7 @@ of its archiving, and the stamp of METRICS (see
             (and (drover-list--cache-fraction session now) t)
             (and frames (opencode-session-status-frame-index (length (car frames)) now))
             (and (numberp archived) (opencode-format-age archived now))
+            (drover-list--host-age session now)
             (plist-get metrics :stamp))))
 
 (defun drover-list--same-inputs-p (a b &optional any-stamp)
@@ -1043,7 +1090,7 @@ compared: the caller compared them."
                  subagents-b (cdr subagents-b)))
          (and (null subagents-a) (null subagents-b)))
        (let ((index 1)
-             (end (if any-stamp 11 12))
+             (end (if any-stamp 12 13))
              (same t))
          (while (and same (< index end))
            (unless (or (= index 4) (equal (aref a index) (aref b index)))
@@ -1086,7 +1133,7 @@ to that list, its heading, tree and section."
   (seq-some (pcase-lambda (`(,rows . ,stamp))
               (when-let* ((row (gethash key rows))
                           (peer-inputs (drover-list--row-inputs row))
-                          ((equal (aref peer-inputs 11) stamp))
+                          ((equal (aref peer-inputs 12) stamp))
                           ((drover-list--same-inputs-p peer-inputs inputs t)))
                 (let ((copy (copy-sequence row)))
                   (setf (drover-list--row-inputs copy) inputs
@@ -2162,6 +2209,9 @@ branch's column leaves out."
       (unless (drover-session-project session)
         (fact 'directory "Directory" (and (drover-session-directory session)
                                           (abbreviate-file-name (drover-session-directory session)))))
+      (when-let* ((host (drover-session-host session)))
+        (fact 'host "Host" (drover-host-label host))
+        (fact 'host-state "Not connected" (drover-host-state host) 'drover-dim))
       (fact 'location "Project" (drover-session-project session))
       ;; Its column leaves out the default branch, which details tell.
       (fact (if (drover-session-default-branch-p session) 'default-branch 'branch)
@@ -2412,7 +2462,7 @@ whole."
                                            (drover-list--group-trees group)))
              (drover-face (drover-group-label grouping value)
                           (cond ((eq grouping 'status) (list (opencode-session-status-face value) 'drover-heading))
-                                ((and (null value) (not (eq grouping 'updated))) '(italic drover-heading))
+                                ((and (null value) (not (memq grouping '(updated host)))) '(italic drover-heading))
                                 (t 'drover-heading)))
              (drover-list--count (drover-list--group-size group))
              (unless (eq grouping 'status)
@@ -3269,11 +3319,12 @@ measures.  The active subagents LAYOUT holds follow the tree.  Throw
 
 (defun drover-list--group-rank (value)
   "Return where the group of VALUE goes among groups, or nil when unknown.
-For groups of a status or a time, a number; for groups placed by their
-most urgent tree, and the one group of sessions not grouped, t."
+For groups of a status, a time or a host, a number; for groups placed by
+their most urgent tree, and the one group of sessions not grouped, t."
   (pcase (car value)
     ('status (seq-position (append drover-status-order '(archived)) (cdr value)))
     ('updated (seq-position drover-activity-buckets (cdr value)))
+    ('host (drover-host-rank (cdr value)))
     (_ t)))
 
 (defun drover-list--group-before-p (a b)
@@ -3874,7 +3925,8 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
                                     (and (drover-list--cache-fraction session now) t))
                                 (equal (aref inputs 10)
                                        (let ((archived (drover-session-archived session)))
-                                         (and (numberp archived) (opencode-format-age archived now)))))
+                                         (and (numberp archived) (opencode-format-age archived now))))
+                                (equal (aref inputs 11) (drover-list--host-age session now)))
                      (push key keys))))
                (drover-list--model-rows model))
       (when (or keys bodies)

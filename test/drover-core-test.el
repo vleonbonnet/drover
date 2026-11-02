@@ -1482,7 +1482,7 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
-    (should (equal (last slots 3) '(agent-display context-estimated archived)))
+    (should (equal (last slots 6) '(agent-display context-estimated archived host origin stale)))
     (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()

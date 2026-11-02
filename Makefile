@@ -13,6 +13,9 @@ DEPS ?= $(HOME)/.emacs.d/elpaca/builds
 OPENCODE_EL ?= $(HOME)/.emacs.d/elpaca/sources/opencode
 AGENT_SHELL_EL ?= $(HOME)/.emacs.d/elpaca/sources/agent-shell
 CLAUDE_CODE_IDE_EL ?= $(HOME)/.emacs.d/elpaca/sources/claude-code-ide
+# Spyglass, which the remote layer loads as it starts: its checkout,
+# with channels.  Without it, the tests of the remote layer are skipped.
+SPYGLASS_EL ?= $(HOME)/local/projects/spyglass
 # What drover's Package-Requires names, and what those need: a package
 # manager compiles drover with these alone, as elpaca does.
 REQUIRED_PATH = \
@@ -20,16 +23,21 @@ REQUIRED_PATH = \
   -L $(OPENCODE_EL) -L $(DEPS)/plz -L $(DEPS)/transient
 LOAD_PATH = -L . -L test $(REQUIRED_PATH) \
   -L $(AGENT_SHELL_EL) -L $(DEPS)/shell-maker -L $(DEPS)/acp \
-  -L $(CLAUDE_CODE_IDE_EL) -L $(DEPS)/websocket -L $(DEPS)/web-server
+  -L $(CLAUDE_CODE_IDE_EL) -L $(DEPS)/websocket -L $(DEPS)/web-server \
+  -L $(SPYGLASS_EL)
 # Stale byte code must never shadow an edited source, in builds or tests.
 PREFER_NEWER = --eval '(setq load-prefer-newer t)'
 BATCH = $(EMACS) -Q --batch $(LOAD_PATH) $(PREFER_NEWER)
+# A batch Emacs keeps SIGPIPE's default action, which kills it when it
+# writes to a peer that just closed, as the tests of the remote layer
+# do; ignored signals stay ignored across exec.
+NOPIPE = trap '' PIPE;
 NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test lint clean bench real-data
+.PHONY: all compile compile-standalone test lint clean bench bench-remote real-data
 
 all: compile test
 
@@ -66,7 +74,7 @@ compile-standalone:
 	exit $$status
 
 test:
-	$(BATCH) -l test/drover-test-helpers.el $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit
+	$(NOPIPE) $(BATCH) -l test/drover-test-helpers.el $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit
 
 # Times the list over thousands of sessions, as compiled: not part of
 # test.  opencode.el, whose look the list draws with, is compiled too,
@@ -94,6 +102,24 @@ bench: compile
 	  fi; \
 	fi; \
 	rm -rf "$$opencode"; exit $$status
+
+# Times the remote layer between two batch Emacs: this one following
+# the 2511 sessions of an agent, here through 127.0.0.1, or with
+# REMOTE=HOST on another host through SSH -W, its files in a temporary
+# directory there, removed after.  BACK=PROGRAM has the agent dial back
+# through SSH run as PROGRAM there, with BACK_ARGS, comma-separated.
+# See test/drover-remote-bench.el.
+REMOTE ?=
+SSH ?= ssh
+REMOTE_EMACS ?= emacs
+BACK ?=
+BACK_ARGS ?=
+BACK_HOST ?=
+bench-remote: compile
+	$(NOPIPE) DROVER_BENCH_REMOTE="$(REMOTE)" DROVER_BENCH_SSH="$(SSH)" \
+	DROVER_BENCH_REMOTE_EMACS="$(REMOTE_EMACS)" DROVER_BENCH_BACK="$(BACK)" \
+	DROVER_BENCH_BACK_ARGS="$(BACK_ARGS)" DROVER_BENCH_BACK_HOST="$(BACK_HOST)" \
+	$(BATCH) -l test/drover-test-helpers.el -l test/drover-remote-bench.el -f drover-remote-bench-main
 
 # Indexes the user's own Claude Code transcripts and Codex rollouts,
 # ~/.claude and ~/.codex or DROVER_CLAUDE_HOME and DROVER_CODEX_HOME,

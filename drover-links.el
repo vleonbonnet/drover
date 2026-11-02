@@ -41,7 +41,9 @@
 ;; of earlier configurations, such as claude-code:ID.
 ;;
 ;; A link may name a host, agent-session://HOST/ENGINE/ID, for the
-;; conversations of other machines: they are read, and refused for now.
+;; conversations of other machines: one naming this host, or one of its
+;; aliases, opens here; another is shown through that host, while the
+;; remote layer runs (see `drover-remote').
 
 ;;; Code:
 
@@ -53,7 +55,7 @@
 (require 'drover-model)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 3))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
   (load "drover-core" nil t))
 
 (defvar org-link-parameters)
@@ -171,11 +173,14 @@ see `drover-register-engine'), so that a front end can resume them."
   "Return the conversation SESSION shows, as `drover-links-parse' returns one.
 Nil until the engine of SESSION knows the conversation's identifier, or
 when links do not name its engine's conversations (see
-`drover-links-linkable-p')."
+`drover-links-linkable-p').  A session of another host names its host,
+whose engines this host need not know."
   (let ((engine (drover-session-engine session))
-        (id (drover-session-engine-id session)))
-    (when (and engine (stringp id) (not (string-empty-p id)) (drover-links-linkable-p engine))
-      (list :engine engine :id id :host nil))))
+        (id (drover-session-engine-id session))
+        (host (drover-session-host session)))
+    (when (and engine (stringp id) (not (string-empty-p id))
+               (or host (drover-links-linkable-p engine)))
+      (list :engine engine :id id :host host))))
 
 ;;;; Storing
 
@@ -308,20 +313,30 @@ identifier gets no directory; another, the one the engine tells."
                             (lambda (directory)
                               (drover-resume-with front-end engine id directory)))))
 
+(defvar drover-links-remote-function nil
+  "Function of a conversation of another host showing it, or nil.
+The conversation is a plist as `drover-links-parse' returns it, its
+:host naming neither this host nor one of its aliases.  The remote
+layer (`drover-remote') sets it.")
+
 (defun drover-links-open (conversation &optional front-end)
   "Show CONVERSATION, a plist as `drover-links-parse' returns it.
 A conversation drover shows in a live buffer is displayed there, through
 `drover-open'; otherwise it is resumed in a front end, asked for when
 several can (see `drover-links-choose-front-end').  With FRONT-END,
 only a live buffer of that front end shows it, and it resumes there
-without asking."
+without asking.  A conversation naming this host (see
+`drover-host-local-p') is one of this host's; one naming another host
+is shown through that host (see `drover-links-remote-function')."
   (map-let (:engine :id :host) conversation
-    (when host
-      (user-error "Conversations of other hosts cannot be opened yet: %s" (drover-bound-line host)))
-    (drover-links--load-engine engine)
-    (if-let* ((session (drover-links--live engine id front-end)))
-        (drover-open session)
-      (drover-links-resume (or front-end (drover-links-choose-front-end engine)) engine id))))
+    (if (and host (not (drover-host-local-p host)))
+        (if drover-links-remote-function
+            (funcall drover-links-remote-function conversation)
+          (user-error "Conversations of %s need `drover-remote-mode'" (drover-bound-line host)))
+      (drover-links--load-engine engine)
+      (if-let* ((session (drover-links--live engine id front-end)))
+          (drover-open session)
+        (drover-links-resume (or front-end (drover-links-choose-front-end engine)) engine id)))))
 
 (defun drover-links-follow (path &optional _arg)
   "Show the conversation the agent-session link PATH names.
