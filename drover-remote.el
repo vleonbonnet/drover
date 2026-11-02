@@ -51,7 +51,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 5))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -1474,6 +1474,9 @@ received so far each time an answer of the owner's comes."
      :session (lambda (key)
                 (when-let* ((peer (drover-remote--peer name)))
                   (drover-remote--peer-session peer key)))
+     ;; Every change comes reported, branches too, as the owner reads
+     ;; them: a refresh lists none again but with FULL.
+     :reports-changes t
      :open (lambda (session &optional _other-window)
              (drover-remote-show session))
      :recap (lambda (session callback)

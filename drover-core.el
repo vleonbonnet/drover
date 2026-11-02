@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 4
+(defconst drover-core-generation 5
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1325,6 +1325,15 @@ PROPERTIES is a plist of:
              reports changed (see `drover-backend-changed'), so it must
              be cheap; without it, drover lists all the backend's
              sessions on every change.
+ :reports-changes
+             Non-nil when the backend reports every change of its
+             sessions with `drover-backend-changed', but for their Git
+             branches, which its records take from `drover-git-branch'
+             of their directories.  A refresh (`drover-index-refresh')
+             then asks :session again only for the sessions whose
+             directory's branch changed, rather than list them all;
+             never for a session of another host, whose owner reports
+             its branch too, its directory being on that host.
  :open       Function of a session and OTHER-WINDOW displaying it, in
              the selected window, or in another window when
              OTHER-WINDOW is non-nil.  `drover-open' chooses the window
@@ -2309,6 +2318,54 @@ backend no longer registered go."
           (setq moved (append (drover--index-put index key (copy-sequence record)) moved)))))
     (cons changed moved)))
 
+(defun drover--index-take (index keys backends)
+  "Bring INDEX up to date with the sessions KEYS and BACKENDS reported.
+Each key is looked up with its backend's :session, or its backend is
+listed anew when it has none, as BACKENDS are.  Return (CHANGED .
+MOVED), as `drover--index-relist' does, CHANGED in the order taken."
+  (let ((relist (delete-dups (copy-sequence backends)))
+        (changed nil)
+        (moved nil))
+    (dolist (key (delete-dups (copy-sequence keys)))
+      (let* ((properties (alist-get (car key) drover--backends))
+             (function (plist-get properties :session)))
+        (if (and properties (not (functionp function)))
+            (progn (cl-pushnew (car key) relist)
+                   ;; Reported, it may have changed what its record
+                   ;; does not tell, as its buffer.
+                   (push key changed))
+          (pcase (if properties
+                     (condition-case err
+                         (list (drover--index-admit
+                                index (drover--index-listed
+                                       (drover--bound-record (funcall function (cdr key))))))
+                       ((debug error) (drover-report-failure "backend session" err) 'failed))
+                   (list nil))
+            ('failed (cl-pushnew (car key) relist))
+            (`(,record)
+             (push key changed)
+             (setq moved (append (drover--index-put index key record) moved)))))))
+    (dolist (backend relist)
+      (pcase-let ((`(,relisted . ,relinked) (drover--index-relist index backend)))
+        (setq changed (append relisted changed)
+              moved (append relinked moved))))
+    (pcase-let ((`(,settled . ,relinked) (drover--index-settle index)))
+      (setq changed (append settled changed)
+            moved (append relinked moved)))
+    (cons (nreverse changed) moved)))
+
+(defun drover--index-changes (index changed moved)
+  "Return what views must draw of INDEX, CHANGED and MOVED keys taken in.
+That is those keys, or t when views must draw everything anew: while
+records of several backends make one session, to merge, or while
+parents form a cycle, which drops the index."
+  (cond ((drover--index-cyclic index)
+         ;; A cycle is rare: lists rebuild the index rather than follow it.
+         (setq drover--index nil)
+         t)
+        ((> (drover--index-shared index) 0) t)
+        (t (delete-dups (append changed moved)))))
+
 (defun drover--index-apply (keys backends)
   "Bring the index up to date with the sessions KEYS and BACKENDS reported.
 Each key is looked up with its backend's :session, or its backend is
@@ -2318,42 +2375,8 @@ without an index, or while records of several backends make one
 session, to merge, or while parents form a cycle."
   (if (not (drover--index-current))
       t
-    (let ((index drover--index)
-          (relist (delete-dups (copy-sequence backends)))
-          (changed nil)
-          (moved nil))
-      (dolist (key (delete-dups (copy-sequence keys)))
-        (let* ((properties (alist-get (car key) drover--backends))
-               (function (plist-get properties :session)))
-          (if (and properties (not (functionp function)))
-              (progn (cl-pushnew (car key) relist)
-                     ;; Reported, it may have changed what its record
-                     ;; does not tell, as its buffer.
-                     (push key changed))
-            (pcase (if properties
-                       (condition-case err
-                           (list (drover--index-admit
-                                  index (drover--index-listed
-                                         (drover--bound-record (funcall function (cdr key))))))
-                         ((debug error) (drover-report-failure "backend session" err) 'failed))
-                     (list nil))
-              ('failed (cl-pushnew (car key) relist))
-              (`(,record)
-               (push key changed)
-               (setq moved (append (drover--index-put index key record) moved)))))))
-      (dolist (backend relist)
-        (pcase-let ((`(,relisted . ,relinked) (drover--index-relist index backend)))
-          (setq changed (append relisted changed)
-                moved (append relinked moved))))
-      (pcase-let ((`(,settled . ,relinked) (drover--index-settle index)))
-        (setq changed (append settled changed)
-              moved (append relinked moved)))
-      (cond ((drover--index-cyclic index)
-             ;; A cycle is rare: lists rebuild the index rather than follow it.
-             (setq drover--index nil)
-             t)
-            ((> (drover--index-shared index) 0) t)
-            (t (delete-dups (append (nreverse changed) moved)))))))
+    (pcase-let ((`(,changed . ,moved) (drover--index-take drover--index keys backends)))
+      (drover--index-changes drover--index changed moved))))
 
 (defun drover-index ()
   "Return the index of the live sessions, made if needed.
@@ -2432,31 +2455,57 @@ them from the sessions `drover-index-sessions' lists."
     (mapcar (lambda (key) (gethash key records))
             (sort keys :key (lambda (key) (gethash key serials)) :in-place t))))
 
-(defun drover-index-refresh ()
-  "List every session anew, and tell views what changed since the index knew.
+(defun drover--index-unreported (index backend)
+  "Return the keys of the sessions of BACKEND in INDEX whose branch changed.
+BACKEND reports every other change (:reports-changes): the branch of a
+directory is read once, as `drover-git-branch' reads it, for every
+session of it, and compared with what each record holds, bounded as
+records are.  A session of another host is never looked at: its
+directory is on that host, whose drover reports its branch."
+  (let ((branches (make-hash-table :test #'equal))
+        (keys nil))
+    (maphash (lambda (key record)
+               (when (and (eq (car key) backend)
+                          (not (drover-session-host record)))
+                 (when-let* ((directory (drover-session-directory record)))
+                   (let ((branch (with-memoization (gethash directory branches)
+                                   (let ((branch (ignore-errors (drover-git-branch directory))))
+                                     (if (drover--unbounded-line-p branch)
+                                         (drover-bound-line branch)
+                                       branch)))))
+                     (unless (equal branch (drover-session-branch record))
+                       (push key keys))))))
+             (drover--index-records index))
+    keys))
+
+(defun drover-index-refresh (&optional full)
+  "List anew what may have changed unreported, and tell views what did.
 Backends report their changes, but some details change unreported, such
 as a branch: views refresh the index from time to time, and on demand.
-Run `drover-changed-hook' when something changed."
+A backend reporting every change but branches (:reports-changes in
+`drover-register-backend') has only the sessions whose branch changed
+asked for again; the others list all their sessions anew, as every
+backend does with FULL non-nil.  Run `drover-changed-hook' when
+something changed."
   (when (drover--index-current)
-    (let ((changed nil)
-          (moved nil))
+    (drover-git-look-again)
+    (let ((keys nil)
+          (relist nil))
       (dolist (backend (delete-dups (append (drover-backends)
                                             (let ((backends nil))
                                               (maphash (lambda (key _) (push (car key) backends))
                                                        (drover--index-records drover--index))
                                               backends))))
-        (pcase-let ((`(,relisted . ,relinked) (drover--index-relist drover--index backend)))
-          (setq changed (append relisted changed)
-                moved (append relinked moved))))
-      (pcase-let ((`(,settled . ,relinked) (drover--index-settle drover--index)))
-        (setq changed (append settled changed)
-              moved (append relinked moved)))
-      (when (or changed moved (drover--index-cyclic drover--index))
-        (let ((drover-changed-sessions
-               (cond ((drover--index-cyclic drover--index) (setq drover--index nil) t)
-                     ((> (drover--index-shared drover--index) 0) t)
-                     (t (delete-dups (append changed moved))))))
-          (drover-run-hook-reporting 'drover-changed-hook))))))
+        (let ((properties (alist-get backend drover--backends)))
+          (if (and (not full)
+                   (plist-get properties :reports-changes)
+                   (functionp (plist-get properties :session)))
+              (setq keys (append (drover--index-unreported drover--index backend) keys))
+            (push backend relist))))
+      (pcase-let ((`(,changed . ,moved) (drover--index-take drover--index keys (nreverse relist))))
+        (when (or changed moved (drover--index-cyclic drover--index))
+          (let ((drover-changed-sessions (drover--index-changes drover--index changed moved)))
+            (drover-run-hook-reporting 'drover-changed-hook)))))))
 
 ;;;; View settings
 
@@ -3365,12 +3414,25 @@ nothing.  THEN is called exactly once."
 ;;;; Git branches
 
 (defcustom drover-branch-ttl 30
-  "Seconds `drover-git-branch' keeps the branch of a directory it read."
+  "Seconds `drover-git-branch' trusts what it read of a directory's HEAD.
+Past them, it looks at the file's status again, and reads it only when
+it changed; so does a refresh of the sessions (see
+`drover-git-look-again'), once per directory."
   :type 'natnum
   :group 'drover)
 
-(defvar drover--branches (make-hash-table :test #'equal)
-  "Directories mapped to (BRANCH . TIME), as `drover-git-branch' read them.")
+(defvar drover--git-heads (make-hash-table :test #'equal)
+  "Directories mapped to what `drover-git-branch' read of them.
+Each value is a vector [BRANCH HEAD STATUS LOOK TIME DIRECTORY]: the
+branch, the file name of the HEAD of the worktree, nil outside Git, the
+status of that file when read (see `drover--git-head-status'), the look
+and the time the status was last compared (see `drover--git-look'), nil
+before it was read, and the directory, expanded.  A directory is found
+by that name, and by the absolute name it was asked by, which share the
+vector.")
+
+(defvar drover--git-look 0
+  "How many times `drover-git-look-again' asked for HEAD files to be looked at.")
 
 ;; Read from the file system: views ask as they draw, and must never
 ;; wait for a Git process.
@@ -3387,16 +3449,28 @@ nothing.  THEN is called exactly once."
         (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
           (expand-file-name (match-string 1) root))))))
 
-(defun drover--read-git-branch (directory)
-  "Return the branch checked out in the worktree of DIRECTORY, or a short commit.
-Return nil outside Git.  HEAD is read directly, without running Git."
-  (when-let* ((gitdir (drover--git-directory directory))
-              (head (expand-file-name "HEAD" gitdir))
-              ((file-readable-p head)))
+(defun drover--git-head (directory)
+  "Return the file name of the HEAD of the worktree of DIRECTORY, or nil.
+Nil outside Git."
+  (when-let* ((gitdir (drover--git-directory directory)))
+    (expand-file-name "HEAD" gitdir)))
+
+(defun drover--read-git-head (head)
+  "Return the branch HEAD, a file, names, or a short commit when detached, or nil."
+  (when (file-readable-p head)
     (with-temp-buffer
       (insert-file-contents head)
       (cond ((looking-at "ref: refs/heads/\\(.+?\\) *$") (match-string 1))
             ((looking-at "[0-9a-f]\\{7\\}") (match-string 0))))))
+
+(defun drover--git-head-status (head)
+  "Return what tells whether HEAD, a file, changed: its time, size and inode.
+Nil when it cannot be read.  Git writes HEAD anew through a lock file
+renamed over it, so a checkout changes at least its inode."
+  (when-let* ((attributes (file-attributes head)))
+    (list (file-attribute-modification-time attributes)
+          (file-attribute-size attributes)
+          (file-attribute-inode-number attributes))))
 
 (defun drover--read-git-default-branch (directory)
   "Return the default branch of the repository of DIRECTORY, or nil when unknown.
@@ -3436,13 +3510,58 @@ Nil for a nil or missing directory."
           (puthash directory (cons value now) table)
           value)))))
 
+(defun drover-git-look-again ()
+  "Have `drover-git-branch' look at each directory's HEAD again, once.
+A refresh of the sessions begins with it: every branch it reads then is
+current, at the cost of a file status per directory, however many
+sessions run there."
+  (cl-incf drover--git-look))
+
+(defun drover--git-read-branch (entry now)
+  "Read the branch of the directory of ENTRY, of `drover--git-heads', at NOW.
+ENTRY takes what was read, in place, and is returned."
+  (let* ((directory (aref entry 5))
+         (head (and (file-directory-p directory)
+                    (ignore-errors (drover--git-head directory))))
+         (status (and head (drover--git-head-status head))))
+    (aset entry 0 (and status (ignore-errors (drover--read-git-head head))))
+    (aset entry 1 head)
+    (aset entry 2 status)
+    (aset entry 3 drover--git-look)
+    (aset entry 4 now)
+    entry))
+
 (defun drover-git-branch (directory)
   "Return the Git branch of DIRECTORY, or a short commit when detached, or nil.
 It is read from HEAD without running Git, so backends may call it for
-every session they list: a directory's branch is kept for
-`drover-branch-ttl' seconds.  Nil outside Git and for a missing
-directory."
-  (drover--git-cached drover--branches directory #'drover--read-git-branch))
+every session they list: what was read of a directory is trusted for
+`drover-branch-ttl' seconds and until the next refresh of the sessions,
+as `drover-git-look-again' tells; then HEAD's file status is compared,
+and the file read again only when it changed.  Nil outside Git and for
+a missing directory."
+  (when directory
+    (let ((entry (gethash directory drover--git-heads))
+          (now (float-time)))
+      (unless entry
+        (let ((normal (file-name-as-directory (expand-file-name directory))))
+          (setq entry (or (gethash normal drover--git-heads)
+                          (puthash normal (vector nil nil nil nil nil normal) drover--git-heads)))
+          ;; Asked again by the same name, as backends do, it is found
+          ;; without expanding it.
+          (when (file-name-absolute-p directory)
+            (puthash directory entry drover--git-heads))))
+      (cond ((null (aref entry 4))
+             (aref (drover--git-read-branch entry now) 0))
+            ((and (eql (aref entry 3) drover--git-look)
+                  (< (- now (aref entry 4)) drover-branch-ttl))
+             (aref entry 0))
+            ((and (aref entry 1)
+                  (equal (drover--git-head-status (aref entry 1)) (aref entry 2)))
+             (aset entry 3 drover--git-look)
+             (aset entry 4 now)
+             (aref entry 0))
+            ;; HEAD changed, or none was found: the worktree is found anew.
+            (t (aref (drover--git-read-branch entry now) 0))))))
 
 (defvar drover--default-branches (make-hash-table :test #'equal)
   "Directories mapped to (BRANCH . TIME), as `drover-git-default-branch' read them.")

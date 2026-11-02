@@ -486,6 +486,18 @@ registration; the agent, if BODY starts one, is stopped after."
             (should session)
             (should (equal (drover-session-title session) (aref entry 1)))
             (should (equal (symbol-name (drover-session-status session)) (aref entry 2))))))
+      ;; Reporting every change, branches too, its sessions are neither
+      ;; listed again by the minute's refresh nor their branches read
+      ;; here: their directories are on the agent.
+      (should (drover-backend-property 'remote:agent :reports-changes))
+      (let ((read nil) (ran nil))
+        (cl-letf (((symbol-function 'drover-git-branch)
+                   (lambda (directory) (push directory read) "elsewhere")))
+          (let ((drover-changed-hook (list (lambda () (push drover-changed-sessions ran)))))
+            (drover-index-refresh)))
+        (should-not read)
+        (should-not ran)
+        (should (equal (drover-session-branch (drover-index-session '(remote:agent fake . "s1"))) "main")))
       ;; How the peer stands.
       (save-window-excursion
         (drover-remote-status)

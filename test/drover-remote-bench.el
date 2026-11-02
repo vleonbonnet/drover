@@ -289,6 +289,20 @@ With BACK, the agent will be told to dial this host back."
                   (drover-remote-bench--time-until (lambda () (equal (drover-remote-bench--title "s149") "Fifty")))
                   (drover-remote-bench--row "50 sessions changed" (- (float-time) start)
                                             (- (drover-remote-bench--records) before)))
+                ;; The minute's refresh, the peer reporting every change,
+                ;; against a full one, as `g' asks.
+                (drover-changed-now)
+                (dolist (full '(nil t))
+                  (drover-remote-bench--reset)
+                  (let ((times nil))
+                    (dotimes (_ 5)
+                      (let ((start (float-time)))
+                        (drover-index-refresh full)
+                        (push (- (float-time) start) times)))
+                    (drover-remote-bench--row (if full
+                                                  "a full refresh, as g (median of 5)"
+                                                "the minute's refresh (median of 5)")
+                                              (nth 2 (sort times #'<)))))
                 ;; Resynchronizations after changes during an outage.
                 (dolist (count '(10 500))
                   (drover-remote-bench--reset)
