@@ -227,17 +227,26 @@ them only when needed."
 (define-obsolete-variable-alias 'drover-list-animation-interval
   'opencode-session-status-animation-interval "0.2.0")
 
-(defcustom drover-list-animation-unfocused-interval 1.0
+(defcustom drover-list-animation-unfocused-interval 1.35
   "Seconds between two frames of the animated glyphs while Emacs has no focus.
 A list may show while the user works in another application, on another
 screen or beside it: its glyphs keep moving then, at this slower pace,
-rounded to a whole number of frames of
-`opencode-session-status-animation-interval', and never quicker than it.
-The frame shown is the one of the time, as while Emacs has focus, the
-same in every list and mode line; once Emacs has focus again, the glyphs
-show the frame of the time at once, and move at the pace of
-`opencode-session-status-animation-interval'.  A value of nil keeps
-them still while Emacs has no focus.
+never quicker than `opencode-session-status-animation-interval'.  The
+frame shown is the one of the time, as while Emacs has focus, the same
+in every list and mode line, so that a tick spans a whole number of
+frames: this many seconds rounded up to the next number of frames that
+shows each animation of `opencode-session-status-animations' its next
+frame, one more than a multiple of the frames of each.  The default is
+nine frames of 0.15 s: the eight phases of the moon and the four hours
+of the clock step forward once a tick, where seven frames, a second,
+showed them turning backwards.  When no such number of frames comes
+within three times this many seconds, the tick spans the least number
+of frames, from this many seconds up, showing their next frame to the
+animations of the most frames together.
+
+Once Emacs has focus again, the glyphs show the frame of the time at
+once, and move at the pace of `opencode-session-status-animation-interval'.
+A value of nil keeps them still while Emacs has no focus.
 
 Emacs has focus while any of its frames has: a list in a frame other
 than the one the user works in moves at the full pace."
@@ -4236,19 +4245,50 @@ default; stop it when INTERVAL or NEEDED is nil."
         (set symbol (run-at-time (or first interval) interval function)))
     (drover-list--stop-timer symbol)))
 
+(defun drover-list--forward-frames (target counts)
+  "Return how many frames a tick spans to show the next frame of animations.
+TARGET is the frames it should span at least, a number; COUNTS are the
+numbers of frames of the animations.  The frame shown is the clock's:
+spanning one more than a multiple of an animation's frames shows its
+next frame, one less its frame before, as if it turned backwards.  It
+is the least whole number, at least TARGET, that is one more than a
+multiple of every count.  When that is past three times TARGET, it is
+the least from TARGET up to there showing their next frame to the
+animations of the most frames together: the more frames an animation
+has, the more it reads as turning one way."
+  (let* ((least (max 1 (ceiling (- target 1e-9))))
+         (period (apply #'cl-lcm 1 counts))
+         (forward (1+ (* period (ceiling (1- least) period))))
+         (most (max least (floor (+ (* 3 target) 1e-9)))))
+    (if (<= forward most)
+        forward
+      (let ((best least)
+            (stepping -1))
+        (cl-loop for frames from least to most
+                 for weight = (apply #'+ (seq-filter (lambda (count) (= (mod frames count) 1)) counts))
+                 when (> weight stepping)
+                 do (setq best frames stepping weight))
+        best))))
+
 (defun drover-list--frame-pace ()
   "Return the seconds between two frames the lists show now, or nil for none.
 It is `opencode-session-status-animation-interval' while Emacs has
-focus, else `drover-list-animation-unfocused-interval' rounded to a
-whole number of those intervals: each tick then falls in the middle of
-a frame of the time (`opencode-session-status-frame-delay'), as it does
-at the full pace."
+focus, else `drover-list-animation-unfocused-interval' rounded up to a
+whole number of those intervals showing each animation its next frame,
+as `drover-list--forward-frames' counts them: each tick then falls in the
+middle of a frame of the time (`opencode-session-status-frame-delay'), as
+it does at the full pace, and every glyph steps forward."
   (when-let* ((interval opencode-session-status-animation-interval))
     (if drover-list--focused
         interval
       (let ((slow drover-list-animation-unfocused-interval))
         (and (numberp slow) (> slow 0)
-             (* interval (max 1 (round slow interval))))))))
+             (* interval
+                (drover-list--forward-frames
+                 (/ slow interval)
+                 (seq-filter (lambda (count) (> count 1))
+                             (mapcar (lambda (entry) (length (opencode-session-status-frames (car entry))))
+                                     opencode-session-status-animations)))))))))
 
 (defun drover-list--update-timers ()
   "Run the timers lists shown need, and only those.

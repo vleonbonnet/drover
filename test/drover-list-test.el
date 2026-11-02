@@ -5049,10 +5049,11 @@ Regaining it, the frame of the time shows at once, at the full pace."
             (drover-list--refocus)
             (should-not drover-list--focus-timer)
             (should-not drover-list--focused)
-            ;; The glyphs tick every 2 s, in the middle of a frame; the
-            ;; caches and ages keep their timers.
+            ;; The glyphs tick every 3.5 s, seven frames, the next frame
+            ;; of three and of two from 2 s up, in the middle of a frame;
+            ;; the caches and ages keep their timers.
             (should (timerp drover-list--frame-timer))
-            (should (= (timer--repeat-delay drover-list--frame-timer) 2))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))
             (should (<= (float-time (time-subtract (timer--time drover-list--frame-timer) nil)) 0.75))
             (should (eq drover-list--cache-timer cache-timer))
             (should (eq drover-list--age-timer age-timer))
@@ -5062,10 +5063,10 @@ Regaining it, the frame of the time shows at once, at the full pace."
             (drover-list--frame-tick)
             (should (= (opencode-session-status-frame-index 3 drover-list-test-clock) 1))
             (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
-            (setq drover-list-test-clock (+ drover-test-now 4.25))
+            (setq drover-list-test-clock (+ drover-test-now 5.75))
             (drover-list--frame-tick)
             (should (string-prefix-p "  3 Session w" (drover-list-test-heading "w")))
-            (should (= (timer--repeat-delay drover-list--frame-timer) 2))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))
             ;; The caches keep moving.
             (setq drover-list-test-clock (+ drover-test-now 90.5))
             (drover-list--cache-tick)
@@ -5089,20 +5090,124 @@ Regaining it, the frame of the time shows at once, at the full pace."
             (should (eq drover-list--age-timer age-timer))))))))
 
 (ert-deftest drover-list-test-unfocused-pace ()
-  "The pace while Emacs has no focus is a whole number of frames, never quicker."
+  "The pace while Emacs has no focus is a whole number of frames, never quicker.
+With the moon's eight phases and the clock's four hours, nine frames:
+seven, a second, showed them turning backwards."
   (let ((opencode-session-status-animation-interval 0.15)
-        (drover-list-animation-unfocused-interval 1.0)
+        (opencode-session-status-animations (eval (car (get 'opencode-session-status-animations
+                                                             'standard-value))
+                                                  t))
+        (drover-list-animation-unfocused-interval
+         (eval (car (get 'drover-list-animation-unfocused-interval 'standard-value)) t))
         (drover-list--focused nil))
-    ;; 6.67 frames, rounded to 7: ticks fall mid-frame.
-    (should (< (abs (- (drover-list--frame-pace) 1.05)) 1e-9))
+    (should (equal (mapcar (lambda (entry) (length (cdr entry))) opencode-session-status-animations) '(8 4)))
+    ;; The default, nine frames, ticks fall mid-frame.
+    (should (= drover-list-animation-unfocused-interval 1.35))
+    (should (< (abs (- (drover-list--frame-pace) 1.35)) 1e-9))
+    ;; A second, 6.67 frames, rounds up to nine too, not to seven.
+    (let ((drover-list-animation-unfocused-interval 1.0))
+      (should (< (abs (- (drover-list--frame-pace) 1.35)) 1e-9)))
+    ;; Past nine frames, seventeen.
+    (let ((drover-list-animation-unfocused-interval 1.4))
+      (should (< (abs (- (drover-list--frame-pace) 2.55)) 1e-9)))
+    ;; Quicker than a frame, a frame.
     (let ((drover-list-animation-unfocused-interval 0.05))
       (should (= (drover-list--frame-pace) 0.15)))
+    ;; Without animations, the frames asked, rounded up.
+    (let ((opencode-session-status-animations nil)
+          (drover-list-animation-unfocused-interval 1.0))
+      (should (< (abs (- (drover-list--frame-pace) 1.05)) 1e-9)))
     (let ((drover-list-animation-unfocused-interval nil))
       (should-not (drover-list--frame-pace)))
     (let ((opencode-session-status-animation-interval nil))
       (should-not (drover-list--frame-pace)))
     (let ((drover-list--focused t))
       (should (= (drover-list--frame-pace) 0.15)))))
+
+(defun drover-list-test-steps (pace counts &optional ticks)
+  "Return how each animation of COUNTS frames moves at each of TICKS ticks of PACE.
+The ticks fall in the middle of frames, from an instant the clock picks;
+each step is the frames an animation moved at a tick, as shown by the
+frame of the time, modulo its frames: 1 its next frame."
+  (let ((time (+ drover-test-now (opencode-session-status-frame-delay drover-test-now)))
+        (steps nil))
+    (dotimes (_ (or ticks 20))
+      (let ((next (+ time pace)))
+        (dolist (count counts)
+          (push (mod (- (opencode-session-status-frame-index count next)
+                        (opencode-session-status-frame-index count time))
+                     count)
+                steps))
+        (setq time next)))
+    (delete-dups steps)))
+
+(ert-deftest drover-list-test-unfocused-steps-forward ()
+  "Without focus, each tick shows every animation its next frame.
+The frame shown is the clock's: a tick of seven frames of eight showed
+the moon its phase before, turning backwards."
+  (let ((opencode-session-status-animation-interval 0.15)
+        (drover-list--focused nil))
+    (pcase-dolist (`(,counts ,seconds ,frames)
+                   '(((8 4) 1.35 9) ((8 4) 1.0 9) ((8 4) 0.5 9) ((8 4) 2 17) ((8) 1.0 9)
+                     ((4) 1.0 9) ((3 2) 1.0 7) ((3) 1.0 7) ((5) 1.0 11) ((6 4) 1.0 13)
+                     ((8 4) 0.15 1) ((8 4) 0.1 1) ((2) 1.0 7) (nil 1.0 7)))
+      (ert-info ((format "Animations of %s frames, %s s asked" counts seconds))
+        (let ((opencode-session-status-animations
+               (seq-map-indexed (lambda (count index)
+                                  (cons (nth index '(working retrying))
+                                        (mapcar #'number-to-string (number-sequence 1 count))))
+                                counts))
+              (drover-list-animation-unfocused-interval seconds))
+          (should (< (abs (- (drover-list--frame-pace) (* frames 0.15))) 1e-9))
+          (should (>= (+ (drover-list--frame-pace) 1e-9) (max seconds 0.15)))
+          (when counts
+            (should (equal (drover-list-test-steps (drover-list--frame-pace) counts)
+                           (if (seq-every-p (lambda (count) (= count 1)) counts) '(0) '(1))))))))
+    ;; Frames of five, seven and nine show their next frames together
+    ;; every 315 frames, past three times a second, 20 frames.  Then the
+    ;; least spanning showing their next frame to the animations of the
+    ;; most frames together: from 7 to 20 frames, 10, the nine-frame
+    ;; one's; from 20 to 60, 46, the nine and five-frame ones', 14
+    ;; frames, rather than 36, seven and five, 12.
+    (should (= (drover-list--forward-frames (/ 1.0 0.15) '(5 7 9)) 10))
+    (should (= (drover-list--forward-frames 20 '(5 7 9)) 46))
+    ;; Within reach, the least of all.
+    (should (= (drover-list--forward-frames 200 '(5 7 9)) 316))
+    ;; Eight and three: their next frames together every 25 frames, past
+    ;; three times 6.67; nine shows the moon its next phase, seven would
+    ;; show the three-frame one its next, the moon its phase before.
+    (should (= (drover-list--forward-frames (/ 1.0 0.15) '(8 3)) 9))
+    (should (= (drover-list--forward-frames 9 '(8 4)) 9))
+    (should (= (drover-list--forward-frames 9.000000000000002 '(8 4)) 9))
+    (should (= (drover-list--forward-frames 0.3 '(8 4)) 1))))
+
+(ert-deftest drover-list-test-unfocused-glyphs-step-forward ()
+  "A list without focus shows each animated glyph its next frame at each tick."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working)
+                               (drover-test-session "r" :status 'retrying))
+    (let ((opencode-session-status-animations '((working "1" "2" "3" "4" "5" "6" "7" "8")
+                                                (retrying "a" "b" "c" "d")))
+          (opencode-session-status-animation-interval 0.15)
+          (drover-list-animation-unfocused-interval 1.0)
+          (drover-list-collapsed-groups nil)
+          (focused nil))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (drover-list--refocus)
+          (should-not drover-list--focused)
+          (should (< (abs (- (timer--repeat-delay drover-list--frame-timer) 1.35)) 1e-9))
+          (cl-flet ((glyph (id) (substring (drover-list-test-heading id) 2 3)))
+            (let ((moon (glyph "w"))
+                  (clock (glyph "r")))
+              (dotimes (tick 12)
+                (setq drover-list-test-clock (+ drover-test-now 0.075 (* (1+ tick) 1.35)))
+                (drover-list--frame-tick)
+                (should (equal (glyph "w") (number-to-string (1+ (mod (string-to-number moon) 8)))))
+                (should (equal (glyph "r") (string (+ ?a (mod (1+ (- (aref clock 0) ?a)) 4)))))
+                (setq moon (glyph "w")
+                      clock (glyph "r"))))))))))
 
 (ert-deftest drover-list-test-unfocused-animation-off ()
   "Without an unfocused pace, glyphs stand still while Emacs has no focus.
@@ -5169,7 +5274,7 @@ it: the focus is looked at once those events settled."
             (setq focused nil)
             (drover-list--refocus)
             (should-not drover-list--focused)
-            (should (= (timer--repeat-delay drover-list--frame-timer) 2))))))))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))))))))
 
 (ert-deftest drover-list-test-unfocused-hidden-frames ()
   "A list on an iconified frame animates nothing, Emacs having focus or not."
@@ -5183,7 +5288,7 @@ it: the focus is looked at once those events settled."
           (revert-buffer)
           (drover-list--refocus)
           (should-not drover-list--focused)
-          (should (= (timer--repeat-delay drover-list--frame-timer) 2))
+          (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))
           (cl-letf (((symbol-function 'frame-visible-p) (lambda (_frame) 'icon)))
             (setq drover-list-test-clock (+ drover-test-now 2.25))
             (let ((tick (buffer-modified-tick)))
