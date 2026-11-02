@@ -64,6 +64,16 @@ slices that give way to input; a file found changed is read again."
 (defconst drover-transcript-slice-delay 0.05
   "Seconds between two slices of the index's work.")
 
+(defconst drover-transcript-full-look-every 8
+  "How many looks of an index make one that checks every file.
+The others check the files that changed in the last
+`drover-transcript-hot-age' seconds, and list the names of the rest,
+to find those coming and going: a conversation of days ago seldom goes
+on, and its file status costs as much as a recent one's.")
+
+(defconst drover-transcript-hot-age 86400
+  "Seconds since its last change a file is checked at every look.")
+
 (defconst drover-transcript-save-interval 300
   "Seconds at least between two writes of what the index read.
 The file is a cache, checked against the files: written seldom, it
@@ -104,8 +114,13 @@ is gone.")
   (entries (make-hash-table :test #'equal) :documentation "Entries by file.")
   (directories nil :documentation "The directories left to list in this look, as roots are.")
   (queue nil :documentation "The files left to read, first first.")
+  (later nil :documentation "The files to read after QUEUE, last first.")
   (queued (make-hash-table :test #'equal) :documentation "The files of QUEUE.")
   (seen nil :documentation "The files listed in this look, a hash table, or nil between looks.")
+  (full nil :documentation "Non-nil when this look checks every file.")
+  (listings (make-hash-table :test #'equal)
+            :documentation "Directories of files as last listed, as (MTIME . FILES), by name.")
+  (looks 0 :documentation "How many looks began.")
   (complete t :documentation "Nil when a directory of this look could not be listed.")
   (timer nil :documentation "Timer of the next slice or look.")
   (active nil :documentation "Non-nil while the index looks at its files from time to time.")
@@ -225,11 +240,12 @@ passed since they were kept last.  A failure is reported once."
            (puthash file t queued)
            (if first
                (push file (drover-transcript-index-queue index))
-             (setf (drover-transcript-index-queue index)
-                   (nconc (drover-transcript-index-queue index) (list file)))))
+             (push file (drover-transcript-index-later index))))
           (first
            (setf (drover-transcript-index-queue index)
-                 (cons file (delete file (drover-transcript-index-queue index))))))))
+                 (cons file (delete file (drover-transcript-index-queue index)))
+                 (drover-transcript-index-later index)
+                 (delete file (drover-transcript-index-later index)))))))
 
 (defun drover-transcript--note (index file attributes)
   "Note FILE of ATTRIBUTES listed by INDEX, queued to read when it changed."
@@ -238,20 +254,58 @@ passed since they were kept last.  A failure is reported once."
   (unless (drover-transcript--current-p (drover-transcript-entry index file) attributes)
     (drover-transcript--enqueue index file)))
 
+(defun drover-transcript--hot-p (entry now)
+  "Return non-nil when ENTRY, read before, is to be checked at every look at NOW.
+That is when its file changed lately, or was never read."
+  (or (null entry)
+      (> (drover-transcript-mtime entry) (- now drover-transcript-hot-age))))
+
 (defun drover-transcript--list (index directory depth regexp)
-  "List DIRECTORY, DEPTH levels above the files of INDEX matching REGEXP."
-  (when (file-directory-p directory)
-    (condition-case nil
-        (dolist (entry (directory-files-and-attributes directory t (and (zerop depth) regexp) t))
-          (let ((name (car entry))
-                (type (file-attribute-type (cdr entry))))
-            (cond ((zerop depth)
-                   (unless type
-                     (drover-transcript--note index name (cdr entry))))
-                  ((and (eq type t) (not (member (file-name-nondirectory name) '("." ".."))))
-                   (push (list name (1- depth) regexp) (drover-transcript-index-directories index))))))
-      ;; Entries of a directory not listed are kept: their files may be there.
-      (file-error (setf (drover-transcript-index-complete index) nil)))))
+  "List DIRECTORY, DEPTH levels above the files of INDEX matching REGEXP.
+Files are checked as the look says (see
+`drover-transcript-full-look-every'): all of them, or those changed
+lately and those new, the others only noted as there, their directory
+listed again only once its modification time tells files came or went."
+  (condition-case nil
+      (cond
+       ((> depth 0)
+        (dolist (entry (directory-files-and-attributes directory t nil t))
+          (let ((name (car entry)))
+            (when (and (eq (file-attribute-type (cdr entry)) t)
+                       (not (member (file-name-nondirectory name) '("." ".."))))
+              (push (list name (1- depth) regexp) (drover-transcript-index-directories index))))))
+       ((drover-transcript-index-full index)
+        (let ((mtime (file-attribute-modification-time (file-attributes directory)))
+              (files nil))
+          (dolist (entry (directory-files-and-attributes directory t regexp t))
+            (unless (file-attribute-type (cdr entry))
+              (push (car entry) files)
+              (drover-transcript--note index (car entry) (cdr entry))))
+          (puthash directory (cons mtime files) (drover-transcript-index-listings index))))
+       (t
+        (let* ((listings (drover-transcript-index-listings index))
+               (mtime (file-attribute-modification-time (or (file-attributes directory)
+                                                            (signal 'file-missing (list directory)))))
+               (listing (gethash directory listings))
+               (files (if (equal (car listing) mtime)
+                          (cdr listing)
+                        (cdr (puthash directory (cons mtime (directory-files directory t regexp t))
+                                      listings))))
+               (now (float-time))
+               (seen (drover-transcript-index-seen index)))
+          (dolist (name files)
+            (if (drover-transcript--hot-p (drover-transcript-entry index name) now)
+                (if-let* ((attributes (file-attributes name)))
+                    (unless (file-attribute-type attributes)
+                      (drover-transcript--note index name attributes))
+                  ;; Gone since listed: the next listing tells.
+                  (remhash directory listings))
+              (when seen
+                (puthash name t seen)))))))
+    ;; A directory missing holds no file.
+    (file-missing (remhash directory (drover-transcript-index-listings index)))
+    ;; Entries of a directory not listed are kept: their files may be there.
+    (file-error (setf (drover-transcript-index-complete index) nil))))
 
 (defun drover-transcript--change (index file old new)
   "Tell INDEX's backend that what was read of FILE went from OLD to NEW."
@@ -288,8 +342,13 @@ passed since they were kept last.  A failure is reported once."
         (drover-transcript--change index file (and entry (drover-transcript-data entry)) data))))))
 
 (defun drover-transcript--begin (index)
-  "Begin a look of INDEX at its files, unless one is under way."
+  "Begin a look of INDEX at its files, unless one is under way.
+It checks every file when its turn came (see
+`drover-transcript-full-look-every'), the first look among them."
   (unless (drover-transcript-index-seen index)
+    (setf (drover-transcript-index-full index)
+          (zerop (% (drover-transcript-index-looks index) drover-transcript-full-look-every)))
+    (cl-incf (drover-transcript-index-looks index))
     (setf (drover-transcript-index-seen index) (make-hash-table :test #'equal)
           (drover-transcript-index-complete index) t
           (drover-transcript-index-directories index)
@@ -318,6 +377,9 @@ passed since they were kept last.  A failure is reported once."
   "Do one step of the work of INDEX, and return non-nil when work remains.
 Files to read come first, then directories to list; with neither, the
 look ends."
+  (unless (drover-transcript-index-queue index)
+    (setf (drover-transcript-index-queue index) (nreverse (drover-transcript-index-later index))
+          (drover-transcript-index-later index) nil))
   (cond ((drover-transcript-index-queue index)
          (drover-transcript--read index (pop (drover-transcript-index-queue index)))
          t)
@@ -390,12 +452,15 @@ For a change made to them, such as an engine's command moving a file."
     (drover-transcript--begin index)
     (drover-transcript--schedule index drover-transcript-slice-delay #'drover-transcript--work)))
 
-(defun drover-transcript-scan (index)
+(defun drover-transcript-scan (index &optional quick)
   "Look at every file of INDEX now, reading those that changed, and return.
-Slices and timers aside, it is what a look does: for commands and
-tests that need the index current."
+Slices and timers aside, it is what a full look does, or with QUICK one
+checking only the files changed lately (see
+`drover-transcript-full-look-every'): for commands and tests that need
+the index current."
   (drover-transcript-load index)
   (drover-transcript--begin index)
+  (setf (drover-transcript-index-full index) (not quick))
   (while (drover-transcript--step index)))
 
 ;;;; Reading files

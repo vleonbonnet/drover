@@ -322,7 +322,9 @@ Idle but for a session \"claude agents\" listed as working or waiting."
 
 (defun drover-claude-code-transcripts--record (data &optional catalog)
   "Return the `drover-session' of the conversation DATA tells, or nil.
-CATALOG names its model, by default the catalog the CLI caches."
+CATALOG names its model, by default the catalog the CLI caches; the
+symbol `none' stands for no catalog, so that one listing many looks for
+it once."
   (when (drover-claude-code-transcripts--listed-p data)
     (let* ((id (plist-get data :id))
            (status (drover-claude-code-transcripts--status id))
@@ -342,7 +344,10 @@ CATALOG names its model, by default the catalog the CLI caches."
        :created (plist-get data :created)
        :agent (and mode (car (rassoc mode drover-claude-code-agent-modes)))
        :model (and model (drover-claude-code-transcripts--model-name
-                          model (or catalog (drover-claude-code-catalog))))
+                          model (pcase catalog
+                                  ('none nil)
+                                  ('nil (drover-claude-code-catalog))
+                                  (_ catalog))))
        :effort (plist-get data :effort)))))
 
 (defun drover-claude-code-transcripts--subagent-id (id agent)
@@ -372,7 +377,7 @@ CATALOG names its model, by default the catalog the CLI caches."
   "Return the records of the conversations PREDICATE keeps, with subagents.
 PREDICATE is a function of what was read of a conversation."
   (let ((records nil)
-        (catalog (drover-claude-code-catalog)))
+        (catalog (or (drover-claude-code-catalog) 'none)))
     (when drover-claude-code-transcripts--index
       (drover-transcript-map
        (lambda (_file data)

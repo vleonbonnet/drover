@@ -117,6 +117,53 @@ file's size as :size and the size it read from before as :from, and
           (should (> slices 30)))
         (should (= (length changes) 30))))))
 
+(ert-deftest drover-transcript-test-quick-looks ()
+  "Most looks check only the files changed lately, and the directories' names."
+  (drover-transcript-test-with
+    (let ((old (expand-file-name "p/old.jsonl" root))
+          (recent (expand-file-name "p/recent.jsonl" root))
+          (now (float-time)))
+      (drover-test-write old "old\n")
+      (drover-test-write recent "recent\n")
+      (set-file-times old (seconds-to-time (- now (* 3 86400))))
+      ;; The directory's own time, as files come and go.
+      (set-file-times (expand-file-name "p" root) (seconds-to-time (- now 60)))
+      (drover-transcript-scan index)
+      (setq changes nil)
+      (drover-test-write old "old\nmore\n")
+      (set-file-times old (seconds-to-time (- now (* 3 86400))))
+      (drover-test-write recent "recent\nmore\n")
+      (set-file-times (expand-file-name "p" root) (seconds-to-time (- now 60)))
+      (drover-transcript-scan index t)
+      ;; The recent one is read again, the old one not yet.
+      (should (equal (mapcar #'car changes) '("recent.jsonl")))
+      ;; A file coming changes its directory's time: it is found.
+      (drover-test-write (expand-file-name "p/new.jsonl" root) "new\n")
+      (drover-transcript-scan index t)
+      (should (equal (mapcar #'car changes) '("new.jsonl" "recent.jsonl")))
+      ;; One going too, old or not.
+      (delete-file old)
+      (drover-transcript-scan index t)
+      (should (equal (car changes) '("old.jsonl" (:size 4 :from nil) nil)))
+      ;; A full look checks every file, old ones too.
+      (let ((aged (expand-file-name "p/aged.jsonl" root)))
+        (drover-test-write aged "aged\n")
+        (set-file-times aged (seconds-to-time (- now (* 3 86400))))
+        (drover-transcript-scan index)
+        (setq changes nil)
+        (drover-test-write aged "aged\nmore\n")
+        (set-file-times aged (seconds-to-time (- now (* 3 86400))))
+        (set-file-times (expand-file-name "p" root) (seconds-to-time (- now 30)))
+        (drover-transcript-scan index)
+        (setq changes nil)
+        (drover-test-write aged "aged\nmore\nagain\n")
+        (set-file-times aged (seconds-to-time (- now (* 3 86400))))
+        (set-file-times (expand-file-name "p" root) (seconds-to-time (- now 30)))
+        (drover-transcript-scan index t)
+        (should-not changes)
+        (drover-transcript-scan index)
+        (should (equal (mapcar #'car changes) '("aged.jsonl")))))))
+
 (ert-deftest drover-transcript-test-reading ()
   "Readers read the ends of a file, values found without parsing their lines."
   (let ((file (make-temp-file "drover-transcript" nil ".jsonl"))
