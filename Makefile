@@ -21,7 +21,7 @@ SPYGLASS_EL ?= $(HOME)/local/projects/spyglass
 # manager compiles drover with these alone, as elpaca does.
 REQUIRED_PATH = \
   -L $(DEPS)/magit-section -L $(DEPS)/compat -L $(DEPS)/cond-let -L $(DEPS)/llama \
-  -L $(OPENCODE_EL) -L $(DEPS)/plz -L $(DEPS)/transient
+  -L $(OPENCODE_EL) -L $(DEPS)/transient
 LOAD_PATH = -L . -L test $(REQUIRED_PATH) \
   -L $(AGENT_SHELL_EL) -L $(DEPS)/shell-maker -L $(DEPS)/acp \
   -L $(CLAUDE_CODE_IDE_EL) -L $(DEPS)/websocket -L $(DEPS)/web-server \
@@ -102,7 +102,7 @@ test-alone:
 # choose its font and theme.  See test/drover-bench.el.
 EMACS_GUI ?=
 BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-bench.el --eval '(drover-bench-main)'
-OPENCODE_DEPS = -L $(DEPS)/plz -L $(DEPS)/transient -L $(DEPS)/cond-let -L $(DEPS)/compat -L $(DEPS)/llama
+OPENCODE_DEPS = -L $(DEPS)/transient -L $(DEPS)/cond-let -L $(DEPS)/compat -L $(DEPS)/llama
 bench: compile
 	@opencode=$$(mktemp -d); status=0; \
 	cp $(OPENCODE_EL)/opencode*.el "$$opencode" && \
