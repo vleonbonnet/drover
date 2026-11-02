@@ -37,7 +37,7 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test lint clean bench bench-idle bench-remote real-data
+.PHONY: all compile compile-standalone test test-alone lint clean bench bench-idle bench-remote real-data
 
 all: compile test
 
@@ -73,8 +73,24 @@ compile-standalone:
 	[ $$status -ne 0 ] || echo "Compiled with the required packages alone: $(SOURCES)"; \
 	exit $$status
 
+# Standard input is closed, so that a test reading it fails rather than
+# waits.
 test:
-	$(NOPIPE) $(BATCH) -l test/drover-test-helpers.el $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit
+	$(NOPIPE) $(BATCH) -l test/drover-test-helpers.el $(addprefix -l ,$(TESTS)) -f ert-run-tests-batch-and-exit < /dev/null
+
+# Each test file alone, in a batch Emacs of its own, so that each
+# requires what it uses rather than what files before it loaded: the
+# log of a file failing shows, the others a line each.
+test-alone:
+	@status=0; log=$$(mktemp); \
+	for test in $(TESTS); do \
+	  if $(NOPIPE) $(BATCH) -l $$test -f ert-run-tests-batch-and-exit < /dev/null > "$$log" 2>&1; then \
+	    echo "$$test: $$(grep '^Ran ' "$$log")"; \
+	  else \
+	    cat "$$log"; echo "$$test failed alone"; status=1; \
+	  fi; \
+	done; \
+	rm -f "$$log"; exit $$status
 
 # Times the list over thousands of sessions, as compiled: not part of
 # test.  opencode.el, whose look the list draws with, is compiled too,

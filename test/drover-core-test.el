@@ -655,13 +655,6 @@ REMAPPING the face remapping in force."
 
 ;;;; Trees
 
-(defun drover-test-tree-shape (nodes)
-  "Return trees NODES as nested lists of session identifiers."
-  (mapcar (lambda (node)
-            (cons (drover-session-id (drover-node-session node))
-                  (drover-test-tree-shape (drover-node-children node))))
-          nodes))
-
 (ert-deftest drover-test-tree-nests-subagents ()
   (let ((nodes (drover-tree
                 (list (drover-test-session "child" :parent "root" :status 'working :updated 5.0)

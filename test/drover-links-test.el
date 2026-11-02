@@ -28,6 +28,9 @@
 (require 'drover-test-helpers)
 (require 'ol)
 (require 'drover-links)
+;; Loaded before tests stub its functions, which loading would undo:
+;; `drover-links-complete' loads it as it runs.
+(require 'drover-attention)
 
 (defvar drover-links-test-directories nil
   "Directories the fake engines tell, as an alist (ID . DIRECTORY).")

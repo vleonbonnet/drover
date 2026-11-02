@@ -6342,9 +6342,6 @@ of 3500 sessions ran to gigabytes."
               (ert-info ((format "Grouped by %s, a %s" grouping (type-of object)))
                 (should (drover-list-test-printed-length object limit))))))))))
 
-(provide 'drover-list-test)
-;;; drover-list-test.el ends here
-
 ;;;; Sessions of other hosts
 
 (defun drover-list-test-remote-line (key)
@@ -6414,3 +6411,6 @@ of 3500 sessions ran to gigabytes."
       (should (string-match-p "\\`here" (drover-list-test-visible-text)))
       (should (string-match-p "core (not connected)" (drover-list-test-visible-text)))
       (should-not (string-match-p "zed (not connected)" (drover-list-test-visible-text))))))
+
+(provide 'drover-list-test)
+;;; drover-list-test.el ends here

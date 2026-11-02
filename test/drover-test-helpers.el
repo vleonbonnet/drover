@@ -128,6 +128,13 @@ The title defaults to \"Session ID\"."
   (apply #'drover-session-create
          (append properties (list :backend 'fake :id id :title (concat "Session " id)))))
 
+(defun drover-test-tree-shape (nodes)
+  "Return trees NODES as nested lists of session identifiers."
+  (mapcar (lambda (node)
+            (cons (drover-session-id (drover-node-session node))
+                  (drover-test-tree-shape (drover-node-children node))))
+          nodes))
+
 (defun drover-test--recorder (operation)
   "Return a fake backend function recording OPERATION."
   (lambda (session &rest arguments)
