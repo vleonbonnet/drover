@@ -6092,6 +6092,53 @@ The prompt shows nowhere; `prompt' returns its text."
           (funcall (cdr (assoc "c" drover-test-recap-pending)) (list :reply "Too late"))
           (should (equal (prompt) text)))))))
 
+(defun drover-list-test-printed-length (object limit)
+  "Return how many characters `prin1' writes for OBJECT, or nil past LIMIT.
+It prints whole, as Emacs prints an error's data, and stops at LIMIT."
+  (let ((count 0)
+        (print-length nil)
+        (print-level nil)
+        (print-circle nil))
+    (catch 'drover-list-test-printed-length
+      (prin1 object (lambda (_char)
+                      (when (> (setq count (1+ count)) limit)
+                        (throw 'drover-list-test-printed-length nil))))
+      count)))
+
+(ert-deftest drover-list-test-prints-in-proportion ()
+  "The structures of a drawing print in proportion to the sessions they show.
+Emacs prints a value whole in an error's data, or as `format' does,
+here the closure drawing a group, as a profile showed it: each row,
+tree and group once led back to every section of the buffer, every
+tree of its group and every row, printed again for each, and a group
+of 3500 sessions ran to gigabytes."
+  (let ((sessions (cl-loop for i below 200
+                           collect (drover-test-session
+                                    (format "s%03d" i) :title (format "Session %d" i)
+                                    :status (nth (% i 4) '(working idle waiting done))
+                                    :parent (and (zerop (% i 5)) (> i 0) (format "s%03d" (1- i)))))))
+    (dolist (grouping '(nil status))
+      (drover-list-test-with sessions
+        (let ((drover-group-by grouping))
+          (revert-buffer)
+          (let* ((model drover-list--model)
+                 (group (car (drover-list--model-groups model)))
+                 (tree (aref (drover-list--group-trees group) 0))
+                 (row (car (drover-list--tree-shown tree)))
+                 (drawing (lambda () group))
+                 ;; About 5 kB a session for the whole drawing, keys,
+                 ;; titles and sections included: twice that, but not
+                 ;; the square.
+                 (limit (* 10000 (length sessions))))
+            (should (drover-list--row-section row))
+            (should (drover-list--group-container group))
+            ;; Drover's own report of an error carrying one is a line.
+            (should (< (length (drover-error-string (list 'wrong-type-argument 'drover-list--tree group)))
+                       drover-error-length))
+            (dolist (object (list row tree group drawing model magit-root-section))
+              (ert-info ((format "Grouped by %s, a %s" grouping (type-of object)))
+                (should (drover-list-test-printed-length object limit))))))))))
+
 (provide 'drover-list-test)
 ;;; drover-list-test.el ends here
 
