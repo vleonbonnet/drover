@@ -1908,9 +1908,11 @@ them, and non-nil when time passed, ages reading otherwise.  A hidden
 list draws nothing, and catches up in place when shown.")
 
 (defconst drover-list--pending-limit 64
-  "Most sessions a hidden list notes as changed before drawing whole.
-Past this many, drawing them in place once shown costs about what
-drawing the list whole does.")
+  "Most sessions a list draws in place before drawing whole.
+Past this many, drawing them in place costs about what drawing the
+list whole does: a hidden list notes as many before drawing whole once
+shown, and a list shown draws whole a change of more, such as the
+first look at thousands of transcripts.")
 
 (defvar-local drover-list--width nil
   "Width, in pixels, of the lines the list was last drawn for.")
@@ -2736,18 +2738,21 @@ shows, by what the filter leaves of it, by the whole tree, and by the
 order its top session was listed in.  It is total: no two trees rank
 alike, so that where a changed tree goes among the others is known
 from its neighbours alone."
-  (let ((pairs (list (cons (drover-list--tree-node a) (drover-list--tree-node b))
-                     (cons (drover-list--tree-cut a) (drover-list--tree-cut b))
-                     (cons (drover-list--tree-full a) (drover-list--tree-full b))))
-        (order nil))
-    (while (and pairs (null order))
-      (pcase-let ((`(,x . ,y) (pop pairs)))
-        (when (and x y)
-          (cond ((drover--node-before-p x y) (setq order 'before))
-                ((drover--node-before-p y x) (setq order 'after))))))
+  ;; Allocating nothing: a change in a group of thousands of trees
+  ;; compares the changed one with each of them.
+  (let ((order (or (drover-list--node-order (drover-list--tree-node a) (drover-list--tree-node b))
+                   (drover-list--node-order (drover-list--tree-cut a) (drover-list--tree-cut b))
+                   (drover-list--node-order (drover-list--tree-full a) (drover-list--tree-full b)))))
     (if order
         (eq order 'before)
       (< (drover-list--tree-serial a) (drover-list--tree-serial b)))))
+
+(defun drover-list--node-order (x y)
+  "Return `before' or `after' as tree X ranks before or after tree Y.
+Nil when they rank alike, or either is nil."
+  (and x y
+       (cond ((drover--node-before-p x y) 'before)
+             ((drover--node-before-p y x) 'after))))
 
 (defun drover-list--drawn-before-p (a b)
   "Return non-nil when tree A is drawn before tree B in their group.
@@ -3415,7 +3420,19 @@ when the groups would come in another order, or the layout change."
       (let ((position -1))
         (seq-doseq (tree (drover-list--group-trees group))
           (setf (drover-list--tree-position tree) (cl-incf position))))
-      (setf (drover-list--group-head group) (drover-list--head group)))
+      ;; The head stays unless it changed or left: then the trees that
+      ;; came may come before it.  Looking at every tree of a group of
+      ;; thousands, at every change, cost most of a change.
+      (let ((head (drover-list--group-head group)))
+        (setf (drover-list--group-head group)
+              (if (and head (not (memq head removed)))
+                  (let ((best head))
+                    (pcase-dolist (`(,_ ,new) plans)
+                      (when (and new (eq (drover-list--tree-group new) group)
+                                 (drover-list--before-p new best))
+                        (setq best new)))
+                    best)
+                (drover-list--head group)))))
     ;; Groups come and go, in their place; those staying keep theirs.
     (let ((groups (seq-remove (lambda (group) (zerop (drover-list--group-size group)))
                               (drover-list--model-groups model))))
@@ -3762,6 +3779,8 @@ list anew."
           ((or drover-show-history drover-show-archived)
            (drover-list--render))
           ((not (or keys bodies)))
+          ((> (+ (length keys) (length bodies)) drover-list--pending-limit)
+           (drover-list--render))
           ((drover-list--follow keys bodies))
           (t (drover-list--render)))))
 

@@ -29,7 +29,7 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test lint clean bench
+.PHONY: all compile compile-standalone test lint clean bench real-data
 
 all: compile test
 
@@ -74,7 +74,7 @@ test:
 # DROVER_BENCH_FONT, DROVER_BENCH_THEME and DROVER_BENCH_THEME_DIRECTORY
 # choose its font and theme.  See test/drover-bench.el.
 EMACS_GUI ?=
-BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-bench.el
+BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-bench.el --eval '(drover-bench-main)'
 bench: compile
 	@if [ -n "$(EMACS_GUI)" ]; then \
 	  out=$$(mktemp); \
@@ -83,6 +83,13 @@ bench: compile
 	else \
 	  $(BATCH) $(BENCH_FILES); \
 	fi
+
+# Indexes the user's own Claude Code transcripts and Codex rollouts,
+# ~/.claude and ~/.codex or DROVER_CLAUDE_HOME and DROVER_CODEX_HOME,
+# read only, and times the list over them: not part of test.  See
+# test/drover-real-data.el.
+real-data: compile
+	$(BATCH) -l test/drover-test-helpers.el -l test/drover-real-data.el
 
 lint:
 	$(BATCH) --eval '(dolist (file (list $(patsubst %,"%",$(SOURCES)))) (checkdoc-file file))'

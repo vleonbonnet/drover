@@ -166,6 +166,30 @@ Nor the `face' properties font lock removes from what it displayed, as
     (remove-list-of-text-properties 0 (length text) '(magit-section face fontified) text)
     text))
 
+(defun drover-bench-same-p ()
+  "Return non-nil when the current list is what drawing it anew draws.
+When it is not, log where the two first differ."
+  (let ((text (drover-bench-text)))
+    (drover-list--render)
+    (let ((anew (drover-bench-text)))
+      (or (equal-including-properties text anew)
+          (let* ((at (compare-strings text nil nil anew nil nil))
+                 (at (if (integerp at) (1- (abs at)) (min (length text) (length anew))))
+                 (at (if (equal text anew)
+                         ;; The same text, other properties.
+                         (let ((position 0))
+                           (while (and (< position (length text))
+                                       (equal (text-properties-at position text)
+                                              (text-properties-at position anew)))
+                             (cl-incf position))
+                           position)
+                       at)))
+            (drover-bench-log "  drawn in place, differs from drawn anew at %d: %S\n  drawn anew: %S"
+                              at
+                              (substring text (max 0 (- at 80)) (min (length text) (+ at 80)))
+                              (substring anew (max 0 (- at 80)) (min (length anew) (+ at 80))))
+            nil)))))
+
 (defun drover-bench-row (label result target)
   "Return RESULT, of `drover-bench-measure', as a cell LABEL, flagged over TARGET ms."
   (pcase-let ((`(,time ,gcs ,gc-time) result))
@@ -291,9 +315,7 @@ Nor the `face' properties font lock removes from what it displayed, as
                                        (drover-bench-step (if (cl-evenp drover-bench-tick) top second)))
                                    (advice-remove 'drover-list--render count))
                                  (- 10 redraws)))
-                     (same (let ((text (drover-bench-text)))
-                             (drover-list--render)
-                             (equal-including-properties text (drover-bench-text)))))
+                     (same (drover-bench-same-p)))
                 (drover-bench-log "%-6s %4d rows" mode rows)
                 (drover-bench-log "  drawn whole: %s | %s | %s"
                                   (drover-bench-row "refresh" revert 150)
@@ -325,7 +347,10 @@ Nor the `face' properties font lock removes from what it displayed, as
                                   in-place (if same "yes" "NO"))
                 (drover-bench-two-lists top second)))
             (drover-bench-default-view top second)))
-        (drover-attention-mode -1)))))
+        (drover-attention-mode -1)
+        ;; The list follows the change hook of this run alone: the next
+        ;; run makes a list of its own.
+        (kill-buffer buffer)))))
 
 (defun drover-bench-default-view (top second)
   "Time the list as it shows by default, sessions TOP and SECOND taking turns.
@@ -367,9 +392,7 @@ buffer, alone in the selected window."
                                  (cl-incf moved))))
                          (advice-remove 'drover-list--render count))
                        (- 10 redraws)))
-           (same (let ((text (drover-bench-text)))
-                   (drover-list--render)
-                   (equal-including-properties text (drover-bench-text)))))
+           (same (drover-bench-same-p)))
       (drover-bench-log "default view: ungrouped, last activity first, active subagents, %d rows" rows)
       (drover-bench-log "  drawn whole: %s | %s"
                         (drover-bench-row "refresh" revert 150)
@@ -443,9 +466,7 @@ The list is the current buffer, alone in the selected window."
                              (setq drover-list--stale t)))))
                  (same (seq-every-p (lambda (buffer)
                                       (with-current-buffer buffer
-                                        (let ((text (drover-bench-text)))
-                                          (drover-list--render)
-                                          (equal-including-properties text (drover-bench-text)))))
+                                        (drover-bench-same-p)))
                                     (list sidebar list))))
             (drover-bench-log "  with the sidebar, %d columns, beside the list, %d:"
                               (window-body-width side) (window-body-width main))
@@ -594,6 +615,8 @@ drawn in place."
                 (set-window-buffer (selected-window) buffer)
                 (with-current-buffer buffer
                   (drover-list--revert t)
+                  ;; What the indexes reported, as Emacs follows it once idle.
+                  (drover-changed-now)
                   (let* ((ids (mapcar #'drover-bench-uuid (number-sequence 1990 1999)))
                          (tick 0)
                          (render (drover-bench-measure #'drover-list--render 5))
@@ -617,29 +640,84 @@ drawn in place."
                                     (advice-add 'drover-list--render :before count)
                                     (unwind-protect (drover-bench-measure toggle 20)
                                       (advice-remove 'drover-list--render count))))
-                         (same (let ((text (drover-bench-text)))
-                                 (drover-list--render)
-                                 (equal-including-properties text (drover-bench-text)))))
+                         (same (drover-bench-same-p)))
                     (drover-bench-log "  the list:    %s | %s | %s"
                                       (drover-bench-row "drawn whole" render 150)
                                       (drover-bench-row "listing anew" relist 150)
                                       (drover-bench-row "a terminal opening or closing one" opening 10))
                     (drover-bench-log "               %d of 20 drawn in place; the same as drawn anew: %s"
-                                      (- 20 redraws) (if same "yes" "NO")))))
+                                      (- 20 redraws) (if same "yes" "NO"))
+                    (drover-bench-history-default-view toggle))))
               (kill-buffer buffer))
             (drover-transcript-stop claude)
             (drover-transcript-stop codex)))))))
 
-(if (not drover-bench-output)
-    (progn (drover-bench-run)
-           (drover-bench-history))
-  ;; A graphical Emacs ends with the bench, whatever happens.
-  (unwind-protect
-      (condition-case err
-          (progn (drover-bench-run)
-                 (drover-bench-history))
-        (error (drover-bench-log "drover bench failed: %S" err)))
-    (kill-emacs 0)))
+(defun drover-bench-history-default-view (toggle)
+  "Time the list as it shows by default over the closed conversations.
+Ungrouped, by last activity, newest first, they are drawn with the
+sessions of `drover-bench-run' besides, every tree of either; TOGGLE
+opens or closes a terminal over one of them.  The list is the current
+buffer, alone in the selected window."
+  (let ((drover-group-by nil)
+        (drover-sort-by 'updated)
+        (drover-sort-descending t)
+        (drover-show-subagents 'active)
+        (top (drover-bench-id 'top 0))
+        (second (drover-bench-id 'top 1)))
+    (setq drover-test-sessions (drover-bench-sessions))
+    (drover-test-register-simple 'fake (lambda () (mapcar #'copy-sequence drover-test-sessions))
+                                 :session (lambda (id)
+                                            (when-let* ((session (seq-find (lambda (session)
+                                                                             (equal (drover-session-id session) id))
+                                                                           drover-test-sessions)))
+                                              (copy-sequence session))))
+    (drover-list--revert t)
+    (drover-changed-now)
+    (let* ((rows (hash-table-count (drover-list--model-rows drover-list--model)))
+           (first (drover-bench-measure (lambda ()
+                                          (setq drover-list--widths nil
+                                                drover-list--model nil)
+                                          (drover-list--render))
+                                        2))
+           (render (drover-bench-measure #'drover-list--render 5))
+           (relist (drover-bench-measure #'drover-index-refresh 5))
+           (step (progn (drover-bench-step top)
+                        (drover-bench-measure (lambda () (drover-bench-step top)) 21)))
+           (turns (drover-bench-measure
+                   (lambda () (drover-bench-step (if (cl-evenp drover-bench-tick) top second)))
+                   21))
+           (redraws 0)
+           (opening (let ((count (lambda () (cl-incf redraws))))
+                      (advice-add 'drover-list--render :before count)
+                      (unwind-protect (drover-bench-measure toggle 20)
+                        (advice-remove 'drover-list--render count))))
+           (same (drover-bench-same-p)))
+      (drover-bench-log "  default view, ungrouped, last activity first, with the %d sessions above: %d rows"
+                        (length drover-test-sessions) rows)
+      (drover-bench-log "               %s | %s | %s"
+                        (drover-bench-row "first, measuring" first 1000)
+                        (drover-bench-row "drawn whole" render 150)
+                        (drover-bench-row "listing anew" relist 150))
+      (drover-bench-log "               %s | %s | %s"
+                        (drover-bench-row "a step" step 10)
+                        (drover-bench-row "two taking turns" turns 10)
+                        (drover-bench-row "a terminal opening or closing one" opening 10))
+      (drover-bench-log "               %d of 20 drawn in place; the same as drawn anew: %s"
+                        (- 20 redraws) (if same "yes" "NO")))
+    (drover-unregister-backend 'fake)))
+
+(defun drover-bench-main ()
+  "Run the bench, and print the results; a graphical Emacs then exits."
+  (if (not drover-bench-output)
+      (progn (drover-bench-run)
+             (drover-bench-history))
+    ;; A graphical Emacs ends with the bench, whatever happens.
+    (unwind-protect
+        (condition-case err
+            (progn (drover-bench-run)
+                   (drover-bench-history))
+          (error (drover-bench-log "drover bench failed: %S" err)))
+      (kill-emacs 0))))
 
 (provide 'drover-bench)
 ;;; drover-bench.el ends here

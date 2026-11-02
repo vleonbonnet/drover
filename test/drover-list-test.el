@@ -4147,6 +4147,20 @@ Each shows its own buffer."
         (should (= (drover-list-test-counting-redraws (drover-list--on-window-change (selected-window))) 1))
         (should-not drover-list--stale)))))
 
+(ert-deftest drover-list-test-shown-list-draws-whole-past-a-limit ()
+  "A change of more than `drover-list--pending-limit' sessions draws a list shown whole."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test-shown
+      (let ((drover-list--pending-limit 2))
+        (dolist (id '("work" "done" "fail"))
+          (setf (drover-session-title (drover-list-test-find id)) (concat "Renamed " id))
+          (drover-backend-changed 'fake id))
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 1))
+        (setf (drover-session-title (drover-list-test-find "work")) "Renamed wark")
+        (drover-backend-changed 'fake "work")
+        (should (= (drover-list-test-counting-redraws (drover-changed-now)) 0))
+        (drover-list-test-is-fresh)))))
+
 (ert-deftest drover-list-test-side-shown-again-keeps-point ()
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-side)
