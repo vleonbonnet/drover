@@ -679,14 +679,14 @@ the answer."
   "Stop the running turn of SESSION."
   (opencode-session-interrupt (drover-session-id session)))
 
-(defun drover-opencode--archive (session then else)
+(defun drover-opencode--archive (session &optional then else)
   "Archive SESSION on the service; call THEN once it took, ELSE if refused.
-ELSE gets the refusal's description.  The backend's :archive, which
-confirms (:archive-confirms): the session's buffer closes only once the
-service archived it."
+ELSE gets the refusal's description; without it, opencode.el reports
+the refusal.  The backend's :archive, which confirms (:archive-confirms):
+the session's buffer closes only once the service archived it."
   (opencode-session-archive (drover-session-id session) nil
-                            (lambda (_info) (funcall then))
-                            (lambda (error) (funcall else (opencode-error-describe error)))))
+                            (and then (lambda (_info) (funcall then)))
+                            (and else (lambda (error) (funcall else (opencode-error-describe error))))))
 
 (defun drover-opencode--unarchive (session)
   "Restore SESSION from the service's archive."
