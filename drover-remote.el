@@ -2032,6 +2032,12 @@ whose write failed, as those offering `spyglass-reconnect' do."
                (signal (car err) (cdr err))))
     (drover-remote--stop)))
 
+;; Loaded anew, as reloading drover does, the peers' backends take
+;; this file's properties.
+(when (bound-and-true-p drover-remote-mode)
+  (drover-with-reporting "remote reload"
+    (mapc #'drover-remote--register (drover-remote--peers))))
+
 (defun drover-remote-unload-function ()
   "Stop the remote layer before its file is unloaded."
   (when drover-remote-mode (drover-remote-mode -1))

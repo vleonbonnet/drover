@@ -1142,7 +1142,7 @@ name, and a line of two, show the icon alone.  The tooltip tells what
 runs SESSION (see `drover-session-harness-description').  The sessions
 of a harness, an engine and a host share one text, made once as widths
 are measured (see `drover-list--memo'): thousands of rows show a few."
-  (drover-list--memo (list 'harness drover-harnesses (drover-session-harness session)
+  (drover-list--memo (list 'harness drover-harnesses opencode-provider-icons (drover-session-harness session)
                            (drover-session-engine session) (drover-session-host session))
                      #'drover-list--make-harness-text session))
 
@@ -1305,7 +1305,7 @@ place, is the same row; see `drover-list--inputs'."
         opencode-session-status-icons opencode-subagent-icons opencode-session-status-animations
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
         ;; Printed with each row, so a digest of the harnesses, not them.
-        (md5 (prin1-to-string (list drover-harnesses drover-harness-default-icon)))
+        (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon)))
         drover-list--text-fields drover-list--measuring))
 
 (defvar drover-list--reuse nil

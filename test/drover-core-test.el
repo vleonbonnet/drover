@@ -175,6 +175,59 @@ subagent, \"busy\" works, under a subagent whose turn ended unseen."
                               (should (= started 2))
                               (should (memq 'later drover--started)))))
 
+(ert-deftest drover-test-register-again ()
+  "Registering a backend again applies its new properties, and keeps what drover holds of it.
+Its place among backends, its start, which runs once, and its older
+sessions fetched stay; a property it no longer gives goes."
+  (drover-test-with-backend (list (drover-test-session "a"))
+    (let ((started 0)
+          (older (list (drover-test-session "old" :status 'idle))))
+      (drover-register-backend 'second :label "Second" :sessions #'ignore
+                               :start (lambda () (cl-incf started))
+                               :history (lambda (callback) (funcall callback older))
+                               :rename #'ignore)
+      (drover-start)
+      (drover-set-show-history t)
+      (should (= started 1))
+      (should (assq 'second drover--history))
+      (should (equal (drover-backends) '(second fake)))
+      ;; As a file loaded anew registers it.
+      (drover-register-backend 'second :label "Second, anew" :sessions #'ignore
+                               :start (lambda () (cl-incf started))
+                               :history (lambda (callback) (funcall callback older))
+                               :recorded-times #'ignore)
+      (should (equal (drover-backend-label 'second) "Second, anew"))
+      (should (eq (drover-backend-property 'second :recorded-times) #'ignore))
+      (should-not (drover-backend-property 'second :rename))
+      (should (= started 1))
+      (should (memq 'second drover--started))
+      (should (assq 'second drover--history))
+      (should (equal (drover-backends) '(second fake)))
+      (drover-set-show-history nil))))
+
+(ert-deftest drover-test-harness-icons ()
+  "Claude Code's harnesses show Claude's logo and Codex's OpenAI's, as opencode.el draws those providers.
+The icons are those of `opencode-provider-icons', whatever it holds;
+OpenCode and agent-shell have icons of their own."
+  (let ((standard (eval (car (get 'opencode-provider-icons 'standard-value)) t))
+        (drover-harnesses (eval (car (get 'drover-harnesses 'standard-value)) t)))
+    (let ((opencode-provider-icons standard))
+      (should (equal (drover-harness-icon 'claude-code-ide) (alist-get "\\`anthropic\\'" standard nil nil #'equal)))
+      (should (equal (drover-harness-icon 'claude-code-ide) "\uec82"))
+      (should (equal (drover-harness-icon 'claude-code) "\uec82"))
+      (should (equal (drover-harness-icon 'codex) (alist-get "\\`openai\\'" standard nil nil #'equal)))
+      (should (equal (drover-harness-icon 'codex) "\uec81"))
+      (should (equal (drover-harness-icon 'opencode) "\U000F0C8C"))
+      (should (equal (drover-harness-icon 'agent-shell) "\U000F07B7"))
+      (should (equal (drover-harness-icon 'other) drover-harness-default-icon)))
+    ;; Providers drawn otherwise, harnesses follow.
+    (let ((opencode-provider-icons '(("\\`anthropic\\'" . "A") ("\\`openai\\'" . "O"))))
+      (should (equal (drover-harness-icon 'claude-code) "A"))
+      (should (equal (drover-harness-icon 'codex) "O")))
+    ;; A provider without an icon: the default one.
+    (let ((opencode-provider-icons nil))
+      (should (equal (drover-harness-icon 'codex) drover-harness-default-icon)))))
+
 (ert-deftest drover-test-session-buffer ()
   (drover-test-with-backend nil
                             (let ((live (generate-new-buffer " live"))

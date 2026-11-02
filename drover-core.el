@@ -798,29 +798,51 @@ A waiting session shows its oldest request, another its detail."
 ;; backend, but for a session of another host, whose harness is its
 ;; owner's backend.
 
+(defconst drover--former-harnesses
+  '((opencode :name "OpenCode" :icon "\U000F0C8C"
+              :description "OpenCode's service, through opencode.el")
+    (claude-code-ide :name "Claude IDE" :icon "\U000F018D"
+                     :description "Claude Code in a terminal, through claude-code-ide")
+    (agent-shell :name "agent-shell" :icon "\U000F07B7"
+                 :description "a shell of agent-shell, over ACP")
+    (claude-code :name "Claude Code" :icon "\U000F0BC3"
+                 :description "Claude Code's transcript, of a conversation no front end shows")
+    (codex :name "Codex" :icon "\U000F1174"
+           :description "Codex's rollout, of a conversation no front end shows"))
+  "The standard value of `drover-harnesses' before the vendors' logos.")
+
+;; Loaded over a drover of the former standard value, which `defcustom'
+;; would keep, views take the new one.
+(when (and (boundp 'drover-harnesses) (equal drover-harnesses drover--former-harnesses))
+  (makunbound 'drover-harnesses))
+
 (defcustom drover-harnesses
   '((opencode :name "OpenCode" :icon "\U000F0C8C" ; nf-md-application_brackets_outline
               :description "OpenCode's service, through opencode.el")
-    (claude-code-ide :name "Claude IDE" :icon "\U000F018D" ; nf-md-console
+    (claude-code-ide :name "Claude IDE" :provider "anthropic"
                      :description "Claude Code in a terminal, through claude-code-ide")
     (agent-shell :name "agent-shell" :icon "\U000F07B7" ; nf-md-console_line
                  :description "a shell of agent-shell, over ACP")
-    (claude-code :name "Claude Code" :icon "\U000F0BC3" ; nf-md-script_text_outline
+    (claude-code :name "Claude Code" :provider "anthropic"
                  :description "Claude Code's transcript, of a conversation no front end shows")
-    (codex :name "Codex" :icon "\U000F1174" ; nf-md-message_text_clock_outline
+    (codex :name "Codex" :provider "openai"
            :description "Codex's rollout, of a conversation no front end shows"))
   "How views show the harness of a session, by backend.
 The harness is what runs the session for you: the front end showing
 it, or the CLI that recorded a conversation drover lists from its
 files (see `drover-session-harness').  Each entry is (BACKEND . PLIST):
-:name names it, short, :icon is a compact display, such as a Nerd Font
-icon, which lists show before the name, or alone where room is short,
-and :description, what tooltips tell of it.  A backend without an
-entry is named by its label, after `drover-harness-default-icon'.
-Nerd Font icons by default, none of them a provider's logo: the
-providers serving models show theirs (`opencode-provider-icons')."
+:name names it, short; :icon is a compact display, such as a Nerd Font
+icon, which lists show before the name, or alone where room is short;
+:provider, without :icon, takes the icon `opencode-provider-icons'
+gives a provider of that identifier, such as \"anthropic\", the
+vendor's logo, so that a harness of a vendor's CLI shows the logo its
+models do; :description, what tooltips tell of it.  A backend without
+an icon is named by its label, after `drover-harness-default-icon'.
+Nerd Font icons by default, Claude's logo for Claude Code, in a
+terminal or as its transcripts, and OpenAI's for Codex."
   :type '(alist :key-type symbol
-                :value-type (plist :options ((:name string) (:icon string) (:description string))))
+                :value-type (plist :options ((:name string) (:icon string) (:provider string)
+                                             (:description string))))
   :group 'drover)
 
 (defcustom drover-harness-default-icon "\U000F0614" ; nf-md-application_outline
@@ -845,8 +867,13 @@ else by its own name."
 
 (defun drover-harness-icon (harness)
   "Return the icon of HARNESS, a backend name, without faces.
-See `drover-harnesses'; `drover-harness-default-icon' without one."
-  (or (plist-get (alist-get harness drover-harnesses) :icon) drover-harness-default-icon))
+See `drover-harnesses': its :icon, else the icon of its :provider in
+`opencode-provider-icons', else `drover-harness-default-icon'."
+  (let ((entry (alist-get harness drover-harnesses)))
+    (or (plist-get entry :icon)
+        (when-let* ((provider (plist-get entry :provider)))
+          (cdr (seq-find (lambda (icon) (string-match-p (car icon) provider)) opencode-provider-icons)))
+        drover-harness-default-icon)))
 
 (declare-function drover-engine-label "drover-model" (engine))
 
@@ -1663,9 +1690,14 @@ A session's parent and subagents need no operation: drover finds them
 among the sessions through `drover-session-parent'.
 
 Only :label and :sessions are required.  Registering NAME again
-replaces its properties and keeps its place: backends registered first
-win over later ones showing the same session (see `drover-sessions').
-A backend registered after `drover-start' ran is started at once."
+replaces its properties, those it no longer gives going, and keeps its
+place, backends registered first winning over later ones showing the
+same session (see `drover-sessions'), and what drover holds of it: it
+is not started again, the older and archived sessions fetched stay, and
+its sessions are listed anew with its new properties.  So a backend
+whose file is loaded anew, as reloading drover does, registers again
+with the properties of that file.  A backend registered after
+`drover-start' ran is started at once."
   (unless (functionp (plist-get properties :sessions))
     (error "Backend %s has no :sessions function" name))
   (setf (alist-get name drover--backends) properties)

@@ -494,6 +494,23 @@ registration; the agent, if BODY starts one, is stopped after."
 
 ;;;; Two Emacs
 
+(ert-deftest drover-remote-test-registered-anew ()
+  "Its file loaded anew, as reloading drover does, the peers' backends take its properties.
+Their sessions stay, as received."
+  (drover-remote-test-with nil
+    (let ((registration (drover-remote-test-start-agent dir)))
+      (drover-remote-test-connect registration)
+      (drover-remote-test-command "sessions" :n 3)
+      (drover-remote-test-synced 3)
+      (let ((sessions (drover-backend-property 'remote:agent :sessions)))
+        ;; As an older drover registered it.
+        (drover-register-backend 'remote:agent :label "agent" :remote "agent" :sessions sessions)
+        (should-not (drover-backend-property 'remote:agent :recap))
+        (load "drover-remote" nil t)
+        (should (drover-backend-property 'remote:agent :recap))
+        (should (drover-backend-property 'remote:agent :reports-changes))
+        (drover-remote-test-synced 3)))))
+
 (ert-deftest drover-remote-test-snapshot-and-updates ()
   "Another Emacs's sessions arrive, subagents under their parents, and follow it."
   (drover-remote-test-with nil

@@ -6826,6 +6826,19 @@ several."
             (revert-buffer)
             (should (string-match-p "Rollout +▣ Codex " (drover-list-test-remote-line '(codex . "x"))))))))))
 
+(ert-deftest drover-list-test-harness-provider-icon ()
+  "A harness drawn with its vendor's logo follows `opencode-provider-icons', drawn anew."
+  (drover-list-test-with nil
+    (drover-list-test-showing
+      (let ((drover-harnesses '((codex :name "Codex" :provider "openai")))
+            (opencode-provider-icons '(("\\`openai\\'" . "Ω"))))
+        (drover-list-test-register-harnesses)
+        (revert-buffer)
+        (should (string-match-p "Rollout +Ω Codex " (drover-list-test-remote-line '(codex . "x"))))
+        (setq opencode-provider-icons '(("\\`openai\\'" . "Ø")))
+        (revert-buffer)
+        (should (string-match-p "Rollout +Ø Codex " (drover-list-test-remote-line '(codex . "x"))))))))
+
 (ert-deftest drover-list-test-harness-icon-where-room-is-short ()
   "A column too narrow for its name shows the harness's icon alone, never a name cut.
 The column is then as wide as the icon; in two lines, the icon alone

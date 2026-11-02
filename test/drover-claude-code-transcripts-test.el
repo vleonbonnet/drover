@@ -752,5 +752,34 @@ entry or a record leading back to the index would print it all again."
      100 (list (cons "an entry" (car (hash-table-values (drover-transcript-index-entries index))))
                (cons "a record" (drover-find 'claude-code "c001"))))))
 
+(ert-deftest drover-claude-code-transcripts-test-registered-anew ()
+  "Installed again, or its file loaded again, the backend takes this file's properties.
+A registration an older drover made, without :recorded-times, stayed
+until registered by hand."
+  (drover-claude-code-transcripts-test-with
+    (let ((stale (lambda ()
+                   (drover-register-backend 'claude-code :label "Claude Code" :recorded '(claude-code)
+                                            :sessions #'drover-claude-code-transcripts--sessions))))
+      (funcall stale)
+      (should-not (drover-backend-property 'claude-code :recorded-times))
+      ;; A front end installing it again, as it loads anew.
+      (drover-claude-code-transcripts-install 'other)
+      (should (eq (drover-backend-property 'claude-code :recorded-times)
+                  #'drover-claude-code-transcripts--times))
+      (should (equal drover-claude-code-transcripts--users '(other test)))
+      (should (eq drover-claude-code-transcripts--index index))
+      (drover-claude-code-transcripts-uninstall 'other)
+      ;; Its file loaded anew.
+      (funcall stale)
+      (load "drover-claude-code-transcripts" nil t)
+      (should (eq (drover-backend-property 'claude-code :recorded-times)
+                  #'drover-claude-code-transcripts--times))
+      (should (eq drover-claude-code-transcripts--index index))
+      ;; Another package's backend of that name is not replaced.
+      (drover-register-backend 'claude-code :label "Mine" :sessions #'ignore)
+      (load "drover-claude-code-transcripts" nil t)
+      (should (equal (drover-backend-label 'claude-code) "Mine"))
+      (drover-claude-code-transcripts--register))))
+
 (provide 'drover-claude-code-transcripts-test)
 ;;; drover-claude-code-transcripts-test.el ends here
