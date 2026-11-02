@@ -779,6 +779,49 @@ Each is (DIRECTORY CALLBACK)."
                                   (buffer-string)))
           (should (eobp)))))))
 
+(ert-deftest drover-prompt-test-session-buffers-quote-lines ()
+  "Outside drover's own lists, the line or the region is quoted, whatever session is at point.
+A session buffer tells its session at point, and so does a list of
+another front end, its session keys on: neither quotes a session."
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "s"))
+          (transient-mark-mode t)
+          (recaps nil))
+      (cl-letf (((symbol-function 'drover-recap)
+                 (lambda (session _callback) (push (drover-session-id session) recaps))))
+        (dolist (list '(nil t))
+          (with-temp-buffer
+            (setq default-directory "/")
+            (setq-local drover-session-at-point-function (lambda () session))
+            (setq-local drover-selected-sessions-function (lambda () (list session)))
+            (when list
+              (drover-session-keys-mode))
+            (insert "first line\nthe line at point\nlast line\n")
+            (goto-char (point-min))
+            (forward-line 1)
+            (forward-char 4)
+            (drover-prompt-add-context)
+            (with-current-buffer (drover-prompt-buffer)
+              (should (string-match-p "\\`From buffer .* line 2:\n#\\+begin_src fundamental\nthe line at point\n#\\+end_src\n\n\\'"
+                                      (buffer-string)))
+              (erase-buffer))
+            (set-mark (point-min))
+            (goto-char (line-end-position))
+            (activate-mark)
+            (drover-prompt-add-context)
+            (with-current-buffer (drover-prompt-buffer)
+              (should (string-match-p "\n#\\+begin_src fundamental\nfirst line\nthe line at point\n#\\+end_src\n\n\\'"
+                                      (buffer-string)))
+              (erase-buffer))))
+        (should-not recaps)
+        ;; In drover's own list, the session at point is quoted.
+        (with-temp-buffer
+          (setq-local drover-view-p t
+                      drover-session-at-point-function (lambda () session))
+          (insert "Session s\n")
+          (drover-prompt-add-context))
+        (should (equal recaps '("s")))))))
+
 (ert-deftest drover-prompt-test-task-keeps-draft ()
   "Starting a task's prompt asks before replacing a draft, and keeps picks made on an empty prompt."
   (drover-prompt-test-with

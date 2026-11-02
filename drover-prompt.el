@@ -22,8 +22,8 @@
 
 ;; The prompt: an Org buffer, `*drover*', where the user writes to an
 ;; agent, gathering context from the buffers worked in
-;; (`drover-prompt-dwim'), or from a list of sessions the sessions
-;; selected, quoted with their last replies
+;; (`drover-prompt-dwim'), or from drover's list the sessions selected,
+;; quoted with their last replies
 ;; (`drover-prompt-quote-sessions'), then sends it to a running session
 ;; or a new one of any backend and engine (`drover-prompt-submit').  The
 ;; buffer is in `drover-prompt-mode', which defines drover's prompt
@@ -595,12 +595,14 @@ buffer."
 The first call from a buffer shows the prompt, begun in that buffer's
 directory, with a link to the line at point and the active region
 quoted in a code block; later calls add such a block at the point the
-user left the prompt at.  In a list of sessions, the context is the
-sessions the region selects, else the one at point, each linked and
-quoted with its last reply (see `drover-prompt-quote-sessions').  An
-Org heading line is quoted as any other line: `drover-prompt-org-task'
-starts a prompt for an Org task.  Signal a `user-error' in the prompt
-buffer itself."
+user left the prompt at.  In drover's own lists, `*drover sessions*'
+and the sidebar, the context is the sessions the region selects, else
+the one at point, each linked and quoted with its last reply (see
+`drover-prompt-quote-sessions'); everywhere else, in session buffers
+and the lists of other front ends too, it is the line or the region.
+An Org heading line is quoted as any other line:
+`drover-prompt-org-task' starts a prompt for an Org task.  Signal a
+`user-error' in the prompt buffer itself."
   (interactive)
   (when drover-prompt-mode
     (user-error "Already in the prompt"))
@@ -610,11 +612,14 @@ buffer itself."
   "Open the prompt, or add to it the context at point.
 As `drover-prompt-dwim' does, which refuses the prompt buffer first.
 The context is the active region, else the line at point, formatted by
-`drover-prompt-format-context'.  In a list of sessions, it is the
-sessions selected, or the one at point, quoted with their last replies
-by `drover-prompt-quote-sessions'.  It goes at point in the prompt's
-window, or while the prompt is hidden where the user left point."
-  (if-let* (((drover-session-list-p))
+`drover-prompt-format-context'.  In drover's own lists, those setting
+`drover-view-p', it is the sessions selected, or the one at point,
+quoted with their last replies by `drover-prompt-quote-sessions'; a
+buffer telling a session at point, such as a session buffer, or a list
+of another front end, gives its line or region as any buffer does.  It
+goes at point in the prompt's window, or while the prompt is hidden
+where the user left point."
+  (if-let* ((drover-view-p)
             (sessions (drover-selected-sessions t)))
       (drover-prompt-quote-sessions sessions)
     (let* ((source (current-buffer))

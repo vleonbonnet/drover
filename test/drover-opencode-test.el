@@ -1064,6 +1064,34 @@ nothing is fetched."
       (should (equal (drover-session-at-point) (drover-opencode-test-session "ses_1")))
       (should-not (drover-session-list-p)))))
 
+(ert-deftest drover-opencode-test-session-buffer-quotes-line ()
+  "In a session buffer, the prompt quotes the line at point, never the session."
+  (require 'drover-prompt)
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let ((drover-prompt-buffer-name "*drover opencode quote test*")
+          (drover-prompt-require-features nil)
+          (org-mode-hook nil)
+          (recaps nil))
+      (unwind-protect
+          (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                    ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
+                    ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
+                    ((symbol-function 'drover-recap)
+                     (lambda (session _callback) (push (drover-session-id session) recaps))))
+            (with-temp-buffer
+              (opencode-session-mode)
+              (setq opencode-session-id "ses_1")
+              (let ((inhibit-read-only t))
+                (insert "An answer of the agent, quoted whole\n"))
+              (goto-char 4)
+              (should (drover-session-at-point))
+              (drover-prompt-dwim)
+              (should (string-match-p "\n#\\+begin_src markdown\nAn answer of the agent, quoted whole\n#\\+end_src\n"
+                                      (with-current-buffer drover-prompt-buffer-name (buffer-string))))
+              (should-not recaps)))
+        (when-let* ((buffer (get-buffer drover-prompt-buffer-name)))
+          (kill-buffer buffer))))))
+
 (ert-deftest drover-opencode-test-session-buffer-outside-registry ()
   "A session the registry does not hold is described by its buffer."
   (drover-opencode-test-with nil
