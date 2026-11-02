@@ -551,9 +551,70 @@ after a compaction until the next step measures it:
            :archived (plist-get entry :archived)
            (drover-opencode--run entry directory))))
 
+(defvar drover-opencode--made nil
+  "The records the registry's entries made, as (LAYOUT . TABLE), or nil.
+TABLE maps session IDs to (INPUTS . RECORD), INPUTS what RECORD was
+made of (see `drover-opencode--inputs'); LAYOUT is that of
+`drover-session' then.  OpenCode reports many changes without telling
+which sessions changed, which lists them all anew: thousands of records
+were made each time, displays of models and agents included, most the
+same as before.")
+
+;; Records of the version of this file loaded before are made anew.
+(setq drover-opencode--made nil)
+
+(defvar opencode-catalog-generation)
+
+(defun drover-opencode--inputs (entry)
+  "Return what the record of registry ENTRY is made of, as a vector.
+ENTRY, its prompt cache, the service's projects, the branch of its
+directory, and how many times catalogs changed, which displays of
+models, providers and agents read."
+  (let ((directory (plist-get entry :directory)))
+    (vector entry
+            (opencode-state-cache (plist-get entry :id))
+            drover-opencode--projects
+            (and directory (drover-git-branch directory))
+            (bound-and-true-p opencode-catalog-generation))))
+
+(defun drover-opencode--listed (entry)
+  "Return the `drover-session' of registry ENTRY, as made before when it can be.
+A record made of the same inputs (see `drover-opencode--inputs') is
+the same record."
+  (unless (and drover-opencode--made
+               (drover-layout-matches-p (car drover-opencode--made)))
+    (setq drover-opencode--made (cons (drover-layout 'drover-session)
+                                      (make-hash-table :test #'equal))))
+  (let* ((table (cdr drover-opencode--made))
+         (id (plist-get entry :id))
+         (made (gethash id table))
+         (inputs (car-safe made))
+         (directory (plist-get entry :directory)))
+    ;; Compared before a vector of inputs is made: listing thousands of
+    ;; sessions, most are the same.
+    (if (and (vectorp inputs)
+             (= (length inputs) 5)
+             (eq (aref inputs 2) drover-opencode--projects)
+             (eql (aref inputs 4) (bound-and-true-p opencode-catalog-generation))
+             (eq (aref inputs 1) (opencode-state-cache id))
+             (equal (aref inputs 3) (and directory (drover-git-branch directory)))
+             (or (eq (aref inputs 0) entry) (equal (aref inputs 0) entry)))
+        (cdr made)
+      (let ((record (drover-opencode--session entry)))
+        (puthash id (cons (drover-opencode--inputs entry) record) table)
+        record))))
+
 (defun drover-opencode--sessions ()
-  "Return the sessions of the `opencode-state' registry."
-  (mapcar #'drover-opencode--session (opencode-state-sessions)))
+  "Return the sessions of the `opencode-state' registry.
+The records of sessions gone are forgotten."
+  (let ((records (mapcar #'drover-opencode--listed (opencode-state-sessions))))
+    (when-let* ((table (cdr drover-opencode--made))
+                ((> (hash-table-count table) (length records))))
+      (let ((listed (make-hash-table :test #'equal :size (length records))))
+        (dolist (record records)
+          (puthash (drover-session-id record) t listed))
+        (maphash (lambda (id _) (unless (gethash id listed) (remhash id table))) table)))
+    records))
 
 (defun drover-opencode--session-by-id (id)
   "Return the session ID of the `opencode-state' registry, or nil.
@@ -566,7 +627,7 @@ change."
   (when-let* ((entry (opencode-state-get id))
               ((or (not (plist-get entry :archived))
                    (memq entry (opencode-state-sessions)))))
-    (drover-opencode--session entry)))
+    (drover-opencode--listed entry)))
 
 (defun drover-opencode--prefetch (sessions)
   "Ask the registry for the context size of SESSIONS, which a view shows.

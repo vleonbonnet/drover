@@ -131,6 +131,7 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (drover--archived nil)
          (drover-opencode--refetch-timer nil)
          (drover-opencode--projects nil)
+         (drover-opencode--made nil)
          (drover-opencode--projects-fetching nil)
          (drover-opencode--projects-stale nil)
          (opencode-state-updated-functions nil)
@@ -455,6 +456,62 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                                    (drover-opencode-test-entry "ses_3"))
     (should (equal (mapcar #'drover-session-id (drover-sessions)) '("ses_1" "ses_2" "ses_3")))))
 
+(ert-deftest drover-opencode-test-records-made-once ()
+  "A session listed again of the same inputs is the record made before."
+  (let ((entries (list (drover-opencode-test-entry "ses_1" :agent "build")
+                       (drover-opencode-test-entry "ses_2" :directory "/work/opencode/"))))
+    (drover-opencode-test-with entries
+      (let ((made 0))
+        (cl-letf* ((make (symbol-function 'drover-opencode--session))
+                   ((symbol-function 'drover-opencode--session)
+                    (lambda (entry) (cl-incf made) (funcall make entry))))
+          (let ((first (drover-opencode--sessions)))
+            (should (= made 2))
+            (should (equal (mapcar #'drover-opencode--listed entries) first))
+            (cl-flet ((again ()
+                        (let ((records (drover-opencode--sessions)))
+                          (prog1 (list (eq (nth 0 records) (nth 0 first))
+                                       (eq (nth 1 records) (nth 1 first)))
+                            (setq first records)))))
+              (should (equal (again) '(t t)))
+              (should (= made 2))
+              ;; By id, as a change reported.
+              (should (eq (drover-opencode--session-by-id "ses_2") (nth 1 first)))
+              ;; The registry's entry replaced: that session alone.
+              (setcar drover-opencode-test-entries
+                      (drover-opencode-test-entry "ses_1" :agent "build" :title "Renamed"))
+              (should (equal (again) '(nil t)))
+              (should (equal (drover-session-title (nth 0 first)) "Renamed"))
+              ;; Replaced by an equal entry, it is the same.
+              (setcar drover-opencode-test-entries
+                      (drover-opencode-test-entry "ses_1" :agent "build" :title "Renamed"))
+              (should (equal (again) '(t t)))
+              ;; Its prompt cache, its branch.
+              (let ((drover-opencode-test-caches '(("ses_1" :expires 1000.0 :ttl 300.0))))
+                (should (equal (again) '(nil t))))
+              (should (equal (again) '(nil t)))
+              (let ((drover-opencode-test-branches '(("/work/drover/" . "main") ("/work/opencode/" . "next"))))
+                (should (equal (again) '(t nil)))
+                (should (equal (drover-session-branch (nth 1 first)) "next")))
+              (should (equal (again) '(t nil)))
+              ;; The projects fetched, and the catalogs, for every session.
+              (let ((drover-opencode--projects (list '((id . "prj_drover") (name . "Drover")))))
+                (should (equal (again) '(nil nil))))
+              (should (equal (again) '(nil nil)))
+              (let ((opencode-catalog-generation (1+ opencode-catalog-generation)))
+                (should (equal (again) '(nil nil))))
+              (should (equal (again) '(nil nil)))
+              (should (equal (again) '(t t)))
+              ;; Gone from the registry, it is forgotten.
+              (setq drover-opencode-test-entries (list (car drover-opencode-test-entries)))
+              (drover-opencode--sessions)
+              (should (equal (hash-table-keys (cdr drover-opencode--made)) '("ses_1")))
+              ;; Another version of the records: all made anew.
+              (setcar drover-opencode--made '((drover-session . stale)))
+              (setq made 0)
+              (drover-opencode--sessions)
+              (should (= made 1)))))))))
+
 (ert-deftest drover-opencode-test-registry-is-authoritative ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1" :title "Before"))
     (should (equal (drover-session-title (drover-opencode-test-session "ses_1")) "Before"))
@@ -528,6 +585,9 @@ PROJECTS defaults to `drover-opencode-test-projects'."
                                    opencode-agent-display))
   "The displays of opencode.el, as loaded, before tests stub them.")
 
+(defvar drover-opencode-test--catalog-changes 0
+  "How many times tests changed opencode.el's catalogs.")
+
 (defmacro drover-opencode-test-with-catalogs (catalogs &rest body)
   "Run BODY with opencode.el's real displays reading CATALOGS.
 CATALOGS is non-nil for the fixture catalogs to be cached, nil for
@@ -536,7 +596,9 @@ nothing is fetched."
   (declare (indent 1) (debug t))
   `(let ((cached ,catalogs)
          (stubs (mapcar (lambda (entry) (cons (car entry) (symbol-function (car entry))))
-                        drover-opencode-test--displays)))
+                        drover-opencode-test--displays))
+         ;; Catalogs arriving or forgotten change their generation.
+         (opencode-catalog-generation (cl-incf drover-opencode-test--catalog-changes)))
      (unwind-protect
          (progn
            (dolist (entry drover-opencode-test--displays)
