@@ -21,7 +21,8 @@
 ;; the user runs it, and measures what it costs in the background: the
 ;; OpenCode backend over a registry of 2519 sessions in 53 Git
 ;; worktrees, the list and the sidebar shown, the mode-line count on,
-;; one session and one of its subagents working, their glyphs animated.
+;; one session and one of its subagents working, their glyphs animated,
+;; the user working in a window below the list.
 ;; Nothing reaches an OpenCode service: the registry and the catalogs
 ;; are filled here, and a request signals.
 ;;
@@ -32,13 +33,15 @@
 ;; - streaming: the working session takes a step every 100 ms;
 ;; - unfocused: Emacs lost focus, as a focus-out event tells;
 ;; - then, synchronously, a frame of the animation drawn and redisplayed,
-;;   against a redisplay changing nothing, and the minute's refresh.
+;;   its lines reordered for display or not, against a redisplay
+;;   changing nothing; a change followed, of a session and of the
+;;   registry as a whole; and the minute's refresh.
 ;;
 ;; Each phase tells the processor time it took per second (the share of
 ;; one core), what it allocated per second, the garbage collections, the
 ;; frame ticks and the redisplays that did something.  The streaming
-;; phase is then profiled, processor and memory, the report written
-;; beside the results.  Focus is simulated, as `handle-focus-out' and
+;; phase is then profiled, processor and memory, and so are changes and
+;; the refresh, the reports written beside the results.  Focus is simulated, as `handle-focus-out' and
 ;; `handle-focus-in' set it, so that the user's clicking elsewhere while
 ;; it runs changes nothing.  Above 2 GB, Emacs exits.
 
@@ -246,18 +249,18 @@ Session 0 and its first subagent run turns."
       (funcall function))
     (/ (* 1000 (- (float-time) start)) runs)))
 
-(defun drover-idle-bench-tick-cost (direction ticks clock-cell)
+(defun drover-idle-bench-tick-cost (reordering ticks clock-cell)
   "Return the milliseconds a frame tick and its redisplay take, TICKS times.
-The lists' paragraphs go in DIRECTION, as `bidi-paragraph-direction';
+The lists' lines are reordered for display as REORDERING says, as
+`bidi-display-reordering', or as they are when it is `as-is';
 CLOCK-CELL is a cons whose car is the clock the lists read."
-  (let ((buffers (seq-filter (lambda (buffer)
-                               (with-current-buffer buffer (derived-mode-p 'drover-list-mode)))
-                             (buffer-list)))
+  (let ((buffers (list (drover-list--buffer) (drover-list--buffer t)))
         (saved nil))
-    (dolist (buffer buffers)
-      (push (cons buffer (buffer-local-value 'bidi-paragraph-direction buffer)) saved)
-      (with-current-buffer buffer
-        (setq bidi-paragraph-direction direction)))
+    (unless (eq reordering 'as-is)
+      (dolist (buffer buffers)
+        (push (cons buffer (buffer-local-value 'bidi-display-reordering buffer)) saved)
+        (with-current-buffer buffer
+          (setq bidi-display-reordering reordering))))
     (redisplay t)
     (unwind-protect
         (drover-idle-bench-time
@@ -268,7 +271,7 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
          ticks)
       (pcase-dolist (`(,buffer . ,value) saved)
         (with-current-buffer buffer
-          (setq bidi-paragraph-direction value))))))
+          (setq bidi-display-reordering value))))))
 
 (defun drover-idle-bench-redisplay-costs ()
   "Log what a frame of the animation costs to draw and to redisplay."
@@ -281,14 +284,12 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
                       (setcar clock (+ (car clock) opencode-session-status-animation-interval))
                       (drover-list--frame-tick))
                     ticks))
-             (as-set (drover-idle-bench-tick-cost
-                      (buffer-local-value 'bidi-paragraph-direction (drover-list--buffer))
-                      ticks clock))
-             (found (drover-idle-bench-tick-cost nil ticks clock))
-             (left (drover-idle-bench-tick-cost 'left-to-right ticks clock)))
+             (as-is (drover-idle-bench-tick-cost 'as-is ticks clock))
+             (on (drover-idle-bench-tick-cost t ticks clock))
+             (off (drover-idle-bench-tick-cost nil ticks clock)))
         (drover-idle-bench-log
-         "a frame of the animation: drawn %.2f ms; drawn and redisplayed %.2f ms (paragraphs %s), %.2f ms (direction found per paragraph), %.2f ms (left to right); a redisplay changing nothing %.2f ms"
-         draw as-set (buffer-local-value 'bidi-paragraph-direction (drover-list--buffer)) found left quiet)))))
+         "a frame of the animation: drawn %.2f ms; drawn and redisplayed %.2f ms (lines reordered: %s), %.2f ms (reordered), %.2f ms (not reordered); a redisplay changing nothing %.2f ms"
+         draw as-is (buffer-local-value 'bidi-display-reordering (drover-list--buffer)) on off quiet)))))
 
 (defun drover-idle-bench-change-costs ()
   "Log what following a change costs, a session's or the registry's."
@@ -463,6 +464,9 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
         (delete-other-windows)
         (switch-to-buffer (drover-list--buffer))
         (drover-list--show-side)
+        ;; The user works in another window, below the list.
+        (select-window (split-window (selected-window) -15 'below))
+        (switch-to-buffer (get-buffer-create "*scratch*"))
         (redisplay t)
         (drover-idle-bench-log "drover idle bench: %d sessions in %d worktrees; %s, frame %dx%d, %s"
                                (hash-table-count opencode-state--sessions) drover-idle-bench-directories
