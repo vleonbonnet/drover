@@ -68,7 +68,7 @@
 (require 'drover-codex)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
   (load "drover-core" nil t))
 
 (declare-function org-id-get-create "org-id" (&optional force))
@@ -739,7 +739,7 @@ session whose reply did not arrive, or that has none, quoted without
 one.  See `drover-prompt-format-sessions' for the quote."
   (let* ((count (length sessions))
          (links (mapcar #'drover-session-link sessions))
-         (directory (or (drover-session-directory (car sessions)) default-directory))
+         (directory (or (drover-session-local-directory (car sessions)) default-directory))
          (origin (selected-window))
          (recaps (make-hash-table :test #'equal))
          (finished nil)
@@ -1455,7 +1455,7 @@ runs or would start.  Each NAME carries its target as its
                    :current (and (drover-supports-p session :options)
                                  (drover-with-reporting "session options"
                                    (drover-backend-call session :options)))
-                   :directory (or (drover-session-directory session)
+                   :directory (or (drover-session-local-directory session)
                                   (buffer-local-value 'default-directory buffer)))))
       (dolist (target targets)
         (add (format "[New %s…]" (or (plist-get target :label) (plist-get target :engine)))

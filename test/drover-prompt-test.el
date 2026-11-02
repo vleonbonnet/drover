@@ -1005,6 +1005,18 @@ Each is (DIRECTORY CALLBACK)."
 
 ;;;; Content and what leaves the prompt
 
+(ert-deftest drover-prompt-test-quote-another-host ()
+  "Quoting another host's session leaves the prompt where it is: its directory is not here."
+  (drover-test-with-backend (list (drover-test-session "r" :directory "/on/core/" :host "core")
+                                  (drover-test-session "h" :directory "/work/h/"))
+    (let ((added nil)
+          (default-directory "/work/here/"))
+      (cl-letf (((symbol-function 'drover-prompt--add)
+                 (lambda (_text directory &rest _) (push directory added)))
+                ((symbol-function 'drover-session-link) (lambda (_session) "[[link]]")))
+        (drover-prompt-quote-sessions (list (drover-find 'fake "r")))
+        (drover-prompt-quote-sessions (list (drover-find 'fake "h"))))
+      (should (equal added '("/work/h/" "/work/here/"))))))
 (ert-deftest drover-prompt-test-content ()
   "The content is the region when active, else the whole prompt, trimmed; nil when blank."
   (drover-prompt-test-with

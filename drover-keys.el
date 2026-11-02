@@ -63,7 +63,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -113,8 +113,11 @@ the parent in another window."
   (let ((parent (or (drover-session-parent session)
                     (user-error "%s is not a subagent" (drover-session-display-title session)))))
     (drover-open (or (drover-parent session)
+                     ;; Of another host, the parent is its too.
                      (drover-session-create :backend (drover-session-backend session) :id parent
-                                            :directory (drover-session-directory session)))
+                                            :directory (drover-session-directory session)
+                                            :host (drover-session-host session)
+                                            :origin (and (drover-session-host session) (car-safe parent))))
                  other-window)))
 
 (defun drover-open-subagent (session &optional other-window)
@@ -269,11 +272,12 @@ buffer."
 (defun drover-new-session (directory backend)
   "Start a session of BACKEND in DIRECTORY.
 Interactively, DIRECTORY is the directory of the session at point, or
-`default-directory' without one, and BACKEND the backend of that
-session, or the backend that starts sessions, chosen among several."
+`default-directory' without one or for a session of another host, and
+BACKEND the backend of that session, or the backend that starts
+sessions, chosen among several."
   (interactive
    (let ((session (drover-session-at-point t)))
-     (list (or (and session (drover-session-directory session)) default-directory)
+     (list (or (and session (drover-session-local-directory session)) default-directory)
            (if (and session (drover-supports-p session :new))
                (drover-session-backend session)
              (drover--read-backend :new "Start a session of: ")))))

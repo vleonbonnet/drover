@@ -1482,7 +1482,7 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
-    (should (equal (last slots 6) '(agent-display context-estimated archived host origin stale)))
+    (should (equal (last slots 7) '(agent-display context-estimated archived host origin stale default-branch)))
     (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()
@@ -2933,6 +2933,45 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
           (let ((drover-branch-ttl 0))
             (should (equal (drover-git-default-branch main) "main"))))
       (delete-directory root t))))
+
+(ert-deftest drover-test-default-branch-of-another-host ()
+  "Another host's session has the default branch its owner read; this host reads nothing."
+  (let* ((root (file-name-as-directory (make-temp-file "drover-git" t)))
+         (drover--default-branches (make-hash-table :test #'equal))
+         (looked nil))
+    (unwind-protect
+        (progn
+          ;; The same directory here is another repository, whose default
+          ;; branch is not the owner's.
+          (make-directory (expand-file-name ".git/refs/remotes/origin" root) t)
+          (with-temp-file (expand-file-name ".git/refs/remotes/origin/HEAD" root)
+            (insert "ref: refs/remotes/origin/develop\n"))
+          (advice-add 'drover--read-git-default-branch :before (lambda (directory) (push directory looked))
+                      '((name . drover-test-looked)))
+          (cl-flet ((default-p (branch &optional default)
+                      (drover-session-default-branch-p
+                       (drover-session-create :directory root :branch branch :host "core"
+                                              :default-branch default))))
+            (should (default-p "develop" "develop"))
+            (should-not (default-p "main" "develop"))
+            ;; The owner knows none: main and master stand for it.
+            (should (default-p "main"))
+            (should-not (default-p "develop"))
+            (should-not looked)
+            ;; This host's session in the same directory reads it.
+            (should (drover-session-default-branch-p (drover-session-create :directory root :branch "develop")))
+            (should (equal looked (list (file-name-as-directory (expand-file-name root)))))))
+      (advice-remove 'drover--read-git-default-branch 'drover-test-looked)
+      (delete-directory root t))))
+
+(ert-deftest drover-test-local-directory ()
+  "A session's directory is this host's to use only when the session is."
+  (should (equal (drover-session-local-directory (drover-session-create :directory "/here/")) "/here/"))
+  (should-not (drover-session-local-directory (drover-session-create :directory "/there/" :host "core")))
+  (should (equal (drover-relative-file-name "/work/a/b.el" "/work/a/") "b.el"))
+  (should (equal (drover-relative-file-name "/elsewhere/b.el" "/work/a/") "/elsewhere/b.el"))
+  (should (equal (drover-relative-file-name "/work/a/b.el" nil) "/work/a/b.el"))
+  (should (equal (drover-relative-file-name "b.el" "/work/a/") "b.el")))
 
 ;;;; Several sessions at once
 

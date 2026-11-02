@@ -260,6 +260,44 @@ registration; the agent, if BODY starts one, is stopped after."
     ;; Without a parent listed, the record's own, in its backend.
     (should (equal (drover-session-parent (drover-remote-test--roundtrip record)) '(opencode . "ses_0")))))
 
+(ert-deftest drover-remote-test-owner-reads-its-files ()
+  "The owner tells the default branch and names the files changed: the viewer reads nothing of its own."
+  (skip-unless (drover-remote-test--available-p))
+  (let* ((root (file-name-as-directory (make-temp-file "drover-repo" t)))
+         (drover--default-branches (make-hash-table :test #'equal))
+         (looked nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git/refs/remotes/origin" root) t)
+          (with-temp-file (expand-file-name ".git/refs/remotes/origin/HEAD" root)
+            (insert "ref: refs/remotes/origin/develop\n"))
+          (let* ((record (drover-session-create :backend 'opencode :id "s" :directory root :branch "develop"))
+                 (encoded (drover-remote-encode-record '(opencode . "s") record)))
+            (should (equal (plist-get encoded :default-branch) "develop"))
+            ;; Without a branch, no default to tell.
+            (should-not (plist-member (drover-remote-encode-record
+                                       '(opencode . "s") (drover-session-create :directory root))
+                                      :default-branch))
+            ;; The viewer takes it, and never looks at its own directory of
+            ;; that name, here the same one.
+            (let ((bytes (spyglass-channel-encode encoded)))
+              (advice-add 'drover--read-git-default-branch :before (lambda (directory) (push directory looked))
+                          '((name . drover-remote-test-looked)))
+              (clrhash drover--default-branches)
+              (let ((decoded (drover-remote-decode-record (spyglass-channel-decode bytes) "core" 'remote:core 0)))
+                (should (equal (drover-session-default-branch decoded) "develop"))
+                (should (drover-session-default-branch-p decoded))
+                (setf (drover-session-branch decoded) "main")
+                (should-not (drover-session-default-branch-p decoded))
+                (should-not looked)))))
+      (advice-remove 'drover--read-git-default-branch 'drover-remote-test-looked)
+      (delete-directory root t)))
+  ;; Files changed are named relative to the session's directory there.
+  (should (equal (plist-get (drover-remote--encode-recap
+                             '(:changes (("/work/p/a.el" 1 2) ("/elsewhere/b.el" nil nil))) "/work/p/")
+                            :changes)
+                 [["a.el" 1 2] ["/elsewhere/b.el" :false :false]])))
+
 (ert-deftest drover-remote-test-hostile-records ()
   "Records received are checked and bounded, whatever they hold, and never read."
   (skip-unless (drover-remote-test--available-p))

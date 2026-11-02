@@ -5684,6 +5684,52 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
               (should (string-match-p "Session d +p +20s\\'" (drover-list-test-heading "d"))))))
       (delete-directory root t))))
 
+(ert-deftest drover-list-test-branch-default-of-another-host ()
+  "Another host's session hides the branch its owner read as the default; this host reads nothing."
+  (let* ((root (make-temp-file "drover-repo" t))
+         (remote (expand-file-name ".git/refs/remotes/origin" root))
+         (looked nil))
+    (unwind-protect
+        (progn
+          (make-directory remote t)
+          (with-temp-file (expand-file-name ".git/HEAD" root) (insert "ref: refs/heads/main\n"))
+          ;; Here, the same directory is a repository of another default.
+          (with-temp-file (expand-file-name "HEAD" remote) (insert "ref: refs/remotes/origin/develop\n"))
+          (advice-add 'drover--read-git-default-branch :before (lambda (directory) (push directory looked))
+                      '((name . drover-list-test-looked)))
+          (let ((drover--default-branches (make-hash-table :test #'equal)))
+            (drover-list-test-with
+                (list (drover-test-session "m" :status 'working :project "p" :branch "main" :host "core"
+                                           :default-branch "main" :directory root
+                                           :updated (drover-list-test-ago 10))
+                      (drover-test-session "d" :status 'working :project "p" :branch "develop" :host "core"
+                                           :default-branch "main" :directory root
+                                           :updated (drover-list-test-ago 20))
+                      (drover-test-session "u" :status 'working :project "p" :branch "master" :host "core"
+                                           :directory root :updated (drover-list-test-ago 30)))
+              (should-not (string-search "main" (drover-list-test-heading "m")))
+              (should (string-search "develop" (drover-list-test-heading "d")))
+              ;; The owner knowing none, main and master stand for it.
+              (should-not (string-search "master" (drover-list-test-heading "u")))
+              (should-not looked))))
+      (advice-remove 'drover--read-git-default-branch 'drover-list-test-looked)
+      (delete-directory root t))))
+
+(ert-deftest drover-list-test-directory-of-another-host ()
+  "Details name another host's directory as it does, and its changed files as it sent them."
+  (let* ((home (expand-file-name "~/src/x/"))
+         (layout (list :fields nil :now drover-test-now))
+         (fact (lambda (session)
+                 (nth 1 (assoc "Directory" (drover-list--hidden-facts session layout))))))
+    (should (equal (funcall fact (drover-session-create :directory home)) "~/src/x/"))
+    (should (equal (funcall fact (drover-session-create :directory home :host "core")) home))
+    (should (equal (drover-list--changes-text (list (list (concat home "a.el") 1 2)) home)
+                   "+1 −2 in 1 file: a.el"))
+    (should (equal (drover-list--changes-text (list (list (concat home "a.el") 1 2))
+                                              (drover-session-local-directory
+                                               (drover-session-create :directory home :host "core")))
+                   (concat "+1 −2 in 1 file: " home "a.el")))))
+
 (ert-deftest drover-list-test-branch-in-view-menu ()
   "The View menu's Columns switch the branch's column."
   (drover-list-test-with

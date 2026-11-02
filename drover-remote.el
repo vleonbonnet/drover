@@ -51,7 +51,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 5))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -361,6 +361,11 @@ identifier cannot travel."
         (put :directory (drover-remote--plain (drover-session-directory record)))
         (put :project (drover-remote--plain (drover-session-project record)))
         (put :branch (drover-remote--plain (drover-session-branch record)))
+        ;; Read here, where the repository is: the peer never looks at
+        ;; its own file system for a session of this host.
+        (put :default-branch (and (drover-session-branch record)
+                                  (drover-remote--plain
+                                   (ignore-errors (drover-git-default-branch (drover-session-directory record))))))
         (let ((parent-id (and parent (drover-remote--wire-id (cdr parent)))))
           (cond (parent-id (put :parent (vector (symbol-name (car parent)) parent-id)))
                 ((drover-remote--wire-id (drover-session-parent record))
@@ -482,6 +487,7 @@ minus this host's.  Nil when DATA names no session."
         :directory (drover-remote--line (plist-get data :directory) 1024)
         :project (drover-remote--line (plist-get data :project))
         :branch (drover-remote--line (plist-get data :branch))
+        :default-branch (drover-remote--line (plist-get data :default-branch))
         :parent (and parent (drover-remote--key parent))
         :status (drover-remote--status (plist-get data :status))
         :requests (let ((requests (plist-get data :requests)))
@@ -1216,8 +1222,10 @@ ERROR is a line when it cannot be asked or fails."
                                              (seq-take changes 100))))))
     out))
 
-(defun drover-remote--encode-recap (recap)
-  "Return RECAP, as `drover-recap' tells one, as it travels."
+(defun drover-remote--encode-recap (recap &optional directory)
+  "Return RECAP, as `drover-recap' tells one, as it travels.
+The files changed under DIRECTORY, the session's, are named relative to
+it, here, where they are: the peer names them as received."
   (let ((out nil))
     (dolist (key '(:prompt :reply :error :failure))
       (when-let* ((text (drover-remote--plain (plist-get recap key))))
@@ -1226,7 +1234,8 @@ ERROR is a line when it cannot be asked or fails."
       (setq out (plist-put out :changes
                            (vconcat (delq nil (mapcar (lambda (change)
                                                         (and (consp change) (stringp (car change))
-                                                             (vector (substring-no-properties (car change))
+                                                             (vector (substring-no-properties
+                                                                      (drover-relative-file-name (car change) directory))
                                                                      (or (drover-remote--number (nth 1 change)) :false)
                                                                      (or (drover-remote--number (nth 2 change)) :false))))
                                                       (and (listp changes) (seq-take changes 100))))))))
@@ -1423,7 +1432,8 @@ received so far each time an answer of the owner's comes."
              (funcall reply nil "no such session here")
            (drover-recap (car served)
                          (lambda (recap)
-                           (funcall reply (list :recap (or (drover-remote--encode-recap recap)
+                           (funcall reply (list :recap (or (drover-remote--encode-recap
+                                                            recap (drover-session-directory (car served)))
                                                            (list :failure "no recap"))))))))
         ("fetch"
          (let ((kind (plist-get message :kind)))

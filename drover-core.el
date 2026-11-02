@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 5
+(defconst drover-core-generation 6
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -649,7 +649,10 @@ backend a proxy of that host (see `drover-remote').")
 Such as `opencode' or `claude-code-ide': it tells how the session opens.")
   (stale nil :documentation "When the owner of a session of another host was last heard from, or nil.
 A float time, set while that host is not connected: the record is as it
-was then, its status perhaps past."))
+was then, its status perhaps past.")
+  (default-branch nil :documentation "The default branch of the repository of a session of another host, or nil.
+As its owner read it: the file system of this host is never looked at
+for a session of another (see `drover-session-default-branch-p')."))
 
 (drover-note-layout 'drover-session)
 
@@ -676,7 +679,8 @@ and `drover-text-limit' characters.  RECORD itself when within those."
         (line drover-session-provider-name)
         (line drover-session-project)
         (line drover-session-branch)
-        (line drover-session-host))
+        (line drover-session-host)
+        (line drover-session-default-branch))
       (let ((detail (drover-session-detail record)))
         (when (and (stringp detail) (not (eq (drover-bound-text detail) detail)))
           (unless copy (setq copy (copy-sequence record)))
@@ -3597,11 +3601,33 @@ See `drover-session-default-branch-p'."
   "Return non-nil when SESSION works on the default branch of its repository.
 The default branch is the one a remote of the repository names (see
 `drover-git-default-branch'), else one of `drover-default-branches'.
-Nil for a session without a branch."
+For a session of another host, it is the one its owner read, which the
+record tells (`drover-session-default-branch'): its directory is on
+that host, and this host's file system is never looked at for it.  Nil
+for a session without a branch."
   (when-let* ((branch (drover-session-branch session)))
-    (if-let* ((default (drover-git-default-branch (drover-session-directory session))))
+    (if-let* ((default (if (drover-session-host session)
+                           (drover-session-default-branch session)
+                         (drover-git-default-branch (drover-session-directory session)))))
         (equal branch default)
       (and (member branch drover-default-branches) t))))
+
+(defun drover-session-local-directory (session)
+  "Return the directory of SESSION when it is one of this host, else nil.
+A session of another host runs in a directory of that host, which this
+host's file system must not be asked about, nor commands run in."
+  (and (not (drover-session-host session))
+       (drover-session-directory session)))
+
+(defun drover-relative-file-name (file directory)
+  "Return FILE named relative to DIRECTORY when under it, else FILE.
+Compared as names, the files may be gone.  For the files a session
+changed, DIRECTORY its own, on this host."
+  (if (and directory (file-name-absolute-p file)
+           (string-prefix-p (file-name-as-directory (expand-file-name directory))
+                            (expand-file-name file)))
+      (file-relative-name file directory)
+    file))
 
 ;;;; The session at point
 

@@ -121,7 +121,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 5))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
   (load "drover-core" nil t))
 
 (defgroup drover-list nil
@@ -2237,17 +2237,11 @@ shows in the session itself, or in a preview.  An alist (PART . LINES)."
 (defun drover-list--changes-text (changes directory)
   "Return CHANGES, a recap's files changed, as one line of text.
 Such as \"+120 −14 in 3 files: a.el, b.el, c.el\"; the counts are left
-out when unknown.  Files under DIRECTORY are named relative to it."
+out when unknown.  Files under DIRECTORY, one of this host, are named
+relative to it; those of another host's session come so named by it."
   (let* ((additions (delq nil (mapcar #'cadr changes)))
          (deletions (delq nil (mapcar #'caddr changes)))
-         (names (mapcar (lambda (change)
-                          (let ((file (car change)))
-                            ;; Compared as names: the files may be gone.
-                            (if (and directory (file-name-absolute-p file)
-                                     (string-prefix-p (file-name-as-directory (expand-file-name directory))
-                                                      (expand-file-name file)))
-                                (file-relative-name file directory)
-                              file)))
+         (names (mapcar (lambda (change) (drover-relative-file-name (car change) directory))
                         changes)))
     (concat (and (or additions deletions)
                  (format "+%d −%d in " (apply #'+ additions) (apply #'+ deletions)))
@@ -2268,8 +2262,10 @@ branch's column leaves out."
                            (not (string-empty-p (drover-list--one-line value))))
                   (push (list label value face) facts))))
       (unless (drover-session-project session)
-        (fact 'directory "Directory" (and (drover-session-directory session)
-                                          (abbreviate-file-name (drover-session-directory session)))))
+        ;; Another host's, as it names it: not this host's to abbreviate.
+        (fact 'directory "Directory" (if-let* ((directory (drover-session-local-directory session)))
+                                         (abbreviate-file-name directory)
+                                       (drover-session-directory session))))
       (when-let* ((host (drover-session-host session)))
         (fact 'host "Host" (drover-host-label host))
         (fact 'host-state "Not connected" (drover-host-state host) 'drover-dim))
@@ -2318,7 +2314,7 @@ to one, cut.  FACE, if any, is that of TEXT."
       (add "Prompt" (plist-get recap :prompt) 'prompt)
       (add "Reply" (plist-get recap :reply) 'reply)
       (when-let* ((changes (plist-get recap :changes)))
-        (add "Changes" (drover-list--changes-text changes (drover-session-directory session)) 'changes))
+        (add "Changes" (drover-list--changes-text changes (drover-session-local-directory session)) 'changes))
       (cond ((and (plist-get entry :loading) (not (plist-get entry :known)))
              (add "Last turn" "loading…" nil 'drover-dim))
             (failure (add "Last turn" (concat "not available: " failure) nil 'drover-dim))

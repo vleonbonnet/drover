@@ -300,7 +300,8 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 
 (ert-deftest drover-keys-test-new-session ()
   (drover-keys-test-with (list (drover-test-session "s" :directory "/work/s/")
-                               (drover-test-session "nowhere"))
+                               (drover-test-session "nowhere")
+                               (drover-test-session "remote" :directory "/on/core/" :host "core"))
     (drover-keys-test-in 'view "s"
       (call-interactively #'drover-new-session))
     (drover-keys-test-in 'view "nowhere"
@@ -309,8 +310,12 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (drover-keys-test-in 'view nil
       (let ((default-directory "/work/empty/"))
         (call-interactively #'drover-new-session)))
+    ;; Another host's directory is not this host's to start in.
+    (drover-keys-test-in 'view "remote"
+      (let ((default-directory "/work/here/"))
+        (call-interactively #'drover-new-session)))
     (should (equal (reverse drover-test-calls)
-                   '((:new "/work/s/") (:new "/work/list/") (:new "/work/empty/"))))))
+                   '((:new "/work/s/") (:new "/work/list/") (:new "/work/empty/") (:new "/work/here/"))))))
 
 (ert-deftest drover-keys-test-new-session-backend-choice ()
   (drover-keys-test-with nil
