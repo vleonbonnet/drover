@@ -120,7 +120,12 @@ It returns what it reads of FILE, a plist of Lisp data, or nil.")
 Called when what was read of FILE changed; the latter is nil once FILE
 is gone.")
   (on-cycle nil :documentation "Function of no argument called once every directory was listed.")
+  (key nil :documentation "Function of the DATA read of a file returning what names it, or nil.
+Its backend finds the file of a conversation by that name, such as its
+identifier, with `drover-transcript-keyed-file'.")
   (entries (make-hash-table :test #'equal) :documentation "Entries by file.")
+  (files (make-hash-table :test #'equal)
+         :documentation "The files of the entries, by what KEY names them.")
   (directories nil :documentation "The directories left to list in this look, as roots are.")
   (queue nil :documentation "The files left to read, first first.")
   (later nil :documentation "The files to read after QUEUE, last first.")
@@ -146,12 +151,13 @@ One made before drover's files were loaded anew, of other slots, is to
 be dropped: its timers stop, and its backend makes another."
   (drover-layout-current-p index 'drover-transcript-index))
 
-(defun drover-transcript-index-create (name roots read on-change &optional on-cycle)
+(defun drover-transcript-index-create (name roots read on-change &optional on-cycle key)
   "Return an index NAME of the files ROOTS tells, read with READ.
-ON-CHANGE and ON-CYCLE are told of changes and of each look's end.  See
-`drover-transcript-index' for each."
+ON-CHANGE and ON-CYCLE are told of changes and of each look's end, and
+KEY names what was read of a file.  See `drover-transcript-index' for
+each."
   (drover-transcript-index--create :name name :roots roots :read read
-                                   :on-change on-change :on-cycle on-cycle))
+                                   :on-change on-change :on-cycle on-cycle :key key))
 
 (defun drover-transcript-entry (index file)
   "Return the entry INDEX keeps of FILE, or nil."
@@ -161,6 +167,30 @@ ON-CHANGE and ON-CYCLE are told of changes and of each look's end.  See
   "Return what INDEX read of FILE, or nil."
   (when-let* ((entry (drover-transcript-entry index file)))
     (drover-transcript-data entry)))
+
+(defun drover-transcript-id (data)
+  "Return the identifier of the conversation read as DATA, its :id, or nil.
+A key function of an index, see `drover-transcript-index'."
+  (plist-get data :id))
+
+(defun drover-transcript-keyed-file (index key)
+  "Return the file of INDEX whose data its key function names KEY, or nil.
+Of two, it is the one read last, or of those kept between Emacs
+sessions, the one changed last."
+  (gethash key (drover-transcript-index-files index)))
+
+(defun drover-transcript--rekey (index file old new)
+  "Note that what was read of FILE of INDEX went from OLD to NEW, for its key.
+The table of files by key follows every entry, those read and those
+kept between Emacs sessions alike, which the backend is not told of."
+  (when-let* ((key (drover-transcript-index-key index)))
+    (let ((files (drover-transcript-index-files index))
+          (old-key (and old (funcall key old)))
+          (new-key (and new (funcall key new))))
+      (when (and old-key (not (equal old-key new-key)) (equal (gethash old-key files) file))
+        (remhash old-key files))
+      (when new-key
+        (puthash new-key file files)))))
 
 (defun drover-transcript-map (function index)
   "Call FUNCTION with the file and data of each entry of INDEX that has data."
@@ -190,6 +220,17 @@ FORMAT-STRING and ARGS are as for `format-message'."
   (pcase entry
     (`(,(pred stringp) ,(pred natnump) ,(pred numberp) ,_ ,(pred plistp)) t)))
 
+(defun drover-transcript--load-key (index file mtime data)
+  "Key FILE of INDEX, kept as DATA read when the file's time was MTIME.
+Of two files of one key, the one changed last keeps it."
+  (when-let* ((key (drover-transcript-index-key index))
+              (name (and data (funcall key data))))
+    (let* ((files (drover-transcript-index-files index))
+           (other (gethash name files))
+           (entry (and other (drover-transcript-entry index other))))
+      (unless (and entry (>= (drover-transcript-mtime entry) mtime))
+        (puthash name file files)))))
+
 (defun drover-transcript-load (index)
   "Read what was kept of INDEX, unless read already.
 Entries read since are kept over those of the file."
@@ -205,7 +246,8 @@ Entries read since are kept over those of the file."
               (unless (gethash name entries)
                 (puthash name (drover-transcript--create :file name :size size :mtime mtime
                                                          :inode inode :data data)
-                         entries))))
+                         entries)
+                (drover-transcript--load-key index name mtime data))))
         (error
          (drover-transcript--warn index "Ignoring what drover kept of %s in %s: %s"
                                   (drover-transcript-index-name index)
@@ -327,6 +369,7 @@ listed again only once its modification time tells files came or went."
 (defun drover-transcript--change (index file old new)
   "Tell INDEX's backend that what was read of FILE went from OLD to NEW."
   (unless (equal old new)
+    (drover-transcript--rekey index file old new)
     (when-let* ((function (drover-transcript-index-on-change index)))
       (drover-with-reporting "transcript change"
         (funcall function file old new)))))

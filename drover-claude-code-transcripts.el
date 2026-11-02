@@ -113,9 +113,6 @@ started."
         (drover-transcript-start drover-claude-code-transcripts--index))
       drover-claude-code-transcripts--index)))
 
-(defvar drover-claude-code-transcripts--files (make-hash-table :test #'equal)
-  "The transcript of each conversation, by identifier.")
-
 (defvar drover-claude-code-transcripts--agents (make-hash-table :test #'equal)
   "The sessions \"claude agents\" listed last, by conversation, as plists.")
 
@@ -475,7 +472,8 @@ See `drover-claude-code-history-days'.  The backend's :history."
 
 (defun drover-claude-code-transcripts--file (id)
   "Return the transcript of conversation ID, or nil."
-  (gethash id drover-claude-code-transcripts--files))
+  (when-let* ((index (drover-claude-code-transcripts--current-index)))
+    (drover-transcript-keyed-file index id)))
 
 (defun drover-claude-code-transcripts--data (id)
   "Return what was read of conversation ID, or nil."
@@ -505,13 +503,9 @@ read.  The backend's :session."
 
 ;;;; Following the transcripts
 
-(defun drover-claude-code-transcripts--changed (file old new)
-  "Report that what was read of transcript FILE went from OLD to NEW."
+(defun drover-claude-code-transcripts--changed (_file old new)
+  "Report that what was read of a transcript went from OLD to NEW."
   (let ((id (plist-get (or new old) :id)))
-    (if new
-        (puthash id file drover-claude-code-transcripts--files)
-      (when (equal (gethash id drover-claude-code-transcripts--files) file)
-        (remhash id drover-claude-code-transcripts--files)))
     (drover-backend-changed 'claude-code id)
     (dolist (agent (delete-dups (mapcar (lambda (subagent) (plist-get subagent :agent))
                                         (append (plist-get old :subagents)
@@ -553,7 +547,8 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
                                   #'drover-claude-code-transcripts--roots
                                   #'drover-claude-code-transcripts--read
                                   #'drover-claude-code-transcripts--changed
-                                  #'drover-claude-code-transcripts--looked))
+                                  #'drover-claude-code-transcripts--looked
+                                  #'drover-transcript-id))
 
 ;;;; Sessions Claude Code runs elsewhere
 

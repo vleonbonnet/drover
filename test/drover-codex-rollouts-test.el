@@ -34,7 +34,6 @@
      (drover-test-with-backend nil
        (let ((drover-codex-rollouts--users nil)
              (drover-codex-rollouts--index nil)
-             (drover-codex-rollouts--files (make-hash-table :test #'equal))
              (drover-codex-rollouts--names nil)
              (drover-codex-program (expand-file-name "no-codex" home))
              (drover-codex-include-non-interactive nil)
@@ -127,6 +126,23 @@
             (should (equal (mapcar #'drover-session-id archived) (list drover-codex-rollouts-test-b)))
             (should (drover-session-archived (car archived))))
         (drover-set-show-archived nil)))))
+
+(ert-deftest drover-codex-rollouts-test-kept-between-sessions ()
+  "A new Emacs finds the conversations it kept, read again or not."
+  (drover-codex-rollouts-test-with
+    (let ((project (expand-file-name "work/" home)))
+      (drover-fixture-codex drover-codex-rollouts-test-a project)
+      (drover-codex-rollouts-test-scan)
+      (drover-transcript-save drover-codex-rollouts--index t)
+      (let ((drover-codex-rollouts--index (drover-codex-rollouts--make-index)))
+        (drover-transcript-load drover-codex-rollouts--index)
+        (drover-index-refresh)
+        (should (equal (drover-codex-rollouts-test-ids) (list drover-codex-rollouts-test-a)))
+        (should (drover-find 'codex drover-codex-rollouts-test-a))
+        (drover-codex-rollouts--recap (drover-find 'codex drover-codex-rollouts-test-a)
+                                      (lambda (recap) (should-not (plist-get recap :failure))))
+        (drover-codex-rollouts-test-scan)
+        (should (drover-find 'codex drover-codex-rollouts-test-a))))))
 
 (ert-deftest drover-codex-rollouts-test-non-interactive-and-subagents ()
   "Sessions `codex exec' ran are left out unless asked; subagents name their parent."
