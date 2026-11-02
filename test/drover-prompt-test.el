@@ -1130,23 +1130,54 @@ another front end, its session keys on: neither quotes a session."
           (should (window-live-p (selected-window))))))))
 
 (ert-deftest drover-prompt-test-erase ()
-  "Clearing erases the text, region or not, and keeps the buffer, its window and the picks."
+  "Clearing erases the text, region or not, closes the prompt's window, and keeps the buffer and picks.
+The window closes as `drover-prompt-toggle' hides it; the last window
+of a frame stays."
   (drover-prompt-test-with
     (let ((transient-mark-mode t)
-          (prompt (drover-prompt-buffer t)))
+          (prompt (drover-prompt-buffer t))
+          (model (drover-test-model "m")))
       (save-window-excursion
-        (set-window-buffer (selected-window) prompt)
-        (with-current-buffer prompt
-          (insert "some text")
-          (setq drover-prompt-picked-agent "plan")
-          (set-mark (point-min))
-          (activate-mark)
-          (drover-prompt-run 'clear)
-          (should (equal (buffer-string) ""))
-          (should-not mark-active)
-          (should (equal drover-prompt-picked-agent "plan")))
-        (should (eq (window-buffer (selected-window)) prompt))
-        (should (buffer-live-p prompt))))))
+        (delete-other-windows)
+        (let ((other (selected-window))
+              (window (split-window)))
+          (set-window-buffer window prompt)
+          (select-window window)
+          (with-current-buffer prompt
+            (insert "some text")
+            (setq drover-prompt-picked-agent "plan"
+                  drover-prompt-picked-model model
+                  drover-prompt-picked-variant 'high
+                  default-directory "/"
+                  drover-prompt-directory-picked-p t)
+            (set-mark (point-min))
+            (activate-mark)
+            (drover-prompt-run 'clear))
+          (should-not (window-live-p window))
+          (should (eq (selected-window) other))
+          (should (buffer-live-p prompt))
+          (with-current-buffer prompt
+            (should (equal (buffer-string) ""))
+            (should-not mark-active)
+            (should (equal drover-prompt-picked-agent "plan"))
+            (should (eq drover-prompt-picked-model model))
+            (should (eq drover-prompt-picked-variant 'high))
+            (should (equal default-directory "/"))
+            (should drover-prompt-directory-picked-p))
+          ;; Shown again, the choices still hold, the directory chosen too.
+          (with-temp-buffer
+            (setq default-directory temporary-file-directory)
+            (drover-prompt-toggle))
+          (should (equal (buffer-local-value 'default-directory prompt) "/"))
+          (should (equal (buffer-local-value 'drover-prompt-picked-agent prompt) "plan"))
+          ;; The last window of a frame stays.
+          (delete-other-windows)
+          (set-window-buffer (selected-window) prompt)
+          (with-current-buffer prompt
+            (insert "more text")
+            (drover-prompt-run 'clear)
+            (should (equal (buffer-string) "")))
+          (should (eq (window-buffer (selected-window)) prompt)))))))
 
 ;;;; Options for a running session
 

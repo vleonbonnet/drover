@@ -954,14 +954,17 @@ rather than the whole buffer.  Nil too without a prompt buffer."
                   :end (copy-marker end)
                   :region (and region t))))))))
 
+(defun drover-prompt--hide (buffer)
+  "Delete the windows showing the prompt BUFFER, but the last of a frame."
+  (dolist (window (get-buffer-window-list buffer nil t))
+    (when (and (window-live-p window) (eq (window-deletable-p window) t))
+      (delete-window window))))
+
 (defun drover-prompt--close (buffer)
   "Kill the prompt BUFFER and delete the windows that showed it.
 A window that is the last of its frame stays."
-  (let ((windows (get-buffer-window-list buffer nil t)))
-    (kill-buffer buffer)
-    (dolist (window windows)
-      (when (and (window-live-p window) (eq (window-deletable-p window) t))
-        (delete-window window)))))
+  (drover-prompt--hide buffer)
+  (kill-buffer buffer))
 
 (defun drover-prompt-consume (content &optional buffer)
   "Remove CONTENT, as `drover-prompt-content' returned it, from the prompt BUFFER.
@@ -1085,13 +1088,17 @@ the prompt action `send'."
         (drover-prompt--send-to-new target content buffer)))))
 
 (defun drover-prompt-erase ()
-  "Erase the text of the prompt, region or not.
-The buffer, its window and the agent, model, effort and directory
-chosen stay, for the next prompt.  This is the prompt action `clear'."
+  "Erase the text of the prompt, region or not, and close its window.
+The buffer and the agent, model, effort and directory chosen stay, for
+the next prompt, which `drover-prompt-toggle' shows again.  A window
+that is the last of its frame stays.  This is the prompt action
+`clear'."
   (interactive)
-  (with-current-buffer (drover-prompt--prompt-buffer)
-    (deactivate-mark)
-    (erase-buffer)))
+  (let ((buffer (drover-prompt--prompt-buffer)))
+    (with-current-buffer buffer
+      (deactivate-mark)
+      (erase-buffer))
+    (drover-prompt--hide buffer)))
 
 (defun drover-prompt--attach-candidates (buffer)
   "Return the buffers and project files `drover-prompt-insert-attachment' offers.
