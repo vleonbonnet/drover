@@ -75,6 +75,13 @@ isolated, engines read their local state from the throwaway homes of
            (drover--model-memory nil)
            (drover--model-memory-stamp 'unread)
            (drover-agent-shell--gemini-registered nil)
+           (drover--resumers nil)
+           (drover-claude-code-transcripts--users nil)
+           (drover-claude-code-transcripts--index nil)
+           (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
+           (drover-codex-rollouts--users nil)
+           (drover-codex-rollouts--index nil)
+           (drover-codex-rollouts--files (make-hash-table :test #'equal))
            (drover-agent-shell-test--buffers nil)
            (drover-agent-shell-test--calls nil)
            (drover-agent-shell-test--warnings nil)
@@ -205,7 +212,8 @@ effort for a model without effort."
                       agent-shell-viewport--compose-snapshot))
     (should (boundp variable)))
   (let ((usage (car (help-split-fundoc (documentation 'agent-shell--start t) 'agent-shell--start))))
-    (dolist (key '("CONFIG" "NO-FOCUS" "NEW-SESSION" "SESSION-STRATEGY"))
+    ;; Resuming starts a shell loading a session, in a directory.
+    (dolist (key '("CONFIG" "NO-FOCUS" "NEW-SESSION" "SESSION-STRATEGY" "SESSION-ID" "CWD"))
       (should (string-match-p (concat "&key .*\\_<" key "\\_>") usage))))
   ;; The start effort relies on default config options, applied after the model.
   (should (assq :default-config-options (agent-shell-make-agent-config)))
@@ -226,7 +234,10 @@ effort for a model without effort."
               (window-buffer-change-functions nil)
               (after-focus-change-function #'ignore))
           (load "drover-agent-shell" nil t)
-          (should (equal (drover-backends) '(agent-shell)))
+          ;; With it, the backends listing the conversations Claude Code
+          ;; and Codex recorded, which its shells resume.
+          (should (equal (sort (drover-backends) #'string<) '(agent-shell claude-code codex)))
+          (should (equal (car (drover-resumer 'codex)) 'agent-shell))
           (should (equal (drover-backend-label 'agent-shell) "agent-shell"))
           (let ((session (drover-session-create :backend 'agent-shell :id "shell-0")))
             (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new
@@ -401,6 +412,31 @@ the shell started with."
                                 (lambda (session) (setq result (list 'then session)))
                                 (lambda (message) (setq result (list 'else message))))
     (cons result (drover-agent-shell-test--started-config))))
+
+(ert-deftest drover-agent-shell-test-resume ()
+  "A conversation resumes in a new shell of its engine, loading it by identifier."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let* ((directory (file-name-as-directory (make-temp-file "drover-resume" t)))
+             (buffer (save-window-excursion
+                       (drover-agent-shell-resume 'codex "019f-thread" directory)))
+             (start (car (drover-agent-shell-test--calls-of 'agent-shell--start))))
+        (unwind-protect
+            (progn
+              (should (equal (car start) directory))
+              (should (equal (cdr start)
+                             (list :config (drover-agent-shell-test--started-config) :no-focus t
+                                   :new-session t :session-strategy 'new :session-id "019f-thread"
+                                   :cwd directory)))
+              (should (eq (map-elt (drover-agent-shell-test--started-config) :identifier) 'codex))
+              (should (buffer-live-p buffer))
+              ;; Every engine of a configuration resumes in a shell.
+              (drover-agent-shell--register)
+              (should (equal (mapcar (lambda (engine) (car (drover-resumer engine)))
+                                     '(claude-code codex opencode))
+                             '(agent-shell agent-shell agent-shell)))
+              (should-error (drover-agent-shell-resume 'unknown "x" directory) :type 'user-error))
+          (delete-directory directory t))))))
 
 (ert-deftest drover-agent-shell-test-create ()
   "A new shell starts on the explicit model, agent and effort, displayed."

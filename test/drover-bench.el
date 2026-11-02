@@ -30,6 +30,12 @@
 ;; again after changes while hidden.  It checks that what was drawn in
 ;; place is what a drawing anew draws.
 ;;
+;; Then it writes 2000 Claude Code transcripts, 20 of 3 MB, and 600
+;; Codex rollouts, and times their indexes: reading every file, looking
+;; at them unchanged, after a turn appended, keeping what was read and
+;; reading it again; the list drawn whole with them, listing them anew,
+;; and terminals opening and closing them, drawn in place.
+;;
 ;; It runs in batch, or in a graphical Emacs, where measuring text and
 ;; collecting garbage cost what they cost the user:
 ;;
@@ -46,6 +52,7 @@
 ;;; Code:
 
 (require 'drover-test-helpers)
+(require 'drover-transcript-fixtures)
 (require 'drover-list)
 (require 'drover-attention)
 
@@ -401,12 +408,178 @@ The list is the current buffer, alone in the selected window."
       (with-current-buffer list
         (drover-list--on-window-change main)))))
 
+(defconst drover-bench-claude-conversations 2000
+  "Claude Code transcripts of the bench of closed conversations.")
+
+(defconst drover-bench-codex-conversations 600
+  "Codex rollouts of the bench of closed conversations.")
+
+(defconst drover-bench-large-conversations 20
+  "Transcripts of megabytes among them.")
+
+(defun drover-bench-uuid (index &optional version)
+  "Return a random-looking identifier of conversation INDEX, as the CLIs make them.
+VERSION is the UUID's version digit, 4 by default.  Emacs hashes long
+strings by sampling them, so names alike but for a counter would hash
+alike, which real identifiers never do."
+  (let ((hex (md5 (format "%s-%d" (or version 4) index))))
+    (format "%s-%s-%d%s-8%s-%s" (substring hex 0 8) (substring hex 8 12) (or version 4)
+            (substring hex 13 16) (substring hex 17 20) (substring hex 20 32))))
+
+(defun drover-bench-history-write (home)
+  "Write the transcripts and rollouts of the bench, of conversations under HOME."
+  ;; An hour apart, the newest a day old: as many as a day holds keep
+  ;; being checked at every look.
+  (let ((start (- drover-bench-now (* drover-bench-claude-conversations 3600))))
+    (dotimes (index drover-bench-claude-conversations)
+      (let ((directory (format "%swork/project-%02d/" home (% index 37))))
+        (drover-fixture-claude (drover-bench-uuid index) directory
+                               :start (+ start (* index 3600))
+                               :prompt (format "Investigate issue %d of the registry paging" index)
+                               :ai-title (and (cl-evenp index) (format "Registry paging, part %d" index))
+                               :filler (if (< index drover-bench-large-conversations) 3000000 4000)
+                               :subagents (and (zerop (% index 10))
+                                               '(("agent-a1" "Explore the code" "Explore"))))))
+    (dotimes (index drover-bench-codex-conversations)
+      (drover-fixture-codex (drover-bench-uuid index 7)
+                            (format "%swork/codex-%02d/" home (% index 23))
+                            :start (+ start (- (* drover-bench-claude-conversations 3600)
+                                              (* drover-bench-codex-conversations 7200))
+                                      (* index 7200))
+                            :prompt (format "Port module %d" index)
+                            :archived (zerop (% index 20))))))
+
+(defun drover-bench-history ()
+  "Time the closed conversations of Claude Code and Codex, by the thousand.
+Their indexes reading the files first, then looking at them unchanged,
+then after a turn appended; what they keep between Emacs sessions; the
+list drawn whole with them, and front ends opening and closing them,
+drawn in place."
+  (drover-test-with-homes
+    (drover-test-with-backend nil
+      (let ((drover-claude-code-transcripts--users nil)
+            (drover-claude-code-transcripts--index nil)
+            (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
+            (drover-claude-code-transcripts--agents (make-hash-table :test #'equal))
+            (drover-claude-code-agents-interval nil)
+            (drover-codex-rollouts--users nil)
+            (drover-codex-rollouts--index nil)
+            (drover-codex-rollouts--files (make-hash-table :test #'equal))
+            (drover-codex-rollouts--names nil)
+            (drover-list-age-interval nil)
+            (drover-list-cache-interval nil)
+            (drover-list-animation-interval nil)
+            (drover-list-deferred-delay nil)
+            (terminals nil)
+            (bytes 0))
+        (setq drover--backends nil)
+        (let ((written (drover-bench-measure (lambda () (drover-bench-history-write home)) 1)))
+          (drover-claude-code-transcripts-install 'bench)
+          (drover-codex-rollouts-install 'bench)
+          (drover-test-register-simple 'term (lambda () terminals)
+                                       :session (lambda (id)
+                                                  (seq-find (lambda (session) (equal (drover-session-id session) id))
+                                                            terminals)))
+          (let* ((claude drover-claude-code-transcripts--index)
+                 (codex drover-codex-rollouts--index)
+                 (first (cl-letf* ((insert (symbol-function 'drover-transcript-insert))
+                                   ((symbol-function 'drover-transcript-insert)
+                                    (lambda (file beg end) (cl-incf bytes (- end beg)) (funcall insert file beg end))))
+                          (drover-bench-measure (lambda ()
+                                                  (drover-transcript-scan claude)
+                                                  (drover-transcript-scan codex))
+                                                1)))
+                 (unchanged (drover-bench-measure (lambda ()
+                                                    (drover-transcript-scan claude)
+                                                    (drover-transcript-scan codex))
+                                                  5))
+                 (quick (drover-bench-measure (lambda ()
+                                                (drover-transcript-scan claude t)
+                                                (drover-transcript-scan codex t))
+                                              5))
+                 (big (drover-claude-code-transcripts--file (drover-bench-uuid 0)))
+                 (appended (drover-bench-measure
+                            (lambda () (drover-transcript-scan claude))
+                            5
+                            (lambda ()
+                              (drover-fixture-claude-append
+                               big (drover-fixture-claude-meta (drover-bench-uuid 0) "ai-title"
+                                                               :aiTitle (format "Renamed %d" (random 1000000)))))))
+                 (save (drover-bench-measure (lambda ()
+                                               (setf (drover-transcript-index-dirty claude) t)
+                                               (drover-transcript-save claude t))
+                                             3))
+                 (load (drover-bench-measure (lambda ()
+                                               (drover-transcript-load (drover-claude-code-transcripts--make-index)))
+                                             3))
+                 (records (length (drover-sessions)))
+                 (listed (drover-bench-measure #'drover-claude-code-transcripts--sessions 5)))
+            (drover-bench-log "closed conversations: %d Claude Code transcripts, %d of 3 MB, %d Codex rollouts; %d sessions listed; written in %.1f s"
+                              drover-bench-claude-conversations drover-bench-large-conversations
+                              drover-bench-codex-conversations records (/ (car written) 1000))
+            (drover-bench-log "  indexes:     %s, %.1f MB read | %s"
+                              (drover-bench-row "first look, reading all" first 100000)
+                              (/ bytes 1048576.0)
+                              (drover-bench-row "a turn appended to a large one" appended 1000))
+            (drover-bench-log "               nothing changed: %s | %s"
+                              (drover-bench-row "a look checking every file" unchanged 1000)
+                              (drover-bench-row "one checking the last day's" quick 1000))
+            (drover-bench-log "               %s, %d kB | %s | %s"
+                              (drover-bench-row "kept" save 1000)
+                              (/ (file-attribute-size (file-attributes (drover-transcript-cache-file claude))) 1024)
+                              (drover-bench-row "read again" load 1000)
+                              (drover-bench-row "Claude Code's listed" listed 150))
+            (let ((buffer (drover-list--buffer)))
+              (cl-letf (((symbol-function 'drover-list--now) (lambda () drover-bench-now)))
+                (drover-start)
+                (delete-other-windows)
+                (set-window-buffer (selected-window) buffer)
+                (with-current-buffer buffer
+                  (drover-list--revert t)
+                  (let* ((ids (mapcar #'drover-bench-uuid (number-sequence 1990 1999)))
+                         (tick 0)
+                         (render (drover-bench-measure #'drover-list--render 5))
+                         (relist (drover-bench-measure #'drover-index-refresh 5))
+                         (toggle (lambda ()
+                                   (let ((id (nth (% (cl-incf tick) 10) ids)))
+                                     (if (seq-find (lambda (session) (equal (drover-session-engine-id session) id))
+                                                   terminals)
+                                         (setq terminals (seq-remove (lambda (session)
+                                                                       (equal (drover-session-engine-id session) id))
+                                                                     terminals))
+                                       (push (drover-session-create :backend 'term :id (concat "term-" id)
+                                                                    :title "A terminal" :status 'working
+                                                                    :updated (+ drover-bench-now tick)
+                                                                    :engine 'claude-code :engine-id id)
+                                             terminals))
+                                     (drover-backend-changed 'term (concat "term-" id))
+                                     (drover-changed-now))))
+                         (redraws 0)
+                         (opening (let ((count (lambda () (cl-incf redraws))))
+                                    (advice-add 'drover-list--render :before count)
+                                    (unwind-protect (drover-bench-measure toggle 20)
+                                      (advice-remove 'drover-list--render count))))
+                         (same (let ((text (drover-bench-text)))
+                                 (drover-list--render)
+                                 (equal-including-properties text (drover-bench-text)))))
+                    (drover-bench-log "  the list:    %s | %s | %s"
+                                      (drover-bench-row "drawn whole" render 150)
+                                      (drover-bench-row "listing anew" relist 150)
+                                      (drover-bench-row "a terminal opening or closing one" opening 10))
+                    (drover-bench-log "               %d of 20 drawn in place; the same as drawn anew: %s"
+                                      (- 20 redraws) (if same "yes" "NO")))))
+              (kill-buffer buffer))
+            (drover-transcript-stop claude)
+            (drover-transcript-stop codex)))))))
+
 (if (not drover-bench-output)
-    (drover-bench-run)
+    (progn (drover-bench-run)
+           (drover-bench-history))
   ;; A graphical Emacs ends with the bench, whatever happens.
   (unwind-protect
       (condition-case err
-          (drover-bench-run)
+          (progn (drover-bench-run)
+                 (drover-bench-history))
         (error (drover-bench-log "drover bench failed: %S" err)))
     (kill-emacs 0)))
 

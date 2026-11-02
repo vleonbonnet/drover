@@ -149,6 +149,13 @@ Terminals BODY makes are killed."
          (drover-claude-code-start-flags-function nil)
          (drover-claude-code-project-directory-function nil)
          (drover-claude-code-ide--watchers nil)
+         (drover--resumers nil)
+         (drover-claude-code-transcripts--users nil)
+         (drover-claude-code-transcripts--index nil)
+         (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
+         (drover-codex-rollouts--users nil)
+         (drover-codex-rollouts--index nil)
+         (drover-codex-rollouts--files (make-hash-table :test #'equal))
          (window-selection-change-functions window-selection-change-functions)
          (window-buffer-change-functions window-buffer-change-functions)
          (after-focus-change-function after-focus-change-function)
@@ -355,6 +362,31 @@ session of `buffer', a temporary buffer, active."
   (drover-claude-code-ide-test-starting "--verbose"
     (drover-claude-code-ide-resume "a b" "/tmp/project/")
     (should (equal (nth 1 observed) (concat "--verbose --resume " (shell-quote-argument "a b"))))))
+
+(ert-deftest drover-claude-code-ide-test-resume-in-its-directory ()
+  "A conversation resumes in the directory it ran in, not the root of a project around it."
+  (let* ((root (file-name-as-directory (make-temp-file "drover-project" t)))
+         (directory (file-name-as-directory (expand-file-name "sub" root))))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".git" root) t)
+          (make-directory directory t)
+          (drover-claude-code-ide-test-starting ""
+            (let ((working nil))
+              (cl-letf (((symbol-function 'claude-code-ide--start-session)
+                         (lambda (&rest _)
+                           (setq working (claude-code-ide--get-working-directory)
+                                 started t))))
+                (drover-claude-code-ide-resume "33333333-3333-4333-8333-333333333333" directory))
+              (should (equal working directory))
+              ;; Started otherwise, it starts at the root, as claude-code-ide does.
+              (cl-letf (((symbol-function 'claude-code-ide--start-session)
+                         (lambda (&rest _)
+                           (setq working (claude-code-ide--get-working-directory)
+                                 started t))))
+                (drover-claude-code-ide-start directory))
+              (should (equal (file-truename working) (file-truename root))))))
+      (delete-directory root t))))
 
 (ert-deftest drover-claude-code-ide-test-fork ()
   "Forking resumes the conversation under a new identifier, given at start."
@@ -1383,7 +1415,11 @@ guess could hide another session of the directory."
 (ert-deftest drover-claude-code-ide-test-backend ()
   "The backend offers the operations of a terminal, and runs Claude Code."
   (drover-claude-code-ide-test-with
-    (should (equal (drover-backends) '(claude-code-ide)))
+    ;; With it, the backend listing Claude Code's transcripts, whose
+    ;; conversations it resumes.
+    (should (equal (sort (drover-backends) #'string<) '(claude-code claude-code-ide)))
+    (should (equal (drover-backend-property 'claude-code :recorded) '(claude-code)))
+    (should (eq (cdr (drover-resumer 'claude-code)) #'drover-claude-code-ide-resume))
     (should (equal (drover-backend-label 'claude-code-ide) "Claude Code IDE"))
     (should (equal (drover-backend-engines 'claude-code-ide) '(claude-code)))
     (dolist (operation '(:sessions :open :respond :interrupt :mark-seen :preview :recap :new :buffer

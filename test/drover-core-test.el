@@ -350,6 +350,151 @@ and `listed' how many times its :sessions was called."
                    (mapcar #'drover-session-key (drover-sessions))))
     (should (= (length (drover-index-sessions)) 1))))
 
+(defmacro drover-test-with-recorded (records &rest body)
+  "Run BODY with the fake backend's index, and a backend `records' recording RECORDS.
+`records' lists the conversations of the engine `fake' as their engine
+records them (:recorded), its sessions named by their engine
+identifiers; RECORDS is a variable BODY may set.  `recorded-asked'
+holds the identifiers its :session was asked for."
+  (declare (indent 1) (debug t))
+  `(drover-test-with-index nil
+     (let ((recorded-asked nil))
+       (drover-test-register-simple
+        'records (lambda () ,records)
+        :recorded '(fake)
+        :session (lambda (id)
+                   (push id recorded-asked)
+                   (seq-find (lambda (session) (equal (drover-session-id session) id)) ,records)))
+       (drover-changed-now)
+       (setq changed 'none)
+       ,@body)))
+
+(defun drover-test-record (id &rest properties)
+  "Return the record of conversation ID of the engine `fake', by `records'."
+  (apply #'drover-session-create
+         (append properties (list :backend 'records :id id :title (concat "Record " id)
+                                  :engine 'fake :engine-id id))))
+
+(ert-deftest drover-test-recorded-yields-to-front-ends ()
+  "A conversation a front end follows is its session; the record of it is not listed."
+  (let ((records (list (drover-test-record "x") (drover-test-record "y"))))
+    (drover-test-with-recorded records
+      (should (equal (mapcar #'drover-session-key (drover-index-sessions))
+                     '((records . "x") (records . "y"))))
+      ;; A front end opens x: its session alone is listed, followed in
+      ;; place, its record leaving as the front end's session comes.
+      (setq drover-test-sessions (list (drover-test-session "terminal" :engine 'fake :engine-id "x"
+                                                            :status 'working)))
+      (drover-backend-changed 'fake "terminal")
+      (drover-changed-now)
+      (should (equal (drover-test-index-ids changed) '("terminal" "x")))
+      (should (equal recorded-asked '("x")))
+      (should (drover-index-incremental-p))
+      (should (equal (drover-test-index-ids (drover-index-sessions)) '("terminal" "y")))
+      (should (equal (drover-test-index-ids (drover-sessions)) '("terminal" "y")))
+      ;; The record changing changes nothing listed.
+      (setq records (list (drover-test-record "x" :title "Renamed") (drover-test-record "y")))
+      (drover-backend-changed 'records "x")
+      (drover-changed-now)
+      (should-not (drover-index-session '(records . "x")))
+      ;; Relisting either backend agrees.
+      (drover-index-refresh)
+      (should (equal (drover-test-index-ids (drover-index-sessions)) '("terminal" "y")))
+      ;; The front end's session following another conversation: x is
+      ;; the record's again, and z, recorded too, the front end's.
+      (setq records (append records (list (drover-test-record "z"))))
+      (setq drover-test-sessions (list (drover-test-session "terminal" :engine 'fake :engine-id "z")))
+      (drover-backend-changed 'fake "terminal")
+      (drover-changed-now)
+      (should (drover-index-incremental-p))
+      (should (equal (drover-test-index-ids (drover-index-sessions)) '("terminal" "x" "y")))
+      (should (equal (drover-session-title (drover-index-session '(records . "x"))) "Renamed"))
+      ;; Closed, its conversation is listed by its record.
+      (setq drover-test-sessions nil)
+      (drover-backend-changed 'fake "terminal")
+      (drover-changed-now)
+      (should (equal (drover-test-index-ids changed) '("terminal" "z")))
+      (should (equal (drover-test-index-ids (drover-index-sessions)) '("x" "y" "z")))
+      ;; A front end's session not knowing its conversation yet hides nothing.
+      (setq drover-test-sessions (list (drover-test-session "new" :engine 'fake)))
+      (drover-backend-changed 'fake "new")
+      (drover-changed-now)
+      (should (equal (drover-test-index-ids (drover-index-sessions)) '("new" "x" "y" "z")))
+      ;; A subagent of a recorded conversation finds a front end showing it.
+      (setq records (append records (list (drover-test-record "x/agent" :engine-id nil :parent "x"))))
+      (setq drover-test-sessions (list (drover-test-session "terminal" :engine 'fake :engine-id "x")))
+      (drover-backend-changed 'records)
+      (drover-backend-changed 'fake "terminal")
+      (drover-changed-now)
+      (should (equal (drover-index-parent '(records . "x/agent")) '(fake . "terminal"))))))
+
+(ert-deftest drover-test-recorded-built-index ()
+  "An index made anew, and every listing, leave out the records of followed conversations."
+  (let ((records (list (drover-test-record "x") (drover-test-record "y"))))
+    (drover-test-with-backend (list (drover-test-session "terminal" :engine 'fake :engine-id "x"))
+      (drover-test-register-simple 'records (lambda () records) :recorded '(fake))
+      (should (equal (drover-test-index-ids (drover-sessions)) '("terminal" "y")))
+      (should (equal (drover-test-index-ids (drover-index-sessions)) '("terminal" "y")))
+      (should (drover-index-incremental-p))
+      ;; Another engine's conversation of the same identifier is another.
+      (setq records (list (drover-session-create :backend 'records :id "x" :engine 'other :engine-id "x")))
+      (should (equal (drover-test-index-ids (drover-sessions)) '("terminal" "x"))))))
+
+(ert-deftest drover-test-resumers ()
+  "A conversation resumes in the front end preferred, else the one it ran in, else the first."
+  (let ((drover--resumers nil)
+        (drover-resume-front-ends nil)
+        (calls nil))
+    (should-not (drover-resumer 'fake))
+    (should-error (drover-resume 'fake "x" "/work/") :type 'user-error)
+    (drover-register-resumer 'fake 'terminal (lambda (id directory) (push (list 'terminal id directory) calls)))
+    (drover-register-resumer 'fake 'shell (lambda (id directory) (push (list 'shell id directory) calls)))
+    (drover-register-resumer 'other 'shell #'ignore)
+    (should (eq (car (drover-resumer 'fake)) 'terminal))
+    (should (eq (car (drover-resumer 'fake 'shell)) 'shell))
+    (should (eq (car (drover-resumer 'fake 'unloaded)) 'terminal))
+    (let ((drover-resume-front-ends '((fake shell))))
+      (should (eq (car (drover-resumer 'fake 'terminal)) 'shell)))
+    (drover-resume 'fake "x" "/work/" 'shell)
+    (should (equal calls '((shell "x" "/work/"))))
+    ;; Registered again, it keeps its place.
+    (drover-register-resumer 'fake 'terminal #'ignore)
+    (should (equal (car (drover-resumer 'fake)) 'terminal))
+    (drover-unregister-resumer 'fake 'terminal)
+    (should (eq (car (drover-resumer 'fake)) 'shell))))
+
+(ert-deftest drover-test-archive-what-the-backend-does-not ()
+  "A session its backend's archive does not take, drover archives itself."
+  (drover-test-with-backend nil
+    (drover-test-with-state
+      (let ((sessions (list (drover-session-create :backend 'picky :id "p" :engine 'fake :engine-id "p")))
+            (archived nil))
+        (drover-test-register-simple 'picky (lambda () sessions)
+                                     :archive (lambda (session) (push session archived))
+                                     :supports (lambda (_session operation) (not (eq operation :archive))))
+        (let ((session (drover-find 'picky "p")))
+          (should (drover-archivable-p session))
+          (drover-archive-session session)
+          (should-not archived)
+          (should (assoc '(fake . "p") (drover--archive)))
+          (should-not (drover-sessions)))))))
+
+(ert-deftest drover-test-restore-older-recorded ()
+  "A conversation drover archived is restored when a recording backend lists it among older ones."
+  (drover-test-with-backend nil
+    (drover-test-with-state
+      (let ((old (drover-test-record "old" :updated 1.0)))
+        (drover-test-register-simple 'records (lambda () (list old)) :recorded '(fake))
+        (drover-archive-session old)
+        ;; Its record no longer listed live, but kept among older ones.
+        (drover-test-register-simple 'records (lambda () nil) :recorded '(fake)
+                                     :history (lambda (callback) (funcall callback (list old))))
+        (let ((drover-show-archived t))
+          (let ((archived (car (drover-archived-sessions))))
+            (should (equal (drover-session-key archived) '(records . "old")))
+            (drover-unarchive-session archived)))
+        (should-not (drover--archive))))))
+
 (ert-deftest drover-test-format-age ()
   (should (equal (drover-format-age nil) ""))
   (should (equal (drover-format-age (- drover-test-now 42) drover-test-now) "42s"))
@@ -1788,7 +1933,7 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
             ;; Restored, nothing would list it: it stays archived, and
             ;; says why.
             (let ((err (should-error (drover-unarchive kept) :type 'user-error)))
-              (should (string-match-p "\\`Shown a stays archived: its terminal or shell is closed"
+              (should (string-match-p "\\`Shown a stays archived: no front end follows its conversation"
                                       (cadr err))))
             (should (equal (mapcar #'drover-session-key (drover-archived-sessions)) '((shown . "conv-a"))))
             (should (drover-session-archived-p kept))
