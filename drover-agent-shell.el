@@ -589,6 +589,26 @@ They are `drover-model' records; see `drover-agent-shell--models-of'."
                                    (drover-agent-shell--levels state)
                                    state)))
 
+(defun drover-agent-shell--current-model (engine state &optional options)
+  "Return the `drover-model' of the model the current shell of ENGINE runs, or nil.
+STATE is its state.  The model is described as its option alone names
+it (see `drover-agent-shell--models-of'); with OPTIONS, the shell's
+model options, as the shell lists it among them, which may know it by
+another name."
+  (when-let* ((value (ignore-errors (agent-shell--current-model-id state)))
+              ((stringp value)))
+    (let* ((levels (drover-agent-shell--levels state))
+           (alone (car (drover-agent-shell--models-of
+                        engine (list (or (assoc value (or options (drover-agent-shell--model-options state)))
+                                         (list value)))
+                        value levels state))))
+      (and alone
+           (or (and options
+                    (seq-find (lambda (model)
+                                (equal (drover-model-key model) (drover-model-key alone)))
+                              (drover-agent-shell--models-of engine options value levels state)))
+               alone)))))
+
 (defun drover-agent-shell--options (session)
   "Return what the shell of SESSION runs, or nil.
 The value is (:model MODEL :variant VARIANT), MODEL a `drover-model' as
@@ -600,18 +620,8 @@ leaves the effort to its agent."
       (when-let* ((state agent-shell--state)
                   (value (agent-shell--current-model-id state))
                   ((stringp value)))
-        (let* ((engine (drover-agent-shell--engine))
-               (options (drover-agent-shell--model-options state))
-               (alone (car (drover-agent-shell--models-of
-                            engine (list (or (assoc value options) (list value)))
-                            value (drover-agent-shell--levels state) state)))
-               ;; As the shell lists it, which may know it by another name.
-               (model (and alone
-                           (or (seq-find (lambda (model)
-                                           (equal (drover-model-key model) (drover-model-key alone)))
-                                         (drover-agent-shell--models-of
-                                          engine options value (drover-agent-shell--levels state) state))
-                               alone)))
+        (let* ((model (drover-agent-shell--current-model
+                       (drover-agent-shell--engine) state (drover-agent-shell--model-options state)))
                (level (agent-shell--current-thought-level-id state)))
           (list :model model
                 :variant (cond ((not (and (stringp level) (not (string-empty-p level)))) nil)
@@ -764,10 +774,23 @@ The value is a plist of :status, :since, :detail and :requests, as
              (list :status 'idle))))))))
 
 (defun drover-agent-shell--effort (state)
-  "Return the thought level the current shell runs, from its STATE, or nil.
-Whether it is the model's default the shell does not tell."
+  "Return the effort the current shell runs, from its STATE, as (LEVEL . DEFAULT).
+LEVEL is a string, or nil when unknown.  Claude Code's agent offers a
+level \"default\", leaving the effort to the CLI: the model's default
+level stands for it, as `drover-agent-shell--options' runs it, its
+model as its sources describe it (Claude Code's catalog for Claude's
+models), else as drover learnt it (see `drover-learnt-model'), and
+DEFAULT is non-nil; nil when unknown.  Whether another level is the
+model's default the shell does not tell."
   (let ((level (ignore-errors (agent-shell--current-thought-level-id state))))
-    (and (stringp level) (not (string-empty-p level)) level)))
+    (cond ((not (and (stringp level) (not (string-empty-p level)))) nil)
+          ((not (equal level "default")) (cons level nil))
+          (t (when-let* ((engine (drover-agent-shell--engine))
+                         (model (drover-agent-shell--current-model engine state))
+                         (variant (or (drover-model-default-variant model)
+                                      (when-let* ((learnt (drover-learnt-model engine (drover-model-key model))))
+                                        (drover-model-default-variant learnt)))))
+               (cons (symbol-name variant) t))))))
 
 (defun drover-agent-shell--provider (state)
   "Return the provider of the model the current shell runs, from its STATE, or nil.
@@ -782,7 +805,8 @@ OpenCode's, tell it."
   (with-current-buffer buffer
     (let* ((state agent-shell--state)
            (status (drover-agent-shell--status state))
-           (activity (ignore-errors (agent-shell-last-activity-time))))
+           (activity (ignore-errors (agent-shell-last-activity-time)))
+           (effort (drover-agent-shell--effort state)))
       (drover-session-create
        :backend 'agent-shell
        :id (drover-agent-shell--ensure-id)
@@ -797,7 +821,8 @@ OpenCode's, tell it."
        :created drover-agent-shell--created
        :agent (ignore-errors (agent-shell--current-mode-id state))
        :model (drover-model-short-name (ignore-errors (agent-shell-get-model-name state)))
-       :effort (drover-agent-shell--effort state)
+       :effort (car effort)
+       :effort-default (cdr effort)
        :provider-name (drover-agent-shell--provider state)
        :detail (plist-get status :detail)
        :engine (drover-agent-shell--engine)

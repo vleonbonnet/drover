@@ -694,6 +694,19 @@ Nil when `drover-remember-models' is off."
         (mapcar (lambda (data) (drover--model-from-data data time))
                 (plist-get entry :models))))))
 
+(defun drover-learnt-model (engine key)
+  "Return what drover learnt of the model of ENGINE whose key is KEY, or nil.
+KEY is a value of `drover-model-key'.  It is what live sessions of
+ENGINE last told of it, completed by what they told before (see
+`drover--remember-models'): its variants and default variant even
+while no live session tells them.  Without `drover-remember-models',
+what this Emacs session learnt."
+  (when-let* ((entry (alist-get engine (drover--model-memory)))
+              (data (seq-find (lambda (data)
+                                (equal (cons (plist-get data :provider-id) (plist-get data :id)) key))
+                              (plist-get entry :models))))
+    (drover--model-from-data data (and drover-remember-models (plist-get entry :time)))))
+
 (defun drover--remembered-engines ()
   "Return the engines whose models are remembered."
   (and drover-remember-models (mapcar #'car (drover--model-memory))))

@@ -831,6 +831,48 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
         (should (equal (drover-model-id-for (plist-get options :model) 'claude-code 'agent-shell) "sonnet"))
         (should (eq (plist-get options :variant) 'medium))))))
 
+(ert-deftest drover-agent-shell-test-default-effort-shown ()
+  "A shell leaving the effort to its agent tells the model's default level, as a default.
+Not the agent's own \"default\": the level the catalog, else what drover
+learnt, gives the model; nothing when unknown."
+  (drover-agent-shell-test-with
+    (let ((claude (drover-agent-shell-test-shell 'claude-code))
+          (gemini (drover-agent-shell-test-shell 'gemini-cli)))
+      ;; Unknown: no catalog yet, nothing learnt.
+      (drover-agent-shell-test-initialize claude "abc")
+      (drover-agent-shell-test-acp-models claude drover-test-claude-acp-models "sonnet"
+                                          '("default" "low" "medium" "high") "default")
+      (let ((session (drover-agent-shell-test-session claude)))
+        (should-not (drover-session-effort session))
+        (should-not (drover-session-effort-default session)))
+      ;; The catalog gives Sonnet 5.5 its default level.
+      (drover-test-write-claude-catalog)
+      (let ((session (drover-agent-shell-test-session claude)))
+        (should (equal (drover-session-effort session) "medium"))
+        (should (drover-session-effort-default session)))
+      ;; A level chosen is no default, even the model's.
+      (drover-agent-shell-test-acp-models claude drover-test-claude-acp-models "sonnet"
+                                          '("default" "low" "medium" "high") "medium")
+      (let ((session (drover-agent-shell-test-session claude)))
+        (should (equal (drover-session-effort session) "medium"))
+        (should-not (drover-session-effort-default session)))
+      ;; An engine whose agent tells no default: what drover learnt of
+      ;; the model, else nothing.
+      (drover-agent-shell-test-initialize gemini "g1")
+      (drover-agent-shell-test-acp-models gemini '(("gemini-3-pro" . "Gemini 3 Pro")) "gemini-3-pro"
+                                          '("default" "low" "high") "default")
+      (let ((session (drover-agent-shell-test-session gemini)))
+        (should-not (drover-session-effort session))
+        (should-not (drover-session-effort-default session)))
+      (let ((drover-remember-models nil))
+        (drover--remember-models 'gemini-cli
+                                 (list (drover-model-create :id "gemini-3-pro" :name "Gemini 3 Pro"
+                                                            :variants '((low) (high)) :default-variant 'high
+                                                            :engines '(gemini-cli))))
+        (let ((session (drover-agent-shell-test-session gemini)))
+          (should (equal (drover-session-effort session) "high"))
+          (should (drover-session-effort-default session)))))))
+
 (ert-deftest drover-agent-shell-test-claude-alias-sent ()
   "A Claude model, however a source named it, reaches a shell by the alias the shell lists."
   (drover-agent-shell-test-with
