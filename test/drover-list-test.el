@@ -1725,6 +1725,81 @@ START and END bound its overlay."
     (should (string-match-p "^    Prompt cache +expires in 4m (5m window), 120k of 130k tokens cached$"
                             (drover-list-test-visible-text)))))
 
+(defun drover-list-test-cached-family ()
+  "Return a parent and its subagent, both working with a live prompt cache."
+  (list (drover-list-test-titled "p" "Parent" :status 'working :updated (drover-list-test-ago 60)
+                                 :cache-expires (+ drover-test-now 240) :cache-ttl 300)
+        (drover-list-test-titled "k" "Kid" :parent "p" :status 'working
+                                 :updated (drover-list-test-ago 90)
+                                 :cache-expires (+ drover-test-now 120) :cache-ttl 300)))
+
+(ert-deftest drover-list-test-cache-not-on-subagents ()
+  "In columns, a subagent shows no prompt cache, its parent does."
+  (drover-list-test-with (drover-list-test-cached-family)
+    (setq drover-show-subagents 'all)
+    (revert-buffer)
+    (should (eq drover-list--layout 'columns))
+    (should (equal (drover-list-test-cache-field "p") '(4 1 "4m")))
+    (should (equal (drover-list-test-cache-field "k") '(nil nil nil)))
+    (should (equal (mapcar (lambda (entry) (drover-session-id (plist-get entry :session)))
+                           drover-list--caches)
+                   '("p")))
+    ;; Nor its details, even where the line leaves the cache out.
+    (setq drover-list-hidden-fields '(cache))
+    (revert-buffer)
+    (dolist (id '("p" "k"))
+      (drover-list-test-goto id)
+      (magit-section-show (magit-current-section)))
+    (let ((text (drover-list-test-visible-text)))
+      (should (= (with-temp-buffer
+                   (insert text)
+                   (count-matches "Prompt cache" (point-min) (point-max)))
+                 1))
+      (should (string-match-p "Prompt cache +expires in 4m" text)))
+    ;; A subagent's cache alone takes no column, and no timer draws it.
+    (setq drover-list-hidden-fields nil)
+    (setf (drover-session-cache-expires (drover-list-test-find "p")) nil)
+    (let ((drover-list-cache-interval 5))
+      (drover-list-test-shown
+        (drover-list-test-refresh)
+        (should-not (memq 'cache drover-list--fields))
+        (should-not drover-list--caches)
+        (should-not (text-property-not-all (point-min) (point-max) 'drover-list-cache nil))
+        (should-not drover-list--cache-timer)))))
+
+(ert-deftest drover-list-test-cache-background-not-on-subagents ()
+  "In two lines, a subagent's line has no cache under it, nor in its tooltip."
+  (drover-list-test-with (drover-list-test-cached-family)
+    (setq drover-show-subagents 'all)
+    (drover-list-test-with-font
+      (let ((drover-list-test-width 200))
+        (revert-buffer)
+        (should (eq drover-list--layout 'narrow))
+        (should (equal (mapcar (lambda (entry) (list (drover-session-id (plist-get entry :session))
+                                                     (plist-get entry :kind)))
+                               drover-list--caches)
+                       '(("p" narrow))))
+        (drover-list-test-goto "k")
+        (should (equal (drover-list-test-help-at (1+ (point))) "Kid"))
+        (drover-list-test-goto "p")
+        (should (string-suffix-p "Prompt cache: expires in 4m (5m window)"
+                                 (drover-list-test-help-at (1+ (point)))))))))
+
+(ert-deftest drover-list-test-cache-not-on-subagents-in-both-lists ()
+  "Neither the sidebar nor the list shows a subagent's cache."
+  (drover-list-test-two-lists
+    (setq drover-test-sessions (drover-list-test-cached-family)
+          drover-show-subagents 'all)
+    (drover-view-settings-changed)
+    (dolist (list (list buffer sidebar))
+      (with-current-buffer list
+        (drover-list-test-refresh)
+        (should (equal (mapcar (lambda (entry) (drover-session-id (plist-get entry :session)))
+                               drover-list--caches)
+                       '("p")))
+        (should (eq (plist-get (car drover-list--caches) :kind)
+                    (if (eq list sidebar) 'narrow 'columns)))))))
+
 ;;;; Faces and measures
 
 (ert-deftest drover-list-test-variable-pitch ()

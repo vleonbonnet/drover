@@ -78,7 +78,9 @@
 ;; A session whose provider still holds its prompt cache shows how much
 ;; of the cache's lifetime is left: as a short bar and the time left in
 ;; columns, as a line under its line, from the left, in two lines.  Only
-;; the bar and the time left are redrawn as the cache runs out.
+;; the bar and the time left are redrawn as the cache runs out.  A
+;; subagent shows none: the user writes to its parent only, whose cache
+;; is the one telling what the next turn costs.
 ;;
 ;; An active region selects the sessions whose lines it spans, those
 ;; Magit highlights: marking seen, interrupting, archiving, unarchiving
@@ -254,7 +256,7 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  age       How long ago it last did something, or since when it needs
            you.
  cache     How much of the lifetime of its prompt cache is left: a
-           short bar and the time left.
+           short bar and the time left; nothing for a subagent.
  summary   What it waits for, or one line on its status.
 
 PROPERTIES is a plist of:
@@ -1029,7 +1031,7 @@ of its archiving, and the stamp of METRICS (see
             state
             (drover-format-age (drover-list--age-time session) now)
             (drover-format-age (drover-session-created session) now)
-            (and (drover-session-cache-fraction session now) t)
+            (and (drover-list--cache-fraction session now) t)
             (and frames (drover-list--frame-index (length (car frames)) now))
             (and (numberp archived) (drover-format-age archived now))
             (plist-get metrics :stamp))))
@@ -1124,7 +1126,7 @@ of another list, copied (see `drover-list--peer-rows')."
           :state state
           :texts (mapcar (lambda (field) (cons field (drover-list--text field session group metrics)))
                          drover-list--text-fields)
-          :cache (drover-session-cache-fraction session (plist-get metrics :now))
+          :cache (drover-list--cache-fraction session (plist-get metrics :now))
           :inputs inputs))))))
 
 (defun drover-list--tree-rows (nodes group metrics &optional depth indent)
@@ -1632,6 +1634,14 @@ in pixels, and :overlay, the overlay of a background.  The time left a
 field shows is text, which changes length as time passes: positions
 after it are kept by markers.")
 
+(defun drover-list--cache-fraction (session now)
+  "Return what the prompt cache of SESSION shows of its lifetime left at NOW.
+It is `drover-session-cache-fraction', but nil for a subagent: the user
+sends to its parent, never to it, so its cache tells nothing they can
+act on, and its bar would only stand beside the one that does."
+  (and (not (drover-session-parent session))
+       (drover-session-cache-fraction session now)))
+
 (defun drover-list--cache-help (session now)
   "Return the line telling how the prompt cache of SESSION stands at NOW."
   (concat "Prompt cache: " (or (drover-session-cache-description session now) "expired")))
@@ -1748,7 +1758,7 @@ nothing, and is forgotten."
             (seq-filter
              (lambda (entry)
                (let* ((session (plist-get entry :session))
-                      (fraction (drover-session-cache-fraction session now)))
+                      (fraction (drover-list--cache-fraction session now)))
                  (if (eq (plist-get entry :kind) 'narrow)
                      (drover-list--draw-background entry fraction)
                    (drover-list--draw-field entry fraction
@@ -2157,7 +2167,8 @@ branch's column leaves out."
               ('near 'drover-context-near)))
       (fact 'created "Created" (when-let* ((created (drover-session-created session)))
                                  (concat (drover-format-age created now) " ago")))
-      (fact 'cache "Prompt cache" (drover-session-cache-description session now)))
+      (fact 'cache "Prompt cache" (and (not (drover-session-parent session))
+                                       (drover-session-cache-description session now))))
     (nreverse facts)))
 
 (defun drover-list--details (session layout)
@@ -3799,7 +3810,7 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
                                 (equal (aref inputs 7)
                                        (drover-format-age (drover-session-created session) now))
                                 (eq (aref inputs 8)
-                                    (and (drover-session-cache-fraction session now) t))
+                                    (and (drover-list--cache-fraction session now) t))
                                 (equal (aref inputs 10)
                                        (let ((archived (drover-session-archived session)))
                                          (and (numberp archived) (drover-format-age archived now)))))
