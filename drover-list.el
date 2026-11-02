@@ -124,6 +124,17 @@
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 7))
   (load "drover-core" nil t))
 
+;; A row's tree and section, a tree's group and a group's section were
+;; slots once, read by the accessors of their structures, which leave
+;; their compiler macros on these names.  Loaded over such a drover from
+;; its sources, or compiled in an Emacs that ran one, the code below
+;; would read the slots holding their links where these functions
+;; follow them (`drover-link').
+(eval-and-compile
+  (dolist (function '(drover-list--row-tree drover-list--row-section
+                      drover-list--tree-group drover-list--group-container))
+    (function-put function 'compiler-macro nil)))
+
 (defgroup drover-list nil
   "The list of agent sessions."
   :group 'drover
@@ -364,6 +375,119 @@ The header line's tooltips tell it.")
   "Deepest nesting level indented further than the one above it.
 Deeper subagents line up with that level, so that titles keep room in a
 narrow window.")
+
+;;;; The model of the list
+
+;; A drawing keeps what it drew: the groups, their trees, the rows of
+;; their sessions, the summary of the rows the layout follows, and the
+;; counts of each group.  A change of a few sessions then redraws their
+;; lines in place, when it moves no tree (see `drover-list--follow'),
+;; and a redraw reuses the rows of the sessions that did not change
+;; (`drover-list--reuse').
+
+;; The structures come before the code using them: their accessors are
+;; inlined where code is compiled, or loaded from its sources, and those
+;; of another version, loaded before, would read other slots.
+
+;; A row leads to its tree and a tree to its group, which leads to all its
+;; trees and rows, and rows and groups lead to their sections, which lead
+;; to the root section and from there to every section of the buffer:
+;; held as they are, what prints of any of them, or of a closure holding
+;; one, grew with the square of the sessions shown, or faster.  They are
+;; held through links (`drover-link').
+
+(cl-defstruct (drover-list--row (:constructor drover-list--row-create)
+                                (:copier nil))
+  "A session as its heading shows it, before the layout."
+  (session nil :documentation "The `drover-session' shown.")
+  (depth nil :documentation "Depth of the session in its tree.")
+  (indent nil :documentation "Position of the status glyph, in pixels.")
+  (icons nil :documentation "The glyphs before the title, and a space.")
+  (title-start nil :documentation "Position of the title, in pixels.")
+  (title nil :documentation "The title, without the glyph.")
+  (state nil :documentation "Where the session is in Emacs, see `drover-list--title-state'.")
+  (texts nil :documentation "Alist (FIELD . TEXT) of the other fields.")
+  (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil.")
+  (inputs nil :documentation "What the row was made of, see `drover-list--row-inputs'.")
+  (measures nil :documentation "What the layout needs of it, see `drover-list--row-measures'.")
+  (heading nil :documentation "Its heading as drawn, see `drover-list--heading', or nil.")
+  (tree-link nil :documentation "A link to the `drover-list--tree' showing it, see `drover-list--row-tree'.")
+  (section-link nil :documentation "A link to its section once drawn, see `drover-list--row-section'."))
+
+(defun drover-list--row-tree (row)
+  "Return the `drover-list--tree' showing ROW, or nil."
+  (drover-linked (drover-list--row-tree-link row)))
+
+(gv-define-setter drover-list--row-tree (tree row)
+  (macroexp-let2 nil tree tree
+    `(progn (setf (drover-list--row-tree-link ,row) (drover-link ,tree)) ,tree)))
+
+(defun drover-list--row-section (row)
+  "Return the section of ROW, once drawn, or nil."
+  (drover-linked (drover-list--row-section-link row)))
+
+(gv-define-setter drover-list--row-section (section row)
+  (macroexp-let2 nil section section
+    `(progn (setf (drover-list--row-section-link ,row) (drover-link ,section)) ,section)))
+
+(cl-defstruct (drover-list--tree (:constructor drover-list--tree-create)
+                                 (:copier nil))
+  "A tree of sessions the list shows, under the session at its top."
+  (root nil :documentation "The key of the session at the top.")
+  (node nil :documentation "The tree as drawn: its visible sessions, sorted.")
+  (full nil :documentation "The whole tree, as `drover-tree' made it.")
+  (cut nil :documentation "The tree as `drover-filter' cuts it, or nil without a filter.")
+  (serial nil :documentation "The place of its top session in the sessions listed.")
+  (group-link nil :documentation "A link to the `drover-list--group' showing it, see `drover-list--tree-group'.")
+  (position nil :documentation "Its place among the trees of its group.")
+  (shown nil :documentation "The rows of its visible sessions, in the order drawn."))
+
+(defun drover-list--tree-group (tree)
+  "Return the `drover-list--group' showing TREE, or, while it is placed, its value."
+  (drover-linked (drover-list--tree-group-link tree)))
+
+(gv-define-setter drover-list--tree-group (group tree)
+  (macroexp-let2 nil group group
+    `(progn (setf (drover-list--tree-group-link ,tree) (drover-link ,group)) ,group)))
+
+(cl-defstruct (drover-list--group (:constructor drover-list--group-create)
+                                  (:copier nil))
+  "A group of trees the list shows."
+  (value nil :documentation "(GROUPING . VALUE), or nil when sessions are not grouped.")
+  (container-link nil :documentation "A link to its section, see `drover-list--group-container'.")
+  (trees nil :documentation "Its trees, in the order drawn, a vector.")
+  (head nil :documentation "Its most urgent tree, which places it among groups.")
+  (counts nil :documentation "How many sessions of each status it shows, see `drover-list--count-row'.")
+  (size 0 :documentation "How many sessions it shows.")
+  (heading-text nil :documentation "Its heading as drawn."))
+
+(defun drover-list--group-container (group)
+  "Return the section of GROUP, the root section without groups, or nil."
+  (drover-linked (drover-list--group-container-link group)))
+
+(gv-define-setter drover-list--group-container (section group)
+  (macroexp-let2 nil section section
+    `(progn (setf (drover-list--group-container-link ,group) (drover-link ,section)) ,section)))
+
+(cl-defstruct (drover-list--model (:constructor drover-list--model-create)
+                                  (:copier nil))
+  "What the list drew, to draw again only what changes."
+  ;; First, whatever the version: see `drover-layout-current-p'.
+  (stamp (drover-layout 'drover-list--model 'drover-list--group 'drover-list--tree
+                        'drover-list--row 'drover-node 'drover-session)
+         :documentation "The layouts of the types it was made of, as `drover-layout' tells them.")
+  (settings nil :documentation "The settings it was drawn with, see `drover-list--settings'.")
+  (groups nil :documentation "The `drover-list--group's, in their order.")
+  (trees nil :documentation "Hash table of the trees drawn, by the key of their top session.")
+  (rows nil :documentation "Hash table of the rows drawn, by session key.")
+  (summary nil :documentation "The summary of the rows, see `drover-list--summarize'.")
+  (layout nil :documentation "The layout of the rows, see `drover-list--layout-of'.")
+  (size 0 :documentation "How many sessions it shows."))
+
+(drover-note-layout 'drover-list--row 'drover-list--tree 'drover-list--group 'drover-list--model)
+
+(defvar-local drover-list--model nil
+  "The `drover-list--model' of the last drawing, or nil.")
 
 ;;;; Sections
 
@@ -1037,47 +1161,6 @@ text: it is drawn apart."
           ('age (drover-face (opencode-format-age (drover-list--age-time session) now) 'drover-dim))
           ('summary (drover-list--one-line (drover-session-summary session))))
         "")))
-
-;; A row leads to its tree and a tree to its group, which leads to all its
-;; trees and rows, and rows and groups lead to their sections, which lead
-;; to the root section and from there to every section of the buffer:
-;; held as they are, what prints of any of them, or of a closure holding
-;; one, grew with the square of the sessions shown, or faster.  They are
-;; held through links (`drover-link').
-
-(cl-defstruct (drover-list--row (:constructor drover-list--row-create)
-                                (:copier nil))
-  "A session as its heading shows it, before the layout."
-  (session nil :documentation "The `drover-session' shown.")
-  (depth nil :documentation "Depth of the session in its tree.")
-  (indent nil :documentation "Position of the status glyph, in pixels.")
-  (icons nil :documentation "The glyphs before the title, and a space.")
-  (title-start nil :documentation "Position of the title, in pixels.")
-  (title nil :documentation "The title, without the glyph.")
-  (state nil :documentation "Where the session is in Emacs, see `drover-list--title-state'.")
-  (texts nil :documentation "Alist (FIELD . TEXT) of the other fields.")
-  (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil.")
-  (inputs nil :documentation "What the row was made of, see `drover-list--row-inputs'.")
-  (measures nil :documentation "What the layout needs of it, see `drover-list--row-measures'.")
-  (heading nil :documentation "Its heading as drawn, see `drover-list--heading', or nil.")
-  (tree-link nil :documentation "A link to the `drover-list--tree' showing it, see `drover-list--row-tree'.")
-  (section-link nil :documentation "A link to its section once drawn, see `drover-list--row-section'."))
-
-(defun drover-list--row-tree (row)
-  "Return the `drover-list--tree' showing ROW, or nil."
-  (drover-linked (drover-list--row-tree-link row)))
-
-(gv-define-setter drover-list--row-tree (tree row)
-  (macroexp-let2 nil tree tree
-    `(progn (setf (drover-list--row-tree-link ,row) (drover-link ,tree)) ,tree)))
-
-(defun drover-list--row-section (row)
-  "Return the section of ROW, once drawn, or nil."
-  (drover-linked (drover-list--row-section-link row)))
-
-(gv-define-setter drover-list--row-section (section row)
-  (macroexp-let2 nil section section
-    `(progn (setf (drover-list--row-section-link ,row) (drover-link ,section)) ,section)))
 
 (defun drover-list--metrics (now &optional active places)
   "Return the measures lines of the list are drawn with at time NOW.
@@ -1972,74 +2055,6 @@ every line of the windows showing it again."
                     (put-text-property position (1+ position) 'display frame)
                     (put-text-property (1+ position) (+ position 2) 'display
                                        `(space :width (,(- width (nth index widths)))))))))))))))
-
-;;;; The model of the list
-
-;; A drawing keeps what it drew: the groups, their trees, the rows of
-;; their sessions, the summary of the rows the layout follows, and the
-;; counts of each group.  A change of a few sessions then redraws their
-;; lines in place, when it moves no tree (see `drover-list--follow'),
-;; and a redraw reuses the rows of the sessions that did not change
-;; (`drover-list--reuse').
-
-(cl-defstruct (drover-list--tree (:constructor drover-list--tree-create)
-                                 (:copier nil))
-  "A tree of sessions the list shows, under the session at its top."
-  (root nil :documentation "The key of the session at the top.")
-  (node nil :documentation "The tree as drawn: its visible sessions, sorted.")
-  (full nil :documentation "The whole tree, as `drover-tree' made it.")
-  (cut nil :documentation "The tree as `drover-filter' cuts it, or nil without a filter.")
-  (serial nil :documentation "The place of its top session in the sessions listed.")
-  (group-link nil :documentation "A link to the `drover-list--group' showing it, see `drover-list--tree-group'.")
-  (position nil :documentation "Its place among the trees of its group.")
-  (shown nil :documentation "The rows of its visible sessions, in the order drawn."))
-
-(defun drover-list--tree-group (tree)
-  "Return the `drover-list--group' showing TREE, or, while it is placed, its value."
-  (drover-linked (drover-list--tree-group-link tree)))
-
-(gv-define-setter drover-list--tree-group (group tree)
-  (macroexp-let2 nil group group
-    `(progn (setf (drover-list--tree-group-link ,tree) (drover-link ,group)) ,group)))
-
-(cl-defstruct (drover-list--group (:constructor drover-list--group-create)
-                                  (:copier nil))
-  "A group of trees the list shows."
-  (value nil :documentation "(GROUPING . VALUE), or nil when sessions are not grouped.")
-  (container-link nil :documentation "A link to its section, see `drover-list--group-container'.")
-  (trees nil :documentation "Its trees, in the order drawn, a vector.")
-  (head nil :documentation "Its most urgent tree, which places it among groups.")
-  (counts nil :documentation "How many sessions of each status it shows, see `drover-list--count-row'.")
-  (size 0 :documentation "How many sessions it shows.")
-  (heading-text nil :documentation "Its heading as drawn."))
-
-(defun drover-list--group-container (group)
-  "Return the section of GROUP, the root section without groups, or nil."
-  (drover-linked (drover-list--group-container-link group)))
-
-(gv-define-setter drover-list--group-container (section group)
-  (macroexp-let2 nil section section
-    `(progn (setf (drover-list--group-container-link ,group) (drover-link ,section)) ,section)))
-
-(cl-defstruct (drover-list--model (:constructor drover-list--model-create)
-                                  (:copier nil))
-  "What the list drew, to draw again only what changes."
-  ;; First, whatever the version: see `drover-layout-current-p'.
-  (stamp (drover-layout 'drover-list--model 'drover-list--group 'drover-list--tree
-                        'drover-list--row 'drover-node 'drover-session)
-         :documentation "The layouts of the types it was made of, as `drover-layout' tells them.")
-  (settings nil :documentation "The settings it was drawn with, see `drover-list--settings'.")
-  (groups nil :documentation "The `drover-list--group's, in their order.")
-  (trees nil :documentation "Hash table of the trees drawn, by the key of their top session.")
-  (rows nil :documentation "Hash table of the rows drawn, by session key.")
-  (summary nil :documentation "The summary of the rows, see `drover-list--summarize'.")
-  (layout nil :documentation "The layout of the rows, see `drover-list--layout-of'.")
-  (size 0 :documentation "How many sessions it shows."))
-
-(drover-note-layout 'drover-list--row 'drover-list--tree 'drover-list--group 'drover-list--model)
-
-(defvar-local drover-list--model nil
-  "The `drover-list--model' of the last drawing, or nil.")
 
 ;;;; Drawing
 

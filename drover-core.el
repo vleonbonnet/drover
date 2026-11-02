@@ -683,19 +683,37 @@ for a session of another (see `drover-session-default-branch-p')."))
 
 (drover-note-layout 'drover-session)
 
+(defconst drover--session-length (length (drover-session-create))
+  "How many slots a record of `drover-session' has, its type's first.")
+
+(defun drover--whole-record (record)
+  "Return RECORD, or a copy of it with the slots it lacks, nil.
+A record a backend made with an older drover, still running as this one
+was loaded, lacks the slots that came after: their accessors would
+signal reading past its end."
+  (if (>= (length record) drover--session-length)
+      record
+    (let ((whole (make-record 'drover-session (1- drover--session-length) nil)))
+      (dotimes (index (length record))
+        (aset whole index (aref record index)))
+      whole)))
+
 (defun drover--bound-record (record)
   "Return RECORD, or a copy of it whose texts are bounded, as drover takes it in.
 Its title and the other fields shown on a line are cut to their first
 line and `drover-line-limit' characters (see `drover-bound-line'), its
 detail and the summaries of its requests to `drover-text-lines' lines
-and `drover-text-limit' characters.  RECORD itself when within those."
+and `drover-text-limit' characters.  RECORD itself when within those,
+and of all the slots of a `drover-session' now (see
+`drover--whole-record')."
   (if (not (drover-session-p record))
       record
-    (let ((copy nil))
+    (let* ((whole (drover--whole-record record))
+           (copy (unless (eq whole record) whole)))
       (cl-macrolet ((line (slot)
-                      `(let ((value (,slot record)))
+                      `(let ((value (,slot whole)))
                          (when (drover--unbounded-line-p value)
-                           (unless copy (setq copy (copy-sequence record)))
+                           (unless copy (setq copy (copy-sequence whole)))
                            (setf (,slot copy) (drover-bound-line value))))))
         (line drover-session-title)
         (line drover-session-agent)
@@ -708,16 +726,16 @@ and `drover-text-limit' characters.  RECORD itself when within those."
         (line drover-session-branch)
         (line drover-session-host)
         (line drover-session-default-branch))
-      (let ((detail (drover-session-detail record)))
+      (let ((detail (drover-session-detail whole)))
         (when (and (stringp detail) (not (eq (drover-bound-text detail) detail)))
-          (unless copy (setq copy (copy-sequence record)))
+          (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-detail copy) (drover-bound-text detail))))
-      (let ((requests (drover-session-requests record)))
+      (let ((requests (drover-session-requests whole)))
         (when (seq-some (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))
                             (and (stringp summary) (not (eq (drover-bound-text summary) summary)))))
                         requests)
-          (unless copy (setq copy (copy-sequence record)))
+          (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-requests copy)
                 (mapcar (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))
