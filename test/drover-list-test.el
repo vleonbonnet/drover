@@ -6295,52 +6295,66 @@ The prompt shows nowhere; `prompt' returns its text."
           (funcall (cdr (assoc "c" drover-test-recap-pending)) (list :reply "Too late"))
           (should (equal (prompt) text)))))))
 
-(defun drover-list-test-printed-length (object limit)
-  "Return how many characters `prin1' writes for OBJECT, or nil past LIMIT.
-It prints whole, as Emacs prints an error's data, and stops at LIMIT."
-  (let ((count 0)
-        (print-length nil)
-        (print-level nil)
-        (print-circle nil))
-    (catch 'drover-list-test-printed-length
-      (prin1 object (lambda (_char)
-                      (when (> (setq count (1+ count)) limit)
-                        (throw 'drover-list-test-printed-length nil))))
-      count)))
-
 (ert-deftest drover-list-test-prints-in-proportion ()
-  "The structures of a drawing print in proportion to the sessions they show.
+  "What the lists keep prints in proportion to the sessions they show.
 Emacs prints a value whole in an error's data, or as `format' does,
 here the closure drawing a group, as a profile showed it: each row,
 tree and group once led back to every section of the buffer, every
 tree of its group and every row, printed again for each, and a group
-of 3500 sessions ran to gigabytes."
+of 3500 sessions ran to gigabytes.  The lists, here both, with older
+and archived sessions, every session expanded and its recap kept, and
+the mode line's count, print within a bound a session, and a row or a
+tree within a bound whatever the sessions."
   (let ((sessions (cl-loop for i below 200
                            collect (drover-test-session
                                     (format "s%03d" i) :title (format "Session %d" i)
                                     :status (nth (% i 4) '(working idle waiting done))
-                                    :parent (and (zerop (% i 5)) (> i 0) (format "s%03d" (1- i)))))))
+                                    :requests (and (= (% i 4) 2) (list (list :kind 'question :summary "Which?")))
+                                    :parent (and (zerop (% i 5)) (> i 0) (format "s%03d" (1- i))))))
+        (older (cl-loop for i below 100
+                        collect (drover-test-session (format "old%03d" i) :status 'idle)))
+        (archived (cl-loop for i below 100
+                           collect (drover-test-session (format "gone%03d" i) :status 'done :archived 1.0))))
     (dolist (grouping '(nil status))
       (drover-list-test-with sessions
-        (let ((drover-group-by grouping))
-          (revert-buffer)
-          (let* ((model drover-list--model)
-                 (group (car (drover-list--model-groups model)))
-                 (tree (aref (drover-list--group-trees group) 0))
-                 (row (car (drover-list--tree-shown tree)))
-                 (drawing (lambda () group))
-                 ;; About 5 kB a session for the whole drawing, keys,
-                 ;; titles and sections included: twice that, but not
-                 ;; the square.
-                 (limit (* 10000 (length sessions))))
-            (should (drover-list--row-section row))
-            (should (drover-list--group-container group))
-            ;; Drover's own report of an error carrying one is a line.
-            (should (< (length (drover-error-string (list 'wrong-type-argument 'drover-list--tree group)))
-                       drover-error-length))
-            (dolist (object (list row tree group drawing model magit-root-section))
-              (ert-info ((format "Grouped by %s, a %s" grouping (type-of object)))
-                (should (drover-list-test-printed-length object limit))))))))))
+        (setf (alist-get 'fake drover--backends)
+              (append (list :history (lambda (callback) (funcall callback older))
+                            :archived (lambda (callback) (funcall callback archived)))
+                      (alist-get 'fake drover--backends)))
+        (let ((drover-group-by grouping)
+              (drover-list-collapsed-groups nil)
+              (global-mode-string nil))
+          (drover-list-test-shown
+            (drover-set-show-history t)
+            (drover-set-show-archived t)
+            (drover-changed-now)
+            (revert-buffer)
+            (let ((expanded 0))
+              (magit-map-sections (lambda (section)
+                                    (when (drover-list-session-section-p section)
+                                      (cl-incf expanded)
+                                      (magit-section-show section))))
+              (should (> expanded 200))
+              (should (= (hash-table-count drover-list--recaps) expanded)))
+            (drover-list-side)
+            (drover-attention-mode 1)
+            (unwind-protect
+                (let* ((model drover-list--model)
+                       (group (car (drover-list--model-groups model)))
+                       (tree (aref (drover-list--group-trees group) 0))
+                       (row (car (drover-list--tree-shown tree)))
+                       (drawing (lambda () group)))
+                  (should (drover-list--row-section row))
+                  (should (drover-list--group-container group))
+                  ;; Drover's own report of an error carrying one is a line.
+                  (should (< (length (drover-error-string (list 'wrong-type-argument 'drover-list--tree group)))
+                             drover-error-length))
+                  (ert-info ((format "Grouped by %s" grouping))
+                    (should (drover-test-printed-length drawing (* 10000 400)))
+                    (drover-test-prints-in-proportion
+                     400 (list (cons "a row" row) (cons "a tree" tree)
+                               (cons "a record" (drover-list--row-session row))))))
+              (drover-attention-mode -1))))))))
 
 ;;;; Sessions of other hosts
 

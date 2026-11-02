@@ -51,7 +51,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 6))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 7))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -709,11 +709,13 @@ The batch goes to the current revision of STATE."
 (defun drover-remote--schedule-flush (sub)
   "Send SUB what is due, from a timer."
   (unless (drover-remote--sub-timer sub)
-    (setf (drover-remote--sub-timer sub)
-          (run-at-time 0 nil (lambda ()
-                               (setf (drover-remote--sub-timer sub) nil)
-                               (drover-with-reporting "remote sending"
-                                 (drover-remote--flush sub)))))))
+    (let ((link (drover-link sub)))
+      (setf (drover-remote--sub-timer sub)
+            (run-at-time 0 nil (lambda ()
+                                 (let ((sub (drover-linked link)))
+                                   (setf (drover-remote--sub-timer sub) nil)
+                                   (drover-with-reporting "remote sending"
+                                     (drover-remote--flush sub)))))))))
 
 (defun drover-remote--flush (sub)
   "Send SUB what is due, for a slice at most, and come back for the rest.
@@ -986,16 +988,20 @@ write lost is broken, so that a new one resynchronizes."
           (drover-remote--fail peer line))
         (when (spyglass-connection-live-p connection)
           (run-at-time drover-remote--write-grace nil
-                       (lambda ()
-                         (drover-with-reporting "remote connection"
-                           (when (and (eq state (drover-remote--current))
-                                      (eql stream (gethash connection (drover-remote--state-streams state) 0))
-                                      (spyglass-connection-live-p connection))
-                             (drover-remote--stat peer :unexpected)
-                             (when (drover--report-due-p (list "remote" (drover-remote--peer-name peer) line))
-                               (drover-warn "%s: %s" (drover-remote--label peer) line))
-                             (when (string-prefix-p "Sending failed" line)
-                               (spyglass-connection-drop-stream connection)))))))))))
+                       (let ((state-link (drover-link state))
+                             (peer-link (drover-link peer)))
+                         (lambda ()
+                           (drover-with-reporting "remote connection"
+                             (let ((state (drover-linked state-link))
+                                   (peer (drover-linked peer-link)))
+                               (when (and (eq state (drover-remote--current))
+                                          (eql stream (gethash connection (drover-remote--state-streams state) 0))
+                                          (spyglass-connection-live-p connection))
+                                 (drover-remote--stat peer :unexpected)
+                                 (when (drover--report-due-p (list "remote" (drover-remote--peer-name peer) line))
+                                   (drover-warn "%s: %s" (drover-remote--label peer) line))
+                                 (when (string-prefix-p "Sending failed" line)
+                                   (spyglass-connection-drop-stream connection)))))))))))))
 
 (defun drover-remote--attach (connection)
   "Greet the peer of CONNECTION, whose stream just opened."
@@ -1045,14 +1051,16 @@ Only a peer this host dials, and not when its configuration dropped it."
              (not (drover-remote--peer-standby peer)))
     (setf (drover-remote--peer-standby peer)
           (run-at-time drover-remote-standby-delay nil
-                       (lambda ()
-                         (drover-with-reporting "remote standby"
-                           (setf (drover-remote--peer-standby peer) nil)
-                           (when (and (drover-remote--current)
-                                      (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
-                                      (not (drover-remote--peer-connection peer))
-                                      (not (drover-remote--peer-dialed peer)))
-                             (drover-remote--dial peer))))))))
+                       (let ((link (drover-link peer)))
+                         (lambda ()
+                           (drover-with-reporting "remote standby"
+                             (let ((peer (drover-linked link)))
+                               (setf (drover-remote--peer-standby peer) nil)
+                               (when (and (drover-remote--current)
+                                          (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
+                                          (not (drover-remote--peer-connection peer))
+                                          (not (drover-remote--peer-dialed peer)))
+                                 (drover-remote--dial peer))))))))))
 
 (defun drover-remote--transport (peer)
   "Return the spyglass transport reaching PEER."
@@ -1132,11 +1140,13 @@ finds those."
 (defun drover-remote--schedule-work (peer)
   "Apply PEER's queue from a timer."
   (unless (drover-remote--peer-worker peer)
-    (setf (drover-remote--peer-worker peer)
-          (run-at-time 0 nil (lambda ()
-                               (setf (drover-remote--peer-worker peer) nil)
-                               (drover-with-reporting "remote sessions"
-                                 (drover-remote--work peer)))))))
+    (let ((link (drover-link peer)))
+      (setf (drover-remote--peer-worker peer)
+            (run-at-time 0 nil (lambda ()
+                                 (let ((peer (drover-linked link)))
+                                   (setf (drover-remote--peer-worker peer) nil)
+                                   (drover-with-reporting "remote sessions"
+                                     (drover-remote--work peer)))))))))
 
 (defun drover-remote--resubscribe (peer why)
   "Subscribe to PEER again from what it holds, after WHY, a gap in its updates."
@@ -1244,33 +1254,37 @@ anew (see `drover-remote--resume'), unless ONCE, until DEADLINE, by
 default `drover-remote-request-timeout' seconds from now, past which it
 fails: a stream dropped and resumed loses no answer."
   (let ((connection (drover-remote--peer-connection peer))
-        (deadline (or deadline (+ (float-time) drover-remote-request-timeout))))
+        (deadline (or deadline (+ (float-time) drover-remote-request-timeout)))
+        (link (drover-link peer)))
     (if (not (and connection (spyglass-connection-live-p connection)))
         (funcall callback nil (format "%s is not connected" (drover-remote--label peer)))
       (spyglass-channel-request
        connection drover-remote-channel message
        (lambda (reply error)
          (drover-with-reporting "remote request"
-           (if (and error (not once)
-                    (not (spyglass-connection-live-p connection))
-                    (< (float-time) deadline)
-                    (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
-                    (not (eq (drover-remote--peer-state peer) 'closed)))
-               (drover-remote--ask-later peer message callback deadline)
-             (funcall callback reply (and error (drover-bound-line (format "%s" error)))))))
+           (let ((peer (drover-linked link)))
+             (if (and error (not once)
+                      (not (spyglass-connection-live-p connection))
+                      (< (float-time) deadline)
+                      (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
+                      (not (eq (drover-remote--peer-state peer) 'closed)))
+                 (drover-remote--ask-later peer message callback deadline)
+               (funcall callback reply (and error (drover-bound-line (format "%s" error))))))))
        (max 0.1 (- deadline (float-time)))))))
 
 (defun drover-remote--ask-later (peer message callback deadline)
   "Ask PEER MESSAGE again once connected anew, for CALLBACK, until DEADLINE."
-  (let ((entry (list message callback deadline nil)))
+  (let ((entry (list message callback deadline nil))
+        (link (drover-link peer)))
     (setf (nth 3 entry)
           (run-at-time (max 0 (- deadline (float-time))) nil
                        (lambda ()
                          (drover-with-reporting "remote request"
-                           (when (memq entry (drover-remote--peer-asks peer))
-                             (setf (drover-remote--peer-asks peer) (delq entry (drover-remote--peer-asks peer)))
-                             (funcall callback nil (format "%s did not come back in time"
-                                                           (drover-remote--label peer))))))))
+                           (let ((peer (drover-linked link)))
+                             (when (memq entry (drover-remote--peer-asks peer))
+                               (setf (drover-remote--peer-asks peer) (delq entry (drover-remote--peer-asks peer)))
+                               (funcall callback nil (format "%s did not come back in time"
+                                                             (drover-remote--label peer)))))))))
     (setf (drover-remote--peer-asks peer) (append (drover-remote--peer-asks peer) (list entry)))))
 
 (defun drover-remote--drop-asks (peer why)
@@ -1289,14 +1303,15 @@ fails: a stream dropped and resumed loses no answer."
 
 (defun drover-remote--recap (peer session callback)
   "Fetch the recap of SESSION through PEER, and call CALLBACK with it."
-  (drover-remote--request
-   peer (list :op "recap" :key (drover-remote--wire-key session))
-   (lambda (reply error)
-     (let ((recap (and (null error) (plist-get reply :recap))))
-       (funcall callback
-                (if (and (consp recap) (keywordp (car recap)))
-                    (drover-remote--decode-recap recap)
-                  (list :failure (or error (format "%s told no recap" (drover-remote--label peer))))))))))
+  (let ((label (drover-remote--label peer)))
+    (drover-remote--request
+     peer (list :op "recap" :key (drover-remote--wire-key session))
+     (lambda (reply error)
+       (let ((recap (and (null error) (plist-get reply :recap))))
+         (funcall callback
+                  (if (and (consp recap) (keywordp (car recap)))
+                      (drover-remote--decode-recap recap)
+                    (list :failure (or error (format "%s told no recap" label))))))))))
 
 (defun drover-remote--decode-recap (recap)
   "Return RECAP, as received, as `drover-recap' tells one."
@@ -1339,12 +1354,13 @@ it, here, where they are: the peer names them as received."
 
 (defun drover-remote--preview (peer session callback)
   "Fetch where SESSION stands through PEER, and call CALLBACK with it or nil."
-  (drover-remote--request
-   peer (list :op "preview" :key (drover-remote--wire-key session))
-   (lambda (reply error)
-     (funcall callback (if error
-                           (format "%s: %s" (drover-remote--label peer) error)
-                         (drover-remote--text (plist-get reply :text)))))))
+  (let ((label (drover-remote--label peer)))
+    (drover-remote--request
+     peer (list :op "preview" :key (drover-remote--wire-key session))
+     (lambda (reply error)
+       (funcall callback (if error
+                             (format "%s: %s" label error)
+                           (drover-remote--text (plist-get reply :text))))))))
 
 (defun drover-remote--prefetch (peer sessions)
   "Ask PEER to fetch what the records of SESSIONS lack, at most once a second."
@@ -1355,21 +1371,23 @@ it, here, where they are: the peer names them as received."
       (setf (drover-remote--peer-prefetch peer)
             (cons pending
                   (run-at-time 1 nil
-                               (lambda ()
-                                 (drover-with-reporting "remote prefetch"
-                                   (let ((pending (car (drover-remote--peer-prefetch peer)))
-                                         (connection (drover-remote--peer-connection peer)))
-                                     (if (not (and connection (spyglass-connection-live-p connection)))
-                                         ;; Asked once connected anew.
-                                         (setf (drover-remote--peer-prefetch peer) (cons pending nil))
-                                       (setf (drover-remote--peer-prefetch peer) nil)
-                                       (drover-remote--send
-                                        connection
-                                        (list :t "pre"
-                                              :keys (vconcat (mapcar (lambda (key)
-                                                                       (vector (symbol-name (car key)) (cdr key)))
-                                                                     (seq-take (hash-table-keys pending)
-                                                                               500)))))))))))))
+                               (let ((link (drover-link peer)))
+                                 (lambda ()
+                                   (drover-with-reporting "remote prefetch"
+                                     (let* ((peer (drover-linked link))
+                                            (pending (car (drover-remote--peer-prefetch peer)))
+                                            (connection (drover-remote--peer-connection peer)))
+                                       (if (not (and connection (spyglass-connection-live-p connection)))
+                                           ;; Asked once connected anew.
+                                           (setf (drover-remote--peer-prefetch peer) (cons pending nil))
+                                         (setf (drover-remote--peer-prefetch peer) nil)
+                                         (drover-remote--send
+                                          connection
+                                          (list :t "pre"
+                                                :keys (vconcat (mapcar (lambda (key)
+                                                                         (vector (symbol-name (car key)) (cdr key)))
+                                                                       (seq-take (hash-table-keys pending)
+                                                                                 500))))))))))))))
     (setcar (drover-remote--peer-prefetch peer) pending)))
 
 ;;;; Older and archived sessions
@@ -1432,9 +1450,11 @@ received so far each time an answer of the owner's comes."
     ;; Not asked again as such: a peer connected anew is asked for what
     ;; lists show, all of it (see `drover-remote--resume').
     (drover-remote--request peer (list :op "fetch" :kind kind :gen generation)
-                            (lambda (_reply error)
-                              (when error
-                                (drover-remote--fail peer (format "fetching %s: %s" kind error))))
+                            (let ((link (drover-link peer)))
+                              (lambda (_reply error)
+                                (when error
+                                  (drover-remote--fail (drover-linked link)
+                                                       (format "fetching %s: %s" kind error)))))
                             nil t)))
 
 (defun drover-remote--fetched (peer message)

@@ -28,6 +28,7 @@
 (require 'drover-test-helpers)
 (require 'drover-remote)
 (require 'drover-links)
+(require 'drover-list)
 (require 'spyglass nil t)
 
 (defun drover-remote-test--available-p ()
@@ -908,6 +909,39 @@ registration; the agent, if BODY starts one, is stopped after."
       (should (= (length (drover-index-sessions)) 3))
       (should (drover-attention--needs-p (drover-session-key live) live))
       (should-not (drover-attention--needs-p (drover-session-key stale) stale)))))
+
+(ert-deftest drover-remote-test-prints-in-proportion ()
+  "What the remote layer keeps prints in proportion to the sessions, both ways.
+Emacs prints a value whole in an error's data, or as `format' does: a
+peer's or a subscriber's state, a connection, or a record received,
+leading back to what holds it would print it again from each."
+  (drover-remote-test-with (cl-loop for i below 200 collect (drover-test-session (format "v%d" i)))
+    (drover-remote-test-connect (drover-remote-test-start-agent dir "agent" "viewer"))
+    (drover-remote-test-command "sessions" :n 100 :children 1)
+    (drover-remote-test-synced 200)
+    (drover-remote-test-wait (lambda () (> (hash-table-count (drover-remote--state-subs drover-remote--state)) 0)))
+    (drover-set-show-history t)
+    (drover-remote-test-wait (lambda () (drover-index-session '(remote:agent fake . "s1"))))
+    (save-window-excursion
+      (drover-remote-status)
+      (with-current-buffer (drover-list--buffer)
+        (revert-buffer)
+        (unwind-protect
+            (let* ((peer (drover-remote--peer "agent"))
+                   (connection (drover-remote--peer-connection peer)))
+              (should connection)
+              ;; Recaps asked, none answered yet: each request held by
+              ;; the connection, once leading back to the peer, printed
+              ;; it and all its sessions again.
+              (dolist (session (seq-take (drover-remote-test-remote) 50))
+                (funcall (drover-backend-property 'remote:agent :recap) session #'ignore))
+              (drover-test-prints-in-proportion
+               400 (list (cons "a record received" (drover-index-session '(remote:agent fake . "s1")))
+                         (cons "a row" (gethash '(remote:agent fake . "s1")
+                                                (drover-list--model-rows drover-list--model))))))
+          (drover-set-show-history nil)
+          (kill-buffer)
+          (kill-buffer "*drover remote*"))))))
 
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

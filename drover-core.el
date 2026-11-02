@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 6
+(defconst drover-core-generation 7
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -573,6 +573,33 @@ message is shown at most once per `drover-error-interval' seconds for
 one WHAT."
   (when (drover--report-due-p (cons 'layout what))
     (message "Drover: %s made by another version of drover, made anew" what)))
+
+;;;; Links
+
+;; Emacs prints a value whole wherever nothing bounds it: an error's
+;; data in a command, what `format' and `prin1-to-string' are given, a
+;; value evaluated.  Its printer, without `print-circle', prints a
+;; structure again from every path reaching it, so that structures many
+;; of which lead back to what holds them all, such as a list's rows to
+;; their group and sections, or the requests and timers of a peer to the
+;; peer and all its sessions, print with the square of what that holds:
+;; a profile formatted so ran to gigabytes.  They are held through
+;; links, uninterned symbols whose values are what they lead to, which
+;; print as their names: each structure prints once, from where it is
+;; held.
+
+(defsubst drover-link (object)
+  "Return a link to OBJECT, which prints as a name alone, or nil for nil.
+`drover-linked' returns OBJECT from it.  Each link is new, so that a
+copy of a structure holding one may be linked elsewhere."
+  (when object
+    (let ((link (make-symbol "link")))
+      (set link object)
+      link)))
+
+(defsubst drover-linked (link)
+  "Return what LINK, made by `drover-link', leads to, or nil."
+  (and link (symbol-value link)))
 
 ;;;; Sessions
 

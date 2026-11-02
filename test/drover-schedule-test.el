@@ -1109,5 +1109,31 @@ backends does nothing."
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "#")) :command) #'drover-schedule-list))
   (should (commandp #'drover-schedule-list)))
 
+(ert-deftest drover-schedule-test-prints-in-proportion ()
+  "The queue prints in proportion to its prompts, deliveries in progress included.
+Emacs prints a value whole in an error's data, or as `format' does: a
+prompt or a delivery leading back to the queue would print it all again."
+  (drover-schedule-test-state
+    (let ((drover-schedule-test-blocker "the input holds a draft")
+          (jobs nil))
+      (dotimes (i 100)
+        (let ((id (format "s%d" i)))
+          (push (drover-test-session id :engine 'claude-code :engine-id (concat id "-session"))
+                drover-test-sessions)
+          (drover-schedule-test-buffer id)
+          (push (drover-schedule-add (drover-schedule-test-target (concat id "-session"))
+                                     (time-add (current-time) 3600) (format "check %d" i))
+                jobs)
+          (drover-schedule-add (drover-schedule-test-target (concat id "-session"))
+                               (time-add (current-time) 7200) (format "then %d" i))))
+      ;; Half wait for their sessions to take a prompt.
+      (dolist (job (seq-take jobs 50))
+        (drover-schedule--run (plist-get job :id))
+        (should (eq (plist-get job :status) 'waiting)))
+      (let ((job (car jobs)))
+        (drover-test-prints-in-proportion
+         200 (list (cons "a prompt" job)
+                   (cons "a delivery" (gethash (plist-get job :id) (drover-schedule--active)))))))))
+
 (provide 'drover-schedule-test)
 ;;; drover-schedule-test.el ends here
