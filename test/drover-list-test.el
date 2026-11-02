@@ -2731,6 +2731,49 @@ yet.  Most changes are drawn in place."
     (should (equal (cdr drawn) (cdr fresh)))
     (should (equal-including-properties (car drawn) (car fresh)))))
 
+(ert-deftest drover-list-test-closed-conversations-in-place ()
+  "Front ends opening and closing recorded conversations are drawn in place, as drawn anew.
+A conversation a front end follows is its session; closed, the record
+of a backend listing what the engine recorded stands for it."
+  (random "drover closed conversations")
+  (let ((records (mapcar (lambda (index)
+                           (drover-list-test-titled
+                            (format "c%02d" index) (format "Closed conversation %d" index)
+                            :updated (drover-list-test-ago (* 600 (1+ index)))
+                            :engine 'fake :engine-id (format "c%02d" index)))
+                         (number-sequence 0 19))))
+    (dolist (record records)
+      (setf (drover-session-backend record) 'records))
+    (drover-list-test-with nil
+      (drover-test-register-simple 'records (lambda () records) :recorded '(fake)
+                                   :session (lambda (id)
+                                              (seq-find (lambda (record) (equal (drover-session-id record) id))
+                                                        records)))
+      (let ((in-place 0))
+        (drover-list-test-shown
+          (revert-buffer)
+          (dotimes (step 30)
+            (let* ((open (mapcar #'drover-session-engine-id drover-test-sessions))
+                   (id (format "c%02d" (random 20))))
+              (if (member id open)
+                  (setq drover-test-sessions
+                        (seq-remove (lambda (session) (equal (drover-session-engine-id session) id))
+                                    drover-test-sessions))
+                (push (drover-list-test-titled (concat "t-" id) (concat "Terminal " id)
+                                               :status (seq-random-elt '(working idle done))
+                                               :updated (drover-list-test-ago (random 60))
+                                               :engine 'fake :engine-id id)
+                      drover-test-sessions))
+              (drover-backend-changed 'fake (concat "t-" id))
+              (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
+                (cl-incf in-place))
+              (should (equal (sort (mapcar (lambda (session) (drover-session-engine-id session))
+                                           (drover-index-sessions))
+                                   #'string<)
+                             (mapcar (lambda (index) (format "c%02d" index)) (number-sequence 0 19))))
+              (drover-list-test-is-fresh)))
+          (should (> in-place 20)))))))
+
 (ert-deftest drover-list-test-collapsed-groups-drawn-later ()
   "Collapsed groups draw their sessions once expanded, searched, copied, or idle."
   (drover-list-test-with (list (drover-list-test-titled "w" "Working away" :status 'working

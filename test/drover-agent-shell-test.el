@@ -409,6 +409,31 @@ the shell started with."
                                 (lambda (message) (setq result (list 'else message))))
     (cons result (drover-agent-shell-test--started-config))))
 
+(ert-deftest drover-agent-shell-test-resume ()
+  "A conversation resumes in a new shell of its engine, loading it by identifier."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-start
+      (let* ((directory (file-name-as-directory (make-temp-file "drover-resume" t)))
+             (buffer (save-window-excursion
+                       (drover-agent-shell-resume 'codex "019f-thread" directory)))
+             (start (car (drover-agent-shell-test--calls-of 'agent-shell--start))))
+        (unwind-protect
+            (progn
+              (should (equal (car start) directory))
+              (should (equal (cdr start)
+                             (list :config (drover-agent-shell-test--started-config) :no-focus t
+                                   :new-session t :session-strategy 'new :session-id "019f-thread"
+                                   :cwd directory)))
+              (should (eq (map-elt (drover-agent-shell-test--started-config) :identifier) 'codex))
+              (should (buffer-live-p buffer))
+              ;; Every engine of a configuration resumes in a shell.
+              (drover-agent-shell--register)
+              (should (equal (mapcar (lambda (engine) (car (drover-resumer engine)))
+                                     '(claude-code codex opencode))
+                             '(agent-shell agent-shell agent-shell)))
+              (should-error (drover-agent-shell-resume 'unknown "x" directory) :type 'user-error))
+          (delete-directory directory t))))))
+
 (ert-deftest drover-agent-shell-test-create ()
   "A new shell starts on the explicit model, agent and effort, displayed."
   (drover-agent-shell-test-with

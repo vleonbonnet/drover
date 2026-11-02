@@ -960,13 +960,17 @@ BACKEND is a name."
 A backend listing conversations as their engine records them (see
 :recorded in `drover-register-backend') yields to a backend following
 one, with the same engine key, among SESSIONS."
-  (let ((followed nil))
-    (dolist (session sessions)
-      (when-let* (((not (drover--recorded-p (drover-session-backend session))))
-                  (key (drover-session-engine-key session)))
-        (unless followed
-          (setq followed (make-hash-table :test #'equal)))
-        (puthash key t followed)))
+  (let ((engines (mapcan (lambda (entry) (copy-sequence (plist-get (cdr entry) :recorded)))
+                         drover--backends))
+        (followed nil))
+    (when engines
+      (dolist (session sessions)
+        (when-let* (((memq (drover-session-engine session) engines))
+                    ((not (drover--recorded-p (drover-session-backend session))))
+                    (key (drover-session-engine-key session)))
+          (unless followed
+            (setq followed (make-hash-table :test #'equal)))
+          (puthash key t followed))))
     (if (not followed)
         sessions
       (seq-remove (lambda (session)

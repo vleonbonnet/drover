@@ -499,7 +499,7 @@ With PREDICATE, the last one for which it returns non-nil."
 (defun drover-transcript-time (string)
   "Return the ISO 8601 time STRING as a float time, or nil."
   (and (stringp string)
-       (ignore-errors (float-time (encode-time (iso8601-parse string))))))
+       (ignore-errors (float-time (encode-time (iso8601-parse string t))))))
 
 (defun drover-transcript-text (string)
   "Return STRING on one line, trimmed and cut to `drover-transcript-text-limit'.

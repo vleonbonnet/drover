@@ -180,7 +180,8 @@ effort, branch and activity there; members not told are left out."
 (defun drover-claude-code-transcripts--read-head (beg end)
   "Return what the records between BEG and END tell of the conversation's start.
 A plist of its directory, creation time, entry point, branch, first
-prompt and the titles there; members not told are left out."
+prompt, the titles there and its newest message's time; members not
+told are left out."
   (let ((data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value))))
               (sniff (key) (save-excursion (goto-char beg) (drover-transcript-sniff key nil end))))
@@ -192,6 +193,9 @@ prompt and the titles there; members not told are left out."
                              (drover-transcript-lines "\"type\":\"user\"" nil beg end)))
       (add :custom-title (drover-claude-code-transcripts--member "\"type\":\"custom-title\"" 'customTitle beg end))
       (add :ai-title (drover-claude-code-transcripts--member "\"type\":\"ai-title\"" 'aiTitle beg end))
+      ;; A tail of other records leaves the head's newest message as the
+      ;; last activity.
+      (add :updated (drover-claude-code-transcripts--activity beg end))
       (add :messages (save-excursion
                        (goto-char beg)
                        (and (re-search-forward "\"type\":\"\\(?:user\\|assistant\\)\"" end t) t))))
