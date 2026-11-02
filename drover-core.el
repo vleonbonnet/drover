@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 3
+(defconst drover-core-generation 8
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -406,14 +406,27 @@ echo area or a tooltip, which it measures to size them."
   (when (stringp text)
     (let ((text (drover-bound-text text (or lines drover-text-lines)
                                    (* (or lines drover-text-lines) (1+ drover-line-limit)))))
-      (if (seq-some #'drover--unbounded-line-p (split-string text "\n"))
+      (if (drover--long-line-p text)
           (mapconcat (lambda (line)
-                       (if (drover--unbounded-line-p line)
+                       (if (> (length line) drover-line-limit)
                            (concat (substring line 0 drover-line-limit) "…")
                          line))
                      (split-string text "\n")
                      "\n")
         text))))
+
+(defun drover--long-line-p (text)
+  "Return non-nil when a line of TEXT is longer than `drover-line-limit'.
+Or holds a carriage return.  Nothing is allocated: tooltips are made by
+the thousand."
+  (or (string-search "\r" text)
+      (let ((start 0)
+            (long nil))
+        (while (and start (not long))
+          (let ((end (string-search "\n" text start)))
+            (setq long (> (- (or end (length text)) start) drover-line-limit)
+                  start (and end (1+ end)))))
+        long)))
 
 (defun drover-format-message (format-string &rest args)
   "Return FORMAT-STRING formatted with ARGS, as `format-message', bounded.
@@ -426,6 +439,80 @@ a backend said may be of any length."
   "Show FORMAT-STRING formatted with ARGS in the echo area, bounded.
 As `message', through `drover-format-message'."
   (message "%s" (apply #'drover-format-message format-string args)))
+
+;;;; Hosts
+
+(defun drover--system-host ()
+  "Return the name of this host as the system names it, short and downcased.
+That is up to its first dot, as \"reaver\" of \"reaver.local\"."
+  (let ((name (downcase (or (car (split-string (system-name) "\\." t)) ""))))
+    (if (string-empty-p name) "localhost" name)))
+
+(defcustom drover-host (drover--system-host)
+  "The name of this host, as other hosts' drover know it.
+A short name, such as \"reaver\", by default the system's name up to
+its first dot, downcased.  Sessions of other hosts carry their host's
+name (see `drover-session-host'), and links naming this host or one of
+`drover-host-aliases' open sessions of this host (see `drover-links')."
+  :type 'string
+  :group 'drover)
+
+(defcustom drover-host-aliases nil
+  "Other names this host answers to in links, such as \"reaver.local\"."
+  :type '(repeat string)
+  :group 'drover)
+
+(defun drover-host-local-p (host)
+  "Return non-nil when HOST, a name, names this host.
+That is `drover-host' or one of `drover-host-aliases', ignoring case."
+  (and (stringp host)
+       (seq-some (lambda (name) (and (stringp name) (string-equal-ignore-case name host)))
+                 (cons drover-host drover-host-aliases))
+       t))
+
+(defvar drover-hosts-function nil
+  "Function of no argument returning the names of the other hosts, in order.
+The remote layer (`drover-remote') sets it: groups of hosts come in
+this order, after this host's.")
+
+(defvar drover-host-label-function nil
+  "Function of a host's name returning how views name it, or nil.
+The remote layer (`drover-remote') sets it, to the label of each peer.")
+
+(defvar drover-host-state-function nil
+  "Function of a host's name telling how it stands when not connected, or nil.
+It returns nil while the host is connected, else a line such as
+\"reconnecting, attempt 3, last heard from 5m ago\".  The remote layer
+\(`drover-remote') sets it.")
+
+(defun drover-hosts ()
+  "Return the names of the other hosts, in the order configured."
+  (and drover-hosts-function
+       (drover-with-reporting "hosts"
+         (funcall drover-hosts-function))))
+
+(defun drover-host-label (host)
+  "Return how views name HOST, a name, or this host for nil."
+  (or (and drover-host-label-function
+           (drover-with-reporting "host label"
+             (funcall drover-host-label-function host)))
+      (or host drover-host)))
+
+(defun drover-host-state (host)
+  "Return how HOST, a name, stands when it is not connected, a line, else nil.
+Nil for this host, always connected."
+  (and host drover-host-state-function
+       (drover-bound-line (drover-with-reporting "host state"
+                            (funcall drover-host-state-function host)))))
+
+(defun drover-host-rank (host)
+  "Return where the sessions of HOST, a name or nil for this one, go among hosts.
+This host comes first, then the others in the order of `drover-hosts',
+then those it does not name, by name."
+  (if (null host)
+      0
+    (let ((position (seq-position (drover-hosts) host)))
+      (if position (1+ position) (+ 1000 (length (drover-hosts)))))))
 
 ;;;; Layouts of long-lived structures
 
@@ -486,6 +573,33 @@ message is shown at most once per `drover-error-interval' seconds for
 one WHAT."
   (when (drover--report-due-p (cons 'layout what))
     (message "Drover: %s made by another version of drover, made anew" what)))
+
+;;;; Links
+
+;; Emacs prints a value whole wherever nothing bounds it: an error's
+;; data in a command, what `format' and `prin1-to-string' are given, a
+;; value evaluated.  Its printer, without `print-circle', prints a
+;; structure again from every path reaching it, so that structures many
+;; of which lead back to what holds them all, such as a list's rows to
+;; their group and sections, or the requests and timers of a peer to the
+;; peer and all its sessions, print with the square of what that holds:
+;; a profile formatted so ran to gigabytes.  They are held through
+;; links, uninterned symbols whose values are what they lead to, which
+;; print as their names: each structure prints once, from where it is
+;; held.
+
+(defsubst drover-link (object)
+  "Return a link to OBJECT, which prints as a name alone, or nil for nil.
+`drover-linked' returns OBJECT from it.  Each link is new, so that a
+copy of a structure holding one may be linked elsewhere."
+  (when object
+    (let ((link (make-symbol "link")))
+      (set link object)
+      link)))
+
+(defsubst drover-linked (link)
+  "Return what LINK, made by `drover-link', leads to, or nil."
+  (and link (symbol-value link)))
 
 ;;;; Sessions
 
@@ -554,23 +668,52 @@ stays what views group, sort and filter by.")
 The next step measures it.")
   (archived nil :documentation "Time, as a float, at which the session was archived, t when unknown, or nil.
 Archived sessions show only while `drover-show-archived' is set; see
-`drover-session-archived-p'."))
+`drover-session-archived-p'.")
+  (host nil :documentation "Name of the host owning the session, or nil for this one.
+A session of another host is its owner's record as last received, its
+backend a proxy of that host (see `drover-remote').")
+  (origin nil :documentation "The owner's backend of a session of another host, a symbol, or nil.
+Such as `opencode' or `claude-code-ide': it tells how the session opens.")
+  (stale nil :documentation "When the owner of a session of another host was last heard from, or nil.
+A float time, set while that host is not connected: the record is as it
+was then, its status perhaps past.")
+  (default-branch nil :documentation "The default branch of the repository of a session of another host, or nil.
+As its owner read it: the file system of this host is never looked at
+for a session of another (see `drover-session-default-branch-p')."))
 
 (drover-note-layout 'drover-session)
+
+(defconst drover--session-length (length (drover-session-create))
+  "How many slots a record of `drover-session' has, its type's first.")
+
+(defun drover--whole-record (record)
+  "Return RECORD, or a copy of it with the slots it lacks, nil.
+A record a backend made with an older drover, still running as this one
+was loaded, lacks the slots that came after: their accessors would
+signal reading past its end."
+  (if (>= (length record) drover--session-length)
+      record
+    (let ((whole (make-record 'drover-session (1- drover--session-length) nil)))
+      (dotimes (index (length record))
+        (aset whole index (aref record index)))
+      whole)))
 
 (defun drover--bound-record (record)
   "Return RECORD, or a copy of it whose texts are bounded, as drover takes it in.
 Its title and the other fields shown on a line are cut to their first
 line and `drover-line-limit' characters (see `drover-bound-line'), its
 detail and the summaries of its requests to `drover-text-lines' lines
-and `drover-text-limit' characters.  RECORD itself when within those."
+and `drover-text-limit' characters.  RECORD itself when within those,
+and of all the slots of a `drover-session' now (see
+`drover--whole-record')."
   (if (not (drover-session-p record))
       record
-    (let ((copy nil))
+    (let* ((whole (drover--whole-record record))
+           (copy (unless (eq whole record) whole)))
       (cl-macrolet ((line (slot)
-                      `(let ((value (,slot record)))
+                      `(let ((value (,slot whole)))
                          (when (drover--unbounded-line-p value)
-                           (unless copy (setq copy (copy-sequence record)))
+                           (unless copy (setq copy (copy-sequence whole)))
                            (setf (,slot copy) (drover-bound-line value))))))
         (line drover-session-title)
         (line drover-session-agent)
@@ -580,17 +723,19 @@ and `drover-text-limit' characters.  RECORD itself when within those."
         (line drover-session-provider)
         (line drover-session-provider-name)
         (line drover-session-project)
-        (line drover-session-branch))
-      (let ((detail (drover-session-detail record)))
+        (line drover-session-branch)
+        (line drover-session-host)
+        (line drover-session-default-branch))
+      (let ((detail (drover-session-detail whole)))
         (when (and (stringp detail) (not (eq (drover-bound-text detail) detail)))
-          (unless copy (setq copy (copy-sequence record)))
+          (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-detail copy) (drover-bound-text detail))))
-      (let ((requests (drover-session-requests record)))
+      (let ((requests (drover-session-requests whole)))
         (when (seq-some (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))
                             (and (stringp summary) (not (eq (drover-bound-text summary) summary)))))
                         requests)
-          (unless copy (setq copy (copy-sequence record)))
+          (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-requests copy)
                 (mapcar (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))
@@ -607,10 +752,20 @@ and `drover-text-limit' characters.  RECORD itself when within those."
 (defun drover-session-engine-key (session)
   "Return (ENGINE . ENGINE-ID) of SESSION, or nil unless both are known.
 It names the conversation across backends: two front ends may show the
-same conversation of one engine."
+same conversation of one engine.  A session of another host is a
+conversation of that host, never merged with one of this host, though
+a copy of it keeps its identifier: its key is (HOST ENGINE . ENGINE-ID)."
   (let ((engine (drover-session-engine session))
         (id (drover-session-engine-id session)))
-    (and engine id (cons engine id))))
+    (and engine id
+         (if-let* ((host (drover-session-host session)))
+             (cons host (cons engine id))
+           (cons engine id)))))
+
+(defun drover-session-stale-p (session)
+  "Return non-nil when SESSION is of a host not connected now.
+Its record is as that host last told it; see `drover-session-stale'."
+  (and (drover-session-stale session) t))
 
 (defun drover-session-attention-p (session)
   "Return non-nil when SESSION needs the user."
@@ -1045,7 +1200,7 @@ that groups of last activity follow the order of that sort."
         'today
       (drover-activity-bucket (cdr activity) now))))
 
-(defconst drover-groupings '(status project branch agent model provider updated nil)
+(defconst drover-groupings '(status project branch agent model provider host updated nil)
   "The values `drover-group-by' may take.")
 
 (defun drover-group-trees (nodes grouping &optional now)
@@ -1060,6 +1215,9 @@ GROUPING is one of `drover-groupings':
           before another when its most urgent tree does.
  provider VALUE is the provider name of the root session (see
           `drover-session-provider-name'), or nil, likewise.
+ host     VALUE is the host of the root session, nil for this host,
+          whose group comes first, then the other hosts in the order
+          of `drover-hosts' (see `drover-host-rank').
  updated  VALUE is the bucket of the tree's last activity at NOW (see
           `drover-tree-activity-bucket'), newest first.
  nil      One group, of VALUE nil, holding every tree; none without
@@ -1076,6 +1234,9 @@ Within a group, trees keep their order in NODES."
                     ('model #'drover-session-model)
                     (_ #'drover-session-provider-name))))
        (drover--group-trees-by nodes (lambda (node) (funcall field (drover-node-session node))))))
+    ('host
+     (sort (drover--group-trees-by nodes (lambda (node) (drover-session-host (drover-node-session node))))
+           :key (lambda (group) (drover-host-rank (car group)))))
     ('updated
      (let ((groups (drover--group-trees-by
                     nodes (lambda (node) (drover-tree-activity-bucket node now)))))
@@ -1232,7 +1393,9 @@ PROPERTIES is a plist of:
              branches, which its records take from `drover-git-branch'
              of their directories.  A refresh (`drover-index-refresh')
              then asks :session again only for the sessions whose
-             directory's branch changed, rather than list them all.
+             directory's branch changed, rather than list them all;
+             never for a session of another host, whose owner reports
+             its branch too, its directory being on that host.
  :open       Function of a session and OTHER-WINDOW displaying it, in
              the selected window, or in another window when
              OTHER-WINDOW is non-nil.  `drover-open' chooses the window
@@ -1252,6 +1415,14 @@ PROPERTIES is a plist of:
              closes only after THEN, and stays after ELSE.
  :unarchive  Function of a session, archived, restoring it from the
              archive.
+ :unarchive-confirms
+             Non-nil when :unarchive is told later whether the restore
+             took, as :archive-confirms tells of :archive: it is then
+             called with a session, THEN and ELSE, and calls THEN with
+             no argument once the session left the archive, or ELSE
+             with a message once the restore was refused, at most one
+             of them once.  The record of the session fetched among
+             the archived ones is forgotten after THEN.
  :archived   Function of a CALLBACK fetching the backend's archived
              sessions, and calling CALLBACK with them as
              `drover-session' records, their ARCHIVED set, as soon as
@@ -1350,6 +1521,9 @@ as `drover-model' describes them: explicit choices (:agent :model
              (nil without :check, or for a new session), submitting TEXT
              as a prompt once SESSION is ready.  A failure is reported
              with `drover-warn', saying the prompt is in the kill ring.
+             A session drover archived is restored before (see
+             `drover-unarchive-to-send'); one its backend archived, the
+             backend restores as it sends, telling a refusal so.
  :options    Function of a SESSION returning what it runs now, as a
              plist (:model MODEL :variant VARIANT), or nil.  It is
              called for every session a picker offers, so it must be
@@ -1369,7 +1543,10 @@ no scheduled prompt.
  :submit     Function of a SESSION, a TEXT, THEN and ELSE, submitting
              TEXT as a prompt now, :blocker having allowed it: THEN with
              no argument once the front end took it, ELSE with a message
-             otherwise, at most one of them once.
+             otherwise, at most one of them once.  ELSE gets a second
+             argument, non-nil, when nothing was sent for sure, as when
+             the session could not be restored from its archive: the
+             prompt then failed rather than was interrupted.
  :ready      Function of no argument returning non-nil once :sessions
              lists every session the backend runs, as a service's
              registry does once loaded: a session it then no longer
@@ -1768,15 +1945,18 @@ subagent of `all', those in the middle of a turn and the way to them in
 `active', none in `none' (see `drover-tree-visible'), and every
 subagent waiting for the user, whatever the mode: it blocks its parent
 until answered.  `drover-filter', which narrows lists only, does not
-apply.  The mode-line count, `drover-next' and `drover-select' offer
-them.  They keep their order in SESSIONS."
+apply.  The sessions of a host not connected, whose statuses may be
+past, are left out (see `drover-session-stale').  The mode-line count,
+`drover-next' and `drover-select' offer them.  They keep their order in
+SESSIONS."
   (let ((sessions (or sessions (drover-sessions)))
         (shown (make-hash-table :test #'equal)))
     (dolist (session (drover-tree-sessions (drover-tree-visible (drover-tree sessions))))
       (puthash (drover-session-key session) t shown))
     (seq-filter (lambda (session)
-                  (or (gethash (drover-session-key session) shown)
-                      (eq (drover-session-status session) 'waiting)))
+                  (and (not (drover-session-stale session))
+                       (or (gethash (drover-session-key session) shown)
+                           (eq (drover-session-status session) 'waiting))))
                 sessions)))
 
 (defun drover-attention-sessions ()
@@ -2356,11 +2536,13 @@ them from the sessions `drover-index-sessions' lists."
 BACKEND reports every other change (:reports-changes): the branch of a
 directory is read once, as `drover-git-branch' reads it, for every
 session of it, and compared with what each record holds, bounded as
-records are."
+records are.  A session of another host is never looked at: its
+directory is on that host, whose drover reports its branch."
   (let ((branches (make-hash-table :test #'equal))
         (keys nil))
     (maphash (lambda (key record)
-               (when (eq (car key) backend)
+               (when (and (eq (car key) backend)
+                          (not (drover-session-host record)))
                  (when-let* ((directory (drover-session-directory record)))
                    (let ((branch (with-memoization (gethash directory branches)
                                    (let ((branch (ignore-errors (drover-git-branch directory))))
@@ -2407,15 +2589,17 @@ something changed."
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
 first; `project', `branch', `agent', `model' or `provider', the
-provider's name, of the session at the top of each tree; `updated',
-the last activity, as today, yesterday, this week and older; or nil
-for no groups, the default.  See `drover-group-trees'."
+provider's name, of the session at the top of each tree; `host', this
+host's sessions first, then each other host's; `updated', the last
+activity, as today, yesterday, this week and older; or nil for no
+groups, the default.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
                  (const :tag "By branch" branch)
                  (const :tag "By agent" agent)
                  (const :tag "By model" model)
                  (const :tag "By provider" provider)
+                 (const :tag "By host" host)
                  (const :tag "By last activity" updated)
                  (const :tag "No groups" nil))
   :group 'drover)
@@ -2433,6 +2617,8 @@ Its members are:
  :since     A float time: sessions last updated then or later.
  :search    A string found, ignoring case, in the title, summary,
             project or branch of the session.
+ :host      A list of hosts: the sessions of one of them, each a name
+            of another host, or `local' for this host's.
 
 A nil or missing member, or an empty search string, matches every
 session.  Change it with `drover-set-filter' so that views follow.")
@@ -2441,7 +2627,7 @@ session.  Change it with `drover-set-filter' so that views follow.")
   "Non-nil in the buffers of drover's own session views.
 Those follow `drover-filter', `drover-group-by' and `drover-sort-by'.")
 
-(defconst drover--filter-keys '(:project :statuses :agent :model :provider :since :search)
+(defconst drover--filter-keys '(:project :statuses :agent :model :provider :since :search :host)
   "The members of `drover-filter', in the order they are described.")
 
 (defun drover--filter-value (filter key)
@@ -2465,12 +2651,17 @@ SESSION must satisfy every member of FILTER that is set."
          (model (drover--filter-value filter :model))
          (provider (drover--filter-value filter :provider))
          (since (drover--filter-value filter :since))
-         (search (drover--filter-value filter :search)))
+         (search (drover--filter-value filter :search))
+         (hosts (drover--filter-value filter :host)))
     (and (or (null project) (equal (drover-session-project session) project))
          (or (null statuses) (memq (drover-session-status session) statuses))
          (or (null agent) (equal (drover-session-agent session) agent))
          (or (null model) (equal (drover-session-model session) model))
          (or (null provider) (equal (drover-session-provider-name session) provider))
+         (or (null hosts)
+             (let ((host (drover-session-host session)))
+               (seq-some (lambda (wanted) (if (eq wanted 'local) (null host) (equal wanted host)))
+                         (if (listp hosts) hosts (list hosts)))))
          (or (null since)
              (let ((updated (drover-session-updated session)))
                (and updated (>= updated since))))
@@ -2588,8 +2779,8 @@ lines, which hint at the settings, are drawn again, and only theirs."
 
 (defun drover-set-filter (key value)
   "Set member KEY of `drover-filter' to VALUE, nil removing it, and redraw views.
-KEY is one of :project, :statuses, :agent, :model, :provider, :since
-and :search."
+KEY is one of :project, :statuses, :agent, :model, :provider, :since,
+:search and :host."
   (unless (memq key drover--filter-keys)
     (error "Unknown filter member %S" key))
   (let ((filter (copy-sequence drover-filter)))
@@ -2942,10 +3133,13 @@ whose buffer is gone: idle, identified by its engine identifier."
   "Return non-nil when SESSION may be archived: by its backend, else by drover.
 Drover archives a session of a backend without an archive of its own,
 or whose archive does not take it (see `drover-supports-p'), once its
-engine identifier is known, as it keeps it by conversation."
+engine identifier is known, as it keeps it by conversation; never a
+session of another host, which its host archives."
   (and (not (drover-session-archived-p session))
        (or (drover--native-archive-p session)
-           (and (drover-session-engine-key session) t))))
+           (and (not (drover-session-host session))
+                (drover-session-engine-key session)
+                t))))
 
 (defun drover-unarchivable-p (session)
   "Return non-nil when SESSION is archived and may be restored."
@@ -2984,6 +3178,8 @@ is, and the value is `confirming' when there is one to close."
      ((drover--native-archive-p session)
       (drover-backend-call session :archive)
       (drover--close-archived session))
+     ((drover-session-host session)
+      (user-error "%s is archived by its host, %s" title (drover-host-label (drover-session-host session))))
      ((not (drover-session-engine-key session))
       (user-error "%s cannot be archived before its conversation is known" title))
      (t
@@ -3067,19 +3263,99 @@ archived it and no backend lists its conversation any more, neither a
 front end following it nor one listing what its engine records, as for
 a Claude Code conversation whose transcript is gone: restored, it would
 leave every list, so it stays archived, and listed among the archived
-sessions.  A buffer archiving was to close once its turn ended stays open."
+sessions.  A buffer archiving was to close once its turn ended stays open.
+
+A backend whose restore is confirmed later (:unarchive-confirms) has
+SESSION's record fetched among the archived sessions forgotten once it
+took (see `drover-archived-left'), and a refusal told on one line, as a
+warning."
   (cond
    ((drover--archive-entry session)
-    (unless (drover--followed-p session)
-      (user-error "%s stays archived: no front end follows its conversation, and its engine keeps no record of it that drover lists"
-                  (drover-session-display-title session)))
+    (when-let* ((refusal (drover--unarchive-refusal session)))
+      (user-error "%s stays archived: %s" (drover-session-display-title session) refusal))
     (drover--archive-forget session)
     (drover--close-cancel session)
     (drover--archive-changed session))
+   ((and (drover-session-archived session) (drover-backend-property session :unarchive-confirms))
+    (let ((backend (drover-session-backend session))
+          (id (drover-session-id session))
+          (title (drover-bound-line (drover-session-display-title session))))
+      (drover-backend-call session :unarchive
+                           (lambda ()
+                             (drover-with-reporting "unarchive"
+                               (drover-archived-left backend id)))
+                           (lambda (message)
+                             (drover-with-reporting "unarchive"
+                               (drover-warn "Could not restore %s from the archive: %s" title
+                                            (or (drover-bound-line message drover-error-length)
+                                                "refused"))))))
+    (drover--close-cancel session))
    ((drover-session-archived session)
     (drover-backend-call session :unarchive)
     (drover--close-cancel session))
    (t (user-error "%s is not archived" (drover-session-display-title session)))))
+
+(defun drover--unarchive-refusal (session)
+  "Return why SESSION, which drover archived, cannot be restored, or nil.
+Restored while no backend lists its conversation, it would leave every
+list."
+  (unless (drover--followed-p session)
+    "no front end follows its conversation, and its engine keeps no record of it that drover lists"))
+
+(defun drover-unarchive-to-send (session)
+  "Restore SESSION from drover's own archive, so that a prompt may go to it.
+Return non-nil once restored, nil when drover did not archive its
+conversation: a backend archiving its sessions itself restores one as
+it takes a prompt, as opencode.el does.  Signal a `user-error' telling,
+on one line, why SESSION cannot be restored (see
+`drover-unarchive-session'): nothing is to be sent to it then."
+  (when (drover--archive-entry session)
+    (when-let* ((refusal (drover--unarchive-refusal session)))
+      (user-error "Could not restore %s from the archive: %s"
+                  (drover-bound-line (drover-session-display-title session)) refusal))
+    (drover-unarchive-session session)
+    t))
+
+(defun drover-archived-conversation (key)
+  "Return a session standing for the conversation of engine KEY drover archived.
+KEY is an engine key, (ENGINE . ENGINE-ID).  The session is the record
+of a backend following the conversation live, else of one listing what
+its engine records, else the record drover kept of it, when its backend
+is still registered.  Nil when drover did not archive it."
+  (when-let* ((entry (alist-get key (drover--archive) nil nil #'equal)))
+    (or (seq-find (lambda (session) (equal (drover-session-engine-key session) key))
+                  (drover--live-sessions))
+        (and (drover--recording-backends (car key))
+             (gethash key (drover--recorded-history)))
+        (and (assq (plist-get entry :backend) drover--backends)
+             (drover--archive-record key entry)))))
+
+(defun drover-archived-live-sessions ()
+  "Return the live sessions whose conversations drover archived itself.
+They are left out of `drover-sessions', yet have buffers a prompt may
+go to, restoring them (see `drover-unarchive-to-send').  Records of
+different backends showing one conversation are merged as
+`drover-sessions' merges them."
+  (when-let* ((archive (drover--archive)))
+    (drover--merge-duplicates
+     (seq-filter (lambda (session)
+                   (when-let* ((key (drover-session-engine-key session)))
+                     (assoc key archive)))
+                 (drover--live-sessions)))))
+
+(defun drover-archived-left (backend id)
+  "Forget the record of session ID of BACKEND fetched as archived: it left.
+For a backend learning that a session left its archive before its
+archived sessions are fetched again (see :archived in
+`drover-register-backend'): lists then no longer show it archived.
+Return non-nil when there was such a record, BACKEND then noted
+changed (see `drover-backend-changed')."
+  (when-let* ((records (alist-get backend drover--archived))
+              ((seq-find (lambda (record) (equal (drover-session-id record) id)) records)))
+    (setf (alist-get backend drover--archived)
+          (seq-remove (lambda (record) (equal (drover-session-id record) id)) records))
+    (drover-backend-changed backend)
+    t))
 
 (defun drover--followed-p (session)
   "Return non-nil when a backend lists the conversation of SESSION.
@@ -3464,11 +3740,33 @@ See `drover-session-default-branch-p'."
   "Return non-nil when SESSION works on the default branch of its repository.
 The default branch is the one a remote of the repository names (see
 `drover-git-default-branch'), else one of `drover-default-branches'.
-Nil for a session without a branch."
+For a session of another host, it is the one its owner read, which the
+record tells (`drover-session-default-branch'): its directory is on
+that host, and this host's file system is never looked at for it.  Nil
+for a session without a branch."
   (when-let* ((branch (drover-session-branch session)))
-    (if-let* ((default (drover-git-default-branch (drover-session-directory session))))
+    (if-let* ((default (if (drover-session-host session)
+                           (drover-session-default-branch session)
+                         (drover-git-default-branch (drover-session-directory session)))))
         (equal branch default)
       (and (member branch drover-default-branches) t))))
+
+(defun drover-session-local-directory (session)
+  "Return the directory of SESSION when it is one of this host, else nil.
+A session of another host runs in a directory of that host, which this
+host's file system must not be asked about, nor commands run in."
+  (and (not (drover-session-host session))
+       (drover-session-directory session)))
+
+(defun drover-relative-file-name (file directory)
+  "Return FILE named relative to DIRECTORY when under it, else FILE.
+Compared as names, the files may be gone.  For the files a session
+changed, DIRECTORY its own, on this host."
+  (if (and directory (file-name-absolute-p file)
+           (string-prefix-p (file-name-as-directory (expand-file-name directory))
+                            (expand-file-name file)))
+      (file-relative-name file directory)
+    file))
 
 ;;;; The session at point
 

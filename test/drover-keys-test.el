@@ -300,7 +300,8 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 
 (ert-deftest drover-keys-test-new-session ()
   (drover-keys-test-with (list (drover-test-session "s" :directory "/work/s/")
-                               (drover-test-session "nowhere"))
+                               (drover-test-session "nowhere")
+                               (drover-test-session "remote" :directory "/on/core/" :host "core"))
     (drover-keys-test-in 'view "s"
       (call-interactively #'drover-new-session))
     (drover-keys-test-in 'view "nowhere"
@@ -309,8 +310,12 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (drover-keys-test-in 'view nil
       (let ((default-directory "/work/empty/"))
         (call-interactively #'drover-new-session)))
+    ;; Another host's directory is not this host's to start in.
+    (drover-keys-test-in 'view "remote"
+      (let ((default-directory "/work/here/"))
+        (call-interactively #'drover-new-session)))
     (should (equal (reverse drover-test-calls)
-                   '((:new "/work/s/") (:new "/work/list/") (:new "/work/empty/"))))))
+                   '((:new "/work/s/") (:new "/work/list/") (:new "/work/empty/") (:new "/work/here/"))))))
 
 (ert-deftest drover-keys-test-new-session-backend-choice ()
   (drover-keys-test-with nil
@@ -734,7 +739,7 @@ go after p, more prompt commands after O."
                                        " F follow [off|on]" " U subagents [all|active|none]"
                                        " O older [hidden|shown]"
                                        " A archived [hidden|shown]"
-                                       " -l location" " -b branch" " -a agent" " -m model" " -r provider"
+                                       " -h host" " -l location" " -b branch" " -a agent" " -m model" " -r provider"
                                        " -x context" " -c created"
                                        " -t age" " -p cache" " -s summary")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
@@ -789,7 +794,10 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
                      '(("Sort by" "o" "r") ("Group by" "g")
                        ("Filter by" "p" "s" "a" "m" "v" "d" "f" "c")
                        ("Toggles" "F" "U" "O" "A")
-                       ("Columns" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
+                       ("Columns" "- h" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
+      ;; Hosts are filtered once there are others.
+      (let ((drover-hosts-function (lambda () '("core"))))
+        (should (member "h" (cdr (assoc "Filter by" (drover-keys-test-keys 'drover-view))))))
       ;; One key, one setting.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
         (should (equal keys (delete-dups (copy-sequence keys)))))
@@ -1028,7 +1036,7 @@ The value is (PREFIX-OBJECT . SUFFIX), for `drover-keys-test-choose'."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 25))
+      (should (= (length suffixes) 27))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 

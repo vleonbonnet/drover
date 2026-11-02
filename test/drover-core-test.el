@@ -655,13 +655,6 @@ REMAPPING the face remapping in force."
 
 ;;;; Trees
 
-(defun drover-test-tree-shape (nodes)
-  "Return trees NODES as nested lists of session identifiers."
-  (mapcar (lambda (node)
-            (cons (drover-session-id (drover-node-session node))
-                  (drover-test-tree-shape (drover-node-children node))))
-          nodes))
-
 (ert-deftest drover-test-tree-nests-subagents ()
   (let ((nodes (drover-tree
                 (list (drover-test-session "child" :parent "root" :status 'working :updated 5.0)
@@ -1482,7 +1475,7 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
-    (should (equal (last slots 3) '(agent-display context-estimated archived)))
+    (should (equal (last slots 7) '(agent-display context-estimated archived host origin stale default-branch)))
     (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()
@@ -2147,6 +2140,73 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
             (should-not (drover-archived-sessions))
             (should-not (drover-archived-available-p))
             (should (equal (mapcar #'drover-session-id (drover-sessions)) '("a" "b" "unknown")))))))))
+
+(ert-deftest drover-test-unarchive-to-send ()
+  "Before a prompt goes, what drover archived is restored; what its backend archived is left to it."
+  (let ((sessions (list (drover-test-shown "a") (drover-test-shown "b"))))
+    (drover-test-with-shown sessions
+      (let ((a (drover-find 'shown "a")))
+        ;; Not archived: nothing to do.
+        (should-not (drover-unarchive-to-send a))
+        (should-not (drover-archived-live-sessions))
+        (should-not (drover-archived-conversation '(claude-code . "conv-a")))
+        (drover-archive a)
+        ;; Its buffer open, it is live, archived.
+        (should (equal (mapcar #'drover-session-key (drover-archived-live-sessions)) '((shown . "a"))))
+        (should (equal (drover-session-key (drover-archived-conversation '(claude-code . "conv-a")))
+                       '(shown . "a")))
+        (should (drover-unarchive-to-send a))
+        (should-not (drover-session-archived-p a))
+        (should-not (drover-archived-live-sessions))
+        ;; Gone from every list, drover's record stands for it, and it
+        ;; cannot be restored: told on one line.
+        (drover-archive a)
+        (setq sessions (cdr sessions))
+        (let ((kept (drover-archived-conversation '(claude-code . "conv-a"))))
+          (should (equal (drover-session-key kept) '(shown . "conv-a")))
+          (let ((err (should-error (drover-unarchive-to-send kept) :type 'user-error)))
+            (should (equal (cadr err)
+                           (concat "Could not restore Shown a from the archive: no front end follows its "
+                                   "conversation, and its engine keeps no record of it that drover lists"))))
+          (should (drover-session-archived-p kept))))
+      ;; Archived by its backend: the backend restores it as it sends.
+      (let ((native (drover-test-session "n" :archived 1.0 :engine 'claude-code :engine-id "conv-n")))
+        (should-not (drover-unarchive-to-send native))))))
+
+(ert-deftest drover-test-unarchive-confirmed ()
+  "A backend confirming restores has the record fetched as archived forgotten once it took."
+  (drover-test-with-backend nil
+    (let ((drover-test-archived-calls nil)
+          (asked nil)
+          (warnings nil))
+      (drover-test-register-archived)
+      (setf (alist-get 'fake drover--backends)
+            (append (list :unarchive (lambda (session then else)
+                                       (push (list (drover-session-id session) then else) asked))
+                          :unarchive-confirms t)
+                    (alist-get 'fake drover--backends)))
+      (drover-set-show-archived t)
+      (funcall (car drover-test-archived-calls)
+               (list (drover-test-session "a" :archived 1.0) (drover-test-session "b" :archived 1.0)))
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (&rest arguments) (push (apply #'format arguments) warnings))))
+        (drover-unarchive (list (drover-find 'fake "a") (drover-find 'fake "b")))
+        (should (equal (mapcar #'car asked) '("b" "a")))
+        (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("a" "b")))
+        (funcall (nth 1 (cadr asked)))
+        (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("b")))
+        (funcall (nth 2 (car asked)) (concat "Refused\n" (make-string 1000 ?x)))
+        (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("b")))
+        (should (= (length warnings) 1))
+        (should (string-prefix-p "Could not restore Session b from the archive: Refused" (car warnings)))
+        (should-not (string-search "\n" (car warnings))))
+      ;; Forgetting a record not fetched changes nothing.
+      (setq drover--changed-backends nil)
+      (should-not (drover-archived-left 'fake "a"))
+      (should-not drover--changed-backends)
+      (should (drover-archived-left 'fake "b"))
+      (should (memq 'fake drover--changed-backends))
+      (should-not (drover-archived-sessions)))))
 
 (ert-deftest drover-test-drover-archive-file ()
   "Drover keeps what it archived in its state directory, read anew when it changes."
@@ -2845,6 +2905,42 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
         (should-not asked)
         (should (equal (car ran) '((reporting . "2"))))))))
 
+(ert-deftest drover-test-index-refresh-other-host ()
+  "A refresh never reads the branch of a session of another host, whose directory is there."
+  (drover-test-with-backend nil
+    (let* ((sessions (list (drover-session-create :backend 'remote:core :id '(fake . "1") :title "1"
+                                                  :directory "/w/a/" :branch "main" :host "core")
+                           (drover-session-create :backend 'remote:core :id '(fake . "2") :title "2"
+                                                  :directory "/w/b/" :host "core")))
+           (read nil)
+           (listed 0)
+           (asked nil)
+           (ran nil))
+      (cl-letf (((symbol-function 'drover-git-branch)
+                 (lambda (directory) (push directory read) "elsewhere")))
+        (drover-test-register-simple
+         'remote:core (lambda () (cl-incf listed) (mapcar #'copy-sequence sessions))
+         :session (lambda (id)
+                    (push id asked)
+                    (copy-sequence (seq-find (lambda (session) (equal (drover-session-id session) id))
+                                             sessions)))
+         :remote "core"
+         :reports-changes t)
+        (drover-index)
+        (drover-changed-now)
+        (setq listed 0)
+        (add-hook 'drover-changed-hook (lambda () (push drover-changed-sessions ran)))
+        (drover-index-refresh)
+        (should-not read)
+        (should (zerop listed))
+        (should-not asked)
+        (should-not ran)
+        ;; A full refresh lists them again, still reading no branch.
+        (drover-index-refresh t)
+        (should (= listed 1))
+        (should-not read)
+        (should-not ran)))))
+
 (ert-deftest drover-test-git-default-branch ()
   "The default branch is the one a remote's HEAD names, read without Git."
   (let* ((root (file-name-as-directory (make-temp-file "drover-git" t)))
@@ -2897,6 +2993,45 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
           (let ((drover-branch-ttl 0))
             (should (equal (drover-git-default-branch main) "main"))))
       (delete-directory root t))))
+
+(ert-deftest drover-test-default-branch-of-another-host ()
+  "Another host's session has the default branch its owner read; this host reads nothing."
+  (let* ((root (file-name-as-directory (make-temp-file "drover-git" t)))
+         (drover--default-branches (make-hash-table :test #'equal))
+         (looked nil))
+    (unwind-protect
+        (progn
+          ;; The same directory here is another repository, whose default
+          ;; branch is not the owner's.
+          (make-directory (expand-file-name ".git/refs/remotes/origin" root) t)
+          (with-temp-file (expand-file-name ".git/refs/remotes/origin/HEAD" root)
+            (insert "ref: refs/remotes/origin/develop\n"))
+          (advice-add 'drover--read-git-default-branch :before (lambda (directory) (push directory looked))
+                      '((name . drover-test-looked)))
+          (cl-flet ((default-p (branch &optional default)
+                      (drover-session-default-branch-p
+                       (drover-session-create :directory root :branch branch :host "core"
+                                              :default-branch default))))
+            (should (default-p "develop" "develop"))
+            (should-not (default-p "main" "develop"))
+            ;; The owner knows none: main and master stand for it.
+            (should (default-p "main"))
+            (should-not (default-p "develop"))
+            (should-not looked)
+            ;; This host's session in the same directory reads it.
+            (should (drover-session-default-branch-p (drover-session-create :directory root :branch "develop")))
+            (should (equal looked (list (file-name-as-directory (expand-file-name root)))))))
+      (advice-remove 'drover--read-git-default-branch 'drover-test-looked)
+      (delete-directory root t))))
+
+(ert-deftest drover-test-local-directory ()
+  "A session's directory is this host's to use only when the session is."
+  (should (equal (drover-session-local-directory (drover-session-create :directory "/here/")) "/here/"))
+  (should-not (drover-session-local-directory (drover-session-create :directory "/there/" :host "core")))
+  (should (equal (drover-relative-file-name "/work/a/b.el" "/work/a/") "b.el"))
+  (should (equal (drover-relative-file-name "/elsewhere/b.el" "/work/a/") "/elsewhere/b.el"))
+  (should (equal (drover-relative-file-name "/work/a/b.el" nil) "/work/a/b.el"))
+  (should (equal (drover-relative-file-name "b.el" "/work/a/") "b.el")))
 
 ;;;; Several sessions at once
 

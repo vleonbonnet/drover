@@ -61,6 +61,7 @@
   (drover-list--stop-timer 'drover-list--frame-timer)
   (drover-list--stop-timer 'drover-list--focus-timer)
   (setq drover-list--age-due nil
+        drover-list--frame-timer-pace nil
         drover-list--focused t))
 
 (defmacro drover-list-test-with (sessions &rest body)
@@ -899,6 +900,40 @@ sessions; which subagents show, the View menu tells."
       (should (equal (drover-list--truncate "abc" 5) ""))
       (should (equal (drover-list--truncate "abc" -5) ""))
       (should (equal (drover-list--truncate "" 0) "")))))
+
+(ert-deftest drover-list-test-cut-measures-little ()
+  "A cut lays out few candidates, keeps none of them, and the one it returns."
+  (with-temp-buffer
+    (let ((drover-list--widths nil)
+          (measured nil))
+      (cl-letf (((symbol-function 'drover-list--measure)
+                 (lambda (string) (push (substring-no-properties string) measured) (string-width string))))
+        (let ((title (drover-face (make-string 40 ?m) 'drover-dim))
+              (cut (concat (make-string 9 ?m) "…")))
+          (should (equal (drover-list--truncate title 10) cut))
+          ;; The text whole, then ten, eight and nine characters: neither
+          ;; the empty prefix, which fits, nor the result is laid out again.
+          (should (equal (reverse measured)
+                         (list (make-string 40 ?m) (concat (make-string 10 ?m) "…")
+                               (concat (make-string 8 ?m) "…") cut)))
+          ;; No candidate is kept, but what the text is cut to is.
+          (should-not (gethash (drover-face cut 'drover-dim) (nth 1 drover-list--widths)))
+          (setq measured nil)
+          (should (equal (drover-list--truncate title 10) cut))
+          (should-not measured)
+          ;; Not even the ellipsis fits: nothing, found last.
+          (should (equal (drover-truncate-to-pixels "abc" 0 #'string-width) ""))
+          (should (equal (drover-truncate-to-pixels "abc" 1 #'string-width) "…")))))))
+
+(ert-deftest drover-list-test-lines-share-their-parts ()
+  "A text on one line is used as it is, and aligned spaces are made once per position."
+  (let ((text "Already one line"))
+    (should (eq (drover-list--one-line text) text))
+    (should (equal (drover-list--one-line " two\nlines ") "two lines"))
+    (should (equal (drover-list--one-line nil) ""))
+    (should (equal (drover-list--one-line 'symbol) "symbol")))
+  (should (eq (drover-list--align 120) (drover-list--align 120)))
+  (should (equal (get-text-property 0 'display (drover-list--align 120)) '(space :align-to (120)))))
 
 (ert-deftest drover-list-test-titles-truncated-in-pixels ()
   (drover-list-test-with-font
@@ -4988,10 +5023,12 @@ The subagent's glyph stands under its parent's title."
         (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))))))
 
 (ert-deftest drover-list-test-timers-follow-the-focus ()
-  "Timers pause once Emacs lost focus, and run again once it has it, drawing at once."
+  "Losing focus, glyphs move slower and the other timers keep their pace.
+Regaining it, the frame of the time shows at once, at the full pace."
   (drover-list-test-with (list (drover-test-session "w" :status 'working
                                                     :cache-expires (+ drover-test-now 240) :cache-ttl 300))
     (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval 2)
           (drover-list-cache-interval 5)
           (drover-list-age-interval 60)
           (focused t))
@@ -5000,43 +5037,268 @@ The subagent's glyph stands under its parent's title."
         (drover-list-test-shown
           (revert-buffer)
           (should (timerp drover-list--frame-timer))
+          (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
           (should (timerp drover-list--cache-timer))
           (should (timerp drover-list--age-timer))
-          ;; Focus moves out: looked at once the events settled.
-          (setq focused nil)
-          (drover-list--focus-changed)
-          (should (timerp drover-list--focus-timer))
+          (let ((cache-timer drover-list--cache-timer)
+                (age-timer drover-list--age-timer))
+            ;; Focus moves out: looked at once the events settled.
+            (setq focused nil)
+            (drover-list--focus-changed)
+            (should (timerp drover-list--focus-timer))
+            (drover-list--refocus)
+            (should-not drover-list--focus-timer)
+            (should-not drover-list--focused)
+            ;; The glyphs tick every 3.5 s, seven frames, the next frame
+            ;; of three and of two from 2 s up, in the middle of a frame;
+            ;; the caches and ages keep their timers.
+            (should (timerp drover-list--frame-timer))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))
+            (should (<= (float-time (time-subtract (timer--time drover-list--frame-timer) nil)) 0.75))
+            (should (eq drover-list--cache-timer cache-timer))
+            (should (eq drover-list--age-timer age-timer))
+            ;; A tick shows the frame of the time, as at the full pace:
+            ;; 4.5 frames of 0.5 s later, the second of three.
+            (setq drover-list-test-clock (+ drover-test-now 2.25))
+            (drover-list--frame-tick)
+            (should (= (opencode-session-status-frame-index 3 drover-list-test-clock) 1))
+            (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
+            (setq drover-list-test-clock (+ drover-test-now 5.75))
+            (drover-list--frame-tick)
+            (should (string-prefix-p "  3 Session w" (drover-list-test-heading "w")))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))
+            ;; The caches keep moving.
+            (setq drover-list-test-clock (+ drover-test-now 90.5))
+            (drover-list--cache-tick)
+            (should (equal (drover-list-test-cache-field "w") '(2 3 "2m")))
+            (should (eq drover-list--cache-timer cache-timer))
+            ;; A change of windows meanwhile keeps the slow pace.
+            (let ((timer drover-list--frame-timer))
+              (drover-list--windows-changed)
+              (should (eq drover-list--frame-timer timer)))
+            ;; Focus back: the frame of the time shows at once, and the
+            ;; glyphs move at the full pace.
+            (setq focused t
+                  drover-list-test-clock (+ drover-test-now 100.75))
+            (drover-list--refocus)
+            (should drover-list--focused)
+            (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))
+            (should (timerp drover-list--frame-timer))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
+            (should (<= (float-time (time-subtract (timer--time drover-list--frame-timer) nil)) 0.75))
+            (should (eq drover-list--cache-timer cache-timer))
+            (should (eq drover-list--age-timer age-timer))))))))
+
+(ert-deftest drover-list-test-unfocused-pace ()
+  "The pace while Emacs has no focus is a whole number of frames, never quicker.
+With the moon's eight phases and the clock's four hours, nine frames:
+seven, a second, showed them turning backwards."
+  (let ((opencode-session-status-animation-interval 0.15)
+        (opencode-session-status-animations (eval (car (get 'opencode-session-status-animations
+                                                             'standard-value))
+                                                  t))
+        (drover-list-animation-unfocused-interval
+         (eval (car (get 'drover-list-animation-unfocused-interval 'standard-value)) t))
+        (drover-list--focused nil))
+    (should (equal (mapcar (lambda (entry) (length (cdr entry))) opencode-session-status-animations) '(8 4)))
+    ;; The default, nine frames, ticks fall mid-frame.
+    (should (= drover-list-animation-unfocused-interval 1.35))
+    (should (< (abs (- (drover-list--frame-pace) 1.35)) 1e-9))
+    ;; A second, 6.67 frames, rounds up to nine too, not to seven.
+    (let ((drover-list-animation-unfocused-interval 1.0))
+      (should (< (abs (- (drover-list--frame-pace) 1.35)) 1e-9)))
+    ;; Past nine frames, seventeen.
+    (let ((drover-list-animation-unfocused-interval 1.4))
+      (should (< (abs (- (drover-list--frame-pace) 2.55)) 1e-9)))
+    ;; Quicker than a frame, a frame.
+    (let ((drover-list-animation-unfocused-interval 0.05))
+      (should (= (drover-list--frame-pace) 0.15)))
+    ;; Without animations, the frames asked, rounded up.
+    (let ((opencode-session-status-animations nil)
+          (drover-list-animation-unfocused-interval 1.0))
+      (should (< (abs (- (drover-list--frame-pace) 1.05)) 1e-9)))
+    (let ((drover-list-animation-unfocused-interval nil))
+      (should-not (drover-list--frame-pace)))
+    (let ((opencode-session-status-animation-interval nil))
+      (should-not (drover-list--frame-pace)))
+    (let ((drover-list--focused t))
+      (should (= (drover-list--frame-pace) 0.15)))))
+
+(defun drover-list-test-steps (pace counts &optional ticks)
+  "Return how each animation of COUNTS frames moves at each of TICKS ticks of PACE.
+The ticks fall in the middle of frames, from an instant the clock picks;
+each step is the frames an animation moved at a tick, as shown by the
+frame of the time, modulo its frames: 1 its next frame."
+  (let ((time (+ drover-test-now (opencode-session-status-frame-delay drover-test-now)))
+        (steps nil))
+    (dotimes (_ (or ticks 20))
+      (let ((next (+ time pace)))
+        (dolist (count counts)
+          (push (mod (- (opencode-session-status-frame-index count next)
+                        (opencode-session-status-frame-index count time))
+                     count)
+                steps))
+        (setq time next)))
+    (delete-dups steps)))
+
+(ert-deftest drover-list-test-unfocused-steps-forward ()
+  "Without focus, each tick shows every animation its next frame.
+The frame shown is the clock's: a tick of seven frames of eight showed
+the moon its phase before, turning backwards."
+  (let ((opencode-session-status-animation-interval 0.15)
+        (drover-list--focused nil))
+    (pcase-dolist (`(,counts ,seconds ,frames)
+                   '(((8 4) 1.35 9) ((8 4) 1.0 9) ((8 4) 0.5 9) ((8 4) 2 17) ((8) 1.0 9)
+                     ((4) 1.0 9) ((3 2) 1.0 7) ((3) 1.0 7) ((5) 1.0 11) ((6 4) 1.0 13)
+                     ((8 4) 0.15 1) ((8 4) 0.1 1) ((2) 1.0 7) (nil 1.0 7)))
+      (ert-info ((format "Animations of %s frames, %s s asked" counts seconds))
+        (let ((opencode-session-status-animations
+               (seq-map-indexed (lambda (count index)
+                                  (cons (nth index '(working retrying))
+                                        (mapcar #'number-to-string (number-sequence 1 count))))
+                                counts))
+              (drover-list-animation-unfocused-interval seconds))
+          (should (< (abs (- (drover-list--frame-pace) (* frames 0.15))) 1e-9))
+          (should (>= (+ (drover-list--frame-pace) 1e-9) (max seconds 0.15)))
+          (when counts
+            (should (equal (drover-list-test-steps (drover-list--frame-pace) counts)
+                           (if (seq-every-p (lambda (count) (= count 1)) counts) '(0) '(1))))))))
+    ;; Frames of five, seven and nine show their next frames together
+    ;; every 315 frames, past three times a second, 20 frames.  Then the
+    ;; least spanning showing their next frame to the animations of the
+    ;; most frames together: from 7 to 20 frames, 10, the nine-frame
+    ;; one's; from 20 to 60, 46, the nine and five-frame ones', 14
+    ;; frames, rather than 36, seven and five, 12.
+    (should (= (drover-list--forward-frames (/ 1.0 0.15) '(5 7 9)) 10))
+    (should (= (drover-list--forward-frames 20 '(5 7 9)) 46))
+    ;; Within reach, the least of all.
+    (should (= (drover-list--forward-frames 200 '(5 7 9)) 316))
+    ;; Eight and three: their next frames together every 25 frames, past
+    ;; three times 6.67; nine shows the moon its next phase, seven would
+    ;; show the three-frame one its next, the moon its phase before.
+    (should (= (drover-list--forward-frames (/ 1.0 0.15) '(8 3)) 9))
+    (should (= (drover-list--forward-frames 9 '(8 4)) 9))
+    (should (= (drover-list--forward-frames 9.000000000000002 '(8 4)) 9))
+    (should (= (drover-list--forward-frames 0.3 '(8 4)) 1))))
+
+(ert-deftest drover-list-test-unfocused-glyphs-step-forward ()
+  "A list without focus shows each animated glyph its next frame at each tick."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working)
+                               (drover-test-session "r" :status 'retrying))
+    (let ((opencode-session-status-animations '((working "1" "2" "3" "4" "5" "6" "7" "8")
+                                                (retrying "a" "b" "c" "d")))
+          (opencode-session-status-animation-interval 0.15)
+          (drover-list-animation-unfocused-interval 1.0)
+          (drover-list-collapsed-groups nil)
+          (focused nil))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
           (drover-list--refocus)
-          (should-not drover-list--focus-timer)
           (should-not drover-list--focused)
+          (should (< (abs (- (timer--repeat-delay drover-list--frame-timer) 1.35)) 1e-9))
+          (cl-flet ((glyph (id) (substring (drover-list-test-heading id) 2 3)))
+            (let ((moon (glyph "w"))
+                  (clock (glyph "r")))
+              (dotimes (tick 12)
+                (setq drover-list-test-clock (+ drover-test-now 0.075 (* (1+ tick) 1.35)))
+                (drover-list--frame-tick)
+                (should (equal (glyph "w") (number-to-string (1+ (mod (string-to-number moon) 8)))))
+                (should (equal (glyph "r") (string (+ ?a (mod (1+ (- (aref clock 0) ?a)) 4)))))
+                (setq moon (glyph "w")
+                      clock (glyph "r"))))))))))
+
+(ert-deftest drover-list-test-unfocused-animation-off ()
+  "Without an unfocused pace, glyphs stand still while Emacs has no focus.
+The caches and ages keep their timers; focus back, the frame of the
+time shows at once."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working
+                                                    :cache-expires (+ drover-test-now 240) :cache-ttl 300))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval nil)
+          (drover-list-cache-interval 5)
+          (drover-list-age-interval 60)
+          (focused t))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should (timerp drover-list--frame-timer))
+          (setq focused nil)
+          (drover-list--refocus)
           (should-not drover-list--frame-timer)
-          (should-not drover-list--cache-timer)
-          (should-not drover-list--age-timer)
+          (should (timerp drover-list--cache-timer))
+          (should (timerp drover-list--age-timer))
           ;; A tick already due draws nothing, and changes nothing.
           (setq drover-list-test-clock (+ drover-test-now 0.5))
           (let ((tick (buffer-modified-tick)))
             (drover-list--frame-tick)
-            (drover-list--cache-tick)
             (should (= tick (buffer-modified-tick))))
           (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))
-          (should (equal (drover-list-test-cache-field "w") '(4 1 "4m")))
           ;; A change of windows meanwhile starts nothing.
           (drover-list--windows-changed)
           (should-not drover-list--frame-timer)
-          ;; Focus back: the frame of the time and the cache as it
-          ;; stands show at once, and the timers run.
           (setq focused t
                 drover-list-test-clock (+ drover-test-now 90.5))
           (drover-list--refocus)
-          (should drover-list--focused)
           (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
-          (should (equal (drover-list-test-cache-field "w") '(2 3 "2m")))
           (should (timerp drover-list--frame-timer))
-          (should (timerp drover-list--cache-timer))
-          (should (timerp drover-list--age-timer))
-          ;; The age timer ticks when it was due, a second from now
-          ;; once that passed, rather than a whole interval later.
-          (should (<= (float-time (time-subtract (timer--time drover-list--age-timer) nil)) 61)))))))
+          (should (= (timer--repeat-delay drover-list--frame-timer) 0.5)))))))
+
+(ert-deftest drover-list-test-other-frame-focus ()
+  "Another frame of Emacs having focus, the list's glyphs keep the full pace.
+Emacs may tell the list's frame lost focus before telling the other has
+it: the focus is looked at once those events settled."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval 2)
+          (focused (selected-frame)))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-list) (lambda () (list (selected-frame) 'other)))
+                ((symbol-function 'frame-focus-state) (lambda (&optional frame) (eq frame focused))))
+        (drover-list-test-shown
+          (revert-buffer)
+          (let ((timer drover-list--frame-timer))
+            (should (timerp timer))
+            ;; The list's frame loses focus, then the other frame has it.
+            (setq focused nil)
+            (drover-list--focus-changed)
+            (setq focused 'other)
+            (drover-list--focus-changed)
+            (drover-list--refocus)
+            (should drover-list--focused)
+            (should (eq drover-list--frame-timer timer))
+            (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
+            ;; Then Emacs loses focus: the slow pace.
+            (setq focused nil)
+            (drover-list--refocus)
+            (should-not drover-list--focused)
+            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))))))))
+
+(ert-deftest drover-list-test-unfocused-hidden-frames ()
+  "A list on an iconified frame animates nothing, Emacs having focus or not."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-animation-unfocused-interval 2)
+          (focused nil))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (drover-list--refocus)
+          (should-not drover-list--focused)
+          (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))
+          (cl-letf (((symbol-function 'frame-visible-p) (lambda (_frame) 'icon)))
+            (setq drover-list-test-clock (+ drover-test-now 2.25))
+            (let ((tick (buffer-modified-tick)))
+              (drover-list--frame-tick)
+              (should (= tick (buffer-modified-tick))))
+            (should-not drover-list--frame-timer)
+            (setq focused t)
+            (drover-list--refocus)
+            (should-not drover-list--frame-timer)
+            (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))))))))
 
 (ert-deftest drover-list-test-timers-stop-on-hidden-frames ()
   "A list on an iconified frame animates nothing; shown again, it does."
@@ -5650,6 +5912,52 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
               (should (string-match-p "Session d +p +20s\\'" (drover-list-test-heading "d"))))))
       (delete-directory root t))))
 
+(ert-deftest drover-list-test-branch-default-of-another-host ()
+  "Another host's session hides the branch its owner read as the default; this host reads nothing."
+  (let* ((root (make-temp-file "drover-repo" t))
+         (remote (expand-file-name ".git/refs/remotes/origin" root))
+         (looked nil))
+    (unwind-protect
+        (progn
+          (make-directory remote t)
+          (with-temp-file (expand-file-name ".git/HEAD" root) (insert "ref: refs/heads/main\n"))
+          ;; Here, the same directory is a repository of another default.
+          (with-temp-file (expand-file-name "HEAD" remote) (insert "ref: refs/remotes/origin/develop\n"))
+          (advice-add 'drover--read-git-default-branch :before (lambda (directory) (push directory looked))
+                      '((name . drover-list-test-looked)))
+          (let ((drover--default-branches (make-hash-table :test #'equal)))
+            (drover-list-test-with
+                (list (drover-test-session "m" :status 'working :project "p" :branch "main" :host "core"
+                                           :default-branch "main" :directory root
+                                           :updated (drover-list-test-ago 10))
+                      (drover-test-session "d" :status 'working :project "p" :branch "develop" :host "core"
+                                           :default-branch "main" :directory root
+                                           :updated (drover-list-test-ago 20))
+                      (drover-test-session "u" :status 'working :project "p" :branch "master" :host "core"
+                                           :directory root :updated (drover-list-test-ago 30)))
+              (should-not (string-search "main" (drover-list-test-heading "m")))
+              (should (string-search "develop" (drover-list-test-heading "d")))
+              ;; The owner knowing none, main and master stand for it.
+              (should-not (string-search "master" (drover-list-test-heading "u")))
+              (should-not looked))))
+      (advice-remove 'drover--read-git-default-branch 'drover-list-test-looked)
+      (delete-directory root t))))
+
+(ert-deftest drover-list-test-directory-of-another-host ()
+  "Details name another host's directory as it does, and its changed files as it sent them."
+  (let* ((home (expand-file-name "~/src/x/"))
+         (layout (list :fields nil :now drover-test-now))
+         (fact (lambda (session)
+                 (nth 1 (assoc "Directory" (drover-list--hidden-facts session layout))))))
+    (should (equal (funcall fact (drover-session-create :directory home)) "~/src/x/"))
+    (should (equal (funcall fact (drover-session-create :directory home :host "core")) home))
+    (should (equal (drover-list--changes-text (list (list (concat home "a.el") 1 2)) home)
+                   "+1 −2 in 1 file: a.el"))
+    (should (equal (drover-list--changes-text (list (list (concat home "a.el") 1 2))
+                                              (drover-session-local-directory
+                                               (drover-session-create :directory home :host "core")))
+                   (concat "+1 −2 in 1 file: " home "a.el")))))
+
 (ert-deftest drover-list-test-branch-in-view-menu ()
   "The View menu's Columns switch the branch's column."
   (drover-list-test-with
@@ -6091,6 +6399,137 @@ The prompt shows nowhere; `prompt' returns its text."
           ;; c's reply, arriving later still, adds nothing.
           (funcall (cdr (assoc "c" drover-test-recap-pending)) (list :reply "Too late"))
           (should (equal (prompt) text)))))))
+
+(ert-deftest drover-list-test-prints-in-proportion ()
+  "What the lists keep prints in proportion to the sessions they show.
+Emacs prints a value whole in an error's data, or as `format' does,
+here the closure drawing a group, as a profile showed it: each row,
+tree and group once led back to every section of the buffer, every
+tree of its group and every row, printed again for each, and a group
+of 3500 sessions ran to gigabytes.  The lists, here both, with older
+and archived sessions, every session expanded and its recap kept, and
+the mode line's count, print within a bound a session, and a row or a
+tree within a bound whatever the sessions."
+  (let ((sessions (cl-loop for i below 200
+                           collect (drover-test-session
+                                    (format "s%03d" i) :title (format "Session %d" i)
+                                    :status (nth (% i 4) '(working idle waiting done))
+                                    :requests (and (= (% i 4) 2) (list (list :kind 'question :summary "Which?")))
+                                    :parent (and (zerop (% i 5)) (> i 0) (format "s%03d" (1- i))))))
+        (older (cl-loop for i below 100
+                        collect (drover-test-session (format "old%03d" i) :status 'idle)))
+        (archived (cl-loop for i below 100
+                           collect (drover-test-session (format "gone%03d" i) :status 'done :archived 1.0))))
+    (dolist (grouping '(nil status))
+      (drover-list-test-with sessions
+        (setf (alist-get 'fake drover--backends)
+              (append (list :history (lambda (callback) (funcall callback older))
+                            :archived (lambda (callback) (funcall callback archived)))
+                      (alist-get 'fake drover--backends)))
+        (let ((drover-group-by grouping)
+              (drover-list-collapsed-groups nil)
+              (global-mode-string nil))
+          (drover-list-test-shown
+            (drover-set-show-history t)
+            (drover-set-show-archived t)
+            (drover-changed-now)
+            (revert-buffer)
+            (let ((expanded 0))
+              (magit-map-sections (lambda (section)
+                                    (when (drover-list-session-section-p section)
+                                      (cl-incf expanded)
+                                      (magit-section-show section))))
+              (should (> expanded 200))
+              (should (= (hash-table-count drover-list--recaps) expanded)))
+            (drover-list-side)
+            (drover-attention-mode 1)
+            (unwind-protect
+                (let* ((model drover-list--model)
+                       (group (car (drover-list--model-groups model)))
+                       (tree (aref (drover-list--group-trees group) 0))
+                       (row (car (drover-list--tree-shown tree)))
+                       (drawing (lambda () group)))
+                  (should (drover-list--row-section row))
+                  (should (drover-list--group-container group))
+                  ;; Drover's own report of an error carrying one is a line.
+                  (should (< (length (drover-error-string (list 'wrong-type-argument 'drover-list--tree group)))
+                             drover-error-length))
+                  (ert-info ((format "Grouped by %s" grouping))
+                    (should (drover-test-printed-length drawing (* 10000 400)))
+                    (drover-test-prints-in-proportion
+                     400 (list (cons "a row" row) (cons "a tree" tree)
+                               (cons "a record" (drover-list--row-session row))))))
+              (drover-attention-mode -1))))))))
+
+;;;; Sessions of other hosts
+
+(defun drover-list-test-remote-line (key)
+  "Return the first line of the session KEY, of any backend, as a terminal draws it."
+  (drover-list--draw-deferred)
+  (save-excursion
+    (goto-char (oref (drover-list--find-session key) start))
+    (drover-list-test-line)))
+
+(defun drover-list-test-remote-animated-p (key)
+  "Return non-nil when the glyph of the session KEY, of any backend, is animated."
+  (let ((section (drover-list--find-session key)))
+    (text-property-any (oref section start) (oref section end) 'drover-list-frame 'working)))
+
+(ert-deftest drover-list-test-host-column ()
+  "The host shows only once a session of another host is listed, with its age while not connected."
+  (drover-list-test-with (drover-list-test-rich)
+    (drover-list-test-with-font
+      (should-not (memq 'host (cdr (drover-list-test-layout-at 1000))))
+      (let* ((remote (drover-session-create :backend 'remote:core :id '(fake . "r1") :host "core"
+                                            :origin 'fake :title "Remote" :status 'working
+                                            :since (drover-list-test-ago 60)
+                                            :updated (drover-list-test-ago 60)))
+             (records (list remote))
+             (key '(remote:core fake . "r1"))
+             (opencode-session-status-animation-interval 0.15))
+        (drover-test-register-simple 'remote:core (lambda () records) :remote "core")
+        (should (equal (cdr (drover-list-test-layout-at 1000))
+                       '(title host location agent model provider context created age cache summary)))
+        (should (string-match-p "Remote +core " (drover-list-test-remote-line key)))
+        ;; Animated while its host is connected.
+        (should (drover-list-test-remote-animated-p key))
+        ;; Not connected: dimmed, still, its host telling since when.
+        (setq remote (copy-sequence remote))
+        (setf (drover-session-stale remote) (drover-list-test-ago 300))
+        (setq records (list remote))
+        (drover-backend-changed 'remote:core)
+        (drover-changed-now)
+        (revert-buffer)
+        (should (string-match-p "Remote +core 5m " (drover-list-test-remote-line key)))
+        (should-not (drover-list-test-remote-animated-p key))
+        (goto-char (point-min))
+        (let ((title (text-property-search-forward 'drover-list-title key t)))
+          (should (memq 'drover-dim (ensure-list (get-text-property (prop-match-beginning title)
+                                                                     'font-lock-face)))))
+        ;; The narrow layout places it on the title's line.
+        (drover-list-test-layout-at 300)
+        (should (string-match-p "Remote.*core 5m" (drover-list-test-remote-line key)))))))
+
+(ert-deftest drover-list-test-group-by-host ()
+  "Grouped by host, this host comes first, then the others in order, each saying how it stands."
+  (drover-list-test-with (list (drover-test-session "a"))
+    (let ((drover-group-by 'host)
+          (drover-hosts-function (lambda () '("zed" "core")))
+          (drover-host-state-function (lambda (host) (and (equal host "core") "reconnecting")))
+          (drover-host "here"))
+      (drover-test-register-simple
+       'remote:core (list (drover-session-create :backend 'remote:core :id '(fake . "c") :host "core"
+                                                 :title "From core" :stale 1.0))
+       :remote "core")
+      (drover-test-register-simple
+       'remote:zed (list (drover-session-create :backend 'remote:zed :id '(fake . "z") :host "zed"
+                                                :title "From zed"))
+       :remote "zed")
+      (revert-buffer)
+      (should (equal (drover-list-test-groups) '((nil "a") ("zed" (fake . "z")) ("core" (fake . "c")))))
+      (should (string-match-p "\\`here" (drover-list-test-visible-text)))
+      (should (string-match-p "core (not connected)" (drover-list-test-visible-text)))
+      (should-not (string-match-p "zed (not connected)" (drover-list-test-visible-text))))))
 
 (provide 'drover-list-test)
 ;;; drover-list-test.el ends here

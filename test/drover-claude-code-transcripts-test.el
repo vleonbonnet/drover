@@ -553,5 +553,21 @@ empty; `home' is the homes' directory, and `index' the index."
   (should (equal (drover-claude-code--hash "C:\\Users\\val") "686f3c")))
 
 
+(ert-deftest drover-claude-code-transcripts-test-prints-in-proportion ()
+  "The index of transcripts prints in proportion to the conversations it read.
+Emacs prints a value whole in an error's data, or as `format' does: an
+entry or a record leading back to the index would print it all again."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (dotimes (i 100)
+      (drover-fixture-claude (format "c%03d" i) (expand-file-name (format "work/p%d/" (% i 7)) home)
+                             :prompt (format "Prompt %d" i)
+                             :subagents (and (zerop (% i 10)) '(("agent-a1" "Look around" "Explore")))))
+    (drover-claude-code-transcripts-test-scan)
+    (should (>= (length (drover-sessions)) 100))
+    (drover-test-prints-in-proportion
+     100 (list (cons "an entry" (car (hash-table-values (drover-transcript-index-entries index))))
+               (cons "a record" (drover-find 'claude-code "c001"))))))
+
 (provide 'drover-claude-code-transcripts-test)
 ;;; drover-claude-code-transcripts-test.el ends here

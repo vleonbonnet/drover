@@ -779,6 +779,49 @@ Each is (DIRECTORY CALLBACK)."
                                   (buffer-string)))
           (should (eobp)))))))
 
+(ert-deftest drover-prompt-test-session-buffers-quote-lines ()
+  "Outside drover's own lists, the line or the region is quoted, whatever session is at point.
+A session buffer tells its session at point, and so does a list of
+another front end, its session keys on: neither quotes a session."
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "s"))
+          (transient-mark-mode t)
+          (recaps nil))
+      (cl-letf (((symbol-function 'drover-recap)
+                 (lambda (session _callback) (push (drover-session-id session) recaps))))
+        (dolist (list '(nil t))
+          (with-temp-buffer
+            (setq default-directory "/")
+            (setq-local drover-session-at-point-function (lambda () session))
+            (setq-local drover-selected-sessions-function (lambda () (list session)))
+            (when list
+              (drover-session-keys-mode))
+            (insert "first line\nthe line at point\nlast line\n")
+            (goto-char (point-min))
+            (forward-line 1)
+            (forward-char 4)
+            (drover-prompt-add-context)
+            (with-current-buffer (drover-prompt-buffer)
+              (should (string-match-p "\\`From buffer .* line 2:\n#\\+begin_src fundamental\nthe line at point\n#\\+end_src\n\n\\'"
+                                      (buffer-string)))
+              (erase-buffer))
+            (set-mark (point-min))
+            (goto-char (line-end-position))
+            (activate-mark)
+            (drover-prompt-add-context)
+            (with-current-buffer (drover-prompt-buffer)
+              (should (string-match-p "\n#\\+begin_src fundamental\nfirst line\nthe line at point\n#\\+end_src\n\n\\'"
+                                      (buffer-string)))
+              (erase-buffer))))
+        (should-not recaps)
+        ;; In drover's own list, the session at point is quoted.
+        (with-temp-buffer
+          (setq-local drover-view-p t
+                      drover-session-at-point-function (lambda () session))
+          (insert "Session s\n")
+          (drover-prompt-add-context))
+        (should (equal recaps '("s")))))))
+
 (ert-deftest drover-prompt-test-task-keeps-draft ()
   "Starting a task's prompt asks before replacing a draft, and keeps picks made on an empty prompt."
   (drover-prompt-test-with
@@ -1005,6 +1048,18 @@ Each is (DIRECTORY CALLBACK)."
 
 ;;;; Content and what leaves the prompt
 
+(ert-deftest drover-prompt-test-quote-another-host ()
+  "Quoting another host's session leaves the prompt where it is: its directory is not here."
+  (drover-test-with-backend (list (drover-test-session "r" :directory "/on/core/" :host "core")
+                                  (drover-test-session "h" :directory "/work/h/"))
+    (let ((added nil)
+          (default-directory "/work/here/"))
+      (cl-letf (((symbol-function 'drover-prompt--add)
+                 (lambda (_text directory &rest _) (push directory added)))
+                ((symbol-function 'drover-session-link) (lambda (_session) "[[link]]")))
+        (drover-prompt-quote-sessions (list (drover-find 'fake "r")))
+        (drover-prompt-quote-sessions (list (drover-find 'fake "h"))))
+      (should (equal added '("/work/h/" "/work/here/"))))))
 (ert-deftest drover-prompt-test-content ()
   "The content is the region when active, else the whole prompt, trimmed; nil when blank."
   (drover-prompt-test-with
@@ -1075,23 +1130,54 @@ Each is (DIRECTORY CALLBACK)."
           (should (window-live-p (selected-window))))))))
 
 (ert-deftest drover-prompt-test-erase ()
-  "Clearing erases the text, region or not, and keeps the buffer, its window and the picks."
+  "Clearing erases the text, region or not, closes the prompt's window, and keeps the buffer and picks.
+The window closes as `drover-prompt-toggle' hides it; the last window
+of a frame stays."
   (drover-prompt-test-with
     (let ((transient-mark-mode t)
-          (prompt (drover-prompt-buffer t)))
+          (prompt (drover-prompt-buffer t))
+          (model (drover-test-model "m")))
       (save-window-excursion
-        (set-window-buffer (selected-window) prompt)
-        (with-current-buffer prompt
-          (insert "some text")
-          (setq drover-prompt-picked-agent "plan")
-          (set-mark (point-min))
-          (activate-mark)
-          (drover-prompt-run 'clear)
-          (should (equal (buffer-string) ""))
-          (should-not mark-active)
-          (should (equal drover-prompt-picked-agent "plan")))
-        (should (eq (window-buffer (selected-window)) prompt))
-        (should (buffer-live-p prompt))))))
+        (delete-other-windows)
+        (let ((other (selected-window))
+              (window (split-window)))
+          (set-window-buffer window prompt)
+          (select-window window)
+          (with-current-buffer prompt
+            (insert "some text")
+            (setq drover-prompt-picked-agent "plan"
+                  drover-prompt-picked-model model
+                  drover-prompt-picked-variant 'high
+                  default-directory "/"
+                  drover-prompt-directory-picked-p t)
+            (set-mark (point-min))
+            (activate-mark)
+            (drover-prompt-run 'clear))
+          (should-not (window-live-p window))
+          (should (eq (selected-window) other))
+          (should (buffer-live-p prompt))
+          (with-current-buffer prompt
+            (should (equal (buffer-string) ""))
+            (should-not mark-active)
+            (should (equal drover-prompt-picked-agent "plan"))
+            (should (eq drover-prompt-picked-model model))
+            (should (eq drover-prompt-picked-variant 'high))
+            (should (equal default-directory "/"))
+            (should drover-prompt-directory-picked-p))
+          ;; Shown again, the choices still hold, the directory chosen too.
+          (with-temp-buffer
+            (setq default-directory temporary-file-directory)
+            (drover-prompt-toggle))
+          (should (equal (buffer-local-value 'default-directory prompt) "/"))
+          (should (equal (buffer-local-value 'drover-prompt-picked-agent prompt) "plan"))
+          ;; The last window of a frame stays.
+          (delete-other-windows)
+          (set-window-buffer (selected-window) prompt)
+          (with-current-buffer prompt
+            (insert "more text")
+            (drover-prompt-run 'clear)
+            (should (equal (buffer-string) "")))
+          (should (eq (window-buffer (selected-window)) prompt)))))))
 
 ;;;; Options for a running session
 
@@ -1451,6 +1537,50 @@ PROPERTIES are more of its properties.  Return the buffer."
           (drover-prompt-submit)))
       (should (equal warnings '("Broken did not take the prompt: Gone; it is in the kill ring"))))
     (should-not (drover-prompt-buffer))))
+
+(ert-deftest drover-prompt-test-send-restores-archived ()
+  "A session drover archived, its buffer still open, is offered, and restored before it is sent to.
+One that cannot be restored is sent nothing, the prompt kept, and the
+user told why on one line."
+  (drover-prompt-test-with
+    (drover-test-with-state
+      (let* ((session (drover-session-create :backend 'kept :id "k" :title "Kept"
+                                             :engine 'claude-code :engine-id "conv-k"))
+             (buffer (drover-prompt-test--register
+                      'kept "Kept"
+                      :send (lambda (session text _token)
+                              (push (list :send (drover-session-id session) text
+                                          (drover-session-archived-p session))
+                                    drover-test-calls)))))
+        ;; The backend serves this record, with its engine.
+        (drover-test-register-simple 'kept (list session) :buffer (lambda (_) buffer)
+                                     :send (drover-backend-property 'kept :send))
+        (drover-archive-session session)
+        (should (buffer-live-p buffer))
+        (should-not (drover-sessions))
+        (with-current-buffer (drover-prompt-test--prompt "Go on")
+          (drover-prompt-test-choosing (lambda (names)
+                                         (should (member "Kept" names))
+                                         "Kept")
+            (drover-prompt-submit)))
+        ;; Restored first, then sent.
+        (should (equal drover-test-calls '((:send "k" "Go on" nil))))
+        (should-not (drover-session-archived-p session))
+        (should (equal (mapcar #'drover-session-id (drover-sessions)) '("k")))
+        (should-not (drover-prompt-buffer))
+        ;; Archived again, and no backend would list it restored.
+        (setq drover-test-calls nil)
+        (drover-archive-session session)
+        (cl-letf (((symbol-function 'drover--followed-p) #'ignore))
+          (with-current-buffer (drover-prompt-test--prompt "Once more")
+            (let ((err (drover-prompt-test-choosing (lambda (_) "Kept")
+                         (should-error (drover-prompt-submit) :type 'user-error))))
+              (should (equal (cadr err)
+                             (concat "Could not restore Kept from the archive: no front end follows its "
+                                     "conversation, and its engine keeps no record of it that drover lists"))))
+            (should (equal (buffer-string) "Once more"))))
+        (should-not drover-test-calls)
+        (should (drover-session-archived-p session))))))
 
 (ert-deftest drover-prompt-test-send-new ()
   "A new session starts with the prompt's choices, title and engine defaults, then takes the text."

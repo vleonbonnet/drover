@@ -22,8 +22,8 @@
 
 ;; The prompt: an Org buffer, `*drover*', where the user writes to an
 ;; agent, gathering context from the buffers worked in
-;; (`drover-prompt-dwim'), or from a list of sessions the sessions
-;; selected, quoted with their last replies
+;; (`drover-prompt-dwim'), or from drover's list the sessions selected,
+;; quoted with their last replies
 ;; (`drover-prompt-quote-sessions'), then sends it to a running session
 ;; or a new one of any backend and engine (`drover-prompt-submit').  The
 ;; buffer is in `drover-prompt-mode', which defines drover's prompt
@@ -68,7 +68,7 @@
 (require 'drover-codex)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 8))
   (load "drover-core" nil t))
 
 (declare-function org-id-get-create "org-id" (&optional force))
@@ -595,12 +595,14 @@ buffer."
 The first call from a buffer shows the prompt, begun in that buffer's
 directory, with a link to the line at point and the active region
 quoted in a code block; later calls add such a block at the point the
-user left the prompt at.  In a list of sessions, the context is the
-sessions the region selects, else the one at point, each linked and
-quoted with its last reply (see `drover-prompt-quote-sessions').  An
-Org heading line is quoted as any other line: `drover-prompt-org-task'
-starts a prompt for an Org task.  Signal a `user-error' in the prompt
-buffer itself."
+user left the prompt at.  In drover's own lists, `*drover sessions*'
+and the sidebar, the context is the sessions the region selects, else
+the one at point, each linked and quoted with its last reply (see
+`drover-prompt-quote-sessions'); everywhere else, in session buffers
+and the lists of other front ends too, it is the line or the region.
+An Org heading line is quoted as any other line:
+`drover-prompt-org-task' starts a prompt for an Org task.  Signal a
+`user-error' in the prompt buffer itself."
   (interactive)
   (when drover-prompt-mode
     (user-error "Already in the prompt"))
@@ -610,11 +612,14 @@ buffer itself."
   "Open the prompt, or add to it the context at point.
 As `drover-prompt-dwim' does, which refuses the prompt buffer first.
 The context is the active region, else the line at point, formatted by
-`drover-prompt-format-context'.  In a list of sessions, it is the
-sessions selected, or the one at point, quoted with their last replies
-by `drover-prompt-quote-sessions'.  It goes at point in the prompt's
-window, or while the prompt is hidden where the user left point."
-  (if-let* (((drover-session-list-p))
+`drover-prompt-format-context'.  In drover's own lists, those setting
+`drover-view-p', it is the sessions selected, or the one at point,
+quoted with their last replies by `drover-prompt-quote-sessions'; a
+buffer telling a session at point, such as a session buffer, or a list
+of another front end, gives its line or region as any buffer does.  It
+goes at point in the prompt's window, or while the prompt is hidden
+where the user left point."
+  (if-let* ((drover-view-p)
             (sessions (drover-selected-sessions t)))
       (drover-prompt-quote-sessions sessions)
     (let* ((source (current-buffer))
@@ -739,7 +744,7 @@ session whose reply did not arrive, or that has none, quoted without
 one.  See `drover-prompt-format-sessions' for the quote."
   (let* ((count (length sessions))
          (links (mapcar #'drover-session-link sessions))
-         (directory (or (drover-session-directory (car sessions)) default-directory))
+         (directory (or (drover-session-local-directory (car sessions)) default-directory))
          (origin (selected-window))
          (recaps (make-hash-table :test #'equal))
          (finished nil)
@@ -949,14 +954,17 @@ rather than the whole buffer.  Nil too without a prompt buffer."
                   :end (copy-marker end)
                   :region (and region t))))))))
 
+(defun drover-prompt--hide (buffer)
+  "Delete the windows showing the prompt BUFFER, but the last of a frame."
+  (dolist (window (get-buffer-window-list buffer nil t))
+    (when (and (window-live-p window) (eq (window-deletable-p window) t))
+      (delete-window window))))
+
 (defun drover-prompt--close (buffer)
   "Kill the prompt BUFFER and delete the windows that showed it.
 A window that is the last of its frame stays."
-  (let ((windows (get-buffer-window-list buffer nil t)))
-    (kill-buffer buffer)
-    (dolist (window windows)
-      (when (and (window-live-p window) (eq (window-deletable-p window) t))
-        (delete-window window)))))
+  (drover-prompt--hide buffer)
+  (kill-buffer buffer))
 
 (defun drover-prompt-consume (content &optional buffer)
   "Remove CONTENT, as `drover-prompt-content' returned it, from the prompt BUFFER.
@@ -1006,8 +1014,11 @@ timer, so it signals nothing."
 (defun drover-prompt--send-to-session (session content buffer)
   "Send CONTENT of the prompt BUFFER to the running SESSION.
 Its backend's checks run first, for the options about to be applied:
-when they cancel, nothing is sent and the prompt stays.  Otherwise the
-options are applied, the text sent, and CONTENT leaves the prompt."
+when they cancel, nothing is sent and the prompt stays.  A session
+drover archived is restored then (see `drover-unarchive-to-send'):
+when it cannot be, a `user-error' says why, nothing is sent and the
+prompt stays.  Otherwise the options are applied, the text sent, and
+CONTENT leaves the prompt."
   (let* ((text (plist-get content :text))
          (target (drover-session-buffer session))
          (explicit (drover-prompt-explicit-options buffer))
@@ -1017,6 +1028,7 @@ options are applied, the text sent, and CONTENT leaves the prompt."
     (if (eq token 'cancel)
         (message "Not sent to %s; the prompt is in the kill ring"
                  (drover-session-display-title session))
+      (drover-unarchive-to-send session)
       (drover-prompt-apply-options session explicit
                                    (lambda () (drover-prompt--deliver session target text token)))
       (drover-prompt-consume content buffer))))
@@ -1080,13 +1092,17 @@ the prompt action `send'."
         (drover-prompt--send-to-new target content buffer)))))
 
 (defun drover-prompt-erase ()
-  "Erase the text of the prompt, region or not.
-The buffer, its window and the agent, model, effort and directory
-chosen stay, for the next prompt.  This is the prompt action `clear'."
+  "Erase the text of the prompt, region or not, and close its window.
+The buffer and the agent, model, effort and directory chosen stay, for
+the next prompt, which `drover-prompt-toggle' shows again.  A window
+that is the last of its frame stays.  This is the prompt action
+`clear'."
   (interactive)
-  (with-current-buffer (drover-prompt--prompt-buffer)
-    (deactivate-mark)
-    (erase-buffer)))
+  (let ((buffer (drover-prompt--prompt-buffer)))
+    (with-current-buffer buffer
+      (deactivate-mark)
+      (erase-buffer))
+    (drover-prompt--hide buffer)))
 
 (defun drover-prompt--attach-candidates (buffer)
   "Return the buffers and project files `drover-prompt-insert-attachment' offers.
@@ -1343,7 +1359,9 @@ The key of `drover-dispatch' opens `drover-prompt-options-menu' there."
   "Return the running sessions the prompt may go to, with their buffers.
 The value is a list of (SESSION . BUFFER): the sessions whose backend
 takes prompts (:send) and that have a live buffer, the current
-buffer's first, then in the order of `buffer-list'."
+buffer's first, then in the order of `buffer-list'.  Those drover
+archived itself are among them, a buffer still showing them: sent a
+prompt, they are restored first (see `drover-unarchive-to-send')."
   (let ((ranks (make-hash-table :test #'eq))
         (rank 0)
         (current (current-buffer)))
@@ -1354,7 +1372,7 @@ buffer's first, then in the order of `buffer-list'."
                               (when-let* (((drover-supports-p session :send))
                                           (buffer (drover-session-buffer session)))
                                 (cons session buffer)))
-                            (drover-sessions)))
+                            (append (drover-sessions) (drover-archived-live-sessions))))
           (lambda (a b)
             (< (gethash (cdr a) ranks most-positive-fixnum)
                (gethash (cdr b) ranks most-positive-fixnum))))))
@@ -1455,7 +1473,7 @@ runs or would start.  Each NAME carries its target as its
                    :current (and (drover-supports-p session :options)
                                  (drover-with-reporting "session options"
                                    (drover-backend-call session :options)))
-                   :directory (or (drover-session-directory session)
+                   :directory (or (drover-session-local-directory session)
                                   (buffer-local-value 'default-directory buffer)))))
       (dolist (target targets)
         (add (format "[New %s…]" (or (plist-get target :label) (plist-get target :engine)))

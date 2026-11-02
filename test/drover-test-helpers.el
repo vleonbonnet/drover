@@ -128,6 +128,13 @@ The title defaults to \"Session ID\"."
   (apply #'drover-session-create
          (append properties (list :backend 'fake :id id :title (concat "Session " id)))))
 
+(defun drover-test-tree-shape (nodes)
+  "Return trees NODES as nested lists of session identifiers."
+  (mapcar (lambda (node)
+            (cons (drover-session-id (drover-node-session node))
+                  (drover-test-tree-shape (drover-node-children node))))
+          nodes))
+
 (defun drover-test--recorder (operation)
   "Return a fake backend function recording OPERATION."
   (lambda (session &rest arguments)
@@ -439,6 +446,71 @@ registry reads nothing, and cached JSON is forgotten."
            (cl-letf (((symbol-function 'w32-read-registry) #'ignore))
              ,@body)
          (delete-directory home t)))))
+
+;;;; What prints
+
+;; Emacs prints a value whole in an error's data, in `format', in a
+;; value evaluated; its printer, without `print-circle', prints a
+;; structure again from every path reaching it.  A structure leading
+;; back to what holds it prints with the square of what that holds.
+
+(defun drover-test-printed-length (object limit)
+  "Return how many characters `prin1' writes for OBJECT, or nil past LIMIT.
+It prints whole, as Emacs prints an error's data, and stops at LIMIT."
+  (let ((count 0)
+        (print-length nil)
+        (print-level nil)
+        (print-circle nil))
+    (catch 'drover-test-printed-length
+      (prin1 object (lambda (_char)
+                      (when (> (setq count (1+ count)) limit)
+                        (throw 'drover-test-printed-length nil))))
+      count)))
+
+(defconst drover-test-kept-regexp "\\`\\(?:drover\\|spyglass\\|magit-root-section\\'\\)"
+  "What the names of the variables holding drover's state match.")
+
+(defun drover-test-kept ()
+  "Return what drover keeps, as (NAME . OBJECT).
+Those are the values of the variables `drover-test-kept-regexp' matches,
+global and local to any buffer, the timers running functions other than
+Emacs's own, and the filters, sentinels and properties of processes."
+  (let ((kept nil))
+    (mapatoms (lambda (symbol)
+                (when (and (boundp symbol)
+                           (not (keywordp symbol))
+                           (symbol-value symbol)
+                           (string-match-p drover-test-kept-regexp (symbol-name symbol)))
+                  (push (cons (symbol-name symbol) (symbol-value symbol)) kept))))
+    (dolist (buffer (buffer-list))
+      (pcase-dolist (`(,variable . ,value) (seq-filter #'consp (buffer-local-variables buffer)))
+        (when (and value (string-match-p drover-test-kept-regexp (symbol-name variable)))
+          (push (cons (format "%s in %s" variable (buffer-name buffer)) value) kept))))
+    (dolist (timer (append timer-list timer-idle-list))
+      (push (cons (format "a timer of %S" (let ((function (timer--function timer)))
+                                            (if (symbolp function) function (type-of function))))
+                  timer)
+            kept))
+    (dolist (process (process-list))
+      (push (cons (format "process %s" (process-name process))
+                  (list (process-filter process) (process-sentinel process) (process-plist process)))
+            kept))
+    kept))
+
+(defun drover-test-prints-in-proportion (sessions &optional objects)
+  "Check that what drover keeps prints in proportion to SESSIONS, a count.
+Each value `drover-test-kept' returns prints within 10 kB a session, and
+each of OBJECTS, an alist (NAME . OBJECT) of things held once a session,
+such as a record or a row, within 20 kB whatever the sessions: one
+leading back to what holds it would print it all."
+  (let ((limit (+ 65536 (* 10000 sessions))))
+    (pcase-dolist (`(,name . ,object) (drover-test-kept))
+      (ert-info ((format "%s, for %d sessions" name sessions))
+        (should (drover-test-printed-length object limit)))))
+  (pcase-dolist (`(,name . ,object) objects)
+    (ert-info ((format "%s, alone" name))
+      (should object)
+      (should (drover-test-printed-length object 20000)))))
 
 (provide 'drover-test-helpers)
 ;;; drover-test-helpers.el ends here

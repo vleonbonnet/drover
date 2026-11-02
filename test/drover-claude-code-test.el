@@ -24,6 +24,7 @@
 
 (require 'drover-test-helpers)
 (require 'drover-claude-code)
+(require 'json)
 
 (defconst drover-claude-code-test-catalog
   "{\"catalog\": {\"surface\": \"cc\",

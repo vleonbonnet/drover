@@ -28,6 +28,9 @@
 (require 'drover-test-helpers)
 (require 'ol)
 (require 'drover-links)
+;; Loaded before tests stub its functions, which loading would undo:
+;; `drover-links-complete' loads it as it runs.
+(require 'drover-attention)
 
 (defvar drover-links-test-directories nil
   "Directories the fake engines tell, as an alist (ID . DIRECTORY).")
@@ -233,12 +236,35 @@ resumers, `opencode' by identifier, and none needs loading."
       (should-not drover-links-test-resumed)
       (should (equal warned "No OpenCode session ses_gone: HTTP 404")))))
 
+(defun drover-links-test--directory-of (id directory)
+  "Have the fake engines tell DIRECTORY for conversation ID."
+  (push (cons id directory) drover-links-test-directories))
+
 (ert-deftest drover-links-test-other-hosts ()
-  "A conversation of another host is refused, for now."
+  "A conversation of another host goes to the remote layer; one of this host opens here."
   (drover-links-test-with
-    (should-error (drover-links-follow "//aiur/claude-code/c1") :type 'user-error)
-    (should-error (drover-links-follow "not a path") :type 'user-error)
-    (should-not drover-links-test-resumed)))
+    (let ((drover-host "reaver")
+          (drover-host-aliases '("reaver.local"))
+          (drover-links-remote-function nil)
+          (remote nil))
+      (drover-links-test--directory-of "c1" "/work/one")
+      (should-error (drover-links-follow "//aiur/claude-code/c1") :type 'user-error)
+      (should-error (drover-links-follow "not a path") :type 'user-error)
+      (should-not drover-links-test-resumed)
+      (setq drover-links-remote-function (lambda (conversation) (push conversation remote)))
+      (drover-links-follow "//aiur/claude-code/c1")
+      (should (equal remote '((:engine claude-code :id "c1" :host "aiur"))))
+      (should-not drover-links-test-resumed)
+      ;; This host, by its name or an alias, whatever the case.
+      (let ((drover-links-ask-front-end nil))
+        (drover-links-follow "//REAVER.local/claude-code/c1")
+        (should (equal drover-links-test-resumed '((claude-code-ide claude-code "c1" "/work/one"))))
+        (should (= (length remote) 1)))
+      ;; A session of another host names it in its link.
+      (should (equal (drover-links-conversation
+                      (drover-session-create :backend 'remote:aiur :id '(claude-code-ide . "t1")
+                                             :host "aiur" :engine 'claude-code :engine-id "c9"))
+                     '(:engine claude-code :id "c9" :host "aiur"))))))
 
 ;;;; Types of front ends, and the links of earlier configurations
 

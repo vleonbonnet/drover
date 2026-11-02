@@ -1,0 +1,362 @@
+#+TITLE: drover across hosts: design
+#+OPTIONS: toc:nil
+
+A design, accepted, its first milestone built (see [[*The first milestone, as built][below]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
+
+* What was decided
+
+- Each session has a host; the owner host is the truth of its sessions: status, seen, archive, scheduled prompts.  Peers mirror; every change goes to the owner.
+- Each host shares only the sessions it owns: nothing learnt from a peer is passed on, so two hosts connected to each other never loop nor duplicate.
+- Remote OpenCode sessions open as full local buffers: opencode.el talks to the remote service through a tunnel, and so supports several services.
+- Remote terminals and shells (Claude Code in claude-code-ide on Ghostel, Eat or vterm; agent-shell) open as spyglass mirrors.
+- A remote session can be cloned or forked here.
+- View settings (grouping, filter, collapsed groups, subagents) stay each machine's own.
+- Disconnects and reconnects cost no lag: asynchronous, a snapshot then numbered updates, resynchronized on reconnection; a first step toward controlling sessions from a phone.
+- SSH from Reaver is =myssh=, never =ssh=.
+
+* Hosts today
+
+| Host   | System                                                                                   | Emacs                             | Reaches the other                                                                                                                                               | What runs there                                                                        |
+|--------+------------------------------------------------------------------------------------------+-----------------------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------|
+| Reaver | macOS, this machine; sshd listens on port 22                                             | the user's                        | =myssh core= works: =Host core=, 192.168.4.22, key =~/.ssh/zeratul=                                                                                             | drover, opencode.el, claude-code-ide, agent-shell, spyglass in development             |
+| Core   | Windows 11 (build 26200) with MSYS2; sshd's shell is MSYS bash, =HOME= is =C:/Users/val= | 31.1, UCRT64, =/ucrt64/bin/emacs= | =ssh reaver= (=Host reaver=, =reaver.local=, key =~/.ssh/zeratul=) is refused from a non-interactive session, whose =SSH_AUTH_SOCK= is unset, but works with =-o IdentityAgent=~/.ssh/agent.sock=, the agent holding the key; no =myssh= | drover 3fda715, opencode.el, claude-code-ide, agent-shell, Ghostel, vterm; no spyglass |
+
+Core's OpenCode service registers in =~/.local/state/opencode/service.json=, as Reaver's does.  Neither direction is assumed to work: the first milestone checks each, from the Emacs that will dial, with =BatchMode=yes=, and tells what is missing (see [[*Setting up a direction][Setting up a direction]]).
+
+* Hosts and identity
+
+** Names
+
+Each Emacs names its host with =drover-host=, a short lowercase name, =reaver= or =core=, by default the system's name up to its first dot, downcased; =drover-host-aliases= are other names it answers to in links.  The name travels in the peer protocol's greeting, and a peer announcing the name of this host, or a name another connected peer has, is refused: one Emacs per host serves that host's sessions.  A second Emacs on the same host, a test or a daemon, runs no peer layer unless told to with a name of its own.
+
+** Peers
+
+A peer is a host this Emacs exchanges sessions with, configured once per machine:
+
+#+begin_src elisp
+(setq drover-host "reaver"
+      drover-remote-peers
+      '(("core" :label "Core" :dial t :ssh "core" :program "myssh"
+         :access full :aliases ("core.local" "192.168.4.22")
+         :directories (("C:/Users/val/" . "~/")))))
+#+end_src
+
+=:dial= has this Emacs connect to the peer through =:program= (=myssh= on Reaver; =:ssh= the host as the SSH configuration names it); without it, it waits for the peer to connect.  =:access= is what the peer may do with this host's sessions (see [[*Security][Security]]), =:directories= maps the peer's directories to this host's for clones.  A peer connecting in under a name not configured is refused unless =drover-remote-accept-unknown= says how (nil by default).
+
+** Sessions with a host
+
+Every peer is a backend, =remote:core=, registered as the peer is configured: its sessions are the owner's records as last received, its operations forward to the owner, so the index, the lists, the menus and actions work as for any backend, and the index's incremental machinery (=:session= by identifier, changes coalesced) serves remote sessions unchanged.  Two slots join =drover-session=, last as new slots go: =host=, the owner's name, nil on this host, and =origin=, the owner's backend, such as =opencode= or =claude-code-ide=, which picks how a session opens here; =drover-session-backend= of a remote record is its proxy.  A remote record's =id= is the owner's key, (BACKEND . ID), so its key here is =(remote:core BACKEND . ID)=, and its parent the owner's parent key, found among that proxy's sessions.
+
+Records of the same conversation merge by =drover-session-engine-key=, which stays =(ENGINE . ID)= on this host and becomes =(HOST ENGINE . ID)= for another: a clone keeping its identifier, an OpenCode import or a Codex rollout copied, is a session of each host, never merged with its original.  drover's own archive, =(ENGINE . ID)= in =archive.eld=, keeps only this host's conversations: a remote session is archived by its owner.  =drover-session= changing layout, the index and lists are made anew once, with =drover-stale-layout=.
+
+** In the list
+
+| Where      | What shows                                                                                                                                                                                                                                                |
+|------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| A column   | =host= in =drover-list-fields=, a short text (the peer's =:label=), ranked after the age, =:narrow line=: it has something to show only for remote sessions, so a list of this host's sessions alone draws as today                                       |
+| Grouping   | =drover-group-by= gains =host=: this host first, then peers in the order configured; a group's heading tells a peer's state when it is not connected                                                                                                      |
+| Filtering  | =drover-filter= gains =:host=, a list of names, =local= naming this host                                                                                                                                                                                  |
+| Stale rows | the sessions of a peer not connected stay listed as last received, dimmed, their glyphs still; the host's cell reads =core 5m=, the time since it was last heard from, the tooltip the state, =reconnecting, attempt 3=, and the error last seen, bounded |
+| Attention  | the mode-line count, =drover-next= and =drover-select= count a connected peer's sessions as their own, and leave out those of a peer not connected, whose statuses may be past                                                                            |
+
+View settings stay this machine's: nothing of them goes on the wire.  =drover-remote-status= lists the peers: state, round trip, clock offset, sessions, last heard from, the tunnel to its OpenCode service, the mirrors open.  The mirrored records are kept in memory only: =drover-state-directory= keeps what drover keeps of this host's sessions, and remote rows come back as their peer connects.
+
+** Links and scheduled prompts
+
+=drover-links-conversation= of a remote session gives its host, the owner's canonical name, so a link stored here is =agent-session://core/claude-code/ID=; a link naming =drover-host= or one of its aliases is this host's, so a link stored on Core opens on Core as on Reaver.  Following a link with another host finds the proxy by name or alias and opens the session there, through its owner (=:open=); a peer not connected is a =user-error= naming it and when it was last heard from, and a conversation the owner does not list live is resumed by the owner, which may resume it in a front end of its own.
+
+A scheduled prompt for a remote conversation lives in its owner's queue: scheduling one here sends it to the owner (=schedule=), the time read here and sent absolute, the triggers offered being the owner's (=triggers=).  =drover-schedule-list= shows this host's queue and each connected peer's, read from the protocol, cancelling, retrying and sending now forwarded.  A job of this host's queue naming another host, stored before this, is handed to its owner once it connects, and leaves the queue once the owner confirmed it took it.
+
+* The peer protocol
+
+** On spyglass connections
+
+Drover speaks over spyglass's connections rather than beside them: a channel of messages, =drover=, on the connection that carries the mirrors of the same pair of hosts.
+
+| What                                                                     | On spyglass (chosen)                               | A server of drover's own                |
+|--------------------------------------------------------------------------+----------------------------------------------------+-----------------------------------------|
+| Listener, token, registration file, handshake, frame limits              | reused                                             | written again                           |
+| Transport through =myssh -W=, reconnection, adoption of an orphan stream | reused                                             | written again                           |
+| Heartbeats, round trip, clock offset                                     | reused: drover corrects remote times by the offset | written again                           |
+| Mirrors of the same peer                                                 | the same connection, one SSH process               | a second connection                     |
+| Cost                                                                     | spyglass gains a public channel API                | duplicated, and drifting, protocol code |
+
+Spyglass registers message handlers privately (=spyglass--register-handler=) and answers one request, =list=.  It gains, as a library change of its own: =spyglass-register-channel= (a name and a handler of a connection, a header and a payload), =spyglass-channel-send= and =spyglass-channel-request= (with a reply or an error, and nil when the stream ends first), the attach and detach hooks made public, a share visible to some peers only (=:peers=, a predicate of a connection) and input functions told which connection typed (for per-peer access), and payloads sent in chunks paced by acknowledgments (for clones).  The handshake's =app= stays =spyglass=: drover's own greeting follows on its channel.
+
+** One channel per pair of hosts
+
+Either host may dial; when both do, two spyglass connections join the same pair.  Each drover greeting carries the host name, the Emacs's spyglass instance and which end dialed, so both ends see both connections and keep the same one: the one dialed by the host whose name sorts first.  The other end's dialer, having lost, closes its connection with =bye= and stands by, dialing again only once the kept connection has been away for =drover-remote-standby-delay= seconds (30 by default).  Sessions go both ways over the kept connection, each host sending only its own: a host serving its index leaves out every record with a host, so nothing comes back to where it came from.
+
+** Messages
+
+On the =drover= channel, headers are JSON, as spyglass's are; texts with faces use spyglass's encoding of Lisp values, sanitized on arrival.
+
+| Type        | From   | Meaning                                                                                                                                           |
+|-------------+--------+---------------------------------------------------------------------------------------------------------------------------------------------------|
+| =hello=     | both   | drover's protocol version, host name, instance, which end dialed, the access granted to the peer, the operations and engines this host serves     |
+| =sub=       | viewer | subscribe to the owner's sessions, with the epoch and revision it holds, if any                                                                   |
+| =snap=      | owner  | a chunk of a snapshot: epoch, revision, up to 200 records, =last= on the final chunk                                                              |
+| =up=        | owner  | an update: the revision range =(FROM . TO)=, records changed, keys gone                                                                           |
+| =req=/=res= | both   | requests with an identifier: actions, recaps, previews, older and archived sessions, engines and models, triggers, the scheduled prompts, exports |
+| =jobs=      | owner  | the scheduled prompts, sent on subscription and as the queue changes                                                                              |
+| =svc=       | owner  | how to reach its OpenCode service: the port, the password, the service's identifier and process, to a peer of full access only (see below)        |
+| =bye=       | both   | the channel ends: the peer's configuration dropped this host                                                                                      |
+
+** Records on the wire
+
+An owner sends a record as an object of the slots of =drover-session=, by name, unknown names ignored on arrival so that either end may be newer, its key, and what this host's views need of it without asking: =ops=, the operations =drover-supports-p= allows for it among those forwarded, which the proxy's =:supports= reads, so that menus grey out what the owner would refuse; =buffer=, whether the owner has a buffer for it and of which kind (=opencode=, =terminal=, =shell=); =link=, its conversation.  Records are bounded where the owner reads them and again on arrival, through =drover--bound-record=; =agent-display= and the provider's display come as strings with faces, sanitized by spyglass's sanitizers, the plain =agent= and =provider-name= always beside them for clients without faces.
+
+Times (=since=, =updated=, =created=, =cache-expires=, =archived=) are the owner's clock; the viewer subtracts the connection's clock offset, which spyglass measures from its heartbeats, so that ages read right between hosts whose clocks differ.  The order of last activity keeps the tolerance of =drover-sort-activity-tolerance= against these corrected times.
+
+** Snapshot, revisions, resynchronization
+
+The owner numbers changes: a revision counter it raises each time its index takes a session's record in or lets one go, kept per key (=rev=), and an epoch, made anew when its Emacs starts or its index is made anew.  It follows =drover-changed-hook=, reading the records of =drover-changed-sessions= from its index (all of them, compared by =eq= with those last sent, when the hook says t), and sends one =up= per peer per refresh, coalesced as the hook is.  The viewer applies an update only when its =FROM= is the revision it holds, so a gap, which a reliable stream never shows, has it subscribe again.  Gone keys leave tombstones, the revision they went at, kept for the last 4096 keys gone.
+
+On reconnection the viewer subscribes with the epoch and revision it holds: under the same epoch, with tombstones reaching back that far, the owner sends the records whose =rev= is newer and the keys gone since, in one update; otherwise, a snapshot.  A resynchronization costs what changed meanwhile, a few records for a short outage, a snapshot at worst; no log of updates is kept, so nothing per peer grows while it is away.  The viewer keeps its records while the snapshot arrives, as opencode.el's registry does through a rebuild, and drops at its last chunk the keys it did not list, so that lists never empty.
+
+** Actions, decided by the owner
+
+The viewer never changes a remote record itself: an action is a request, its outcome the owner's records changing, its answer telling success, a refusal or an error, on one bounded line.  Each action carries an identifier the viewer makes; the owner remembers the outcome of the last 256, so an action sent again after a reconnection, its answer lost, gets that outcome rather than run twice; one whose answer never came, the connection gone for good, is reported as unknown, as a scheduled prompt interrupted is.
+
+| Action                              | On the owner                                                                                                                      | Notes                                                                                 |
+|-------------------------------------+-----------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------|
+| =open=                              | answers how the session opens here: its OpenCode service, or a share to mirror, sharing the buffer, or resuming the session first | see the two parts below                                                               |
+| =interrupt=, =compact=, =mark-seen= | the backend's operation                                                                                                           |                                                                                       |
+| =archive=, =unarchive=              | the backend's, or drover's own archive there; the owner closes its own buffer as archiving does                                   | the viewer closes its own buffer or mirror once the owner's record says archived      |
+| =delete=                            | the backend's                                                                                                                     | the viewer asks the user, naming the host; the owner never asks                       |
+| =rename=                            | the backend's, with the title read here                                                                                           |                                                                                       |
+| =fork=                              | the backend's, its buffer kept off the owner's windows                                                                            | the viewer then opens the fork; forking here is a clone (see [[*Clone or fork here][Clone or fork here]])      |
+| =send=                              | =:check= skipped, then =:apply-options= and =:send=                                                                               | from =*drover*= to a remote target; =:check= asks the user, which only the viewer can |
+| =create=                            | =:create= in a directory of the owner's, with the start options                                                                   | a later milestone: the prompt's new-session targets gain each peer's engines          |
+| =schedule=, =unschedule=, =retry=   | the queue's own functions                                                                                                         |                                                                                       |
+| =seen=                              | a mirror shown in a selected window is a session viewed, sent at most once a second                                               | the owner's notion of unseen turns follows the user wherever they look                |
+
+Nothing a peer asks prompts on the owner, nor takes the owner's windows: actions run with =display-buffer-overriding-action= bound to show no window, Ghostel's terminals going to the parking frame (see [[*Size and Ghostel's parking][below]]).  =:respond=, which answers a request from the session's buffer, is not forwarded: the viewer opens the session, buffer or mirror, where the user answers.
+
+** Older and archived sessions, recaps, previews
+
+The proxy's =:history= and =:archived= ask the owner, which fetches from its backends as =drover-set-show-history= does and answers in chunks; =:recap= and =:preview= ask for one session's, bounded on both ends; =:prefetch= sends the keys a list shows, at most once a second, so that the owner fetches their context sizes and the updates bring them.  Every request carries the generation the viewer asked under, and an answer of a stale generation is dropped, as for local fetches.
+
+** Lifecycle
+
+| State          | Seen here                                                                           | Leaves for                                                                             |
+|----------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------|
+| =connecting=   | rows of the last snapshot, if any, stale                                            | =open= after both greetings, =reconnecting= on failure                                 |
+| =open=         | live rows; updates                                                                  | =reconnecting= as the stream ends, falls silent or a write on it fails                 |
+| =reconnecting= | stale rows, last heard from; =drover-remote-status= tells the attempt and the error | =open=, resynchronized; spyglass retries after 0.2, 1, 2, 5, 10, 30 s, then every 30 s |
+| =standby=      | the peer's rows through the connection it dialed                                    | dials again after =drover-remote-standby-delay= without that connection                |
+| =closed=       | rows dropped                                                                        | the peer removed from the configuration, or =bye=                                      |
+
+A stream ending is seen at once; a silent one after spyglass's heartbeat timeout, 40 s, which drover's connections lower to 20 (a heartbeat every 5 s costs nothing on a local network).  Spyglass looks at a connection every half interval, and drover gives it the interval as a float: an integer halved is a whole number, and the tests' interval of 1 s halved to 0, a timer that ran once, so that a peer stopped by SIGSTOP stayed open for as long as it was stopped (=drover-remote-test-frozen-peer=).  A Mac waking from sleep finds its stream dead at the first write or heartbeat and dials again 0.2 s later.
+
+** Never blocking
+
+Everything goes through processes and timers: SSH runs as =make-process=, the stream's filter only splits frames, and drover's handlers do their work in slices.  A snapshot is applied 8 ms at a time from timers, as drover reads transcripts, giving way to input, the proxy reporting its sessions changed once per chunk; the owner serializes records 4 ms at a time, spyglass's tick, and stops sending to a peer whose frames are not acknowledged past spyglass's window.  Handlers run in =drover-with-reporting=; spyglass's errors reach =drover-warn= once per =drover-error-interval=; no request is waited for in a command but those a command must answer from, with a timeout, as opencode.el's =opencode-wait=.
+
+* Remote OpenCode sessions as full buffers
+
+** Three ways
+
+| What                   | opencode.el per service, through a tunnel (chosen)              | A mirror of the owner's buffer                       | opencode.el's requests relayed by the peer protocol |
+|------------------------+-----------------------------------------------------------------+------------------------------------------------------+-----------------------------------------------------|
+| The buffer             | a full local buffer: typing, pickers, folding, links, all local | the owner's rendering; each key travels to the owner | a full local buffer                                 |
+| The owner's Emacs      | not involved: the service answers                               | must hold the buffer, render and capture it          | relays every byte, the event stream included        |
+| The owner's Emacs down | works while the service runs                                    | nothing                                              | nothing                                             |
+| What it needs          | opencode.el with several services, an SSH forward               | nothing more than terminals need                     | several services, and a relay of HTTP in Lisp       |
+| Use                    | from milestone 5, peers of full access                          | until then, and for peers of lesser access           | rejected                                            |
+
+The service is the authority over an OpenCode session, and the owner's drover reads it through its own registry: a turn sent, a request answered, a view posted from Reaver's buffer reach Core's service, whose events Core's registry follows, whose records Core's drover sends back.  Owner authority holds without drover relaying anything.
+
+** Reaching the service
+
+The host that dials a peer also runs its forwards, one SSH process per peer beside the stream (=-W= excludes other forwards): =myssh -N -o ExitOnForwardFailure=yes -L 127.0.0.1:LOCAL:127.0.0.1:PORT core=, PORT the peer's service as its =svc= message tells, LOCAL a free port of this host, bound to the loopback only.  When the other end dials, it forwards its own service to this host instead: =-R 127.0.0.1:0:127.0.0.1:PORT=, which has sshd pick the port and print it, sent in =svc=; so a single working direction of SSH serves both hosts' services, and the bytes go through sshd, not through either Emacs.  The forward starts as the first remote OpenCode buffer of that peer opens, follows the service's port when =svc= tells it changed (a service restarted), and stops ten minutes after its last buffer closed.
+
+The password comes in =svc=, to peers of full access only, over the authenticated, encrypted stream; it is held in memory, never written.  A peer this host can reach by SSH may also read the service's registration itself, =myssh core cat ~/.local/state/opencode/service.json=, as spyglass reads its own: buffers then open while the owner's Emacs is down, the service running.
+
+** opencode.el with several services
+
+opencode.el gains a service object, =opencode-service=: a name, a kind (=local=, found and started through the registration file as today; =remote=, given by a provider function and never started, restarted or stopped by Emacs), its URL, password, identifier, process and version, and, as slots, the state its modules keep globally today: the lookup counter and waiters, the event stream (process, backoff, watchdog, queue), the registry (sessions, children, revision, readiness, listing, caches, contexts), the catalogs and their queue, the session buffers, the directory names.  =opencode-current-service= is the service a piece of code works for: buffer-local in a session buffer, bound around every callback, event handler and hook run for a service, the local service otherwise.  So the 15 places reading =opencode-session-buffers= by identifier, the catalogs read at redisplay and the hooks drover follows keep their signatures, and read the service they run under.
+
+The local service is the default everywhere: without a remote service registered, opencode.el behaves and costs as today, =opencode-session-buffers= stays the local service's table, and its tests run unchanged.  A remote service is registered with =opencode-service-register= (a name, a provider of its URL and password) and dropped with =opencode-service-unregister=, which closes its stream and leaves its buffers stale, saying so in their header.
+
+** The changes in opencode.el
+
+| File                                                            | Today                                                 | Per service                                                                                                                                           |
+|-----------------------------------------------------------------+-------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =opencode-service.el=                                           | =opencode-service-connection=, lookups, start, import | the object; lookups per service; a remote service asks its provider again on a 401 or a refused connection, as the local one reads its file again     |
+| =opencode-http.el=                                              | one connection                                        | =opencode-request= takes =:service=, by default the current one, and binds it around THEN and ELSE                                                    |
+| =opencode-events.el=                                            | one stream, handlers global                           | a stream per service, wanted while it has buffers (a remote one) or clients; handlers run with the service bound; one dispatch budget for all streams |
+| =opencode-state.el=                                             | one registry of every session                         | a registry per service with a listing policy: =all= for the local service, =buffers= for a remote one, its sessions with buffers and their subagents  |
+| =opencode-session.el=                                           | buffers by identifier, catalogs by directory          | buffers by service then identifier; catalogs by (SERVICE DIRECTORY KIND); a remote buffer named with =@core=; resynchronization per stream            |
+| =opencode-common.el=                                            | directories normalized through the file system        | per service: the local one as today; a remote one spells directories as its service does, with no =file-truename=, and drive letters upcased          |
+| =opencode-edits.el=, =opencode-links.el=, =opencode-desktop.el= | local files, the desktop app                          | off for a remote service: files it edits are not here                                                                                                 |
+| attachments, file mentions                                      | =file://= URLs, the project's files                   | for a remote service, an attachment goes as data in the request; mentions complete through the service's file search                                  |
+| =opencode-modeline.el=, =opencode-notify.el=                    | one service                                           | the host in the mode line of a remote buffer; notifications say where                                                                                 |
+
+A remote buffer's =default-directory= is this host's home: its session's directory is the service's, kept in =opencode-session-info= and shown, not visited.  This is the largest change of the plan, about a third of the global state of =opencode-events.el=, =opencode-state.el= and =opencode-session.el= moved into the object, done in opencode.el's repository in steps of its own (see [[*Milestones][Milestones]]).
+
+** drover's OpenCode backend and hosts
+
+The =opencode= backend lists the local service's registry only; remote OpenCode sessions come from their owner, as any remote session.  Opening one (=:open= of the proxy, =origin= =opencode=) registers the peer's service in opencode.el, as =core=, starts the forward, and opens the session there; =drover-session-buffer= of the record is that buffer, so titles tell where it shows.  In a remote buffer, =drover-opencode--buffer-session= returns the proxy's record, so drover's keys act through the owner, while opencode.el's own keys talk to the service directly; scheduling from it goes to the owner's queue.  opencode.el's buffer hooks, run with the service bound, have the backend report the proxy's session changed rather than its own.
+
+* Remote terminals and shells as mirrors
+
+** Sharing on the owner
+
+A session's buffer is shared when a peer opens it, not before: the owner's =open= shares it with spyglass under =drover/BACKEND/ID=, visible to that peer alone (=:peers=), read-only for a peer of read access, and answers the share's identifier.  A share costs nothing until subscribed, and capture starts with the first subscription; the owner unshares once no peer has been subscribed for spyglass's resume timeout, five minutes, and as the buffer dies, which closes the mirrors with a reason.  A session without a buffer on the owner is resumed there first, by its backend or a resumer (=drover-resume-with=), without taking a window.
+
+| Origin                 | Opens here as                                                                                                                                  |
+|------------------------+------------------------------------------------------------------------------------------------------------------------------------------------|
+| =opencode=             | a full buffer through the service (milestone 5), until then and for lesser access a mirror of the owner's OpenCode buffer, opened hidden there |
+| =claude-code-ide=      | a mirror of the terminal                                                                                                                       |
+| =agent-shell=          | a mirror of the shell                                                                                                                          |
+| =claude-code=, =codex= | resumed on the owner in its front end, then mirrored; or cloned here, when asked (see [[*Clone or fork here][Clone or fork here]])                                      |
+
+** Input
+
+A mirror sends keys as typed: printing characters, =RET=, =TAB=, =DEL=, arrows, =ESC=, and spyglass's =C-c= keys; a terminal's adapter types them through the terminal's own encoding, a shell's through =spyglass-submit-function=, which drover sets to =agent-shell-submit= in agent-shell buffers it shares.  Prompts written in =*drover*= go whole through =send=, not key by key, and so do scheduled prompts, delivered by the owner.  A mirror is a session buffer: drover sets =drover-session-at-point-function= there to the proxy's record, so the session keys act on the remote session from its mirror.
+
+** Size and Ghostel's parking
+
+A terminal mirrored takes the size of the viewer's window while a viewer shows it and no window of the owner does, as the parking branch of spyglass lets a viewer drive it; shown on both, the owner's size wins and the mirror shows it as is.  Ghostel renders only buffers a window shows: a terminal resumed or kept hidden on the owner for a viewer goes to spyglass's parking frame, invisible, where it renders at the viewer's size, and leaves it when the owner shows it again.  Drover uses whatever API that branch settles on, and the claude-code-ide backend's statuses, read from Ghostel's title, keep working in the parking frame.
+
+** Closing
+
+Killing a mirror closes it: the session runs on, and its owner unshares once the resume timeout passed.  Archiving or deleting a remote session closes its mirror once the owner's record says so; a mirror whose share ended says why in its header line and stays readable.
+
+* Clone or fork here
+
+A clone is a new conversation on this host carrying a remote conversation's history, which then goes its own way, the remote one untouched: a fork across hosts.  The working tree is not copied: the clone runs in this host's copy of the project, =:directories= mapping the owner's directory to this host's, else asked, the owner's branch shown so that the user checks it out.  Files go through the protocol, in chunks paced by acknowledgments, so a clone works in either direction of SSH; a peer of read access may clone, as it reads the conversation anyway.
+
+| Engine        | Steps                                                                                                                                                                                                                                                                                                                 | To verify                                                                                                     |
+|---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------|
+| =opencode=    | the owner runs =opencode session export ID= (its CLI talks to its service); here, =opencode session import --directory LOCAL FILE=, then the session opens                                                                                                                                                            | whether import keeps the identifier, which the host in keys allows; whether export carries subagent sessions  |
+| =claude-code= | the owner sends =ID.jsonl= and =ID/= from its bucket; here they go to the bucket of the local directory (=drover-claude-code--encode=), and the terminal forks them as drover already forks: =claude --resume ID --fork-session --session-id NEW=; the staged copy is removed once =NEW='s transcript has its records | that a fork's transcript holds the history; a transcript whose =cwd= names the owner's directory resumes here |
+| =codex=       | the owner sends the rollout; here it goes under =~/.codex/sessions/= with its identifier, =session_meta='s =cwd= mapped, and is resumed in agent-shell; a fork by identifier, if the CLI offers one, preferred as for Claude Code                                                                                     | that =codex resume ID= finds a rollout its state database does not know                                       |
+| =gemini-cli=  | none: drover reads nothing Gemini records                                                                                                                                                                                                                                                                             |                                                                                                               |
+
+An agent-shell session is cloned by its engine's row.  Each step is tested with the CLIs' files in throwaway homes, as drover's tests do; what needs a CLI run is checked by hand once, with a throwaway configuration directory, before the milestone lands.
+
+* Security
+
+** Listeners and secrets
+
+| What               | Exposure                                                                                                                                                                               |
+|--------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| spyglass's server  | 127.0.0.1 only, a 256-bit token compared in constant time, its registration file readable by its owner (on Windows, the profile's ACL), 64 KB frames before the handshake              |
+| OpenCode's service | 127.0.0.1 with its password, as today                                                                                                                                                  |
+| Forwards           | =-L= bound to 127.0.0.1 explicitly; =-R= on the peer's loopback (sshd's =GatewayPorts no=)                                                                                             |
+| Secrets            | none in the configuration: tokens and passwords are read over SSH or sent over the authenticated stream, held in memory; a later TCP transport without SSH takes its token from =pass= |
+| What peers send    | JSON, decoded as data, never =read= nor =eval=; records bounded; faces and displays through spyglass's sanitizers; keys only to a share's input function                               |
+
+** What a peer may do
+
+| Access | May                                                                                                |
+|--------+----------------------------------------------------------------------------------------------------|
+| =read= | subscribe, recaps, previews, older and archived sessions, the queue, read-only mirrors, clones     |
+| =act=  | and every action but =delete=; mirrors taking input; OpenCode through a mirror, never its password |
+| =full= | and =delete=, and the OpenCode service's password                                                  |
+
+The access is the owner's, per peer, checked on every request it receives, whatever the peer's interface greyed out.  It protects what SSH does not: a peer able to log into this host by SSH can do anything there anyway, so for it =read= guards against mistakes, not against the peer; it matters for a peer this host dialed, whose own SSH access ends at the restricted key below, and for a phone.
+
+** Setting up a direction
+
+The first milestone checks each configured direction from the Emacs that dials, with =BatchMode=yes=, and tells what fails: SSH reaching the host, the registration file read, the stream opened.  For Reaver to Core, =myssh core= works today.  For Core to Reaver, Emacs on Core needs a key Reaver accepts, reachable without a prompt: =SSH_AUTH_SOCK= in Emacs's environment pointing to an agent holding it (Core has =~/.ssh/agent.sock=), or a key of its own; the program is MSYS's =/usr/bin/ssh= unless =myssh= exists there.  The key recommended is one for drover alone, restricted in Reaver's =authorized_keys=: =restrict,port-forwarding,permitopen="127.0.0.1:*",permitlisten="127.0.0.1:*",command="drover-peer-files"=, the command serving only the two registration files, so that Core reaching Reaver gets streams and forwards, not a shell.
+
+** Windows
+
+Core's Emacs runs native processes: SSH's stdin and stdout carry binary frames, which spyglass sets binary on both ends; =ssh.exe= of Windows's OpenSSH and MSYS's =ssh= differ in their agent and configuration, hence =:program= per peer; directories are =C:/…=, the drive letter upcased as OpenCode spells it, and mapped for clones.  The remote shell is MSYS bash on Core, so =cat ~/…= reads the files; PowerShell knows =cat= too.
+
+* Mobile later
+
+A phone reaches the hosts through a gateway: a peer of no sessions of its own, subscribing to every host with =act= access, which keeps each host's records by revision as any viewer does and serves the phone over HTTPS or a WebSocket, behind the homelab's reverse proxy or a VPN, with its own authentication.  Nothing it learns is relayed to a host, so the rule against relaying holds: it is a viewer of many, not a host.  What this design does for it now: messages are JSON, every record carries plain texts beside faces, actions are data with identifiers answered once, resynchronization costs what changed (a phone disconnects all the time), access is per peer, and nothing on the wire is Emacs's but encoded faces.  Later: the gateway pushes a notification when a session needs the user, terminals reach the phone as spyglass's runs of text and styles, OpenCode sessions through the service's own clients, which =opencode pair= serves.
+
+* Plan
+
+** Milestones
+
+Each is useful alone, and lands with its tests, =make compile=, =make lint= and the bench.
+
+| # | Milestone               | What it gives                                                                                                                                                                                                                                                          |
+|---+-------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 0 | spyglass's channels     | in spyglass: the channel API, shares visible to some peers, input told its connection, chunked payloads; the parking branch merged                                                                                                                                     |
+| 1 | Remote sessions listed (built) | =drover-remote.el=: hosts and peers, dialing and accepting, the checks of each direction, one channel per pair, snapshot, revisions and resynchronization, proxies, the host slot, column, group and filter, stale rows, recaps, previews, older and archived sessions |
+| 2 | Actions                 | every action of the table, idempotent; links with hosts opened; scheduled prompts sent to their owner, the owners' queues listed                                                                                                                                       |
+| 3 | Terminals and shells    | mirrors opened from drover, sharing on the owner, input, sizes, parking, mirrors as session buffers; OpenCode through mirrors meanwhile                                                                                                                                |
+| 4 | opencode.el's services  | in opencode.el, each step keeping the local service as today: (a) the service object and requests; (b) a stream per service; (c) a registry per service with its policy; (d) catalogs and directories per service; (e) buffers per service, files off for remote ones  |
+| 5 | Remote OpenCode buffers | forwards both ways, =svc=, services registered from peers, full buffers mapped to remote records, the owner's Emacs down                                                                                                                                               |
+| 6 | Clones                  | OpenCode, Claude Code and Codex conversations cloned here, directories mapped                                                                                                                                                                                          |
+| 7 | New sessions elsewhere  | the prompt's targets on peers: their engines, models and defaults over the protocol, =create=                                                                                                                                                                          |
+| 8 | The gateway             | a first gateway and a phone client reading sessions and needing-you notifications                                                                                                                                                                                      |
+
+Spyglass and the remote layer are optional: =drover-remote.el= requires spyglass only as it activates, declaring what it uses, as the backends of optional front ends do, so that =make compile='s standalone check holds.
+
+** Tests
+
+| Level           | How                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+|-----------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Units           | records encoded and decoded, every slot, unknown names, hostile values (500 kB lines, wrong types, deep nesting); revisions, tombstones and the choice between delta and snapshot; the choice of channel when both dial; access checked per request                                                                                                                                                                                                                                                                                                      |
+| Two batch Emacs | one with the fake backend of =drover-test-helpers.el= and N sessions, one connecting through =spyglass-file-transport= on 127.0.0.1, SIGPIPE ignored, under =timeout=: random changes on the owner, the viewer's index compared with the owner's after each quiet period; the stream dropped mid-change (=spyglass-connection-drop-stream=), changes during the outage, the records resent counted; both dialing, one channel kept; both owning sessions, neither seeing its own come back; actions recorded by the fake, retried after a drop, run once |
+| Mirrors         | a comint buffer and agent-shell's submit stubbed; Eat, vterm and Ghostel with spyglass's =EAT_EL=, =VTERM_EL=, =GHOSTEL_EL=                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| opencode.el     | its fake service, =test/opencode-test-server.el=, run twice on two ports: two services in one Emacs, streams, registries, catalogs and buffers kept apart, reconnections of one leaving the other; every existing test unchanged                                                                                                                                                                                                                                                                                                                         |
+| Across hosts    | =make test-remote REMOTE=core SSH=myssh REMOTE_EMACS=/ucrt64/bin/emacs=, as spyglass's remote bench: a temporary directory on Core, batch Emacs only there, a fake backend and a fake OpenCode service, never Core's running Emacs nor its service, the directory removed after                                                                                                                                                                                                                                                                          |
+| Bench           | 2510 remote sessions shaped as drover's bench: the snapshot installed, the longest block, an update, a resynchronization after 10 and after 500 changes, both on one host and between Reaver and Core                                                                                                                                                                                                                                                                                                                                                    |
+
+** Budgets
+
+| What                                               | Budget                                                                                                     |
+|----------------------------------------------------+------------------------------------------------------------------------------------------------------------|
+| Any message handled on the main thread             | 5 ms as a rule; no block over 50 ms                                                                        |
+| A snapshot of 2510 sessions                        | slices of 8 ms at most; installed within a second on a local network                                       |
+| The owner serializing                              | slices of 4 ms                                                                                             |
+| An update, the owner's change to the viewer's list | twice =drover-refresh-delay= and a round trip                                                              |
+| A resynchronization                                | the records changed and the keys gone since, a snapshot at most, under the same slices                     |
+| A peer lost                                        | stale at once on the stream's end, within 20 s when silent                                                 |
+| Memory per peer                                    | the viewer, its records; the owner, 4096 tombstones and 256 outcomes, nothing growing while a peer is away |
+
+* Open questions
+
+1. *Host names*: =drover-host= set in each machine's configuration, or the system's name by default?  Recommended: the default, short and downcased (=reaver=, =core=), set explicitly only where it differs.
+2. *Who dials*: Reaver alone, or Core too?  Recommended: Reaver dials Core now; Core also dials once its key is set up, the channel kept being Core's by the order of names, Reaver's dialing standing by.  Both are supported.
+3. *SSH on Core*: there is no =myssh= on Core; is =:program= MSYS's =ssh= there, with =SSH_AUTH_SOCK= set for Emacs, or should =myssh= be installed on Core?  Recommended: MSYS's =ssh= with a dedicated, restricted key in Reaver's =authorized_keys=.
+4. *Access between Reaver and Core*: recommended =full= both ways; =read= and =act= exist for later peers and the phone.
+5. *Stale rows*: listed dimmed but left out of the mode-line count, as proposed, or counted?  Recommended: left out.
+6. *Remote rows across restarts*: kept in memory only, as proposed, or cached in =drover-state-directory=?  Recommended: memory only; the peer resends them as it connects.
+7. *Remote OpenCode registries*: following only sessions with buffers, as proposed, or every session of the remote service?  Recommended: only those with buffers; drover's list comes from the owner anyway.
+8. *The owner's Emacs down*: should OpenCode buffers open from the registration file read over SSH?  Recommended: yes, for peers this host can log into.
+9. *Sharing*: lazily as a peer opens, as proposed, or every session buffer at once?  Recommended: lazily.
+10. *Terminal sizes*: the viewer's size while the owner does not show the terminal, the owner's otherwise?  Recommended: yes.
+11. *Fork of a remote session*: one key, asking where (on its host or here), or here only under a prefix argument?  Recommended: asking, here first, since forking on the host stays possible.
+12. *Clone of Claude Code*: staged then forked by the CLI, as proposed, or copied under a new identifier by rewriting =sessionId=?  Recommended: forked by the CLI, which drover already does, once checked by hand.
+13. *Directories for clones*: =:directories= per peer, asked when unmapped?  Recommended: yes, the answer offered to be saved.
+14. *The host column*: only when a remote session is listed, as proposed, or always?  Recommended: only then.
+15. *New sessions on another host* (milestone 7): wanted before OpenCode buffers, after, or not?  Recommended: after milestone 5.
+16. *Where the code lives*: =drover-remote.el= in drover, spyglass optional, as proposed, or a package of its own?  Recommended: in drover.
+17. *The gateway*: which host runs it, and what the phone talks to, a web page or an app?  Recommended: decided at milestone 8; nothing before depends on it.
+
+* The first milestone, as built
+
+Milestone 1 is built: spyglass's channels (=spyglass-channel.el=, the part of milestone 0 it needs), =drover-remote.el=, the host in records, lists, filters, groups and links, its tests and =make bench-remote=.  Peers list each other's sessions, read only: recaps, previews, context sizes, older and archived sessions come through the owner; opening a session of a peer, or following a link to one, shows what its host tells of it in a buffer of its own, read only, until milestone 2.
+
+** What differs from the design
+
+| Design                                                          | Built                                                                                                                                                                                                                         | Why                                                                                                                                                                                    |
+|-----------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Two slots join =drover-session=, =host= and =origin=            | Three: =stale= too, when the owner was last heard from while it is not connected                                                                                                                                              | the index and the lists see a record change only when it differs: a stale record must differ from a live one, for its row to be dimmed and its glyph still, and the count to leave it out |
+| =spyglass-channel-request= calls back with a reply, or nil      | with =(REPLY ERROR)=: the answer, or a line when the peer refused, no channel answers, the time ran out, or the stream ended                                                                                                   | an empty JSON object parses to nil: nil could not tell an empty answer from a lost one                                                                                                 |
+| Drover's connections lower spyglass's heartbeats                | spyglass gained =spyglass-connection-set-heartbeat=, a connection's own heartbeats: drover's are every 5 s, dropped after 20 (=drover-remote-heartbeat=)                                                                     | the options are global, for every connection of spyglass                                                                                                                               |
+| Messages: =hello=, =sub=, =snap=, =up=, =req=/=res=, =jobs=, =svc=, =bye= | =hello= (with =ask= to have a peer greet again), =refuse=, =sub=, =snap=, =up=, =ack= (per message), =pre= (prefetch), =fetched= (older and archived sessions, as each backend answers), =bye=; requests =recap=, =preview=, =fetch= | =jobs= and =svc= belong to milestones 2 and 5; acknowledgments pace the owner, so that a peer lagging gets one update of a session changed many times                                    |
+| Records carry =ops=, =buffer= and =link=                         | none of them yet                                                                                                                                                                                                              | nothing acts on a remote session before milestone 2; the link is made here from the record                                                                                             |
+| A record is the owner's =drover-session=                        | and the default branch of its repository, =default-branch=, as the owner reads it; the files a recap names, relative to the session's directory there                                                                         | the viewer never looks at its own file system for another host's directory, whatever it holds of that name                                                                            |
+| A record's parent is the owner's parent key                     | the key the owner's index resolved, else the record's own parent in its backend                                                                                                                                              | a parent the owner found through the engine resolves here too                                                                                                                         |
+| The owner serves its index                                      | its index but the records of a conversation another of its backends shows, as =drover-sessions= merges them                                                                                                                   | the viewer would list such a conversation twice, its records being of one backend here                                                                                                 |
+| Updates reported to the index session by session                | past 200 sessions at once, the peer's sessions listed again                                                                                                                                                                   | 2511 sessions of a snapshot took 80 ms one by one, 9 ms listed again                                                                                                                   |
+| A peer refused is closed                                        | a second after telling why                                                                                                                                                                                                    | closed at once, the peer, writing its greeting meanwhile, lost the reason unread                                                                                                       |
+| Spyglass's errors reach =drover-warn= once per interval         | only those leaving their stream open; a write failing as its stream ends is quiet, the stream's end telling it; other errors are the peer's last error                                                                        | every drop of a stream would otherwise warn of the write it caught                                                                                                                      |
+| Requests answered or failed                                     | a request whose stream ended before its answer is asked again once connected anew, until its timeout                                                                                                                         | a stream dropped and resumed in a second lost recaps and previews                                                                                                                       |
+| Both hosts dial when configured to                              | a host already connected through the other's dialing dials only when its own connection would be kept                                                                                                                         | it would be closed at once                                                                                                                                                              |
+| Core reaches Reaver with a dedicated, restricted key            | MSYS's =ssh= with =-o IdentityAgent=~/.ssh/agent.sock=, the agent Core runs, holding the key Reaver accepts                                                                                                                    | it works today; the restricted key remains recommended                                                                                                                                  |
+
+** Measured
+
+=make bench-remote=, Reaver viewing an agent of 2511 sessions on Reaver through 127.0.0.1, then on Core through =myssh -W=, Core dialing Reaver back: see the table in =doc/design.org= (Other hosts).  Every step stayed within the budgets: slices of the viewer under 4 ms, of the owner under 5 ms, garbage collections apart; the longest block of the viewer's main thread 25 ms, the index and the mode-line count taking 2511 sessions in at once; a snapshot of 2511 in 0.36 s locally and 1.05 s through SSH, most of it reconnecting; a resynchronization after 10 or 500 changes made during an outage, only those records sent.  Both directions held one connection, Core's.

@@ -273,7 +273,12 @@ came after: the accessors of today read past its end."
   (should (equal (drover-bound-text "a\nb\nc\nd" 2) "a\nb…"))
   (should (equal (drover-bound-text "a\nb\nc\nd" 2 nil t) "…c\nd"))
   (should (equal (drover-bound-lines (concat "a\n" (make-string 500 ?y)) 5)
-                 (concat "a\n" (make-string drover-line-limit ?y) "…"))))
+                 (concat "a\n" (make-string drover-line-limit ?y) "…")))
+  ;; A tooltip within bounds is itself; a short line with a carriage
+  ;; return stays as it is.
+  (let ((tooltip "Title\nproject:main\nbuild (Opus 5.5)"))
+    (should (eq (drover-bound-lines tooltip) tooltip)))
+  (should (equal (drover-bound-lines "a\rb\nc") "a\rb\nc")))
 
 (ert-deftest drover-robustness-test-records-bounded ()
   "Records are bounded as drover takes them in, the backend's own left alone."
@@ -286,15 +291,95 @@ came after: the accessors of today read past its end."
     (drover-test-with-backend (list session)
       (let ((record (drover-find 'fake "big"))
             (listed (drover-index-session '(fake . "big"))))
-        (dolist (record (list record listed))
-          (should (equal (drover-session-title record) "Fix the build"))
-          (should (<= (length (drover-session-detail record)) (1+ drover-text-limit)))
-          (should (<= (length (plist-get (car (drover-session-requests record)) :summary))
-                      (1+ drover-text-limit)))))
+        (pcase-dolist (`(,name . ,record) (list (cons "found" record) (cons "listed" listed)))
+          (ert-info (name :prefix "Record: ")
+            (should (equal (drover-session-title record) "Fix the build"))
+            (should (<= (length (drover-session-detail record)) (1+ drover-text-limit)))
+            (should (<= (length (plist-get (car (drover-session-requests record)) :summary))
+                        (1+ drover-text-limit))))))
       ;; The backend's record is the backend's.
       (should (eq (drover-session-title session) title)))
     (let ((plain (drover-test-session "plain")))
       (should (eq (drover--bound-record plain) plain)))))
+
+(defun drover-robustness-test-older-record (record)
+  "Return RECORD as drover d61bfdf made it, without the slots that came after."
+  (let ((older (make-record 'drover-session 31 nil)))
+    (dotimes (index 32)
+      (aset older index (aref record index)))
+    older))
+
+(ert-deftest drover-robustness-test-records-of-older-layouts ()
+  "A record a backend made with an older drover gets the slots that came since.
+Loaded over a drover still running, this one reads the slots that came
+after, such as the host of a session, of the records its backends made
+before: read past their end, their sessions were reported as failing."
+  (let ((old (drover-robustness-test-older-record
+              (drover-test-session "old" :status 'waiting :title (concat "Old\n" (make-string 1000 ?x)))))
+        (short (drover-robustness-test-older-record (drover-test-session "short" :status 'working))))
+    (should (= (length old) 32))
+    (drover-test-with-backend (list old short)
+      (let ((bounded (drover--bound-record old))
+            (whole (drover--bound-record short)))
+        (should (= (length bounded) (length (drover-session-create))))
+        (should (equal (drover-session-title bounded) "Old"))
+        (should (eq (drover-session-status bounded) 'waiting))
+        (should-not (drover-session-host bounded))
+        (should-not (drover-session-default-branch bounded))
+        ;; Complete, though within bounds: a copy, the backend's own left alone.
+        (should (= (length whole) (length (drover-session-create))))
+        (should (equal (drover-session-title whole) "Session short"))
+        (should (= (length short) 32)))
+      (let ((messages (drover-robustness-test-messages
+                        (should (equal (drover-session-title (drover-find 'fake "short")) "Session short"))
+                        (should (equal (sort (mapcar #'drover-session-id (drover-index-sessions)) #'string<)
+                                       '("old" "short"))))))
+        (should-not messages)))))
+
+(ert-deftest drover-robustness-test-structures-before-use ()
+  "Each file defines its structures before code calling their accessors.
+Accessors are inlined where code is compiled, or loaded from its
+sources: code before the definition, compiled or loaded where another
+version of drover runs, would read the slots of that version's
+structures.  The accessors of slots the links replaced, defined as
+functions, have their setters defined with them."
+  (let ((root (file-name-directory (locate-library "drover-core"))))
+    (dolist (file (directory-files root t "\\`drover.*\\.el\\'"))
+      (let ((forms nil))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (condition-case nil
+              (while t (push (read (current-buffer)) forms))
+            (end-of-file nil)))
+        (setq forms (nreverse forms))
+        (let ((defined (make-hash-table :test #'eq)))
+          ;; Where each accessor comes: its structure's definition, or
+          ;; the setter of one defined as a function.
+          (seq-do-indexed
+           (lambda (form index)
+             (pcase form
+               (`(cl-defstruct ,spec . ,slots)
+                (let ((name (if (consp spec) (car spec) spec)))
+                  (dolist (slot slots)
+                    (unless (stringp slot)
+                      (puthash (intern (format "%s-%s" name (if (consp slot) (car slot) slot))) index defined)))))
+               (`(gv-define-setter ,name . ,_) (puthash name index defined))))
+           forms)
+          (seq-do-indexed
+           (lambda (form index)
+             (let ((seen nil))
+               (named-let walk ((tree form))
+                 (cond ((eq (car-safe tree) 'quote))
+                       ((consp tree) (walk (car tree)) (walk (cdr tree)))
+                       ((and (symbolp tree) (> (gethash tree defined -1) index))
+                        (push tree seen))))
+               ;; The function an accessor is, defined with its setter.
+               (when (memq (car-safe form) '(defun defsubst))
+                 (setq seen (delq (cadr form) seen)))
+               (ert-info ((format "%s, form %d" (file-name-nondirectory file) index))
+                 (should-not (delete-dups seen)))))
+           forms))))))
 
 (ert-deftest drover-robustness-test-measuring-bounded ()
   "Measuring a text of hundreds of kilobytes in pixels measures its start."
@@ -579,7 +664,7 @@ and a session changes, as its timers follow."
                                                :index (drover-layout-current-p drover--index 'drover--index)
                                                :model (drover-layout-current-p drover-list--model 'drover-list--model)
                                                :messages (mapcar (lambda (m) (substring m 0 (min 120 (length m))))
-                                                                 (seq-take messages 5))))))
+                                                                 (reverse messages))))))
                         (kill-emacs 0))
                      (current-buffer)))
             (apply #'call-process "timeout" nil output nil "120"
@@ -595,8 +680,12 @@ and a session changes, as its timers follow."
               (should (zerop (plist-get result :timer-errors)))
               (should (plist-get result :index))
               (should (plist-get result :model))
-              (should (member "Drover: index of sessions made by another version of drover, made anew"
-                              (plist-get result :messages)))))
+              ;; Told once each, and nothing else: no error reading the
+              ;; records of the backend made before, nor running code
+              ;; inlined where the structures were others.
+              (should (equal (sort (plist-get result :messages) #'string<)
+                             '("Drover: index of sessions made by another version of drover, made anew"
+                               "Drover: list of sessions made by another version of drover, made anew")))))
         (delete-directory old t)
         (delete-file script)
         (kill-buffer output)))))

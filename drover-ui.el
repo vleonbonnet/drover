@@ -37,7 +37,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 2))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
   (load "drover-core" nil t))
 
 (defgroup drover-faces nil
@@ -161,11 +161,15 @@ defaults to the current time."
 (defun drover-group-label (grouping value)
   "Return the display name of the group of VALUE when grouping by GROUPING.
 GROUPING is one of `drover-groupings'; groups without a value, nil, are
-named after what they lack.  Grouping by status, the group `archived'
-holds the archived sessions."
+named after what they lack, but this host's, grouping by host.
+Grouping by status, the group `archived' holds the archived sessions."
   (pcase grouping
     ('status (if (eq value 'archived) "Archived" (opencode-session-status-label value)))
     ('updated (or (alist-get value drover-activity-labels) "No activity"))
+    ('host (replace-regexp-in-string
+            "[\n\r\t]+" " "
+            (concat (drover-host-label value)
+                    (and value (drover-host-state value) " (not connected)"))))
     (_ (if value
            (replace-regexp-in-string "[\n\r\t]+" " " (format "%s" value))
          (format "No %s" grouping)))))
@@ -360,40 +364,53 @@ is cut to those first: no window shows more."
     (if (<= width pixels)
         string
       (let* ((ellipsis (truncate-string-ellipsis))
+             (ellipses nil)
              (cut (lambda (length)
-                    (concat (string-trim-right (substring string 0 length))
-                            (apply #'propertize ellipsis
-                                   (text-properties-at (max 0 (1- length)) string)))))
-             (fits (lambda (length) (<= (funcall measure (funcall cut length)) pixels)))
+                    (let ((properties (text-properties-at (max 0 (1- length)) string)))
+                      (concat (string-trim-right (substring string 0 length))
+                              ;; One ellipsis per properties: titles have one run.
+                              (or (cdr (assq properties ellipses))
+                                  (cdar (push (cons properties (apply #'propertize ellipsis properties))
+                                              ellipses)))))))
+             ;; The candidate that fits, of the longest length tried.
+             (best nil)
+             (fits (lambda (length)
+                     (let ((candidate (funcall cut length)))
+                       (when (<= (funcall measure candidate) pixels)
+                         (when (or (null best) (> length (car best)))
+                           (setq best (cons length candidate)))
+                         t))))
              (low 0)
              (high (1- (length string))))
-        (if (not (funcall fits 0))
-            ""
-          ;; Characters differ in width, so the longest prefix that fits
-          ;; is found by laying out candidates.  Each costs a layout:
-          ;; the search starts where the average width of a character
-          ;; puts the cut, and gallops away from it, before bisecting.
-          (let ((guess (max 0 (min high (floor (* (length string) pixels) (max 1 width)))))
-                (step 1))
-            (if (funcall fits guess)
-                (progn
-                  (setq low guess)
-                  (while (and (<= (+ low step) high) (funcall fits (+ low step)))
-                    (setq low (+ low step)
-                          step (* 2 step)))
-                  (setq high (min high (+ low step -1))))
-              (setq high (1- guess))
-              (while (and (> (- high step) low) (not (funcall fits (- high step))))
-                (setq high (- high step 1)
-                      step (* 2 step)))
-              (when (> (- high step) low)
-                (setq low (- high step)))))
-          (while (< low high)
-            (let ((middle (/ (+ low high 1) 2)))
-              (if (funcall fits middle)
-                  (setq low middle)
-                (setq high (1- middle)))))
-          (funcall cut low))))))
+        ;; Characters differ in width, so the longest prefix that fits is
+        ;; found by laying out candidates.  Each costs a layout: the
+        ;; search starts where the average width of a character puts the
+        ;; cut, and gallops away from it, before bisecting.  The empty
+        ;; prefix, assumed to fit, is checked last, when nothing longer
+        ;; does.
+        (let ((guess (max 0 (min high (floor (* (length string) pixels) (max 1 width)))))
+              (step 1))
+          (if (funcall fits guess)
+              (progn
+                (setq low guess)
+                (while (and (<= (+ low step) high) (funcall fits (+ low step)))
+                  (setq low (+ low step)
+                        step (* 2 step)))
+                (setq high (min high (+ low step -1))))
+            (setq high (1- guess))
+            (while (and (> (- high step) low) (not (funcall fits (- high step))))
+              (setq high (- high step 1)
+                    step (* 2 step)))
+            (when (> (- high step) low)
+              (setq low (- high step)))))
+        (while (< low high)
+          (let ((middle (/ (+ low high 1) 2)))
+            (if (funcall fits middle)
+                (setq low middle)
+              (setq high (1- middle)))))
+        (cond ((and best (= (car best) low)) (cdr best))
+              ((funcall fits low) (cdr best))
+              (t ""))))))
 
 ;;;; Filters
 
@@ -410,12 +427,19 @@ default, and otherwise the age of SINCE, such as \"2d\"."
   (mapconcat (lambda (status) (downcase (opencode-session-status-label status)))
              statuses " or "))
 
+(defun drover-filter-hosts-label (hosts)
+  "Return HOSTS, a value of the filter member :host, as one string.
+Such as \"on reaver or core\": `local' names this host."
+  (concat "on " (mapconcat (lambda (host) (drover-host-label (if (eq host 'local) nil host)))
+                           (if (listp hosts) hosts (list hosts))
+                           " or ")))
+
 (defun drover-filter-description (&optional filter now)
   "Return FILTER, `drover-filter' by default, described for headers, or nil.
 The description lists each member set, such as \"project drover,
-needs you, agent build, provider Anthropic, since 2d, \"auth\"\".  Ages
-count up to NOW, the current time by default.  Return nil when FILTER
-lists every session."
+needs you, agent build, provider Anthropic, since 2d, \"auth\", on
+core\".  Ages count up to NOW, the current time by default.  Return
+nil when FILTER lists every session."
   (let ((filter (or filter drover-filter)))
     (when (drover-filter-active-p filter)
       (let ((project (drover--filter-value filter :project))
@@ -424,7 +448,8 @@ lists every session."
             (model (drover--filter-value filter :model))
             (provider (drover--filter-value filter :provider))
             (since (drover--filter-value filter :since))
-            (search (drover--filter-value filter :search)))
+            (search (drover--filter-value filter :search))
+            (hosts (drover--filter-value filter :host)))
         (mapconcat #'identity
                    (delq nil (list (and project (concat "project " project))
                                    (and statuses (drover-filter-statuses-label statuses))
@@ -432,7 +457,8 @@ lists every session."
                                    (and model (concat "model " model))
                                    (and provider (concat "provider " provider))
                                    (and since (drover-filter-since-label since now))
-                                   (and search (format "\"%s\"" search))))
+                                   (and search (format "\"%s\"" search))
+                                   (and hosts (drover-filter-hosts-label hosts))))
                    ", ")))))
 
 (provide 'drover-ui)

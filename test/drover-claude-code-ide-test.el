@@ -31,6 +31,7 @@
 ;;; Code:
 
 (require 'drover-test-helpers)
+(require 'json)
 ;; claude-code-ide first: drover loads the backend once it is loaded.
 (require 'claude-code-ide)
 (require 'drover-claude-code-ide)

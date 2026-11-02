@@ -897,6 +897,104 @@ drawn.  Buffers of sessions BODY makes are killed."
         (should (eq (plist-get job :status) 'failed))
         (should (equal (plist-get job :error) "No OpenCode session"))))))
 
+(defun drover-schedule-test--archived-by-drover ()
+  "Have drover archive the fake sessions itself, as for a backend without an archive."
+  (let ((plist (alist-get 'fake drover--backends))
+        (kept nil))
+    (while plist
+      (unless (eq (car plist) :archive)
+        (setq kept (append kept (list (car plist) (cadr plist)))))
+      (setq plist (cddr plist)))
+    (setf (alist-get 'fake drover--backends) kept)))
+
+(ert-deftest drover-schedule-test-delivery-restores-archived ()
+  "A prompt to a conversation drover archived restores it, then goes to its buffer, still open.
+One that cannot be restored is sent nothing and fails, saying why."
+  (drover-schedule-test-state
+    (drover-schedule-test--archived-by-drover)
+    (let ((session (drover-schedule-test-session))
+          (buffer (drover-schedule-test-buffer)))
+      (drover-archive-session session)
+      (should (drover-session-archived-p session))
+      (should (buffer-live-p buffer))
+      (should-not (drover-sessions))
+      (let ((job (drover-schedule-test-job)) run)
+        (drover-schedule--run (plist-get job :id))
+        (setq run (gethash (plist-get job :id) (drover-schedule--active)))
+        ;; Restored as delivery begins, its open buffer taken.
+        (should-not (drover-session-archived-p session))
+        (should (eq (plist-get run :buffer) buffer))
+        (drover-schedule--poll job run)
+        (should (equal (mapcar #'car drover-schedule-test-submitted) '("fixture")))
+        (funcall (nth 2 (car drover-schedule-test-submitted)))
+        (should (eq (plist-get job :status) 'sent)))
+      ;; Archived again; restored, no backend would list it.
+      (setq drover-schedule-test-submitted nil)
+      (drover-archive-session session)
+      (cl-letf (((symbol-function 'drover--followed-p) #'ignore))
+        (let ((job (drover-schedule-test-job)) run)
+          (drover-schedule--run (plist-get job :id))
+          (setq run (gethash (plist-get job :id) (drover-schedule--active)))
+          (should (eq (plist-get run :buffer) buffer))
+          (drover-schedule--poll job run)
+          (should-not drover-schedule-test-submitted)
+          (should (eq (plist-get job :status) 'failed))
+          (should (string-prefix-p "Could not restore Session fixture from the archive: no front end follows"
+                                   (plist-get job :error)))
+          (should (drover-session-archived-p session)))))))
+
+(ert-deftest drover-schedule-test-delivery-restores-resumed ()
+  "A conversation drover archived, without a buffer, is resumed, then restored before the prompt goes."
+  (drover-schedule-test-state
+    (drover-schedule-test--archived-by-drover)
+    (let ((drover--resumers nil)
+          (drover--resumer-properties nil)
+          (session (drover-schedule-test-session)))
+      (drover-archive-session session)
+      ;; No backend lists it any more, but drover's archive.
+      (setq drover-test-sessions nil)
+      (drover-register-resumer 'claude-code 'fake
+                               (lambda (_id _directory)
+                                 (drover-schedule-test-session)
+                                 (drover-schedule-test-buffer)))
+      (let ((job (drover-schedule-test-job)) run)
+        (drover-schedule--run (plist-get job :id))
+        (setq run (gethash (plist-get job :id) (drover-schedule--active)))
+        (should (plist-get run :buffer))
+        ;; Not before it was resumed, as nothing listed it.
+        (should (drover-session-archived-p (drover-find 'fake "fixture")))
+        (drover-schedule--poll job run)
+        (should-not (drover-session-archived-p (drover-find 'fake "fixture")))
+        (should (equal (mapcar #'car drover-schedule-test-submitted) '("fixture")))))))
+
+(ert-deftest drover-schedule-test-turn-of-archived ()
+  "The turn of a session drover archived is waited for, as of any session."
+  (drover-schedule-test-state
+    (drover-schedule-test--archived-by-drover)
+    (let ((session (drover-schedule-test-session :status 'working)))
+      (drover-schedule-test-buffer)
+      (drover-archive-session session)
+      (let ((job (drover-schedule-add-after-turn (drover-schedule-test-target) "next")))
+        (drover-schedule--turn-check)
+        (should (drover-schedule--turn-waiting-p job))
+        (setf (drover-session-status session) 'idle)
+        (drover-schedule--turn-check)
+        (should-not (drover-schedule--turn-waiting-p job))
+        (should (gethash (plist-get job :id) (drover-schedule--timers)))))))
+
+(ert-deftest drover-schedule-test-submit-not-sent ()
+  "A front end telling nothing was sent fails the prompt, rather than leave it uncertain."
+  (drover-schedule-test-state
+    (drover-schedule-test-session)
+    (drover-schedule-test-buffer)
+    (let ((job (drover-schedule-test-job)) run)
+      (drover-schedule--run (plist-get job :id))
+      (setq run (gethash (plist-get job :id) (drover-schedule--active)))
+      (drover-schedule--poll job run)
+      (funcall (nth 3 (car drover-schedule-test-submitted)) "Could not restore it from the archive" t)
+      (should (eq (plist-get job :status) 'failed))
+      (should (equal (plist-get job :error) "Could not restore it from the archive")))))
+
 (ert-deftest drover-schedule-test-delivery-refused ()
   "A conversation of another host, of a missing directory or a backend not delivering, fails at once."
   (drover-schedule-test-state
@@ -1108,6 +1206,32 @@ backends does nothing."
   "The menu lists scheduled prompts with #, which loads nothing until used."
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "#")) :command) #'drover-schedule-list))
   (should (commandp #'drover-schedule-list)))
+
+(ert-deftest drover-schedule-test-prints-in-proportion ()
+  "The queue prints in proportion to its prompts, deliveries in progress included.
+Emacs prints a value whole in an error's data, or as `format' does: a
+prompt or a delivery leading back to the queue would print it all again."
+  (drover-schedule-test-state
+    (let ((drover-schedule-test-blocker "the input holds a draft")
+          (jobs nil))
+      (dotimes (i 100)
+        (let ((id (format "s%d" i)))
+          (push (drover-test-session id :engine 'claude-code :engine-id (concat id "-session"))
+                drover-test-sessions)
+          (drover-schedule-test-buffer id)
+          (push (drover-schedule-add (drover-schedule-test-target (concat id "-session"))
+                                     (time-add (current-time) 3600) (format "check %d" i))
+                jobs)
+          (drover-schedule-add (drover-schedule-test-target (concat id "-session"))
+                               (time-add (current-time) 7200) (format "then %d" i))))
+      ;; Half wait for their sessions to take a prompt.
+      (dolist (job (seq-take jobs 50))
+        (drover-schedule--run (plist-get job :id))
+        (should (eq (plist-get job :status) 'waiting)))
+      (let ((job (car jobs)))
+        (drover-test-prints-in-proportion
+         200 (list (cons "a prompt" job)
+                   (cons "a delivery" (gethash (plist-get job :id) (drover-schedule--active)))))))))
 
 (provide 'drover-schedule-test)
 ;;; drover-schedule-test.el ends here

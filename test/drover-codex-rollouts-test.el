@@ -245,5 +245,21 @@
         (should (equal (length warnings) 1))
         (should (string-match-p "\\`Codex could not delete" (car warnings)))))))
 
+(ert-deftest drover-codex-rollouts-test-prints-in-proportion ()
+  "The index of rollouts prints in proportion to the conversations it read.
+Emacs prints a value whole in an error's data, or as `format' does: an
+entry or a record leading back to the index would print it all again."
+  (drover-codex-rollouts-test-with
+    (dotimes (i 100)
+      (drover-fixture-codex (format "019f0000-0000-7000-8000-%012d" i)
+                            (expand-file-name (format "work/p%d/" (% i 7)) home)
+                            :prompt (format "Prompt %d" i)))
+    (drover-codex-rollouts-test-scan)
+    (should (= (length (drover-sessions)) 100))
+    (drover-test-prints-in-proportion
+     100 (list (cons "an entry" (car (hash-table-values (drover-transcript-index-entries
+                                                          drover-codex-rollouts--index))))
+               (cons "a record" (drover-find 'codex "019f0000-0000-7000-8000-000000000001"))))))
+
 (provide 'drover-codex-rollouts-test)
 ;;; drover-codex-rollouts-test.el ends here
