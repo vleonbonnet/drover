@@ -71,6 +71,10 @@
 (require 'subr-x)
 (require 'drover-core)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 ;;;; Models
 
 (cl-defstruct (drover-model (:constructor drover-model-create)
@@ -411,11 +415,11 @@ live session starts.  What a live source of ENGINE answers now is
 remembered, then `drover-models-changed-hook' runs.  A function of the
 hook failing is reported, and stops neither the others nor the
 caller."
-  (with-demoted-errors "Drover models changed: %S"
+  (drover-with-reporting "models changed"
     (drover--engine-models engine default-directory))
   (run-hook-wrapped 'drover-models-changed-hook
                     (lambda (function)
-                      (with-demoted-errors "Drover models changed: %S"
+                      (drover-with-reporting "models changed"
                         (funcall function engine))
                       nil)))
 
@@ -438,7 +442,7 @@ what was remembered of each model (see `drover--remember-models')."
                        (lambda (a b) (< (nth 1 a) (nth 1 b))))))
     (catch 'answer
       (dolist (source sources)
-        (when-let* ((models (with-demoted-errors "Drover model source: %S"
+        (when-let* ((models (drover-with-reporting "model source"
                               (if (nth 2 source)
                                   (funcall (nth 2 source) directory)
                                 (drover-remembered-models engine)))))
@@ -612,7 +616,7 @@ is reported once and ignored: the next live answer replaces it."
             (drover--model-memory-parse (read (current-buffer))))
         (error
          (drover--model-memory-warn "Ignoring the models remembered in %s: %s"
-                                    (abbreviate-file-name file) (error-message-string err))
+                                    (abbreviate-file-name file) (drover-error-message err))
          nil)))))
 
 (defun drover--model-memory ()
@@ -634,7 +638,7 @@ See `drover-write-data'.  A failure is reported once."
         (drover-write-data file "Models drover remembers" drover--model-memory-version :engines memory)
       (error
        (drover--model-memory-warn "Could not remember models in %s: %s"
-                                  (abbreviate-file-name file) (error-message-string err))))
+                                  (abbreviate-file-name file) (drover-error-message err))))
     (setq drover--model-memory-stamp (drover-file-mtime file))))
 
 (defun drover--complete-models (models remembered)
@@ -782,7 +786,7 @@ MINIBUFFER is gone."
       ;; keep are flushed only by editing the input.
       (setq completion-all-sorted-completions nil)
       (dolist (function drover-completion-refresh-functions)
-        (with-demoted-errors "Drover completion refresh: %S"
+        (drover-with-reporting "completion refresh"
           (funcall function))))))
 
 (defun drover-read-model (&optional default directory)
@@ -844,7 +848,7 @@ none."
   (delete-dups
    (mapcan (lambda (engine)
              (when-let* ((function (drover-engine-property engine :agents)))
-               (copy-sequence (with-demoted-errors "Drover engine agents: %S"
+               (copy-sequence (drover-with-reporting "engine agents"
                                 (funcall function directory)))))
            (drover-engines))))
 

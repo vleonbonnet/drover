@@ -2288,12 +2288,14 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
           (setq-local opencode-session-id "ses_new")
           (funcall late '((id . "ses_new"))))
         (should (= (length results) 1))))
-    ;; An error of THEN is reported, not signaled from the callback.
-    (setq warnings nil)
-    (funcall (drover-backend-property 'opencode :create) temporary-file-directory 'opencode nil
-             (lambda (_) (error "Broken continuation"))
-             (lambda (_) (ert-fail "ELSE called")))
-    (should (string-match-p "Broken continuation" (car warnings)))
+    ;; An error of THEN is reported briefly, not signaled from the callback.
+    (let ((messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest arguments) (push (apply #'format-message format arguments) messages))))
+        (funcall (drover-backend-property 'opencode :create) temporary-file-directory 'opencode nil
+                 (lambda (_) (error "Broken continuation"))
+                 (lambda (_) (ert-fail "ELSE called"))))
+      (should (equal messages '("Drover OpenCode session start: error: Broken continuation"))))
     ;; The backend starts OpenCode sessions only.
     (setq results nil created nil)
     (funcall (drover-backend-property 'opencode :create) temporary-file-directory 'codex nil

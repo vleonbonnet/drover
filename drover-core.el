@@ -72,6 +72,13 @@
 (require 'seq)
 (require 'subr-x)
 
+(defconst drover-core-generation 1
+  "The generation of drover-core, which grows as other files need more of it.
+A file of drover loaded into an Emacs running an older drover-core, as
+reloading drover's files does, loads drover-core anew first when its
+generation is older than the one it needs, rather than fail on what that
+one lacks.")
+
 (defgroup drover nil
   "Manage the sessions of coding agents."
   :group 'tools
@@ -136,6 +143,332 @@ view with `drover-toggle-subagents', U in lists, or with
                  (const :tag "Active subagents" active)
                  (const :tag "No subagent" none))
   :group 'drover)
+
+;;;; Errors out of commands
+
+;; Drover runs much of its code out of commands: from timers, process
+;; sentinels and filters, and the hooks of Emacs and other packages.
+;; Emacs reports an error there with its data printed whole, in the echo
+;; area: an error carrying the index of thousands of sessions made a
+;; message of two million characters, which every redisplay measured
+;; again to size the echo area, for minutes.  Such code reports its
+;; errors through `drover-with-reporting' instead: one short line, the
+;; data printed briefly, and the same error at most once in
+;; `drover-error-interval' seconds.
+
+(defcustom drover-error-interval 60
+  "Seconds during which an error drover reports out of a command is not repeated.
+Code running from timers or hooks may fail again and again, as often as
+it runs: the same error, out of the same code, is reported once in this
+many seconds."
+  :type 'number
+  :group 'drover)
+
+(defconst drover-error-length 200
+  "Characters at most of the report of an error, after what it comes from.")
+
+(defvar drover--errors-reported (make-hash-table :test #'equal)
+  "When each error was last reported, a float time, by (CONTEXT . REPORT).")
+
+(defun drover--brief (object depth)
+  "Return OBJECT printed briefly, DEPTH levels of lists and vectors deep.
+Strings are cut, records, hash tables and functions named by their type
+alone, lists and vectors cut after a few elements: what an error carries
+may be a structure holding thousands of sessions, or a whole transcript."
+  (cond ((stringp object)
+         (prin1-to-string (if (> (length object) 40)
+                              (concat (substring-no-properties object 0 40) "…")
+                            (substring-no-properties object))))
+        ((recordp object) (format "#s(%s …)" (type-of object)))
+        ((hash-table-p object) (format "#<hash-table %d>" (hash-table-count object)))
+        ((or (byte-code-function-p object) (interpreted-function-p object)
+             (subrp object) (bool-vector-p object) (char-table-p object))
+         (format "#<%s>" (type-of object)))
+        ((or (consp object) (vectorp object))
+         (if (<= depth 0)
+             (if (consp object) "(…)" "[…]")
+           (let ((parts nil)
+                 (count 0)
+                 (tail (if (consp object) object (append (seq-take object 9) nil))))
+             (while (and (consp tail) (< count 8))
+               (push (drover--brief (car tail) (1- depth)) parts)
+               (setq tail (cdr tail)
+                     count (1+ count)))
+             (cond ((or (consp tail) (and (vectorp object) (> (length object) 8)))
+                    (push "…" parts))
+                   (tail (push "." parts)
+                         (push (drover--brief tail (1- depth)) parts)))
+             (concat (if (consp object) "(" "[")
+                     (string-join (nreverse parts) " ")
+                     (if (consp object) ")" "]")))))
+        (t (let ((print-length 8)
+                 (print-level 2))
+             (drover-bound-line (prin1-to-string object) 80)))))
+
+(defun drover-error-message (err)
+  "Return the message of ERR, an error as `condition-case' binds it, briefly.
+As `error-message-string', but on one line of at most
+`drover-error-length' characters, its data printed briefly (see
+`drover--brief'): what an error carries may be of any size."
+  (let* ((symbol (car-safe err))
+         (data (cdr-safe err))
+         (message (and (symbolp symbol) (get symbol 'error-message)))
+         (text (cond
+                ((and (memq symbol '(error user-error)) (stringp (car-safe data)))
+                 (string-replace "\n" " " (or (drover-bound-line (car data) drover-error-length) "")))
+                ;; As `error-message-string', a file error is told by its
+                ;; data, its strings unquoted.
+                ((and (symbolp symbol) (memq 'file-error (get symbol 'error-conditions))
+                      (stringp (car-safe data)))
+                 (mapconcat (lambda (object)
+                              (if (stringp object)
+                                  (or (drover-bound-line object 120) "")
+                                (drover--brief object 2)))
+                            (if (proper-list-p data) data (list data))
+                            ": "))
+                (t
+                 (concat (if (stringp message) message (format "%s" symbol))
+                         (and data ": ")
+                         (mapconcat (lambda (object) (drover--brief object 2))
+                                    (if (proper-list-p data) data (list data))
+                                    ", "))))))
+    (or (drover-bound-line (string-replace "\n" " " text) drover-error-length) "")))
+
+(defun drover-error-string (err)
+  "Return ERR, an error as `condition-case' binds it, on one short line.
+It names the error's symbol, then its message (see
+`drover-error-message')."
+  (drover-bound-line (format "%s: %s" (car-safe err) (drover-error-message err))
+                     drover-error-length))
+
+(defun drover-report-failure (context err &optional where)
+  "Report ERR, signalled out of a command by the code CONTEXT names, briefly.
+CONTEXT is a short string, such as \"list timer\"; WHERE, if any, tells
+what it was at, such as a file.  The report is one line (see
+`drover-error-string'), in the echo area and *Messages*; the same error
+out of the same CONTEXT, wherever, is not reported again within
+`drover-error-interval' seconds."
+  (let ((report (drover-error-string err)))
+    (when (drover--report-due-p (cons context report))
+      (message "Drover %s: %s%s" context report
+               (if where
+                   ;; The end of a file name tells which file.
+                   (let ((where (or (drover-bound-line where 1000) "")))
+                     (concat " (" (if (> (length where) 120)
+                                      (concat "…" (substring where -120))
+                                    where)
+                             ")"))
+                 "")))))
+
+(defun drover--report-due-p (key)
+  "Return non-nil when what KEY stands for may be reported now, noting it.
+Not when it was within `drover-error-interval' seconds."
+  (let* ((now (float-time))
+         (interval (or drover-error-interval 0))
+         (last (gethash key drover--errors-reported)))
+    (unless (and last (< (- now last) interval))
+      (when (> (hash-table-count drover--errors-reported) 64)
+        (let ((old nil))
+          (maphash (lambda (key time) (when (>= (- now time) interval) (push key old)))
+                   drover--errors-reported)
+          (dolist (key old) (remhash key drover--errors-reported))))
+      (puthash key now drover--errors-reported)
+      t)))
+
+(defmacro drover-with-reporting (context &rest body)
+  "Run BODY, reporting an error it signals as `drover-report-failure' does.
+CONTEXT, a string, tells what failed.  Return the value of BODY, or nil
+when it signalled.  For code running out of commands, from timers,
+processes and hooks, so that Emacs never prints an error's data whole;
+with `debug-on-error', the debugger is entered first."
+  (declare (indent 1) (debug t))
+  (let ((err (make-symbol "err")))
+    `(condition-case ,err
+         (progn ,@body)
+       ((debug error) (drover-report-failure ,context ,err) nil))))
+
+(defun drover-run-hook-reporting (hook &rest arguments)
+  "Run the functions of HOOK with ARGUMENTS, each reporting its own error.
+One function failing stops neither the others nor the caller (see
+`drover-with-reporting')."
+  (run-hook-wrapped hook
+                    (lambda (function)
+                      (drover-with-reporting (if (symbolp function)
+                                                 (symbol-name function)
+                                               (format "%s" hook))
+                        (apply function arguments))
+                      nil)))
+
+;;;; Text from outside
+
+;; Titles, prompts, replies, descriptions and errors come from backends
+;; and from files engines write, and may be of any length: a first
+;; prompt pasting a log is a line of hundreds of kilobytes.  Drover
+;; bounds them as it takes them in, a title to its first line, so that
+;; nothing measures, draws or prints them whole: measuring a long line
+;; in pixels costs as much as drawing it.
+
+(defconst drover-line-limit 300
+  "Characters at most of a line of text drover takes in, such as a title.")
+
+(defconst drover-text-limit 4000
+  "Characters at most of a text of several lines drover takes in, such as a reply.")
+
+(defconst drover-text-lines 40
+  "Lines at most of a text of several lines drover takes in.")
+
+(defun drover--unbounded-line-p (string &optional limit)
+  "Return non-nil when STRING is longer than LIMIT characters, or is not one line.
+LIMIT defaults to `drover-line-limit'."
+  (and (stringp string)
+       (or (> (length string) (or limit drover-line-limit))
+           (string-search "\n" string)
+           (string-search "\r" string))))
+
+(defun drover-bound-line (string &optional limit)
+  "Return the first line of STRING that is not blank, trimmed, or nil.
+It is cut to LIMIT characters, by default `drover-line-limit', ending
+in an ellipsis when cut.  STRING is returned itself when it is such a
+line already.  Text properties are kept.  Only what the result takes is
+looked at, so that a line of megabytes costs no more than a short one."
+  (cond
+   ((not (stringp string)) nil)
+   ((not (drover--unbounded-line-p string limit))
+    (and (string-match-p "[^ \t\f\v]" string)
+         (if (string-match-p "\\`[ \t\f\v]\\|[ \t\f\v]\\'" string) (string-trim string) string)))
+   (t
+    (let* ((limit (or limit drover-line-limit))
+           (start (string-match "[^ \t\n\r\f\v]" string)))
+      (when start
+        (let* ((piece (substring string start (min (length string) (+ start limit 1))))
+               (newline (string-match "[\n\r]" piece))
+               (line (string-trim-right (if newline (substring piece 0 newline) piece))))
+          (if (> (length line) limit)
+              (concat (string-trim-right (substring line 0 limit)) "…")
+            line)))))))
+
+(defun drover--more-lines-p (string lines)
+  "Return the position after the LINES first lines of STRING, if more follow."
+  (let ((position 0)
+        (count 0))
+    (while (and position (< count lines))
+      (setq position (string-search "\n" string position))
+      (when position
+        (setq position (1+ position)
+              count (1+ count))))
+    (and position (< position (length string)) position)))
+
+(defun drover-bound-text (string &optional lines limit tail)
+  "Return STRING cut to LINES lines and LIMIT characters, or nil.
+LINES and LIMIT default to `drover-text-lines' and `drover-text-limit';
+a text cut ends in an ellipsis, or with TAIL non-nil keeps its end and
+begins with one.  STRING is returned itself when within both."
+  (when (stringp string)
+    (let* ((lines (or lines drover-text-lines))
+           (limit (or limit drover-text-limit))
+           (cut (> (length string) limit))
+           (text (cond ((not cut) string)
+                       (tail (substring string (- (length string) limit)))
+                       (t (substring string 0 limit))))
+           (end (if tail
+                    (let ((reversed (reverse text)))
+                      (when-let* ((end (drover--more-lines-p reversed lines)))
+                        (- (length text) (1- end))))
+                  (drover--more-lines-p text lines))))
+      (when end
+        (setq text (if tail (substring text end) (substring text 0 (1- end)))
+              cut t))
+      (cond ((not cut) text)
+            (tail (concat "…" (string-trim-left text)))
+            (t (concat (string-trim-right text) "…"))))))
+
+(defun drover-bound-lines (text &optional lines)
+  "Return TEXT cut to LINES lines of at most `drover-line-limit' characters each.
+LINES defaults to `drover-text-lines'.  For what Emacs shows in the
+echo area or a tooltip, which it measures to size them."
+  (when (stringp text)
+    (let ((text (drover-bound-text text (or lines drover-text-lines)
+                                   (* (or lines drover-text-lines) (1+ drover-line-limit)))))
+      (if (seq-some #'drover--unbounded-line-p (split-string text "\n"))
+          (mapconcat (lambda (line)
+                       (if (drover--unbounded-line-p line)
+                           (concat (substring line 0 drover-line-limit) "…")
+                         line))
+                     (split-string text "\n")
+                     "\n")
+        text))))
+
+(defun drover-format-message (format-string &rest args)
+  "Return FORMAT-STRING formatted with ARGS, as `format-message', bounded.
+The message is cut to `drover-text-lines' lines and `drover-line-limit'
+characters per line (see `drover-bound-lines'), for the echo area: what
+a backend said may be of any length."
+  (drover-bound-lines (apply #'format-message format-string args)))
+
+(defun drover-message (format-string &rest args)
+  "Show FORMAT-STRING formatted with ARGS in the echo area, bounded.
+As `message', through `drover-format-message'."
+  (message "%s" (apply #'drover-format-message format-string args)))
+
+;;;; Layouts of long-lived structures
+
+;; Drover keeps structures for as long as Emacs runs: the index of
+;; sessions, what each list drew, the indexes of transcripts.  Loading
+;; another version of drover into a running Emacs, as reloading its
+;; files does, defines their types anew, but leaves the structures made
+;; before, whose slots the new accessors read by position: one of fewer
+;; slots signalled an error carrying it whole from a timer, again on
+;; every change.  Each long-lived structure holds in its first slot,
+;; `stamp', the layouts of the types it was made of (`drover-layout');
+;; code finding a structure of other layouts drops it and makes it anew
+;; (`drover-layout-current-p').
+
+(defvar drover--layouts (make-hash-table :test #'eq)
+  "The slots of drover's structures as defined last, as (SLOTS . STAMP), by type.
+STAMP is a new object whenever the slots of the type change.")
+
+(defun drover-note-layout (&rest types)
+  "Note the layouts of TYPES, drover's structures, as just defined.
+Files call it after their definitions: a type whose slots differ from
+those noted before, as after loading another version of drover, gets a
+new stamp, so that structures made of it before are known as stale."
+  (dolist (type types)
+    (let ((slots (mapcar #'car (cl-struct-slot-info type))))
+      (unless (equal slots (car (gethash type drover--layouts)))
+        (puthash type (cons slots (list type)) drover--layouts)))))
+
+(defun drover-layout (&rest types)
+  "Return the layout of a structure made of TYPES, for its `stamp' slot.
+TYPES are the structure's own type and those of the structures it
+holds, each noted by `drover-note-layout'."
+  (mapcar (lambda (type) (cons type (cdr (gethash type drover--layouts)))) types))
+
+(defun drover-layout-matches-p (layout)
+  "Return non-nil when LAYOUT, made by `drover-layout', is of the types now.
+That is of the types as defined last."
+  (and layout
+       (proper-list-p layout)
+       (seq-every-p (lambda (entry)
+                      (and (consp entry)
+                           (eq (cdr entry) (cdr (gethash (car entry) drover--layouts)))))
+                    layout)))
+
+(defun drover-layout-current-p (object type)
+  "Return non-nil when OBJECT is a structure of TYPE of the layouts defined now.
+The first slot of such a structure is `stamp', its value made by
+`drover-layout'; one made before its types were defined anew, or of a
+version of drover without the slot, is not current."
+  (and (recordp object)
+       (eq (type-of object) type)
+       (drover-layout-matches-p (condition-case nil (aref object 1) (error nil)))))
+
+(defun drover-stale-layout (what)
+  "Tell that WHAT, made by another version of drover, is made anew.
+WHAT is a short description, such as \"the index of sessions\"; the
+message is shown at most once per `drover-error-interval' seconds for
+one WHAT."
+  (when (drover--report-due-p (cons 'layout what))
+    (message "Drover: %s made by another version of drover, made anew" what)))
 
 ;;;; Sessions
 
@@ -205,6 +538,50 @@ The next step measures it.")
   (archived nil :documentation "Time, as a float, at which the session was archived, t when unknown, or nil.
 Archived sessions show only while `drover-show-archived' is set; see
 `drover-session-archived-p'."))
+
+(drover-note-layout 'drover-session)
+
+(defun drover--bound-record (record)
+  "Return RECORD, or a copy of it whose texts are bounded, as drover takes it in.
+Its title and the other fields shown on a line are cut to their first
+line and `drover-line-limit' characters (see `drover-bound-line'), its
+detail and the summaries of its requests to `drover-text-lines' lines
+and `drover-text-limit' characters.  RECORD itself when within those."
+  (if (not (drover-session-p record))
+      record
+    (let ((copy nil))
+      (cl-macrolet ((line (slot)
+                      `(let ((value (,slot record)))
+                         (when (drover--unbounded-line-p value)
+                           (unless copy (setq copy (copy-sequence record)))
+                           (setf (,slot copy) (drover-bound-line value))))))
+        (line drover-session-title)
+        (line drover-session-agent)
+        (line drover-session-agent-display)
+        (line drover-session-model)
+        (line drover-session-effort)
+        (line drover-session-provider)
+        (line drover-session-provider-name)
+        (line drover-session-project)
+        (line drover-session-branch))
+      (let ((detail (drover-session-detail record)))
+        (when (and (stringp detail) (not (eq (drover-bound-text detail) detail)))
+          (unless copy (setq copy (copy-sequence record)))
+          (setf (drover-session-detail copy) (drover-bound-text detail))))
+      (let ((requests (drover-session-requests record)))
+        (when (seq-some (lambda (request)
+                          (let ((summary (and (listp request) (plist-get request :summary))))
+                            (and (stringp summary) (not (eq (drover-bound-text summary) summary)))))
+                        requests)
+          (unless copy (setq copy (copy-sequence record)))
+          (setf (drover-session-requests copy)
+                (mapcar (lambda (request)
+                          (let ((summary (and (listp request) (plist-get request :summary))))
+                            (if (stringp summary)
+                                (plist-put (copy-sequence request) :summary (drover-bound-text summary))
+                              request)))
+                        requests))))
+      (or copy record))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -410,6 +787,8 @@ the earliest time its running sessions sort by, which the turns of
 subagents starting under a running parent do not move; otherwise the
 latest time a session of the tree sorts by.  See
 `drover-session-activity'.  Nil when neither is known."))
+
+(drover-note-layout 'drover-node)
 
 (defun drover--node-before-p (a b)
   "Return non-nil when tree A comes before tree B."
@@ -967,7 +1346,7 @@ A backend registered after `drover-start' ran is started at once."
 Backends without a :buffer function never report one."
   (when-let* ((function (drover-backend-property session :buffer))
               ((functionp function))
-              (buffer (with-demoted-errors "Drover backend buffer: %S"
+              (buffer (drover-with-reporting "backend buffer"
                         (funcall function session))))
     (and (bufferp buffer) (buffer-live-p buffer) buffer)))
 
@@ -999,7 +1378,7 @@ They are its :engines, a list or what the function there returns; nil
 when it has none, or when the function fails."
   (let ((engines (drover-backend-property backend :engines)))
     (if (functionp engines)
-        (with-demoted-errors "Drover backend engines: %S"
+        (drover-with-reporting "backend engines"
           (funcall engines))
       engines)))
 
@@ -1010,7 +1389,7 @@ it, and its :supports function, if any, must allow it for SESSION."
   (and (functionp (drover-backend-property session operation))
        (let ((supports (drover-backend-property session :supports)))
          (or (not (functionp supports))
-             (with-demoted-errors "Drover backend supports: %S"
+             (drover-with-reporting "backend supports"
                (funcall supports session operation))))
        t))
 
@@ -1036,7 +1415,7 @@ its :supports function says it does not apply to SESSION."
   (unless (memq name drover--started)
     (push name drover--started)
     (when-let* ((start (plist-get (alist-get name drover--backends) :start)))
-      (with-demoted-errors "Drover backend start: %S"
+      (drover-with-reporting "backend start"
         (funcall start)))))
 
 (defun drover-start ()
@@ -1045,15 +1424,17 @@ its :supports function says it does not apply to SESSION."
   (mapc #'drover--start-backend (drover-backends)))
 
 (defun drover--backend-sessions (properties)
-  "Return the sessions of the backend of PROPERTIES, or nil when they fail."
-  (with-demoted-errors "Drover backend sessions: %S"
-    (copy-sequence (funcall (plist-get properties :sessions)))))
+  "Return the sessions of the backend of PROPERTIES, or nil when they fail.
+Their texts are bounded (see `drover--bound-record')."
+  (drover-with-reporting "backend sessions"
+    (mapcar #'drover--bound-record (funcall (plist-get properties :sessions)))))
 
 (defun drover--backend-session (properties id)
   "Return session ID of the backend of PROPERTIES, through its :session, or nil.
-Nil too when :session fails."
-  (with-demoted-errors "Drover backend session: %S"
-    (funcall (plist-get properties :session) id)))
+Nil too when :session fails.  Its texts are bounded (see
+`drover--bound-record')."
+  (drover-with-reporting "backend session"
+    (drover--bound-record (funcall (plist-get properties :session) id))))
 
 (defun drover--registration-rank (backend)
   "Return how many of the registered backends were registered before BACKEND."
@@ -1173,7 +1554,7 @@ costing a request is fetched for those sessions alone.  A backend whose
     (pcase-dolist (`(,backend . ,records) (nreverse by-backend))
       (when-let* ((function (drover-backend-property backend :prefetch))
                   ((functionp function)))
-        (with-demoted-errors "Drover backend prefetch: %S"
+        (drover-with-reporting "backend prefetch"
           (funcall function (nreverse records)))))))
 
 (defvar drover-show-history nil
@@ -1188,17 +1569,35 @@ They are those the backends' :archived functions fetch, and those
 drover archived itself (see `drover-archive-session').  Change it with
 `drover-set-show-archived', which fetches them.")
 
-(defun drover--fetched-sessions (fetched)
-  "Return the sessions of FETCHED, an alist (BACKEND . SESSIONS), still registered."
+(defvar drover--fetched-layout nil
+  "The layout of the sessions of `drover--history' and `drover--archived'.
+As `drover-layout' makes it, when they were fetched.")
+
+(defun drover--fetched-current ()
+  "Forget the older and archived sessions fetched by another version of drover.
+Their records, made before the files of drover were loaded anew, would
+be misread; those shown are fetched again."
+  (unless (drover-layout-matches-p drover--fetched-layout)
+    (setq drover--fetched-layout (drover-layout 'drover-session))
+    (when (or drover--history drover--archived)
+      (setq drover--history nil
+            drover--archived nil)
+      (drover-stale-layout "older and archived sessions")
+      (when drover-show-history (drover--fetch 'history nil))
+      (when drover-show-archived (drover--fetch 'archived nil)))))
+
+(defun drover--fetched-sessions (kind)
+  "Return the sessions fetched of KIND, `history' or `archived', still registered."
+  (drover--fetched-current)
   (mapcan (lambda (entry)
             (and (assq (car entry) drover--backends)
                  (copy-sequence (cdr entry))))
-          fetched))
+          (if (eq kind 'history) drover--history drover--archived)))
 
 (defun drover--history-sessions ()
   "Return the older sessions fetched, of the backends still registered.
 The conversations drover archived are left out."
-  (drover--unarchived (drover--fetched-sessions drover--history)))
+  (drover--unarchived (drover--fetched-sessions 'history)))
 
 (defun drover--recorded-history ()
   "Return the older conversations the recording backends list, by engine key.
@@ -1210,7 +1609,7 @@ table mapping each engine key to its record; the first record wins."
       (when-let* (((plist-get properties :recorded))
                   (history (plist-get properties :history))
                   ((functionp history)))
-        (with-demoted-errors "Drover backend history: %S"
+        (drover-with-reporting "backend history"
           (funcall history
                    (lambda (sessions)
                      (dolist (session sessions)
@@ -1255,7 +1654,7 @@ Records of different backends showing one conversation are merged as
                         (let ((copy (copy-sequence session)))
                           (setf (drover-session-archived copy) t)
                           copy)))
-                    (drover--fetched-sessions drover--archived)))))
+                    (drover--fetched-sessions 'archived)))))
 
 (defun drover--not-seen (sessions seen)
   "Return SESSIONS but those SEEN holds, noting those kept in SEEN.
@@ -1358,7 +1757,9 @@ its ARCHIVED set."
                              (and drover-show-archived
                                   (find (drover-archived-sessions)))
                              (and drover-show-history
-                                  (find (cdr (assq backend drover--history)))))))
+                                  (find (and (assq backend drover--backends)
+                                             (progn (drover--fetched-current)
+                                                    (cdr (assq backend drover--history)))))))))
       (drover--mark-archived session))))
 
 (defun drover-find-engine-session (engine engine-id)
@@ -1450,10 +1851,20 @@ See `drover--changed-applied'."
                   t
                 (append drover--changed-applied changed)))))))
 
+(defvar drover--index)
+
 (defun drover--run-changed ()
-  "Bring the index up to date, then run `drover-changed-hook'."
+  "Bring the index up to date, then run `drover-changed-hook'.
+It runs from a timer: an error is reported briefly (see
+`drover-with-reporting'), and stops neither the hook's other functions
+nor the next changes.  The index failing to take the changes in is
+dropped, and views draw everything anew from an index made again."
   (setq drover--change-timer nil)
-  (drover--apply-changed)
+  (unless (drover-with-reporting "index of sessions"
+            (drover--apply-changed)
+            t)
+    (setq drover--index nil
+          drover--changed-all t))
   (let ((drover-changed-sessions (if drover--changed-all
                                      t
                                    (if (listp drover--changed-applied)
@@ -1461,7 +1872,7 @@ See `drover--changed-applied'."
                                      t))))
     (setq drover--changed-applied nil
           drover--changed-all nil)
-    (run-hooks 'drover-changed-hook)))
+    (drover-run-hook-reporting 'drover-changed-hook)))
 
 (defun drover--schedule-changed ()
   "Run `drover-changed-hook' after `drover-refresh-delay' seconds of quiet."
@@ -1502,6 +1913,9 @@ views draw everything anew."
 (cl-defstruct (drover--index (:constructor drover--index-make)
                              (:copier nil))
   "The live sessions, kept current as backends report changes."
+  ;; First, whatever the version: see `drover-layout-current-p'.
+  (stamp (drover-layout 'drover--index 'drover-session)
+          :documentation "The layouts of the types it was made of, as `drover-layout' tells them.")
   (records (make-hash-table :test #'equal)
            :documentation "Copies of the records listed, by key: unarchived, not merged.")
   (serials (make-hash-table :test #'equal)
@@ -1522,8 +1936,24 @@ views draw everything anew."
 See `drover--index-settle'.")
   (cyclic nil :documentation "Non-nil when parents form a cycle."))
 
+(drover-note-layout 'drover--index)
+
 (defvar drover--index nil
   "The index of the live sessions, or nil until a view asks for it.")
+
+(defun drover--index-current ()
+  "Return the index of the live sessions, or nil when there is none to follow.
+An index made by another version of drover, before its files were
+loaded anew, is dropped: views then draw everything anew, from an index
+made again."
+  (when drover--index
+    (if (drover-layout-current-p drover--index 'drover--index)
+        drover--index
+      (setq drover--index nil
+            drover--changed-all t)
+      (drover-stale-layout "index of sessions")
+      (drover--schedule-changed)
+      nil)))
 
 (defun drover--index-listed (record)
   "Return RECORD as `drover-sessions' lists it, a copy, or nil when it does not."
@@ -1742,7 +2172,7 @@ listed anew when it has none, as BACKENDS are.  Return the keys whose
 records or places changed, or t when views must draw everything anew:
 without an index, or while records of several backends make one
 session, to merge, or while parents form a cycle."
-  (if (not drover--index)
+  (if (not (drover--index-current))
       t
     (let ((index drover--index)
           (relist (delete-dups (copy-sequence backends)))
@@ -1759,8 +2189,9 @@ session, to merge, or while parents form a cycle."
             (pcase (if properties
                        (condition-case err
                            (list (drover--index-admit
-                                  index (drover--index-listed (funcall function (cdr key)))))
-                         (error (message "Drover backend session: %S" err) 'failed))
+                                  index (drover--index-listed
+                                         (drover--bound-record (funcall function (cdr key))))))
+                         ((debug error) (drover-report-failure "backend session" err) 'failed))
                      (list nil))
               ('failed (cl-pushnew (car key) relist))
               (`(,record)
@@ -1784,7 +2215,7 @@ session, to merge, or while parents form a cycle."
   "Return the index of the live sessions, made if needed.
 Views use it to draw only what changed, as `drover-changed-sessions'
 tells it while `drover-changed-hook' runs."
-  (if drover--index
+  (if (drover--index-current)
       (drover--apply-changed)
     (setq drover--index (drover--index-build)))
   drover--index)
@@ -1862,7 +2293,7 @@ them from the sessions `drover-index-sessions' lists."
 Backends report their changes, but some details change unreported, such
 as a branch: views refresh the index from time to time, and on demand.
 Run `drover-changed-hook' when something changed."
-  (when drover--index
+  (when (drover--index-current)
     (let ((changed nil)
           (moved nil))
       (dolist (backend (delete-dups (append (drover-backends)
@@ -1881,7 +2312,7 @@ Run `drover-changed-hook' when something changed."
                (cond ((drover--index-cyclic drover--index) (setq drover--index nil) t)
                      ((> (drover--index-shared drover--index) 0) t)
                      (t (delete-dups (append changed moved))))))
-          (run-hooks 'drover-changed-hook))))))
+          (drover-run-hook-reporting 'drover-changed-hook))))))
 
 ;;;; View settings
 
@@ -2149,15 +2580,19 @@ the others fetching all the same."
                   ((functionp function)))
         (let ((generation (cl-incf (alist-get (cons kind backend) drover--fetch-generations
                                               0 nil #'equal))))
-          (with-demoted-errors "Drover backend fetch: %S"
+          (drover-with-reporting "backend fetch"
             (funcall function
                      (lambda (sessions)
-                       (when (and (if (eq kind 'history) drover-show-history drover-show-archived)
-                                  (= generation (drover--fetch-generation kind backend)))
-                         (if (eq kind 'history)
-                             (setf (alist-get backend drover--history) (copy-sequence sessions))
-                           (setf (alist-get backend drover--archived) (copy-sequence sessions)))
-                         (drover-backend-changed backend))))))))))
+                       ;; Called back from a process or a timer, as often.
+                       (drover-with-reporting "backend fetch"
+                         (when (and (if (eq kind 'history) drover-show-history drover-show-archived)
+                                    (= generation (drover--fetch-generation kind backend)))
+                           (drover--fetched-current)
+                           (let ((sessions (mapcar #'drover--bound-record sessions)))
+                             (if (eq kind 'history)
+                                 (setf (alist-get backend drover--history) sessions)
+                               (setf (alist-get backend drover--archived) sessions)))
+                           (drover-backend-changed backend)))))))))))
 
 (defun drover-history-available-p ()
   "Return non-nil when a registered backend fetches older sessions."
@@ -2340,7 +2775,7 @@ and ignored."
           entries)
       (error
        (drover--archive-warn "Ignoring the sessions drover archived in %s: %s"
-                             (abbreviate-file-name file) (error-message-string err))
+                             (abbreviate-file-name file) (drover-error-message err))
        nil))))
 
 (defun drover--archive ()
@@ -2359,7 +2794,7 @@ A failure is reported once; ARCHIVE stays for this Emacs session."
     (condition-case err
         (drover-write-data file "Sessions drover archived" drover--archive-version :sessions archive)
       (error (drover--archive-warn "Could not remember the sessions drover archived in %s: %s"
-                                   (abbreviate-file-name file) (error-message-string err))))
+                                   (abbreviate-file-name file) (drover-error-message err))))
     (setq drover--archive-stamp (file-attribute-modification-time (file-attributes file)))))
 
 (defun drover--archive-entry (session)
@@ -2506,7 +2941,7 @@ fetched or those a backend recording conversations lists at once,
 whether drover's archive hides it or not: restored, it shows again."
   (when-let* ((key (drover-session-engine-key session)))
     (or (seq-some (lambda (record) (equal (drover-session-engine-key record) key))
-                  (append (drover--live-sessions) (drover--fetched-sessions drover--history)))
+                  (append (drover--live-sessions) (drover--fetched-sessions 'history)))
         (and (drover--recording-backends (car key))
              (gethash key (drover--recorded-history))
              t))))
@@ -2583,7 +3018,7 @@ Return `kept' when what the buffer held unsent went to the kill ring,
 `closed' otherwise, or (failed . MESSAGE) when closing failed."
   (condition-case err
       (if (funcall (drover-backend-property session :close) session) 'kept 'closed)
-    (error (cons 'failed (error-message-string err)))))
+    (error (cons 'failed (drover-error-message err)))))
 
 (defun drover--close-archived (session)
   "Close the buffer of SESSION, just archived, now or once its turn ends.
@@ -2668,8 +3103,8 @@ up, so the prompt still goes out."
   "Report something that went wrong on its own, out of a command.
 Such as an option a session refused, or a prompt it did not take.  The
 message is a warning of type `drover', FORMAT-STRING and ARGS as for
-`format-message'."
-  (display-warning 'drover (apply #'format-message format-string args) :warning))
+`format-message', the message bounded (see `drover-format-message')."
+  (display-warning 'drover (apply #'drover-format-message format-string args) :warning))
 
 (defun drover-run-steps (steps then)
   "Run asynchronous STEPS in order, then call THEN with no argument.
@@ -2691,15 +3126,16 @@ nothing.  THEN is called exactly once."
                      (drover-run-steps (cdr steps) then)))))
       (setq timer (run-at-time drover-step-timeout nil
                                (lambda ()
-                                 (unless settled
-                                   (drover-warn "Timed out setting %s; sending the prompt anyway" label)
-                                   (funcall next)))))
+                                 (drover-with-reporting "prompt steps"
+                                   (unless settled
+                                     (drover-warn "Timed out setting %s; sending the prompt anyway" label)
+                                     (funcall next))))))
       (condition-case err
           (funcall (cdar steps) next)
         (error
          (unless settled
            (drover-warn "Could not set %s: %s; sending the prompt anyway"
-                        label (error-message-string err))
+                        label (drover-error-message err))
            (funcall next)))))))
 
 ;;;; Git branches
@@ -2935,7 +3371,7 @@ sessions ends its selection."
                 (when note
                   (push (funcall note value (drover-session-display-title session)) noted)))
             (error (push (format "%s (%s)" (drover--session-names (list session))
-                                 (error-message-string err))
+                                 (drover-error-message err))
                          failures))))
         ;; Done with the selection, as Magit's commands are: kept, it
         ;; would select other sessions once these went.
@@ -3201,8 +3637,41 @@ unseen, or the session at point (see `drover--selected-for')."
   (drover--act sessions :mark-seen "Marked %s seen"))
 
 (defun drover-preview (session callback)
-  "Call CALLBACK with a string showing where SESSION stands, or nil."
-  (drover-backend-call session :preview callback))
+  "Call CALLBACK with a string showing where SESSION stands, or nil.
+The string is bounded, its end kept (see `drover-bound-text');
+CALLBACK is called at most once, reporting its error briefly when it is
+called back out of a command."
+  (let ((called nil))
+    (drover-backend-call session :preview
+                         (lambda (text)
+                           (unless called
+                             (setq called t)
+                             (drover-with-reporting "preview"
+                               (funcall callback (drover-bound-text text nil nil t))))))))
+
+(defun drover--bound-recap (recap)
+  "Return RECAP, as `drover-recap' tells it, its texts bounded.
+Its prompt, reply and error to `drover-text-lines' lines and
+`drover-text-limit' characters, its files to a hundred, each name to a
+line (see `drover-bound-text', `drover-bound-line')."
+  (if (not (listp recap))
+      (list :failure "Malformed recap")
+    (let ((bounded nil))
+      (while recap
+        (let ((key (pop recap))
+              (value (pop recap)))
+          (push key bounded)
+          (push (pcase key
+                  ((or :prompt :reply :error) (drover-bound-text value))
+                  (:failure (drover-bound-line value))
+                  (:changes (mapcar (lambda (change)
+                                      (if (consp change)
+                                          (cons (drover-bound-line (car change)) (cdr change))
+                                        change))
+                                    (seq-take (and (listp value) value) 100)))
+                  (_ value))
+                bounded)))
+      (nreverse bounded))))
 
 (defun drover-recap (session callback)
   "Fetch a recap of the last turn of SESSION, and call CALLBACK with it.
@@ -3216,20 +3685,24 @@ The recap is a plist; each member is nil when unknown or empty:
            or nil when the backend does not know them.
  :error    The error that ended the turn, in full.
 
-When nothing could be fetched, the recap is (:failure MESSAGE).  The
-backend's :recap fetches it in the background; CALLBACK is called once,
-possibly before this returns.  A backend without :recap, or failing
-from the start, calls CALLBACK with a failure at once."
+When nothing could be fetched, the recap is (:failure MESSAGE).  Its
+texts are bounded (see `drover--bound-recap').  The backend's :recap
+fetches it in the background; CALLBACK is called once, possibly before
+this returns, an error it signals reported briefly.  A backend without
+:recap, or failing from the start, calls CALLBACK with a failure at
+once."
   (let ((called nil))
     (cl-flet ((deliver (recap)
                 (unless called
                   (setq called t)
-                  (funcall callback recap))))
+                  ;; Often called back from a process or a timer.
+                  (drover-with-reporting "recap"
+                    (funcall callback (drover--bound-recap recap))))))
       (if-let* ((function (drover-backend-property session :recap))
                 ((functionp function)))
           (condition-case err
               (funcall function session #'deliver)
-            (error (deliver (list :failure (error-message-string err)))))
+            (error (deliver (list :failure (drover-error-message err)))))
         (deliver (list :failure (format "%s sessions tell no recap"
                                         (drover-backend-label session))))))))
 

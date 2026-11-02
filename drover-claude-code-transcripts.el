@@ -65,6 +65,10 @@
 (require 'drover-claude-code)
 (require 'drover-transcript)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (declare-function drover-claude-code-ide-fork "drover-claude-code-ide" (session-id directory))
 
 (defcustom drover-claude-code-history-days nil
@@ -93,6 +97,21 @@ list of drover's shows."
 
 (defvar drover-claude-code-transcripts--index nil
   "The index of Claude Code's transcripts, once installed.")
+
+(defun drover-claude-code-transcripts--current-index ()
+  "Return the index of Claude Code's transcripts, or nil before installed.
+One made by another version of drover, before its files were loaded
+anew, is replaced: its timers stop, and the new one, which reads what
+was kept of the files, looks at them from now on if the backend
+started."
+  (let ((index drover-claude-code-transcripts--index))
+    (if (or (null index) (drover-transcript-index-current-p index))
+        index
+      (drover-stale-layout "index of Claude Code's transcripts")
+      (setq drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index))
+      (when (memq 'claude-code drover--started)
+        (drover-transcript-start drover-claude-code-transcripts--index))
+      drover-claude-code-transcripts--index)))
 
 (defvar drover-claude-code-transcripts--files (make-hash-table :test #'equal)
   "The transcript of each conversation, by identifier.")
@@ -124,6 +143,38 @@ A hash table, kept only while `drover-claude-code-history-days' is set.")
 Records of subagents give none."
   (unless (alist-get 'isSidechain record)
     (drover-transcript-text (drover-claude-code--prompt-p record))))
+
+(defun drover-claude-code-transcripts--cut-prompt (beg end)
+  "Return the first prompt between BEG and END on a line too long to parse.
+A prompt pasting a log may make a line longer than the window it is
+read in, which cuts it: its text is read from its start (see
+`drover-transcript-string-prefix'), as long as the start tells it is a
+prompt of the user, on one line, or nil."
+  (save-excursion
+    (goto-char beg)
+    (let ((found nil))
+      (while (and (not found) (search-forward "\"type\":\"user\"" end t))
+        (let ((line-beg (line-beginning-position))
+              (line-end (min end (line-end-position))))
+          (unless (drover-transcript-line)
+            (goto-char line-beg)
+            (when (search-forward "\"content\":" line-end t)
+              (skip-chars-forward " \t" line-end)
+              (let* ((blocks (eq (char-after) ?\[))
+                     (content (cond ((not blocks) (drover-transcript-string-prefix 2000))
+                                    ((and (re-search-forward "\"\\(text\\|tool_result\\)\"" line-end t)
+                                          (equal (match-string 1) "text")
+                                          (re-search-forward "\"text\":[ \t]*" line-end t))
+                                     (drover-transcript-string-prefix 2000)))))
+                (setq found (drover-claude-code-transcripts--prompt
+                             `((type . "user")
+                               (isSidechain . ,(save-excursion
+                                                 (goto-char line-beg)
+                                                 (and (search-forward "\"isSidechain\":true" line-end t) t)))
+                               (message (content . ,content))))))))
+          (goto-char line-end)
+          (forward-line 1)))
+      found)))
 
 (defun drover-claude-code-transcripts--member (marker key &optional beg end)
   "Return KEY of the last record with MARKER between BEG and END, as text."
@@ -202,8 +253,9 @@ told are left out."
       (add :created (drover-transcript-time (sniff "timestamp")))
       (add :entrypoint (sniff "entrypoint"))
       (add :branch (sniff "gitBranch"))
-      (add :prompt (seq-some #'drover-claude-code-transcripts--prompt
-                             (drover-transcript-lines "\"type\":\"user\"" nil beg end)))
+      (add :prompt (or (seq-some #'drover-claude-code-transcripts--prompt
+                                 (drover-transcript-lines "\"type\":\"user\"" nil beg end))
+                       (drover-claude-code-transcripts--cut-prompt beg end)))
       (add :custom-title (drover-claude-code-transcripts--member "\"type\":\"custom-title\"" 'customTitle beg end))
       (add :ai-title (drover-claude-code-transcripts--member "\"type\":\"ai-title\"" 'aiTitle beg end))
       ;; A tail of other records leaves the head's newest message as the
@@ -395,14 +447,14 @@ it once."
 PREDICATE is a function of what was read of a conversation."
   (let ((records nil)
         (catalog (or (drover-claude-code-catalog) 'none)))
-    (when drover-claude-code-transcripts--index
+    (when (drover-claude-code-transcripts--current-index)
       (drover-transcript-map
        (lambda (_file data)
          (when (funcall predicate data)
            (when-let* ((record (drover-claude-code-transcripts--record data catalog)))
              (push record records)
              (setq records (append (drover-claude-code-transcripts--subagent-records data) records)))))
-       drover-claude-code-transcripts--index))
+       (drover-claude-code-transcripts--current-index)))
     records))
 
 (defun drover-claude-code-transcripts--sessions ()
@@ -428,7 +480,7 @@ See `drover-claude-code-history-days'.  The backend's :history."
 (defun drover-claude-code-transcripts--data (id)
   "Return what was read of conversation ID, or nil."
   (when-let* ((file (drover-claude-code-transcripts--file id)))
-    (drover-transcript-lookup drover-claude-code-transcripts--index file)))
+    (drover-transcript-lookup (drover-claude-code-transcripts--current-index) file)))
 
 (defun drover-claude-code-transcripts--split (id)
   "Return (CONVERSATION . AGENT) of ID, AGENT nil for a conversation."
@@ -442,9 +494,9 @@ Its transcript is looked at again soon when it changed since it was
 read.  The backend's :session."
   (pcase-let* ((`(,conversation . ,agent) (drover-claude-code-transcripts--split id))
                (file (drover-claude-code-transcripts--file conversation))
-               (data (and file (drover-transcript-lookup drover-claude-code-transcripts--index file))))
+               (data (and file (drover-transcript-lookup (drover-claude-code-transcripts--current-index) file))))
     (when file
-      (drover-transcript-check drover-claude-code-transcripts--index file))
+      (drover-transcript-check (drover-claude-code-transcripts--current-index) file))
     (when (and data (drover-claude-code-transcripts--recent-p data))
       (if agent
           (seq-find (lambda (record) (equal (drover-session-id record) id))
@@ -479,7 +531,7 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
       (drover-transcript-map (lambda (_file data)
                                (when (drover-claude-code-transcripts--recent-p data now)
                                  (puthash (plist-get data :id) t recent)))
-                             drover-claude-code-transcripts--index)
+                             (drover-claude-code-transcripts--current-index))
       (when before
         (maphash (lambda (id _) (unless (gethash id recent) (push id moved))) before)
         (maphash (lambda (id _) (unless (gethash id before) (push id moved))) recent))
@@ -563,21 +615,21 @@ as it comes."
                  :noquery t
                  :sentinel
                  (lambda (process _event)
-                   (unless (process-live-p process)
-                     (unwind-protect
-                         (when (and (eq (process-status process) 'exit)
-                                    (zerop (process-exit-status process))
-                                    (buffer-live-p output))
-                           (with-demoted-errors "Drover claude agents: %S"
+                   (drover-with-reporting "claude agents"
+                     (unless (process-live-p process)
+                       (unwind-protect
+                           (when (and (eq (process-status process) 'exit)
+                                      (zerop (process-exit-status process))
+                                      (buffer-live-p output))
                              (drover-claude-code-transcripts--agents-listed
                               (drover-claude-code-transcripts--parse-agents
-                               (with-current-buffer output (buffer-string))))))
-                       (when (buffer-live-p output) (kill-buffer output))
-                       (when (buffer-live-p errors) (kill-buffer errors)))))))
+                               (with-current-buffer output (buffer-string)))))
+                         (when (buffer-live-p output) (kill-buffer output))
+                         (when (buffer-live-p errors) (kill-buffer errors))))))))
         (error
          (kill-buffer output)
          (kill-buffer errors)
-         (message "Drover could not run %s agents: %s" program (error-message-string err)))))))
+         (drover-report-failure "claude agents" err program))))))
 
 ;;;; Actions
 
@@ -638,7 +690,7 @@ It is read from the end of its transcript, or of its subagent's (see
                                  file))))
     (funcall callback
              (or (and file (file-readable-p file)
-                      (with-demoted-errors "Drover Claude Code recap: %S"
+                      (drover-with-reporting "Claude Code recap"
                         (drover-claude-code-recap file)))
                  (list :failure "No transcript of this conversation")))))
 
@@ -663,7 +715,7 @@ See `drover-claude-code-session-files'.  The backend's :delete."
     (drover-claude-code-delete-session-files
      (drover-claude-code-session-files id (drover-session-directory session)))
     (when file
-      (drover-transcript-check drover-claude-code-transcripts--index file))))
+      (drover-transcript-check (drover-claude-code-transcripts--current-index) file))))
 
 (defun drover-claude-code-transcripts--fork (session)
   "Fork the conversation of SESSION into a new claude-code-ide terminal.
@@ -692,7 +744,7 @@ elsewhere; answering, one waiting there.  The backend's :supports."
 (defun drover-claude-code-transcripts--start ()
   "Look at the transcripts from now on, and at what Claude Code runs elsewhere.
 The backend's :start."
-  (drover-transcript-start drover-claude-code-transcripts--index))
+  (drover-transcript-start (drover-claude-code-transcripts--current-index)))
 
 (defun drover-claude-code-transcripts--register ()
   "Register the `claude-code' backend."
@@ -716,7 +768,7 @@ The backend's :start."
   "List Claude Code's conversations, for FRONT-END to resume them.
 FRONT-END is a symbol, such as `claude-code-ide'; the backend stays
 until every front end that installed it uninstalled it."
-  (unless drover-claude-code-transcripts--index
+  (unless (drover-claude-code-transcripts--current-index)
     (setq drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index)))
   (unless (assq 'claude-code drover--backends)
     (drover-claude-code-transcripts--register))
@@ -724,17 +776,19 @@ until every front end that installed it uninstalled it."
   (add-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save))
 
 (defun drover-claude-code-transcripts--save ()
-  "Keep what was read of the transcripts, as Emacs exits."
-  (when drover-claude-code-transcripts--index
-    (drover-transcript-save drover-claude-code-transcripts--index t)))
+  "Keep what was read of the transcripts, as Emacs exits.
+An error is reported, and lets Emacs exit."
+  (drover-with-reporting "keeping Claude Code's transcripts"
+    (when-let* ((index (drover-claude-code-transcripts--current-index)))
+      (drover-transcript-save index t))))
 
 (defun drover-claude-code-transcripts-uninstall (front-end)
   "Stop listing Claude Code's conversations for FRONT-END.
 The backend goes once no front end needs it."
   (setq drover-claude-code-transcripts--users (delq front-end drover-claude-code-transcripts--users))
   (unless drover-claude-code-transcripts--users
-    (when drover-claude-code-transcripts--index
-      (drover-transcript-stop drover-claude-code-transcripts--index))
+    (when (drover-claude-code-transcripts--current-index)
+      (drover-transcript-stop (drover-claude-code-transcripts--current-index)))
     (when (process-live-p drover-claude-code-transcripts--agents-process)
       (delete-process drover-claude-code-transcripts--agents-process))
     (remove-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save)

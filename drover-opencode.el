@@ -73,6 +73,10 @@
 (require 'seq)
 (require 'subr-x)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 ;; Recent additions to opencode.el.
 (declare-function opencode-fetch-sessions "opencode-sessions" (query callback &optional else cursor accumulated))
 (declare-function opencode-session-delete "opencode-session" (id))
@@ -176,7 +180,9 @@ reported.  It is called once, possibly at once."
                 (unless done
                   (setq done t)
                   (when timer (cancel-timer timer))
-                  (funcall callback catalog))))
+                  ;; Called back from a timer or a process.
+                  (drover-with-reporting "OpenCode catalog"
+                    (funcall callback catalog)))))
       (setq timer (run-at-time drover-opencode-timeout nil #'finish nil))
       (condition-case err
           (opencode-catalog-fetch kind #'finish directory
@@ -273,7 +279,7 @@ CALLBACK is then never called.  The engine's :defaults."
                                              agents models providers default-model))
                         (error (drover-warn "Could not read the OpenCode defaults of %s: %s"
                                             (abbreviate-file-name directory)
-                                            (error-message-string err)))))))
+                                            (drover-error-message err)))))))
           (opencode-catalog-fetch 'agent (lambda (data) (setq agents data) (deliver)) directory)
           (opencode-catalog-fetch 'model (lambda (data) (setq models data) (deliver)) directory)
           (opencode-catalog-fetch 'provider (lambda (data) (setq providers data) (deliver)) directory)
@@ -284,7 +290,7 @@ CALLBACK is then never called.  The engine's :defaults."
                                     (deliver))
                             :else (lambda (_error) (deliver)))))
     (error (drover-warn "Could not ask OpenCode for the defaults of %s: %s"
-                        (abbreviate-file-name directory) (error-message-string err)))))
+                        (abbreviate-file-name directory) (drover-error-message err)))))
 
 (defun drover-opencode--resolve (defaults agent model variant)
   "Return the agent, model and variant a new OpenCode session would run.
@@ -375,11 +381,14 @@ it, so a burst of changes costs at most two requests."
     (condition-case err
         (opencode-fetch-projects
          (lambda (projects)
-           (setq drover-opencode--projects projects)
-           (drover-opencode--projects-fetched)
-           (drover-backend-changed 'opencode))
+           (drover-with-reporting "OpenCode projects"
+             (setq drover-opencode--projects projects)
+             (drover-opencode--projects-fetched)
+             (drover-backend-changed 'opencode)))
          ;; Project names only decorate sessions: keep the previous ones.
-         (lambda (_error) (drover-opencode--projects-fetched)))
+         (lambda (_error)
+           (drover-with-reporting "OpenCode projects"
+             (drover-opencode--projects-fetched))))
       (error (setq drover-opencode--projects-fetching nil)
              (signal (car err) (cdr err))))))
 
@@ -393,7 +402,8 @@ it, so a burst of changes costs at most two requests."
   "Fetch the projects again after EVENT.
 EVENT is a `project.updated' event, or `server.connected', after which
 changes missed while disconnected are fetched like the registry is."
-  (drover-opencode--fetch-projects))
+  (drover-with-reporting "OpenCode events"
+    (drover-opencode--fetch-projects)))
 
 (defun drover-opencode--project-name (project-id directory)
   "Return the name of the project with PROJECT-ID or containing DIRECTORY, or nil."
@@ -552,12 +562,14 @@ WHAT was fetched, and CALLBACK not called."
     (opencode-fetch-sessions
      `((archived . ,(if archived "true" "false")))
      (lambda (infos)
-       (funcall callback (mapcar (lambda (info)
-                                   (drover-opencode--session (drover-opencode--info-entry info)))
-                                 infos)))
+       (drover-with-reporting (format "OpenCode %s sessions" what)
+         (funcall callback (mapcar (lambda (info)
+                                     (drover-opencode--session (drover-opencode--info-entry info)))
+                                   infos))))
      (lambda (error)
-       (message "Drover: cannot fetch %s OpenCode sessions: %s"
-                what (opencode-error-describe error))))))
+       (drover-with-reporting (format "OpenCode %s sessions" what)
+         (drover-message "Drover: cannot fetch %s OpenCode sessions: %s"
+                         what (opencode-error-describe error)))))))
 
 (defun drover-opencode--history (callback)
   "Fetch every unarchived session of every project, and call CALLBACK with them.
@@ -575,11 +587,12 @@ Their records tell when they were archived.  See
 
 (defun drover-opencode--refetch ()
   "Fetch again the older and archived sessions lists show, if any."
-  (setq drover-opencode--refetch-timer nil)
-  (when drover-show-history
-    (drover-history-fetch 'opencode))
-  (when drover-show-archived
-    (drover-archived-fetch 'opencode)))
+  (drover-with-reporting "OpenCode fetch"
+    (setq drover-opencode--refetch-timer nil)
+    (when drover-show-history
+      (drover-history-fetch 'opencode))
+    (when drover-show-archived
+      (drover-archived-fetch 'opencode))))
 
 (defun drover-opencode--sessions-moved (_event)
   "Fetch the older and archived sessions again, after _EVENT, if lists show them.
@@ -587,10 +600,11 @@ _EVENT archived, restored or deleted a session, which moves it between
 the lists the service gives, or reconnected the event stream, after
 which events may have been missed.  Archiving a selection sends a burst
 of events: they are fetched again once, half a second after the last."
-  (when (or drover-show-history drover-show-archived)
-    (when (timerp drover-opencode--refetch-timer)
-      (cancel-timer drover-opencode--refetch-timer))
-    (setq drover-opencode--refetch-timer (run-at-time 0.5 nil #'drover-opencode--refetch))))
+  (drover-with-reporting "OpenCode events"
+    (when (or drover-show-history drover-show-archived)
+      (when (timerp drover-opencode--refetch-timer)
+        (cancel-timer drover-opencode--refetch-timer))
+      (setq drover-opencode--refetch-timer (run-at-time 0.5 nil #'drover-opencode--refetch)))))
 
 (defconst drover-opencode--moving-events
   '("session.archived" "session.unarchived" "session.deleted" "server.connected")
@@ -600,7 +614,8 @@ of events: they are fetched again once, half a second after the last."
 
 (defun drover-opencode--updated (id)
   "Report a change of session ID to drover."
-  (drover-backend-changed 'opencode id))
+  (drover-with-reporting "OpenCode changes"
+    (drover-backend-changed 'opencode id)))
 
 (defun drover-opencode--catalog-changed (_kind _directory)
   "Report that sessions may read otherwise, now that a catalog changed.
@@ -608,7 +623,8 @@ Names, icons, efforts and context sizes come from a location's
 catalogs, which opencode.el fetches the first time they are asked for,
 and fetches again once an event or a reconnection made it forget them.
 For `opencode-catalog-changed-functions'."
-  (drover-backend-changed 'opencode))
+  (drover-with-reporting "OpenCode changes"
+    (drover-backend-changed 'opencode)))
 
 (defun drover-opencode--start ()
   "Follow the registry, session buffers, catalogs and projects; bootstrap it.
@@ -730,7 +746,7 @@ may run from a process filter or a timer, where no error may escape."
         (setq called t)
         (condition-case err
             (apply function arguments)
-          (error (drover-warn "OpenCode: %s" (error-message-string err))))))))
+          (error (drover-warn "OpenCode: %s" (drover-error-message err))))))))
 
 (defun drover-opencode--in-buffer (session function else)
   "Call FUNCTION with no argument in the buffer of SESSION.
@@ -747,9 +763,9 @@ message when the session cannot be opened, or when FUNCTION signals."
          :callback (lambda (_info)
                      (condition-case err
                          (funcall function)
-                       (error (funcall else (error-message-string err)))))
+                       (error (funcall else (drover-error-message err)))))
          :else (lambda (error) (funcall else (opencode-error-describe error)))))
-    (error (funcall else (error-message-string err)))))
+    (error (funcall else (drover-error-message err)))))
 
 (defun drover-opencode--switch-failure (buffer label next)
   "Return a switch's failure handler reporting LABEL of BUFFER, then calling NEXT.
@@ -918,7 +934,9 @@ exists, ELSE a message.  The backend's :create."
          (settle (drover-opencode--once
                   (lambda (function value)
                     (when timer (cancel-timer timer))
-                    (funcall function value)))))
+                    ;; Called back from a timer or a process.
+                    (drover-with-reporting "OpenCode session start"
+                      (funcall function value))))))
     (cl-flet ((fail (message) (funcall settle else message)))
       (if (not (eq engine 'opencode))
           (fail (format "OpenCode sessions run OpenCode, not %s" (drover-engine-label engine)))
@@ -954,8 +972,8 @@ exists, ELSE a message.  The backend's :create."
                                             opencode-session-id (or (alist-get 'title info) title)
                                             default-directory)))
                       :else (lambda (error) (fail (opencode-error-describe error)))))
-                 (error (fail (error-message-string err))))))
-          (error (fail (error-message-string err))))))))
+                 (error (fail (drover-error-message err))))))
+          (error (fail (drover-error-message err))))))))
 
 (defun drover-opencode--options (session)
   "Return the model and variant SESSION runs, as (:model MODEL :variant VARIANT).
@@ -1079,9 +1097,10 @@ Everything after the process mark goes; \\[undo] brings it back."
 
 (defun drover-opencode--setup-session-buffer ()
   "Tell drover the session and the prompt actions of this session buffer."
-  (setq-local drover-session-at-point-function #'drover-opencode--buffer-session)
-  (pcase-dolist (`(,action . ,command) drover-opencode--prompt-actions)
-    (drover-prompt-define action command)))
+  (drover-with-reporting "OpenCode buffer"
+    (setq-local drover-session-at-point-function #'drover-opencode--buffer-session)
+    (pcase-dolist (`(,action . ,command) drover-opencode--prompt-actions)
+      (drover-prompt-define action command))))
 
 (defun drover-opencode--teardown-session-buffer ()
   "Undo `drover-opencode--setup-session-buffer' in this buffer."

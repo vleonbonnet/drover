@@ -230,6 +230,7 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--history nil)
          (drover-show-archived nil)
          (drover--archived nil)
+         (drover--fetched-layout (drover-layout 'drover-session))
          (drover--archive nil)
          (drover--archive-stamp 'unread)
          (drover-test-sessions ,sessions)

@@ -60,6 +60,10 @@
 (require 'drover-core)
 (require 'drover-ui)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (autoload 'drover-next "drover-attention" nil t)
 (autoload 'drover-select "drover-attention" nil t)
 (autoload 'drover-list "drover-list" nil t)
@@ -177,7 +181,7 @@ With FORCE, show it whatever was shown before."
   (let ((position (cons (point) (buffer-modified-tick))))
     (when (or force (not (equal position drover--follow-position)))
       (setq drover--follow-position position)
-      (with-demoted-errors "Drover follow: %S"
+      (drover-with-reporting "follow"
         (when-let* ((session (drover-session-at-point t))
                     (key (drover-session-key session))
                     ((or force (not (equal key drover--follow-key))))
@@ -479,12 +483,12 @@ follow mode showed: only the session at point is read again."
 
 (defun drover--context-session ()
   "Return the session at point, or nil, reporting a failing lookup."
-  (with-demoted-errors "Drover session at point: %S"
+  (drover-with-reporting "session at point"
     (drover-session-at-point t)))
 
 (defun drover--context-selection ()
   "Return the sessions a region selects here, or nil, reporting a failing lookup."
-  (with-demoted-errors "Drover selected sessions: %S"
+  (drover-with-reporting "selected sessions"
     (and drover-selected-sessions-function
          (funcall drover-selected-sessions-function))))
 
@@ -598,7 +602,7 @@ of that window, as typed there."
   (when (local-variable-p hook)
     (dolist (function (symbol-value hook))
       (unless (eq function t)
-        (with-demoted-errors "Drover list hook: %S"
+        (drover-with-reporting "list hook"
           (funcall function))))))
 
 (defun drover--dispatch-navigate (function &rest arguments)

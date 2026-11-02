@@ -78,6 +78,10 @@
 (require 'seq)
 (require 'subr-x)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 ;; Drover does not require agent-shell, so this file compiles without
 ;; it: what it uses of agent-shell and shell-maker is declared here, and
 ;; agent-shell is loaded only when the backend activates
@@ -344,7 +348,7 @@ the shell."
   (let ((buffer (condition-case err
                     (drover-agent-shell--start directory
                                                (drover-agent-shell--start-config engine options))
-                  (error (funcall else (error-message-string err))
+                  (error (funcall else (drover-error-message err))
                          nil))))
     (when buffer
       (when-let* ((title (plist-get options :title))
@@ -420,15 +424,16 @@ One of them is called, once."
             (agent-shell-subscribe-to
              :shell-buffer buffer
              :on-event (lambda (event)
-                         (let ((kind (map-elt event :event)))
-                           (when (memq kind '(init-finished error clean-up))
-                             (with-current-buffer buffer
-                               (agent-shell-unsubscribe :subscription token))
-                             (pcase kind
-                               ('init-finished (funcall then))
-                               ('error (funcall else (or (map-nested-elt event '(:data :message))
-                                                         "it failed to start")))
-                               (_ (funcall else "it was closed"))))))))))))
+                         (drover-with-reporting "agent-shell start"
+                           (let ((kind (map-elt event :event)))
+                             (when (memq kind '(init-finished error clean-up))
+                               (with-current-buffer buffer
+                                 (agent-shell-unsubscribe :subscription token))
+                               (pcase kind
+                                 ('init-finished (funcall then))
+                                 ('error (funcall else (or (map-nested-elt event '(:data :message))
+                                                           "it failed to start")))
+                                 (_ (funcall else "it was closed")))))))))))))
 
 (defun drover-agent-shell--submit (buffer text)
   "Submit TEXT to the initialized shell of BUFFER, queued while it is busy."
@@ -463,10 +468,11 @@ a ready one takes it at once, without taking the focus."
   "Return an ACP failure handler warning that BUFFER refused LABEL.
 The handler then calls NEXT, so the prompt is sent anyway."
   (lambda (acp-error &rest _)
-    (drover-warn "%s refused %s: %s; sending the prompt anyway"
-                 (buffer-name buffer) label
-                 (or (and (consp acp-error) (map-elt acp-error 'message)) acp-error))
-    (funcall next)))
+    (drover-with-reporting "agent-shell options"
+      (drover-warn "%s refused %s: %s; sending the prompt anyway"
+                   (buffer-name buffer) label
+                   (or (and (consp acp-error) (map-elt acp-error 'message)) acp-error))
+      (funcall next))))
 
 (defun drover-agent-shell--option-steps (buffer engine agent model-id model effort-variant variant)
   "Return the steps applying a prompt's choices to the shell of BUFFER.
@@ -912,63 +918,64 @@ success."
 
 (defun drover-agent-shell--on-event (event)
   "Follow EVENT of the current shell, and report what changed to drover."
-  (let* ((kind (map-elt event :event))
-         (data (map-elt event :data))
-         (request (map-elt data :request-id)))
-    (pcase kind
-      ('input-submitted
-       (setq drover-agent-shell--outcome nil
-             drover-agent-shell--turn-start (float-time)
-             drover-agent-shell--prompt (map-elt data :prompt)
-             drover-agent-shell--reply nil
-             drover-agent-shell--reply-open nil
-             drover-agent-shell--written nil))
-      ('agent-message-chunk
-       (when-let* ((text (map-elt data :text-chunk))
-                   ((stringp text)))
-         (setq drover-agent-shell--reply (if drover-agent-shell--reply-open
-                                             (concat drover-agent-shell--reply text)
-                                           text)
-               drover-agent-shell--reply-open t)))
-      ('tool-call-update
-       (let ((tool-call (map-elt data :tool-call)))
-         ;; Proposed edits carry diffs too: only those done count.
-         (when (equal (map-elt tool-call :status) "completed")
-           (dolist (diff (map-elt tool-call :diffs))
-             (drover-agent-shell--note-change (map-elt diff :file))))))
-      ('file-write
-       (drover-agent-shell--note-change (map-elt data :path)))
-      ('turn-complete
-       (setq drover-agent-shell--request-times nil)
-       (let ((reason (map-elt data :stop-reason)))
-         (pcase reason
-           ("end_turn" (drover-agent-shell--end-turn 'done nil))
-           ("cancelled" (setq drover-agent-shell--outcome nil))
-           (_ (drover-agent-shell--end-turn 'failed (agent-shell--stop-reason-description reason))))))
-      ('error
-       (let ((message (or (map-elt data :message) "Agent request failed")))
-         (unless (drover-agent-shell--initialized-p (current-buffer))
-           (setq drover-agent-shell--start-error message))
-         (drover-agent-shell--end-turn 'failed message)))
-      ((or 'permission-request 'elicitation-request)
-       (when request
-         (setf (alist-get request drover-agent-shell--request-times nil nil #'equal) (float-time))))
-      ((or 'permission-response 'elicitation-response)
-       (when request
-         (setf (alist-get request drover-agent-shell--request-times nil t #'equal) nil)))
-      ((or 'session-selected 'clean-up)
-       (setq drover-agent-shell--outcome nil
-             drover-agent-shell--request-times nil)))
-    ;; Initialization went on, so it had not failed for good.
-    (when (string-prefix-p "init-" (symbol-name kind))
-      (setq drover-agent-shell--start-error nil))
-    ;; What comes between two messages of the agent parts them.
-    (when (memq kind '(tool-call-update permission-request elicitation-request turn-complete))
-      (setq drover-agent-shell--reply-open nil))
-    (unless (memq kind drover-agent-shell--quiet-events)
-      (drover-backend-changed 'agent-shell drover-agent-shell--id))
-    (when (memq kind drover-agent-shell--model-events)
-      (drover-agent-shell--models-changed))))
+  (drover-with-reporting "agent-shell event"
+    (let* ((kind (map-elt event :event))
+           (data (map-elt event :data))
+           (request (map-elt data :request-id)))
+      (pcase kind
+        ('input-submitted
+         (setq drover-agent-shell--outcome nil
+               drover-agent-shell--turn-start (float-time)
+               drover-agent-shell--prompt (map-elt data :prompt)
+               drover-agent-shell--reply nil
+               drover-agent-shell--reply-open nil
+               drover-agent-shell--written nil))
+        ('agent-message-chunk
+         (when-let* ((text (map-elt data :text-chunk))
+                     ((stringp text)))
+           (setq drover-agent-shell--reply (if drover-agent-shell--reply-open
+                                               (concat drover-agent-shell--reply text)
+                                             text)
+                 drover-agent-shell--reply-open t)))
+        ('tool-call-update
+         (let ((tool-call (map-elt data :tool-call)))
+           ;; Proposed edits carry diffs too: only those done count.
+           (when (equal (map-elt tool-call :status) "completed")
+             (dolist (diff (map-elt tool-call :diffs))
+               (drover-agent-shell--note-change (map-elt diff :file))))))
+        ('file-write
+         (drover-agent-shell--note-change (map-elt data :path)))
+        ('turn-complete
+         (setq drover-agent-shell--request-times nil)
+         (let ((reason (map-elt data :stop-reason)))
+           (pcase reason
+             ("end_turn" (drover-agent-shell--end-turn 'done nil))
+             ("cancelled" (setq drover-agent-shell--outcome nil))
+             (_ (drover-agent-shell--end-turn 'failed (agent-shell--stop-reason-description reason))))))
+        ('error
+         (let ((message (or (map-elt data :message) "Agent request failed")))
+           (unless (drover-agent-shell--initialized-p (current-buffer))
+             (setq drover-agent-shell--start-error message))
+           (drover-agent-shell--end-turn 'failed message)))
+        ((or 'permission-request 'elicitation-request)
+         (when request
+           (setf (alist-get request drover-agent-shell--request-times nil nil #'equal) (float-time))))
+        ((or 'permission-response 'elicitation-response)
+         (when request
+           (setf (alist-get request drover-agent-shell--request-times nil t #'equal) nil)))
+        ((or 'session-selected 'clean-up)
+         (setq drover-agent-shell--outcome nil
+               drover-agent-shell--request-times nil)))
+      ;; Initialization went on, so it had not failed for good.
+      (when (string-prefix-p "init-" (symbol-name kind))
+        (setq drover-agent-shell--start-error nil))
+      ;; What comes between two messages of the agent parts them.
+      (when (memq kind '(tool-call-update permission-request elicitation-request turn-complete))
+        (setq drover-agent-shell--reply-open nil))
+      (unless (memq kind drover-agent-shell--quiet-events)
+        (drover-backend-changed 'agent-shell drover-agent-shell--id))
+      (when (memq kind drover-agent-shell--model-events)
+        (drover-agent-shell--models-changed)))))
 
 (defun drover-agent-shell--note-change (file)
   "Note that the agent of the current shell changed FILE, a file name or nil."
@@ -987,12 +994,13 @@ success."
 FRAME is the selected frame by default.  This runs from
 `window-selection-change-functions', `window-buffer-change-functions'
 and `after-focus-change-function'."
-  (let* ((frame (if (frame-live-p frame) frame (selected-frame)))
-         (shell (drover-agent-shell--shell-of (window-buffer (frame-selected-window frame)))))
-    (when (and shell
-               (buffer-local-value 'drover-agent-shell--outcome shell)
-               (drover-agent-shell--focused-p shell))
-      (drover-agent-shell--seen shell))))
+  (drover-with-reporting "agent-shell windows"
+    (let* ((frame (if (frame-live-p frame) frame (selected-frame)))
+           (shell (drover-agent-shell--shell-of (window-buffer (frame-selected-window frame)))))
+      (when (and shell
+                 (buffer-local-value 'drover-agent-shell--outcome shell)
+                 (drover-agent-shell--focused-p shell))
+        (drover-agent-shell--seen shell)))))
 
 ;;;; Actions
 
@@ -1158,11 +1166,13 @@ the shell goes once the agent deleted the session.  The backend's
      :client (car acp)
      :request (acp-make-session-delete-request :session-id (cdr acp))
      :on-success (lambda (_response)
-                   (when (buffer-live-p buffer)
-                     (drover-agent-shell--close buffer)))
+                   (drover-with-reporting "agent-shell delete"
+                     (when (buffer-live-p buffer)
+                       (drover-agent-shell--close buffer))))
      :on-failure (lambda (error &rest _)
-                   (drover-warn "The agent of %s did not delete its session (%s); its shell stays"
-                                title (or (and (consp error) (map-elt error 'message)) error))))))
+                   (drover-with-reporting "agent-shell delete"
+                     (drover-warn "The agent of %s did not delete its session (%s); its shell stays"
+                                  title (or (and (consp error) (map-elt error 'message)) error)))))))
 
 (defun drover-agent-shell--supports (session operation)
   "Return non-nil when OPERATION applies to SESSION.
@@ -1188,28 +1198,30 @@ whether it can.  The backend's :supports."
   "Report the current shell going away, and the models it no longer offers.
 The models are told once the buffer is gone, as a dying shell is still
 live."
-  (drover-agent-shell--changed)
-  (when-let* ((engine (ignore-errors (drover-agent-shell--engine))))
-    (run-at-time 0 nil #'drover-models-changed engine)))
+  (drover-with-reporting "agent-shell"
+    (drover-agent-shell--changed)
+    (when-let* ((engine (ignore-errors (drover-agent-shell--engine))))
+      (run-at-time 0 nil #'drover-models-changed engine))))
 
 (defun drover-agent-shell--setup (&optional existing)
   "Follow the current shell and tell drover its session.
 EXISTING is non-nil for a shell that ran before drover followed it,
 whose creation time is unknown."
-  (when (and (derived-mode-p 'agent-shell-mode) agent-shell--state)
-    (unless (or existing drover-agent-shell--created)
-      (setq drover-agent-shell--created (float-time)))
-    (when drover-agent-shell--subscription
-      (ignore-errors (agent-shell-unsubscribe :subscription drover-agent-shell--subscription)))
-    (setq drover-agent-shell--subscription
-          (agent-shell-subscribe-to :shell-buffer (current-buffer)
-                                    :on-event #'drover-agent-shell--on-event))
-    (setq-local drover-session-at-point-function #'drover-agent-shell--buffer-session)
-    (add-hook 'kill-buffer-hook #'drover-agent-shell--killed nil t)
-    (drover-agent-shell--changed)
-    ;; A shell drover follows late may offer models already.
-    (when existing
-      (drover-agent-shell--models-changed))))
+  (drover-with-reporting "agent-shell"
+    (when (and (derived-mode-p 'agent-shell-mode) agent-shell--state)
+      (unless (or existing drover-agent-shell--created)
+        (setq drover-agent-shell--created (float-time)))
+      (when drover-agent-shell--subscription
+        (ignore-errors (agent-shell-unsubscribe :subscription drover-agent-shell--subscription)))
+      (setq drover-agent-shell--subscription
+            (agent-shell-subscribe-to :shell-buffer (current-buffer)
+                                      :on-event #'drover-agent-shell--on-event))
+      (setq-local drover-session-at-point-function #'drover-agent-shell--buffer-session)
+      (add-hook 'kill-buffer-hook #'drover-agent-shell--killed nil t)
+      (drover-agent-shell--changed)
+      ;; A shell drover follows late may offer models already.
+      (when existing
+        (drover-agent-shell--models-changed)))))
 
 (defun drover-agent-shell--teardown ()
   "Undo `drover-agent-shell--setup' in the current shell."

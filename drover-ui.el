@@ -31,6 +31,10 @@
 (require 'drover-core)
 (require 'face-remap)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (defgroup drover-faces nil
   "Faces of drover."
   :group 'drover
@@ -403,7 +407,7 @@ when no type does."
         (stored nil))
     (dolist (function (org-store-link-functions))
       (unless stored
-        (when (with-demoted-errors "Drover session link: %S"
+        (when (drover-with-reporting "session link"
                 (condition-case nil
                     (funcall function nil)
                   ;; Store functions of Org before 9.7 take no argument.
@@ -427,14 +431,25 @@ first.  Without it, every buffer would take FACE."
 (defconst drover--measure-buffer " *drover measure*"
   "Name of the buffer in which text is laid out to be measured.")
 
+(defconst drover-measure-limit 1000
+  "Characters of a text measured in pixels at most.
+Laying a line out costs as much as it is long, and a line of hundreds
+of kilobytes took minutes: a longer text is measured by its first
+characters, its width estimated from theirs, which no window is wide
+enough to show anyway.")
+
 (defun drover-text-pixel-width (string &optional remapping window)
   "Return the width in pixels of STRING as a session view draws it.
 REMAPPING is the face remapping of the view's buffer, such as its
 variable pitch, and WINDOW the window whose frame's fonts draw it, the
 selected one by default.  The faces of STRING count.  On a text
 terminal, a pixel is a character cell."
-  (if (zerop (length string))
-      0
+  (cond
+   ((zerop (length string)) 0)
+   ((> (length string) drover-measure-limit)
+    (let ((head (drover-text-pixel-width (substring string 0 drover-measure-limit) remapping window)))
+      (ceiling (* head (length string)) drover-measure-limit)))
+   (t
     ;; `string-pixel-width' ignores face remapping before Emacs 31.
     (with-current-buffer (get-buffer-create drover--measure-buffer)
       (let ((inhibit-read-only t))
@@ -446,7 +461,7 @@ terminal, a pixel is a character cell."
                     wrap-prefix nil
                     display-line-numbers nil)
         (insert string)
-        (car (buffer-text-pixel-size nil (and (window-live-p window) window) t))))))
+        (car (buffer-text-pixel-size nil (and (window-live-p window) window) t)))))))
 
 (defun drover--face-over-default (face)
   "Return FACE, a value of the `face' property, merged over the face `default'."
@@ -470,8 +485,10 @@ The font drawing each character is the one the window's frame would
 pick, through its fontset when the face's font lacks the character.  A
 character displayed as something else, through a `display' property,
 counts by its advance alone, and so does every character on a text
-terminal."
+terminal.  Each character measures the text before it: ink is looked
+for in the first 64 characters only, glyphs and short labels."
   (let ((width (drover-text-pixel-width string remapping window))
+        (string (if (> (length string) 64) (substring string 0 64) string))
         (window (if (window-live-p window) window (selected-window))))
     (if (not (display-graphic-p (window-frame window)))
         (cons 0 width)
@@ -502,8 +519,12 @@ terminal."
 MEASURE is a function of a string returning its width in pixels.  A
 cut string loses its trailing blanks and ends in an ellipsis in the
 properties of the text before it; when not even the ellipsis fits, the
-result is empty."
-  (let ((width (if (zerop (length string)) 0 (funcall measure string))))
+result is empty.  A text longer than `drover-measure-limit' characters
+is cut to those first: no window shows more."
+  (let* ((string (if (> (length string) drover-measure-limit)
+                     (concat (substring string 0 drover-measure-limit) (truncate-string-ellipsis))
+                   string))
+         (width (if (zerop (length string)) 0 (funcall measure string))))
     (if (<= width pixels)
         string
       (let* ((ellipsis (truncate-string-ellipsis))

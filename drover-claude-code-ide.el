@@ -74,6 +74,10 @@
 (require 'seq)
 (require 'subr-x)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 ;; Drover does not require claude-code-ide, so this file compiles
 ;; without it: what it uses of claude-code-ide is declared here, and
 ;; claude-code-ide is loaded only when the backend activates
@@ -359,7 +363,7 @@ seconds."
                 (drover-claude-code-ide--stop-watching timer)
                 (drover-warn "Cannot learn the session of %s: %s"
                              (if (buffer-live-p buffer) (buffer-name buffer) "a Claude terminal")
-                             (error-message-string err)))))))
+                             (drover-error-message err)))))))
     (push timer drover-claude-code-ide--watchers)
     timer))
 
@@ -414,7 +418,7 @@ conversation at once; otherwise it is looked for as it starts (see
           (drover-backend-changed 'claude-code-ide)
           (drover-models-changed 'claude-code))
       (error (drover-warn "Cannot follow the new Claude terminal %s: %s"
-                          buffer-name (error-message-string err))))
+                          buffer-name (drover-error-message err))))
     result))
 
 ;;;; Statuses
@@ -496,10 +500,11 @@ See `drover-claude-code-ide--focused-buffers'."
 (defun drover-claude-code-ide--status-changed (_id _old _new)
   "Note a change of the program status of the current terminal.
 For `ghostel-program-status-functions'."
-  (drover-claude-code-ide--note-status
-   (drover-claude-code-ide--focused-p (current-buffer)))
-  (when (drover-claude-code-ide--claude-buffer-p (current-buffer))
-    (drover-backend-changed 'claude-code-ide)))
+  (drover-with-reporting "Claude terminal"
+    (drover-claude-code-ide--note-status
+     (drover-claude-code-ide--focused-p (current-buffer)))
+    (when (drover-claude-code-ide--claude-buffer-p (current-buffer))
+      (drover-backend-changed 'claude-code-ide))))
 
 (defun drover-claude-code-ide--see (buffer)
   "Mark the turn terminal BUFFER ended seen, if it is not yet."
@@ -513,10 +518,11 @@ For `ghostel-program-status-functions'."
   "Mark seen the turns of the terminals in front of the user.
 For `window-selection-change-functions', `window-buffer-change-functions'
 and `after-focus-change-function'."
-  (dolist (buffer (drover-claude-code-ide--focused-buffers))
-    ;; Only terminals whose status was ever noted can have a turn to see.
-    (when (buffer-local-value 'drover-claude-code-ide--state buffer)
-      (drover-claude-code-ide--see buffer))))
+  (drover-with-reporting "Claude terminal windows"
+    (dolist (buffer (drover-claude-code-ide--focused-buffers))
+      ;; Only terminals whose status was ever noted can have a turn to see.
+      (when (buffer-local-value 'drover-claude-code-ide--state buffer)
+        (drover-claude-code-ide--see buffer)))))
 
 (defun drover-claude-code-ide--request (record)
   "Return the request a `blocked' program status RECORD stands for."
@@ -570,7 +576,7 @@ served it, as the CLI may reach Claude through a cloud's.  The
 transcript is read again only once it changed, so that listing sessions
 costs a file status; the current buffer, the session's terminal, keeps
 what was read.  Nil without a turn."
-  (with-demoted-errors "Drover Claude Code run: %S"
+  (drover-with-reporting "Claude Code run"
     (when-let* ((file (drover-claude-code-transcript id directory))
                 (attributes (file-attributes file)))
       (let ((stamp (list file (file-attribute-size attributes)
@@ -662,7 +668,7 @@ FUNCTION is called with no argument; what it signals is reported."
                    (with-current-buffer buffer
                      (condition-case err
                          (funcall function)
-                       (error (drover-warn "%s: %s" (buffer-name) (error-message-string err)))))))))
+                       (error (drover-warn "%s: %s" (buffer-name) (drover-error-message err)))))))))
 
 ;;;; Sending
 
@@ -709,7 +715,7 @@ kill ring."
                 (condition-case err
                     (drover-claude-code-ide--submit buffer text)
                   (error (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
-                                      name (error-message-string err))))))
+                                      name (drover-error-message err))))))
       (cond
        ((not (buffer-live-p buffer))
         (drover-warn "%s died before the prompt was sent; it is in the kill ring" name))
@@ -721,19 +727,20 @@ kill ring."
               (run-at-time
                drover-claude-code-ide--ready-interval drover-claude-code-ide--ready-interval
                (lambda ()
-                 (cond
-                  ((not (buffer-live-p buffer))
-                   (cancel-timer timer)
-                   (drover-warn "%s died before the prompt was sent; it is in the kill ring" name))
-                  ((condition-case nil
-                       (drover-claude-code-ide--takes-input-p buffer)
-                     (error nil))
-                   (cancel-timer timer)
-                   (send))
-                  ((> (float-time) deadline)
-                   (cancel-timer timer)
-                   (drover-warn "%s was not ready after %ds; the prompt is in the kill ring"
-                                name drover-claude-code-ide--ready-timeout)))))))))))
+                 (drover-with-reporting "Claude terminal"
+                   (cond
+                    ((not (buffer-live-p buffer))
+                     (cancel-timer timer)
+                     (drover-warn "%s died before the prompt was sent; it is in the kill ring" name))
+                    ((condition-case nil
+                         (drover-claude-code-ide--takes-input-p buffer)
+                       (error nil))
+                     (cancel-timer timer)
+                     (send))
+                    ((> (float-time) deadline)
+                     (cancel-timer timer)
+                     (drover-warn "%s was not ready after %ds; the prompt is in the kill ring"
+                                  name drover-claude-code-ide--ready-timeout))))))))))))
 
 (defun drover-claude-code-ide--send (session text _token)
   "Submit TEXT as a prompt to SESSION, once it reads input."
@@ -783,7 +790,7 @@ a model are reported instead."
             (drover-warn "Variant selection requires an explicit model for Claude Code"))))
       (error
        (drover-warn "Could not set the model of %s: %s; sending the prompt anyway"
-                    name (error-message-string err))))
+                    name (drover-error-message err))))
     (unless pending
       (funcall then))))
 
@@ -797,13 +804,13 @@ reported."
   (condition-case err
       (funcall then)
     (error (drover-warn "Could not send the prompt after /model: %s; it is in the kill ring"
-                        (error-message-string err)))))
+                        (drover-error-message err)))))
 
 (defun drover-claude-code-ide--options (session)
   "Return what SESSION runs, as (:model MODEL :variant VARIANT), or nil.
 It is what the newest turn of its transcript ran: a model or an effort
 changed since shows from the next answer."
-  (with-demoted-errors "Drover Claude Code options: %S"
+  (drover-with-reporting "Claude Code options"
     (when-let* ((buffer (drover-claude-code-ide--buffer session))
                 (id (drover-claude-code-ide-current-session-id buffer))
                 (file (drover-claude-code-transcript id (drover-session-directory session)))
@@ -915,7 +922,7 @@ Claude Code or no terminal starts."
           (setq buffer (drover-claude-code-ide-start
                         directory (drover-claude-code-ide--start-flags
                                    options claude-code-ide-cli-extra-flags)))
-        (error (setq failure (error-message-string err))))
+        (error (setq failure (drover-error-message err))))
       (cond (failure (funcall else failure))
             ((buffer-live-p buffer) (funcall then (drover-claude-code-ide--session-of buffer)))
             (t (funcall else "Could not locate new Claude Code buffer"))))))
@@ -965,7 +972,7 @@ It is read from the end of the session's transcript (see
 whose terminal is gone, as one archived may be, by its conversation.
 The backend's :recap."
   (funcall callback
-           (or (with-demoted-errors "Drover Claude Code recap: %S"
+           (or (drover-with-reporting "Claude Code recap"
                  (when-let* ((id (if-let* ((buffer (drover-claude-code-ide--buffer session)))
                                      (drover-claude-code-ide-current-session-id buffer)
                                    (drover-session-engine-id session)))
@@ -1126,19 +1133,22 @@ With several, the most recently used."
 
 (defun drover-claude-code-ide--terminal-killed ()
   "Report a Claude terminal going away."
-  (when (or drover-claude-code-ide--token
-            (drover-claude-code-ide--claude-buffer-p (current-buffer)))
-    (drover-backend-changed 'claude-code-ide)))
+  (drover-with-reporting "Claude terminal"
+    (when (or drover-claude-code-ide--token
+              (drover-claude-code-ide--claude-buffer-p (current-buffer)))
+      (drover-backend-changed 'claude-code-ide))))
 
 (defun drover-claude-code-ide--terminal-exited (&rest _)
   "Report a terminal whose program exited."
-  (drover-backend-changed 'claude-code-ide))
+  (drover-with-reporting "Claude terminal"
+    (drover-backend-changed 'claude-code-ide)))
 
 (defun drover-claude-code-ide--setup-terminal ()
   "Let the current terminal tell its session, when Claude's, and report it."
-  (setq-local drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
-  (add-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed nil t)
-  (drover-backend-changed 'claude-code-ide))
+  (drover-with-reporting "Claude terminal"
+    (setq-local drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
+    (add-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed nil t)
+    (drover-backend-changed 'claude-code-ide)))
 
 (defun drover-claude-code-ide--teardown-terminal ()
   "Undo `drover-claude-code-ide--setup-terminal' in the current terminal."
@@ -1159,9 +1169,10 @@ With several, the most recently used."
   "Add the backend to the hooks of the terminals that are defined.
 A hook is left alone until its package defines it: adding to a hook
 customization option not yet defined would replace its default value."
-  (pcase-dolist (`(,hook . ,function) (drover-claude-code-ide--hooks))
-    (when (boundp hook)
-      (add-hook hook function))))
+  (drover-with-reporting "Claude terminal hooks"
+    (pcase-dolist (`(,hook . ,function) (drover-claude-code-ide--hooks))
+      (when (boundp hook)
+        (add-hook hook function)))))
 
 (defun drover-claude-code-ide--remove-hooks ()
   "Remove the backend from the hooks of the terminals."

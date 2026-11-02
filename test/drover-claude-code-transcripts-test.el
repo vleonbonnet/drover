@@ -92,9 +92,9 @@ empty; `home' is the homes' directory, and `index' the index."
                              (drover-session-created a) (drover-session-updated a))
                        (list "Keep the login page" project "fix-login" 'idle 'claude-code "a1"
                              "Opus 5.5" "xhigh" "plan" 1790000000.0 1790000002.0)))
-        ;; Without a title, its first prompt, on one line: not the
+        ;; Without a title, its first prompt's first line: not the
         ;; command note before it.
-        (should (equal (drover-session-title b) "Bump the SDK to 2.0"))
+        (should (equal (drover-session-title b) "Bump the SDK"))
         (should (equal (drover-session-model b) "Sonnet 5.5"))
         (should-not (drover-session-agent b))
         (should-not (drover-session-buffer b))))))

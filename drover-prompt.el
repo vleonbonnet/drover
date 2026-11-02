@@ -66,6 +66,10 @@
 (require 'drover-claude-code)
 (require 'drover-codex)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (declare-function org-id-get-create "org-id" (&optional force))
 (declare-function project-current "project" (&optional maybe-prompt directory))
 (declare-function project-root "project" (project))
@@ -236,10 +240,11 @@ other comes in order.")
   "Remember point in `drover-prompt--last-point', from `post-command-hook'.
 A window's point is lost with the window, so context added while the
 prompt is hidden goes where the user last left point instead."
-  (if (markerp drover-prompt--last-point)
-      (set-marker drover-prompt--last-point (point))
-    (setq drover-prompt--last-point (point-marker))
-    (set-marker-insertion-type drover-prompt--last-point t)))
+  (drover-with-reporting "prompt"
+    (if (markerp drover-prompt--last-point)
+        (set-marker drover-prompt--last-point (point))
+      (setq drover-prompt--last-point (point-marker))
+      (set-marker-insertion-type drover-prompt--last-point t))))
 
 (define-minor-mode drover-prompt-mode
   "Minor mode of drover's prompt buffer.
@@ -274,15 +279,17 @@ prompt buffer is still live and its directory unchanged."
           (directory default-directory)
           (generation (1+ (alist-get engine drover-prompt--generations 0))))
       (setf (alist-get engine drover-prompt--generations) generation)
-      (with-demoted-errors "Drover engine defaults: %S"
+      (drover-with-reporting "engine defaults"
         (funcall function directory
                  (lambda (defaults)
-                   (when (buffer-live-p buffer)
-                     (with-current-buffer buffer
-                       (when (and (eql (alist-get engine drover-prompt--generations) generation)
-                                  (equal default-directory directory))
-                         (setf (alist-get engine drover-prompt--defaults) defaults)
-                         (force-mode-line-update))))))))))
+                   ;; Often called back from a process.
+                   (drover-with-reporting "engine defaults"
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (when (and (eql (alist-get engine drover-prompt--generations) generation)
+                                    (equal default-directory directory))
+                           (setf (alist-get engine drover-prompt--defaults) defaults)
+                           (force-mode-line-update)))))))))))
 
 (defun drover-prompt--refresh-volatile ()
   "Read again which engine took a prompt last and the volatile engines' defaults.
@@ -302,7 +309,7 @@ So the prompt shows at once, its header following."
                  (lambda ()
                    (when (buffer-live-p buffer)
                      (with-current-buffer buffer
-                       (with-demoted-errors "Drover prompt defaults: %S"
+                       (drover-with-reporting "prompt defaults"
                          (drover-prompt--refresh-volatile))))))))
 
 (defun drover-prompt--fetch-defaults ()
@@ -314,7 +321,7 @@ refreshed after the command.  The features of
 engines are registered."
   (drover-prompt--schedule-refresh)
   (dolist (feature drover-prompt-require-features)
-    (with-demoted-errors "Drover prompt: %S"
+    (drover-with-reporting "prompt"
       (require feature nil t)))
   (dolist (engine (drover-engines))
     (unless (drover-engine-property engine :volatile)
@@ -403,7 +410,7 @@ even when the backend signals, which is reported."
           (funcall apply session options then)
         (error
          (drover-warn "Could not apply the options to %s: %s; sending the prompt anyway"
-                      (drover-session-display-title session) (error-message-string err))
+                      (drover-session-display-title session) (drover-error-message err))
          (funcall then))))))
 
 (defun drover-prompt-apply-options (session options then)
@@ -759,7 +766,8 @@ one.  See `drover-prompt-format-sessions' for the quote."
                                  (format "%d sessions" count)
                                (drover-session-display-title (car sessions)))
                              (hash-table-count recaps) count))))
-      (setq timer (run-at-time drover-prompt-quote-timeout nil #'finish))
+      (setq timer (run-at-time drover-prompt-quote-timeout nil
+                               (lambda () (drover-with-reporting "prompt quote" (finish)))))
       (dolist (session sessions)
         (let ((key (drover-session-key session)))
           (drover-recap session
@@ -989,7 +997,7 @@ timer, so it signals nothing."
             (funcall send session text token))
         (error
          (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
-                      title (error-message-string err))))))))
+                      title (drover-error-message err))))))))
 
 (defun drover-prompt--send-to-session (session content buffer)
   "Send CONTENT of the prompt BUFFER to the running SESSION.
@@ -1196,9 +1204,10 @@ undisplayed when missing, as from the target picker's option menu."
 
 (defun drover-prompt--remove-minibuffer-overlay ()
   "Delete the overlay of the current minibuffer showing what the prompt runs."
-  (when (overlayp drover-prompt--minibuffer-overlay)
-    (delete-overlay drover-prompt--minibuffer-overlay))
-  (setq drover-prompt--minibuffer-overlay nil))
+  (drover-with-reporting "prompt"
+    (when (overlayp drover-prompt--minibuffer-overlay)
+      (delete-overlay drover-prompt--minibuffer-overlay))
+    (setq drover-prompt--minibuffer-overlay nil)))
 
 (defun drover-prompt--update-minibuffer (buffer)
   "Show, after the prompt of the current minibuffer, what the prompt BUFFER runs.
@@ -1440,7 +1449,7 @@ runs or would start.  Each NAME carries its target as its
         (add (buffer-name buffer)
              (list :target session
                    :current (and (drover-supports-p session :options)
-                                 (with-demoted-errors "Drover session options: %S"
+                                 (drover-with-reporting "session options"
                                    (drover-backend-call session :options)))
                    :directory (or (drover-session-directory session)
                                   (buffer-local-value 'default-directory buffer)))))

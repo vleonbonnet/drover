@@ -933,7 +933,8 @@ sessions; which subagents show, the View menu tells."
   (drover-list-test-with
       (list (drover-list-test-titled "s" "Two\nlines" :status 'waiting
                                      :requests '((:kind question :summary "First\n\nsecond"))))
-    (should (string-match-p "Two lines.*asks: First second\\'" (drover-list-test-heading "s")))))
+    ;; A title is its first line, a summary all of its lines on one.
+    (should (string-match-p "Two .*asks: First second\\'" (drover-list-test-heading "s")))))
 
 ;;;; Width
 

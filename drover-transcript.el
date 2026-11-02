@@ -51,6 +51,10 @@
 (require 'subr-x)
 (require 'drover-core)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (defcustom drover-transcript-scan-interval 15
   "Seconds between two looks at the files engines record conversations in.
 Each look lists their directories, a file status per conversation, in
@@ -97,9 +101,14 @@ Claude Code's own list of conversations reads as much.")
   (inode nil :documentation "Its inode number when read, which a file replaced changes.")
   (data nil :documentation "What the engine's reader read of it, a plist, or nil."))
 
+(drover-note-layout 'drover-transcript)
+
 (cl-defstruct (drover-transcript-index (:constructor drover-transcript-index--create)
                                        (:copier nil))
   "The files recording an engine's conversations, and what was read of each."
+  ;; First, whatever the version: see `drover-layout-current-p'.
+  (stamp (drover-layout 'drover-transcript-index 'drover-transcript)
+          :documentation "The layouts of the types it was made of, as `drover-layout' tells them.")
   (name nil :documentation "A symbol naming the index, and the file it is kept in.")
   (roots nil :documentation "Function of no argument returning where the files are.
 A list of (DIRECTORY DEPTH REGEXP): the files whose names match REGEXP
@@ -128,6 +137,14 @@ is gone.")
   (dirty nil :documentation "Non-nil when entries changed since they were kept.")
   (saved 0 :documentation "When the entries were kept last, as a float time.")
   (warned nil :documentation "Non-nil once a problem with the kept entries was reported."))
+
+(drover-note-layout 'drover-transcript-index)
+
+(defun drover-transcript-index-current-p (index)
+  "Return non-nil when INDEX is an index of the layouts defined now.
+One made before drover's files were loaded anew, of other slots, is to
+be dropped: its timers stop, and its backend makes another."
+  (drover-layout-current-p index 'drover-transcript-index))
 
 (defun drover-transcript-index-create (name roots read on-change &optional on-cycle)
   "Return an index NAME of the files ROOTS tells, read with READ.
@@ -192,7 +209,7 @@ Entries read since are kept over those of the file."
         (error
          (drover-transcript--warn index "Ignoring what drover kept of %s in %s: %s"
                                   (drover-transcript-index-name index)
-                                  (abbreviate-file-name file) (error-message-string err)))))))
+                                  (abbreviate-file-name file) (drover-error-message err)))))))
 
 (defun drover-transcript-save (index &optional force)
   "Keep the entries of INDEX in its file, when they changed.
@@ -216,7 +233,7 @@ passed since they were kept last.  A failure is reported once."
                              (sort entries :key #'car :in-place t))
         (error (drover-transcript--warn index "Could not keep what drover read of %s in %s: %s"
                                         (drover-transcript-index-name index)
-                                        (abbreviate-file-name file) (error-message-string err)))))))
+                                        (abbreviate-file-name file) (drover-error-message err)))))))
 
 ;;;; Looking at the files
 
@@ -311,7 +328,7 @@ listed again only once its modification time tells files came or went."
   "Tell INDEX's backend that what was read of FILE went from OLD to NEW."
   (unless (equal old new)
     (when-let* ((function (drover-transcript-index-on-change index)))
-      (with-demoted-errors "Drover transcript change: %S"
+      (drover-with-reporting "transcript change"
         (funcall function file old new)))))
 
 (defun drover-transcript--read (index file)
@@ -332,8 +349,10 @@ listed again only once its modification time tells files came or went."
                       (funcall (drover-transcript-index-read index) file attributes entry)
                     ;; A file that cannot be read is noted as read, to be
                     ;; read again once it changes, not on every look.
-                    (error (message "Drover could not read %s: %s" file (error-message-string err))
-                           nil))))
+                    ((debug error)
+                     (drover-report-failure (format "reading %s" (drover-transcript-index-name index)) err
+                                          (abbreviate-file-name file))
+                     nil))))
         (pcase-let ((`(,size ,mtime ,inode) (drover-transcript--stamp attributes)))
           (puthash file (drover-transcript--create :file file :size size :mtime mtime
                                                    :inode inode :data data)
@@ -352,7 +371,7 @@ It checks every file when its turn came (see
     (setf (drover-transcript-index-seen index) (make-hash-table :test #'equal)
           (drover-transcript-index-complete index) t
           (drover-transcript-index-directories index)
-          (copy-sequence (with-demoted-errors "Drover transcript roots: %S"
+          (copy-sequence (drover-with-reporting "transcript roots"
                            (funcall (drover-transcript-index-roots index)))))))
 
 (defun drover-transcript--finish (index)
@@ -369,7 +388,7 @@ It checks every file when its turn came (see
           (setf (drover-transcript-index-dirty index) t)
           (drover-transcript--change index file (drover-transcript-data entry) nil))))
     (when-let* ((function (drover-transcript-index-on-cycle index)))
-      (with-demoted-errors "Drover transcript cycle: %S"
+      (drover-with-reporting "transcript cycle"
         (funcall function)))
     (drover-transcript-save index)))
 
@@ -397,22 +416,32 @@ look ends."
   (setf (drover-transcript-index-timer index) (run-at-time delay nil function index)))
 
 (defun drover-transcript--work (index)
-  "Work for INDEX for a slice, then schedule the next slice or look."
-  (setf (drover-transcript-index-timer index) nil)
-  (when (drover-transcript-index-active index)
-    (let ((deadline (+ (float-time) drover-transcript-slice))
-          (more t))
-      (while (and (setq more (drover-transcript--step index))
-                  (< (float-time) deadline)
-                  (not (input-pending-p))))
-      (if more
-          (drover-transcript--schedule index drover-transcript-slice-delay #'drover-transcript--work)
-        (drover-transcript--schedule index drover-transcript-scan-interval #'drover-transcript--look)))))
+  "Work for INDEX for a slice, then schedule the next slice or look.
+It runs from a timer: an error is reported briefly, and the next look
+comes at its time.  An index of other layouts, made before drover's
+files were loaded anew, does nothing more."
+  (when (drover-transcript-index-current-p index)
+    (setf (drover-transcript-index-timer index) nil)
+    (when (drover-transcript-index-active index)
+      (let ((more t))
+        (unwind-protect
+            (drover-with-reporting (format "index of %s" (drover-transcript-index-name index))
+              (let ((deadline (+ (float-time) drover-transcript-slice)))
+                (while (and (setq more (drover-transcript--step index))
+                            (< (float-time) deadline)
+                            (not (input-pending-p))))))
+          (when (drover-transcript-index-active index)
+            (if more
+                (drover-transcript--schedule index drover-transcript-slice-delay #'drover-transcript--work)
+              (drover-transcript--schedule index drover-transcript-scan-interval
+                                           #'drover-transcript--look))))))))
 
 (defun drover-transcript--look (index)
   "Begin a look of INDEX at its files, and work at it."
-  (drover-transcript--begin index)
-  (drover-transcript--work index))
+  (when (drover-transcript-index-current-p index)
+    (drover-with-reporting (format "index of %s" (drover-transcript-index-name index))
+      (drover-transcript--begin index))
+    (drover-transcript--work index)))
 
 (defun drover-transcript-start (index)
   "Read what was kept of INDEX, and look at its files from now on.
@@ -493,12 +522,66 @@ start.  Head and tail are inserted once when they overlap."
           (drover-transcript-insert file (- size window) size)
           tail)))))
 
+(defun drover-transcript--string-scan (bound)
+  "Scan the JSON string whose opening quote is at point, up to BOUND.
+Return (END . CLOSED): END where the scan stopped, past the closing
+quote when CLOSED is non-nil, else at BOUND, at the end of the line or
+of the buffer, the string being cut there.  Point does not move.  A
+loop rather than a regexp, whose matcher overflows its stack on
+strings of tens of kilobytes."
+  (save-excursion
+    (forward-char 1)
+    (let ((closed nil)
+          (done nil))
+      (while (not done)
+        (skip-chars-forward "^\"\\\\\n" bound)
+        (cond ((>= (point) bound) (setq done t))
+              ((eq (char-after) ?\\)
+               (if (>= (+ (point) 2) bound)
+                   (setq done t)
+                 (forward-char 2)))
+              ((eq (char-after) ?\")
+               (forward-char 1)
+               (setq closed t done t))
+              (t (setq done t))))
+      (cons (min (point) bound) closed))))
+
 (defun drover-transcript-string-at ()
   "Return the JSON string at point, decoded, and move past it; nil when none.
 Point is at its opening quote."
-  (when (looking-at "\"\\(?:[^\"\\\n]\\|\\\\.\\)*\"")
-    (goto-char (match-end 0))
-    (ignore-errors (json-parse-string (match-string 0)))))
+  (when (eq (char-after) ?\")
+    (pcase-let ((`(,end . ,closed) (drover-transcript--string-scan (point-max))))
+      (when closed
+        (prog1 (ignore-errors (json-parse-string (buffer-substring-no-properties (point) end)))
+          (goto-char end))))))
+
+(defun drover-transcript-string-prefix (&optional limit)
+  "Return the start of the JSON string at point, decoded, or nil.
+Point is at its opening quote.  Unlike `drover-transcript-string-at',
+the string may be cut, by the window it was read in, and only its first
+LIMIT characters are decoded, by default `drover-text-limit': a prompt
+pasting a log is a line of hundreds of kilobytes, longer than any
+window.  Point does not move."
+  (when (eq (char-after) ?\")
+    (let* ((limit (or limit drover-text-limit))
+           ;; An escaped character takes up to six.
+           (bound (min (point-max) (+ (point) 1 (* 6 limit))))
+           (scan (drover-transcript--string-scan bound))
+           (text (buffer-substring-no-properties (point) (car scan))))
+      (unless (cdr scan)
+        ;; What a cut leaves: half an escape, bytes of half a character.
+        (setq text (replace-regexp-in-string
+                    (rx (or (seq "\\" (? "u" (** 0 3 xdigit))) (+ (any (#x3fff80 . #x3fffff)))) eos)
+                    "" text t t))
+        (setq text (concat text "\"")))
+      (let ((decoded (ignore-errors (json-parse-string text))))
+        ;; A high surrogate cut from its pair does not decode: drop it.
+        (when (and (not decoded) (not (cdr scan))
+                   (string-match "\\\\u[dD][89abAB][[:xdigit:]]\\{2\\}\"\\'" text))
+          (setq decoded (ignore-errors
+                          (json-parse-string (concat (substring text 0 (match-beginning 0)) "\"")))))
+        (and (stringp decoded)
+             (if (> (length decoded) limit) (substring decoded 0 limit) decoded))))))
 
 (defun drover-transcript-sniff (key &optional backward bound)
   "Return the next string value of KEY in the current buffer, from point.
@@ -567,14 +650,11 @@ With PREDICATE, the last one for which it returns non-nil."
        (ignore-errors (float-time (encode-time (iso8601-parse string t))))))
 
 (defun drover-transcript-text (string)
-  "Return STRING on one line, trimmed and cut to `drover-transcript-text-limit'.
-Nil for a blank or missing STRING."
-  (when (stringp string)
-    (let ((text (string-trim (replace-regexp-in-string "[ \t\n\r]+" " " string))))
-      (unless (string-empty-p text)
-        (if (> (length text) drover-transcript-text-limit)
-            (concat (substring text 0 drover-transcript-text-limit) "…")
-          text)))))
+  "Return the first line of STRING that is not blank, trimmed and cut, or nil.
+It is cut to `drover-transcript-text-limit' characters, ending in an
+ellipsis when cut (see `drover-bound-line'); nil for a blank or missing
+STRING."
+  (drover-bound-line string drover-transcript-text-limit))
 
 (defvar drover-transcript--projects (make-hash-table :test #'equal)
   "Projects of directories, as `drover-transcript-project' found them.")

@@ -49,6 +49,10 @@
 (require 'drover-ui)
 (require 'drover-keys)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (with-eval-after-load 'opencode
   (require 'drover-opencode))
 

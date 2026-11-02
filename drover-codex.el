@@ -38,6 +38,10 @@
 (require 'drover-core)
 (require 'drover-model)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (defcustom drover-codex-home (expand-file-name (or (getenv "CODEX_HOME") "~/.codex"))
   "Codex's home directory."
   :type 'directory
@@ -162,7 +166,7 @@ They are read at once; a failure is reported, and CALLBACK not called."
   (when-let* ((defaults (condition-case err
                             (drover-codex-defaults)
                           (error
-                           (drover-warn "Could not read Codex's defaults: %s" (error-message-string err))
+                           (drover-warn "Could not read Codex's defaults: %s" (drover-error-message err))
                            nil))))
     (funcall callback defaults)))
 

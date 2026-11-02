@@ -42,6 +42,10 @@
 (require 'seq)
 (require 'subr-x)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (defcustom drover-attention-echo t
   "Whether `drover-next' tells which session it visits, and its place in the cycle."
   :type 'boolean
@@ -85,25 +89,35 @@ out."
                 (seq-sort-by #'drover-status-rank #'< drover-attention-statuses))))
 
 (defun drover-attention--describe (session)
-  "Return one line describing SESSION, for lists of sessions."
+  "Return one line describing SESSION, for lists of sessions.
+It is cut to `drover-line-limit' characters, its summary on one line."
   (let ((location (drover-session-location session))
         (summary (drover-session-summary session)))
-    (concat (drover-status-glyph (drover-session-status session)) " "
-            (format "%s" (drover-session-display-title session))
-            (and location (concat "  " (propertize location 'face 'drover-dim)))
-            (and summary (concat "  " summary)))))
+    (drover-bound-line
+     (concat (drover-status-glyph (drover-session-status session)) " "
+             (format "%s" (drover-session-display-title session))
+             (and location (concat "  " (propertize location 'face 'drover-dim)))
+             (and summary (concat "  " (string-replace "\n" " " (drover-bound-line summary))))))))
+
+(defconst drover-attention--help-sessions 10
+  "Sessions of a status the tooltip of the count names at most.")
 
 (defun drover-attention--help (sessions)
-  "Return the help text of the mode line count of SESSIONS, by status."
+  "Return the help text of the mode line count of SESSIONS, by status.
+It names `drover-attention--help-sessions' sessions of a status at
+most, and how many more: Emacs measures a tooltip whole to show it."
   (concat "Sessions that need you:"
           (mapconcat (pcase-lambda (`(,status . ,count))
                        (concat "\n" (drover-status-label status) (format " (%d):" count)
                                (mapconcat (lambda (session)
                                             (concat "\n  " (drover-attention--describe session)))
-                                          (seq-filter (lambda (session)
-                                                        (eq (drover-session-status session) status))
-                                                      sessions)
-                                          "")))
+                                          (seq-take (seq-filter (lambda (session)
+                                                                  (eq (drover-session-status session) status))
+                                                                sessions)
+                                                    drover-attention--help-sessions)
+                                          "")
+                               (and (> count drover-attention--help-sessions)
+                                    (format "\n  … and %d more" (- count drover-attention--help-sessions)))))
                      (drover-attention--counts sessions) "")
           "\n\nmouse-1: visit the most urgent\nmouse-3: choose a session"))
 
@@ -142,8 +156,23 @@ They are those of `drover-attention-sessions', kept current as
 sessions change: a change of one session looks at that session and
 those above it, not at every session.")
 
+(defvar drover-attention--layout nil
+  "The layout of the records of `drover-attention--sessions', or nil.
+As `drover-layout' made it when they were found: records made by
+another version of drover are found again (see
+`drover-attention--current-p').")
+
+(defun drover-attention--current-p ()
+  "Return non-nil when the sessions needing the user are of the layout now.
+Those are `drover-attention--sessions'; otherwise forget them, so that
+they are found again."
+  (or (drover-layout-matches-p drover-attention--layout)
+      (setq drover-attention--sessions nil)))
+
 (defun drover-attention--current ()
   "Return the sessions that need the user, most urgent first."
+  (unless (drover-attention--current-p)
+    (drover-attention--recount))
   (let ((sessions nil))
     (when drover-attention--sessions
       (maphash (lambda (_ session) (push session sessions)) drover-attention--sessions))
@@ -153,7 +182,8 @@ those above it, not at every session.")
   "Return the tooltip of the mode line count, from the sessions needing you now.
 It is made when shown, however many the sessions are, rather than on
 every change."
-  (drover-attention--help (drover-attention--current)))
+  (drover-with-reporting "mode line tooltip"
+    (drover-attention--help (drover-attention--current))))
 
 (defun drover-attention--format (sessions)
   "Return the mode line count of SESSIONS, the sessions that need the user.
@@ -216,7 +246,8 @@ a subagent `drover-show-subagents' shows, or waits for the user."
     (dolist (session (seq-filter #'drover-session-attention-p
                                  (drover-surfaced-sessions (drover-index-sessions))))
       (puthash (drover-session-key session) session table))
-    (setq drover-attention--sessions table)))
+    (setq drover-attention--sessions table
+          drover-attention--layout (drover-layout 'drover-session))))
 
 (defun drover-attention--follow (keys)
   "Bring the sessions that need the user up to date with the change of KEYS.
@@ -241,7 +272,7 @@ mode line of every frame to be drawn again costs tens of milliseconds
 with many windows, so only a count that reads otherwise forces it.  Its
 tooltip is a function, made when shown: the string compares alike
 whatever the sessions it lists."
-  (if (and keys drover-attention--sessions (drover-index-incremental-p))
+  (if (and keys (drover-attention--current-p) drover-attention--sessions (drover-index-incremental-p))
       (drover-attention--follow keys)
     (drover-attention--recount))
   (let ((string (drover-attention--format (hash-table-values drover-attention--sessions))))
@@ -252,14 +283,16 @@ whatever the sessions it lists."
 (defun drover-attention--fonts-changed (&rest _)
   "Measure the glyphs of the mode line again, the fonts having changed.
 For `after-setting-font-hook' and `enable-theme-functions'."
-  (clrhash drover-attention--pads)
-  (drover-attention--update))
+  (drover-with-reporting "mode line"
+    (clrhash drover-attention--pads)
+    (drover-attention--update)))
 
 (defun drover-attention--changed ()
   "Follow a change of sessions, those `drover-changed-sessions' tells."
-  (let ((changed drover-changed-sessions))
-    (cond ((eq changed t) (drover-attention--update))
-          (changed (drover-attention--update changed)))))
+  (drover-with-reporting "mode line"
+    (let ((changed drover-changed-sessions))
+      (cond ((eq changed t) (drover-attention--update))
+            (changed (drover-attention--update changed))))))
 
 (defun drover-attention--show ()
   "Add the counts to `global-mode-string'."

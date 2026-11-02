@@ -59,6 +59,10 @@
 (require 'drover-codex)
 (require 'drover-transcript)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (defcustom drover-codex-program "codex"
   "The Codex CLI, which archives, restores and deletes conversations."
   :type 'string
@@ -81,6 +85,21 @@ all."
 
 (defvar drover-codex-rollouts--index nil
   "The index of Codex's rollouts, once installed.")
+
+(defun drover-codex-rollouts--current-index ()
+  "Return the index of Codex's rollouts, or nil before the backend is installed.
+One made by another version of drover, before its files were loaded
+anew, is replaced: its timers stop, and the new one, which reads what
+was kept of the files, looks at them from now on if the backend
+started."
+  (let ((index drover-codex-rollouts--index))
+    (if (or (null index) (drover-transcript-index-current-p index))
+        index
+      (drover-stale-layout "index of Codex's rollouts")
+      (setq drover-codex-rollouts--index (drover-codex-rollouts--make-index))
+      (when (memq 'codex drover--started)
+        (drover-transcript-start drover-codex-rollouts--index))
+      drover-codex-rollouts--index)))
 
 (defvar drover-codex-rollouts--files (make-hash-table :test #'equal)
   "The rollout of each conversation, by identifier.")
@@ -122,13 +141,38 @@ names by identifier.")
       (list (and (stringp (alist-get 'model payload)) (alist-get 'model payload))
             (and (stringp (alist-get 'effort payload)) (alist-get 'effort payload))))))
 
+(defun drover-codex-rollouts--cut-prompt (beg end)
+  "Return the first prompt between BEG and END on a line too long to parse, or nil.
+A prompt pasting a log may make a line longer than the window it is
+read in, which cuts it: the event Codex records of it is read from its
+start (see `drover-transcript-string-prefix')."
+  (save-excursion
+    (goto-char beg)
+    (let ((found nil))
+      (while (and (not found) (search-forward "\"type\":\"user_message\"" end t))
+        (let ((line-beg (line-beginning-position))
+              (line-end (min end (line-end-position))))
+          (unless (drover-transcript-line)
+            (goto-char line-beg)
+            (when (re-search-forward "\"message\":[ \t]*" line-end t)
+              (setq found (drover-transcript-text
+                           (drover-codex-prompt
+                            `((type . "event_msg")
+                              (payload (type . "user_message")
+                                       (message . ,(drover-transcript-string-prefix 2000)))))))))
+          (goto-char line-end)
+          (forward-line 1)))
+      found)))
+
 (defun drover-codex-rollouts--first-prompt (beg end)
   "Return the first prompt of the user between BEG and END, on one line, or nil.
-The event Codex records of it comes first; else its message."
+The event Codex records of it comes first; else its message; else the
+start of an event on a line too long to parse."
   (or (seq-some (lambda (record) (drover-transcript-text (drover-codex-prompt record)))
                 (drover-transcript-lines "\"type\":\"user_message\"" nil beg end))
       (seq-some (lambda (record) (drover-transcript-text (drover-codex-prompt record)))
-                (drover-transcript-lines "\"role\":\"user\"" nil beg end))))
+                (drover-transcript-lines "\"role\":\"user\"" nil beg end))
+      (drover-codex-rollouts--cut-prompt beg end)))
 
 (defun drover-codex-rollouts--messages-p (beg end)
   "Return non-nil when a message of the conversation is between BEG and END."
@@ -304,12 +348,12 @@ PREDICATE is a function of what was read of a conversation."
   (let ((records nil)
         (names (drover-codex-rollouts--names))
         (models (make-hash-table :test #'equal)))
-    (when drover-codex-rollouts--index
+    (when (drover-codex-rollouts--current-index)
       (drover-transcript-map (lambda (_file data)
                                (when (funcall predicate data)
                                  (when-let* ((record (drover-codex-rollouts--record data names models)))
                                    (push record records))))
-                             drover-codex-rollouts--index))
+                             (drover-codex-rollouts--current-index)))
     records))
 
 (defun drover-codex-rollouts--sessions ()
@@ -339,16 +383,16 @@ The backend's :archived."
 (defun drover-codex-rollouts--data (id)
   "Return what was read of conversation ID, or nil."
   (when-let* ((file (gethash id drover-codex-rollouts--files)))
-    (drover-transcript-lookup drover-codex-rollouts--index file)))
+    (drover-transcript-lookup (drover-codex-rollouts--current-index) file)))
 
 (defun drover-codex-rollouts--session (id)
   "Return the record of conversation ID, as :sessions lists it, or nil.
 Its rollout is looked at again soon when it changed since it was read.
 The backend's :session."
   (let* ((file (gethash id drover-codex-rollouts--files))
-         (data (and file (drover-transcript-lookup drover-codex-rollouts--index file))))
+         (data (and file (drover-transcript-lookup (drover-codex-rollouts--current-index) file))))
     (when file
-      (drover-transcript-check drover-codex-rollouts--index file))
+      (drover-transcript-check (drover-codex-rollouts--current-index) file))
     (when (and data (not (plist-get data :archived)) (drover-codex-rollouts--recent-p data))
       (drover-codex-rollouts--record data (drover-codex-rollouts--names)
                                      (make-hash-table :test #'equal)))))
@@ -411,7 +455,7 @@ backend's :recap."
   (let ((file (gethash (drover-session-id session) drover-codex-rollouts--files)))
     (funcall callback
              (or (and file (file-readable-p file)
-                      (with-demoted-errors "Drover Codex recap: %S"
+                      (drover-with-reporting "Codex recap"
                         (drover-codex-recap file)))
                  (list :failure "No rollout of this conversation")))))
 
@@ -443,18 +487,19 @@ looked at again either way."
      :connection-type 'pipe
      :noquery t
      :sentinel (lambda (process _event)
-                 (unless (process-live-p process)
-                   (unwind-protect
-                       (if (and (eq (process-status process) 'exit)
-                                (zerop (process-exit-status process)))
-                           (message "Codex %s %s" done title)
-                         (drover-warn "Codex could not %s %s: %s" command title
-                                      (if (buffer-live-p output)
-                                          (string-trim (with-current-buffer output (buffer-string)))
-                                        (process-status process))))
-                     (when (buffer-live-p output) (kill-buffer output))
-                     (when drover-codex-rollouts--index
-                       (drover-transcript-look-soon drover-codex-rollouts--index))))))))
+                 (drover-with-reporting (concat "codex " command)
+                   (unless (process-live-p process)
+                     (unwind-protect
+                         (if (and (eq (process-status process) 'exit)
+                                  (zerop (process-exit-status process)))
+                             (message "Codex %s %s" done title)
+                           (drover-warn "Codex could not %s %s: %s" command title
+                                        (if (buffer-live-p output)
+                                            (string-trim (with-current-buffer output (buffer-string)))
+                                          (process-status process))))
+                       (when (buffer-live-p output) (kill-buffer output))
+                       (when-let* ((index (drover-codex-rollouts--current-index)))
+                         (drover-transcript-look-soon index)))))))))
 
 (defun drover-codex-rollouts--archive (session)
   "Archive the conversation of SESSION with \"codex archive\".
@@ -482,7 +527,7 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
 
 (defun drover-codex-rollouts--start ()
   "Look at the rollouts from now on.  The backend's :start."
-  (drover-transcript-start drover-codex-rollouts--index))
+  (drover-transcript-start (drover-codex-rollouts--current-index)))
 
 (defun drover-codex-rollouts--register ()
   "Register the `codex' backend."
@@ -504,15 +549,17 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
    :supports #'drover-codex-rollouts--supports))
 
 (defun drover-codex-rollouts--save ()
-  "Keep what was read of the rollouts, as Emacs exits."
-  (when drover-codex-rollouts--index
-    (drover-transcript-save drover-codex-rollouts--index t)))
+  "Keep what was read of the rollouts, as Emacs exits.
+An error is reported, and lets Emacs exit."
+  (drover-with-reporting "keeping Codex's rollouts"
+    (when-let* ((index (drover-codex-rollouts--current-index)))
+      (drover-transcript-save index t))))
 
 (defun drover-codex-rollouts-install (front-end)
   "List Codex's conversations, for FRONT-END to resume them.
 The backend stays until every front end that installed it uninstalled
 it."
-  (unless drover-codex-rollouts--index
+  (unless (drover-codex-rollouts--current-index)
     (setq drover-codex-rollouts--index (drover-codex-rollouts--make-index)))
   (unless (assq 'codex drover--backends)
     (drover-codex-rollouts--register))
@@ -524,8 +571,8 @@ it."
 The backend goes once no front end needs it."
   (setq drover-codex-rollouts--users (delq front-end drover-codex-rollouts--users))
   (unless drover-codex-rollouts--users
-    (when drover-codex-rollouts--index
-      (drover-transcript-stop drover-codex-rollouts--index))
+    (when (drover-codex-rollouts--current-index)
+      (drover-transcript-stop (drover-codex-rollouts--current-index)))
     (remove-hook 'kill-emacs-hook #'drover-codex-rollouts--save)
     (drover-unregister-backend 'codex)))
 

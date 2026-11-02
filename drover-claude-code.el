@@ -59,6 +59,10 @@
 (require 'drover-core)
 (require 'drover-model)
 
+;; Reloaded into an Emacs running an older drover, load its core anew.
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+  (load "drover-core" nil t))
+
 (declare-function w32-read-registry "w32fns.c" (root key &optional name))
 
 ;;;; Options
@@ -845,7 +849,7 @@ They are read at once; a failure is reported, and CALLBACK not called."
                           (error
                            (drover-warn "Could not read Claude Code's defaults for %s: %s"
                                         (if (stringp directory) (abbreviate-file-name directory) directory)
-                                        (error-message-string err))
+                                        (drover-error-message err))
                            nil))))
     (funcall callback defaults)))
 

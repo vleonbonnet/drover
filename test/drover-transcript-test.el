@@ -190,8 +190,8 @@ file's size as :size and the size it read from before as :from, and
       (delete-file file))))
 
 (ert-deftest drover-transcript-test-text-and-time ()
-  "Titles are one line, cut; times are the CLIs' ISO 8601 ones."
-  (should (equal (drover-transcript-text "  Fix\n the  build ") "Fix the build"))
+  "Titles are their first line, cut; times are the CLIs' ISO 8601 ones."
+  (should (equal (drover-transcript-text "\n  Fix the  build \nand test") "Fix the  build"))
   (should-not (drover-transcript-text " \n "))
   (let ((drover-transcript-text-limit 5))
     (should (equal (drover-transcript-text "abcdefgh") "abcde…")))
