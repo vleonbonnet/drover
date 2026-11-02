@@ -24,7 +24,10 @@
 ;; width, the first drawing, every group expanded) and following the
 ;; changes a running turn makes (a step of a working session, two
 ;; taking turns at the top, one going idle and back, one coming), with
-;; the garbage collections each costs.  It checks that what was drawn in
+;; the garbage collections each costs; then with the sidebar beside the
+;; list: its first drawing, the list's rows at hand, two sessions
+;; taking turns drawn in both, and the list catching up once shown
+;; again after changes while hidden.  It checks that what was drawn in
 ;; place is what a drawing anew draws.
 ;;
 ;; It runs in batch, or in a graphical Emacs, where measuring text and
@@ -100,15 +103,18 @@
                         (number-sequence 0 (1- drover-bench-subagents))))
         :key #'drover-session-updated :reverse t))
 
-(defun drover-bench-measure (function runs)
+(defun drover-bench-measure (function runs &optional setup)
   "Return (MS GCS GC-MS) of FUNCTION over RUNS runs, averages per run.
 The time includes the garbage collections.  Each run of a measure pays
-for its own garbage, not for that of the measure before."
+for its own garbage, not for that of the measure before.  SETUP, a
+function, runs before each run, untimed."
   (let ((times nil)
         (gcs 0)
         (gc-time 0.0))
     (garbage-collect)
     (dotimes (_ runs)
+      (when setup
+        (funcall setup))
       (let ((done gcs-done)
             (elapsed gc-elapsed)
             (start (float-time)))
@@ -307,8 +313,93 @@ Nor the `face' properties font lock removes from what it displayed, as
                                   (drover-bench-row "to idle and back" back 10)
                                   (drover-bench-row "one coming" coming 10))
                 (drover-bench-log "               %d of 10 turns drawn in place; the same as drawn anew: %s"
-                                  in-place (if same "yes" "NO"))))))
+                                  in-place (if same "yes" "NO"))
+                (drover-bench-two-lists top second)))))
         (drover-attention-mode -1)))))
+
+(defun drover-bench-two-lists (top second)
+  "Time the sidebar beside the list, sessions TOP and SECOND taking turns.
+The list is the current buffer, alone in the selected window."
+  (let* ((main (selected-window))
+         (list (current-buffer))
+         (side (drover-list--show-side))
+         (sidebar (window-buffer side))
+         (hidden (get-buffer-create " *drover bench other*")))
+    (unwind-protect
+        (progn
+          ;; Narrower beside the sidebar: drawn for its width.
+          (drover-list--on-window-change main)
+          (let* ((first (drover-bench-measure
+                         (lambda ()
+                           (with-current-buffer sidebar
+                             (setq drover-list--widths nil
+                                   drover-list--model nil)
+                             (drover-list--render)))
+                         3))
+                 (both (drover-bench-measure
+                        (lambda () (drover-bench-step (if (cl-evenp drover-bench-tick) top second)))
+                        21))
+                 (catch-up (drover-bench-measure
+                            (lambda ()
+                              (set-window-buffer main list)
+                              (drover-list--on-window-change main))
+                            5
+                            (lambda ()
+                              (set-window-buffer main hidden)
+                              (dotimes (_ 10)
+                                (drover-bench-step (if (cl-evenp drover-bench-tick) top second))))))
+                 ;; As many sessions as a hidden list follows in place,
+                 ;; idle ones starting turns, then going idle again.
+                 (many (let ((ids (mapcar (lambda (index) (drover-bench-id 'top index))
+                                          (number-sequence 300 (+ 299 drover-list--pending-limit))))
+                             (working nil))
+                         (drover-bench-measure
+                          (lambda ()
+                            (set-window-buffer main list)
+                            (drover-list--on-window-change main))
+                          4
+                          (lambda ()
+                            (set-window-buffer main hidden)
+                            (setq working (not working))
+                            (dolist (id ids)
+                              (drover-bench-change
+                               id (lambda (session)
+                                    (setf (drover-session-status session) (if working 'working 'idle)
+                                          (drover-session-updated session)
+                                          (+ drover-bench-now (cl-incf drover-bench-tick))))))))))
+                 (whole (drover-bench-measure
+                         (lambda ()
+                           (set-window-buffer main list)
+                           (drover-list--on-window-change main))
+                         4
+                         (lambda ()
+                           (set-window-buffer main hidden)
+                           (with-current-buffer list
+                             (setq drover-list--stale t)))))
+                 (same (seq-every-p (lambda (buffer)
+                                      (with-current-buffer buffer
+                                        (let ((text (drover-bench-text)))
+                                          (drover-list--render)
+                                          (equal-including-properties text (drover-bench-text)))))
+                                    (list sidebar list))))
+            (drover-bench-log "  with the sidebar, %d columns, beside the list, %d:"
+                              (window-body-width side) (window-body-width main))
+            (drover-bench-log "               %s | %s | %s"
+                              (drover-bench-row "the sidebar's first drawing" first 1000)
+                              (drover-bench-row "two taking turns, both drawn" both 10)
+                              (drover-bench-row "the list shown after 10 hidden" catch-up 150))
+            (drover-bench-log "               %s | %s"
+                              (drover-bench-row (format "the list shown after %d sessions changed hidden"
+                                                        drover-list--pending-limit)
+                                                many 150)
+                              (drover-bench-row "after more, drawn whole" whole 150))
+            (drover-bench-log "               both the same as drawn anew: %s" (if same "yes" "NO"))))
+      (delete-window side)
+      (kill-buffer sidebar)
+      (set-window-buffer main list)
+      (kill-buffer hidden)
+      (with-current-buffer list
+        (drover-list--on-window-change main)))))
 
 (if (not drover-bench-output)
     (drover-bench-run)

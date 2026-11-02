@@ -1,7 +1,7 @@
 #+TITLE: drover
 #+OPTIONS: toc:nil
 
-Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session in one list, in a window or beside your work, from which you can open, answer, interrupt, archive, restore, fork, compact, delete or preview any of them, as far as its front end can.
+Drover gathers the sessions of your coding agents into one place in Emacs: which ones wait for you, which ones run, and which finished while you were elsewhere. It shows how many sessions need you in the mode line, takes you to the most urgent one, and lists every session, in a window, in a sidebar beside your work, or both at once, from which you can open, answer, interrupt, archive, restore, fork, compact, delete or preview any of them, as far as its front end can.
 
 Agent front ends plug in as backends: [[https://github.com/vleonbonnet/opencode.el][opencode.el]] for [[https://opencode.ai/][OpenCode]] 2, [[https://github.com/xenodium/agent-shell][agent-shell]] for its ACP agents, and [[https://github.com/manzaltu/claude-code-ide.el][claude-code-ide]] for Claude Code in a terminal. One prompt buffer, =*drover*=, writes to any of them: it gathers context from where you work, lets you choose the agent, model, effort and directory, and sends to a running session or starts a new one.
 
@@ -48,7 +48,7 @@ Subagent sessions show under their parent, their icon under its title. Which of 
 | =active= | the subagents in the middle of a turn: working, waiting to retry, or waiting for you (default) |
 | =none=   | no subagent                                                                                    |
 
-The list's header tells how many subagents are hidden, such as =17 sessions, 89 subagents hidden=; the mode is the View menu's to show, and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count, =drover-next= and =drover-select= follow the mode too, the filter aside: they count, visit and offer the sessions the list would show without a filter, and every subagent waiting for you whatever the mode, since it blocks its parent until you answer (=drover-surfaced-sessions=).
+The list says nothing of the subagents it hides: the mode is the View menu's to show, and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count, =drover-next= and =drover-select= follow the mode too, the filter aside: they count, visit and offer the sessions the list would show without a filter, and every subagent waiting for you whatever the mode, since it blocks its parent until you answer (=drover-surfaced-sessions=).
 
 Shown or not, a session whose subagents (at any depth) are active says so beside its status icon:
 
@@ -121,7 +121,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =U= | =drover-toggle-subagents=  | show all, active or no subagents, in turn (lists)   |
 | =V= | =drover-view=              | the View menu (drover's list)                       |
 
-=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or the list itself. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
+=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds, =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or either list. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 
 =z= archives a session in its front end's archive, such as OpenCode's, or in drover's own when its front end has none (see [[*Archived sessions][Archived sessions]]); =Z= restores it, from the list showing archived sessions, or from the session's buffer.
 
@@ -131,7 +131,7 @@ To store an Org link to the session at point, use Org's own =org-store-link= (=C
 
 ** The menu beside the list
 
-The session keys of the menu act on the session the current buffer tells: the one at point in a list, the buffer's own in a session buffer. In a buffer telling no session, such as the prompt, =*drover*=, or a file you edit, while drover's list shows in a window of the frame (the most recently used, if several), they act on that list instead: on the session at point of the list's window, as if typed there, and so do the list's own entries, =v=, =U= and =V=. A session buffer keeps acting on its own session. The global and prompt keys keep to the current buffer.
+The session keys of the menu act on the session the current buffer tells: the one at point in a list, the buffer's own in a session buffer. In a buffer telling no session, such as the prompt, =*drover*=, or a file you edit, while one of drover's lists, the sidebar or the other, shows in a window of the frame (the one used last, if both do), they act on that list instead: on the session at point of the list's window, as if typed there, and so do the list's own entries, =v=, =U= and =V=. A session buffer keeps acting on its own session. The global and prompt keys keep to the current buffer.
 
 The List group, whether the menu opened in the list or beside it, moves the point of the list's window, the menu staying open and following the new session at point: its title names it, and what applies to it is greyed out anew. Follow mode shows each session as you go, its title taking the colour of the session you work in, as moving in the list would.
 
@@ -190,7 +190,7 @@ Everywhere, through the menu.
 | =n= | =drover-prompt-org-task=    | write a prompt for the Org task point is in                    |
 | ='= | =drover-prompt-toggle=      | show or hide the prompt                                        |
 | =l= | =drover-list=               | the list of sessions, in a window                              |
-| =L= | =drover-list-side=          | the list of sessions beside your work, shown or hidden         |
+| =L= | =drover-list-side=          | the sidebar, a list of sessions beside your work, or hide it   |
 | =p= | =drover-select-project=     | the list of the sessions of a project                          |
 | =S= | =opencode-consult-sessions= | search the OpenCode session buffers                            |
 | =a= | =drover-prompt-agent=       | choose the agent                                               |
@@ -221,11 +221,11 @@ Add your own commands with =transient-append-suffix= and =transient-insert-suffi
 
 * The list
 
-=drover-list= shows every session in a Magit-style buffer, =*drover sessions*=, in an ordinary window; =drover-list-side= shows the same buffer in a side window beside your work (=drover-list-side-window-side=, =drover-list-side-window-width=), or hides it, and with a prefix argument moves between it and your work. Groups and sessions are sections: =TAB= folds a group, or recaps the last turn of a session (see [[*The last turn][The last turn]]). The Idle group starts collapsed (=drover-list-collapsed-groups=); what you collapse or expand survives refreshes.
+=drover-list= shows every session in a Magit-style buffer, =*drover sessions*=, in an ordinary window; =drover-list-side= shows the sidebar, a list of its own, =*drover sidebar*=, in a side window beside your work (=drover-list-side-window-side=, =drover-list-side-window-width=), or hides it, and with a prefix argument moves between it and your work. Both may show at once, each laid out for its own width, typically two lines per session in the sidebar and columns in the other; each has its own point, its own sessions expanded and groups collapsed, and its own follow mode, and the keys act in the list you type them in. What they list, how they sort, group and filter, and which subagents and archived sessions show are the same for both: the View menu changes them for both. Groups and sessions are sections: =TAB= folds a group, or recaps the last turn of a session (see [[*The last turn][The last turn]]). The Idle group starts collapsed (=drover-list-collapsed-groups=); what you collapse or expand survives refreshes.
 
-The buffer shows sessions and how many need you, nothing else: which subagents show, the filter, the sort and the keys are the View menu's to show (=V=), and the mode line's to hint at, such as =by status filtered=. A filter leaving every session out says =No session matches the filter.=; the View menu tells which, and clears it.
+The buffer shows sessions, and how many each group holds, nothing else: no line counts them at the top, as the mode line counts the sessions that need you (see [[*Attention][Attention]]); which subagents show, the filter, the sort and the keys are the View menu's to show (=V=), and the mode line's to hint at, such as =by status filtered=. A filter leaving every session out says =No session matches the filter.=, and a list without sessions =No sessions.=; the View menu tells which filter, and clears it.
 
-From the side window, =RET= opens the session at point in the window where you work, =o= in another window than that one, split from it when there is none, =C-o= shows it where =RET= would and leaves you in the list, and follow mode shows each session there as point reaches it. Wherever the list is, the colour of a title tells where its session is (see [[*Where sessions are][Where sessions are]]).
+From the sidebar, =RET= opens the session at point in the window where you work, never in the other list, =o= in another window than that one, split from it when there is none, =C-o= shows it where =RET= would and leaves you in the sidebar, and follow mode shows each session there as point reaches it. In either list, the colour of a title tells where its session is (see [[*Where sessions are][Where sessions are]]).
 
 ** What a line shows
 
@@ -263,12 +263,12 @@ Each icon takes the room its font draws it in, which may be wider than the room 
 
 The colour of a session's title tells where the session is in Emacs:
 
-| Face                    | Inherits                       | The session                                                                                              |
-|-------------------------+--------------------------------+----------------------------------------------------------------------------------------------------------|
-| none                    |                                | has no buffer                                                                                            |
-| =drover-open-session=   | =font-lock-keyword-face=       | has a buffer no window of a visible frame shows                                                          |
-| =drover-shown-session=  | =font-lock-type-face=          | shows in a window of a visible frame                                                                     |
-| =drover-active-session= | =font-lock-function-name-face= | shows in the window you work in: the selected one, or the one selected before the list or the minibuffer |
+| Face                    | Inherits                       | The session                                                                                            |
+|-------------------------+--------------------------------+--------------------------------------------------------------------------------------------------------|
+| none                    |                                | has no buffer                                                                                          |
+| =drover-open-session=   | =font-lock-keyword-face=       | has a buffer no window of a visible frame shows                                                        |
+| =drover-shown-session=  | =font-lock-type-face=          | shows in a window of a visible frame                                                                   |
+| =drover-active-session= | =font-lock-function-name-face= | shows in the window you work in: the selected one, or the one selected before a list or the minibuffer |
 
 The three faces inherit sibling faces of font lock, which themes tell apart from one another and from the default foreground; none of them is a status's, so a title never reads as a status: the faces of =success=, =warning= and =error= colour the Done, Needs you and Failed icons. =font-lock-function-name-face= names where you are elsewhere too: =which-function-mode= shows the function point is in with it. Over an idle session's dimming, they lend the dimming what they do not set.
 
@@ -327,11 +327,11 @@ The icons of Working and Retrying sessions are animated in the list: each shows 
 - Toggle follow mode, which subagents show (all, the active ones, none: =U= cycles them, as in the list), older sessions: those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session, and archived sessions (see [[*Archived sessions][Archived sessions]]). Both are fetched when shown, and again by =g=.
 - Choose the columns: each switch lets a field show, highlighted, or hides it, dimmed, at once; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
 
-The list follows sessions as they change while it is displayed; hidden, it waits until it is shown again, and costs nothing meanwhile. Only what changed is drawn: the lines of the sessions that changed, in place, and a session moving, coming or going alone, so that a list of thousands of sessions follows a running turn in a millisecond or two. It is drawn whole only when its columns change width, a setting changes, or =g= refreshes it; =g= draws from what the backends reported, then lists every session anew, for what they change without telling, such as a branch, and draws what changed. The sessions of a collapsed group, such as Idle, often most of them, are drawn once it is expanded, searched with Isearch, copied or selected, and otherwise a few at a time while Emacs is idle, stopping as you type (=drover-list-deferred-delay=), so that Occur or Consult find them too.
+The lists follow sessions as they change while they are displayed; hidden, a list notes which sessions changed, draws nothing meanwhile, and draws them in place once shown again, or whole when many did. Only what changed is drawn: the lines of the sessions that changed, in place, and a session moving, coming or going alone, so that a list of thousands of sessions follows a running turn in a millisecond or two; with the sidebar and the other list both shown, each draws its own lines, but what a change makes is made once for both. A list is drawn whole only when its columns change width, a setting changes, or =g= refreshes it; =g= draws from what the backends reported, then lists every session anew, for what they change without telling, such as a branch, and draws what changed. The sessions of a collapsed group, such as Idle, often most of them, are drawn once it is expanded, searched with Isearch, copied or selected, and otherwise a few at a time while Emacs is idle and the list shown, stopping as you type (=drover-list-deferred-delay=), so that Occur or Consult find them too.
 
 ** Archived sessions
 
-Archived sessions leave the list, the mode-line count and every session picker. The View menu's =A= shows them in the list too, dimmed, after =drover-archived-glyph= (=nf-md-archive=), whose tooltip tells how long ago they were archived; grouped by status, they gather in a group of their own, Archived, last. The header line counts them apart, such as =17 sessions, 3 archived=, and they never count as needing you. They are fetched when shown, without waiting, and again by =g=; =Z= restores those selected, or the one at point.
+Archived sessions leave the list, the mode-line count and every session picker. The View menu's =A= shows them in the list too, dimmed, after =drover-archived-glyph= (=nf-md-archive=), whose tooltip tells how long ago they were archived; grouped by status, they gather in a group of their own, Archived, last, whose heading counts them, and they never count as needing you. They are fetched when shown, without waiting, and again by =g=; =Z= restores those selected, or the one at point.
 
 Each front end archives what it can:
 
@@ -387,13 +387,13 @@ A front end also fits its buffers into the keys. A list of sessions sets =drover
 
 * Development
 
-| Command                   | Runs                                                                                                                             |
-|---------------------------+----------------------------------------------------------------------------------------------------------------------------------|
-| =make test=               | every ERT test in a batch =emacs -Q=                                                                                             |
-| =make compile=            | byte compilation with warnings as errors, then =compile-standalone=                                                              |
-| =make compile-standalone= | byte compilation with the required packages alone, as a package manager compiles drover; its byte code must be that of =compile= |
-| =make lint=               | checkdoc                                                                                                                         |
-| =make bench=              | timings of the list over 2510 sessions, drawn whole and following changes; =EMACS_GUI= runs it in a graphical Emacs              |
+| Command                   | Runs                                                                                                                                              |
+|---------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------|
+| =make test=               | every ERT test in a batch =emacs -Q=                                                                                                              |
+| =make compile=            | byte compilation with warnings as errors, then =compile-standalone=                                                                               |
+| =make compile-standalone= | byte compilation with the required packages alone, as a package manager compiles drover; its byte code must be that of =compile=                  |
+| =make lint=               | checkdoc                                                                                                                                          |
+| =make bench=              | timings of the list over 2510 sessions, drawn whole and following changes, alone and beside the sidebar; =EMACS_GUI= runs it in a graphical Emacs |
 
 =DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL=, =AGENT_SHELL_EL= and =CLAUDE_CODE_IDE_EL= the checkouts of opencode.el, agent-shell and claude-code-ide the backends are built and tested against. Tests use a fake backend and fake engines, or stub the front ends; they never touch a running Emacs or OpenCode service, nor read the agents' own configuration.
 

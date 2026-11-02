@@ -31,8 +31,9 @@
 ;; claude-code-ide, which it does not; each backend is loaded with its
 ;; package.  `drover-attention-mode' shows how many sessions need you in
 ;; the mode line and `drover-next' visits the most urgent; `drover-list'
-;; lists every session in a window, and `drover-list-side' beside your
-;; work, laid out for the window's width.
+;; lists every session in a window, and `drover-list-side' in a sidebar
+;; beside your work, both at once if you like, each laid out for its
+;; window's width.
 ;; `drover-prompt-dwim' writes a prompt with context from where you work,
 ;; for any session or a new one of any engine (see `drover-model').
 ;; `drover-dispatch' is a menu of every command, on sessions and on the

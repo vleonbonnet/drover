@@ -469,9 +469,7 @@ current buffer again afterwards."
     (should (seq-every-p (lambda (section) (eq (oref section parent) magit-root-section))
                          (drover-list--session-sections magit-root-section)))
     (should (equal (drover-list-test-visible-text)
-                   (concat "! 1 needs you   4 sessions, 2 subagents hidden\n"
-                           "\n"
-                           "  ◐ ? Session root   10s\n"
+                   (concat "  ◐ ? Session root   10s\n"
                            "      ! Session sub   1m\n"
                            "  ◐ Session other     5s\n"
                            "  · Session idle\n")))
@@ -536,17 +534,29 @@ current buffer again afterwards."
       (drover-set-sort 'urgency)
       (should (equal (drover-list-test-groups) '((waiting "w1" "w2" "kid2" "kid1") (idle "i")))))))
 
-(ert-deftest drover-list-test-header ()
+(ert-deftest drover-list-test-no-summary-line ()
+  "The list begins with its sessions: no line counts them, nor what needs the user.
+The mode line counts what needs the user, the group headings their
+sessions; which subagents show, the View menu tells."
   (drover-list-test-with (append (drover-list-test-sample)
                                  (list (drover-test-session "fail" :status 'failed)
                                        (drover-test-session "sub" :parent "work")))
     (goto-char (point-min))
-    (should (equal (drover-list-test-line)
-                   "! 2 needs you   ✗ 1 failed   ✓ 1 done   6 sessions, 1 subagent hidden"))
-    (should (null (drover-list-test-id-at-point)))
-    ;; Which subagents show is the View menu's to tell, not the list's.
+    (should (equal (drover-list-test-line) "Needs you (2)"))
     (forward-line 1)
-    (should (equal (drover-list-test-line) ""))))
+    (should (equal (drover-list-test-id-at-point) "wait1"))
+    (dolist (text '("needs you " "sessions" "subagent" "hidden" "Nothing needs you"))
+      (should-not (string-search text (buffer-string))))
+    ;; Ungrouped, the first line is the most urgent session's.
+    (setq drover-group-by nil)
+    (revert-buffer)
+    (goto-char (point-min))
+    (should (equal (drover-list-test-id-at-point) "wait1"))
+    (should (string-prefix-p "  ! Session wait1" (drover-list-test-line)))
+    ;; Without any session, the list says so, and nothing else.
+    (setq drover-test-sessions nil)
+    (drover-list-test-refresh)
+    (should (equal (buffer-string) "No sessions.\n"))))
 
 (ert-deftest drover-list-test-no-settings-or-keys ()
   "The list shows sessions and their counts; the View menu shows settings and keys."
@@ -562,30 +572,6 @@ current buffer again afterwards."
           (should-not (text-property-any (point-min) (point-max) 'face 'help-key-binding))
           (dolist (word '("Subagents:" "Filter" "clears" "hides" "shows" " U " "V c"))
             (should-not (string-search word text))))))))
-
-(ert-deftest drover-list-test-header-nothing-needs-you ()
-  (drover-list-test-with (list (drover-test-session "w" :status 'working))
-    (goto-char (point-min))
-    (should (equal (drover-list-test-line) "Nothing needs you   1 session"))))
-
-(ert-deftest drover-list-test-header-flows-in-narrow-windows ()
-  "In a narrow window, the parts of the header that do not fit go below."
-  (drover-list-test-with (append (drover-list-test-sample)
-                                 (list (drover-test-session "fail" :status 'failed)
-                                       (drover-test-session "sub" :parent "work")))
-    (drover-list-test-with-font
-      ;; 200 pixels after the ellipsis: two counts, 154 pixels, fit but
-      ;; not the third, 216; the session count alone, 183, does.
-      (let ((drover-list-test-width 207))
-        (revert-buffer)
-        (goto-char (point-min))
-        (let ((lines nil))
-          (while (not (string-empty-p (drover-list-test-line)))
-            (push (string-trim (drover-list-test-line)) lines)
-            (forward-line 1))
-          (should (equal (nreverse lines)
-                         '("! 2 needs you   ✗ 1 failed" "✓ 1 done"
-                           "6 sessions, 1 subagent hidden"))))))))
 
 ;;;; Subagents
 
@@ -642,10 +628,6 @@ current buffer again afterwards."
     (should (equal (drover-list-test-groups) '((waiting "alone" "parent" "asking"))))
     (drover-list-test-goto-group 'waiting)
     (should (equal (drover-list-test-line) "Needs you (3)"))
-    ;; The header counts sessions, not trees.
-    (goto-char (point-min))
-    (should (equal (drover-list-test-line)
-                   "! 2 needs you   ✓ 1 done   3 sessions"))
     (should (string-prefix-p "  ✓ ? Session parent" (drover-list-test-heading "parent")))))
 
 (ert-deftest drover-list-test-orphan-subagent ()
@@ -654,7 +636,7 @@ current buffer again afterwards."
     ;; Its parent is not listed: it shows at the top level, marked.
     (should (string-prefix-p "  ◐ ↳ Session child" (drover-list-test-heading "child")))
     (goto-char (point-min))
-    (should (equal (drover-list-test-line) "Nothing needs you   1 session"))
+    (should (equal (drover-list-test-line) "Working (1)"))
     (drover-list-test-goto "child")
     (magit-section-show (magit-current-section))
     ;; Under its title, the arrow included.
@@ -670,8 +652,6 @@ current buffer again afterwards."
     ;; Active subagents only: the one that ended is hidden, and does not
     ;; place its parent among the finished ones.
     (should (equal (drover-list-test-groups) '((waiting "root" "asking" "child"))))
-    (goto-char (point-min))
-    (should (string-suffix-p "   3 sessions, 1 subagent hidden" (drover-list-test-line)))
     (drover-list-test-goto "root")
     (forward-char 3)
     (let ((offset (- (point) (line-beginning-position))))
@@ -690,9 +670,7 @@ current buffer again afterwards."
         (should (= (- (point) (line-beginning-position)) offset))
         (save-excursion
           (goto-char (point-min))
-          (should (equal (drover-list-test-line) "Nothing needs you   1 session, 3 subagents hidden"))
-          (forward-line 1)
-          (should (equal (drover-list-test-line) "")))
+          (should (equal (drover-list-test-line) "Working (1)")))
         (drover-list-test-press "U")
         (should (eq drover-show-subagents 'all))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "ended" "child"))))
@@ -701,20 +679,12 @@ current buffer again afterwards."
         (should (equal (drover-list-test-id-at-point) "root"))
         (save-excursion
           (goto-char (point-min))
-          (should (string-suffix-p "   4 sessions" (drover-list-test-line))))
+          (should (equal (drover-list-test-line) "Needs you (4)")))
         (drover-list-test-press "U")
         (should (eq drover-show-subagents 'active))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "child"))))
         (should (equal (drover-list-test-id-at-point) "root"))
         (should (= (- (point) (line-beginning-position)) offset))))))
-
-(ert-deftest drover-list-test-no-subagent-no-hint ()
-  "Without subagents, the header says nothing of them."
-  (drover-list-test-with (list (drover-test-session "s" :status 'working))
-    (goto-char (point-min))
-    (should (equal (drover-list-test-line) "Nothing needs you   1 session"))
-    (forward-line 1)
-    (should (equal (drover-list-test-line) ""))))
 
 (ert-deftest drover-list-test-parent-details-keep-subagents ()
   (drover-list-test-with (drover-list-test-family)
@@ -1788,6 +1758,8 @@ START and END bound its overlay."
 
 (ert-deftest drover-list-test-measures-in-side-window ()
   (drover-list-test-with (drover-list-test-sample)
+    ;; Alone: no other list measured these texts.
+    (kill-buffer buffer)
     (let ((side (drover-list--show-side)))
       (with-current-buffer (window-buffer side)
         (drover-list-test-measuring
@@ -1795,6 +1767,33 @@ START and END bound its overlay."
           (should drover-list-test--measured)
           (dolist (measure drover-list-test--measured)
             (should (eq (nth 1 measure) side))))))))
+
+(ert-deftest drover-list-test-lists-share-widths ()
+  "The sidebar measures only what the other list, measuring alike, did not."
+  (drover-list-test-with (drover-list-test-sample)
+    (drover-list-test-shown
+      (drover-list-test-measuring
+        (revert-buffer)
+        (should drover-list-test--measured)
+        (let ((full-texts (mapcar #'caddr drover-list-test--measured)))
+          (setq drover-list-test--measured nil)
+          (with-current-buffer (window-buffer (drover-list--show-side))
+            (should (eq drover-list--layout 'narrow))
+            ;; What it measured, the other did not, properties included:
+            ;; texts cut to its narrower room, say; the titles were
+            ;; measured once.
+            (dolist (measure drover-list-test--measured)
+              (should-not (seq-find (lambda (text) (equal-including-properties text (nth 2 measure)))
+                                    full-texts)))
+            (should-not (seq-find (lambda (measure) (equal (nth 2 measure) "Session wait1"))
+                                  drover-list-test--measured))
+            (should (seq-find (lambda (text) (string-search "Session wait1" text)) full-texts))
+            ;; Measured otherwise, as in another font, it measures anew.
+            (setq drover-list-test--measured nil)
+            (face-remap-add-relative 'default :height 2.0)
+            (drover-list--render)
+            (should (seq-find (lambda (measure) (equal (nth 2 measure) "Session wait1"))
+                              drover-list-test--measured))))))))
 
 (ert-deftest drover-list-test-reuses-widths ()
   (drover-list-test-with (drover-list-test-sample)
@@ -2426,9 +2425,9 @@ Redraws keep point on the session."
         (should (equal (drover-list-test-groups) '((working "live") (archived "old" "seen"))))
         (drover-list-test-goto-group 'archived)
         (should (string-match-p "\\`Archived (2)" (string-trim (drover-list-test-line))))
-        ;; Archived, a session never needs the user: the header counts it apart.
+        ;; Archived, a session never needs the user: its group counts it.
         (goto-char (point-min))
-        (should (string-match-p "Nothing needs you +3 sessions, 2 archived" (drover-list-test-line)))
+        (should (equal (drover-list-test-line) "Working (1)"))
         (should (string-match-p "◐ +Session live" (drover-list-test-heading "live")))
         (should (string-match-p "✓ # Session old" (drover-list-test-heading "old")))
         (save-excursion
@@ -2579,14 +2578,16 @@ Redraws keep point on the session."
   "Return POSITION, a marker or a number, as a number."
   (if (markerp position) (marker-position position) position))
 
-(defun drover-list-test-fresh ()
-  "Return the list drawn anew, from nothing, in a buffer of its own.
-The value is (TEXT SECTIONS HEADER-LINE), TEXT without sections.  The
-buffer has the visibility of the list, and is killed."
-  (let* ((list (get-buffer drover-list-buffer-name))
+(defun drover-list-test-fresh (&optional list)
+  "Return LIST drawn anew, from nothing, in a buffer of its own.
+LIST is a list buffer, the current one by default.  The value is (TEXT
+SECTIONS HEADER-LINE), TEXT without sections.  The buffer has the
+visibility of LIST, is drawn for its width, and is killed."
+  (let* ((list (or list (current-buffer)))
          (visibility (with-current-buffer list (drover-list--remember-visibility)))
          (visibility (copy-hash-table (buffer-local-value 'drover-list--visibility list)))
          (recaps (buffer-local-value 'drover-list--recaps list))
+         (width (buffer-local-value 'drover-list--width list))
          (drawn (with-current-buffer list
                   (mapcar #'drover-list--group-value
                           (seq-remove #'drover-list--deferred-p
@@ -2597,19 +2598,22 @@ buffer has the visibility of the list, and is killed."
           (drover-list-mode)
           (setq drover-list--visibility visibility
                 drover-list--recaps (and recaps (copy-hash-table recaps)))
-          (drover-list--render)
-          ;; The collapsed groups the list drew, drawn too.
-          (dolist (group (drover-list--model-groups drover-list--model))
-            (when (member (drover-list--group-value group) drawn)
-              (drover-list--draw-group group)))
+          ;; Drawn from nothing: no row nor width of another list.
+          (cl-letf (((symbol-function 'drover-list--line-width) (lambda () width))
+                    ((symbol-function 'drover-list--buffers) (lambda () (list fresh))))
+            (drover-list--render)
+            ;; The collapsed groups the list drew, drawn too.
+            (dolist (group (drover-list--model-groups drover-list--model))
+              (when (member (drover-list--group-value group) drawn)
+                (drover-list--draw-group group))))
           (list (drover-list-test-without-sections (buffer-string))
                 (drover-list-test-sections)
                 header-line-format))
       (kill-buffer fresh))))
 
-(defun drover-list-test-drawn ()
-  "Return the list as `drover-list-test-fresh' returns a fresh one."
-  (with-current-buffer drover-list-buffer-name
+(defun drover-list-test-drawn (&optional list)
+  "Return LIST, the current list by default, as `drover-list-test-fresh' returns a fresh one."
+  (with-current-buffer (or list (current-buffer))
     (list (drover-list-test-without-sections (buffer-string))
           (drover-list-test-sections)
           header-line-format)))
@@ -2784,6 +2788,27 @@ yet.  Most changes are drawn in place."
         (should (drawn-p))
         (should (string-match-p "Also IDLE" (drover-list-test-visible-text)))
         (drover-list-test-is-fresh)))))
+
+(ert-deftest drover-list-test-hidden-list-draws-collapsed-groups-once-shown ()
+  "A hidden list leaves the sessions of its collapsed groups undrawn until shown."
+  (drover-list-test-with (list (drover-list-test-titled "w" "Working away" :status 'working)
+                               (drover-list-test-titled "i" "Quietly idle" :status 'idle))
+    (cl-flet ((drawn-p () (string-search "Quietly idle" (buffer-string)))
+              (run-timer ()
+                (let ((timer drover-list--deferred-timer))
+                  (cancel-timer timer)
+                  (apply (timer--function timer) (timer--args timer)))))
+      (should-not (get-buffer-window buffer t))
+      (should (timerp drover-list--deferred-timer))
+      (run-timer)
+      (should-not (drawn-p))
+      (should-not drover-list--deferred-timer)
+      (save-window-excursion
+        (set-window-buffer (selected-window) buffer)
+        (drover-list--on-window-change (selected-window))
+        (should (timerp drover-list--deferred-timer))
+        (run-timer)
+        (should (drawn-p))))))
 
 (ert-deftest drover-list-test-collapsed-groups-drawn-a-few-at-a-time ()
   "While idle, a collapsed group's sessions are drawn a few at a time, stopping for input.
@@ -3054,27 +3079,41 @@ is the list drawn anew."
       (should (equal (mapcar #'car (drover-list-test-groups)) '(done)))
       (should-not drover-list--stale))))
 
-(ert-deftest drover-list-test-stale-when-hidden ()
-  (drover-list-test-with (list (drover-test-session "s" :status 'working))
+(ert-deftest drover-list-test-follows-when-shown-again ()
+  "A hidden list notes what changed, and draws it in place once shown."
+  (drover-list-test-with (list (drover-test-session "s" :status 'working)
+                               (drover-test-session "t" :status 'working))
     (should-not (get-buffer-window buffer t))
     (let ((text (buffer-string)))
-      (setq drover-test-sessions (list (drover-test-session "s" :status 'done)))
+      (setq drover-test-sessions (list (drover-test-session "s" :status 'done)
+                                       (drover-test-session "t" :status 'working)))
       (drover-backend-changed 'fake "s")
       (drover-changed-now)
       ;; Nothing was drawn.
       (should (equal (buffer-string) text))
-      (should drover-list--stale))
+      (should-not drover-list--stale)
+      (should (equal drover-list--pending '(((fake . "s")) nil nil))))
     (should (memq #'drover-list--on-window-change
                   (buffer-local-value 'window-buffer-change-functions buffer)))
     (save-window-excursion
       (set-window-buffer (selected-window) buffer)
-      (drover-list--on-window-change (selected-window))
-      (should-not drover-list--stale)
-      (should (equal (mapcar #'car (drover-list-test-groups)) '(done)))
+      (should (zerop (drover-list-test-counting-redraws
+                       (drover-list--on-window-change (selected-window)))))
+      (should-not drover-list--pending)
+      (should (equal (mapcar #'car (drover-list-test-groups)) '(done working)))
+      (drover-list-test-is-fresh)
       ;; Up to date: showing it again draws nothing.
       (let ((tick (buffer-modified-tick)))
         (drover-list--on-window-change (selected-window))
-        (should (= tick (buffer-modified-tick)))))))
+        (should (= tick (buffer-modified-tick)))))
+    ;; Settings changing while hidden draw it whole once shown.
+    (drover-set-group-by 'project)
+    (should drover-list--stale)
+    (should-not drover-list--pending)
+    (save-window-excursion
+      (set-window-buffer (selected-window) buffer)
+      (should (= (drover-list-test-counting-redraws (drover-list--on-window-change (selected-window))) 1))
+      (should-not drover-list--stale))))
 
 (ert-deftest drover-list-test-mode-line ()
   (drover-list-test-with nil
@@ -3107,7 +3146,8 @@ is the list drawn anew."
 
 ;;;; Filtering
 
-(ert-deftest drover-list-test-filter-header ()
+(ert-deftest drover-list-test-filter-names-nothing ()
+  "A filter leaves sessions out; the list names neither it nor how many it hides."
   (drover-list-test-with (drover-list-test-sample)
     (drover-list-test-goto "work")
     (drover-list-test-shown
@@ -3115,11 +3155,9 @@ is the list drawn anew."
       (should (equal (drover-list-test-groups) '((waiting "wait1") (working "work"))))
       (should (equal (drover-list-test-id-at-point) "work"))
       (should (equal (drover-list--mode-line-process) " by status filtered"))
+      ;; The View menu names the filter; the list begins with its groups.
       (goto-char (point-min))
-      ;; The header counts what is listed; the View menu names the filter.
-      (should (equal (drover-list-test-line) "! 1 needs you   2 sessions"))
-      (forward-line 1)
-      (should (equal (drover-list-test-line) ""))
+      (should (equal (drover-list-test-line) "Needs you (1)"))
       (should-not (string-search "Filter" (buffer-string)))
       (drover-set-filter :statuses '(working))
       (should (equal (drover-list-test-groups) '((working "work"))))
@@ -3127,8 +3165,7 @@ is the list drawn anew."
       (drover-set-filter :project nil)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(waiting done working idle)))
       (goto-char (point-min))
-      (forward-line 1)
-      (should (equal (drover-list-test-line) "")))))
+      (should (equal (drover-list-test-line) "Needs you (2)")))))
 
 (ert-deftest drover-list-test-filter-shows-matching-subagent ()
   (drover-list-test-with (drover-list-test-family)
@@ -3137,7 +3174,7 @@ is the list drawn anew."
     ;; Hidden subagents show when they match, under their parent.
     (should (equal (drover-list-test-groups) '((working "other" "quiet"))))
     (goto-char (point-min))
-    (should (equal (drover-list-test-line) "Nothing needs you   2 sessions"))
+    (should (equal (drover-list-test-line) "Working (2)"))
     ;; And when no subagent shows.
     (drover-list-test-shown
       (drover-set-show-subagents 'none)
@@ -3222,15 +3259,20 @@ is the list drawn anew."
         (drover-list--age-tick)
         (should (string-suffix-p "3m" (drover-list-test-heading "s")))
         (should (timerp drover-list--age-timer)))
-      ;; Hidden, a tick marks it stale and stops.
+      ;; Hidden, a tick notes that time passed, and stops.
       (drover-list--age-tick)
-      (should drover-list--stale)
+      (should-not drover-list--stale)
+      (should (nth 2 drover-list--pending))
       (should-not drover-list--age-timer)
-      ;; Shown again, it redraws and runs again.
+      ;; Shown again, it draws the ages that changed, in place, and runs
+      ;; again.
+      (setq drover-list-test-clock (+ drover-test-now 300))
       (save-window-excursion
         (set-window-buffer (selected-window) buffer)
-        (drover-list--on-window-change (selected-window))
-        (should-not drover-list--stale)
+        (should (zerop (drover-list-test-counting-redraws
+                         (drover-list--on-window-change (selected-window)))))
+        (should-not drover-list--pending)
+        (should (string-suffix-p "6m" (drover-list-test-heading "s")))
         (should (timerp drover-list--age-timer))))))
 
 ;;;; The side window
@@ -3286,7 +3328,7 @@ Each shows its own buffer."
       (let ((window (drover-list--side-window)))
         (should (window-live-p window))
         (should (eq (selected-window) origin))
-        (should (equal (buffer-name (window-buffer window)) "*drover sessions*"))
+        (should (equal (buffer-name (window-buffer window)) "*drover sidebar*"))
         (should (eq (window-parameter window 'window-side) 'left))
         (should (eql (window-parameter window 'window-slot) 0))
         (should (window-parameter window 'no-delete-other-windows))
@@ -3305,7 +3347,7 @@ Each shows its own buffer."
           (should-not drover-list--stale)))
       (drover-list-side)
       (should-not (drover-list--side-window))
-      (should (get-buffer "*drover sessions*"))
+      (should (get-buffer "*drover sidebar*"))
       (should (eq (selected-window) origin)))))
 
 (ert-deftest drover-list-test-side-right ()
@@ -3329,7 +3371,7 @@ Each shows its own buffer."
     (let ((side (drover-list-side '(4))))
       (should (eq side (selected-window)))
       (switch-to-buffer (get-buffer-create "*other 1*"))
-      (should (equal (buffer-name (window-buffer side)) "*drover sessions*"))
+      (should (equal (buffer-name (window-buffer side)) "*drover sidebar*"))
       (should-not (eq (get-buffer-window "*other 1*") side)))))
 
 (ert-deftest drover-list-test-side-select-back-and-forth ()
@@ -3337,7 +3379,7 @@ Each shows its own buffer."
     (pcase-let ((`(,first ,_second) (drover-list-test--main)))
       (drover-list-side '(4))
       (should (eq (selected-window) (drover-list--side-window)))
-      (should (eq (current-buffer) (get-buffer "*drover sessions*")))
+      (should (eq (current-buffer) (get-buffer "*drover sidebar*")))
       (drover-list-side '(4))
       (should (eq (selected-window) first))
       (drover-list-side '(4))
@@ -3348,28 +3390,29 @@ Each shows its own buffer."
       (should (eq (selected-window) first)))))
 
 (ert-deftest drover-list-test-side-and-ordinary-window ()
-  "The list moves between an ordinary window and the side window."
+  "The sidebar and the list in an ordinary window show at once, each for its width."
   (drover-list-test-with (drover-list-test-side-sample)
     (pcase-let ((`(,first ,second) (drover-list-test--main)))
       (drover-list)
       (should (eq (window-buffer first) buffer))
       (should (eq drover-list--layout 'columns))
-      ;; Shown on the side, it leaves the ordinary window.
-      (drover-list-side)
-      (should (drover-list--side-window))
-      (should (equal (get-buffer-window-list buffer) (list (drover-list--side-window))))
-      (with-current-buffer buffer
-        (should (eq drover-list--layout 'narrow)))
-      (should (equal (buffer-name (window-buffer second)) "*other 2*"))
-      ;; Listed in an ordinary window again, it leaves the side.
-      (drover-list)
-      (should-not (drover-list--side-window))
-      (should (eq (window-buffer (selected-window)) buffer))
-      (should-not (window-parameter (selected-window) 'window-side))
-      (should (eq drover-list--layout 'columns))
-      ;; q quits the ordinary window as usual.
-      (call-interactively (key-binding (kbd "q")))
-      (should-not (get-buffer-window buffer)))))
+      ;; The sidebar is a list of its own: the other one stays.
+      (let ((side (drover-list-side)))
+        (should (eq side (drover-list--side-window)))
+        (should (eq (window-buffer side) (drover-list--buffer t)))
+        (should-not (eq (drover-list--buffer t) buffer))
+        (should (eq (window-buffer first) buffer))
+        (should (equal (buffer-name (window-buffer second)) "*other 2*"))
+        (should (eq (buffer-local-value 'drover-list--layout (window-buffer side)) 'narrow))
+        ;; Listing again in an ordinary window leaves the sidebar.
+        (drover-list)
+        (should (eq (drover-list--side-window) side))
+        (should (eq (window-buffer (selected-window)) buffer))
+        (should-not (window-parameter (selected-window) 'window-side))
+        ;; q quits the ordinary window as usual; the sidebar stays.
+        (call-interactively (key-binding (kbd "q")))
+        (should-not (get-buffer-window buffer))
+        (should (window-live-p side))))))
 
 (ert-deftest drover-list-test-side-narrow-lines ()
   (drover-list-test-with (drover-list-test-side-sample)
@@ -3417,7 +3460,7 @@ Each shows its own buffer."
         (should (eq (selected-window) first))
         (should (equal (buffer-name (window-buffer first)) "*session done*"))
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
-        (should (eq (window-buffer side) buffer))))))
+        (should (eq (window-buffer side) (drover-list--buffer t)))))))
 
 (ert-deftest drover-list-test-side-o-opens-beside-main-window ()
   "From the side window, o opens a session in another window than the main window."
@@ -3431,7 +3474,7 @@ Each shows its own buffer."
         (should (eq (selected-window) second))
         (should (equal (buffer-name (window-buffer second)) "*session done*"))
         (should (equal (buffer-name (window-buffer first)) "*other 1*"))
-        (should (eq (window-buffer side) buffer))
+        (should (eq (window-buffer side) (drover-list--buffer t)))
         (should (= (length (window-list nil 'nomini)) 3))))))
 
 (ert-deftest drover-list-test-side-o-splits-main-window ()
@@ -3448,7 +3491,7 @@ Each shows its own buffer."
         (should-not (memq other (list main side)))
         (should (equal (car drover-test-calls) (list :open "done" nil other)))
         (should (equal (buffer-name (window-buffer main)) "*other 1*"))
-        (should (eq (window-buffer side) buffer))
+        (should (eq (window-buffer side) (drover-list--buffer t)))
         (should (= (length (window-list nil 'nomini)) 3))
         ;; RET opens in the main window, the one used last beside the list.
         (select-window main)
@@ -3746,51 +3789,351 @@ Each shows its own buffer."
         (should (= (window-point first) 5))
         (should (eq (selected-window) first))))))
 
-(ert-deftest drover-list-test-side-stale-while-hidden ()
+(ert-deftest drover-list-test-side-follows-while-hidden ()
+  "A hidden sidebar draws nothing as sessions change, and catches up in place once shown."
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-side)
     (drover-list-side)
     (should-not (drover-list--side-window))
-    (push (drover-test-session "new" :status 'working) drover-test-sessions)
-    (drover-backend-changed 'fake)
-    (drover-changed-now)
-    (should drover-list--stale)
-    (should-not (drover-list-test-section "new"))
-    (drover-list-side)
-    (with-current-buffer buffer
+    (with-current-buffer (drover-list--buffer t)
+      (let ((text (buffer-string)))
+        (push (drover-test-session "new" :status 'working) drover-test-sessions)
+        (drover-backend-changed 'fake)
+        (drover-changed-now)
+        ;; Nothing was drawn: the change is noted, to draw once shown.
+        (should (equal (buffer-string) text))
+        (should-not drover-list--stale)
+        (should (equal (car drover-list--pending) '((fake . "new"))))
+        (should-not (drover-list-test-section "new"))))
+    (should (zerop (drover-list-test-counting-redraws (drover-list-side))))
+    (with-current-buffer (drover-list--buffer t)
+      (should-not drover-list--pending)
+      (should (drover-list-test-section "new"))
+      (drover-list-test-is-fresh))))
+
+(ert-deftest drover-list-test-hidden-list-draws-whole-past-a-limit ()
+  "Past `drover-list--pending-limit' sessions changed while hidden, a list is drawn whole once shown."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (should-not (get-buffer-window buffer))
+    (let ((drover-list--pending-limit 2))
+      (dolist (id '("work" "done"))
+        (setf (drover-session-title (drover-list-test-find id)) (concat "Renamed " id))
+        (drover-backend-changed 'fake id)
+        (drover-changed-now))
       (should-not drover-list--stale)
-      (should (drover-list-test-section "new")))))
+      (should (equal (car drover-list--pending) '((fake . "work") (fake . "done"))))
+      (setf (drover-session-title (drover-list-test-find "fail")) "Renamed fail")
+      (drover-backend-changed 'fake "fail")
+      (drover-changed-now)
+      (should drover-list--stale)
+      (should-not drover-list--pending)
+      (save-window-excursion
+        (set-window-buffer (selected-window) buffer)
+        (should (= (drover-list-test-counting-redraws (drover-list--on-window-change (selected-window))) 1))
+        (should-not drover-list--stale)))))
 
 (ert-deftest drover-list-test-side-shown-again-keeps-point ()
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-side)
-    (set-window-point (drover-list--side-window)
-                      (save-excursion (drover-list-test-goto "work") (point)))
-    (drover-list-side)
-    (drover-list-side)
-    (goto-char (window-point (drover-list--side-window)))
-    (should (equal (drover-list-test-id-at-point) "work"))))
+    (with-current-buffer (drover-list--buffer t)
+      (set-window-point (drover-list--side-window)
+                        (save-excursion (drover-list-test-goto "work") (point)))
+      (drover-list-side)
+      (drover-list-side)
+      (goto-char (window-point (drover-list--side-window)))
+      (should (equal (drover-list-test-id-at-point) "work")))))
 
 (ert-deftest drover-list-test-side-width-change ()
   (drover-list-test-with (list (drover-test-session "a" :status 'waiting :since (drover-list-test-ago 60)
                                                     :requests '((:kind question :summary "Go?"))))
     (let* ((side (drover-list--show-side))
            (before (window-max-chars-per-line side)))
-      (should (= drover-list--width before))
-      ;; Two lines: the summary does not fit in a column.
+      (with-current-buffer (window-buffer side)
+        (should (= drover-list--width before))
+        ;; Two lines: the summary does not fit in a column.
+        (should (eq drover-list--layout 'narrow))
+        (should-not header-line-format)
+        (should (string-suffix-p "1m" (drover-list-test-heading "a")))
+        (should (= (string-width (drover-list-test-heading "a")) (1- before)))
+        (window-resize side 6 t nil t)
+        (should (= (window-max-chars-per-line side) (+ before 6)))
+        (drover-list--on-window-change side)
+        (should (= drover-list--width (+ before 6)))
+        ;; Now it does: one line, in columns.
+        (should (eq drover-list--layout 'columns))
+        (should (equal (drover-list-test-entry "a") "  ! Session a   1m  asks: Go?"))
+        ;; Named in the header line, which two lines lack.
+        (should (equal (drover-list-test-displayed header-line-format) "  Session      Age  Summary"))))))
+
+;;;; The sidebar and the list at once
+
+(defmacro drover-list-test-two-lists (&rest body)
+  "Run BODY with the sidebar and the list in an ordinary window, both shown.
+The frame is 200 columns wide.  The side sample is served, sessions
+open in buffers; `side' is the sidebar's window and `sidebar' its
+buffer, `full' the window of the list in an ordinary window, `buffer',
+and `second' another ordinary window, below it.  The list's window is
+selected, the list current."
+  (declare (indent 0) (debug t))
+  `(drover-list-test-with (drover-list-test-side-sample)
+     (drover-list-test--register-buffers)
+     (let ((size (cons (frame-width) (frame-height))))
+       (unwind-protect
+           (progn
+             (set-frame-size (selected-frame) 200 60)
+             (pcase-let ((`(,full ,second) (drover-list-test--main)))
+               (let* ((side (drover-list-side))
+                      (sidebar (window-buffer side)))
+                 (select-window full)
+                 (drover-list)
+                 (should (eq (selected-window) full))
+                 (ignore second sidebar)
+                 ,@body)))
+         (set-frame-size (selected-frame) (car size) (cdr size))))))
+
+(ert-deftest drover-list-test-two-lists-at-once ()
+  "Both lists show at once, each laid out for its width, with its own point and sections.
+A change draws both, in place, each as a drawing anew draws it."
+  (drover-list-test-two-lists
+    (should (eq (window-buffer full) buffer))
+    (should-not (eq sidebar buffer))
+    (with-current-buffer buffer
+      (should (eq drover-list--layout 'columns))
+      (should header-line-format)
+      (should (= drover-list--width (with-selected-window full (drover-list--line-width)))))
+    (with-current-buffer sidebar
       (should (eq drover-list--layout 'narrow))
       (should-not header-line-format)
-      (should (string-suffix-p "1m" (drover-list-test-heading "a")))
-      (should (= (string-width (drover-list-test-heading "a")) (1- before)))
-      (window-resize side 6 t nil t)
-      (should (= (window-max-chars-per-line side) (+ before 6)))
-      (drover-list--on-window-change side)
-      (should (= drover-list--width (+ before 6)))
-      ;; Now it does: one line, in columns.
-      (should (eq drover-list--layout 'columns))
-      (should (equal (drover-list-test-entry "a") "  ! Session a   1m  asks: Go?"))
-      ;; Named in the header line, which two lines lack.
-      (should (equal (drover-list-test-displayed header-line-format) "  Session      Age  Summary")))))
+      (should (= drover-list--width (with-selected-window side (drover-list--line-width))))
+      (should (< drover-list--width (buffer-local-value 'drover-list--width buffer))))
+    ;; Each list its point, its sessions expanded and its groups
+    ;; collapsed.
+    (with-selected-window side
+      (drover-list-test-goto "work")
+      (magit-section-show (drover-list-test-section "ask")))
+    (with-selected-window full
+      (drover-list-test-goto "fail")
+      (magit-section-show (seq-find (lambda (group) (equal (oref group value) '(status . idle)))
+                                    (drover-list--groups))))
+    (cl-flet ((expanded-p (list id)
+                (with-current-buffer list (not (drover-list-test-section-hidden-p id))))
+              (idle-shown-p (list)
+                (with-current-buffer list (not (drover-list-test-group-hidden-p 'idle)))))
+      (should (expanded-p sidebar "ask"))
+      (should-not (expanded-p buffer "ask"))
+      (should (idle-shown-p buffer))
+      (should-not (idle-shown-p sidebar))
+      ;; A change: both lists draw it, in place.
+      (setf (drover-session-title (drover-list-test-find "work")) "Renamed work"
+            (drover-session-title (drover-list-test-find "ask")) "Renamed ask")
+      (dolist (id '("work" "ask"))
+        (drover-backend-changed 'fake id))
+      (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+      (dolist (list (list sidebar buffer))
+        (with-current-buffer list
+          (should (string-match-p "Renamed work" (drover-list-test-heading "work")))
+          (drover-list-test-is-fresh)))
+      ;; Each kept its point and its sections.
+      (should (equal (drover-list-test-at-side side) "work"))
+      (should (equal (drover-list-test-at-side full) "fail"))
+      (should (expanded-p sidebar "ask"))
+      (should-not (expanded-p buffer "ask"))
+      (should (idle-shown-p buffer))
+      (should-not (idle-shown-p sidebar))
+      ;; Commands act in the list they are typed in.
+      (with-selected-window side
+        (drover-list-test-goto "done")
+        (drover-list-test-press "TAB"))
+      (should (expanded-p sidebar "done"))
+      (should-not (expanded-p buffer "done"))
+      (should (equal (drover-list-test-at-side full) "fail")))))
+
+(ert-deftest drover-list-test-two-lists-in-place-is-a-fresh-drawing ()
+  "Whatever sessions change, both lists drawn in place are the lists drawn anew."
+  (random "drover two lists")
+  (drover-list-test-two-lists
+    (setq drover-test-sessions (drover-list-test-random-sessions 30))
+    (let ((drover-list-collapsed-groups nil)
+          (in-place 0))
+      (drover-changed-now)
+      (dolist (list (list sidebar buffer))
+        (with-current-buffer list
+          (revert-buffer)
+          ;; Some sessions show their details, not the same in both.
+          (dolist (section (seq-take (seq-filter (lambda (section) (oref section hidden))
+                                                 (mapcan #'drover-list--session-sections
+                                                         (drover-list--containers)))
+                                     (if (eq list sidebar) 2 4)))
+            (magit-section-show section))))
+      (dotimes (step 25)
+        (when (zerop (random 4))
+          (with-current-buffer (seq-random-elt (list sidebar buffer))
+            (when-let* ((groups (drover-list--groups)))
+              (let ((group (seq-random-elt groups)))
+                (if (oref group hidden) (magit-section-show group) (magit-section-hide group))))))
+        (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
+          (setq drover-test-sessions sessions)
+          (dolist (id ids)
+            (drover-backend-changed 'fake id))
+          (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
+            (cl-incf in-place))
+          (dolist (list (list sidebar buffer))
+            (with-current-buffer list
+              (let ((drawn (drover-list-test-drawn))
+                    (fresh (drover-list-test-fresh)))
+                (should (equal (list step (buffer-name) (cdr drawn)) (list step (buffer-name) (cdr fresh))))
+                (should (equal-including-properties (car drawn) (car fresh))))))))
+      (should (> in-place 10)))))
+
+(ert-deftest drover-list-test-two-lists-share-rows ()
+  "A row made for one list, the other copies: its texts are made and measured once."
+  (drover-list-test-two-lists
+    (let ((made nil))
+      (cl-letf* ((title-text (symbol-function 'drover-list--title-text))
+                 ((symbol-function 'drover-list--title-text)
+                  (lambda (session &rest arguments)
+                    (push (drover-session-id session) made)
+                    (apply title-text session arguments))))
+        (setf (drover-session-title (drover-list-test-find "work")) "Renamed work")
+        (drover-backend-changed 'fake "work")
+        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+        (should (equal made '("work")))
+        (let ((rows (mapcar (lambda (list)
+                              (with-current-buffer list
+                                (gethash '(fake . "work") (drover-list--model-rows drover-list--model))))
+                            (list sidebar buffer))))
+          (should-not (eq (car rows) (cadr rows)))
+          (should (eq (drover-list--row-texts (car rows)) (drover-list--row-texts (cadr rows))))
+          (should (eq (drover-list--row-measures (car rows)) (drover-list--row-measures (cadr rows)))))
+        ;; A sidebar drawn from nothing beside the list makes no row.
+        (setq made nil)
+        (with-current-buffer sidebar
+          (revert-buffer)
+          (should-not made)
+          (should (string-match-p "Renamed work" (drover-list-test-heading "work")))
+          (drover-list-test-is-fresh))
+        ;; Measured otherwise, it makes its own.
+        (setq made nil)
+        (with-current-buffer sidebar
+          (face-remap-add-relative 'default :height 2.0)
+          (drover-list--render))
+        (should (member "work" made))))))
+
+(ert-deftest drover-list-test-two-lists-make-trees-once ()
+  "A change makes the trees it touches once, for both lists."
+  (drover-list-test-two-lists
+    (let ((made 0))
+      (cl-letf* ((tree-sessions (symbol-function 'drover-index-tree-sessions))
+                 ((symbol-function 'drover-index-tree-sessions)
+                  (lambda (root) (cl-incf made) (funcall tree-sessions root))))
+        (setf (drover-session-title (drover-list-test-find "work")) "Renamed work")
+        (drover-backend-changed 'fake "work")
+        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+        (should (= made 1))
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (should (string-match-p "Renamed work" (drover-list-test-heading "work")))))))
+    ;; A setting changed draws both whole, from trees made once.
+    (let ((made 0))
+      (cl-letf* ((tree (symbol-function 'drover-tree))
+                 ((symbol-function 'drover-tree)
+                  (lambda (sessions) (cl-incf made) (funcall tree sessions))))
+        (should (= (drover-list-test-counting-redraws (drover-set-group-by 'project)) 2))
+        (should (= made 1))
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (should (equal (mapcar #'car (drover-list-test-groups)) '(nil)))
+            (drover-list-test-is-fresh)))))))
+
+(ert-deftest drover-list-test-two-lists-hidden-one-waits ()
+  "With the list hidden, a change draws the sidebar alone; the list catches up once shown."
+  (drover-list-test-two-lists
+    (set-window-buffer full (get-buffer-create "*other 1*"))
+    (let ((text (with-current-buffer buffer (buffer-string))))
+      (setf (drover-session-title (drover-list-test-find "work")) "Renamed work")
+      (drover-backend-changed 'fake "work")
+      (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+      (with-current-buffer sidebar
+        (should (string-match-p "Renamed work" (drover-list-test-heading "work"))))
+      (with-current-buffer buffer
+        (should (equal (buffer-string) text))
+        (should (equal (car drover-list--pending) '((fake . "work"))))))
+    (set-window-buffer full buffer)
+    (should (zerop (drover-list-test-counting-redraws (drover-list--on-window-change full))))
+    (with-current-buffer buffer
+      (should (string-match-p "Renamed work" (drover-list-test-heading "work")))
+      (drover-list-test-is-fresh))))
+
+(ert-deftest drover-list-test-two-lists-title-faces ()
+  "Both lists colour a title by where its session is."
+  (drover-list-test-two-lists
+    (select-window side)
+    (drover-list-test-goto "done")
+    (execute-kbd-macro (kbd "RET"))
+    ;; Opened in the window where the user works, beside both lists.
+    (should (equal (buffer-name (window-buffer second)) "*session done*"))
+    (should (eq (selected-window) second))
+    (should (eq (window-buffer full) buffer))
+    (drover-list--windows-changed)
+    (dolist (list (list sidebar buffer))
+      (with-current-buffer list
+        (should (eq (drover-list-test-title-face "done") 'drover-active-session))))
+    ;; Another session shown, the user working in a list: the window
+    ;; selected before stays the one worked in.
+    (select-window side)
+    (drover-list-test-goto "fail")
+    (execute-kbd-macro (kbd "C-o"))
+    (drover-list--windows-changed)
+    (dolist (list (list sidebar buffer))
+      (with-current-buffer list
+        (should (eq (drover-list-test-title-face "fail") 'drover-active-session))
+        (should (eq (drover-list-test-title-face "done") 'drover-open-session))))))
+
+(ert-deftest drover-list-test-two-lists-menu-targets ()
+  "The menu acts on the list it opens in, else on the list used last."
+  (drover-list-test-two-lists
+    (with-selected-window side (drover-list-test-goto "work"))
+    (with-selected-window full (drover-list-test-goto "fail"))
+    ;; In a list, on that list.
+    (with-selected-window side
+      (let ((context (drover--context)))
+        (should-not (plist-get context :window))
+        (should (equal (drover-session-id (plist-get context :session)) "work"))))
+    (with-selected-window full
+      (should (equal (drover-session-id (plist-get (drover--context) :session)) "fail")))
+    ;; Elsewhere, on the list used last.
+    (let ((code (drover-list-test-code-buffer)))
+      (set-window-buffer second code)
+      (select-window side)
+      (select-window second)
+      (with-current-buffer code
+        (should (eq (plist-get (drover--context) :window) side))
+        (should (equal (drover-session-id (plist-get (drover--context) :session)) "work")))
+      (select-window full)
+      (select-window second)
+      (with-current-buffer code
+        (should (eq (plist-get (drover--context) :window) full))
+        (should (equal (drover-session-id (plist-get (drover--context) :session)) "fail"))))))
+
+(ert-deftest drover-list-test-two-lists-share-recaps ()
+  "A session expanded in both lists has its last turn fetched once."
+  (drover-list-test-two-lists
+    (setf (alist-get 'fake drover--backends)
+          (append (list :recap #'drover-test--recap) (alist-get 'fake drover--backends)))
+    (with-current-buffer sidebar
+      (magit-section-show (drover-list-test-section "ask")))
+    (should (equal drover-test-recap-calls '("ask")))
+    (with-current-buffer buffer
+      (magit-section-show (drover-list-test-section "ask"))
+      (should (string-match-p "Prompt +Prompt of ask" (drover-list-test-visible-text))))
+    (should (equal drover-test-recap-calls '("ask")))
+    ;; The session changed: whichever list draws it first fetches it.
+    (setq drover-list-test-clock (+ drover-list-test-clock drover-list--recap-interval))
+    (cl-incf (drover-session-since (drover-list-test-find "ask")) 1)
+    (setf (drover-session-updated (drover-list-test-find "ask")) drover-list-test-clock)
+    (drover-backend-changed 'fake "ask")
+    (drover-changed-now)
+    (should (equal drover-test-recap-calls '("ask" "ask")))))
 
 ;;;; Active subagents
 
@@ -3957,11 +4300,7 @@ still line up, and subagents under their parent's title."
             (should (= (drover-list-test-title-x "p" "Parent") (+ 14 12 4 20 20)))
             (should (= (drover-list-test-title-x "q" "Quiet") (+ 14 12 4)))
             (should (= (car (car (drover-list-test-cells "a"))) (drover-list-test-title-x "p" "Parent")))
-            (should (= (car (car (drover-list-test-cells "w"))) (drover-list-test-title-x "p" "Parent")))
-            ;; The header's glyph and count.
-            (goto-char (point-min))
-            (should (looking-at-p "!"))
-            (should (drover-list-test-ink-apart-p))))
+            (should (= (car (car (drover-list-test-cells "w"))) (drover-list-test-title-x "p" "Parent")))))
         ;; A group heading's glyph and count.
         (setq drover-group-by 'project)
         (revert-buffer)
@@ -4281,17 +4620,19 @@ The subagent's glyph stands under its parent's title."
     (current-buffer)))
 
 (defmacro drover-list-test-elsewhere (&rest body)
-  "Run BODY in a code buffer, the list in a side window beside it.
+  "Run BODY in a code buffer, the sidebar in a side window beside it.
 The side sample is served, sessions open in buffers; `first' is the
 window of the code buffer, selected, `second' another one, `side' the
-list's, its point on \"ask\", `code' the code buffer."
+sidebar's, its point on \"ask\", `buffer' the sidebar, `code' the code
+buffer."
   (declare (indent 0) (debug t))
   `(drover-list-test-with (drover-list-test-side-sample)
      (drover-list-test--register-buffers)
      (pcase-let ((`(,first ,second) (drover-list-test--main)))
-       (let ((side (drover-list--show-side))
-             (code (drover-list-test-code-buffer)))
-         (ignore first second side code)
+       (let* ((side (drover-list--show-side))
+              (buffer (window-buffer side))
+              (code (drover-list-test-code-buffer)))
+         (ignore first second side code buffer)
          (with-selected-window side
            (drover-list-test-goto "ask"))
          (set-window-buffer first code)
