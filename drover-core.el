@@ -2325,8 +2325,8 @@ value tells how, for `drover--archive-note'."
                            :updated (drover-session-updated session))))
           (setf (alist-get (drover-session-engine-key session) archive nil nil #'equal) entry)
           (drover--archive-write archive)
-          (drover--archive-changed session)))))))
-  (drover--close-archived session))
+          (drover--archive-changed session)))))
+    (drover--close-archived session)))
 
 (defun drover-unarchive-session (session)
   "Restore SESSION from the archive, drover's own or its backend's.
