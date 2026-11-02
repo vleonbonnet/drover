@@ -910,6 +910,41 @@ registration; the agent, if BODY starts one, is stopped after."
       (should (drover-attention--needs-p (drover-session-key live) live))
       (should-not (drover-attention--needs-p (drover-session-key stale) stale)))))
 
+(ert-deftest drover-remote-test-frozen-peer ()
+  "A peer that stops answering goes stale within its heartbeat's timeout, and back after.
+Its Emacs stopped by SIGSTOP, its connection stays open to the system:
+only the heartbeat tells.  Spyglass looked at it every half interval,
+which `drover-remote-heartbeat''s integers halved to whole seconds, 1
+to 0: a timer that never repeated, and the peer stayed open."
+  (drover-remote-test-with nil
+    (drover-remote-test-connect (drover-remote-test-start-agent dir))
+    (drover-remote-test-command "sessions" :n 3)
+    (drover-remote-test-synced 3)
+    (let* ((peer (drover-remote--peer "agent"))
+           (timer (spyglass-connection-timer (drover-remote--peer-connection peer)))
+           (top (process-id drover-remote-test--agent))
+           ;; The agent's Emacs, under `timeout'.
+           (emacs (seq-find (lambda (pid) (eql (alist-get 'ppid (process-attributes pid)) top))
+                            (list-system-processes)))
+           (start nil))
+      (should emacs)
+      (should (= (timer--repeat-delay timer) 0.5))
+      (signal-process emacs 'SIGSTOP)
+      (unwind-protect
+          (progn
+            (setq start (float-time))
+            (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 15)
+            ;; The timeout, 4 s, and a look every half second.
+            (should-not (eq (drover-remote--peer-state peer) 'open))
+            (should (< (- (float-time) start) 5.5))
+            (drover-changed-now)
+            (should (= (length (drover-remote-test-remote)) 3))
+            (should (seq-every-p #'drover-session-stale (drover-remote-test-remote))))
+        (signal-process emacs 'SIGCONT))
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state peer) 'open)) 30)
+      (should (eq (drover-remote--peer-state peer) 'open))
+      (drover-remote-test-synced 3 (lambda (session) (not (drover-session-stale session)))))))
+
 (ert-deftest drover-remote-test-prints-in-proportion ()
   "What the remote layer keeps prints in proportion to the sessions, both ways.
 Emacs prints a value whole in an error's data, or as `format' does: a

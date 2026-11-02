@@ -867,8 +867,11 @@ the peer writing meanwhile would lose what it had not read, the reason."
       (setf (alist-get connection (drover-remote--peer-candidates peer) nil 'remove) nil)
       (push (cons connection (gethash connection (drover-remote--state-hellos state)))
             (drover-remote--peer-candidates peer))
-      (spyglass-connection-set-heartbeat connection (car drover-remote-heartbeat)
-                                         (cdr drover-remote-heartbeat))
+      ;; Floats: spyglass looks at a connection every half interval,
+      ;; which an integer halves to a whole number, 1 to 0, a timer that
+      ;; never repeats: a frozen peer then stayed connected for good.
+      (spyglass-connection-set-heartbeat connection (float (car drover-remote-heartbeat))
+                                         (float (cdr drover-remote-heartbeat)))
       (drover-remote--elect state peer)))))
 
 (defun drover-remote--preferred-ours-p (peer)
