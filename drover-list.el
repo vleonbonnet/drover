@@ -4637,6 +4637,40 @@ Sessions in collapsed groups are passed over."
       (goto-char (oref section start))
     (message "No session")))
 
+;;;; Reordering for display
+
+;; Emacs lays out every line of a window showing a buffer that changed,
+;; unless the selected window shows it: an animated glyph costs that
+;; many times a second.  Reordering bidirectional text is a quarter of
+;; it, and does nothing to a list without right-to-left text, as most
+;; are.
+
+(defconst drover-list--right-to-left "[\u202b\u202e\u2067]\\|\\cR"
+  "What makes a list's lines need reordering for display.
+Strong right-to-left characters (the category R: Hebrew, Arabic, and
+the embeddings and overrides RLE and RLO), and the isolate RLI.")
+
+(defvar-local drover-list--reordering-tick nil
+  "The `buffer-chars-modified-tick' of the list when it was last looked at.
+See `drover-list--reorder'.")
+
+(defun drover-list--reorder (&optional _window)
+  "Reorder the list's lines for display only while it holds right-to-left text.
+Without such text, reordering changes nothing on the screen, and costs
+redisplay a quarter of its time.  The text is looked at again once it
+changed, not as the display of characters does, as animated glyphs do.
+For `pre-redisplay-functions'."
+  (drover-with-reporting "list display"
+    (let ((tick (buffer-chars-modified-tick)))
+      (unless (eql tick drover-list--reordering-tick)
+        (setq drover-list--reordering-tick tick)
+        (setq bidi-display-reordering
+              (save-excursion
+                (save-restriction
+                  (widen)
+                  (goto-char (point-min))
+                  (and (re-search-forward drover-list--right-to-left nil t) t))))))))
+
 ;;;; The mode
 
 (defun drover-list--mode-line-process ()
@@ -4723,6 +4757,7 @@ them with their last replies (see `drover-prompt-dwim').
   (add-hook 'kill-buffer-hook #'drover-list--on-kill nil t)
   (add-hook 'change-major-mode-hook #'drover-list--on-kill nil t)
   (add-hook 'post-command-hook #'drover-list--prefetch nil t)
+  (add-hook 'pre-redisplay-functions #'drover-list--reorder nil t)
   ;; Isearch finds the sessions of collapsed groups, and opens them.
   (add-hook 'isearch-mode-hook #'drover-list--draw-deferred nil t)
   (setq drover-list--live (append (remq (current-buffer) drover-list--live) (list (current-buffer))))

@@ -5107,6 +5107,31 @@ The subagent's glyph stands under its parent's title."
           (should (equal-including-properties (car (drover-list-test-drawn))
                                               (car (drover-list-test-fresh)))))))))
 
+(ert-deftest drover-list-test-reordering-only-right-to-left ()
+  "A list's lines are reordered for display only while it holds right-to-left text."
+  (drover-list-test-with (list (drover-list-test-titled "a" "Plain title" :status 'working))
+    (drover-list--reorder)
+    (should-not bidi-display-reordering)
+    (setf (drover-session-title (drover-list-test-find "a")) "שלום עולם")
+    (drover-list-test-refresh)
+    (drover-list--reorder)
+    (should bidi-display-reordering)
+    ;; The display of characters changing, it is not looked at again.
+    (setq bidi-display-reordering nil)
+    (let ((inhibit-read-only t))
+      (with-silent-modifications
+        (put-text-property (point-min) (1+ (point-min)) 'display "x")))
+    (drover-list--reorder)
+    (should-not bidi-display-reordering)
+    (setf (drover-session-title (drover-list-test-find "a")) "Back to \u202eplain")
+    (drover-list-test-refresh)
+    (drover-list--reorder)
+    (should bidi-display-reordering)
+    (setf (drover-session-title (drover-list-test-find "a")) "Plain again")
+    (drover-list-test-refresh)
+    (drover-list--reorder)
+    (should-not bidi-display-reordering)))
+
 ;;;; The menu on a list shown elsewhere
 
 (defun drover-list-test-code-buffer (&optional name)
