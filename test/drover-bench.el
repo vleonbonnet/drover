@@ -716,7 +716,7 @@ buffer, alone in the selected window."
         (condition-case err
             (progn (drover-bench-run)
                    (drover-bench-history))
-          (error (drover-bench-log "drover bench failed: %S" err)))
+          (error (drover-bench-log "drover bench failed: %s" (drover-error-string err))))
       (kill-emacs 0))))
 
 (provide 'drover-bench)

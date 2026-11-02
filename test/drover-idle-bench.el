@@ -492,7 +492,7 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
                                    (window-body-height (get-buffer-window buffer))
                                    (window-body-width (get-buffer-window buffer)))))
         (run-at-time 5 nil #'drover-idle-bench-run-phases (drover-idle-bench-phases)))
-    (error (drover-idle-bench-log "drover idle bench failed: %S" err)
+    (error (drover-idle-bench-log "drover idle bench failed: %s" (drover-error-string err))
            (kill-emacs 1))))
 
 (provide 'drover-idle-bench)

@@ -1029,6 +1029,31 @@ text: it is drawn apart."
           ('summary (drover-list--one-line (drover-session-summary session))))
         "")))
 
+;; A row leads to its tree and a tree to its group, which leads to all its
+;; trees and rows, and rows and groups lead to their sections, which lead
+;; to the root section and from there to every section of the buffer.
+;; Held as they are, these links made what prints of any of them, or of
+;; a closure holding one, grow with the square of the sessions shown, or
+;; faster: Emacs prints whole the data of an error, a value evaluated,
+;; what `format' is given, and a profile formatted so, holding the
+;; closure drawing a group of 3500 sessions, ran to gigabytes.  They are
+;; held through links, uninterned symbols whose values are what they
+;; lead to, which print as their names: each structure prints once, from
+;; where it is held.
+
+(defsubst drover-list--link (object)
+  "Return a link to OBJECT, which prints as a name alone, or nil for nil.
+`drover-list--linked' returns OBJECT from it.  Each link is new, so
+that a copy of a structure holding one may be linked elsewhere."
+  (when object
+    (let ((link (make-symbol "link")))
+      (set link object)
+      link)))
+
+(defsubst drover-list--linked (link)
+  "Return what LINK, made by `drover-list--link', leads to, or nil."
+  (and link (symbol-value link)))
+
 (cl-defstruct (drover-list--row (:constructor drover-list--row-create)
                                 (:copier nil))
   "A session as its heading shows it, before the layout."
@@ -1044,8 +1069,24 @@ text: it is drawn apart."
   (inputs nil :documentation "What the row was made of, see `drover-list--row-inputs'.")
   (measures nil :documentation "What the layout needs of it, see `drover-list--row-measures'.")
   (heading nil :documentation "Its heading as drawn, see `drover-list--heading', or nil.")
-  (tree nil :documentation "The `drover-list--tree' showing it.")
-  (section nil :documentation "Its section, once drawn."))
+  (tree-link nil :documentation "A link to the `drover-list--tree' showing it, see `drover-list--row-tree'.")
+  (section-link nil :documentation "A link to its section once drawn, see `drover-list--row-section'."))
+
+(defun drover-list--row-tree (row)
+  "Return the `drover-list--tree' showing ROW, or nil."
+  (drover-list--linked (drover-list--row-tree-link row)))
+
+(gv-define-setter drover-list--row-tree (tree row)
+  (macroexp-let2 nil tree tree
+    `(progn (setf (drover-list--row-tree-link ,row) (drover-list--link ,tree)) ,tree)))
+
+(defun drover-list--row-section (row)
+  "Return the section of ROW, once drawn, or nil."
+  (drover-list--linked (drover-list--row-section-link row)))
+
+(gv-define-setter drover-list--row-section (section row)
+  (macroexp-let2 nil section section
+    `(progn (setf (drover-list--row-section-link ,row) (drover-list--link ,section)) ,section)))
 
 (defun drover-list--metrics (now &optional active places)
   "Return the measures lines of the list are drawn with at time NOW.
@@ -1958,20 +1999,36 @@ every line of the windows showing it again."
   (full nil :documentation "The whole tree, as `drover-tree' made it.")
   (cut nil :documentation "The tree as `drover-filter' cuts it, or nil without a filter.")
   (serial nil :documentation "The place of its top session in the sessions listed.")
-  (group nil :documentation "The `drover-list--group' showing it.")
+  (group-link nil :documentation "A link to the `drover-list--group' showing it, see `drover-list--tree-group'.")
   (position nil :documentation "Its place among the trees of its group.")
   (shown nil :documentation "The rows of its visible sessions, in the order drawn."))
+
+(defun drover-list--tree-group (tree)
+  "Return the `drover-list--group' showing TREE, or, while it is placed, its value."
+  (drover-list--linked (drover-list--tree-group-link tree)))
+
+(gv-define-setter drover-list--tree-group (group tree)
+  (macroexp-let2 nil group group
+    `(progn (setf (drover-list--tree-group-link ,tree) (drover-list--link ,group)) ,group)))
 
 (cl-defstruct (drover-list--group (:constructor drover-list--group-create)
                                   (:copier nil))
   "A group of trees the list shows."
   (value nil :documentation "(GROUPING . VALUE), or nil when sessions are not grouped.")
-  (container nil :documentation "Its section; the root section without groups.")
+  (container-link nil :documentation "A link to its section, see `drover-list--group-container'.")
   (trees nil :documentation "Its trees, in the order drawn, a vector.")
   (head nil :documentation "Its most urgent tree, which places it among groups.")
   (counts nil :documentation "How many sessions of each status it shows, see `drover-list--count-row'.")
   (size 0 :documentation "How many sessions it shows.")
   (heading-text nil :documentation "Its heading as drawn."))
+
+(defun drover-list--group-container (group)
+  "Return the section of GROUP, the root section without groups, or nil."
+  (drover-list--linked (drover-list--group-container-link group)))
+
+(gv-define-setter drover-list--group-container (section group)
+  (macroexp-let2 nil section section
+    `(progn (setf (drover-list--group-container-link ,group) (drover-list--link ,section)) ,section)))
 
 (cl-defstruct (drover-list--model (:constructor drover-list--model-create)
                                   (:copier nil))
@@ -2975,7 +3032,7 @@ follow a change (see `drover-list--shared')."
                                        :root root :node node :full (gethash root fulls)
                                        :cut (and filtered (gethash root cuts))
                                        :serial (gethash root serials)
-                                       :group group :position (cl-incf position)
+                                       :group-link (drover-list--link group) :position (cl-incf position)
                                        :shown (drover-list--tree-rows (list node) value metrics))))
                            (puthash root tree (drover-list--model-trees model))
                            (dolist (row (drover-list--tree-shown tree))
@@ -3393,7 +3450,7 @@ measures.  The active subagents LAYOUT holds follow the tree.  Throw
             (drover-list--tree-create
              :root root :node node :full (car trees)
              :cut (and (drover-filter-active-p) (car (cdr view)))
-             :serial (drover-index-serial root) :group value
+             :serial (drover-index-serial root) :group-link (drover-list--link value)
              :shown (let ((drover-list--reuse rows-table))
                       (drover-list--tree-rows (list node) value metrics)))))))))
 
