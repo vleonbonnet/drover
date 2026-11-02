@@ -31,6 +31,7 @@
 ;;; Code:
 
 (require 'drover-test-helpers)
+(require 'drover-transcript-fixtures)
 (require 'json)
 ;; claude-code-ide first: drover loads the backend once it is loaded.
 (require 'claude-code-ide)
@@ -884,6 +885,53 @@ guess could hide another session of the directory."
           (drover-claude-code-ide-test-status terminal nil)
           (should (eq (drover-session-status (session)) 'idle))
           (should-not (drover-session-detail (session))))))))
+
+(ert-deftest drover-claude-code-ide-test-resumed-conversation ()
+  "A terminal resuming a conversation shows it as old as its newest message.
+The conversation began when its transcript tells; the idle status the
+CLI tells as it starts is no activity; a turn is, from its start to its
+end, and the conversation's newest message after."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (let* ((project (file-name-as-directory (expand-file-name "work" home)))
+             (start 1790000000.0)
+             (opened (+ start (* 14 86400)))
+             (file (drover-fixture-claude "c1" project :start start))
+             (clock opened)
+             (terminal (drover-claude-code-ide-test-terminal "*claude* resumed" :directory project))
+             (float-time (symbol-function 'float-time)))
+        (drover-transcript-scan drover-claude-code-transcripts--index)
+        (cl-letf (((symbol-function 'float-time)
+                   (lambda (&optional time) (if time (funcall float-time time) clock))))
+          (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+            (with-current-buffer terminal
+              (setq-local drover-claude-code-ide--created opened)
+              (setq-local drover-claude-code-ide-session-id "c1"))
+            (should (eql (drover-session-created (session)) start))
+            (should (eql (drover-session-updated (session)) (+ start 2)))
+            ;; The CLI starts, idle, and its records of its own follow.
+            (setq clock (+ opened 4))
+            (drover-claude-code-ide-test-status terminal '(("" :state idle)))
+            (apply #'drover-fixture-claude-append file (drover-fixture-claude-reopened "c1" project opened))
+            (drover-transcript-scan drover-claude-code-transcripts--index)
+            (should (eq (drover-session-status (session)) 'idle))
+            (should (eql (drover-session-updated (session)) (+ start 2)))
+            (should (eql (drover-session-last-activity (session)) (+ start 2)))
+            ;; A turn.
+            (setq clock (+ opened 60))
+            (drover-claude-code-ide-test-status terminal '(("" :state working)))
+            (should (eql (drover-session-updated (session)) (+ opened 60)))
+            (setq clock (+ opened 90))
+            (drover-claude-code-ide-test-status terminal '(("" :state done)))
+            (should (eql (drover-session-updated (session)) (+ opened 90)))
+            ;; Its end seen, then idle again, is no new activity.
+            (setq clock (+ opened 500))
+            (drover-claude-code-ide-test-status terminal '(("" :state idle)))
+            (should (eql (drover-session-updated (session)) (+ opened 90)))
+            ;; The transcript tells a later message.
+            (drover-fixture-claude-append file (drover-fixture-claude-assistant "c1" project (+ opened 95) "Done."))
+            (drover-transcript-scan drover-claude-code-transcripts--index)
+            (should (eql (drover-session-updated (session)) (+ opened 95)))))))))
 
 (ert-deftest drover-claude-code-ide-test-statuses-of-records-beyond-the-root ()
   "A request or an error of any record wins over the root, as in Ghostel's mode line."

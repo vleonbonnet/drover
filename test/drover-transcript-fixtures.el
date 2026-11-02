@@ -160,6 +160,45 @@ SUBAGENTS is a list of (NAME DESCRIPTION TYPE) written beside it."
   "Append LINES to the transcript FILE, as the CLI does as the conversation goes on."
   (drover-fixture-write file lines t))
 
+(defun drover-fixture-claude-reopened (id directory time)
+  "Return the records the CLI appends to conversation ID in DIRECTORY reopened at TIME.
+As Claude Code 2.1 writes them as it resumes a conversation, before
+any prompt: its own state again, the reply it makes up for a prompt
+left without one, its notes, and a task's notification kept for the
+transcript only."
+  (let ((stamp (drover-fixture-time time)))
+    (list (drover-fixture-line :type "queue-operation" :operation "enqueue" :timestamp stamp
+                               :sessionId id :content "<task-notification>done</task-notification>")
+          (drover-fixture-line :type "queue-operation" :operation "dequeue" :timestamp stamp :sessionId id)
+          (drover-fixture-line :parentUuid :null :isSidechain :false :type "assistant"
+                               :message (list :model "<synthetic>" :role "assistant" :type "message"
+                                              :content (vector (list :type "text" :text "No response requested.")))
+                               :isApiErrorMessage :false :uuid (format "%s-s%d" id (truncate time))
+                               :timestamp stamp :userType "external" :entrypoint "cli" :cwd directory
+                               :sessionId id :version "2.1.316" :gitBranch "main")
+          (drover-fixture-line :parentUuid :null :isSidechain :false :type "system" :subtype "informational"
+                               :content "Resumed" :isMeta :false :level "info" :timestamp stamp
+                               :uuid (format "%s-i%d" id (truncate time)) :cwd directory :sessionId id)
+          (drover-fixture-claude-user id directory time "<local-command-caveat>Caveat</local-command-caveat>"
+                                      :meta t)
+          (drover-fixture-line :parentUuid :null :isSidechain :false :promptId (concat "prompt-" id)
+                               :type "user" :message (list :role "user" :content "<task-notification>done</task-notification>")
+                               :origin (list :kind "task-notification") :promptSource "system"
+                               :queueTranscriptOnly t :uuid (format "%s-q%d" id (truncate time))
+                               :timestamp stamp :userType "external" :entrypoint "cli" :cwd directory
+                               :sessionId id :version "2.1.316" :gitBranch "main")
+          (drover-fixture-line :type "file-history-snapshot" :messageId (concat id "-r")
+                               :snapshot (list :messageId (concat id "-r") :timestamp stamp
+                                               :trackedFileBackups (list :none :false))
+                               :isSnapshotUpdate :false)
+          (drover-fixture-claude-meta id "last-prompt" :lastPrompt "Fix the login redirect")
+          (drover-fixture-claude-meta id "ai-title" :aiTitle "Keep the login page")
+          (drover-fixture-claude-meta id "mode" :mode "normal")
+          (drover-fixture-claude-meta id "permission-mode" :permissionMode "default")
+          (drover-fixture-claude-meta id "atis-latch" :atis :false)
+          (drover-fixture-line :type "cost-state" :sessionId id :totalCostUSD 0)
+          (drover-fixture-line :type "tools-used" :sessionId id :tools []))))
+
 ;;;; Codex
 
 (defun drover-fixture-codex-file (id time &optional archived)
@@ -225,6 +264,26 @@ context with MODEL and EFFORT, a patch and REPLY."
                            :payload (list :type "token_count" :info :null))))
     (set-file-times file (seconds-to-time (+ start 6)))
     file))
+
+(defun drover-fixture-codex-reopened (id directory time)
+  "Return the records Codex may append to conversation ID in DIRECTORY reopened at TIME.
+Records of its own, before any prompt: the session's metadata, the
+context of the next turn, the state of the world, the settings applied,
+the tokens counted and what it tells the model as the developer."
+  (let ((stamp (drover-fixture-time time)))
+    (list (drover-fixture-line :timestamp stamp :type "session_meta"
+                               :payload (list :id id :timestamp stamp :cwd directory
+                                              :originator "codex_cli_rs" :cli_version "0.166.0"))
+          (drover-fixture-line :timestamp stamp :type "event_msg"
+                               :payload (list :type "thread_settings_applied" :model "gpt-5.5"))
+          (drover-fixture-line :timestamp stamp :type "response_item"
+                               :payload (list :type "message" :role "developer"
+                                              :content (vector (list :type "input_text" :text "<permissions>"))))
+          (drover-fixture-line :timestamp stamp :type "world_state" :payload (list :cwd directory))
+          (drover-fixture-line :timestamp stamp :type "turn_context"
+                               :payload (list :cwd directory :model "gpt-5.5" :effort "high"))
+          (drover-fixture-line :timestamp stamp :type "event_msg"
+                               :payload (list :type "token_count" :info :null)))))
 
 (defun drover-fixture-codex-name (id name)
   "Append to session_index.jsonl the NAME Codex gave conversation ID."

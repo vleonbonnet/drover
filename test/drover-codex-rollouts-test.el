@@ -25,6 +25,7 @@
 
 (require 'drover-test-helpers)
 (require 'drover-transcript-fixtures)
+(require 'drover-list)
 
 (defmacro drover-codex-rollouts-test-with (&rest body)
   "Run BODY with the `codex' backend alone, over the fixtures' homes.
@@ -77,7 +78,56 @@
                              (drover-session-engine-id session) (drover-session-status session)
                              (drover-session-created session) (drover-session-updated session))
                        (list "Add the export command" project "feature" "GPT-5.5" "high" 'codex
-                             drover-codex-rollouts-test-a 'idle 1790000000.0 1790000006.0)))))))
+                             ;; Its last activity is its reply's, not the
+                             ;; tokens counted after.
+                             drover-codex-rollouts-test-a 'idle 1790000000.0 1790000005.0)))))))
+
+(ert-deftest drover-codex-rollouts-test-reopened ()
+  "A conversation reopened is as old as its newest event of a turn.
+Codex records of its own, with the time of now, the session's metadata,
+the next turn's context, the settings applied, the tokens counted: its
+age and place in the sort stay those of its reply, until a new prompt.
+Read whole, with a tail of such records longer than its window, the
+same."
+  (drover-codex-rollouts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (start 1790000000.0)
+           (reopened (+ start (* 14 86400)))
+           (file (drover-fixture-codex drover-codex-rollouts-test-a project :start start)))
+      (drover-fixture-codex drover-codex-rollouts-test-b project :start (+ start 86400) :prompt "Other")
+      (drover-codex-rollouts-test-scan)
+      (drover-index)
+      (cl-flet ((session () (drover-index-session (cons 'codex drover-codex-rollouts-test-a)))
+                (order () (mapcar #'drover-session-id (drover-sort (drover-index-sessions)))))
+        (should (eql (drover-session-updated (session)) (+ start 5)))
+        (drover-fixture-write file (drover-fixture-codex-reopened drover-codex-rollouts-test-a project reopened)
+                              t)
+        (set-file-times file (seconds-to-time reopened))
+        (drover-codex-rollouts-test-scan)
+        (should (eql (drover-session-updated (session)) (+ start 5)))
+        (should (eql (drover-list--age-time (session)) (+ start 5)))
+        (should (eql (drover--sort-time (session)) (+ start 5)))
+        (should (equal (order) (list drover-codex-rollouts-test-b drover-codex-rollouts-test-a)))
+        ;; Read whole, its records of its own filling more than a tail.
+        (dotimes (_ 250)
+          (drover-fixture-write file (drover-fixture-codex-reopened drover-codex-rollouts-test-a project
+                                                                    reopened)
+                                t))
+        (should (> (file-attribute-size (file-attributes file)) (* 2 drover-transcript-window)))
+        (should (eql (plist-get (drover-codex-rollouts--read file (file-attributes file) nil) :updated)
+                     (+ start 5)))
+        ;; A new prompt is activity.
+        (drover-fixture-write file (list (drover-fixture-line
+                                          :timestamp (drover-fixture-time (+ reopened 60)) :type "event_msg"
+                                          :payload (list :type "user_message" :message "Go on" :images []))
+                                         (drover-fixture-line
+                                          :timestamp (drover-fixture-time (+ reopened 61)) :type "event_msg"
+                                          :payload (list :type "token_count" :info :null)))
+                              t)
+        (drover-codex-rollouts-test-scan)
+        (should (eql (drover-session-updated (session)) (+ reopened 60)))
+        (should (eql (drover--sort-time (session)) (+ reopened 60)))
+        (should (equal (order) (list drover-codex-rollouts-test-a drover-codex-rollouts-test-b)))))))
 
 (ert-deftest drover-codex-rollouts-test-long-session-meta ()
   "A first record longer than the window still tells the session's directory."
