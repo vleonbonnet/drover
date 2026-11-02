@@ -499,6 +499,134 @@ Each is (DIRECTORY CALLBACK)."
                     'minibuffer-prompt))
         (should (eq (get-text-property (match-beginning 1) 'face info) 'opencode-setting-chosen))))))
 
+(ert-deftest drover-prompt-test-menu-shows-options ()
+  "The dispatch menu shows what the prompt runs beside the keys choosing it.
+A choice shows as a value, highlighted; what the engine would run
+without one, dimmed, as the header dims it.  From another buffer, the
+keys choose for the prompt, and so show its values; until the prompt
+exists, none."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (drover-test-register-engine 'claude :resolve (lambda (defaults agent model variant)
+                                                    (list :agent (or agent (plist-get defaults :agent))
+                                                          :model model :variant variant)))
+    (let ((drover-default-prompt-buffer-function #'drover-prompt-default-buffer))
+      (cl-flet ((value (key) (drover-keys-test-value key 'drover-dispatch))
+                (face (key) (get-text-property 0 'face (drover-keys-test-value key 'drover-dispatch))))
+        (with-temp-buffer
+          (should (equal (value "a") ""))
+          (should-not (get-buffer drover-prompt-buffer-name)))
+        (with-current-buffer (drover-prompt-buffer t)
+          (setq default-directory "/work/project/"
+                drover-prompt--last-engine 'claude
+                drover-prompt--defaults '((claude :agent "plan"))
+                drover-prompt-picked-model (drover-test-model "claude-opus-5-5" :name "Claude Opus 5.5"
+                                                              :engines '(claude))
+                drover-prompt-picked-variant 'high)
+          (should (equal (value "a") "plan"))
+          (should (eq (face "a") 'transient-inactive-value))
+          (should (equal (value "m") "Opus 5.5"))
+          (should (eq (face "m") 'transient-value))
+          (should (equal (value "e") "high"))
+          (should (equal (value "d") "/work/project"))
+          (should (eq (face "d") 'transient-inactive-value))
+          (should (member " a Agent plan" (drover-keys-test-render 'drover-dispatch)))
+          (should (equal (drover--dispatch-options-description) "Prompt runs")))
+        ;; Elsewhere, the prompt's, which the keys choose for; updated as
+        ;; it changes.
+        (with-temp-buffer
+          (should (equal (value "m") "Opus 5.5"))
+          (with-current-buffer drover-prompt-buffer-name
+            (setq drover-prompt-picked-agent "build"))
+          (should (equal (value "a") "build"))
+          (should (eq (face "a") 'transient-value)))
+        ;; A directory shows its end.
+        (with-current-buffer drover-prompt-buffer-name
+          (setq default-directory "/work/a/very/long/path/to/the/project/of/the/prompt/"
+                drover-prompt-directory-picked-p t)
+          (should (equal (value "d") "…/project/of/the/prompt"))
+          (should (eq (face "d") 'transient-value)))))))
+
+(ert-deftest drover-prompt-test-menu-shows-session-options ()
+  "In a session's buffer, the menu shows what the session runs.
+The keys choose for the session there, as in a list on a session whose
+buffer is open: its agent, model, effort and directory show, the model
+and effort its backend tells first, an effort by default dimmed."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (let* ((session (drover-prompt-test--session "s" :agent "build" :model "Opus 5.5" :effort "high"
+                                                 :effort-default t :directory "/work/s/"))
+           (buffer (drover-prompt-test--buffer-of "s")))
+      (with-current-buffer buffer
+        (setq-local drover-session-at-point-function (lambda () session))
+        (dolist (action '(agent model effort directory))
+          (drover-prompt-define action #'ignore)))
+      (cl-flet ((value (key) (drover-keys-test-value key 'drover-dispatch))
+                (face (key) (get-text-property 0 'face (drover-keys-test-value key 'drover-dispatch))))
+        (with-current-buffer buffer
+          (should (equal (mapcar #'value '("a" "m" "e" "d")) '("build" "Opus 5.5" "high" "/work/s")))
+          (should (eq (face "a") 'transient-value))
+          (should (eq (face "e") 'transient-inactive-value))
+          (should (equal (drover--dispatch-options-description) "Session runs"))
+          ;; What the backend tells it runs now comes first.
+          (setf (alist-get 'fake drover--backends)
+                (append (list :options (lambda (_)
+                                         (list :model (drover-test-model "gpt-a" :name "GPT A"
+                                                                         :default-variant 'medium)
+                                               :variant 'xhigh)))
+                        (alist-get 'fake drover--backends)))
+          (should (equal (value "m") "GPT A"))
+          (should (equal (value "e") "xhigh"))
+          (should (eq (face "e") 'transient-value)))
+        ;; From a list, the session at point's, its buffer being open.
+        (with-temp-buffer
+          (setq-local drover-view-p t
+                      drover-session-at-point-function (lambda () session))
+          (should (equal (value "a") "build"))
+          (should (equal (drover--dispatch-options-description) "Session runs")))))))
+
+(ert-deftest drover-prompt-test-menu-option-stays-open ()
+  "Choosing the agent from the menu leaves it open, the new agent shown."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (save-window-excursion
+      (let ((prompt (drover-prompt-buffer t)))
+        (switch-to-buffer prompt)
+        (drover-prompt-define 'agent (lambda ()
+                                       (interactive)
+                                       (setq drover-prompt-picked-agent "review")))
+        (use-local-map (let ((map (make-sparse-keymap)))
+                         (keymap-set map "C-'" #'drover-dispatch)
+                         map))
+        (unwind-protect
+            (progn
+              (execute-kbd-macro (kbd "C-' a"))
+              (should (eq (oref transient--prefix command) 'drover-dispatch))
+              (should (string-search " a Agent review"
+                                     (with-current-buffer " *transient*" (buffer-string))))
+              (execute-kbd-macro (kbd "C-g"))
+              (should-not transient--prefix))
+          (when transient--prefix
+            (execute-kbd-macro (kbd "C-g")))
+          (use-local-map nil))))))
+
+(ert-deftest drover-prompt-test-menu-send-target ()
+  "Send names where the prompt goes, as the functions of a hook tell."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (with-current-buffer (drover-prompt-buffer t)
+      (should (member " RET Send" (drover-keys-test-render 'drover-dispatch)))
+      (let ((drover-dispatch-send-target-functions
+             (list (lambda () (error "Broken"))
+                   (lambda () nil)
+                   (lambda () (and (eq (current-buffer) (get-buffer drover-prompt-buffer-name))
+                                   (concat "Fix the login\nredirect" (make-string 500000 ?x))))
+                   (lambda () "Never asked"))))
+        (let ((line (seq-find (lambda (line) (string-prefix-p " RET Send" line))
+                              (drover-keys-test-render 'drover-dispatch))))
+          (should (string-prefix-p " RET Send Fix the login redirect" line))
+          (should (< (length line) 40)))))))
+
 (ert-deftest drover-prompt-test-picker-entry-options ()
   "Picker entries show what a send runs, choices applied the way sending applies them."
   (drover-prompt-test-with

@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 8
+(defconst drover-core-generation 9
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -3412,6 +3412,14 @@ when they went to the kill ring."
     (kill-new (mapconcat #'string-trim texts "\n\n"))
     t))
 
+(defun drover--view-shown-elsewhere-p (buffer window)
+  "Return non-nil when BUFFER is one of drover's views shown beside WINDOW.
+That is a buffer whose `drover-view-p' is set, shown in a window of any
+frame other than WINDOW."
+  (and (buffer-local-value 'drover-view-p buffer)
+       (seq-some (lambda (other) (not (eq other window)))
+                 (get-buffer-window-list buffer nil t))))
+
 (defun drover--skip-shown-views (skip)
   "Return a value of `switch-to-prev-buffer-skip' skipping drover's views shown.
 A view, a buffer whose `drover-view-p' is set, shown in another window
@@ -3420,11 +3428,20 @@ skips."
   (let ((skip (cond ((or (functionp skip) (memq skip '(nil t visible 0))) skip)
                     (t 'frame))))
     (lambda (window buffer bury-or-kill)
-      (or (and (buffer-local-value 'drover-view-p buffer)
-               (seq-some (lambda (other) (not (eq other window)))
-                         (get-buffer-window-list buffer nil t)))
+      (or (drover--view-shown-elsewhere-p buffer window)
           (switch-to-prev-buffer-skip-p (if (eq skip 'frame) (window-frame window) skip)
                                         window buffer bury-or-kill)))))
+
+(defun drover--prev-buffer-skip ()
+  "Return the value of `switch-to-prev-buffer-skip' for windows drover empties.
+While one of drover's views shows, it skips the views shown in another
+window already (see `drover--skip-shown-views'), so that a window drover
+empties does not show a view a second time; otherwise it is the user's
+value."
+  (if (seq-some (lambda (window) (buffer-local-value 'drover-view-p (window-buffer window)))
+                (window-list-1 nil 'nomini t))
+      (drover--skip-shown-views switch-to-prev-buffer-skip)
+    switch-to-prev-buffer-skip))
 
 (defun drover-kill-buffer (buffer)
   "Kill BUFFER without asking.
@@ -3434,11 +3451,7 @@ ask about a live process or work in progress, are not run.  Its windows
 show what Emacs shows in place of a killed buffer, a dedicated window
 going as usual, but while one of drover's views shows, none of them
 shows that view a second time."
-  (let ((switch-to-prev-buffer-skip
-         (if (seq-some (lambda (window) (buffer-local-value 'drover-view-p (window-buffer window)))
-                       (window-list-1 nil 'nomini t))
-             (drover--skip-shown-views switch-to-prev-buffer-skip)
-           switch-to-prev-buffer-skip)))
+  (let ((switch-to-prev-buffer-skip (drover--prev-buffer-skip)))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         ;; Bound in BUFFER: buffers ask through local values too, as
