@@ -67,7 +67,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 9))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -976,6 +976,18 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
   "Read the provider whose sessions to list, CURRENT being the one now, or nil."
   (drover--read-known "Provider" #'drover-session-provider-name current))
 
+(defun drover--read-filter-harness (current)
+  "Read the harness whose sessions to list, CURRENT being the one now, or nil.
+Harnesses are read by name, among those of the sessions known."
+  (let* ((names (mapcar (lambda (harness) (cons (drover-harness-name harness) harness))
+                        (delete-dups (mapcar #'drover-session-harness (drover-known-sessions)))))
+         (answer (completing-read (if current
+                                      (format "Harness (now %s, empty for any): " (drover-harness-name current))
+                                    "Harness (empty for any): ")
+                                  (sort (mapcar #'car names) :key #'downcase) nil t)))
+    (unless (string-empty-p answer)
+      (cdr (assoc answer names)))))
+
 (defun drover--read-filter-statuses (current)
   "Read the statuses to list, CURRENT being those listed now."
   (let* ((labels (mapcar (lambda (status) (cons (opencode-session-status-label status) status))
@@ -1013,6 +1025,7 @@ This host is `local'; an empty answer lists every host's sessions."
     (:host (mapconcat (lambda (host) (drover-host-label (if (eq host 'local) nil host)))
                       value ", "))
     (:since (drover-filter-since-label value))
+    (:harness (drover-harness-name value))
     (:search (format "\"%s\"" value))
     (_ (format "%s" value))))
 
@@ -1026,14 +1039,14 @@ This host is `local'; an empty answer lists every host's sessions."
 
 (defconst drover-sort-labels
   '((urgency . "urgency") (title . "title") (project . "project") (branch . "branch")
-    (agent . "agent") (model . "model") (provider . "provider") (updated . "last activity")
-    (created . "creation"))
+    (agent . "agent") (model . "model") (provider . "provider") (harness . "harness")
+    (updated . "last activity") (created . "creation"))
   "Display name of each field of `drover-sort-fields'.")
 
 (defconst drover-grouping-labels
   '((status . "status") (project . "project") (branch . "branch") (agent . "agent")
-    (model . "model") (provider . "provider") (host . "host") (updated . "last activity")
-    (nil . "nothing"))
+    (model . "model") (provider . "provider") (harness . "harness") (host . "host")
+    (updated . "last activity") (nil . "nothing"))
   "Display name of each grouping of `drover-groupings'.")
 
 (defclass drover--setting (transient-variable)
@@ -1184,6 +1197,13 @@ The value of an entry that does not apply is dimmed."
   :filter-key :provider
   :chooser #'drover--read-filter-provider)
 
+(transient-define-infix drover-view--filter-harness ()
+  "List the sessions of one harness in every view."
+  :class 'drover--filter-setting
+  :description "harness"
+  :filter-key :harness
+  :chooser #'drover--read-filter-harness)
+
 (transient-define-infix drover-view--filter-host ()
   "List the sessions of some hosts in every view."
   :class 'drover--filter-setting
@@ -1264,8 +1284,8 @@ frame, the one used last of several."
 (defvar drover-list-hidden-fields)
 
 (defconst drover-list-field-labels
-  '((host . "host") (location . "location") (branch . "branch") (agent . "agent") (model . "model") (provider . "provider")
-    (context . "context") (created . "created") (age . "age") (cache . "cache")
+  '((host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
+    (model . "model") (provider . "provider") (context . "context") (created . "created") (age . "age") (cache . "cache")
     (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
 
@@ -1324,6 +1344,7 @@ Before the list is loaded, any field is."
      :if (lambda () (drover--list-field-p ',field))))
 
 (drover--define-column-switch host)
+(drover--define-column-switch harness)
 (drover--define-column-switch location)
 (drover--define-column-switch branch)
 (drover--define-column-switch agent)
@@ -1769,9 +1790,10 @@ The group itself applies, as U may in a list of another front end."
    ("=p" drover-view--filter-project)
    ("=s" drover-view--filter-statuses)
    ("=a" drover-view--filter-agent)
-   ("=m" drover-view--filter-model)]
+   ("=m" drover-view--filter-model)
+   ("=v" drover-view--filter-provider)]
   [:inapt-if-not drover-dispatch-view-shown-p
-   ("=v" drover-view--filter-provider)
+   ("=H" drover-view--filter-harness)
    ("=h" drover-view--filter-host)
    ("=d" drover-view--filter-since)
    ("=f" drover-view--filter-search)
@@ -1779,15 +1801,16 @@ The group itself applies, as U may in a list of another front end."
   ["Columns"
    :inapt-if-not drover-dispatch-view-shown-p
    ("-h" drover-view--column-host)
+   ("-H" drover-view--column-harness)
    ("-l" drover-view--column-location)
-   ("-b" drover-view--column-branch)
-   ("-a" drover-view--column-agent)]
+   ("-b" drover-view--column-branch)]
   [:inapt-if-not drover-dispatch-view-shown-p
+   ("-a" drover-view--column-agent)
    ("-m" drover-view--column-model)
    ("-r" drover-view--column-provider)
-   ("-x" drover-view--column-context)
-   ("-c" drover-view--column-created)]
+   ("-x" drover-view--column-context)]
   [:inapt-if-not drover-dispatch-view-shown-p
+   ("-c" drover-view--column-created)
    ("-t" drover-view--column-age)
    ("-p" drover-view--column-cache)
    ("-s" drover-view--column-summary)])

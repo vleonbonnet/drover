@@ -24,13 +24,14 @@
 ;; ordinary window; `drover-list-side' lists them in a buffer of its
 ;; own, the sidebar, in a side window beside your work, so that both
 ;; may show at once, each laid out for its own width.  Each keeps its
-;; point, its expanded sessions and collapsed groups; both list the
+;; point; the list its expanded sessions and collapsed groups, the
+;; sidebar folding nothing (`drover-list-sidebar-mode'); both list the
 ;; sessions `drover-filter' keeps, grouped as `drover-group-by' says and
 ;; sorted as `drover-sort-by' says, by default ungrouped, the sessions
 ;; running turns first, then the most recently active, none moving as
 ;; a turn streams; the View menu, \\`V', changes all three, for both.
-;; Each group is a section that \\`TAB' collapses, and each session a
-;; section whose body recaps its last turn: what it waits for, the
+;; In the list, each group is a section that \\`TAB' collapses, and each
+;; session a section whose body recaps its last turn: what it waits for, the
 ;; error that ended it, the prompt, the agent's reply and the files it
 ;; changed, as its backend tells them (`drover-recap'), fetched as it
 ;; expands, and what its line leaves out.  The keys of
@@ -121,7 +122,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 7))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -264,7 +265,7 @@ than the one the user works in moves at the full pace."
   :type '(choice (const :tag "Still while unfocused" nil) (number :tag "Seconds"))
   :group 'drover-list)
 
-(defcustom drover-list-fields
+(defconst drover-list--former-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
     (location :priority 8 :min 10 :max 30 :label "Project")
@@ -277,6 +278,27 @@ than the one the user works in moves at the full pace."
     (age :priority 1 :min 3 :align right :narrow line :label "Age")
     (cache :priority 3 :min 9 :narrow background :label "Cache")
     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+  "The standard value of `drover-list-fields' before the harness's field.")
+
+;; Loaded over a drover of the former standard value, which `defcustom'
+;; would keep, the list takes the new one.
+(when (and (boundp 'drover-list-fields) (equal drover-list-fields drover-list--former-fields))
+  (makunbound 'drover-list-fields))
+
+(defcustom drover-list-fields
+  '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+    (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+    (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+    (location :priority 9 :min 10 :max 30 :label "Project")
+    (branch :priority 10 :min 6 :max 24 :label "Branch")
+    (agent :priority 11 :min 5 :max 14 :label "Agent")
+    (model :priority 6 :min 8 :max 22 :label "Model")
+    (provider :priority 8 :min 2 :max 12 :label "Provider")
+    (context :priority 7 :min 9 :label "Context")
+    (created :priority 12 :min 3 :align right :label "Created")
+    (age :priority 1 :min 3 :align right :narrow line :label "Age")
+    (cache :priority 3 :min 9 :narrow background :label "Cache")
+    (summary :priority 4 :min 12 :narrow below :label "Summary"))
   "Fields a line of the session list may show, in the order of columns.
 Each entry is (FIELD . PROPERTIES).  FIELD is one of:
 
@@ -284,6 +306,8 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  host      The host of a session of another host, and how long ago it
            was last heard from while it is not connected; nothing for
            this host's, so that a list of them has no such column.
+ harness   What runs the session (see `drover-harnesses'): its icon and
+           name, its icon alone where room is short, as in two lines.
  location  The project.
  branch    The Git branch, unless it is the default branch of its
            repository (see `drover-session-default-branch-p').
@@ -307,7 +331,8 @@ PROPERTIES is a plist of:
             only when every field of a higher one does.
  :min       Fewest characters the field needs to be shown.  Fields of
             a short text, the ages, context, cache and provider, are
-            never cut, and need the room of their text at least.
+            never cut, and need the room of their text at least; the
+            harness needs that of its icon.
  :max       Most characters it takes before being cut; nil lets it
             take what is left of the line.
  :align     `right' to align the field on the right of its column.
@@ -327,7 +352,8 @@ of those.  Columns are named in the header line, and are at least as
 wide as their name, room allowing.  On a line too narrow for every
 column, the summary gives up room first, then the names of the columns
 of short texts, then the title, then the other fields in proportion;
-the model keeps its effort, cutting its name."
+the model keeps its effort, cutting its name, and the harness its icon,
+leaving its name out.  In two lines, the harness shows its icon alone."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
@@ -337,6 +363,7 @@ The list chooses among the other fields by the room they take; the
 title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
 changes it for the session, with one switch per field."
   :type '(set (const :tag "Host" host)
+              (const :tag "Harness" harness)
               (const :tag "Project" location)
               (const :tag "Branch" branch)
               (const :tag "Agent" agent)
@@ -352,6 +379,7 @@ changes it for the session, with one switch per field."
 (defconst drover-list-field-descriptions
   '((title . "The status of the session, the subagents at work under it, and its title")
     (host . "The host the session runs on, if another; and since when it is not connected")
+    (harness . "What runs the session: its front end, or the CLI that recorded it")
     (location . "The project the session works in")
     (branch . "The branch the session works on, unless its repository's default one")
     (agent . "The agent the session runs")
@@ -492,6 +520,13 @@ narrow window.")
 ;;;; Sections
 
 (defvar drover-list--model)
+
+(defvar-local drover-list--folds t
+  "Non-nil when the current list folds its sections.
+Its sessions then expand to recap their last turn, its groups collapse,
+and every line begins with `drover-list--line-start'.  The sidebar
+folds nothing (see `drover-list-sidebar-mode'): its lines begin with
+their glyphs, at the window's edge.")
 
 (defvar-keymap drover-list-group-section-map
   :doc "Keys on the heading of a group of sessions."
@@ -773,11 +808,31 @@ as the effort after a model."
       (let ((start (or (previous-single-property-change end 'drover-list-keep string) 0)))
         (and (> start 0) start)))))
 
+(defun drover-list--kept-head (string)
+  "Return where the head of STRING to keep whole ends, or nil without one.
+The head is what the property `drover-list-keep' marks at its start,
+not at its end, such as the icon of a harness before its name: cut,
+STRING is its head alone (see `drover-list--compact')."
+  (let ((end (length string)))
+    (when (and (> end 0)
+               (get-text-property 0 'drover-list-keep string)
+               (not (get-text-property (1- end) 'drover-list-keep string)))
+      (next-single-property-change 0 'drover-list-keep string end))))
+
+(defun drover-list--compact (string)
+  "Return STRING as a line too short for it shows it: its head kept, if any.
+See `drover-list--kept-head'; STRING itself without one."
+  (if-let* ((head (drover-list--kept-head string)))
+      (substring string 0 head)
+    string))
+
 (defun drover-list--truncate (string pixels)
   "Return STRING cut to at most PIXELS wide, ending in an ellipsis if cut.
 The ellipsis takes the properties of the text before it.  A tail of
 STRING marked to keep (see `drover-list--kept') stays whole, its head
-being cut, room allowing.  Return \"\" when not even the ellipsis fits.
+being cut, room allowing; a head marked to keep (see
+`drover-list--kept-head') is all that shows, without an ellipsis.
+Return \"\" when not even the ellipsis fits, or the head.
 What a string is cut to is known as its widths are, so that drawing
 the same text in the same room again measures nothing."
   (let ((pixels (max 0 pixels)))
@@ -794,17 +849,21 @@ the same text in the same room again measures nothing."
 The candidates measured on the way are not kept: what STRING is cut to
 in PIXELS is, by `drover-list--truncate'."
   (let ((keep (drover-list--kept string))
+        (head (drover-list--kept-head string))
         (measure (lambda (candidate)
                    (let ((drover-list--keep-widths (eq candidate string)))
                      (drover-list--pixel-width candidate)))))
-    (or (and keep
-             (let* ((tail (concat " " (substring string keep)))
-                    (head (drover-truncate-to-pixels (string-trim-right (substring string 0 keep))
-                                                     (- pixels (drover-list--pixel-width tail))
-                                                     measure)))
-               (unless (string-empty-p head)
-                 (concat head tail))))
-        (drover-truncate-to-pixels string pixels measure))))
+    (if head
+        (let ((compact (drover-list--compact string)))
+          (if (<= (drover-list--pixel-width compact) pixels) compact ""))
+      (or (and keep
+               (let* ((tail (concat " " (substring string keep)))
+                      (head (drover-truncate-to-pixels (string-trim-right (substring string 0 keep))
+                                                       (- pixels (drover-list--pixel-width tail))
+                                                       measure)))
+                 (unless (string-empty-p head)
+                   (concat head tail))))
+          (drover-truncate-to-pixels string pixels measure)))))
 
 (defvar drover-list--aligns (make-hash-table :test #'eql)
   "Spaces reaching a position, as `drover-list--align' made them, by position.
@@ -839,7 +898,7 @@ The list reads the clock through it, so that tests may stop the clock."
 ;;;; Fields
 
 (defconst drover-list--text-fields
-  '(host location branch agent model provider context created age summary)
+  '(host harness location branch agent model provider context created age summary)
   "The fields of `drover-list-fields' a row holds a text for.")
 
 (defun drover-list--one-line (string)
@@ -1075,6 +1134,28 @@ its name; the tooltip names it."
     (propertize (drover-list--icon (drover-face (drover-list--one-line text) 'drover-dim))
                 'help-echo (concat "Provider: " (or (drover-session-provider-name session) text)))))
 
+(defun drover-list--harness-text (session)
+  "Return the harness of SESSION as its column shows it.
+Its icon, in a cell of its own, then its name; the icon is marked to
+keep (see `drover-list--kept-head'), so that a column too narrow for the
+name, and a line of two, show the icon alone.  The tooltip tells what
+runs SESSION (see `drover-session-harness-description').  The sessions
+of a harness, an engine and a host share one text, made once as widths
+are measured (see `drover-list--memo'): thousands of rows show a few."
+  (drover-list--memo (list 'harness drover-harnesses (drover-session-harness session)
+                           (drover-session-engine session) (drover-session-host session))
+                     #'drover-list--make-harness-text session))
+
+(defun drover-list--make-harness-text (session)
+  "Return the harness of SESSION as its column shows it, made anew.
+See `drover-list--harness-text'."
+  (let ((harness (drover-session-harness session)))
+    (propertize (concat (propertize (drover-list--icon (drover-harness-glyph harness)) 'drover-list-keep t)
+                        " "
+                        (drover-face (drover-list--one-line (drover-harness-name harness)) 'drover-harness))
+                'help-echo (drover-bound-lines
+                            (concat "Harness: " (drover-session-harness-description session)) 1))))
+
 (defun drover-list--context-text (session char)
   "Return the context of SESSION as its column shows it, or nil when unknown.
 A short bar of how much of the model's context it fills comes first,
@@ -1142,13 +1223,15 @@ it was last heard from; the tooltip tells how it stands."
   "Return the text of FIELD for SESSION, or \"\" when it has none.
 GROUP is the group showing SESSION, as (GROUPING . VALUE), or nil: a
 group of a project or a branch names it, so its sessions do not repeat
-it, nor do those of a group of a host.  METRICS give the time ages
-count up to and the width of a character.  The prompt cache has no
+it, nor do those of a group of a host or of a harness.  METRICS give
+the time ages count up to and the width of a character.  The prompt cache has no
 text: it is drawn apart."
   (let ((now (plist-get metrics :now)))
     (or (pcase field
           ('host (unless (eq (car group) 'host)
                    (drover-list--host-text session now)))
+          ('harness (unless (eq (car group) 'harness)
+                      (drover-list--harness-text session)))
           ('location (unless (equal group (cons 'project (drover-session-project session)))
                        (drover-face (drover-list--one-line (drover-session-project session)) 'drover-dim)))
           ('branch (unless (equal group (cons 'branch (drover-session-branch session)))
@@ -1166,10 +1249,12 @@ text: it is drawn apart."
   "Return the measures lines of the list are drawn with at time NOW.
 The value is a plist of :now, :char, the width of an average character,
 :gap, the room between two columns, :space, the width of a space,
-:margin, where the sessions at the top of a tree begin, :width, the
-width lines may take, :status-cell and :subagent-cell, the cells of the
-status glyphs and of the glyphs of active subagents (see
-`drover-list--cell'), :frames, an alist (STATUS STRINGS WIDTHS WIDTH)
+:margin, where rows place the sessions at the top of a tree, :lead,
+where lines draw them: the margin in a list that folds, none in the
+sidebar (see `drover-list--folds'), :folds, whether the list folds,
+:width, the width lines may take, :status-cell and :subagent-cell,
+the cells of the status glyphs and of the glyphs of active subagents
+\(see `drover-list--cell'), :frames, an alist (STATUS STRINGS WIDTHS WIDTH)
 of the animated status glyphs, their frames and widths (see
 `drover-list--frames') and the right of the status cell, :active,
 ACTIVE, the table of the active subagents of each session (see
@@ -1177,8 +1262,10 @@ ACTIVE, the table of the active subagents of each session (see
 buffers are shown (see `drover-list--places'), or nil.  The status cell
 holds every status glyph and frame, so that titles line up whatever
 the status; the subagent cell both glyphs of `opencode-subagent-icons'.
-Widths are in pixels; lines leave room for the ellipsis Magit adds to
-collapsed headings."
+Widths are in pixels; the lines of a list that folds leave room for the
+ellipsis Magit adds to collapsed headings.  Rows depend on the margin,
+not on where lines draw them, so that the sidebar and the other list
+share them (see `drover-list--peer-rows')."
   (let* ((char (drover-list--char-width))
          (statuses (seq-uniq (append drover-status-order (mapcar #'car opencode-session-status-icons))))
          (frames (delq nil (mapcar (lambda (status)
@@ -1193,8 +1280,12 @@ collapsed headings."
                          :gap (* drover-list--gap char)
                          :space (drover-list--pixel-width " ")
                          :margin (* drover-list--margin char)
+                         :lead (if drover-list--folds (* drover-list--margin char) 0)
+                         :folds drover-list--folds
                          :width (- (drover-list--line-width)
-                                   (drover-list--pixel-width (truncate-string-ellipsis)))
+                                   (if drover-list--folds
+                                       (drover-list--pixel-width (truncate-string-ellipsis))
+                                     0))
                          :status-cell status-cell
                          :subagent-cell (drover-list--cell (mapcar #'opencode-subagent-glyph
                                                                    '(waiting working)))
@@ -1213,7 +1304,9 @@ place, is the same row; see `drover-list--inputs'."
                 (plist-get metrics :frames))
         opencode-session-status-icons opencode-subagent-icons opencode-session-status-animations
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
-        drover-list--measuring))
+        ;; Printed with each row, so a digest of the harnesses, not them.
+        (md5 (prin1-to-string (list drover-harnesses drover-harness-default-icon)))
+        drover-list--text-fields drover-list--measuring))
 
 (defvar drover-list--reuse nil
   "Rows a drawing may reuse, by session key, or nil.
@@ -1388,8 +1481,9 @@ DEPTH, INDENT, GROUP and METRICS are as for `drover-list--tree-rows'."
 Its elements are: where its title begins, where it ends, 1 when it
 shows a prompt cache, then for each of `drover-list--text-fields' the
 width of its text, nil when empty, then for each the width an ellipsis
-and the tail to keep whole take (see `drover-list--kept'), nil without
-one.  Widths are in pixels."
+and the tail to keep whole take (see `drover-list--kept'), or the head
+to keep (see `drover-list--kept-head'), nil without either.  Widths are
+in pixels."
   (or (drover-list--row-measures row)
       (setf (drover-list--row-measures row)
             (let ((measures (make-vector drover-list--measure-count nil))
@@ -1406,7 +1500,10 @@ one.  Widths are in pixels."
                               (when-let* ((keep (drover-list--kept text)))
                                 (aset measures (+ index count)
                                       (drover-list--pixel-width
-                                       (concat (truncate-string-ellipsis) " " (substring text keep))))))))
+                                       (concat (truncate-string-ellipsis) " " (substring text keep)))))
+                              (when (drover-list--kept-head text)
+                                (aset measures (+ index count)
+                                      (drover-list--pixel-width (drover-list--compact text)))))))
               measures))))
 
 (defun drover-list--tally-create ()
@@ -1490,6 +1587,12 @@ mislead; the provider is an icon.  Their columns may give up only the
 room of their names."
   (memq field '(cache context created age provider)))
 
+(defun drover-list--compact-p (field)
+  "Return non-nil when FIELD shows its head alone where room is short.
+That is the harness, its icon without its name (see
+`drover-list--kept-head'): its column, cut, is as wide as the icon."
+  (eq field 'harness))
+
 (defun drover-list--content-width (field summary metrics)
   "Return the width in pixels FIELD takes to show the rows of SUMMARY in full.
 METRICS are the measures of lines.  That of the title counts from the
@@ -1543,7 +1646,7 @@ title."
                                      (or (eq (car entry) 'title)
                                          (not (memq (car entry) drover-list-hidden-fields)))))
                               drover-list-fields))
-         (used (+ (plist-get metrics :margin) (drover-list--title-prefix summary metrics)))
+         (used (+ (plist-get metrics :lead) (drover-list--title-prefix summary metrics)))
          (chosen nil))
     (catch 'full
       (dolist (entry (seq-sort-by (lambda (entry) (or (plist-get (cdr entry) :priority) 99)) #'<
@@ -1591,17 +1694,19 @@ lines.  A column is as wide as what it shows and its name, up to its
 column down to the fewest pixels it needs (see
 `drover-list--narrowest'), in turn by: the fields without a :max, of a
 long text, such as the summary; the names of the columns of short
-texts, which are never cut (see `drover-list--whole-p'); the title; the
-other fields, in proportion to what they would lose.  So the ages and
-the effort show whole while the summary or the title has room to give,
-the project and model whole while the title has, and no column is
-narrowed while the line has room."
+texts, which are never cut (see `drover-list--whole-p'); the name of
+the harness, whose icon stays (see `drover-list--compact-p'), its
+column then as wide as the icon; the title; the other fields, in
+proportion to what they would lose.  So the ages and the effort show
+whole while the summary or the title has room to give, the project and
+model whole while the title has, and no column is narrowed while the
+line has room."
   (let* ((prefix (drover-list--title-prefix summary metrics))
-         (room (- (plist-get metrics :width) (plist-get metrics :margin)
+         (room (- (plist-get metrics :width) (plist-get metrics :lead)
                   (* (plist-get metrics :gap) (max 0 (1- (length fields))))))
          (widths (make-vector (length fields) 0))
          (floors (make-vector (length fields) 0))
-         (passes (list nil nil nil nil)))
+         (passes (list nil nil nil nil nil)))
     (seq-do-indexed
      (lambda (entry index)
        (let* ((field (car entry))
@@ -1613,24 +1718,34 @@ narrowed while the line has room."
          (aset floors index (min want (+ extra (drover-list--narrowest entry summary metrics))))
          (push index (nth (cond ((drover-list--whole-p field) 1)
                                 ((null max) 0)
-                                ((eq field 'title) 2)
-                                (t 3))
+                                ((drover-list--compact-p field) 2)
+                                ((eq field 'title) 3)
+                                (t 4))
                           passes))))
      fields)
-    (let ((deficit (- (apply #'+ (append widths nil)) room)))
+    (let ((deficit (- (apply #'+ (append widths nil)) room))
+          (wants (copy-sequence widths)))
       (dolist (indices passes)
-        (setq deficit (drover-list--give widths floors (nreverse indices) deficit))))
+        (setq deficit (drover-list--give widths floors (nreverse indices) deficit)))
+      ;; Cut, a compact field shows its head alone: the rest of its
+      ;; column would stay blank.
+      (seq-do-indexed (lambda (entry index)
+                        (when (and (drover-list--compact-p (car entry))
+                                   (< (aref widths index) (aref wants index)))
+                          (aset widths index (aref floors index))))
+                      fields))
     (append widths nil)))
 
 (defun drover-list--layout-of (summary metrics)
   "Return METRICS with the layout of the rows of SUMMARY added.
 Add :layout, `columns' or `narrow', and :fields, the fields shown; in
 columns, :columns, a list of (FIELD X WIDTH ALIGN) giving where each
-field begins and how wide it is, in pixels."
+field begins and how wide it is, in pixels, the first at the lead of
+METRICS."
   (pcase-let* ((`(,layout . ,fields) (drover-list--choose summary metrics))
                (columns nil))
     (when (eq layout 'columns)
-      (let ((x (plist-get metrics :margin)))
+      (let ((x (plist-get metrics :lead)))
         (cl-mapc (lambda (entry width)
                    (push (list (car entry) x width (plist-get (cdr entry) :align)) columns)
                    (setq x (+ x width (plist-get metrics :gap))))
@@ -1647,7 +1762,8 @@ field begins and how wide it is, in pixels."
 Two layouts of the same key draw rows alike: a heading drawn for one is
 the heading for the other."
   (list (plist-get layout :layout) (plist-get layout :fields) (plist-get layout :columns)
-        (plist-get layout :width) (plist-get layout :margin) (plist-get layout :char)
+        (plist-get layout :width) (plist-get layout :margin) (plist-get layout :lead)
+        (plist-get layout :folds) (plist-get layout :char)
         (plist-get layout :gap) (plist-get layout :space) (plist-get layout :stamp)))
 
 ;;;; Lines
@@ -1687,14 +1803,16 @@ line, so that a bar may fill all of it."
 
 (defun drover-list--title-segments (row room &optional shift)
   "Return the segments of the glyphs and title of ROW, the title ROOM pixels wide.
-They begin SHIFT pixels further right than the row's indentation, when
-the title's column does not come first."
+They begin SHIFT pixels further right than the row's indentation,
+further left when SHIFT is negative.  Glyphs at the start of the line
+need no space before them: the line begins with them, so that the
+cursor at the start of a session is on its glyph."
   (let* ((shift (or shift 0))
          (indent (+ shift (drover-list--row-indent row)))
          (title (drover-list--truncate (drover-list--row-title row) room)))
-    (list (list 'align indent)
-          (drover-list--text-segment (drover-list--row-icons row) indent)
-          (drover-list--text-segment title (+ shift (drover-list--row-title-start row))))))
+    (append (and (> indent 0) (list (list 'align indent)))
+            (list (drover-list--text-segment (drover-list--row-icons row) indent)
+                  (drover-list--text-segment title (+ shift (drover-list--row-title-start row)))))))
 
 (defconst drover-list--cache-fill '((:inverse-video t) opencode-cache-bar)
   "Face of the full part of the short bar of a prompt cache.
@@ -1754,7 +1872,8 @@ once: a list drawn whole makes thousands of lines."
         ('title
          ;; As `drover-list--title-segments' places them.
          (let ((shift (- x (plist-get layout :margin))))
-           (push (drover-list--align (+ shift (drover-list--row-indent row))) parts)
+           (when (> (+ shift (drover-list--row-indent row)) 0)
+             (push (drover-list--align (+ shift (drover-list--row-indent row))) parts))
            (push (drover-list--row-icons row) parts)
            (push (drover-list--truncate (drover-list--row-title row)
                                         (- (+ x width) shift (drover-list--row-title-start row)))
@@ -1777,17 +1896,34 @@ once: a list drawn whole makes thousands of lines."
              (push text parts))))))
     (cons (apply #'concat (nreverse parts)) cache)))
 
+(defun drover-list--shift (layout)
+  "Return how far right of their rows' places the lines of LAYOUT draw, in pixels.
+Rows place the sessions at the top of a tree at the margin; lines draw
+them at the lead, the window's edge in the sidebar: there the shift is
+negative."
+  (- (plist-get layout :lead) (plist-get layout :margin)))
+
+(defun drover-list--line-prefix (layout)
+  "Return what each line of a session begins with in LAYOUT.
+That is `drover-list--line-start' in a list that folds, and nothing in
+the sidebar, which hides no line."
+  (if (plist-get layout :folds) drover-list--line-start ""))
+
 (defun drover-list--narrow-line (row layout &optional prefix)
   "Return the heading of ROW in the narrow layout of LAYOUT, and its bar.
 The value is (HEADING . SPEC).  HEADING is one or two lines: the glyph,
-the title and the fields placed on its line, flush right, then, for a
-session that needs the user, the fields placed below, under the title;
-it begins with PREFIX, if any.  SPEC tells where the first line's
-segments lie, from `drover-list--assemble', past PREFIX, when a prompt
-cache colours its background, else nil."
+the title and the fields placed on its line, flush right, as they show
+where room is short (see `drover-list--compact'), then, for a session
+that needs the user, the fields placed below, under the title; it
+begins with PREFIX, if any, its second line with the line prefix of
+LAYOUT.  SPEC tells where the first line's segments lie, from
+`drover-list--assemble', past PREFIX, when a prompt cache colours its
+background, else nil."
   (let* ((session (drover-list--row-session row))
          (width (plist-get layout :width))
          (space (plist-get layout :space))
+         (shift (drover-list--shift layout))
+         (title-start (+ shift (drover-list--row-title-start row)))
          (texts (drover-list--row-texts row))
          (narrow (lambda (place)
                    (seq-filter (lambda (field)
@@ -1797,17 +1933,16 @@ cache colours its background, else nil."
          (end width))
     ;; The fields on the title's line, from the right edge leftwards.
     (dolist (field (reverse (funcall narrow 'line)))
-      (let ((text (or (alist-get field texts) "")))
+      (let ((text (drover-list--compact (or (alist-get field texts) ""))))
         (unless (string-empty-p text)
           (let ((start (- end (drover-list--pixel-width text))))
-            (when (> start (+ (drover-list--row-title-start row) space))
+            (when (> start (+ title-start space))
               (setq right (append (list (list 'align start) (drover-list--text-segment text start))
                                   right)
                     end (- start space)))))))
     (let* ((cache (and (memq 'cache (funcall narrow 'background)) (drover-list--row-cache row)))
            (line (drover-list--assemble
-                  (append (drover-list--title-segments
-                           row (- (if right end width) (drover-list--row-title-start row)))
+                  (append (drover-list--title-segments row (- (if right end width) title-start) shift)
                           right)
                   (and cache width)))
            (below (and (drover-session-attention-p session)
@@ -1818,10 +1953,9 @@ cache colours its background, else nil."
       (cons (concat prefix
                     (car line)
                     (when (and below (not (string-empty-p below)))
-                      (let ((start (drover-list--row-title-start row)))
-                        (concat "\n" drover-list--line-start (drover-list--align start)
-                                (drover-list--truncate (drover-face below 'drover-dim)
-                                                       (- width start))))))
+                      (concat "\n" (drover-list--line-prefix layout) (drover-list--align title-start)
+                              (drover-list--truncate (drover-face below 'drover-dim)
+                                                     (- width title-start)))))
             (and cache (cdr line))))))
 
 ;;;; The prompt cache
@@ -2199,12 +2333,6 @@ again once it arrives.  Nil when the backend of SESSION tells no recap."
            (fresh (and (plist-member entry :recap)
                        (equal (plist-get entry :updated) updated))))
       (unless (or fresh (plist-get entry :pending))
-        ;; The other list may have fetched it, expanded there too.
-        (when-let* ((known (drover-list--peer-recap key updated)))
-          (puthash key known drover-list--recaps)
-          (setq entry known
-                fresh t)))
-      (unless (or fresh (plist-get entry :pending))
         (let ((wait (and (plist-get entry :fetched)
                          (- (+ (plist-get entry :fetched) drover-list--recap-interval)
                             (drover-list--now)))))
@@ -2218,21 +2346,6 @@ again once it arrives.  Nil when the backend of SESSION tells no recap."
 
 (defvar-local drover-list--recap-deferred nil
   "Keys of the sessions whose recap is to be fetched once the timer runs.")
-
-(defun drover-list--peer-recap (key updated)
-  "Return a copy of the recap another list holds of session KEY, or nil.
-Only a recap fresh for the session's last activity, UPDATED, counts:
-expanding a session in the sidebar and in the other list asks its
-backend once."
-  (seq-some (lambda (buffer)
-              (unless (eq buffer (current-buffer))
-                (when-let* ((recaps (buffer-local-value 'drover-list--recaps buffer))
-                            (entry (gethash key recaps))
-                            ((plist-member entry :recap))
-                            ((equal (plist-get entry :updated) updated)))
-                  (list :updated updated :recap (plist-get entry :recap)
-                        :fetched (plist-get entry :fetched)))))
-            (drover-list--buffers)))
 
 (defun drover-list--recap-later (delay key)
   "Draw the details of session KEY again in DELAY seconds, fetching its recap.
@@ -2334,8 +2447,9 @@ relative to it; those of another host's session come so named by it."
   "Return what the line of SESSION does not show of it, as (LABEL VALUE FACE).
 Those are the fields of `drover-list-fields' LAYOUT leaves out, such
 as the model in two lines, and what its line cannot tell: the directory
-of a session without a project, and the default branch, which the
-branch's column leaves out."
+of a session without a project, the default branch, which the branch's
+column leaves out, and in two lines, the name of the harness, whose
+icon alone shows."
   (let ((shown (plist-get layout :fields))
         (now (plist-get layout :now))
         (facts nil))
@@ -2351,6 +2465,9 @@ branch's column leaves out."
       (when-let* ((host (drover-session-host session)))
         (fact 'host "Host" (drover-host-label host))
         (fact 'host-state "Not connected" (drover-host-state host) 'drover-dim))
+      ;; Its line shows its icon alone in two lines.
+      (fact (if (eq (plist-get layout :layout) 'narrow) 'harness-icon 'harness)
+            "Harness" (drover-session-harness-description session))
       (fact 'location "Project" (drover-session-project session))
       ;; Its column leaves out the default branch, which details tell.
       (fact (if (drover-session-default-branch-p session) 'default-branch 'branch)
@@ -2412,14 +2529,14 @@ to one, cut.  FACE, if any, is that of TEXT."
   (+ (drover-list--row-title-start row)
      (if-let* ((column (assq 'title (plist-get layout :columns))))
          (- (nth 1 column) (plist-get layout :margin))
-       0)))
+       (drover-list--shift layout))))
 
 (defun drover-list--insert-details (row layout)
   "Insert the details of the session of ROW, under its title, in LAYOUT.
 Each label is followed by its text, wrapped to the window and aligned
 after the widest label; when that leaves little room, as in a side
 window, the texts go under their labels instead.  Every line begins
-with `drover-list--line-start'."
+with the line prefix of LAYOUT (see `drover-list--line-prefix')."
   (let* ((session (drover-list--row-session row))
          (x (drover-list--body-x row layout))
          (width (plist-get layout :width))
@@ -2430,9 +2547,10 @@ with `drover-list--line-start'."
                       (apply #'max 0 (mapcar (lambda (detail) (drover-list--pixel-width (car detail)))
                                              details))))
          (stacked (< (- width values-x) (* 20 (plist-get layout :char))))
-         (text-x (if stacked x values-x)))
+         (text-x (if stacked x values-x))
+         (prefix (drover-list--line-prefix layout)))
     (cl-flet ((line (&rest parts)
-                (apply #'insert drover-list--line-start parts)
+                (apply #'insert prefix parts)
                 (insert "\n")))
       (pcase-dolist (`(,label ,text ,lines ,face) details)
         (let* ((room (- width text-x))
@@ -2460,11 +2578,12 @@ with `drover-list--line-start'."
 
 (defun drover-list--heading (row layout)
   "Return the heading of ROW in LAYOUT, as (TEXT KIND SPEC KEY).
-TEXT is its line or lines, beginning with `drover-list--line-start',
-the tooltip of the session on the characters without one of their own;
-KIND is `columns' when it shows a prompt cache field, `narrow' when a
-prompt cache colours its first line, else nil; SPEC tells where the
-segments of that line lie, see `drover-list--assemble'.  KEY is the
+TEXT is its line or lines, beginning with the line prefix of LAYOUT
+\(see `drover-list--line-prefix'), the tooltip of the session on the
+characters without one of their own; KIND is `columns' when it shows a
+prompt cache field, `narrow' when a prompt cache colours its first
+line, else nil; SPEC tells where the segments of that line lie, see
+`drover-list--assemble'.  KEY is the
 layout key the heading was drawn for (see `drover-list--layout-key'):
 the heading is kept in ROW, and drawn again only for another layout."
   (let ((key (or (plist-get layout :key) (drover-list--layout-key layout)))
@@ -2473,17 +2592,18 @@ the heading is kept in ROW, and drawn again only for another layout."
         heading
       (setf (drover-list--row-heading row)
             (let* ((session (drover-list--row-session row))
+                   (prefix (drover-list--line-prefix layout))
                    ;; Their text is a string of their own, given its
                    ;; tooltips in place: each copy of a heading copies the
                    ;; properties of its runs.
                    (drawn (if (eq (plist-get layout :layout) 'columns)
-                              (let ((line (drover-list--column-line row layout drover-list--line-start)))
+                              (let ((line (drover-list--column-line row layout prefix)))
                                 (list (car line) (and (cdr line) 'columns) nil))
-                            (let ((heading (drover-list--narrow-line row layout drover-list--line-start)))
+                            (let ((heading (drover-list--narrow-line row layout prefix)))
                               (list (car heading) (and (cdr heading) 'narrow) (cdr heading)))))
                    (help (drover-list--help session (drover-list--row-subagents row layout)))
                    (text (car drawn))
-                   (start (length drover-list--line-start)))
+                   (start (length prefix)))
               (if (eq (nth 1 drawn) 'narrow)
                   ;; The cache colours the line: its tooltip tells of it
                   ;; too, as it stands when shown.
@@ -2499,7 +2619,7 @@ the heading shows, if any, in `drover-list--caches', LAYOUT giving its
 measures.  START is where the heading begins."
   (let* ((session (drover-list--row-session row))
          (key (drover-session-key session))
-         (start (+ start (length drover-list--line-start))))
+         (start (+ start (length (drover-list--line-prefix layout)))))
     (puthash key session drover-list--drawn)
     (puthash key (drover-list--row-state row) drover-list--title-states)
     (when (drover-list--row-state row)
@@ -2540,16 +2660,19 @@ costs thousands of headings a copy and two scans for nothing."
 (defun drover-list--insert-session (row layout)
   "Insert the section of the session of ROW, in LAYOUT.
 Its heading is its line; its body, drawn once expanded, its details,
-as `drover-list--insert-details' draws them.  A prompt cache it shows
-is noted in `drover-list--caches'."
+as `drover-list--insert-details' draws them, in a list that folds; the
+sidebar's sessions have none.  A prompt cache it shows is noted in
+`drover-list--caches'."
   (let* ((heading (drover-list--heading row layout))
          (key (drover-list--row-key row))
+         (folds (plist-get layout :folds))
          (start (point)))
-    (magit-insert-section section (drover-list-session-section key t)
+    (magit-insert-section section (drover-list-session-section key folds)
       (setf (drover-list--row-section row) section)
       (drover-list--insert-heading (car heading))
-      (magit-insert-section-body
-        (drover-list--insert-details-of key)))
+      (when folds
+        (magit-insert-section-body
+          (drover-list--insert-details-of key))))
     (drover-list--note-row row heading start layout)))
 
 (defun drover-list--count (size)
@@ -2582,8 +2705,10 @@ COUNTS is a hash table of the sessions of each status, see
 TREES is a sequence of `drover-list--tree'.  A group of a provider has
 the icon its sessions show for it, when they show one rather than its
 name: the first session showing one, so that a long group is not read
-whole."
+whole.  A group of a harness has the harness's icon."
   (pcase group
+    (`(harness . ,(and harness (pred symbolp)))
+     (concat (drover-list--icon (drover-face (drover-harness-icon harness) 'drover-heading)) " "))
     (`(provider . ,(and name (pred stringp)))
      (when-let* ((icon (catch 'icon
                          (seq-doseq (tree trees)
@@ -2600,7 +2725,7 @@ whole."
   "Return the heading of GROUP, a `drover-list--group', fit to LAYOUT."
   (pcase-let ((`(,grouping . ,value) (drover-list--group-value group)))
     (drover-list--truncate
-     (concat (and (eq grouping 'provider)
+     (concat (and (memq grouping '(provider harness))
                   (drover-list--group-icon (drover-list--group-value group)
                                            (drover-list--group-trees group)))
              (drover-face (drover-group-label grouping value)
@@ -2631,7 +2756,9 @@ Emacs is idle (see `drover-list--defer')."
           (progn (setf (drover-list--group-container group) magit-insert-section--parent)
                  (rows))
         (magit-insert-section section (drover-list-group-section
-                                       value (and (member value drover-list-collapsed-groups) t))
+                                       value (and (plist-get layout :folds)
+                                                  (member value drover-list-collapsed-groups)
+                                                  t))
           (setf (drover-list--group-container group) section
                 (drover-list--group-heading-text group) (drover-list--group-heading group layout))
           (magit-insert-heading (drover-list--group-heading-text group))
@@ -3179,8 +3306,9 @@ say little."
 (defun drover-list--line-shown-p (position)
   "Return non-nil when the line of POSITION shows, in a section not collapsed.
 Its first character tells nothing: every line of a session begins with
-an invisible one (see `drover-list--line-start').  Its newline belongs
-to the body of the section collapsed around it, if any."
+an invisible one in a list that folds (see `drover-list--line-start').
+Its newline belongs to the body of the section collapsed around it, if
+any."
   (not (invisible-p (save-excursion (goto-char position) (line-end-position)))))
 
 (defun drover-list--visible-start (section)
@@ -3360,7 +3488,7 @@ be drawn once expanded, as a drawing anew leaves a collapsed section."
     (when heading
       ;; Magit ends a heading with a newline.
       (drover-list--replace-text section start (oref section content) (concat (car heading) "\n")))
-    (when body
+    (when (and body (plist-get layout :folds))
       (let ((content (oref section content)))
         (unless (and (oref section hidden) (oref section washer))
           (delete-region content (oref section end))
@@ -4002,7 +4130,11 @@ timers keep theirs."
 Its model and rows, of other slots, would be misread: the list is to
 be drawn whole."
   (when (and drover-list--model
-             (not (drover-layout-current-p drover-list--model 'drover-list--model)))
+             (or (not (drover-layout-current-p drover-list--model 'drover-list--model))
+                 ;; Rows measure each text field: those of another
+                 ;; version's fields would be misread too.
+                 (not (eql (length (drover-list--model-summary drover-list--model))
+                           drover-list--measure-count))))
     (setq drover-list--model nil
           drover-list--drawn nil
           drover-list--pending nil
@@ -4661,13 +4793,17 @@ so is any region with prefix argument PLAIN."
 
 (defun drover-list--buffer (&optional side)
   "Return the buffer of the list, creating it if needed.
-With SIDE non-nil, the sidebar's, which `drover-list-side' shows;
-otherwise the one `drover-list' shows in an ordinary window."
-  (let ((name (if side drover-list-sidebar-buffer-name drover-list-buffer-name)))
-    (or (get-buffer name)
-        (with-current-buffer (get-buffer-create name)
-          (drover-list-mode)
-          (current-buffer)))))
+With SIDE non-nil, the sidebar's, which `drover-list-side' shows, in
+`drover-list-sidebar-mode'; otherwise the one `drover-list' shows in an
+ordinary window."
+  (let* ((name (if side drover-list-sidebar-buffer-name drover-list-buffer-name))
+         (mode (if side #'drover-list-sidebar-mode #'drover-list-mode))
+         (buffer (get-buffer-create name)))
+    (with-current-buffer buffer
+      ;; A sidebar an older drover made folds: it folds no more.
+      (unless (eq major-mode mode)
+        (funcall mode)))
+    buffer))
 
 (defun drover-list--show (window)
   "Bring the list WINDOW shows up to date; on a first showing, go to a session."
@@ -4719,6 +4855,8 @@ list of `drover-list' stays where it is."
     (let ((window (or (drover-list--side-window)
                       (display-buffer-in-side-window buffer (drover-list--display-alist))
                       (user-error "No room for the drover list"))))
+      ;; Before drawing, which is for the width the fringes leave.
+      (drover-list--drop-fringes window)
       (drover-list--show window)
       window)))
 
@@ -4730,7 +4868,9 @@ hide it otherwise.  With prefix argument SELECT, select it instead,
 showing it first if needed; in the side window, select the window where
 you work instead, so that the same key moves back and forth.  From the
 side window, sessions open in the window where you work.  The sidebar
-is a list of its own, beside the one `drover-list' shows, if any."
+is a list of its own, beside the one `drover-list' shows, if any, which
+folds nothing (see `drover-list-sidebar-mode'), in a side window
+without fringes."
   (interactive "P")
   (let ((window (drover-list--side-window)))
     (cond (select
@@ -4947,8 +5087,9 @@ What a line shows depends on the window's width: see
 `drover-list-fields'.  In columns, the header line names them; hover
 a name to read what its column shows.  The sidebar, shown by
 `drover-list-side', is a list of its own in a side window, which may
-show beside this one: each keeps its point and its expanded sessions;
-from it, sessions open in the window where you work.  The
+show beside this one, in `drover-list-sidebar-mode', which folds
+nothing: each keeps its point; from it, sessions open in the window
+where you work.  The
 colour of a title tells where its session is: in a buffer no window
 shows, in a window, or in the window you work in, the faces
 `opencode-session-open', `opencode-session-shown' and
@@ -4995,6 +5136,70 @@ them with their last replies (see `drover-prompt-dwim').
 ;; Loaded over an older drover, the lists it made follow this one.
 (when (drover-list--buffers)
   (drover-list--watch))
+
+;;;; The sidebar
+
+;; The sidebar shows a line per session, or two, beside your work: it
+;; folds nothing, so that no key, no click and no indicator expands a
+;; session or collapses a group, its lines need no invisible character
+;; before them, and its window no fringes.
+
+(defvar-keymap drover-list-sidebar-mode-map
+  :doc "Keymap of `drover-list-sidebar-mode'.
+The commands folding sections do nothing: the sidebar folds nothing."
+  :parent drover-list-mode-map
+  "<remap> <magit-section-toggle>" #'ignore
+  "<remap> <magit-section-cycle>" #'ignore
+  "<remap> <magit-section-cycle-global>" #'ignore
+  "<remap> <magit-mouse-toggle-section>" #'ignore
+  "<remap> <magit-section-show-level-1>" #'ignore
+  "<remap> <magit-section-show-level-2>" #'ignore
+  "<remap> <magit-section-show-level-3>" #'ignore
+  "<remap> <magit-section-show-level-4>" #'ignore
+  "<remap> <magit-section-show-level-1-all>" #'ignore
+  "<remap> <magit-section-show-level-2-all>" #'ignore
+  "<remap> <magit-section-show-level-3-all>" #'ignore
+  "<remap> <magit-section-show-level-4-all>" #'ignore)
+
+(defun drover-list--sidebar-window-p (window)
+  "Return non-nil when WINDOW is a side window showing the sidebar."
+  (and (window-live-p window)
+       (window-parameter window 'window-side)
+       (with-current-buffer (window-buffer window)
+         (derived-mode-p 'drover-list-sidebar-mode))))
+
+(defun drover-list--drop-fringes (window)
+  "Take the fringes off WINDOW, a side window showing the sidebar.
+They are set on the window alone, not persistently: a window showing
+another buffer, or the sidebar shown in an ordinary window, takes the
+fringes of its buffer, as any window does."
+  (when (and (drover-list--sidebar-window-p window)
+             (not (equal (seq-take (window-fringes window) 2) '(0 0))))
+    (set-window-fringes window 0 0)))
+
+(defun drover-list--sidebar-shown (window)
+  "Take the fringes off WINDOW as it shows the sidebar, if a side window.
+For the sidebar's `window-buffer-change-functions'."
+  (drover-with-reporting "sidebar window"
+    (drover-list--drop-fringes window)))
+
+(define-derived-mode drover-list-sidebar-mode drover-list-mode "Drover"
+  "Major mode of the sidebar, the list of agent sessions of a side window.
+\\<drover-list-sidebar-mode-map>
+It is `drover-list-mode' folding nothing: a session shows its line, or
+two, without details, a group every session it holds, whatever
+`drover-list-collapsed-groups' says, and \\[magit-section-toggle] does
+nothing.  Its lines begin with their glyphs, and its side window has no
+fringes.
+
+\\{drover-list-sidebar-mode-map}"
+  :group 'drover-list
+  :interactive nil
+  (setq-local drover-list--folds nil)
+  ;; Nothing folds: no section is hidden, nor tells it could be.
+  (setq-local magit-section-visibility-indicators nil)
+  (remove-hook 'magit-section-set-visibility-hook #'drover-list--cached-visibility t)
+  (add-hook 'window-buffer-change-functions #'drover-list--sidebar-shown nil t))
 
 (provide 'drover-list)
 ;;; drover-list.el ends here

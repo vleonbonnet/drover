@@ -555,6 +555,25 @@ functions, have their setters defined with them."
         (should (drover-layout-current-p drover-list--model 'drover-list--model))
         (should (equal (drover-list-test-groups) '((waiting "b") (done "a"))))))))
 
+(ert-deftest drover-robustness-test-list-model-of-other-fields ()
+  "A list drawn with other text fields, as before the harness's, is drawn whole.
+Its rows measure each field of its own: read as this drover's, their
+measures would be misplaced, and their summary too short."
+  (drover-list-test-with (list (drover-test-session "a" :status 'working)
+                               (drover-test-session "b" :status 'waiting :since drover-test-now))
+    (drover-list-test-shown
+      ;; The summary of a drawing of one text field fewer.
+      (setf (drover-list--model-summary drover-list--model)
+            (make-vector (- drover-list--measure-count 2) (drover-list--tally-create)))
+      (let ((messages (drover-robustness-test-messages
+                        (setf (drover-session-status (drover-list-test-find "a")) 'done)
+                        (setf (drover-session-since (drover-list-test-find "a")) drover-test-now)
+                        (drover-backend-changed 'fake "a")
+                        (drover-changed-now))))
+        (should (equal messages '("Drover: list of sessions made by another version of drover, made anew")))
+        (should (= (length (drover-list--model-summary drover-list--model)) drover-list--measure-count))
+        (should (equal (drover-list-test-groups) '((waiting "b") (done "a"))))))))
+
 (ert-deftest drover-robustness-test-old-transcript-index ()
   "An index of transcripts of other slots is replaced, its timers doing nothing."
   (drover-claude-code-transcripts-test-with
