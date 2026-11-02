@@ -31,6 +31,7 @@
 ;; opencode first: drover loads the backend once opencode is loaded.
 (require 'opencode)
 (require 'drover-opencode)
+(require 'drover-prompt)
 (require 'drover-opencode-fixtures)
 
 (defvar opencode-state-updated-functions)
@@ -1632,6 +1633,54 @@ A refusal is told on one line, as a warning, the session staying archived."
                            '("l" "L" "p" "S"))))
         (kill-buffer session-buffer)
         (drover-opencode--install)))))
+
+(ert-deftest drover-opencode-test-old-input-function-installed ()
+  "drover edits earlier prompts in its prompt, unless the user chose a function."
+  (drover-opencode-test-with nil
+    (let ((opencode-old-input-function nil))
+      (drover-opencode--install)
+      (should (eq opencode-old-input-function #'drover-opencode-edit-old-input))
+      (drover-opencode--uninstall)
+      (should-not opencode-old-input-function)
+      (setq opencode-old-input-function #'opencode-put-old-input)
+      (drover-opencode--install)
+      (should (eq opencode-old-input-function #'opencode-put-old-input))
+      (drover-opencode--uninstall)
+      (should (eq opencode-old-input-function #'opencode-put-old-input))
+      (drover-opencode--install))))
+
+(ert-deftest drover-opencode-test-ret-on-earlier-prompt ()
+  "RET on an earlier prompt puts it whole in drover's prompt, set to go to its session."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1") (drover-opencode-test-entry "ses_2"))
+    (drover-opencode-test-with-buffers '("half typed" "")
+      (let ((opencode-old-input-function #'drover-opencode-edit-old-input)
+            (drover-prompt-buffer-name "*drover opencode prompt test*")
+            (drover-prompt-require-features nil)
+            (org-mode-hook nil)
+            (sent nil))
+        (unwind-protect
+            (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                      ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
+                      ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
+                      ((symbol-function 'opencode-session-send)
+                       (lambda (text &rest _) (push text sent))))
+              (with-current-buffer (car buffers)
+                (let ((inhibit-read-only t))
+                  (goto-char (point-min))
+                  (insert (propertize "first line\nsecond line" 'opencode-prompt t) "\n"))
+                (goto-char (+ (point-min) 13))
+                (opencode-send-input)
+                (should-not sent)
+                (should (equal (buffer-substring-no-properties (opencode-pmark) (point-max)) "half typed")))
+              (with-current-buffer (drover-prompt-buffer)
+                (should (equal (buffer-string) "first line\nsecond line"))
+                (should (equal (plist-get drover-prompt--chosen-session :key) '(opencode . "ses_1")))
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (&rest _) (ert-fail "The picker opened"))))
+                  (should (equal (drover-session-key (drover-prompt-read-target "Send to session: "))
+                                 '(opencode . "ses_1"))))))
+          (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+            (kill-buffer prompt)))))))
 
 ;;;; The engine: models
 

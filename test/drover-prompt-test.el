@@ -1658,5 +1658,123 @@ user told why on one line."
       (should (equal (with-current-buffer prompt (buffer-string)) "Do it"))
       (should-not drover-test-calls))))
 
+;;;; Editing a prompt for a session
+
+(defmacro drover-prompt-test-without-picker (&rest body)
+  "Run BODY failing the test should the target picker open."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'completing-read)
+              (lambda (&rest _) (ert-fail "The picker opened"))))
+     ,@body))
+
+(ert-deftest drover-prompt-test-edit-for-empty-prompt ()
+  "An earlier prompt fills an empty prompt, which goes to its session without the picker."
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a" :directory "/tmp/a/")))
+      (drover-prompt-test--session "b")
+      (drover-prompt-test-with-messages
+        (with-temp-buffer
+          (setq default-directory "/")
+          (drover-prompt-edit-for session "first line\nsecond line"))
+        (should (string-match-p "\\`\\(.* \\)?sends it to Session a\\'\\|\\`it goes to Session a\\'"
+                                (car messages)))
+        (should-not (string-match-p "Added after" (car messages))))
+      (let ((prompt (drover-prompt-buffer)))
+        (with-current-buffer prompt
+          (should (equal (buffer-string) "first line\nsecond line"))
+          (should (= (point) (point-max)))
+          (should (equal default-directory "/tmp/a/"))
+          (should (equal drover-prompt--chosen-session '(:key (fake . "a") :title "Session a")))
+          (let ((header (drover-prompt--header-line)))
+            (should (string-match-p "|  to \\[Session a\\]" header))
+            (should (eq (get-text-property (string-match "Session a" header) 'face header)
+                        'opencode-setting-chosen))
+            (should (eq (lookup-key (get-text-property (string-match "Session a" header) 'keymap header)
+                                    [header-line mouse-1])
+                        #'drover-prompt-forget-target)))
+          (drover-prompt-test-without-picker
+            (drover-prompt-submit)))
+        (should-not (buffer-live-p prompt)))
+      (should (equal (reverse drover-test-calls)
+                     '((:check "a" "first line\nsecond line" (:agent nil :model nil :variant nil))
+                       (:apply-options "a" (:agent nil :model nil :variant nil))
+                       (:send "a" "first line\nsecond line" fake-token)))))))
+
+(ert-deftest drover-prompt-test-edit-for-keeps-draft ()
+  "An earlier prompt follows a draft after a blank line, which the echo area tells."
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a"))
+          (prompt (drover-prompt-test--prompt "my draft")))
+      (with-current-buffer prompt
+        (setq drover-prompt-picked-agent "plan"))
+      (drover-prompt-test-with-messages
+        (drover-prompt-edit-for session "again")
+        (should (string-prefix-p "Added after the prompt being written; " (car messages))))
+      (with-current-buffer prompt
+        (should (equal (buffer-string) "my draft\n\nagain"))
+        (should (equal drover-prompt-picked-agent "plan"))
+        (should (equal (plist-get drover-prompt--chosen-session :key) '(fake . "a")))))))
+
+(ert-deftest drover-prompt-test-edit-for-target-cleared ()
+  "The session chosen goes once a region is sent, or the prompt cleared, or forgotten."
+  (drover-prompt-test-with
+    (let ((transient-mark-mode t)
+          (session (drover-prompt-test--session "a")))
+      (drover-prompt-test--session "b")
+      (drover-prompt-edit-for session "send this\nkeep this")
+      (with-current-buffer (drover-prompt-buffer)
+        (goto-char (point-min))
+        (set-mark (line-end-position))
+        (activate-mark)
+        (drover-prompt-test-without-picker
+          (drover-prompt-submit))
+        (should (equal (buffer-string) "\nkeep this"))
+        (should-not drover-prompt--chosen-session)
+        (should-not (string-match-p "|  to " (drover-prompt--header-line)))
+        ;; Now the picker asks.
+        (drover-prompt-test-choosing (lambda (_) "session b")
+          (drover-prompt-submit)))
+      (should (equal (mapcar (lambda (call) (list (car call) (nth 1 call)))
+                             (seq-filter (lambda (call) (eq (car call) :send)) (reverse drover-test-calls)))
+                     '((:send "a") (:send "b"))))
+      ;; Clearing the prompt forgets it.
+      (drover-prompt-edit-for session "text")
+      (with-current-buffer (drover-prompt-buffer)
+        (drover-prompt-run 'clear)
+        (should-not drover-prompt--chosen-session))
+      ;; So does the command, the text staying.
+      (drover-prompt-edit-for session "text")
+      (with-current-buffer (drover-prompt-buffer)
+        (drover-prompt-forget-target)
+        (should-not drover-prompt--chosen-session)
+        (should (equal (buffer-string) "text"))))))
+
+(ert-deftest drover-prompt-test-edit-for-gone-session ()
+  "A session gone since it was chosen is forgotten, and the picker asks."
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a")))
+      (drover-prompt-test--session "b")
+      (drover-prompt-edit-for session "text")
+      (kill-buffer (drover-prompt-test--buffer-of "a"))
+      (drover-prompt-test-with-messages
+        (with-current-buffer (drover-prompt-buffer)
+          (drover-prompt-test-choosing (lambda (offered) (car offered))
+            (drover-prompt-submit)))
+        (should (member "Session a no longer takes prompts; choose where the prompt goes" messages)))
+      (should (equal (seq-keep (lambda (call) (and (eq (car call) :send) (nth 1 call)))
+                               drover-test-calls)
+                     '("b"))))))
+
+(ert-deftest drover-prompt-test-edit-for-read-target ()
+  "The session chosen answers any reading of where the prompt goes, scheduling's included."
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a")))
+      (drover-prompt-test--session "b")
+      (drover-prompt-edit-for session "text")
+      (drover-prompt-test-without-picker
+        (should (equal (drover-session-key (drover-prompt-read-target "Schedule: " :existing-only t))
+                       '(fake . "a")))
+        (should (equal (drover-session-key (drover-prompt-read-target "Send: ")) '(fake . "a")))))))
+
 (provide 'drover-prompt-test)
 ;;; drover-prompt-test.el ends here

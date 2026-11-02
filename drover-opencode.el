@@ -39,7 +39,9 @@
 ;; keys: each tells its session (`drover-session-at-point-function') and
 ;; its prompt actions (`drover-prompt-define').  opencode.el lists no
 ;; sessions of its own: drover's list does.  The menu `drover-dispatch'
-;; gains opencode.el's session search.
+;; gains opencode.el's session search.  RET on an earlier prompt of a
+;; session buffer puts it in drover's prompt, set to go to that session
+;; (`drover-opencode-edit-old-input', for `opencode-old-input-function').
 ;;
 ;; Older sessions, beyond those of the registry, come from the service
 ;; on demand (:history): every unarchived session, of every project;
@@ -93,7 +95,10 @@
 (declare-function drover-schedule-read-when "drover-schedule" (&optional turn))
 (declare-function drover-schedule-read-prompt "drover-schedule" ())
 (declare-function drover-schedule-enqueue "drover-schedule" (target chosen text))
+(declare-function drover-prompt-edit-for "drover-prompt" (session text))
 (defvar opencode--attachments)
+;; From opencode.el's versions that edit earlier prompts.
+(defvar opencode-old-input-function)
 
 ;;;; The OpenCode engine
 
@@ -1373,6 +1378,22 @@ Everything after the process mark goes; \\[undo] brings it back."
     (when (eq (alist-get action drover-prompt-actions) command)
       (drover-prompt-define action nil))))
 
+;;;; Earlier prompts
+
+(defun drover-opencode-edit-old-input (text buffer)
+  "Put TEXT, an earlier prompt of OpenCode session BUFFER, in drover's prompt.
+The prompt shows, set to go to BUFFER's session, which the prompt's
+send then reaches without the picker (see `drover-prompt-edit-for').
+Attachments do not go with it: their labels stay as text.  For
+`opencode-old-input-function', which drover sets to it when nil, so
+that RET on an earlier prompt edits it in drover's prompt; set that
+option to `opencode-put-old-input' to edit it in the session's input."
+  (require 'drover-prompt)
+  (let ((session (with-current-buffer buffer
+                   (or (drover-opencode--buffer-session)
+                       (user-error "Not an OpenCode session buffer")))))
+    (drover-prompt-edit-for session (substring-no-properties text))))
+
 ;;;; The dispatch menu
 
 (defconst drover-opencode--dispatch-suffixes
@@ -1417,7 +1438,9 @@ such as \"C-\\=' A\".  For `opencode-command-keys-function'."
   (match-buffers `(derived-mode . ,mode)))
 
 (defun drover-opencode--install ()
-  "Fit opencode.el's session buffers, existing and future, into drover's keys."
+  "Fit opencode.el's session buffers, existing and future, into drover's keys.
+Their earlier prompts are edited in drover's prompt, unless the user
+chose a function of their own (see `drover-opencode-edit-old-input')."
   (add-hook 'opencode-session-mode-hook #'drover-opencode--setup-session-buffer)
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
@@ -1425,7 +1448,9 @@ such as \"C-\\=' A\".  For `opencode-command-keys-function'."
   (drover-opencode--add-to-dispatch)
   ;; A user's own function stays.
   (unless opencode-command-keys-function
-    (setq opencode-command-keys-function #'drover-opencode--command-keys)))
+    (setq opencode-command-keys-function #'drover-opencode--command-keys))
+  (unless (bound-and-true-p opencode-old-input-function)
+    (setq opencode-old-input-function #'drover-opencode-edit-old-input)))
 
 (defun drover-opencode--uninstall ()
   "Undo `drover-opencode--install'."
@@ -1435,7 +1460,9 @@ such as \"C-\\=' A\".  For `opencode-command-keys-function'."
       (drover-opencode--teardown-session-buffer)))
   (drover-opencode--remove-from-dispatch)
   (when (eq opencode-command-keys-function #'drover-opencode--command-keys)
-    (setq opencode-command-keys-function nil)))
+    (setq opencode-command-keys-function nil))
+  (when (eq (bound-and-true-p opencode-old-input-function) #'drover-opencode-edit-old-input)
+    (setq opencode-old-input-function nil)))
 
 (drover-opencode--install)
 

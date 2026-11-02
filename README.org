@@ -23,7 +23,7 @@ With elpaca or straight, opencode.el's recipe given too, since drover requires i
     :bind ("C-'" . drover-dispatch))
 #+end_src
 
-The OpenCode backend loads with opencode.el, which drover does not load before you do. Its sessions come from opencode.el's registry, which follows the shared OpenCode service whether or not a session has a buffer; drover opens the service's event stream when it starts. opencode.el's hints then name drover's keys, such as "C-' A answers it" for a pending question, through =opencode-command-keys-function=, unless you set that option yourself.
+The OpenCode backend loads with opencode.el, which drover does not load before you do. Its sessions come from opencode.el's registry, which follows the shared OpenCode service whether or not a session has a buffer; drover opens the service's event stream when it starts. opencode.el's hints then name drover's keys, such as "C-' A answers it" for a pending question, through =opencode-command-keys-function=, unless you set that option yourself; and =RET= on an earlier prompt edits it in drover's prompt (see [[*The prompt][The prompt]]) through =opencode-old-input-function=, likewise.
 
 * Statuses
 
@@ -430,6 +430,8 @@ In drover's own lists, =*drover sessions*= and the sidebar, =C-' "= quotes the s
 The header line shows what the prompt would run: directory, agent, model and effort, dim when inherited from the engine's defaults, bold when chosen with =C-' d=, =a=, =m= and =e=. From another buffer these keys choose for the next prompt. =a= switches directly when only two agents are offered.
 
 =C-' RET= sends: it asks for the target among the running sessions, then the new sessions of =drover-prompt-new-targets=, each labelled with what it would run; in that picker =C-'= changes the options. Explicit choices are applied to the target before the prompt goes out. With an active region, only the region is sent and the rest stays for another send. A send that sends nothing, cancelled by a check, leaves the prompt as it was. =C-' k= clears the text and closes the prompt's window, as =C-' '= hides it, keeping the buffer and the choices for the next prompt; =C-' i= attaches a buffer, quoted, or a project file, linked.
+
+=RET= on an earlier prompt of an OpenCode session buffer, but on a link of it, sends nothing again: the prompt, whole, goes into =*drover*= to be edited, and its session becomes where the prompt goes, which the header names (=to [Fix the login redirect]=), so that =C-' RET=, or =C-' S-RET=, takes it there without the picker. A prompt being written stays, the earlier one following it after a blank line, which the echo area says. The session is forgotten once the prompt is sent, its region included, or cleared, by a click on its name in the header, or by =M-x drover-prompt-forget-target=, and the picker asks again; a session whose buffer closed meanwhile is forgotten as the prompt is sent, and the picker asks. Attachments do not go along: their labels stay as text. Drover sets opencode.el's =opencode-old-input-function= to =drover-opencode-edit-old-input= unless you set it yourself; set it to =opencode-put-old-input= to edit earlier prompts in the session's own input, as opencode.el does alone (=C-c RET= there does so whatever the option). Other front ends can do the same through =drover-prompt-edit-for=.
 
 * Org links
 

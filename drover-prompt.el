@@ -49,6 +49,11 @@
 ;; `drover-prompt-consume', `drover-prompt-read-target',
 ;; `drover-prompt-explicit-options', `drover-prompt-options-for' and
 ;; `drover-prompt-apply-options'.
+;;
+;; Front ends put an earlier prompt of a session in it to be edited with
+;; `drover-prompt-edit-for', which also chooses that session as where
+;; the prompt goes: sending skips the picker until the prompt is sent or
+;; cleared, or the session forgotten (`drover-prompt-forget-target').
 
 ;;; Code:
 
@@ -220,6 +225,12 @@ other comes in order.")
 (defvar-local drover-prompt--minibuffer-overlay nil
   "Overlay showing, in the target picker's minibuffer, what the prompt runs.")
 
+(defvar-local drover-prompt--chosen-session nil
+  "Session the prompt goes to without the picker, or nil.
+A plist (:key KEY :title TITLE): KEY is the session's
+`drover-session-key', TITLE how the header names it.  Set by
+`drover-prompt-edit-for'; see `drover-prompt-read-target'.")
+
 ;;;; The mode
 
 (defconst drover-prompt--actions
@@ -333,22 +344,26 @@ engines are registered."
 
 (defun drover-prompt--reset (directory)
   "Start the current prompt afresh, inheriting DIRECTORY.
-Every choice is forgotten, and the defaults are fetched again."
+Every choice is forgotten, the session chosen to send to included, and
+the defaults are fetched again."
   (setq default-directory (file-name-as-directory (expand-file-name directory))
         drover-prompt--default-directory default-directory
         drover-prompt-directory-picked-p nil
         drover-prompt-picked-agent nil
         drover-prompt-picked-model nil
         drover-prompt-picked-variant nil
-        drover-prompt-title nil)
+        drover-prompt-title nil
+        drover-prompt--chosen-session nil)
   (drover-prompt--fetch-defaults))
 
 (defun drover-prompt--begin (directory)
   "Begin a new prompt from DIRECTORY in the current, empty prompt buffer.
 The agent, model, variant and directory chosen while the buffer was
 empty stay, since they were chosen for this prompt; DIRECTORY is
-inherited unless a directory was chosen."
-  (setq drover-prompt-title nil)
+inherited unless a directory was chosen.  A session chosen to send to
+goes, having been chosen for the text that left."
+  (setq drover-prompt-title nil
+        drover-prompt--chosen-session nil)
   (if drover-prompt-directory-picked-p
       (drover-prompt--schedule-refresh)
     (setq default-directory (file-name-as-directory (expand-file-name directory))
@@ -506,10 +521,27 @@ The face of VALUE tells EXPLICIT-P.  Nil when VALUE is."
               (key (plist-get (cdr suffix) :key)))
     (key-description (kbd key))))
 
+(defvar-keymap drover-prompt-target-header-map
+  :doc "Keys of the session the header names as where the prompt goes."
+  "<header-line> <mouse-1>" #'drover-prompt-forget-target)
+
+(defun drover-prompt--header-target ()
+  "Return the header's part naming the session the prompt goes to, or nil.
+A click on the session's name forgets it."
+  (when-let* ((title (plist-get drover-prompt--chosen-session :title)))
+    (concat "  |  to ["
+            (propertize (string-replace "%" "%%" (format "%s" title))
+                        'face 'opencode-setting-chosen
+                        'mouse-face 'mode-line-highlight
+                        'help-echo "mouse-1: forget it, and choose where the prompt goes when sent"
+                        'keymap drover-prompt-target-header-map)
+            "]")))
+
 (defun drover-prompt--header-line ()
   "Return the header line of the prompt: its keys and what it runs.
 The keys are those of `drover-dispatch', after the key it is bound to;
-scheduling shows when the buffer defines it."
+scheduling shows when the buffer defines it.  The session chosen to
+send to, if any, follows them."
   (let* ((options (drover-prompt-effective-options))
          (dispatch (substitute-command-keys "\\[drover-dispatch]"))
          (directory (plist-get options :directory))
@@ -525,6 +557,7 @@ scheduling shows when the buffer defines it."
                                      (funcall key #'drover-prompt-schedule "schedule" t))
                                 (funcall key #'drover-prompt-attach "attach" t)))
                 "  ")
+     (drover-prompt--header-target)
      "  |  "
      (funcall key #'drover-prompt-directory "cwd" t)
      (drover-prompt--header-option (and directory (abbreviate-file-name directory))
@@ -681,6 +714,62 @@ prompt begins in the current buffer's directory."
       (with-current-buffer buffer
         (drover-prompt--reset directory))
       (drover-prompt--display buffer)))))
+
+(defun drover-prompt--send-keys ()
+  "Return the keys sending the prompt, such as \"C-\\=' RET\", or nil."
+  (when-let* ((key (drover-prompt--menu-key #'drover-prompt-send)))
+    (concat (substitute-command-keys "\\[drover-dispatch]") " " key)))
+
+;;;###autoload
+(defun drover-prompt-edit-for (session text)
+  "Put TEXT in the prompt, to be edited and sent to SESSION, and show it.
+The prompt shows as `drover-prompt-toggle' shows it, point after TEXT.
+An empty prompt begins in SESSION's directory with TEXT; a draft stays,
+TEXT following it after a blank line, which the echo area tells.
+SESSION becomes where the prompt goes: sending it, or scheduling it,
+skips the picker, until it is sent, cleared, or the session forgotten
+\(`drover-prompt-forget-target'); the header names it.  Nothing is sent.
+Front ends call this to have an earlier prompt edited in the prompt,
+as drover's OpenCode backend does for opencode.el."
+  (let* ((buffer (drover-prompt-buffer t))
+         (title (drover-session-display-title session))
+         (draft nil)
+         (end nil))
+    (with-current-buffer buffer
+      (setq draft (not (string-blank-p (buffer-string))))
+      (if draft
+          (progn
+            (drover-prompt--schedule-refresh)
+            (goto-char (point-max))
+            (drover-prompt--ensure-blank-line))
+        (erase-buffer)
+        (drover-prompt--begin (or (drover-session-local-directory session) default-directory)))
+      (insert text)
+      (setq end (point)
+            drover-prompt--chosen-session (list :key (drover-session-key session) :title title))
+      (force-mode-line-update))
+    (drover-prompt--display buffer)
+    (if-let* ((window (get-buffer-window buffer t)))
+        (set-window-point window end)
+      (with-current-buffer buffer (goto-char end)))
+    (let ((keys (drover-prompt--send-keys)))
+      (drover-message "%s%s"
+                      (if draft "Added after the prompt being written; " "")
+                      (if keys
+                          (format "%s sends it to %s" keys title)
+                        (format "it goes to %s" title))))))
+
+(defun drover-prompt-forget-target ()
+  "Forget the session the prompt goes to: sending it asks where again.
+The session is the one `drover-prompt-edit-for' chose; the text stays."
+  (interactive)
+  (let ((buffer (drover-prompt--prompt-buffer)))
+    (with-current-buffer buffer
+      (if (not drover-prompt--chosen-session)
+          (message "The prompt goes where the picker says when sent")
+        (setq drover-prompt--chosen-session nil)
+        (force-mode-line-update)
+        (message "The prompt asks where it goes when sent")))))
 
 ;;;###autoload
 (defun drover-prompt-org-task ()
@@ -971,9 +1060,15 @@ A window that is the last of its frame stays."
 BUFFER defaults to the prompt buffer.  A region is deleted and the mark
 deactivated, the buffer and its window kept, unless only blanks remain;
 otherwise the prompt is done with: its buffer is killed and its window
-deleted."
+deleted.  The session chosen to send to, if any, is forgotten either
+way."
   (let ((buffer (or buffer (drover-prompt-buffer))))
     (when (buffer-live-p buffer)
+      ;; The session chosen to send to was for what left.
+      (with-current-buffer buffer
+        (when drover-prompt--chosen-session
+          (setq drover-prompt--chosen-session nil)
+          (force-mode-line-update)))
       (unless (and (plist-get content :region)
                    (with-current-buffer buffer
                      (delete-region (plist-get content :start) (plist-get content :end))
@@ -1094,14 +1189,15 @@ the prompt action `send'."
 (defun drover-prompt-erase ()
   "Erase the text of the prompt, region or not, and close its window.
 The buffer and the agent, model, effort and directory chosen stay, for
-the next prompt, which `drover-prompt-toggle' shows again.  A window
-that is the last of its frame stays.  This is the prompt action
-`clear'."
+the next prompt, which `drover-prompt-toggle' shows again; the session
+chosen to send to goes with the text.  A window that is the last of its
+frame stays.  This is the prompt action `clear'."
   (interactive)
   (let ((buffer (drover-prompt--prompt-buffer)))
     (with-current-buffer buffer
       (deactivate-mark)
-      (erase-buffer))
+      (erase-buffer)
+      (setq drover-prompt--chosen-session nil))
     (drover-prompt--hide buffer)))
 
 (defun drover-prompt--attach-candidates (buffer)
@@ -1532,6 +1628,24 @@ KEYMAP is nil for none.  The minibuffer shows what the prompt runs."
   (when-let* ((prompt (drover-prompt-buffer)))
     (drover-prompt--update-minibuffer prompt)))
 
+(defun drover-prompt--preselected (sessions)
+  "Return the session of SESSIONS the prompt was set to go to, or nil.
+SESSIONS are as `drover-prompt--target-sessions' returns them.  A
+session the prompt was set to go to that is no longer among them, its
+buffer gone or its backend taking no prompt, is forgotten, and the
+echo area says so."
+  (when-let* ((prompt (drover-prompt-buffer))
+              (target (buffer-local-value 'drover-prompt--chosen-session prompt)))
+    (or (car (seq-find (lambda (entry) (equal (drover-session-key (car entry)) (plist-get target :key)))
+                       sessions))
+        (progn
+          (with-current-buffer prompt
+            (setq drover-prompt--chosen-session nil)
+            (force-mode-line-update))
+          (drover-message "%s no longer takes prompts; choose where the prompt goes"
+                          (plist-get target :title))
+          nil))))
+
 (defun drover-prompt-read-target (prompt &rest keys)
   "Read where to send the prompt, with PROMPT.
 The candidates are the running sessions whose backend takes prompts
@@ -1541,7 +1655,8 @@ status, then the new sessions of `drover-prompt-new-targets' whose
 feature is installed and whose engine can run the model chosen.
 Return the `drover-session' chosen, or for a new session its entry of
 `drover-prompt-new-targets', a plist (:backend BACKEND :engine ENGINE
-...).  KEYS are:
+...).  A session `drover-prompt-edit-for' set the prompt to go to is
+returned without asking, while it takes prompts.  KEYS are:
 
  :existing-only  Non-nil to offer the running sessions only; signal a
                  `user-error' when there is none.
@@ -1553,31 +1668,34 @@ Where new sessions are offered, or with :options-menu, the key of
   (let* ((existing-only (plist-get keys :existing-only))
          (sessions (drover-prompt--target-sessions))
          (prompt-buffer (drover-prompt-buffer)))
-    (when (and existing-only (null sessions))
-      (user-error "No running session takes prompts"))
-    ;; New sessions are annotated with the engines' defaults.
-    (when (and prompt-buffer (not existing-only))
-      (with-current-buffer prompt-buffer
-        (drover-prompt--refresh-volatile)))
-    (let* ((targets (unless existing-only (drover-prompt--new-targets)))
-           (candidates (or (drover-prompt--candidates sessions targets)
-                           (user-error "No running session takes prompts, and none can start")))
-           (names (mapcar #'car candidates))
-           (annotate (drover-prompt--annotator candidates))
-           (table (lambda (string predicate action)
-                    (if (eq action 'metadata)
-                        `(metadata (category . drover-target)
-                                   (display-sort-function . identity)
-                                   (cycle-sort-function . identity)
-                                   (annotation-function . ,annotate))
-                      (complete-with-action action names string predicate))))
-           (keymap (and (or targets (plist-get keys :options-menu)) drover-prompt-target-map))
-           (choice (minibuffer-with-setup-hook (lambda () (drover-prompt--setup-picker keymap))
-                     (completing-read prompt table
-                                      (and targets (drover-prompt--target-predicate candidates))
-                                      t))))
-      (or (plist-get (cdr (assoc choice candidates)) :target)
-          (user-error "No session %s" choice)))))
+    (or
+     (drover-prompt--preselected sessions)
+     (progn
+       (when (and existing-only (null sessions))
+         (user-error "No running session takes prompts"))
+       ;; New sessions are annotated with the engines' defaults.
+       (when (and prompt-buffer (not existing-only))
+         (with-current-buffer prompt-buffer
+           (drover-prompt--refresh-volatile)))
+       (let* ((targets (unless existing-only (drover-prompt--new-targets)))
+              (candidates (or (drover-prompt--candidates sessions targets)
+                              (user-error "No running session takes prompts, and none can start")))
+              (names (mapcar #'car candidates))
+              (annotate (drover-prompt--annotator candidates))
+              (table (lambda (string predicate action)
+                       (if (eq action 'metadata)
+                           `(metadata (category . drover-target)
+                                      (display-sort-function . identity)
+                                      (cycle-sort-function . identity)
+                                      (annotation-function . ,annotate))
+                         (complete-with-action action names string predicate))))
+              (keymap (and (or targets (plist-get keys :options-menu)) drover-prompt-target-map))
+              (choice (minibuffer-with-setup-hook (lambda () (drover-prompt--setup-picker keymap))
+                        (completing-read prompt table
+                                         (and targets (drover-prompt--target-predicate candidates))
+                                         t))))
+         (or (plist-get (cdr (assoc choice candidates)) :target)
+             (user-error "No session %s" choice)))))))
 
 (provide 'drover-prompt)
 ;;; drover-prompt.el ends here
