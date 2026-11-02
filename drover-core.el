@@ -1236,6 +1236,13 @@ PROPERTIES is a plist of:
  :archive    Function of a session archiving it.  Sessions of a
              backend without it drover archives itself (see
              `drover-archive-session').
+ :archive-confirms
+             Non-nil when :archive is told later whether the archive
+             took, as by a service answering: it is then called with a
+             session, THEN and ELSE, and calls THEN with no argument
+             once the archive took, or ELSE with a message once it was
+             refused, at most one of them once.  The session's buffer
+             closes only after THEN, and stays after ELSE.
  :unarchive  Function of a session, archived, restoring it from the
              archive.
  :archived   Function of a CALLBACK fetching the backend's archived
@@ -2903,12 +2910,17 @@ which they show among while `drover-show-archived' is set.  Signal a
 `user-error' when SESSION is archived already, or cannot be.
 
 Archived, SESSION's buffer closes (see `drover--close-archived'): the
-value tells how, for `drover--archive-note'."
+value tells how, for `drover--archive-note'.  A backend whose archive
+is confirmed later (:archive-confirms) has the buffer closed once it
+is, and the value is `confirming' when there is one to close."
   (let ((title (drover-session-display-title session)))
     (cond
      ((drover-session-archived-p session) (user-error "%s is archived already" title))
+     ((and (drover--native-archive-p session) (drover-backend-property session :archive-confirms))
+      (drover--archive-confirmed session))
      ((drover--native-archive-p session)
-      (drover-backend-call session :archive))
+      (drover-backend-call session :archive)
+      (drover--close-archived session))
      ((not (drover-session-engine-key session))
       (user-error "%s cannot be archived before its conversation is known" title))
      (t
@@ -2927,8 +2939,63 @@ value tells how, for `drover--archive-note'."
                            :updated (drover-session-updated session))))
           (setf (alist-get (drover-session-engine-key session) archive nil nil #'equal) entry)
           (drover--archive-write archive)
-          (drover--archive-changed session)))))
-    (drover--close-archived session)))
+          (drover--archive-changed session)
+          (drover--close-archived session)))))))
+
+(defvar drover--confirming nil
+  "Archives asked of backends that confirm them, and not answered yet.
+An alist (KEY . TOKEN): KEY is the key of the session archived (see
+`drover-session-key'), TOKEN the archive's own, so that only the answer
+to the latest archive of a session closes its buffer, and none once the
+session was restored meanwhile (see `drover--close-cancel').")
+
+(defun drover--archive-confirmed (session)
+  "Archive SESSION through its backend, closing its buffer once the archive took.
+The backend's :archive tells later whether it took (:archive-confirms):
+the buffer closes then, as `drover--close-archived' closes it, which is
+told only when there is something to tell, such as unsent input kept
+or a buffer left until its turn ends; a refusal leaves the buffer open
+and is told on one line, as a warning.  Return `confirming' when
+SESSION has a buffer to close, else nil."
+  (let ((key (drover-session-key session))
+        (title (drover-bound-line (drover-session-display-title session)))
+        (token (list 'archive))
+        (closes (and (functionp (drover-backend-property session :close))
+                     (drover-session-buffer session)
+                     t))
+        (asked nil))
+    (cl-flet ((settle ()
+                ;; Non-nil when this archive is still the one awaited.
+                (when (eq (alist-get key drover--confirming nil nil #'equal) token)
+                  (drover--confirming-forget key)
+                  t)))
+      (setf (alist-get key drover--confirming nil nil #'equal) token)
+      (unwind-protect
+          (progn
+            (drover-backend-call
+             session :archive
+             (lambda ()
+               (drover-with-reporting "archive"
+                 (when (settle)
+                   (let ((outcome (drover--close-archived session)))
+                     (pcase outcome
+                       (`(failed . ,message)
+                        (drover-warn "Could not close the buffer of %s, archived: %s" title message))
+                       ((or 'kept 'later 'waiting)
+                        (drover-message "Archived %s; %s" title (drover--archive-note outcome nil))))))))
+             (lambda (message)
+               (drover-with-reporting "archive"
+                 (when (settle)
+                   (drover-warn "Could not archive %s: %s; its buffer stays open"
+                                title (or (drover-bound-line message drover-error-length) "refused"))))))
+            (setq asked t))
+        (unless asked
+          (drover--confirming-forget key))))
+    (and closes 'confirming)))
+
+(defun drover--confirming-forget (key)
+  "Forget the archive awaited of the session of KEY, if any."
+  (setq drover--confirming (seq-remove (lambda (entry) (equal (car entry) key)) drover--confirming)))
 
 (defun drover-unarchive-session (session)
   "Restore SESSION from the archive, drover's own or its backend's.
@@ -3060,7 +3127,10 @@ which closing would end, so that it closes once the turn ended, and
       (drover--close session))))
 
 (defun drover--close-cancel (session)
-  "Keep open the buffer of SESSION, restored before its turn ended."
+  "Keep open the buffer of SESSION, restored before its turn ended.
+Or before its backend confirmed the archive: the confirmation, when it
+comes, closes nothing."
+  (drover--confirming-forget (drover-session-key session))
   (setq drover--closing (seq-remove (lambda (entry) (equal (car entry) (drover-session-key session)))
                                     drover--closing))
   (unless drover--closing
@@ -3103,6 +3173,9 @@ title, or nil for a session acted on alone, which the report names."
                 (format "the buffer of %s closes once its turn ends" title)
               "its buffer closes once its turn ends"))
     ('waiting (format "%s waits for you: its buffer closes once its turn ends" (or title "it")))
+    ('confirming (if title
+                     (format "the buffer of %s closes once the archive is confirmed" title)
+                   "its buffer closes once the archive is confirmed"))
     (`(failed . ,message)
      (format "%s stays open: %s" (if title (format "the buffer of %s" title) "its buffer") message))))
 

@@ -46,8 +46,10 @@
 ;; so do the archived ones (:archived), which :unarchive restores.  Both
 ;; are fetched again as sessions are archived, restored or deleted, and
 ;; as the event stream reconnects, while lists show them.  Archiving a
-;; session closes its buffer at once (:close), as the session runs in
-;; the service, input typed and not sent going to the kill ring.
+;; session closes its buffer (:close) once the service confirmed the
+;; archive (:archive-confirms), as the session runs in the service,
+;; input typed and not sent going to the kill ring; a refused archive
+;; leaves the buffer open.
 ;; The recap of a session's last turn (:recap), which the list shows as
 ;; a session expands, is opencode.el's `opencode-session-last-turn'.
 ;;
@@ -677,9 +679,14 @@ the answer."
   "Stop the running turn of SESSION."
   (opencode-session-interrupt (drover-session-id session)))
 
-(defun drover-opencode--archive (session)
-  "Archive SESSION on the service."
-  (opencode-session-archive (drover-session-id session)))
+(defun drover-opencode--archive (session then else)
+  "Archive SESSION on the service; call THEN once it took, ELSE if refused.
+ELSE gets the refusal's description.  The backend's :archive, which
+confirms (:archive-confirms): the session's buffer closes only once the
+service archived it."
+  (opencode-session-archive (drover-session-id session) nil
+                            (lambda (_info) (funcall then))
+                            (lambda (error) (funcall else (opencode-error-describe error)))))
 
 (defun drover-opencode--unarchive (session)
   "Restore SESSION from the service's archive."
@@ -688,10 +695,10 @@ the answer."
 (defun drover-opencode--close (session)
   "Close the buffer of SESSION without asking, as archiving does.
 The session lives in the service: closing its buffer ends nothing, not
-even a turn in progress, so it closes at once.  Input typed at its
-prompt and not sent, which opencode.el keeps nowhere else, goes to the
-kill ring; the value is non-nil when there was some.  The backend's
-:close."
+even a turn in progress, so it closes as soon as the service confirmed
+the archive.  Input typed at its prompt and not sent, which opencode.el
+keeps nowhere else, goes to the kill ring; the value is non-nil when
+there was some.  The backend's :close."
   (when-let* ((buffer (drover-opencode--buffer session)))
     (prog1 (drover-keep-unsent
             (list (when-let* ((process (get-buffer-process buffer)))
@@ -1008,6 +1015,7 @@ unknown.  The backend's :options."
    :respond #'drover-opencode--respond
    :interrupt #'drover-opencode--interrupt
    :archive #'drover-opencode--archive
+   :archive-confirms t
    :unarchive #'drover-opencode--unarchive
    :archived #'drover-opencode--archived
    :mark-seen #'drover-opencode--mark-seen
