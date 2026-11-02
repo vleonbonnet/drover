@@ -2430,29 +2430,29 @@ Redraws keep point on the session."
                 (drover-list-test-goto "s")
                 (forward-char 3)
                 ;; The View menu, its settings, and the filter it clears.
-                (should (equal (type "V F C-g") '((:open "s" nil))))
+                (should (equal (type "V - f C-g") '((:open "s" nil))))
                 (should drover-follow-mode)
-                (should-not (type "V F C-g"))
+                (should-not (type "V - f C-g"))
                 (should-not drover-follow-mode)
-                (should-not (type "V g nothing RET C-g"))
+                (should-not (type "V = g nothing RET C-g"))
                 (should-not drover-group-by)
                 (should (equal (drover-list-test-ungrouped) '("root" "s" "kid" "new" "other")))
-                (should-not (type "V o title RET r C-g"))
+                (should-not (type "V = o title RET = r C-g"))
                 (should (eq drover-sort-by 'title))
                 (should drover-sort-descending)
                 ;; Roots by title, descending: "Session root", "other", "new".
                 (should (equal (drover-list-test-ungrouped) '("root" "s" "kid" "other" "new")))
-                (should-not (type "V f feature RET C-g"))
+                (should-not (type "V = f feature RET C-g"))
                 (should (equal drover-filter '(:search "feature")))
                 (should (equal (drover-list-test-ungrouped) '("root" "s")))
-                (should-not (type "V c C-g"))
+                (should-not (type "V = c C-g"))
                 (should-not drover-filter)
                 (should (equal (drover-list-test-ungrouped) '("root" "s" "kid" "other" "new")))
                 ;; By provider: s's tree, root above it.
-                (should-not (type "V v Anthropic RET C-g"))
+                (should-not (type "V = v Anthropic RET C-g"))
                 (should (equal drover-filter '(:provider "Anthropic")))
                 (should (equal (drover-list-test-ungrouped) '("root" "s")))
-                (should-not (type "V c g provider RET C-g"))
+                (should-not (type "V = c = g provider RET C-g"))
                 (should (eq drover-group-by 'provider))
                 (should (equal (drover-list-test-groups) '((nil "root" "s" "kid" "new") ("OpenAI" "other"))))
                 (should-not (bound-and-true-p transient--prefix))))))
@@ -3925,7 +3925,7 @@ Each shows its own buffer."
         (execute-kbd-macro (kbd "p p"))
         (should (equal (drover-list-test-id-at-point) "ask"))
         ;; Turning it on shows the session at point at once.
-        (execute-kbd-macro (kbd "V F C-g"))
+        (execute-kbd-macro (kbd "V - f C-g"))
         (should drover-follow-mode)
         (should (equal (car drover-test-calls) (list :open "ask" nil first)))
         (should (equal (funcall shown) "*session ask*"))
@@ -3949,7 +3949,7 @@ Each shows its own buffer."
         (should (eq (drover-list--main-window) first))
         (drover-list--windows-changed)
         (should (eq (drover-list-test-title-face "fail") 'opencode-session-active))
-        (execute-kbd-macro (kbd "V F C-g"))
+        (execute-kbd-macro (kbd "V - f C-g"))
         (should-not drover-follow-mode)
         (execute-kbd-macro (kbd "n"))
         (should (equal (funcall shown) "*session fail*"))))))
@@ -5494,20 +5494,135 @@ buffer."
     (should (equal (drover-list-test-at-side side) "fail"))))
 
 (ert-deftest drover-list-test-dispatch-view-elsewhere ()
-  "The View menu opened from a code buffer sets the list's follow mode."
+  "The dispatch menu opened from a code buffer sets the list's follow mode."
   (drover-list-test-elsewhere
-    (execute-kbd-macro (kbd "C-' V F"))
-    (should (eq (oref transient--prefix command) 'drover-view))
+    (execute-kbd-macro (kbd "C-' - f"))
+    (should (eq (oref transient--prefix command) 'drover-dispatch))
     (should (buffer-local-value 'drover-follow-mode buffer))
     (should-not (buffer-local-value 'drover-follow-mode code))
     ;; Following shows the session at the list's point in the main window.
     (should (equal (car drover-test-calls) (list :open "ask" nil first)))
-    (execute-kbd-macro (kbd "F"))
+    (execute-kbd-macro (kbd "- f"))
     (should-not (buffer-local-value 'drover-follow-mode buffer))
-    (execute-kbd-macro (kbd "C-g C-g"))
+    (execute-kbd-macro (kbd "C-g"))
     (should-not transient--prefix)
     ;; The user is back where they work.
     (should (eq (selected-window) first))))
+
+(ert-deftest drover-list-test-dispatch-view-beside-session ()
+  "From a session buffer, the view settings change the list shown beside it.
+The session keys keep to the buffer's own session, and the follow mode
+set is that of the list in sight."
+  (drover-list-test-elsewhere
+    (with-current-buffer code
+      (setq-local drover-session-at-point-function (lambda () (drover-find 'fake "fail"))))
+    (let ((scope (drover--context)))
+      (should-not (plist-get scope :window))
+      (should-not (plist-get scope :view))
+      (should (plist-get scope :shown)))
+    (execute-kbd-macro (kbd "C-'"))
+    (cl-flet ((apt (key) (not (oref (seq-find (lambda (suffix) (equal (oref suffix key) key))
+                                              transient--suffixes)
+                                    inapt))))
+      (dolist (key '("U" "=o" "=r" "=g" "=p" "=c" "-f" "-l"))
+        (should (apt key)))
+      ;; Peeking needs a list: it would peek at the buffer's own session.
+      (should-not (apt "v")))
+    ;; No List group: the menu acts on the session buffer.
+    (should-not (seq-find (lambda (suffix) (eq (oref suffix command) 'drover-list-next-session))
+                          transient--suffixes))
+    (execute-kbd-macro (kbd "- f"))
+    (should (buffer-local-value 'drover-follow-mode buffer))
+    (execute-kbd-macro (kbd "- f"))
+    (should-not (buffer-local-value 'drover-follow-mode buffer))
+    (execute-kbd-macro (kbd "U"))
+    (should (eq (default-value 'drover-show-subagents) 'none))
+    (should (eq (oref transient--prefix command) 'drover-dispatch))
+    (execute-kbd-macro (kbd "C-g"))
+    (should (eq (selected-window) first))
+    ;; Hidden, the list leaves the view settings to nothing.  Following
+    ;; showed its session where the user works: back to the code.
+    (delete-window side)
+    (set-window-buffer first code)
+    (set-buffer code)
+    (execute-kbd-macro (kbd "C-'"))
+    (should (oref (seq-find (lambda (suffix) (equal (oref suffix key) "=o")) transient--suffixes) inapt))
+    (execute-kbd-macro (kbd "C-g"))))
+
+(defun drover-list-test-menu-text ()
+  "Return the text of the open menu, without properties."
+  (with-current-buffer " *transient*"
+    (buffer-substring-no-properties (point-min) (point-max))))
+
+(ert-deftest drover-list-test-dispatch-fills-width ()
+  "The menu lays its groups out in rows as wide as its window, in few lines.
+The old menu took 24 lines at any width, its View menu apart."
+  (drover-list-test-elsewhere
+    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 18) (100 . 27) (60 . 60)))
+      (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
+        (execute-kbd-macro (kbd "C-'"))
+        (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))
+          (should (<= (length lines) bound))
+          ;; Narrow, a column wider than the window takes a row alone.
+          (should (<= (apply #'max (mapcar #'string-width lines)) (max width 40)))
+          (should-not (seq-find (lambda (line) (string-match-p "Global" line)) lines))
+          ;; Titles start their rows.
+          (should (string-prefix-p "Sessions" (car lines))))
+        (execute-kbd-macro (kbd "C-g"))))
+    ;; The window's width, before the menu shows, beside the sidebar.
+    (should (= (drover--menu-width) (max 40 (- (window-total-width (window-main-window)) 2))))))
+
+(ert-deftest drover-list-test-dispatch-layout-stays ()
+  "While the menu stays open, its groups keep their place as long as they fit."
+  (drover-list-test-elsewhere
+    (let ((width 400))
+      (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
+        (execute-kbd-macro (kbd "C-'"))
+        (let* ((count (length (flatten-tree (oref transient--prefix plan))))
+               ;; Every group in a column of its own, on one row.
+               (wide (list (make-list count (list 0)))))
+          (oset transient--prefix plan wide)
+          (execute-kbd-macro (kbd "U"))
+          (should (equal (oref transient--prefix plan) wide))
+          ;; As high as the highest group: a title and seven entries.
+          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 8))
+          ;; Narrower than it, the menu is laid out anew.
+          (setq width 160)
+          (execute-kbd-macro (kbd "U"))
+          (should-not (equal (oref transient--prefix plan) wide))
+          (should (<= (apply #'max (mapcar #'string-width (split-string (drover-list-test-menu-text) "\n")))
+                      160)))
+        (execute-kbd-macro (kbd "C-g"))))))
+
+(ert-deftest drover-list-test-dispatch-values-update ()
+  "The menu shows each view setting's value, and the new one once changed."
+  (drover-list-test-elsewhere
+    (execute-kbd-macro (kbd "C-'"))
+    (should (string-search "=g group status" (drover-list-test-menu-text)))
+    (should (string-search "U subagents [all|active|none]" (drover-list-test-menu-text)))
+    (cl-flet ((face-of (text)
+                (with-current-buffer " *transient*"
+                  (goto-char (point-min))
+                  (search-forward text)
+                  (get-text-property (match-beginning 0) 'face))))
+      (should (eq (face-of "active") 'transient-value))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "nothing")))
+        (execute-kbd-macro (kbd "= g")))
+      (should (eq (oref transient--prefix command) 'drover-dispatch))
+      (should-not drover-group-by)
+      (should (string-search "=g group nothing" (drover-list-test-menu-text)))
+      (execute-kbd-macro (kbd "U"))
+      (should (eq (face-of "none") 'transient-value))
+      (should (eq (face-of "active") 'transient-inactive-value))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "redirect")))
+        (execute-kbd-macro (kbd "= f")))
+      (should (string-search "=f text \"redirect\"" (drover-list-test-menu-text)))
+      (execute-kbd-macro (kbd "= c"))
+      (should (string-search "=f text any" (drover-list-test-menu-text)))
+      (execute-kbd-macro (kbd "- l"))
+      (should (eq (face-of "location") 'transient-inactive-value))
+      (should (equal drover-list-hidden-fields '(location))))
+    (execute-kbd-macro (kbd "C-g"))))
 
 (ert-deftest drover-list-test-dispatch-in-prompt-buffer ()
   "In a buffer sending prompts, RET sends, and o acts on the list."
