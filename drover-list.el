@@ -1669,44 +1669,52 @@ background of the line, that of the session.  For `help-echo'."
           (setq high (1- middle)))))
     low))
 
+(defun drover-list--put-display (position value)
+  "Make VALUE the display of the character at POSITION, unless it is already.
+Putting a property changes the buffer even when the value is the same,
+which has Emacs lay out the windows showing it again."
+  (unless (equal (get-text-property position 'display) value)
+    (put-text-property position (1+ position) 'display value)))
+
 (defun drover-list--draw-background (entry fraction)
   "Colour the line of ENTRY, from the left, over FRACTION of its width.
 FRACTION nil colours nothing.  The bar ends at a space, stretched to
-the pixel, or between two characters of text."
+the pixel, or between two characters of text.  What is drawn already
+is left as it is."
   (let* ((start (plist-get entry :start))
-         (spec (plist-get entry :spec))
+         (overlay (plist-get entry :overlay))
          (x (and fraction (round (* fraction (plist-get entry :width)))))
-         (end start))
-    (cl-flet ((stretch (offset width)
-                (put-text-property (+ start offset) (+ start offset 1)
-                                   'display `(space :width (,(max 0 width))))))
-      (dolist (item spec)
-        (when (eq (nth 1 item) 'split)
-          (stretch (car item) 0)))
-      (when x
-        (catch 'done
-          (dolist (item spec)
-            (pcase item
-              (`(,offset split ,from ,to)
-               (cond ((>= x to)
-                      (stretch offset (- to from))
-                      (setq end (+ start offset 2)))
-                     ((> x from)
-                      (stretch offset (- x from))
-                      (setq end (+ start offset 1))
-                      (throw 'done nil))
-                     (t (throw 'done nil))))
-              (`(,offset text ,from ,width ,string)
-               (if (>= x (+ from width))
-                   (setq end (+ start offset (length string)))
-                 ;; The text as shown now: an animated glyph may show
-                 ;; another frame than when the line was drawn.
-                 (setq end (+ start offset
-                              (drover-list--fitting
-                               (buffer-substring (+ start offset) (+ start offset (length string)))
-                               (- x from))))
-                 (throw 'done nil))))))))
-    (move-overlay (plist-get entry :overlay) start end)))
+         (end start)
+         (done (not x)))
+    (dolist (item (plist-get entry :spec))
+      (pcase item
+        (`(,offset split ,from ,to)
+         (let ((width 0))
+           (unless done
+             (cond ((>= x to)
+                    (setq width (- to from)
+                          end (+ start offset 2)))
+                   ((> x from)
+                    (setq width (- x from)
+                          end (+ start offset 1)
+                          done t))
+                   (t (setq done t))))
+           (drover-list--put-display (+ start offset) `(space :width (,(max 0 width))))))
+        (`(,offset text ,from ,width ,string)
+         (unless done
+           (if (>= x (+ from width))
+               (setq end (+ start offset (length string)))
+             ;; The text as shown now: an animated glyph may show
+             ;; another frame than when the line was drawn.
+             (setq end (+ start offset
+                          (drover-list--fitting
+                           (buffer-substring (+ start offset) (+ start offset (length string)))
+                           (- x from)))
+                   done t))))))
+    (unless (and (eq (overlay-buffer overlay) (current-buffer))
+                 (= (overlay-start overlay) start)
+                 (= (overlay-end overlay) end))
+      (move-overlay overlay start end))))
 
 (defun drover-list--draw-field (entry fraction remaining)
   "Draw the prompt cache field of ENTRY, FRACTION full, REMAINING seconds left.
@@ -1722,8 +1730,8 @@ properties it had, the section it belongs to included."
       (while (setq position (text-property-not-all position end 'drover-list-cache nil))
         (pcase (get-text-property position 'drover-list-cache)
           ('label (setq label (or label position)))
-          (part (put-text-property
-                 position (1+ position) 'display
+          (part (drover-list--put-display
+                 position
                  (pcase part
                    ('full `(space :width (,full)))
                    ('trough `(space :width (,(if fraction (- bar full) 0))))
@@ -1741,13 +1749,16 @@ properties it had, the section it belongs to included."
               (insert (apply #'propertize text properties))
               (delete-region (point) (+ (point) (- label-end label))))))))))
 
-(defun drover-list--draw-caches (&optional now)
+(defun drover-list--draw-caches (&optional now ranges)
   "Redraw the prompt caches of the current list as they stand at NOW.
 NOW defaults to the current time.  Only the caches change: the display
 of their bars, and the text of the time left.  A cache gone out shows
-nothing, and is forgotten."
+nothing, and is forgotten.  With RANGES, the parts of the buffer
+windows show, as (START . END), a cache still live elsewhere is left as
+it was drawn, as `drover-list--draw-frames' leaves animated glyphs."
   (when (drover-list--current-p)
     (let ((now (or now (drover-list--now)))
+          (ranges (or ranges t))
           (inhibit-read-only t)
           (deactivate-mark nil))
       (with-silent-modifications
@@ -1756,10 +1767,11 @@ nothing, and is forgotten."
                (lambda (entry)
                  (let* ((session (plist-get entry :session))
                         (fraction (drover-list--cache-fraction session now)))
-                   (if (eq (plist-get entry :kind) 'narrow)
-                       (drover-list--draw-background entry fraction)
-                     (drover-list--draw-field entry fraction
-                                              (drover-session-cache-remaining session now)))
+                   (when (or (not fraction) (drover-list--in-ranges-p (plist-get entry :start) ranges))
+                     (if (eq (plist-get entry :kind) 'narrow)
+                         (drover-list--draw-background entry fraction)
+                       (drover-list--draw-field entry fraction
+                                                (drover-session-cache-remaining session now))))
                    (unless fraction
                      (when-let* ((overlay (plist-get entry :overlay)))
                        (delete-overlay overlay))
@@ -1792,15 +1804,25 @@ KIND), see `drover-list--animated'."
       (setq position (1+ position)))
     (nreverse found)))
 
-(defun drover-list--draw-frames (&optional now)
+(defun drover-list--in-ranges-p (position ranges)
+  "Return non-nil when RANGES is t, or POSITION lies in one of RANGES.
+RANGES is a list of (START . END), the parts of the buffer windows show."
+  (or (eq ranges t)
+      (seq-some (lambda (range) (<= (car range) position (cdr range))) ranges)))
+
+(defun drover-list--draw-frames (&optional now ranges)
   "Show the frames of the animated glyphs of the current list at NOW.
 NOW defaults to the current time.  Only the display of their two
 characters changes, and only where the frame did: neither the text nor
 the sections.  Glyphs out of sight, in a collapsed group, are left as
-they are until they show."
+they are until they show; so are those out of RANGES, the parts of the
+buffer windows show, as (START . END), when given: changing the text
+of a buffer that the selected window does not show has Emacs lay out
+every line of the windows showing it again."
   (when (drover-list--current-p)
     (when opencode-session-status-animation-interval
       (let ((now (or now (drover-list--now)))
+            (ranges (or ranges t))
             (inhibit-read-only t))
         (with-silent-modifications
           (pcase-dolist (`(,position . ,kind) drover-list--animated)
@@ -1808,8 +1830,9 @@ they are until they show."
               (when strings
                 (let* ((index (opencode-session-status-frame-index (length strings) now))
                        (frame (nth index strings)))
-                  (unless (or (invisible-p position)
-                              (eq (get-text-property position 'display) frame))
+                  (unless (or (eq (get-text-property position 'display) frame)
+                              (not (drover-list--in-ranges-p position ranges))
+                              (invisible-p position))
                     (put-text-property position (1+ position) 'display frame)
                     (put-text-property (1+ position) (+ position 2) 'display
                                        `(space :width (,(- width (nth index widths)))))))))))))))
@@ -3690,13 +3713,114 @@ drawing anew keeps them."
   "Return non-nil when a window of a visible or iconified frame shows BUFFER."
   (get-buffer-window buffer 0))
 
+;;;; Lists, the windows showing them, and the focus
+
+;; Timers ticking several times a second, and hooks running on every
+;; change of the selected window, find the lists from what drover noted
+;; as lists came and went and as windows changed: looking at every
+;; buffer, as `match-buffers' does, cost them more than their drawing.
+
+(defvar drover-list--live (match-buffers '(derived-mode . drover-list-mode))
+  "The list buffers, oldest first.
+`drover-list-mode' adds its buffer; killing it or changing its mode
+takes it out (`drover-list--forget').  Loaded over a drover that kept
+none, the lists of that drover are found once.")
+
 (defun drover-list--buffers ()
-  "Return the live list buffers."
-  (match-buffers '(derived-mode . drover-list-mode)))
+  "Return the live list buffers, oldest first."
+  (if (seq-every-p #'buffer-live-p drover-list--live)
+      drover-list--live
+    (setq drover-list--live (seq-filter #'buffer-live-p drover-list--live))))
+
+(defun drover-list--forget ()
+  "Take the current buffer out of the list buffers.
+For `kill-buffer-hook' and `change-major-mode-hook'."
+  (setq drover-list--live (remq (current-buffer) drover-list--live)))
+
+(defvar drover-list--windows nil
+  "The windows found showing lists, as an alist (BUFFER . WINDOWS).
+They are found again as windows change, lists draw and timers start or
+stop (`drover-list--find-windows'), in every frame, visible or not;
+what uses them checks that each still shows its list in a visible
+frame (`drover-list--showing').")
+
+(defun drover-list--find-windows ()
+  "Find the windows showing lists, in `drover-list--windows'."
+  (setq drover-list--windows
+        (let ((found nil))
+          (dolist (buffer (drover-list--buffers))
+            (when-let* ((windows (get-buffer-window-list buffer nil t)))
+              (push (cons buffer windows) found)))
+          (nreverse found))))
+
+(defun drover-list--showing ()
+  "Return the lists that windows of visible frames show, with what they show.
+The value is an alist (BUFFER . RANGES), RANGES the parts of BUFFER
+the windows show, as (START . END), as they were last displayed.  The
+windows are those found last (`drover-list--windows'): it looks at no
+other window, nor at any buffer."
+  (let ((showing nil))
+    (pcase-dolist (`(,buffer . ,windows) drover-list--windows)
+      (let ((ranges nil))
+        (dolist (window windows)
+          (when (and (window-live-p window)
+                     (eq (window-buffer window) buffer)
+                     (eq (frame-visible-p (window-frame window)) t))
+            (push (cons (window-start window) (window-end window)) ranges)))
+        (when ranges
+          (push (cons buffer ranges) showing))))
+    (nreverse showing)))
 
 (defun drover-list--shown-buffers ()
-  "Return the live list buffers a window shows."
-  (seq-filter #'drover-list--visible-p (drover-list--buffers)))
+  "Return the live list buffers a window of a visible or iconified frame shows."
+  (drover-list--find-windows)
+  (let ((shown nil))
+    (pcase-dolist (`(,buffer . ,windows) drover-list--windows)
+      (when (seq-some (lambda (window) (frame-visible-p (window-frame window))) windows)
+        (push buffer shown)))
+    (nreverse shown)))
+
+(defvar drover-list--focused t
+  "Non-nil unless Emacs lost focus, as `drover-list--focus-state' told last.")
+
+(defun drover-list--focus-state ()
+  "Return non-nil unless Emacs is known to have lost focus.
+It has focus while a frame has, or may have, as `frame-focus-state'
+tells; the initial frame of a daemon or of a batch Emacs does not count,
+and without another frame, Emacs is taken to have focus."
+  (let ((frames (seq-remove #'frame-initial-p (frame-list))))
+    (or (null frames)
+        (and (seq-some #'frame-focus-state frames) t))))
+
+(defvar drover-list--focus-timer nil
+  "Timer looking at the focus once its events settled, or nil.")
+
+(defun drover-list--focus-changed ()
+  "Look at the focus again, once the events moving it settled.
+Moving from one frame to another, Emacs may tell that the first lost
+focus before telling that the other has it.  For
+`after-focus-change-function'."
+  (drover-with-reporting "list focus"
+    (unless (timerp drover-list--focus-timer)
+      (setq drover-list--focus-timer (run-at-time 0 nil #'drover-list--refocus)))))
+
+(defun drover-list--refocus ()
+  "Pause the timers of lists once Emacs lost focus, and run them once it has it.
+Regaining focus, the animated glyphs and prompt caches the lists show
+are drawn as they stand at once, rather than at the next tick."
+  (drover-with-reporting "list focus"
+    (setq drover-list--focus-timer nil)
+    (let ((focused (drover-list--focus-state)))
+      (unless (eq focused drover-list--focused)
+        (setq drover-list--focused focused)
+        (drover-list--find-windows)
+        (when focused
+          (let ((now (drover-list--now)))
+            (pcase-dolist (`(,buffer . ,ranges) (drover-list--showing))
+              (with-current-buffer buffer
+                (drover-list--draw-frames now ranges)
+                (drover-list--draw-caches now ranges)))))
+        (drover-list--update-timers)))))
 
 (defun drover-list--drop-stale ()
   "Drop what another version of drover drew of the current list; non-nil if so.
@@ -3891,12 +4015,19 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
 (defvar drover-list--frame-timer nil
   "Timer showing the next frames of the animated glyphs of displayed lists.")
 
+(defvar drover-list--age-due nil
+  "When the age timer is to tick next, as a float time, or nil before it ran.
+A timer started again, once a list shows again or Emacs has focus again,
+ticks then, or a second later when that time passed.")
+
 (defun drover-list--age-tick ()
   "Keep displayed lists current; stop when none is shown.
-The sessions are listed anew, for what backends change unreported, as
-a branch; the rows whose ages read otherwise are drawn again in place.
-A hidden list notes that time passed, and draws those rows once shown."
+What may have changed unreported, as a branch, is listed anew; the rows
+whose ages read otherwise are drawn again in place.  A hidden list notes
+that time passed, and draws those rows once shown."
   (drover-with-reporting "list timer"
+    (setq drover-list--age-due (and drover-list-age-interval
+                                    (+ (float-time) drover-list-age-interval)))
     (drover-index-refresh)
     (dolist (buffer (drover-list--buffers))
       (with-current-buffer buffer
@@ -3906,20 +4037,32 @@ A hidden list notes that time passed, and draws those rows once shown."
     (drover-list--update-timers)))
 
 (defun drover-list--cache-tick ()
-  "Redraw the prompt caches of displayed lists; stop when none is live."
+  "Redraw the prompt caches lists show; stop when none shows a live one."
   (drover-with-reporting "list timer"
-    (dolist (buffer (drover-list--shown-buffers))
-      (with-current-buffer buffer
-        (drover-list--draw-caches)))
-    (drover-list--update-timers)))
+    (let ((showing (and drover-list--focused (drover-list--showing)))
+          (now (drover-list--now)))
+      (pcase-dolist (`(,buffer . ,ranges) showing)
+        (when (buffer-local-value 'drover-list--caches buffer)
+          (with-current-buffer buffer
+            (drover-list--draw-caches now ranges))))
+      (unless (seq-some (lambda (entry) (buffer-local-value 'drover-list--caches (car entry)))
+                        showing)
+        (drover-list--update-timers)))))
 
 (defun drover-list--frame-tick ()
-  "Show the next frames of displayed lists; stop when none animates."
+  "Show the next frames of the glyphs lists show; stop when none animates.
+It looks at the windows found showing lists, not at every buffer nor
+window, and changes only the glyphs those windows show."
   (drover-with-reporting "list timer"
-    (dolist (buffer (drover-list--shown-buffers))
-      (with-current-buffer buffer
-        (drover-list--draw-frames)))
-    (drover-list--update-timers)))
+    (let ((showing (and drover-list--focused (drover-list--showing)))
+          (now (drover-list--now)))
+      (pcase-dolist (`(,buffer . ,ranges) showing)
+        (when (buffer-local-value 'drover-list--animated buffer)
+          (with-current-buffer buffer
+            (drover-list--draw-frames now ranges))))
+      (unless (seq-some (lambda (entry) (buffer-local-value 'drover-list--animated (car entry)))
+                        showing)
+        (drover-list--update-timers)))))
 
 (defun drover-list--stop-timer (symbol)
   "Cancel the timer in the variable SYMBOL, and forget it."
@@ -3937,21 +4080,29 @@ default; stop it when INTERVAL or NEEDED is nil."
     (drover-list--stop-timer symbol)))
 
 (defun drover-list--update-timers ()
-  "Run the timers a displayed list needs, and only those.
-Ages need redraws while a list is displayed; prompt caches while a
-displayed list shows a live one; animated glyphs while a displayed list
-shows one.  Caches and glyphs change only a few characters: their
-display, and the text of a cache's time left, never the sections."
-  (let ((shown (drover-list--shown-buffers)))
-    (drover-list--keep-timer 'drover-list--age-timer drover-list-age-interval shown
-                             #'drover-list--age-tick)
+  "Run the timers lists shown need, and only those.
+Every timer pauses while Emacs has no focus, and while no window of a
+visible frame shows a list: ages need redraws while a list shows;
+prompt caches while a list shown shows a live one; animated glyphs
+while a list shown shows one.  Caches and glyphs change only a few
+characters: their display, and the text of a cache's time left, never
+the sections."
+  (drover-list--find-windows)
+  (let ((showing (and drover-list--focused (drover-list--showing)))
+        (now (float-time)))
+    (drover-list--keep-timer 'drover-list--age-timer drover-list-age-interval showing
+                             #'drover-list--age-tick
+                             (and drover-list-age-interval drover-list--age-due
+                                  (max 1 (- drover-list--age-due now))))
+    (when (and (timerp drover-list--age-timer) (not drover-list--age-due))
+      (setq drover-list--age-due (+ now drover-list-age-interval)))
     (drover-list--keep-timer 'drover-list--cache-timer drover-list-cache-interval
-                             (seq-some (lambda (buffer) (buffer-local-value 'drover-list--caches buffer))
-                                       shown)
+                             (seq-some (lambda (entry) (buffer-local-value 'drover-list--caches (car entry)))
+                                       showing)
                              #'drover-list--cache-tick)
     (drover-list--keep-timer 'drover-list--frame-timer opencode-session-status-animation-interval
-                             (seq-some (lambda (buffer) (buffer-local-value 'drover-list--animated buffer))
-                                       shown)
+                             (seq-some (lambda (entry) (buffer-local-value 'drover-list--animated (car entry)))
+                                       showing)
                              #'drover-list--frame-tick
                              (and opencode-session-status-animation-interval
                                   (opencode-session-status-frame-delay (drover-list--now))))))
@@ -4130,7 +4281,9 @@ For `window-buffer-change-functions' and
     (setq drover-list--restyle-timer nil)
     (dolist (buffer (drover-list--shown-buffers))
       (with-current-buffer buffer
-        (drover-list--restyle-titles)))))
+        (drover-list--restyle-titles)))
+    ;; A list hidden, or shown, pauses or runs the timers.
+    (drover-list--update-timers)))
 
 (defun drover-list--buffer-killed ()
   "Give titles new faces once the session buffer being killed is gone.
@@ -4153,18 +4306,22 @@ A theme may change fonts, which widths depend on, and the colour of
       (drover-list--update buffer))))
 
 (defun drover-list--watch ()
-  "Follow sessions and windows while a list buffer lives."
+  "Follow sessions, windows and the focus while a list buffer lives."
   (add-hook 'drover-changed-hook #'drover-list--on-change)
   (add-hook 'window-buffer-change-functions #'drover-list--windows-changed)
   (add-hook 'window-selection-change-functions #'drover-list--windows-changed)
   (add-hook 'kill-buffer-hook #'drover-list--buffer-killed)
   (add-hook 'enable-theme-functions #'drover-list--theme-changed)
-  (add-hook 'disable-theme-functions #'drover-list--theme-changed))
+  (add-hook 'disable-theme-functions #'drover-list--theme-changed)
+  (unless (advice-function-member-p #'drover-list--focus-changed after-focus-change-function)
+    (setq drover-list--focused (drover-list--focus-state))
+    (add-function :after after-focus-change-function #'drover-list--focus-changed)))
 
 (defun drover-list--on-kill ()
-  "Stop following sessions and windows once the last list is killed.
+  "Stop following sessions, windows and the focus once the last list is killed.
 The list killed draws no recap later.  For `kill-buffer-hook'."
   (drover-with-reporting "list"
+    (drover-list--forget)
     (when (timerp drover-list--recap-timer)
       (cancel-timer drover-list--recap-timer))
     (when (timerp drover-list--deferred-timer)
@@ -4177,6 +4334,9 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
       (remove-hook 'kill-buffer-hook #'drover-list--buffer-killed)
       (remove-hook 'enable-theme-functions #'drover-list--theme-changed)
       (remove-hook 'disable-theme-functions #'drover-list--theme-changed)
+      (remove-function after-focus-change-function #'drover-list--focus-changed)
+      (setq drover-list--windows nil)
+      (drover-list--stop-timer 'drover-list--focus-timer)
       (drover-list--stop-timer 'drover-list--restyle-timer)
       (drover-list--stop-timer 'drover-list--relist-timer)
       (drover-list--stop-timer 'drover-list--age-timer)
@@ -4561,9 +4721,15 @@ them with their last replies (see `drover-prompt-dwim').
   (add-hook 'text-scale-mode-hook #'drover-list--on-face-change nil t)
   (add-hook 'buffer-face-mode-hook #'drover-list--on-face-change nil t)
   (add-hook 'kill-buffer-hook #'drover-list--on-kill nil t)
+  (add-hook 'change-major-mode-hook #'drover-list--on-kill nil t)
   (add-hook 'post-command-hook #'drover-list--prefetch nil t)
   ;; Isearch finds the sessions of collapsed groups, and opens them.
   (add-hook 'isearch-mode-hook #'drover-list--draw-deferred nil t)
+  (setq drover-list--live (append (remq (current-buffer) drover-list--live) (list (current-buffer))))
+  (drover-list--watch))
+
+;; Loaded over an older drover, the lists it made follow this one.
+(when (drover-list--buffers)
   (drover-list--watch))
 
 (provide 'drover-list)

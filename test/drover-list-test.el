@@ -58,7 +58,10 @@
   (switch-to-buffer "*scratch*")
   (drover-list--stop-timer 'drover-list--age-timer)
   (drover-list--stop-timer 'drover-list--cache-timer)
-  (drover-list--stop-timer 'drover-list--frame-timer))
+  (drover-list--stop-timer 'drover-list--frame-timer)
+  (drover-list--stop-timer 'drover-list--focus-timer)
+  (setq drover-list--age-due nil
+        drover-list--focused t))
 
 (defmacro drover-list-test-with (sessions &rest body)
   "Run BODY in a fresh list drawn from SESSIONS of the fake backend.
@@ -4944,6 +4947,165 @@ The subagent's glyph stands under its parent's title."
         (should (timerp drover-list--frame-timer))
         (kill-buffer buffer)
         (should-not drover-list--frame-timer)))))
+
+(ert-deftest drover-list-test-buffers-tracked ()
+  "Lists are known as they come and go: timers and window hooks scan no buffer list."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working
+                                                    :cache-expires (+ drover-test-now 240) :cache-ttl 300))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-cache-interval 5)
+          (other (generate-new-buffer "*drover sessions other*")))
+      (should (equal (drover-list--buffers) (list buffer)))
+      (with-current-buffer other
+        (drover-list-mode))
+      (should (equal (drover-list--buffers) (list buffer other)))
+      ;; Of another mode, or killed, a buffer is no list.
+      (with-current-buffer other
+        (fundamental-mode))
+      (should (equal (drover-list--buffers) (list buffer)))
+      (with-current-buffer other
+        (drover-list-mode))
+      (kill-buffer other)
+      (should (equal (drover-list--buffers) (list buffer)))
+      (drover-list-test-shown
+        (revert-buffer)
+        (should (timerp drover-list--frame-timer))
+        (should (timerp drover-list--cache-timer))
+        (let* ((scans 0)
+               (count (lambda (&rest _) (cl-incf scans))))
+          (advice-add 'match-buffers :before count)
+          (advice-add 'buffer-list :before count)
+          (unwind-protect
+              (progn
+                (setq drover-list-test-clock (+ drover-test-now 0.5))
+                (drover-list--frame-tick)
+                (drover-list--cache-tick)
+                (drover-list--update-timers)
+                (drover-list--windows-changed))
+            (advice-remove 'match-buffers count)
+            (advice-remove 'buffer-list count))
+          (should (zerop scans)))
+        (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))))))
+
+(ert-deftest drover-list-test-timers-follow-the-focus ()
+  "Timers pause once Emacs lost focus, and run again once it has it, drawing at once."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working
+                                                    :cache-expires (+ drover-test-now 240) :cache-ttl 300))
+    (let ((opencode-session-status-animation-interval 0.5)
+          (drover-list-cache-interval 5)
+          (drover-list-age-interval 60)
+          (focused t))
+      (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
+                ((symbol-function 'frame-focus-state) (lambda (&optional _frame) focused)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should (timerp drover-list--frame-timer))
+          (should (timerp drover-list--cache-timer))
+          (should (timerp drover-list--age-timer))
+          ;; Focus moves out: looked at once the events settled.
+          (setq focused nil)
+          (drover-list--focus-changed)
+          (should (timerp drover-list--focus-timer))
+          (drover-list--refocus)
+          (should-not drover-list--focus-timer)
+          (should-not drover-list--focused)
+          (should-not drover-list--frame-timer)
+          (should-not drover-list--cache-timer)
+          (should-not drover-list--age-timer)
+          ;; A tick already due draws nothing, and changes nothing.
+          (setq drover-list-test-clock (+ drover-test-now 0.5))
+          (let ((tick (buffer-modified-tick)))
+            (drover-list--frame-tick)
+            (drover-list--cache-tick)
+            (should (= tick (buffer-modified-tick))))
+          (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))
+          (should (equal (drover-list-test-cache-field "w") '(4 1 "4m")))
+          ;; A change of windows meanwhile starts nothing.
+          (drover-list--windows-changed)
+          (should-not drover-list--frame-timer)
+          ;; Focus back: the frame of the time and the cache as it
+          ;; stands show at once, and the timers run.
+          (setq focused t
+                drover-list-test-clock (+ drover-test-now 90.5))
+          (drover-list--refocus)
+          (should drover-list--focused)
+          (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
+          (should (equal (drover-list-test-cache-field "w") '(2 3 "2m")))
+          (should (timerp drover-list--frame-timer))
+          (should (timerp drover-list--cache-timer))
+          (should (timerp drover-list--age-timer))
+          ;; The age timer ticks when it was due, a second from now
+          ;; once that passed, rather than a whole interval later.
+          (should (<= (float-time (time-subtract (timer--time drover-list--age-timer) nil)) 61)))))))
+
+(ert-deftest drover-list-test-timers-stop-on-hidden-frames ()
+  "A list on an iconified frame animates nothing; shown again, it does."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working))
+    (let ((opencode-session-status-animation-interval 0.5))
+      (drover-list-test-shown
+        (revert-buffer)
+        (should (timerp drover-list--frame-timer))
+        (cl-letf (((symbol-function 'frame-visible-p) (lambda (_frame) 'icon)))
+          (setq drover-list-test-clock (+ drover-test-now 0.5))
+          (let ((tick (buffer-modified-tick)))
+            (drover-list--frame-tick)
+            (should (= tick (buffer-modified-tick))))
+          (should-not drover-list--frame-timer)
+          (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w"))))
+        ;; Visible again, as windows change, it runs again.
+        (drover-list--windows-changed)
+        (should (timerp drover-list--frame-timer))
+        (drover-list--frame-tick)
+        (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))))))
+
+(ert-deftest drover-list-test-glyphs-out-of-view ()
+  "Glyphs and caches no window shows are left as they are, and so is the buffer."
+  (drover-list-test-with (list (drover-test-session "w" :status 'working
+                                                    :cache-expires (+ drover-test-now 240) :cache-ttl 300))
+    (let ((opencode-session-status-animation-interval 0.5))
+      (revert-buffer)
+      (let ((elsewhere (list (cons (1+ (point-max)) (+ 2 (point-max)))))
+            (here (list (cons (point-min) (point-max))))
+            (tick (buffer-modified-tick)))
+        (setq drover-list-test-clock (+ drover-test-now 90.5))
+        (drover-list--draw-frames nil elsewhere)
+        (drover-list--draw-caches nil elsewhere)
+        (should (= tick (buffer-modified-tick)))
+        (should (string-prefix-p "  1 Session w" (drover-list-test-heading "w")))
+        (should (equal (drover-list-test-cache-field "w") '(4 1 "4m")))
+        (drover-list--draw-frames nil here)
+        (drover-list--draw-caches nil here)
+        (should (string-prefix-p "  2 Session w" (drover-list-test-heading "w")))
+        (should (equal (drover-list-test-cache-field "w") '(2 3 "2m")))
+        ;; Drawn again as they stand, nothing changes.
+        (setq tick (buffer-modified-tick))
+        (drover-list--draw-frames)
+        (drover-list--draw-caches)
+        (should (= tick (buffer-modified-tick)))
+        ;; A cache gone out is forgotten wherever it is.
+        (setq drover-list-test-clock (+ drover-test-now 300))
+        (drover-list--draw-caches nil elsewhere)
+        (should-not drover-list--caches)))))
+
+(ert-deftest drover-list-test-cache-line-drawn-once ()
+  "In two lines, a cache line drawn again as it stands changes nothing."
+  (drover-list-test-with
+      (list (drover-test-session "s" :status 'working :updated (drover-list-test-ago 60)
+                                 :detail "Busy" :cache-expires (+ drover-test-now 300) :cache-ttl 300))
+    (drover-list-test-with-font
+      (let ((drover-list-test-width 300))
+        (revert-buffer)
+        (should (eq drover-list--layout 'narrow))
+        (let ((overlay (plist-get (car drover-list--caches) :overlay)))
+          (setq drover-list-test-clock (+ drover-test-now 30))
+          (drover-list--draw-caches)
+          (let ((tick (buffer-modified-tick))
+                (end (overlay-end overlay)))
+            (drover-list--draw-caches)
+            (should (= tick (buffer-modified-tick)))
+            (should (= end (overlay-end overlay))))
+          (should (equal-including-properties (car (drover-list-test-drawn))
+                                              (car (drover-list-test-fresh)))))))))
 
 ;;;; The menu on a list shown elsewhere
 
