@@ -404,7 +404,8 @@ current buffer again afterwards."
   (drover-list-test-with
       (list (drover-test-session "a" :status 'working :agent "build" :model "opus" :branch "main"
                                  :updated (drover-list-test-ago 60))
-            (drover-test-session "b" :status 'waiting :agent "plan" :since (drover-list-test-ago 30)
+            ;; Waiting, b's last activity is its question, three days old.
+            (drover-test-session "b" :status 'waiting :agent "plan" :since (drover-list-test-ago (* 3 86400))
                                  :updated (drover-list-test-ago (* 3 86400)))
             (drover-test-session "c" :status 'idle :model "opus"))
     (let ((zone (getenv "TZ")))
@@ -2749,12 +2750,14 @@ visibility of LIST, is drawn for its width, and is killed."
 
 (defun drover-list-test-mutate (sessions)
   "Change SESSIONS at random as a backend would, and return what it reports.
-The value is (SESSIONS . IDS), IDS the sessions changed, came or went."
+The value is (SESSIONS . IDS), IDS the sessions changed, came or went.
+Some changes are the events of a turn: the last activity a little
+later, within the tolerance or past it, or a turn starting."
   (let* ((index (random (length sessions)))
          (old (nth index sessions))
          (new (copy-sequence old))
          (id (drover-session-id old)))
-    (pcase (random 9)
+    (pcase (random 12)
       (0 (setf (drover-session-status new) (seq-random-elt '(waiting failed done retrying working idle))))
       (1 (setf (drover-session-updated new) (drover-list-test-ago (random 7200))))
       (2 (setf (drover-session-context-tokens new) (+ 1000 (random 199000))))
@@ -2766,7 +2769,11 @@ The value is (SESSIONS . IDS), IDS the sessions changed, came or went."
       (8 (setq new (drover-list-test-titled (format "n%03d" (random 1000)) "New subagent"
                                             :parent id :status (seq-random-elt '(working idle done))
                                             :updated (drover-list-test-ago (random 60)))
-               id (drover-session-id new))))
+               id (drover-session-id new)))
+      ((or 9 10) (setf (drover-session-updated new)
+                       (+ (or (drover-session-updated old) (drover-list-test-ago 7200)) (random 90))))
+      (11 (setf (drover-session-status new) (seq-random-elt '(working retrying))
+                (drover-session-since new) (drover-list-test-ago (random 120)))))
     (cond ((null new) (cons (remq old sessions) (list id)))
           ((equal (drover-session-id new) (drover-session-id old))
            (cons (append (seq-take sessions index) (list new) (nthcdr (1+ index) sessions)) (list id)))
@@ -2787,20 +2794,25 @@ The value is (SESSIONS . IDS), IDS the sessions changed, came or went."
 Its text and properties, its sections and their places, its header
 line, after each of many random changes, in every subagent mode, in
 columns and in two lines, grouped by status, project or activity or
-not at all, sorted by urgency, activity or title, some sessions
-expanded, groups collapsed and expanded, their sessions drawn or not
-yet.  Most changes are drawn in place."
-  (pcase-dolist (`(,mode ,width ,grouping ,sort)
-                 '((all 1000 status urgency) (active 300 status urgency)
-                   (none 1000 project updated) (all 1000 project urgency)
-                   (all 1000 updated title) (active 1000 nil urgency)))
-    (random (format "drover %s %s %s %s" mode width grouping sort))
+not at all, sorted by urgency, activity or title, either way, with the
+tolerance of activity or without, some sessions expanded, groups
+collapsed and expanded, their sessions drawn or not yet.  Most changes
+are drawn in place."
+  (pcase-dolist (`(,mode ,width ,grouping ,sort ,descending ,tolerance)
+                 '((all 1000 status urgency nil 60) (active 300 status urgency nil 60)
+                   (none 1000 project updated nil 60) (all 1000 project urgency nil 60)
+                   (all 1000 updated title nil 60) (active 1000 nil urgency nil 60)
+                   (all 1000 nil updated t 60) (active 300 nil updated nil 60)
+                   (all 1000 updated updated t 60) (all 1000 nil updated t nil)))
+    (random (format "drover %s %s %s %s %s %s" mode width grouping sort descending tolerance))
     (drover-list-test-with (drover-list-test-random-sessions 40)
       (drover-list-test-with-font
         (let ((drover-list-test-width width)
               (drover-show-subagents mode)
               (drover-group-by grouping)
               (drover-sort-by sort)
+              (drover-sort-descending descending)
+              (drover-sort-activity-tolerance tolerance)
               (drover-list-collapsed-groups nil)
               (in-place 0))
           (drover-list-test-shown
@@ -2825,8 +2837,8 @@ yet.  Most changes are drawn in place."
                   (cl-incf in-place))
                 (let ((drawn (drover-list-test-drawn))
                       (fresh (drover-list-test-fresh)))
-                  (should (equal (list mode width step (nth 1 drawn) (nth 2 drawn))
-                                 (list mode width step (nth 1 fresh) (nth 2 fresh))))
+                  (should (equal (list mode width grouping sort descending step (nth 1 drawn) (nth 2 drawn))
+                                 (list mode width grouping sort descending step (nth 1 fresh) (nth 2 fresh))))
                   (should (equal-including-properties (car drawn) (car fresh))))))
             (should (> in-place 15))))))))
 
@@ -3011,7 +3023,7 @@ is the list drawn anew."
                                                         :updated (drover-list-test-ago 10)
                                                         :context-tokens 1000 :context-limit 200000)
                                (drover-list-test-titled "b" "Bravo" :status 'working
-                                                        :updated (drover-list-test-ago 20)
+                                                        :updated (drover-list-test-ago 90)
                                                         :context-tokens 1000 :context-limit 200000)
                                (drover-list-test-titled "c" "Cee" :status 'done
                                                         :since (drover-list-test-ago 30)))
@@ -3030,9 +3042,11 @@ is the list drawn anew."
           (should (eq magit-root-section root))
           (should (eq (drover-list-test-section "a") section))
           (should (string-match-p "5k" (drover-list-test-heading "a")))
-          ;; Another passing it moves a line, in place.
+          ;; Another passing it, its new turn starting, moves a line, in
+          ;; place.
           (should (zerop (change "b" (lambda (session)
-                                       (setf (drover-session-updated session) (drover-list-test-ago 0))))))
+                                       (setf (drover-session-since session) (drover-list-test-ago 0)
+                                             (drover-session-updated session) (drover-list-test-ago 0))))))
           (should (equal (drover-list-test-order) '("c" "b" "a")))
           ;; So do a session going to another group, coming or going,
           ;; and groups coming and going with them.
@@ -3114,6 +3128,145 @@ is the list drawn anew."
           (drover-backend-changed 'fake "s30")
           (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
           (should (equal (drover-list-test-id-at-point) "s31")))))))
+
+;;;; Sessions running together
+
+(defun drover-list-test-running ()
+  "Return three sessions running turns, started a minute and more apart, and one idle."
+  (list (drover-list-test-titled "a" "Alpha" :status 'working :since (drover-list-test-ago 300)
+                                 :updated (drover-list-test-ago 5))
+        (drover-list-test-titled "b" "Bravo" :status 'working :since (drover-list-test-ago 200)
+                                 :updated (drover-list-test-ago 3))
+        (drover-list-test-titled "c" "Charlie" :status 'working :since (drover-list-test-ago 100)
+                                 :updated (drover-list-test-ago 1))
+        (drover-list-test-titled "i" "Idle" :status 'idle :updated (drover-list-test-ago 30))))
+
+(defvar drover-list-test-event-time drover-test-now
+  "The time of the last event `drover-list-test-stream' made.")
+
+(defun drover-list-test-stream (ids steps)
+  "Have sessions IDS take STEPS events in turn, and return the orders listed.
+Each event sets the session's last activity a second after the event
+before, from `drover-list-test-event-time', as a turn streaming does;
+the clock of the list stands still, so that ages read alike.  The list
+follows each in place, as a drawing anew draws it."
+  (let ((orders nil))
+    (dotimes (step steps)
+      (let ((id (nth (% step (length ids)) ids)))
+        (setq drover-list-test-event-time (1+ drover-list-test-event-time))
+        (setf (drover-session-updated (drover-list-test-find id)) drover-list-test-event-time)
+        (drover-backend-changed 'fake id)
+        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+        (drover-list-test-is-fresh)
+        (push (drover-list-test-order) orders)))
+    (delete-dups (nreverse orders))))
+
+(ert-deftest drover-list-test-default-view ()
+  "By default, the list is ungrouped: sessions running first, newest turn first, then the most recently active."
+  (drover-list-test-with (append (drover-list-test-running)
+                                 (list (drover-list-test-titled "d" "Done" :status 'done
+                                                                :since (drover-list-test-ago 10)
+                                                                :updated (drover-list-test-ago 12))
+                                       (drover-list-test-titled "w" "Waiting" :status 'waiting
+                                                                :since (drover-list-test-ago 50)
+                                                                :updated (drover-list-test-ago 600))))
+    (cl-flet ((standard (symbol) (eval (car (get symbol 'standard-value)) t)))
+      (let ((drover-group-by (standard 'drover-group-by))
+            (drover-sort-by (standard 'drover-sort-by))
+            (drover-sort-descending (standard 'drover-sort-descending)))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should-not (drover-list-test-groups))
+          (should (equal (drover-list-test-ungrouped) '("c" "b" "a" "d" "i" "w")))
+          (should (equal (drover-list--mode-line-process) " ungrouped, last activity ↓")))))))
+
+(ert-deftest drover-list-test-running-sessions-keep-their-places ()
+  "Sessions streaming the events of their turns never swap, however they alternate.
+By last activity, newest first, they come before the others, newest turn
+first; oldest first, after them, oldest turn first; by urgency, newest
+turn first among the working ones."
+  (pcase-dolist (`(,grouping ,sort ,descending ,order)
+                 '((nil updated t ("c" "b" "a" "i"))
+                   (nil updated nil ("i" "a" "b" "c"))
+                   (updated updated t ("c" "b" "a" "i"))
+                   (status urgency nil ("c" "b" "a" "i"))))
+    (drover-list-test-with (drover-list-test-running)
+      (let ((drover-list-test-event-time drover-test-now)
+            (drover-group-by grouping)
+            (drover-sort-by sort)
+            (drover-sort-descending descending)
+            (drover-list-collapsed-groups nil))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should (equal (drover-list-test-order) order))
+          ;; Two, then three, alternating for minutes.
+          (should (equal (drover-list-test-stream '("a" "b") 20) (list order)))
+          (should (equal (drover-list-test-stream '("c" "a" "b") 200) (list order)))
+          ;; A new turn starting moves its session, in place.
+          (setf (drover-session-since (drover-list-test-find "a")) (cl-incf drover-list-test-event-time))
+          (drover-backend-changed 'fake "a")
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (drover-list-test-is-fresh)
+          (should (equal (drover-list-test-order)
+                         (if (and (eq sort 'updated) (not descending))
+                             '("i" "b" "c" "a")
+                           '("a" "c" "b" "i")))))))))
+
+(ert-deftest drover-list-test-activity-tolerance ()
+  "Sessions whose activity moves within the tolerance keep their places; beyond it, they move.
+Here running sessions whose backend does not tell when their turns
+started, each placed at its last event: those moving by less than
+`drover-sort-activity-tolerance' never pass one another; one moving
+further does, in place.  Without a tolerance, every event moves them."
+  (cl-flet ((sessions ()
+              (list (drover-list-test-titled "a" "Alpha" :status 'working :updated (drover-list-test-ago 20))
+                    (drover-list-test-titled "b" "Bravo" :status 'working :updated (drover-list-test-ago 10))
+                    (drover-list-test-titled "c" "Charlie" :status 'working :updated (drover-list-test-ago 0)))))
+    (pcase-dolist (`(,descending ,order ,moved) '((t ("c" "b" "a") ("a" "c" "b"))
+                                                  (nil ("a" "b" "c") ("b" "c" "a"))))
+      (drover-list-test-with (sessions)
+        (let ((drover-list-test-event-time drover-test-now)
+              (drover-group-by nil)
+              (drover-sort-by 'updated)
+              (drover-sort-descending descending))
+          (drover-list-test-shown
+            (revert-buffer)
+            (should (equal (drover-list-test-order) order))
+            ;; Within a minute of their places, a and b, streaming, do
+            ;; not pass c, though newer.
+            (should (equal (drover-list-test-stream '("a" "b") 40) (list order)))
+            ;; a's events, more than a minute after its place, move it.
+            (cl-incf drover-list-test-event-time 30)
+            (should (equal (drover-list-test-stream '("a") 1) (list moved)))))))
+    (drover-list-test-with (sessions)
+      (let ((drover-list-test-event-time drover-test-now)
+            (drover-group-by nil)
+            (drover-sort-by 'updated)
+            (drover-sort-descending t)
+            (drover-sort-activity-tolerance nil))
+        (drover-list-test-shown
+          (revert-buffer)
+          (should (equal (drover-list-test-stream '("a" "b") 4)
+                         '(("a" "c" "b") ("b" "a" "c") ("a" "b" "c")))))))))
+
+(ert-deftest drover-list-test-running-in-both-lists ()
+  "The sidebar and the list keep sessions streaming in the same places."
+  (drover-list-test-two-lists
+    (drover-set-group-by nil)
+    (drover-set-sort 'updated t)
+    (setq drover-test-sessions (drover-list-test-running))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (dotimes (step 30)
+      (let ((drover-list-test-event-time (+ drover-test-now step))
+            (id (nth (% step 3) '("a" "b" "c"))))
+        (setf (drover-session-updated (drover-list-test-find id)) (cl-incf drover-list-test-event-time))
+        (drover-backend-changed 'fake id)
+        (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (drover-list-test-is-fresh)
+            (should (equal (drover-list-test-order) '("c" "b" "a" "i")))))))))
 
 (ert-deftest drover-list-test-in-place-details ()
   "An expanded session changing has its details drawn again; a collapsed one draws them once expanded."
@@ -4110,41 +4263,48 @@ A change draws both, in place, each as a drawing anew draws it."
       (should (equal (drover-list-test-at-side full) "fail")))))
 
 (ert-deftest drover-list-test-two-lists-in-place-is-a-fresh-drawing ()
-  "Whatever sessions change, both lists drawn in place are the lists drawn anew."
-  (random "drover two lists")
-  (drover-list-test-two-lists
-    (setq drover-test-sessions (drover-list-test-random-sessions 30))
-    (let ((drover-list-collapsed-groups nil)
-          (in-place 0))
-      (drover-changed-now)
-      (dolist (list (list sidebar buffer))
-        (with-current-buffer list
-          (revert-buffer)
-          ;; Some sessions show their details, not the same in both.
-          (dolist (section (seq-take (seq-filter (lambda (section) (oref section hidden))
-                                                 (mapcan #'drover-list--session-sections
-                                                         (drover-list--containers)))
-                                     (if (eq list sidebar) 2 4)))
-            (magit-section-show section))))
-      (dotimes (step 25)
-        (when (zerop (random 4))
-          (with-current-buffer (seq-random-elt (list sidebar buffer))
-            (when-let* ((groups (drover-list--groups)))
-              (let ((group (seq-random-elt groups)))
-                (if (oref group hidden) (magit-section-show group) (magit-section-hide group))))))
-        (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
-          (setq drover-test-sessions sessions)
-          (dolist (id ids)
-            (drover-backend-changed 'fake id))
-          (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
-            (cl-incf in-place))
-          (dolist (list (list sidebar buffer))
-            (with-current-buffer list
-              (let ((drawn (drover-list-test-drawn))
-                    (fresh (drover-list-test-fresh)))
-                (should (equal (list step (buffer-name) (cdr drawn)) (list step (buffer-name) (cdr fresh))))
-                (should (equal-including-properties (car drawn) (car fresh))))))))
-      (should (> in-place 10)))))
+  "Whatever sessions change, both lists drawn in place are the lists drawn anew.
+Grouped by status, by urgency, and as by default, ungrouped, last
+activity first."
+  (pcase-dolist (`(,grouping ,sort ,descending) '((status urgency nil) (nil updated t)))
+    (random (format "drover two lists %s" grouping))
+    (drover-list-test-two-lists
+      (setq drover-test-sessions (drover-list-test-random-sessions 30))
+      (let ((drover-list-collapsed-groups nil)
+            (drover-group-by grouping)
+            (drover-sort-by sort)
+            (drover-sort-descending descending)
+            (in-place 0))
+        (drover-changed-now)
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (revert-buffer)
+            ;; Some sessions show their details, not the same in both.
+            (dolist (section (seq-take (seq-filter (lambda (section) (oref section hidden))
+                                                   (mapcan #'drover-list--session-sections
+                                                           (drover-list--containers)))
+                                       (if (eq list sidebar) 2 4)))
+              (magit-section-show section))))
+        (dotimes (step 25)
+          (when (zerop (random 4))
+            (with-current-buffer (seq-random-elt (list sidebar buffer))
+              (when-let* ((groups (drover-list--groups)))
+                (let ((group (seq-random-elt groups)))
+                  (if (oref group hidden) (magit-section-show group) (magit-section-hide group))))))
+          (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
+            (setq drover-test-sessions sessions)
+            (dolist (id ids)
+              (drover-backend-changed 'fake id))
+            (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
+              (cl-incf in-place))
+            (dolist (list (list sidebar buffer))
+              (with-current-buffer list
+                (let ((drawn (drover-list-test-drawn))
+                      (fresh (drover-list-test-fresh)))
+                  (should (equal (list grouping step (buffer-name) (cdr drawn))
+                                 (list grouping step (buffer-name) (cdr fresh))))
+                  (should (equal-including-properties (car drawn) (car fresh))))))))
+        (should (> in-place 10))))))
 
 (ert-deftest drover-list-test-two-lists-share-rows ()
   "A row made for one list, the other copies: its texts are made and measured once."

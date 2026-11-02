@@ -1500,9 +1500,12 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
                    '(("c") ("b" ("b2") ("b3") ("b1")) ("a"))))
     (should (equal (drover-test-tree-shape (drover-sort-trees trees 'created))
                    '(("c") ("a") ("b" ("b3") ("b1") ("b2")))))
-    ;; The last activity of a tree is its latest.
+    ;; The last activity of a tree is its latest; running sessions,
+    ;; active now, come first, b3 bringing its tree with it.
     (should (equal (drover-test-tree-shape (drover-sort-trees trees 'updated t))
-                   '(("b" ("b2") ("b3") ("b1")) ("c") ("a"))))
+                   '(("b" ("b3") ("b2") ("b1")) ("c") ("a"))))
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'updated))
+                   '(("a") ("c") ("b" ("b1") ("b2") ("b3")))))
     ;; The trees keep their ranks.
     (should (eq (drover-node-status (car (drover-sort-trees trees 'title t))) 'working))
     (should (equal (drover-test-tree-shape trees) '(("b" ("b3") ("b2") ("b1")) ("c") ("a"))))))
@@ -1540,6 +1543,150 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
       (should-not drover-sort-descending)
       (should (= runs 2))
       (should-error (drover-set-sort 'colour)))))
+
+(ert-deftest drover-test-view-defaults ()
+  "Views list sessions ungrouped, by last activity, newest first."
+  (cl-flet ((standard (symbol) (eval (car (get symbol 'standard-value)) t)))
+    (should (eq (standard 'drover-sort-by) 'updated))
+    (should (eq (standard 'drover-sort-descending) t))
+    (should-not (standard 'drover-group-by))
+    (should (eql (standard 'drover-sort-activity-tolerance) 60))))
+
+;;;; Activity
+
+(ert-deftest drover-test-session-activity ()
+  "A running session is active now, from the start of its turn; another from its last activity."
+  (cl-flet ((activity (&rest properties)
+              (drover-session-activity (apply #'drover-test-session "s" properties))))
+    ;; Its events do not move a running session: its turn's start places it.
+    (should (equal (activity :status 'working :since 100.0 :updated 190.0) '(t . 100.0)))
+    (should (equal (activity :status 'retrying :since 100.0 :updated 190.0) '(t . 100.0)))
+    ;; Without it, its last event.
+    (should (equal (activity :status 'working :updated 190.0) '(t . 190.0)))
+    ;; Needing the user, since it needs them; otherwise its last activity.
+    (should (equal (activity :status 'waiting :since 150.0 :updated 140.0) '(nil . 150.0)))
+    (should (equal (activity :status 'done :since 170.0 :updated 160.0) '(nil . 170.0)))
+    (should (equal (activity :status 'idle :since 120.0 :updated 160.0) '(nil . 160.0)))
+    (should (equal (activity :status 'idle :since 120.0) '(nil . 120.0)))
+    (should (equal (activity :status 'idle) '(nil)))
+    ;; Its age counts from its last activity, its last event while it runs.
+    (should (= (drover-session-last-activity (drover-test-session "s" :status 'working :since 100.0 :updated 190.0))
+               190.0))
+    (should (= (drover-session-last-activity (drover-test-session "s" :status 'done :since 170.0 :updated 160.0))
+               170.0))))
+
+(ert-deftest drover-test-activity-tolerance ()
+  "A session's time moves once its activity moves further than the tolerance from it."
+  (drover-test-with-index (list (drover-test-session "a" :status 'idle :updated 1000.0)
+                                (drover-test-session "b" :status 'idle :updated 1010.0))
+    (cl-flet ((update (time)
+                (setf (drover-session-updated (car drover-test-sessions)) time)
+                (drover-backend-changed 'fake "a")
+                (drover-changed-now))
+              (sorted (&optional id)
+                (cdr (drover-session-activity (drover-index-session (cons 'fake (or id "a"))))))
+              (order ()
+                (mapcar (lambda (node) (drover-session-id (drover-node-session node)))
+                        (drover-sort-trees (drover-tree (drover-index-sessions)) 'updated t))))
+      (should (= (sorted) 1000.0))
+      (should (equal (order) '("b" "a")))
+      ;; Within a minute of its time: it stays, below b though newer.
+      (update 1030.0)
+      (should (= (sorted) 1000.0))
+      (should (equal (order) '("b" "a")))
+      (update 1060.0)
+      (should (= (sorted) 1000.0))
+      ;; Further: it moves.
+      (update 1061.0)
+      (should (= (sorted) 1061.0))
+      (should (equal (order) '("a" "b")))
+      ;; Back by less than a minute, it stays; by more, it moves.
+      (update 1020.0)
+      (should (= (sorted) 1061.0))
+      (update 1000.0)
+      (should (= (sorted) 1000.0))
+      ;; Records not from the index are placed alike.
+      (should (= (cdr (drover-session-activity (drover-test-session "a" :updated 1040.0))) 1000.0))
+      (should (= (cdr (drover-session-activity (drover-test-session "a" :updated 1070.0))) 1070.0))
+      ;; The index made anew keeps the times.
+      (update 1050.0)
+      (setq drover--index nil)
+      (drover-index)
+      (should (= (sorted) 1000.0))
+      (should (= (sorted "b") 1010.0))
+      ;; Exact times without a tolerance.
+      (dolist (tolerance '(nil 0))
+        (let ((drover-sort-activity-tolerance tolerance))
+          (should (= (sorted) 1050.0))
+          (should (equal (order) '("a" "b")))))
+      ;; A session gone is forgotten.
+      (setq drover-test-sessions (cdr drover-test-sessions))
+      (drover-backend-changed 'fake "a")
+      (drover-changed-now)
+      (should-not (gethash '(fake . "a") drover--activity-times))
+      (should (gethash '(fake . "b") drover--activity-times)))))
+
+(defun drover-test-active-trees ()
+  "Return trees of sessions running, idle and needing the user."
+  (drover-tree
+   (list (drover-test-session "p" :status 'working :since 100.0 :updated 300.0)
+         (drover-test-session "s1" :parent "p" :status 'working :since 200.0 :updated 290.0)
+         (drover-test-session "s2" :parent "p" :status 'idle :updated 310.0)
+         (drover-test-session "q" :status 'idle :updated 250.0)
+         (drover-test-session "r" :status 'done :since 260.0)
+         (drover-test-session "x" :parent "r" :status 'idle :updated 270.0)
+         (drover-test-session "n" :status 'working :since 150.0 :updated 160.0)
+         (drover-test-session "u" :status 'idle))))
+
+(ert-deftest drover-test-tree-activity ()
+  "A tree runs from the earliest turn of its running sessions, else is as active as its latest."
+  (let ((trees (drover-test-active-trees)))
+    (cl-flet ((activity (id)
+                (drover-node-activity (seq-find (lambda (node) (equal (drover-session-id (drover-node-session node)) id))
+                                                trees))))
+      ;; The subagent's later turn does not move its parent's tree.
+      (should (equal (activity "p") '(t . 100.0)))
+      (should (equal (activity "n") '(t . 150.0)))
+      (should (equal (activity "q") '(nil . 250.0)))
+      (should (equal (activity "r") '(nil . 270.0)))
+      (should-not (activity "u")))
+    ;; Newest first: running trees, newest turn first, then the others,
+    ;; latest first, the unknown last; subagents alike under their parent.
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'updated t))
+                   '(("n") ("p" ("s1") ("s2")) ("r" ("x")) ("q") ("u"))))
+    ;; Oldest first, the running last, the unknown still last.
+    (should (equal (drover-test-tree-shape (drover-sort-trees trees 'updated))
+                   '(("q") ("r" ("x")) ("p" ("s2") ("s1")) ("n") ("u"))))
+    ;; By urgency, running sessions come newest turn first, whatever
+    ;; event came last.
+    (should (equal (mapcar #'car (drover-test-tree-shape trees)) '("r" "n" "p" "q" "u")))
+    (should (equal (mapcar #'drover-session-id
+                           (drover-sort (list (drover-test-session "a" :status 'working :since 100.0 :updated 500.0)
+                                              (drover-test-session "b" :status 'working :since 200.0 :updated 300.0)
+                                              (drover-test-session "c" :status 'idle :updated 400.0))))
+                   '("b" "a" "c")))))
+
+(ert-deftest drover-test-activity-ties ()
+  "Trees alike in activity keep the order of urgency, the order sessions are listed in."
+  (let ((trees (drover-tree (list (drover-test-session "a" :status 'working :since 100.0 :updated 101.0)
+                                  (drover-test-session "b" :status 'working :since 100.0 :updated 109.0)
+                                  (drover-test-session "c" :status 'working :since 100.0 :updated 105.0)))))
+    (should (equal (mapcar #'car (drover-test-tree-shape trees)) '("a" "b" "c")))
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'updated t))) '("a" "b" "c")))
+    (should (equal (mapcar #'car (drover-test-tree-shape (drover-sort-trees trees 'updated))) '("a" "b" "c")))))
+
+(ert-deftest drover-test-tree-activity-bucket ()
+  "A tree goes in the group of the time it sorts by; a running one is active today."
+  (let* ((now (+ (drover--start-of-day drover-test-now) 43200.0))
+         (trees (drover-tree
+                 (list (drover-test-session "run" :status 'working :since (- now (* 3 86400)) :updated (- now 10))
+                       ;; Its last event days ago, it asked a minute ago.
+                       (drover-test-session "ask" :status 'waiting :since (- now 60) :updated (- now (* 3 86400)))
+                       (drover-test-session "old" :status 'idle :updated (- now (* 30 86400)))
+                       (drover-test-session "none" :status 'idle)))))
+    (should (equal (mapcar (lambda (group) (cons (car group) (mapcar #'car (drover-test-tree-shape (cdr group)))))
+                           (drover-group-trees trees 'updated now))
+                   '((today "ask" "run") (older "old") (nil "none"))))))
 
 ;;;; Grouping
 

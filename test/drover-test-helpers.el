@@ -215,10 +215,14 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--changed-all nil)
          (drover--changed-applied nil)
          (drover--index nil)
+         (drover--activity-times (make-hash-table :test #'equal))
+         (drover-sort-activity-tolerance 60)
          (drover-changed-hook nil)
          (drover--closing nil)
          (drover-show-subagents 'active)
          (drover-filter nil)
+         ;; Not the defaults: most tests read the groups of statuses and
+         ;; the order of urgency, and say so here once.
          (drover-group-by 'status)
          (drover-sort-by 'urgency)
          (drover-sort-descending nil)

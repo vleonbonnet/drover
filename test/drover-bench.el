@@ -27,8 +27,10 @@
 ;; the garbage collections each costs; then with the sidebar beside the
 ;; list: its first drawing, the list's rows at hand, two sessions
 ;; taking turns drawn in both, and the list catching up once shown
-;; again after changes while hidden.  It checks that what was drawn in
-;; place is what a drawing anew draws.
+;; again after changes while hidden.  Last, the list as it shows by
+;; default, ungrouped and by last activity, every tree drawn, two
+;; sessions taking turns without moving.  It checks that what was drawn
+;; in place is what a drawing anew draws.
 ;;
 ;; Then it writes 2000 Claude Code transcripts, 20 of 3 MB, and 600
 ;; Codex rollouts, and times their indexes: reading every file, looking
@@ -321,8 +323,64 @@ Nor the `face' properties font lock removes from what it displayed, as
                                   (drover-bench-row "one coming" coming 10))
                 (drover-bench-log "               %d of 10 turns drawn in place; the same as drawn anew: %s"
                                   in-place (if same "yes" "NO"))
-                (drover-bench-two-lists top second)))))
+                (drover-bench-two-lists top second)))
+            (drover-bench-default-view top second)))
         (drover-attention-mode -1)))))
+
+(defun drover-bench-default-view (top second)
+  "Time the list as it shows by default, sessions TOP and SECOND taking turns.
+Ungrouped, by last activity, newest first, with the active subagents:
+every tree is drawn, none in a collapsed group, and a session running a
+turn keeps its place as its turn streams.  The list is the current
+buffer, alone in the selected window."
+  (let ((drover-show-subagents 'active)
+        (drover-group-by nil)
+        (drover-sort-by 'updated)
+        (drover-sort-descending t))
+    (drover-list--revert t)
+    (let* ((rows (hash-table-count (drover-list--model-rows drover-list--model)))
+           (revert (drover-bench-measure (lambda () (drover-list--revert t)) 5))
+           (render (drover-bench-measure #'drover-list--render 5))
+           (step (progn (drover-bench-step top)
+                        (drover-bench-measure (lambda () (drover-bench-step top)) 21)))
+           (turns (drover-bench-measure
+                   (lambda () (drover-bench-step (if (cl-evenp drover-bench-tick) top second)))
+                   21))
+           (back (drover-bench-measure
+                  (lambda ()
+                    (drover-bench-change second (lambda (session)
+                                                  (setf (drover-session-status session) 'idle)))
+                    (drover-bench-step second))
+                  11))
+           (redraws 0)
+           (moved 0)
+           (in-place (let ((count (lambda () (cl-incf redraws)))
+                           (order (lambda ()
+                                    (mapcar (lambda (section) (oref section value))
+                                            (seq-take (drover-list--session-sections magit-root-section) 2)))))
+                       (advice-add 'drover-list--render :before count)
+                       (unwind-protect
+                           (dotimes (_ 10)
+                             (let ((before (funcall order)))
+                               (drover-bench-step (if (cl-evenp drover-bench-tick) top second))
+                               (unless (equal before (funcall order))
+                                 (cl-incf moved))))
+                         (advice-remove 'drover-list--render count))
+                       (- 10 redraws)))
+           (same (let ((text (drover-bench-text)))
+                   (drover-list--render)
+                   (equal-including-properties text (drover-bench-text)))))
+      (drover-bench-log "default view: ungrouped, last activity first, active subagents, %d rows" rows)
+      (drover-bench-log "  drawn whole: %s | %s"
+                        (drover-bench-row "refresh" revert 150)
+                        (drover-bench-row "redraw" render 150))
+      (drover-bench-log "  changes:     %s | %s | %s"
+                        (drover-bench-row "a step" step 10)
+                        (drover-bench-row "two taking turns" turns 10)
+                        (drover-bench-row "to idle and back" back 10))
+      (drover-bench-log "               %d of 10 turns drawn in place, %d moving the first two; the same as drawn anew: %s"
+                        in-place moved (if same "yes" "NO"))))
+  (drover-list--revert t))
 
 (defun drover-bench-two-lists (top second)
   "Time the sidebar beside the list, sessions TOP and SECOND taking turns.

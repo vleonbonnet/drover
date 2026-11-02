@@ -48,13 +48,16 @@
 ;;
 ;; Views draw `drover-view-groups': the sessions as trees, filtered by
 ;; `drover-filter', grouped as `drover-group-by' says and sorted as
-;; `drover-sort-by' says, with the subagents `drover-show-subagents'
-;; shows.  Those settings are global, so every view shows the same
-;; sessions.  With `drover-show-history', views also list the older
-;; sessions backends keep, and with `drover-show-archived' the archived
-;; ones (`drover-known-sessions').  Backends without an archive of
-;; their own have their sessions archived by drover, which keeps them in
-;; a file (`drover-archive-session').
+;; `drover-sort-by' says, by default ungrouped, the most recently
+;; active first, a session running a turn placed by the start of its
+;; turn rather than its every event (`drover-session-activity'), with
+;; the subagents `drover-show-subagents' shows.  Those settings are
+;; global, so every view shows the same sessions.  With
+;; `drover-show-history', views also list the older sessions backends
+;; keep, and with `drover-show-archived' the archived ones
+;; (`drover-known-sessions').  Backends without an archive of their own
+;; have their sessions archived by drover, which keeps them in a file
+;; (`drover-archive-session').
 ;;
 ;; Commands act on the session at point, which every list of sessions
 ;; and every prompt buffer tells through
@@ -276,28 +279,120 @@ the limit, or nil when either is unknown."
   "Return TIME, or a time later than any for nil."
   (or time most-positive-fixnum))
 
-(defun drover--before-p (status-a since-a updated-a status-b since-b updated-b)
+;;;; Activity
+
+;; A running session's last activity changes with every event of its
+;; turn, many times a second: sorted by it, sessions running together
+;; took the first place in turn.  Views sort a running session by when
+;; its turn started instead, and every session by a time that moves
+;; only once its activity moved further than a tolerance from it.
+
+(defcustom drover-sort-activity-tolerance 60
+  "Seconds a session's activity may move without moving the session in views.
+Views ordering sessions by activity, the sort by last activity and the
+order of urgency among sessions of one status, keep the time each
+session sorts by while its activity stays within this many seconds of
+it, and take the new time once it moves further: a session whose
+activity moves a little, such as one going from done to idle, keeps its
+place among sessions whose activity is close to it.  What changes then
+is the session's own time, compared exactly with the others' times, so
+that the order stays one order, the same for every view, drawn whole
+or in place.  Nil or 0 sorts by the exact times.  See
+`drover-session-activity'."
+  :type '(choice (const :tag "Exact times" nil) (number :tag "Seconds"))
+  :group 'drover)
+
+(defun drover-session-running-p (session)
+  "Return non-nil when SESSION runs a turn and does not wait for the user.
+That is a status of `drover-active-statuses' that is not one of
+`drover-attention-statuses': working, or waiting to retry."
+  (and (drover-session-active-p session) (not (drover-session-attention-p session))))
+
+(defun drover-session-last-activity (session)
+  "Return the time of the last activity of SESSION, a float, or nil.
+A session needing the user counts from when its status began, as it
+has done nothing since; the others from their last activity.  Lists
+show its age."
+  (if (drover-session-attention-p session)
+      (or (drover-session-since session) (drover-session-updated session))
+    (or (drover-session-updated session) (drover-session-since session))))
+
+(defvar drover--activity-times (make-hash-table :test #'equal)
+  "The time each session of the index sorts by, by key.
+The index notes it as it takes a record in (`drover--note-activity'),
+and keeps it when made anew, so that every view sorts a session by the
+same time, whether drawn whole or in place.")
+
+(defun drover--activity-time (session)
+  "Return the time the activity of SESSION places it at, or nil.
+A running session is placed at the start of its turn, which its events
+do not move; another at its last activity (see
+`drover-session-last-activity')."
+  (if (drover-session-running-p session)
+      (or (drover-session-since session) (drover-session-updated session))
+    (drover-session-last-activity session)))
+
+(defun drover--tolerated-time (time kept)
+  "Return KEPT while TIME is near it, else TIME.
+Near is within `drover-sort-activity-tolerance' seconds."
+  (if (and kept time
+           (numberp drover-sort-activity-tolerance)
+           (<= (abs (- time kept)) drover-sort-activity-tolerance))
+      kept
+    time))
+
+(defun drover--sort-time (session)
+  "Return the time SESSION sorts by, a float, or nil when unknown.
+It is the time the index keeps for SESSION while the activity of
+SESSION stays within `drover-sort-activity-tolerance' of it, else the
+time of that activity (see `drover--activity-time')."
+  (drover--tolerated-time (drover--activity-time session)
+                          (gethash (drover-session-key session) drover--activity-times)))
+
+(defun drover--note-activity (key record &optional times)
+  "Note in TIMES the time RECORD, the record of session KEY, sorts by.
+TIMES defaults to `drover--activity-times'.  RECORD nil forgets KEY."
+  (let ((times (or times drover--activity-times))
+        (time (and record (drover--sort-time record))))
+    (if time (puthash key time times) (remhash key times))))
+
+(defun drover-session-activity (session)
+  "Return where the activity of SESSION places it, as (RUNNING . TIME).
+RUNNING is non-nil when SESSION runs a turn (see
+`drover-session-running-p'): its activity is now, whatever event came
+last, so it is newer than any session not running.  TIME is when its
+turn started for a running session, its last activity for another,
+held while it moves within `drover-sort-activity-tolerance', or nil
+when unknown."
+  (cons (and (drover-session-running-p session) t) (drover--sort-time session)))
+
+(defun drover--before-p (status-a since-a time-a status-b since-b time-b)
   "Return non-nil when a session or tree A comes before another, B.
-STATUS-A, SINCE-A and UPDATED-A describe A: its status, the time it
-began and the time A was last updated; STATUS-B, SINCE-B and UPDATED-B
-describe B.  The more urgent status comes first; within a status needing
-the user, the longest wait; within another, the latest update."
+STATUS-A, SINCE-A and TIME-A describe A: its status, the time it began
+and the time A sorts by (see `drover-session-activity'); STATUS-B,
+SINCE-B and TIME-B describe B.  The more urgent status comes first;
+within a status needing the user, the longest wait; within another, the
+latest activity, the newest turn among running ones."
   (let ((rank-a (drover-status-rank status-a))
         (rank-b (drover-status-rank status-b)))
     (cond
      ((/= rank-a rank-b) (< rank-a rank-b))
      ((memq status-a drover-attention-statuses)
       (< (drover--time since-a) (drover--time since-b)))
-     (t (> (or updated-a 0) (or updated-b 0))))))
+     (t (> (or time-a 0) (or time-b 0))))))
 
 (defun drover-sort (sessions)
   "Return SESSIONS, most urgent first.
 Within a status, sessions that need the user come longest wait first;
-the others most recently updated first."
-  (sort (copy-sequence sessions)
-        (lambda (a b)
-          (drover--before-p (drover-session-status a) (drover-session-since a) (drover-session-updated a)
-                            (drover-session-status b) (drover-session-since b) (drover-session-updated b)))))
+the others latest activity first, newest turn first for running ones,
+see `drover-session-activity'."
+  (mapcar #'car
+          (sort (mapcar (lambda (session) (cons session (drover--sort-time session))) sessions)
+                (lambda (a b)
+                  (let ((session-a (car a))
+                        (session-b (car b)))
+                    (drover--before-p (drover-session-status session-a) (drover-session-since session-a) (cdr a)
+                                      (drover-session-status session-b) (drover-session-since session-b) (cdr b)))))))
 
 ;;;; Trees
 
@@ -308,19 +403,37 @@ the others most recently updated first."
   (children nil :documentation "Trees of the session's subagents, most urgent first.")
   (status nil :documentation "The most urgent status in the tree.")
   (since nil :documentation "When the oldest wait of that status began, or nil.")
-  (updated nil :documentation "The latest activity in the tree, or nil."))
+  (updated nil :documentation "The latest activity in the tree, or nil.")
+  (activity nil :documentation "Where the activity of the tree places it, as (RUNNING . TIME), or nil.
+RUNNING is non-nil when a session of the tree runs a turn: TIME is then
+the earliest time its running sessions sort by, which the turns of
+subagents starting under a running parent do not move; otherwise the
+latest time a session of the tree sorts by.  See
+`drover-session-activity'.  Nil when neither is known."))
 
 (defun drover--node-before-p (a b)
   "Return non-nil when tree A comes before tree B."
-  (drover--before-p (drover-node-status a) (drover-node-since a) (drover-node-updated a)
-                    (drover-node-status b) (drover-node-since b) (drover-node-updated b)))
+  (drover--before-p (drover-node-status a) (drover-node-since a) (cdr (drover-node-activity a))
+                    (drover-node-status b) (drover-node-since b) (cdr (drover-node-activity b))))
+
+(defun drover--activity-join (a b)
+  "Return where activities A and B place a tree holding both, as (RUNNING . TIME).
+Each is a value of `drover-session-activity', or nil when unknown."
+  (cond ((or (null a) (and (not (car a)) (null (cdr a)) b)) b)
+        ((or (null b) (and (not (car b)) (null (cdr b)))) a)
+        ((not (eq (car a) (car b))) (if (car a) a b))
+        ((null (cdr a)) b)
+        ((null (cdr b)) a)
+        ((car a) (if (<= (cdr a) (cdr b)) a b))
+        (t (if (>= (cdr a) (cdr b)) a b))))
 
 (defun drover--node (session children)
   "Return the tree of SESSION with CHILDREN, trees of its subagents."
   (let* ((children (sort children #'drover--node-before-p))
          (status (drover-session-status session))
          (since (drover-session-since session))
-         (updated (drover-session-updated session)))
+         (updated (drover-session-updated session))
+         (activity (drover-session-activity session)))
     (dolist (child children)
       (let ((rank (drover-status-rank (drover-node-status child))))
         (cond ((< rank (drover-status-rank status))
@@ -329,10 +442,12 @@ the others most recently updated first."
               ((and (= rank (drover-status-rank status)) (drover-node-since child))
                (setq since (min (drover--time since) (drover-node-since child))))))
       (when (drover-node-updated child)
-        (setq updated (max (or updated 0) (drover-node-updated child)))))
+        (setq updated (max (or updated 0) (drover-node-updated child))))
+      (setq activity (drover--activity-join activity (drover-node-activity child))))
     (drover-node--create :session session :children children :status status
                          :since (unless (eql since most-positive-fixnum) since)
-                         :updated updated)))
+                         :updated updated
+                         :activity (and (or (car activity) (cdr activity)) activity))))
 
 (defun drover--parent-key (session by-key by-engine)
   "Return the key of the parent of SESSION among the sessions listed, or nil.
@@ -524,6 +639,16 @@ week; `older' before; nil when TIME is nil."
             ((>= time (drover--start-of-day (- today (* 5.5 86400)))) 'week)
             (t 'older)))))
 
+(defun drover-tree-activity-bucket (node &optional now)
+  "Return the bucket of `drover-activity-buckets' tree NODE falls in at NOW.
+A tree running a turn is active today, whenever its turn started; another
+falls where the time it sorts by does (see `drover-node-activity'), so
+that groups of last activity follow the order of that sort."
+  (let ((activity (drover-node-activity node)))
+    (if (car activity)
+        'today
+      (drover-activity-bucket (cdr activity) now))))
+
 (defconst drover-groupings '(status project branch agent model provider updated nil)
   "The values `drover-group-by' may take.")
 
@@ -540,7 +665,7 @@ GROUPING is one of `drover-groupings':
  provider VALUE is the provider name of the root session (see
           `drover-session-provider-name'), or nil, likewise.
  updated  VALUE is the bucket of the tree's last activity at NOW (see
-          `drover-activity-bucket'), newest first.
+          `drover-tree-activity-bucket'), newest first.
  nil      One group, of VALUE nil, holding every tree; none without
           trees.
 
@@ -557,7 +682,7 @@ Within a group, trees keep their order in NODES."
        (drover--group-trees-by nodes (lambda (node) (funcall field (drover-node-session node))))))
     ('updated
      (let ((groups (drover--group-trees-by
-                    nodes (lambda (node) (drover-activity-bucket (drover-node-updated node) now)))))
+                    nodes (lambda (node) (drover-tree-activity-bucket node now)))))
        (delq nil (mapcar (lambda (bucket) (assq bucket groups)) drover-activity-buckets))))
     ('nil (and nodes (list (cons nil nodes))))
     (_ (error "Unknown grouping %S" grouping))))
@@ -567,14 +692,24 @@ Within a group, trees keep their order in NODES."
 (defconst drover-sort-fields '(urgency title project branch agent model provider updated created)
   "The values `drover-sort-by' may take.")
 
-(defcustom drover-sort-by 'urgency
+(defcustom drover-sort-by 'updated
   "What session views sort sessions by, within each group.
 The value is one of `drover-sort-fields': `urgency', the most urgent
 first; `title', `project', `branch', `agent', `model' or `provider',
 the provider's name, in alphabetical order; `updated', the last
 activity, or `created', the time of creation, oldest first.
 `drover-sort-descending' reverses the order.  Subagents stay under
-their parent whatever the order."
+their parent whatever the order.
+
+By last activity, a session running a turn is active now, whatever
+event of its turn came last: running sessions come after the others,
+among themselves in the order their turns started, so that the events
+of a turn do not move its session.  The others come in the order of
+their last activity, a session moving only once its activity moved
+further than `drover-sort-activity-tolerance' from where it was placed
+\(see `drover-session-activity').  Newest first, the default, lists the
+running sessions first, the turn started last on top, then the others,
+the most recently active first."
   :type '(choice (const :tag "Urgency" urgency)
                  (const :tag "Title" title)
                  (const :tag "Project" project)
@@ -586,7 +721,7 @@ their parent whatever the order."
                  (const :tag "Creation" created))
   :group 'drover)
 
-(defcustom drover-sort-descending nil
+(defcustom drover-sort-descending t
   "Whether session views sort sessions in descending order of `drover-sort-by'."
   :type 'boolean
   :group 'drover)
@@ -595,11 +730,12 @@ their parent whatever the order."
   "Return the value tree NODE sorts by on FIELD, or nil when it has none.
 INDEX is the position of NODE in the order of urgency.  Strings are
 compared ignoring case; times are those of the root session, but for
-`updated', the latest activity in the tree."
+`updated', where the activity of the tree places it (see
+`drover-node-activity')."
   (let ((session (drover-node-session node)))
     (pcase field
       ('urgency index)
-      ('updated (drover-node-updated node))
+      ('updated (drover-node-activity node))
       ('created (drover-session-created session))
       (_ (when-let* ((value (pcase field
                               ('title (drover-session-display-title session))
@@ -615,9 +751,16 @@ compared ignoring case; times are those of the root session, but for
 
 (defun drover--sort-key-less-p (a b descending)
   "Return non-nil when sort key A comes before B, DESCENDING or not.
-Keys are numbers, strings or nil; nil comes last either way."
+Keys are numbers, strings, activities (RUNNING . TIME) or nil; nil
+comes last either way.  An activity running comes after one that does
+not, and before it DESCENDING; activities alike compare their times,
+an unknown time last either way."
   (cond ((null b) (and a t))
         ((null a) nil)
+        ((consp a)
+         (if (eq (not (car a)) (not (car b)))
+             (drover--sort-key-less-p (cdr a) (cdr b) descending)
+           (if descending (and (car a) t) (and (car b) t))))
         (descending (if (numberp a) (> a b) (string< b a)))
         (t (if (numberp a) (< a b) (string< a b)))))
 
@@ -642,7 +785,8 @@ for FIELD come last, and ties keep the order of urgency."
                                            :children (arrange (drover-node-children node))
                                            :status (drover-node-status node)
                                            :since (drover-node-since node)
-                                           :updated (drover-node-updated node))))
+                                           :updated (drover-node-updated node)
+                                           :activity (drover-node-activity node))))
                                   nodes)))
                       ;; `sort' is stable: ties keep the order of urgency.
                       (mapcar #'cdr (sort keyed (lambda (a b)
@@ -1457,6 +1601,7 @@ Return the keys whose place among the trees changed."
          (moved nil))
     (when old
       (drover--index-file index key nil))
+    (drover--note-activity key record)
     (if record
         (progn
           (puthash key record records)
@@ -1537,8 +1682,11 @@ no longer while one does.  Return (CHANGED . MOVED), as
     (cons changed moved)))
 
 (defun drover--index-build ()
-  "Return a new index of the sessions `drover-sessions' lists, before merging."
+  "Return a new index of the sessions `drover-sessions' lists, before merging.
+The times sessions sort by are noted anew, from those noted before,
+which a session listed again keeps while its activity stays near them."
   (let ((index (drover--index-make))
+        (times (make-hash-table :test #'equal))
         (listed nil))
     (dolist (record (drover--unarchived (drover--live-sessions)))
       (let ((key (drover-session-key record)))
@@ -1547,7 +1695,9 @@ no longer while one does.  Return (CHANGED . MOVED), as
           (puthash key (copy-sequence record) (drover--index-records index))
           (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index))
           (drover--index-file index key (gethash key (drover--index-records index)))
+          (drover--note-activity key record times)
           (push key listed))))
+    (setq drover--activity-times times)
     (dolist (key listed)
       (drover--index-link index key (drover--index-resolve
                                      index key (gethash key (drover--index-records index)))))
@@ -1735,13 +1885,13 @@ Run `drover-changed-hook' when something changed."
 
 ;;;; View settings
 
-(defcustom drover-group-by 'status
+(defcustom drover-group-by nil
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
 first; `project', `branch', `agent', `model' or `provider', the
 provider's name, of the session at the top of each tree; `updated',
 the last activity, as today, yesterday, this week and older; or nil
-for no groups.  See `drover-group-trees'."
+for no groups, the default.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
                  (const :tag "By branch" branch)
