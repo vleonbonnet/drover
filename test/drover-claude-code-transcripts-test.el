@@ -26,6 +26,7 @@
 
 (require 'drover-test-helpers)
 (require 'drover-transcript-fixtures)
+(require 'drover-list)
 
 (defmacro drover-claude-code-transcripts-test-with (&rest body)
   "Run BODY with the `claude-code' backend alone, over the fixtures' homes.
@@ -36,7 +37,6 @@ empty; `home' is the homes' directory, and `index' the index."
      (drover-test-with-backend nil
        (let ((drover-claude-code-transcripts--users nil)
              (drover-claude-code-transcripts--index nil)
-             (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
              (drover-claude-code-transcripts--agents (make-hash-table :test #'equal))
              (drover-claude-code-transcripts--recent nil)
              (drover-claude-code-agents-interval nil)
@@ -60,6 +60,21 @@ empty; `home' is the homes' directory, and `index' the index."
 (defun drover-claude-code-transcripts-test-ids ()
   "Return the identifiers of the sessions drover lists, sorted."
   (sort (mapcar #'drover-session-id (drover-sessions)) #'string<))
+
+(defun drover-claude-code-transcripts-test-at-point (ids)
+  "Return the identifiers of the sessions at point on the lines of IDS in the list.
+The list is drawn anew, its sessions of collapsed groups too, and
+killed after."
+  (let ((buffer (drover-list--buffer)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (revert-buffer)
+          (drover-list--draw-deferred)
+          (mapcar (lambda (id)
+                    (goto-char (oref (drover-list--find-session (cons 'claude-code id)) start))
+                    (drover-session-id (drover-session-at-point)))
+                  ids))
+      (kill-buffer buffer))))
 
 (defmacro drover-claude-code-transcripts-test-counting-reads (&rest body)
   "Run BODY, and return the bytes of transcripts it read, as (BYTES . VALUE)."
@@ -226,18 +241,28 @@ empty; `home' is the homes' directory, and `index' the index."
       (drover-transcript-save index t)
       (should (file-exists-p (drover-transcript-cache-file index)))
       ;; A new Emacs: nothing read but the kept file, until a look.
-      (let ((drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index))
-            (drover-claude-code-transcripts--files (make-hash-table :test #'equal)))
+      (let ((drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index)))
         (drover-transcript-load drover-claude-code-transcripts--index)
         (should (equal (plist-get (drover-transcript-lookup drover-claude-code-transcripts--index file) :ai-title)
                        "Kept"))
+        ;; Its conversations are found, and open from their lines.
+        (drover-index-refresh)
+        (should (equal (drover-claude-code-transcripts-test-ids) '("k1" "k2")))
+        (should (equal (drover-session-title (drover-find 'claude-code "k1")) "Kept"))
+        (should (equal (drover-claude-code-transcripts-test-at-point '("k1" "k2")) '("k1" "k2")))
         (drover-fixture-claude-append file (drover-fixture-claude-meta "k1" "ai-title" :aiTitle "Changed"))
         ;; Short, it is read whole again, the other not at all.
         (let ((read (car (drover-claude-code-transcripts-test-counting-reads
                            (drover-claude-code-transcripts-test-scan)))))
           (should (= read (file-attribute-size (file-attributes file)))))
         (should (equal (drover-claude-code-transcripts-test-ids) '("k1" "k2")))
-        (should (equal (drover-session-title (drover-find 'claude-code "k1")) "Changed")))
+        (should (equal (drover-session-title (drover-find 'claude-code "k1")) "Changed"))
+        ;; The other, not read again, is still found, and stays listed as it changes.
+        (should (drover-find 'claude-code "k2"))
+        (drover-backend-changed 'claude-code "k2")
+        (drover-changed-now)
+        (should (equal (drover-claude-code-transcripts-test-ids) '("k1" "k2")))
+        (should (equal (drover-claude-code-transcripts-test-at-point '("k1" "k2")) '("k1" "k2"))))
       ;; A kept file that does not read is ignored, once said.
       (drover-test-write (drover-transcript-cache-file index) "(:version 1 :files (garbage")
       (let ((index (drover-claude-code-transcripts--make-index))

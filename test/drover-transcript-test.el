@@ -84,6 +84,56 @@ file's size as :size and the size it read from before as :from, and
       (should-not changes)
       (should (drover-transcript-lookup index a)))))
 
+(ert-deftest drover-transcript-test-files-by-key ()
+  "Files are found by what their data names them, those kept between Emacs sessions too.
+A file kept is found by its key though its backend is not told of it,
+nothing having changed since it was read."
+  (drover-test-with-state
+    (let* ((root (file-name-as-directory (make-temp-file "drover-transcripts" t)))
+           (make (lambda ()
+                   (drover-transcript-index-create
+                    'test-transcripts
+                    (lambda () (list (list root 1 "\\.jsonl\\'")))
+                    (lambda (file _attributes _old)
+                      (with-temp-buffer
+                        (insert-file-contents file)
+                        (list :id (buffer-substring (point-min) (line-end-position 1)))))
+                    #'ignore nil #'drover-transcript-id)))
+           (index (funcall make))
+           (a (expand-file-name "p/a.jsonl" root))
+           (b (expand-file-name "p/b.jsonl" root))
+           (moved (expand-file-name "q/b.jsonl" root)))
+      (unwind-protect
+          (progn
+            (drover-test-write a "one\n")
+            (drover-test-write b "two\n")
+            (drover-transcript-scan index)
+            (should (equal (drover-transcript-keyed-file index "one") a))
+            (should (equal (drover-transcript-keyed-file index "two") b))
+            ;; A file read as another conversation is no longer the first's.
+            (drover-test-write a "three\nmore\n")
+            (drover-transcript-scan index)
+            (should-not (drover-transcript-keyed-file index "one"))
+            (should (equal (drover-transcript-keyed-file index "three") a))
+            ;; A conversation moving to another file is that file's.
+            (rename-file b (progn (make-directory (file-name-directory moved) t) moved))
+            (drover-transcript-scan index)
+            (should (equal (drover-transcript-keyed-file index "two") moved))
+            (drover-transcript-stop index)
+            ;; A new Emacs finds them by what it kept, before any look.
+            (let ((kept (funcall make)))
+              (drover-transcript-load kept)
+              (should (equal (drover-transcript-keyed-file kept "three") a))
+              (should (equal (drover-transcript-keyed-file kept "two") moved))
+              (should-not (drover-transcript-keyed-file kept "one"))
+              (drover-transcript-scan kept)
+              (should (equal (drover-transcript-keyed-file kept "two") moved))
+              (delete-file a)
+              (drover-transcript-scan kept)
+              (should-not (drover-transcript-keyed-file kept "three"))))
+        (drover-transcript-stop index)
+        (delete-directory root t)))))
+
 (ert-deftest drover-transcript-test-slices ()
   "The index works in slices, from timers, each giving way after its time."
   (drover-transcript-test-with

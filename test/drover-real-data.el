@@ -79,11 +79,9 @@
         (drover-test-with-backend nil
           (let ((drover-claude-code-transcripts--users nil)
                 (drover-claude-code-transcripts--index nil)
-                (drover-claude-code-transcripts--files (make-hash-table :test #'equal))
                 (drover-claude-code-transcripts--agents (make-hash-table :test #'equal))
                 (drover-codex-rollouts--users nil)
                 (drover-codex-rollouts--index nil)
-                (drover-codex-rollouts--files (make-hash-table :test #'equal))
                 (drover-codex-rollouts--names nil)
                 (drover-list-age-interval nil)
                 (drover-list-cache-interval nil)

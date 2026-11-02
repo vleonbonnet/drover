@@ -101,9 +101,6 @@ started."
         (drover-transcript-start drover-codex-rollouts--index))
       drover-codex-rollouts--index)))
 
-(defvar drover-codex-rollouts--files (make-hash-table :test #'equal)
-  "The rollout of each conversation, by identifier.")
-
 (defvar drover-codex-rollouts--names nil
   "The names session_index.jsonl gives conversations, as (STAMP . TABLE).
 STAMP is the file's (SIZE MTIME INODE) when read, TABLE a hash table of
@@ -298,7 +295,7 @@ appended to: Codex appends a line per name given."
         (when before
           (maphash (lambda (id _) (unless (and after (gethash id after)) (push id changed))) before))
         (dolist (id (delete-dups changed))
-          (when (gethash id drover-codex-rollouts--files)
+          (when (drover-codex-rollouts--file id)
             (drover-backend-changed 'codex id)))))))
 
 ;;;; Records
@@ -380,16 +377,23 @@ See `drover-codex-history-days'.  The backend's :history."
 The backend's :archived."
   (funcall callback (drover-codex-rollouts--records (lambda (data) (plist-get data :archived)))))
 
+(defun drover-codex-rollouts--file (id)
+  "Return the rollout of conversation ID, or nil.
+A conversation archived moves to another file: it is the one it has
+now."
+  (when-let* ((index (drover-codex-rollouts--current-index)))
+    (drover-transcript-keyed-file index id)))
+
 (defun drover-codex-rollouts--data (id)
   "Return what was read of conversation ID, or nil."
-  (when-let* ((file (gethash id drover-codex-rollouts--files)))
+  (when-let* ((file (drover-codex-rollouts--file id)))
     (drover-transcript-lookup (drover-codex-rollouts--current-index) file)))
 
 (defun drover-codex-rollouts--session (id)
   "Return the record of conversation ID, as :sessions lists it, or nil.
 Its rollout is looked at again soon when it changed since it was read.
 The backend's :session."
-  (let* ((file (gethash id drover-codex-rollouts--files))
+  (let* ((file (drover-codex-rollouts--file id))
          (data (and file (drover-transcript-lookup (drover-codex-rollouts--current-index) file))))
     (when file
       (drover-transcript-check (drover-codex-rollouts--current-index) file))
@@ -399,15 +403,10 @@ The backend's :session."
 
 ;;;; Following the rollouts
 
-(defun drover-codex-rollouts--changed (file old new)
-  "Report that what was read of rollout FILE went from OLD to NEW.
-A conversation archived moves to another file: the one it has now is
-kept."
+(defun drover-codex-rollouts--changed (_file old new)
+  "Report that what was read of a rollout went from OLD to NEW."
   (let ((id (plist-get (or new old) :id)))
     (when id
-      (cond (new (puthash id file drover-codex-rollouts--files))
-            ((equal (gethash id drover-codex-rollouts--files) file)
-             (remhash id drover-codex-rollouts--files)))
       (drover-backend-changed 'codex id)
       (when (and (or (plist-get old :archived) (plist-get new :archived)) drover-show-archived)
         (drover-archived-fetch 'codex)))))
@@ -428,7 +427,8 @@ kept."
                                   #'drover-codex-rollouts--roots
                                   #'drover-codex-rollouts--read
                                   #'drover-codex-rollouts--changed
-                                  #'drover-codex-rollouts--looked))
+                                  #'drover-codex-rollouts--looked
+                                  #'drover-transcript-id))
 
 ;;;; Actions
 
@@ -452,7 +452,7 @@ OTHER-WINDOW is non-nil.  The backend's :open."
   "Call CALLBACK at once with a recap of the last turn of SESSION.
 It is read from the end of its rollout (see `drover-codex-recap').  The
 backend's :recap."
-  (let ((file (gethash (drover-session-id session) drover-codex-rollouts--files)))
+  (let ((file (drover-codex-rollouts--file (drover-session-id session))))
     (funcall callback
              (or (and file (file-readable-p file)
                       (drover-with-reporting "Codex recap"
