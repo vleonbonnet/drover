@@ -772,9 +772,10 @@ SESSION becomes where the prompt goes: sending it, or scheduling it,
 skips the picker, until it is sent, cleared, or the session forgotten
 \(`drover-prompt-forget-target'); the header names it.  Nothing is sent.
 Front ends call this to have a prompt edited in the prompt, as
-drover's OpenCode backend does for the prompts opencode.el withdraws.  The labels of its
-attachments, made by `drover-prompt-attachment-label', carry them in
-TEXT: they go with the prompt to sessions of their backend."
+drover's OpenCode backend does for the prompts opencode.el withdraws.
+The labels of its attachments, made by `drover-prompt-attachment-label',
+carry them in TEXT: they go with the prompt to sessions of their
+backend."
   (let* ((buffer (drover-prompt-buffer t))
          (title (drover-session-display-title session))
          (draft nil)
