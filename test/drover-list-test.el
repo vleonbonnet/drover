@@ -4492,6 +4492,36 @@ changed, as the timer would."
       (drover-list-test-place)
       (should (drover-list--side-window)))))
 
+(ert-deftest drover-list-test-no-sideways-scrolling ()
+  "Lists never scroll sideways by themselves, and windows scrolled so scroll back.
+Lines fill the window from its left edge: point at the end of one must
+not scroll the window, which then shows the lines cut on the left,
+filling part of it, as the sidebar did once back beside the list."
+  (drover-list-test-beside
+    (with-current-buffer (window-buffer side)
+      (should (local-variable-p 'auto-hscroll-mode))
+      (should-not auto-hscroll-mode))
+    (should (local-variable-p 'auto-hscroll-mode buffer))
+    (should-not (buffer-local-value 'auto-hscroll-mode buffer))
+    ;; Scrolled before, or by a command: brought up to date as it
+    ;; shows, the sidebar scrolls back.
+    (set-window-hscroll side 7)
+    (should (= (window-hscroll side) 7))
+    (drover-list--on-window-change side)
+    (should (zerop (window-hscroll side)))
+    ;; Drawn anew, too.
+    (set-window-hscroll side 7)
+    (with-current-buffer (window-buffer side)
+      (drover-list--render))
+    (should (zerop (window-hscroll side)))
+    ;; Back from stepping aside, where it comes back to.
+    (drover-list)
+    (set-window-buffer first (get-buffer-create "*other 1*"))
+    (drover-list-test-place)
+    (let ((side (drover-list--side-window)))
+      (should (zerop (window-hscroll side)))
+      (should (with-current-buffer (window-buffer side) (not auto-hscroll-mode))))))
+
 (ert-deftest drover-list-test-sidebar-stays-unless-beside ()
   "The list in a window not beside the sidebar leaves it: both show."
   (drover-list-test-beside

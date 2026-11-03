@@ -3530,8 +3530,10 @@ same session, and window starts on the same line.  An active region
 stays active, its mark on the same session too, so that it selects the
 same sessions: a list redraws whenever a session changes, many times a
 second during a turn.  The sidebar's side windows get its settings
-first, which the width depends on."
+first, which the width depends on, and windows scrolled sideways
+scroll back (see `drover-list--unscroll')."
   (drover-list--set-up-side-windows)
+  (drover-list--unscroll)
   (let* ((windows (get-buffer-window-list nil nil t))
          (anchor (drover-list--anchor (point)))
          (mark (and (region-active-p) (drover-list--anchor (mark))))
@@ -4392,9 +4394,11 @@ they make are made once for every list (see `drover-list--sharing')."
 Redraw it if it is stale or was drawn for another width; otherwise draw
 in place what changed while it was hidden, and bring the faces of
 titles and the timers up to date.  The sidebar's side windows get its
-settings first (see `drover-list--set-up-side-windows')."
+settings first (see `drover-list--set-up-side-windows'), and windows
+scrolled sideways scroll back (see `drover-list--unscroll')."
   (when (drover-list--current-p)
     (drover-list--set-up-side-windows)
+    (drover-list--unscroll)
     (if (or drover-list--stale (not (eql drover-list--width (drover-list--line-width))))
         (drover-list--render)
       (pcase-let ((`(,keys ,bodies ,times) drover-list--pending))
@@ -4406,6 +4410,17 @@ settings first (see `drover-list--set-up-side-windows')."
       (drover-list--restyle-titles)
       (drover-list--defer)
       (drover-list--update-timers))))
+
+(defun drover-list--unscroll ()
+  "Scroll back the windows showing the current list that are scrolled sideways.
+Lines are laid out for the width of the window, from its left edge: a
+window scrolled sideways shows them cut on the left, filling part of
+it.  `auto-hscroll-mode' is off in lists, so that point at the end of
+a line filling the window does not scroll it, but a window may have
+been scrolled before, or by a command."
+  (dolist (window (get-buffer-window-list nil 'nomini t))
+    (unless (zerop (window-hscroll window))
+      (set-window-hscroll window 0))))
 
 (defun drover-list--on-window-change (window)
   "Bring the list WINDOW shows up to date, now that WINDOW shows it.
@@ -5467,6 +5482,9 @@ with their last replies (see `drover-prompt-dwim').
   (setq-local revert-buffer-function #'drover-list--revert)
   (setq-local mode-line-process '(:eval (drover-list--mode-line-process)))
   (setq-local cursor-in-non-selected-windows nil)
+  ;; Lines fit the window: point at the end of a full one must not
+  ;; scroll the window sideways (see `drover-list--unscroll').
+  (setq-local auto-hscroll-mode nil)
   ;; Magit's cache keys a session by its group too, and never forgets;
   ;; `drover-list--visibility' replaces it.
   (setq-local magit-section-cache-visibility nil)
