@@ -4963,6 +4963,79 @@ activity first."
                   (should (equal-including-properties (car drawn) (car fresh))))))))
         (should (> in-place 10))))))
 
+;;;; The order of the sessions needing the user
+
+(defun drover-list-test-attention-order ()
+  "Return the identifiers of the sessions needing the user in the order to visit them.
+At the clock of the tests, as a pair (CACHED . OTHERS): those with a
+live prompt cache, and the others, both in order."
+  (let ((order (drover-attention-order (drover-attention-sessions) drover-list-test-clock)))
+    (cons (mapcar #'drover-session-id
+                  (seq-filter (lambda (session)
+                                (drover-session-shown-cache-fraction session drover-list-test-clock))
+                              order))
+          (mapcar #'drover-session-id
+                  (seq-remove (lambda (session)
+                                (drover-session-shown-cache-fraction session drover-list-test-clock))
+                              order)))))
+
+(ert-deftest drover-list-test-attention-order-follows-both-lists ()
+  "Sessions with a live cache come first, then the others as both lists draw them.
+The caches to expire soonest first, a subagent's counting as none; the
+others in the order of the sidebar and of the list in an ordinary
+window, which share the view settings, under several of them."
+  (pcase-dolist (`(,mode ,grouping ,sort ,descending)
+                 '((active status urgency nil) (all nil updated t) (active project title nil)
+                   (all updated created t) (active model updated nil) (all status updated t)
+                   (active nil urgency t) (all harness title t)))
+    (random (format "drover attention order %s %s %s %s" mode grouping sort descending))
+    (drover-list-test-two-lists
+      (setq drover-test-sessions (drover-list-test-random-sessions 40))
+      (drover-backend-changed 'fake)
+      (drover-set-show-subagents mode)
+      (drover-set-group-by grouping)
+      (drover-set-sort sort descending)
+      (pcase-let* ((`(,cached . ,others) (drover-list-test-attention-order))
+                   (records (mapcar (lambda (id) (drover-list-test-find id)) cached))
+                   (expiries (mapcar #'drover-session-cache-expires records)))
+        (should cached)
+        (should others)
+        (should (equal expiries (sort (copy-sequence expiries) #'<)))
+        (should-not (seq-some #'drover-session-parent records))
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (should (equal (list mode grouping sort descending
+                                 (seq-filter (lambda (id) (member id others)) (drover-list-test-order)))
+                           (list mode grouping sort descending others)))))))))
+
+(ert-deftest drover-list-test-attention-order-filter ()
+  "The sessions the filter leaves out come after those both lists draw.
+Those in the order the lists would draw them without the filter."
+  (random "drover attention order filter")
+  (drover-list-test-two-lists
+    (setq drover-test-sessions (mapcar (lambda (session)
+                                         (setf (drover-session-cache-expires session) nil)
+                                         session)
+                                       (drover-list-test-random-sessions 40)))
+    (drover-backend-changed 'fake)
+    (drover-set-show-subagents 'all)
+    (drover-set-group-by nil)
+    (drover-set-sort 'updated t)
+    (let ((whole (cdr (drover-list-test-attention-order))))
+      (drover-set-filter :project "alpha")
+      (let* ((order (cdr (drover-list-test-attention-order)))
+             (drawn (with-current-buffer sidebar
+                      (seq-filter (lambda (id) (member id order)) (drover-list-test-order))))
+             (left (seq-remove (lambda (id) (member id drawn)) order)))
+        (should drawn)
+        (should left)
+        (should (equal (seq-take order (length drawn)) drawn))
+        (should (equal (nthcdr (length drawn) order)
+                       (seq-filter (lambda (id) (member id left)) whole)))
+        (with-current-buffer buffer
+          (should (equal (seq-filter (lambda (id) (member id order)) (drover-list-test-order))
+                         drawn)))))))
+
 (ert-deftest drover-list-test-two-lists-share-rows ()
   "A row made for one list, the other copies: its texts are made and measured once."
   (drover-list-test-two-lists

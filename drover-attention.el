@@ -27,12 +27,14 @@
 ;;   in the face of the most urgent of them, as other indicators of the
 ;;   mode line show a count: a symbol, a space and the number.  It counts what lists show
 ;;   under `drover-show-subagents', and every subagent waiting for you.
-;;   mouse-1 on it visits the most urgent, mouse-3 chooses one.
-;; - `drover-next' visits the most urgent session that needs you;
-;;   repeating it walks through the others, in the order of the first
-;;   press, and wraps around.
+;;   mouse-1 on it visits the first of them, mouse-3 chooses one.
+;; - `drover-next' visits the session that needs you whose prompt cache
+;;   expires soonest, or, when no cache is live, the first the list
+;;   shows; repeating it walks through the others, in the order of the
+;;   first press (`drover-attention-order'), and wraps around.
 ;; - `drover-select' chooses any session with completion, grouped by
-;;   status, most urgent first.
+;;   status, those needing you first, in the order `drover-next' visits
+;;   them.
 
 ;;; Code:
 
@@ -44,7 +46,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 4))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 13))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
@@ -78,53 +80,44 @@ costs nothing.")
 nil when it was already a list, `empty' when it was nil, `string' when
 it was a string; disabling the mode restores it.")
 
-(defun drover-attention--counts (sessions)
-  "Return an alist (STATUS . COUNT) of SESSIONS that need the user.
-Statuses come in `drover-status-order'; those with no session are left
-out."
-  (delq nil
-        (mapcar (lambda (status)
-                  (let ((count (seq-count (lambda (session)
-                                            (eq (drover-session-status session) status))
-                                          sessions)))
-                    (and (> count 0) (cons status count))))
-                (seq-sort-by #'drover-status-rank #'< drover-attention-statuses))))
-
-(defun drover-attention--describe (session)
+(defun drover-attention--describe (session &optional now)
   "Return one line describing SESSION, for lists of sessions.
 It is cut to `drover-line-limit' characters, its summary on one line.
-A session of another host names it first."
+A session of another host names it first; one whose prompt cache lives
+at NOW, the current time by default, tells how long it has left (see
+`drover-session-shown-cache-fraction')."
   (let ((location (drover-session-location session))
         (summary (drover-session-summary session))
-        (host (drover-session-host session)))
+        (host (drover-session-host session))
+        (cache (and (drover-session-shown-cache-fraction session now)
+                    (drover-session-cache-remaining session now))))
     (drover-bound-line
      (concat (opencode-session-status-glyph (drover-session-status session)) " "
              (and host (concat (propertize (drover-host-label host) 'face 'drover-dim) ": "))
              (format "%s" (drover-session-display-title session))
              (and location (concat "  " (propertize location 'face 'drover-dim)))
+             (and cache (concat "  " (propertize (concat "cache " (opencode-format-duration cache))
+                                                 'face 'drover-dim)))
              (and summary (concat "  " (string-replace "\n" " " (drover-bound-line summary))))))))
 
-(defconst drover-attention--help-sessions 10
-  "Sessions of a status the tooltip of the count names at most.")
+(defconst drover-attention--help-sessions 20
+  "Sessions the tooltip of the count names at most.")
 
-(defun drover-attention--help (sessions)
-  "Return the help text of the mode line count of SESSIONS, by status.
-It names `drover-attention--help-sessions' sessions of a status at
+(defun drover-attention--help (sessions &optional now)
+  "Return the help text of the mode line count of SESSIONS.
+SESSIONS come in the order `drover-next' visits them, the order the
+text lists them in (see `drover-attention-order'), their caches as they
+stand at NOW.  It names `drover-attention--help-sessions' sessions at
 most, and how many more: Emacs measures a tooltip whole to show it."
-  (concat "Sessions that need you:"
-          (mapconcat (pcase-lambda (`(,status . ,count))
-                       (concat "\n" (opencode-session-status-label status) (format " (%d):" count)
-                               (mapconcat (lambda (session)
-                                            (concat "\n  " (drover-attention--describe session)))
-                                          (seq-take (seq-filter (lambda (session)
-                                                                  (eq (drover-session-status session) status))
-                                                                sessions)
-                                                    drover-attention--help-sessions)
-                                          "")
-                               (and (> count drover-attention--help-sessions)
-                                    (format "\n  … and %d more" (- count drover-attention--help-sessions)))))
-                     (drover-attention--counts sessions) "")
-          "\n\nmouse-1: visit the most urgent\nmouse-3: choose a session"))
+  (let ((count (length sessions)))
+    (concat "Sessions that need you, in the order of `drover-next':"
+            (mapconcat (lambda (session)
+                         (concat "\n  " (drover-attention--describe session now)))
+                       (seq-take sessions drover-attention--help-sessions)
+                       "")
+            (and (> count drover-attention--help-sessions)
+                 (format "\n  … and %d more" (- count drover-attention--help-sessions)))
+            "\n\nmouse-1: visit them in this order\nmouse-3: choose a session")))
 
 (defvar drover-attention--pads (make-hash-table :test #'equal)
   "Room the glyph of the mode line needs, measured.
@@ -174,21 +167,23 @@ they are found again."
   (or (drover-layout-matches-p drover-attention--layout)
       (setq drover-attention--sessions nil)))
 
-(defun drover-attention--current ()
-  "Return the sessions that need the user, most urgent first."
+(defun drover-attention--current (&optional now)
+  "Return the sessions that need the user, in the order to visit them at NOW.
+See `drover-attention-order'."
   (unless (drover-attention--current-p)
     (drover-attention--recount))
   (let ((sessions nil))
     (when drover-attention--sessions
       (maphash (lambda (_ session) (push session sessions)) drover-attention--sessions))
-    (drover-sort sessions)))
+    (drover-attention-order (drover-sort sessions) now)))
 
 (defun drover-attention--help-echo (&rest _)
   "Return the tooltip of the mode line count, from the sessions needing you now.
 It is made when shown, however many the sessions are, rather than on
 every change."
   (drover-with-reporting "mode line tooltip"
-    (drover-attention--help (drover-attention--current))))
+    (let ((now (float-time)))
+      (drover-attention--help (drover-attention--current now) now))))
 
 (defun drover-attention--format (sessions)
   "Return the mode line count of SESSIONS, the sessions that need the user.
@@ -197,7 +192,8 @@ of the most urgent status among them, or nil when SESSIONS is empty.
 The space widens, and room is left before the glyph, only where the
 glyph's ink would reach the count or what comes before it (see
 `drover-attention--measure'); the tooltip lists the sessions needing
-the user by status, when shown (see `drover-attention--help-echo')."
+the user in the order `drover-next' visits them, when shown (see
+`drover-attention--help-echo')."
   (when sessions
     (let* ((face (opencode-session-status-face
                   (car (seq-sort-by #'drover-status-rank #'<
@@ -336,8 +332,9 @@ needs you.  It begins with the glyph: parting it from what comes before
 is the mode line's to do.  It
 counts the sessions lists show under `drover-show-subagents', and every
 subagent waiting for you, which blocks its parent (see
-`drover-surfaced-sessions').  Its tooltip lists them by status;
-clicking it visits the most urgent (`drover-next'), and clicking it
+`drover-surfaced-sessions').  Its tooltip lists them in the order
+`drover-next' visits them; clicking it visits the first, then the
+next (`drover-next'), and clicking it
 with the right button chooses one (`drover-select').  Enabling the mode
 starts the backends."
   :global t
@@ -385,16 +382,21 @@ one is gone."
 
 ;;;###autoload
 (defun drover-next ()
-  "Visit the most urgent session that needs you, in the selected window.
+  "Visit the first session that needs you, in the selected window.
+First come the sessions whose prompt cache lives, the one to expire
+soonest first, so that a turn sent to it reuses it; then the others,
+in the order the list and the sidebar show them, as `drover-group-by'
+and `drover-sort-by' arrange them (see `drover-attention-order').
 Repeating the command visits the following session, and wraps around.
 The order is the one of the first press, so that sessions changing
-status meanwhile, as the ones visited do, keep their place."
+status meanwhile, as the ones visited do, and caches expiring or
+renewed by a turn keep their place."
   (interactive)
   (if-let* ((following (and (eq last-command 'drover-next)
                             drover-attention--cycle
                             (drover-attention--following))))
       (drover-attention--visit (car following) (cdr following))
-    (let ((sessions (drover-attention-sessions)))
+    (let ((sessions (drover-attention-order (drover-attention-sessions))))
       (setq drover-attention--cycle (mapcar #'drover-session-key sessions))
       (if sessions
           (drover-attention--visit (car sessions) 0)
@@ -484,10 +486,15 @@ Their completion category is `drover-session'."
   "Choose a session with completion and display it.
 Sessions are those lists show, under `drover-show-subagents', and the
 subagents waiting for you, whatever it says (see
-`drover-surfaced-sessions'), most urgent first.  With a prefix argument
-OTHER-WINDOW, display it in another window."
+`drover-surfaced-sessions'): those that need you first, in the order
+`drover-next' visits them (see `drover-attention-order'), then the
+others, most urgent first.  Completion groups them by status.  With a
+prefix argument OTHER-WINDOW, display it in another window."
   (interactive "P")
-  (let ((sessions (drover-sort (drover-surfaced-sessions))))
+  (let* ((surfaced (drover-sort (drover-surfaced-sessions)))
+         (sessions (append (drover-attention-order
+                            (seq-filter #'drover-session-attention-p surfaced))
+                           (seq-remove #'drover-session-attention-p surfaced))))
     (unless sessions
       (user-error "No sessions"))
     (drover-open (drover-read-session "Session: " sessions) other-window)))
