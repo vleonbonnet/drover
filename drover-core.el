@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 14
+(defconst drover-core-generation 15
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1649,6 +1649,21 @@ PROPERTIES is a plist of:
              turn of its own (see `drover-recorded-times'); a change of
              the conversation reported for such a backend is reported
              for the front ends following it too.
+ :recorded-run
+             Function of an engine identifier returning what the
+             conversation runs, as recorded, as keyword arguments of
+             `drover-session-create': its provider, the size of its
+             context and its model's, and its prompt cache, those known;
+             nil when it knows none.  It must answer at once.  A front
+             end following the conversation takes them from there (see
+             `drover-recorded-run').
+ :recorded-seen
+             Function of an engine identifier noting that the user saw
+             the conversation as of now: a front end following it
+             reported it idle, its turn seen (see
+             `drover--note-followed').  It must answer at once, and
+             report no change: no record of its own is listed while a
+             front end follows the conversation.
 
 The search of sessions (`drover-search') matches what records tell,
 and asks backends for more through the following operations, both
@@ -2052,6 +2067,41 @@ when later; one recorded nowhere yet, as of now, at CREATED."
           (cond ((and activity last) (max activity last))
                 ((or activity last))
                 (t created)))))
+
+;; A front end tells what a turn does, not always what it ran on: a
+;; terminal of claude-code-ide tells no context nor cache.  What the
+;; conversation records does, and the backends recording it read it.
+
+(defun drover-recorded-run (engine engine-id)
+  "Return what ENGINE's conversation ENGINE-ID runs, as recorded, or nil.
+A plist of keyword arguments of `drover-session-create', its provider,
+context and prompt cache, from the first backend recording ENGINE that
+tells (see :recorded-run in `drover-register-backend'), for a front
+end's record of the conversation: appended to its own arguments, which
+come first and win."
+  (when (and engine engine-id)
+    (seq-some (lambda (backend)
+                (when-let* ((function (drover-backend-property backend :recorded-run))
+                            (run (drover-with-reporting "recorded run"
+                                   (funcall function engine-id))))
+                  (and (plistp run) run)))
+              (drover--recording-backends engine))))
+
+(defun drover--note-followed (record)
+  "Tell the backends recording the conversation of RECORD that the user saw it.
+RECORD is a front end's record of this host, idle: its turn ended seen,
+or none ran, so that once the front end lets the conversation go, its
+record as recorded is not shown done for a reply the user saw there
+\(see :recorded-seen in `drover-register-backend')."
+  (when-let* (((eq (drover-session-status record) 'idle))
+              ((null (drover-session-host record)))
+              (engine (drover-session-engine record))
+              (engine-id (drover-session-engine-id record))
+              ((not (drover--recorded-p (drover-session-backend record)))))
+    (dolist (backend (drover--recording-backends engine))
+      (when-let* ((function (drover-backend-property backend :recorded-seen)))
+        (drover-with-reporting "recorded seen"
+          (funcall function engine-id))))))
 
 (defun drover--live-sessions ()
   "Return the sessions every registered backend follows, as they report them.
@@ -2665,7 +2715,8 @@ Return the keys whose place among the trees changed."
           (puthash key record records)
           (unless (gethash key (drover--index-serials index))
             (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index)))
-          (drover--index-file index key record))
+          (drover--index-file index key record)
+          (drover--note-followed record))
       (remhash key records)
       (remhash key (drover--index-serials index)))
     ;; Sessions naming KEY their parent, directly or through its
@@ -2753,6 +2804,7 @@ which a session listed again keeps while its activity stays near them."
           (puthash key (copy-sequence record) (drover--index-records index))
           (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index))
           (drover--index-file index key (gethash key (drover--index-records index)))
+          (drover--note-followed record)
           (drover--note-activity key record times)
           (push key listed))))
     (setq drover--activity-times times)

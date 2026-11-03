@@ -42,6 +42,14 @@
 ;; conversation is opened again.  Its subagents' transcripts beside it,
 ;; under ID/subagents/, are its subagents.
 ;;
+;; It shows as an OpenCode session does: a turn that ended in a reply,
+;; or an error of the API, the user did not see is done, or failed (see
+;; `drover-transcript-unseen-p'), else idle; its newest reply tells the
+;; size of its context and its prompt cache, which expires an hour or
+;; five minutes after its last request, as Claude Code asked for it
+;; (see `drover-claude-code-transcripts--usage').  Front ends following
+;; a conversation take those from here (:recorded-run).
+;;
 ;; Opening a conversation resumes it in a front end (`drover-resume'):
 ;; claude-code-ide runs \"claude --resume ID\" in a terminal, agent-shell
 ;; loads it through ACP; the front end it ran in, as its transcript's
@@ -69,7 +77,7 @@
 (require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
   (load "drover-core" nil t))
 
 (declare-function drover-claude-code-ide-fork "drover-claude-code-ide" (session-id directory))
@@ -182,20 +190,145 @@ prompt of the user, on one line, or nil."
   (when-let* ((record (drover-transcript-last marker nil beg end)))
     (drover-transcript-text (alist-get key record))))
 
+(defun drover-claude-code-transcripts--turn-record (beg end)
+  "Return the newest record of a reply of a main turn from BEG to END, or nil.
+That is an assistant's record of the conversation, not of a subagent,
+of a model the API ran, not one the CLI made up (\"<synthetic>\")."
+  (drover-transcript-last
+   "\"type\":\"assistant\""
+   (lambda (record)
+     (and (equal (alist-get 'type record) "assistant")
+          (not (alist-get 'isSidechain record))
+          (let ((model (or (alist-get 'requestedModel record)
+                           (alist-get 'model (alist-get 'message record)))))
+            (and (stringp model) (not (string-prefix-p "<" model))))))
+   beg end))
+
 (defun drover-claude-code-transcripts--turn (beg end)
   "Return (MODEL EFFORT TIME) of the newest main turn from BEG to END, or nil."
-  (when-let* ((record (drover-transcript-last
-                       "\"type\":\"assistant\""
-                       (lambda (record)
-                         (and (equal (alist-get 'type record) "assistant")
-                              (not (alist-get 'isSidechain record))
-                              (let ((model (or (alist-get 'requestedModel record)
-                                               (alist-get 'model (alist-get 'message record)))))
-                                (and (stringp model) (not (string-prefix-p "<" model))))))
-                       beg end)))
+  (when-let* ((record (drover-claude-code-transcripts--turn-record beg end)))
     (list (or (alist-get 'requestedModel record) (alist-get 'model (alist-get 'message record)))
           (and (stringp (alist-get 'effort record)) (alist-get 'effort record))
           (drover-transcript-time (alist-get 'timestamp record)))))
+
+(defun drover-claude-code-transcripts--tokens (usage key)
+  "Return the tokens USAGE, a reply's usage, counts under KEY, or 0."
+  (let ((value (alist-get key usage)))
+    (if (natnump value) value 0)))
+
+(defun drover-claude-code-transcripts--write-ttl (usage)
+  "Return the lifetime of the prompt cache USAGE tells a reply wrote, or nil.
+Claude Code asks for a cache of an hour or of five minutes, and the API
+counts the tokens written into each apart: 3600 seconds when it wrote
+any into the hour's, else 300 when it wrote into the five minutes',
+else nil, for a request that wrote nothing."
+  (let ((creation (alist-get 'cache_creation usage)))
+    (cond ((> (drover-claude-code-transcripts--tokens creation 'ephemeral_1h_input_tokens) 0) 3600)
+          ((or (> (drover-claude-code-transcripts--tokens creation 'ephemeral_5m_input_tokens) 0)
+               (> (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens) 0))
+           300))))
+
+(defun drover-claude-code-transcripts--usage-record-p (record)
+  "Return non-nil when RECORD is the reply of a main turn telling its usage."
+  (and (equal (alist-get 'type record) "assistant")
+       (not (alist-get 'isSidechain record))
+       (let ((message (alist-get 'message record)))
+         (and (drover-json-object-p message)
+              (not (equal (alist-get 'model message) "<synthetic>"))
+              (drover-json-object-p (alist-get 'usage message))))))
+
+(defun drover-claude-code-transcripts--requested (record beg end)
+  "Return when the request RECORD replies to was sent, as far as BEG to END tell.
+The request follows the record its reply's first record has for parent,
+the prompt or a tool's result: its time, else that of the reply's first
+record, else RECORD's own.  Those records are looked for from BEG to
+END."
+  (let* ((id (alist-get 'id (alist-get 'message record)))
+         (first (and (stringp id)
+                     (car (seq-filter (lambda (other)
+                                        (equal (alist-get 'id (alist-get 'message other)) id))
+                                      (drover-transcript-lines (concat "\"id\":\"" id "\"") nil beg end)))))
+         (parent (alist-get 'parentUuid (or first record)))
+         (before (and (stringp parent)
+                      (seq-find (lambda (other) (equal (alist-get 'uuid other) parent))
+                                (drover-transcript-lines (concat "\"uuid\":\"" parent "\"") t beg end)))))
+    (or (drover-transcript-time (alist-get 'timestamp before))
+        (drover-transcript-time (alist-get 'timestamp first))
+        (drover-transcript-time (alist-get 'timestamp record)))))
+
+(defconst drover-claude-code-transcripts--usage-marker "\"cache_read_input_tokens\":"
+  "What the line of a reply telling its usage holds, and few others.
+Looking for it, rather than for every reply, parses no line of a reply
+without usage, nor of a prompt.")
+
+(defun drover-claude-code-transcripts--usage (beg end)
+  "Return what the newest reply of a main turn from BEG to END tells it ran on.
+A plist of :context, the tokens of its prompt, uncached, written into
+the cache and read from it, as the API counts what the next request
+sends again; :cache-tokens, those of the prompt cache, read or written;
+:cache-prompt-tokens, those of the prompt; :requested, when its request
+was sent (see `drover-claude-code-transcripts--requested'), which
+starts the cache's lifetime anew; and :cache-ttl, that lifetime, the
+one the newest request writing the cache asked for (see
+`drover-claude-code-transcripts--write-ttl'), if one is there: a request
+reading the cache without writing keeps the lifetime it was written
+with.  Nil without such a reply."
+  (when-let* ((record (drover-transcript-last drover-claude-code-transcripts--usage-marker
+                                              #'drover-claude-code-transcripts--usage-record-p
+                                              beg end)))
+    (let* ((usage (alist-get 'usage (alist-get 'message record)))
+           (input (drover-claude-code-transcripts--tokens usage 'input_tokens))
+           (written (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens))
+           (read (drover-claude-code-transcripts--tokens usage 'cache_read_input_tokens))
+           (ttl (or (drover-claude-code-transcripts--write-ttl usage)
+                    (when-let* ((writer (drover-transcript-last
+                                         drover-claude-code-transcripts--usage-marker
+                                         (lambda (record)
+                                           (and (drover-claude-code-transcripts--usage-record-p record)
+                                                (drover-claude-code-transcripts--write-ttl
+                                                 (alist-get 'usage (alist-get 'message record)))))
+                                         beg end)))
+                      (drover-claude-code-transcripts--write-ttl
+                       (alist-get 'usage (alist-get 'message writer)))))))
+      (append (list :context (+ input written read)
+                    :cache-tokens (+ written read)
+                    :cache-prompt-tokens (+ input written read)
+                    :requested (drover-claude-code-transcripts--requested record beg end))
+              (and ttl (list :cache-ttl ttl))))))
+
+(defconst drover-claude-code-transcripts--batch-entrypoints '("sdk-cli" "sdk-py")
+  "Entry points of Claude Code run by a program rather than a user.
+\"claude -p\" and the Python SDK: their replies went to the program.")
+
+(defun drover-claude-code-transcripts--ending (record)
+  "Return how the conversation whose newest message is RECORD stands.
+A plist of :outcome, `done' when it is a reply ending its turn, `failed'
+when it is an error of the API, otherwise `idle': a prompt left without
+reply, a tool's result, a reply cut by its terminal closing, the note
+of an interruption or of a command such as /exit, after which the user
+saw what came before; :ended, its time; and :error, the error's text.
+A turn of a program, \"claude -p\" or an SDK, is idle: its reply went to
+the program (see `drover-claude-code-transcripts--batch-entrypoints')."
+  (let ((message (alist-get 'message record)))
+    (append
+     (list :outcome
+           (cond ((not (equal (alist-get 'type record) "assistant")) 'idle)
+                 ((member (alist-get 'entrypoint record) drover-claude-code-transcripts--batch-entrypoints)
+                  'idle)
+                 ((alist-get 'isApiErrorMessage record) 'failed)
+                 ((member (alist-get 'stop_reason message) '(nil "tool_use" "pause_turn")) 'idle)
+                 (t 'done))
+           :ended (drover-transcript-time (alist-get 'timestamp record)))
+     (when (alist-get 'isApiErrorMessage record)
+       (let ((content (alist-get 'content message)))
+         (list :error (drover-transcript-text
+                       (cond ((stringp content) content)
+                             ((listp content)
+                              (seq-some (lambda (block)
+                                          (and (drover-json-object-p block)
+                                               (stringp (alist-get 'text block))
+                                               (alist-get 'text block)))
+                                        content))))))))))
 
 (defun drover-claude-code-transcripts--message-p (record)
   "Return non-nil when RECORD is a message of the conversation, parsed.
@@ -208,16 +341,32 @@ prompt left without one.  Its API errors are messages: they end a turn."
     ("assistant" (or (alist-get 'isApiErrorMessage record)
                      (not (equal (alist-get 'model (alist-get 'message record)) "<synthetic>"))))))
 
+(defun drover-claude-code-transcripts--last-message-record (beg end)
+  "Return the newest message between BEG and END, parsed, or nil.
+See `drover-claude-code-transcripts--message-p'."
+  (drover-transcript-last
+   "\"timestamp\":\""
+   (lambda (record)
+     (and (drover-claude-code-transcripts--message-p record)
+          (drover-transcript-time (alist-get 'timestamp record))))
+   beg end))
+
 (defun drover-claude-code-transcripts--activity (beg end)
   "Return the time of the newest message between BEG and END, or nil.
 See `drover-claude-code-transcripts--message-p'."
-  (when-let* ((record (drover-transcript-last
-                       "\"timestamp\":\""
-                       (lambda (record)
-                         (and (drover-claude-code-transcripts--message-p record)
-                              (drover-transcript-time (alist-get 'timestamp record))))
-                       beg end)))
+  (when-let* ((record (drover-claude-code-transcripts--last-message-record beg end)))
     (drover-transcript-time (alist-get 'timestamp record))))
+
+(defun drover-claude-code-transcripts--end (beg end)
+  "Return how the conversation stands at its newest message from BEG to END.
+A plist of its time, :updated, and what
+`drover-claude-code-transcripts--ending' tells of it; nil without a
+message there.  Messages of subagents do not end the conversation's
+turns."
+  (when-let* ((record (drover-claude-code-transcripts--last-message-record beg end)))
+    (append (list :updated (drover-transcript-time (alist-get 'timestamp record)))
+            (unless (alist-get 'isSidechain record)
+              (drover-claude-code-transcripts--ending record)))))
 
 (defun drover-claude-code-transcripts--prompted (beg end)
   "Return the time of the user's newest prompt between BEG and END, or nil.
@@ -234,9 +383,12 @@ A turn running starts there."
 (defun drover-claude-code-transcripts--read-tail (beg end)
   "Return what the records between BEG and END tell of the conversation's end.
 A plist: the newest title, summary, last prompt, permission mode, model,
-effort, branch, prompt's time and activity there; members not told are
-left out."
+effort, branch, prompt's time and activity there; how its newest message
+left it (see `drover-claude-code-transcripts--end') and what its newest
+reply ran on (see `drover-claude-code-transcripts--usage'); members not
+told are left out."
   (let ((turn (drover-claude-code-transcripts--turn beg end))
+        (ending (drover-claude-code-transcripts--end beg end))
         (data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value)))))
       (add :custom-title (drover-claude-code-transcripts--member "\"type\":\"custom-title\"" 'customTitle beg end))
@@ -247,15 +399,28 @@ left out."
       (add :model (nth 0 turn))
       (add :effort (nth 1 turn))
       (add :prompted (drover-claude-code-transcripts--prompted beg end))
-      (add :updated (let ((activity (drover-claude-code-transcripts--activity beg end)))
-                      (if (and activity (nth 2 turn)) (max activity (nth 2 turn)) (or activity (nth 2 turn)))))
       (add :branch (save-excursion
                      (goto-char end)
                      (drover-transcript-sniff "gitBranch" t beg)))
       (add :messages (save-excursion
                        (goto-char beg)
                        (and (re-search-forward "\"type\":\"\\(?:user\\|assistant\\)\"" end t) t))))
+    (setq data (drover-claude-code-transcripts--merge
+                data (append ending (drover-claude-code-transcripts--usage beg end))))
+    (let ((activity (plist-get ending :updated)))
+      (when (or activity (nth 2 turn))
+        (setq data (plist-put data :updated (if (and activity (nth 2 turn))
+                                                (max activity (nth 2 turn))
+                                              (or activity (nth 2 turn)))))))
     data))
+
+(defun drover-claude-code-transcripts--merge (data told)
+  "Return DATA with every member of TOLD, a plist, put in, nil ones included.
+How a conversation stands is told whole: an error of a turn before does
+not outlive a reply that ends the next one."
+  (while told
+    (setq data (plist-put data (pop told) (pop told))))
+  data)
 
 (defun drover-claude-code-transcripts--read-head (beg end)
   "Return what the records between BEG and END tell of the conversation's start.
@@ -274,13 +439,14 @@ told are left out."
                        (drover-claude-code-transcripts--cut-prompt beg end)))
       (add :custom-title (drover-claude-code-transcripts--member "\"type\":\"custom-title\"" 'customTitle beg end))
       (add :ai-title (drover-claude-code-transcripts--member "\"type\":\"ai-title\"" 'aiTitle beg end))
-      ;; A tail of other records leaves the head's newest message as the
-      ;; last activity.
-      (add :updated (drover-claude-code-transcripts--activity beg end))
       (add :messages (save-excursion
                        (goto-char beg)
                        (and (re-search-forward "\"type\":\"\\(?:user\\|assistant\\)\"" end t) t))))
-    data))
+    ;; A tail of other records leaves the head's newest message as the
+    ;; last activity, and how it left the conversation.
+    (drover-claude-code-transcripts--merge
+     data (append (drover-claude-code-transcripts--end beg end)
+                  (drover-claude-code-transcripts--usage beg end)))))
 
 (defun drover-claude-code-transcripts--last-message (file size tail old-size)
   "Return the time of the newest message of transcript FILE, of SIZE bytes, or nil.
@@ -367,14 +533,14 @@ conversation again.  For the index of `drover-transcript'."
                      (drover-claude-code-transcripts--read-head (point-min) (if (= tail (point-min))
                                                                                 (point-max)
                                                                               tail)))))
-        (let* ((recent (drover-claude-code-transcripts--read-tail tail (point-max)))
-               (updated (or (plist-get recent :updated)
-                            (drover-transcript-look-before-tail
-                             file size tail grown #'drover-claude-code-transcripts--activity))))
-          (while recent
-            (setq data (plist-put data (pop recent) (pop recent))))
-          (when updated
-            (setq data (plist-put data :updated updated))))
+        (let ((recent (drover-claude-code-transcripts--read-tail tail (point-max))))
+          ;; What the tail does not tell, the lines before it may.
+          (setq recent (append recent
+                               (drover-transcript-look-before-tail-for
+                                file size tail grown
+                                (append (unless (plist-get recent :updated) (list #'drover-claude-code-transcripts--end))
+                                        (unless (plist-get recent :context) (list #'drover-claude-code-transcripts--usage))))))
+          (setq data (drover-claude-code-transcripts--merge data recent)))
         (setq data (plist-put data :id (drover-claude-code-transcripts--id file)))
         (let ((directory (or (plist-get data :cwd)
                              (drover-claude-code-decode-bucket
@@ -428,25 +594,114 @@ See `drover-claude-code-history-days'."
                    (drover-model-short-name (if name (concat name (substring id (length base))) id)))
                  names))))
 
-(defun drover-claude-code-transcripts--status (id)
+(defconst drover-claude-code-transcripts--name 'claude-code-transcripts
+  "The name of the index of Claude Code's transcripts, which what was seen keys.")
+
+(defun drover-claude-code-transcripts--unseen (data)
+  "Return how the conversation of DATA ended, `done' or `failed', unless seen.
+Nil when its newest message ended no turn, or the user saw it since (see
+`drover-transcript-unseen-p'), as they do marking it seen, opening it,
+or looking at a front end following it."
+  (let ((outcome (plist-get data :outcome)))
+    (and (memq outcome '(done failed))
+         (drover-transcript-unseen-p drover-claude-code-transcripts--name (plist-get data :id)
+                                     (plist-get data :ended))
+         outcome)))
+
+(defun drover-claude-code-transcripts--status (id &optional data)
   "Return (STATUS REQUESTS DETAIL) of conversation ID, as the CLI runs it.
-Idle but for a session \"claude agents\" listed as working or waiting."
-  (if-let* ((agent (gethash id drover-claude-code-transcripts--agents)))
-      (let ((where (if (equal (plist-get agent :kind) "background")
-                       "in the background"
-                     "in another terminal"))
-            (state (or (plist-get agent :state) "")))
-        (pcase state
-          ((or "working" "running" "busy")
-           (list 'working nil (concat "working " where)))
-          ((or "blocked" "waiting" "needs-input" "needs_input" "input")
-           (list 'waiting
-                 (list (list :kind 'permission
-                             :summary (format "waits %s: claude attach %s" where
-                                              (or (plist-get agent :short) id))))
-                 nil))
-          (_ (list 'idle nil (string-trim (concat state " " where))))))
-    (list 'idle nil nil)))
+A session \"claude agents\" lists as working or waiting does so; else,
+with DATA, what was read of it, a turn that ended unseen is done, or
+failed, its error the detail (see
+`drover-claude-code-transcripts--unseen'); else it is idle."
+  (let* ((agent (gethash id drover-claude-code-transcripts--agents))
+         (state (and agent (or (plist-get agent :state) "")))
+         (where (if (equal (plist-get agent :kind) "background")
+                    "in the background"
+                  "in another terminal")))
+    (pcase state
+      ((or "working" "running" "busy")
+       (list 'working nil (concat "working " where)))
+      ((or "blocked" "waiting" "needs-input" "needs_input" "input")
+       (list 'waiting
+             (list (list :kind 'permission
+                         :summary (format "waits %s: claude attach %s" where
+                                          (or (plist-get agent :short) id))))
+             nil))
+      (_ (pcase (and data (drover-claude-code-transcripts--unseen data))
+           ('done (list 'done nil nil))
+           ('failed (list 'failed nil (plist-get data :error)))
+           (_ (list 'idle nil (and agent (string-trim (concat state " " where))))))))))
+
+(defcustom drover-claude-code-context-limits '(("\\[1m\\]\\'" . 1000000))
+  "Context sizes of Claude's models, as (REGEXP . TOKENS), the first match winning.
+REGEXP matches the identifier of a model as a transcript records it,
+such as \"claude-opus-5-5\", or \"claude-sonnet-5-5[1m]\" for its
+context of a million tokens.  A model none matches has the size Claude
+Code's model catalog gives it (its max_input_tokens), else
+`drover-claude-code-default-context-limit'.  A conversation whose
+context is past that size runs a context of a million tokens, the
+largest Claude has."
+  :type '(alist :key-type (regexp :tag "Model") :value-type (natnum :tag "Tokens"))
+  :group 'drover)
+
+(defcustom drover-claude-code-default-context-limit 200000
+  "Context size of a Claude model neither catalog nor table tells.
+See `drover-claude-code-context-limits'."
+  :type 'natnum
+  :group 'drover)
+
+(defvar drover-claude-code-transcripts--limits (cons nil (make-hash-table :test #'equal))
+  "The context sizes of models by identifier, and the catalog that told them.")
+
+(defun drover-claude-code-transcripts--context-limit (id tokens catalog)
+  "Return the context size of the model ID, which ran a context of TOKENS.
+CATALOG is Claude Code's model catalog, or nil.  See
+`drover-claude-code-context-limits'."
+  (unless (eq (car drover-claude-code-transcripts--limits) catalog)
+    (setq drover-claude-code-transcripts--limits (cons catalog (make-hash-table :test #'equal))))
+  (let ((limit (with-memoization (gethash (cons id drover-claude-code-context-limits)
+                                          (cdr drover-claude-code-transcripts--limits))
+                 (or (cdr (seq-find (lambda (entry) (string-match-p (car entry) id))
+                                    drover-claude-code-context-limits))
+                     (let ((tokens (and catalog
+                                        (map-nested-elt (drover-claude-code--catalog-model catalog id)
+                                                        '(runtime max_input_tokens)))))
+                       (and (natnump tokens) (> tokens 0) tokens))
+                     drover-claude-code-default-context-limit))))
+    (if (and (natnump tokens) (> tokens limit) (< limit 1000000))
+        1000000
+      limit)))
+
+(defun drover-claude-code-transcripts--ran-on (data catalog)
+  "Return what the conversation of DATA ran on, as arguments of a record.
+Keyword arguments of `drover-session-create', those its newest reply
+tells: its provider, Anthropic, as OpenCode shows it, the size of its
+context and its model's (see `drover-claude-code-transcripts--context-limit'),
+and its prompt cache, which expires its lifetime after its request was
+sent, as the API keeps a cache for its lifetime from its last use.
+CATALOG is Claude Code's model catalog, or nil."
+  (let ((model (plist-get data :model))
+        (tokens (plist-get data :context))
+        (cached (plist-get data :cache-tokens))
+        (requested (plist-get data :requested)))
+    (append (and model (drover-transcript-provider "anthropic" "Anthropic"))
+            (and (natnump tokens) (> tokens 0)
+                 (list :context-tokens tokens
+                       :context-limit (and model (drover-claude-code-transcripts--context-limit
+                                                  model tokens catalog))))
+            (and (natnump cached) (> cached 0) requested
+                 (let ((ttl (or (plist-get data :cache-ttl) 300)))
+                   (list :cache-expires (+ requested ttl) :cache-ttl ttl
+                         :cache-tokens cached
+                         :cache-prompt-tokens (plist-get data :cache-prompt-tokens)))))))
+
+(defun drover-claude-code-transcripts--catalog (catalog)
+  "Return CATALOG as `drover-claude-code-transcripts--record' takes it, read."
+  (pcase catalog
+    ('none nil)
+    ('nil (drover-claude-code-catalog))
+    (_ catalog)))
 
 (defun drover-claude-code-transcripts--record (data &optional catalog)
   "Return the `drover-session' of the conversation DATA tells, or nil.
@@ -455,32 +710,42 @@ symbol `none' stands for no catalog, so that one listing many looks for
 it once."
   (when (drover-claude-code-transcripts--listed-p data)
     (let* ((id (plist-get data :id))
-           (status (drover-claude-code-transcripts--status id))
+           (status (drover-claude-code-transcripts--status id data))
+           (catalog (drover-claude-code-transcripts--catalog catalog))
            (model (plist-get data :model))
            (branch (plist-get data :branch))
-           (mode (plist-get data :mode)))
+           (mode (plist-get data :mode))
+           (run (drover-claude-code-transcripts--ran-on data catalog)))
+      ;; Not `apply': the constructor's keywords are then parsed at run
+      ;; time, which listing thousands of conversations felt.
       (drover-session-create
-       :backend 'claude-code :id id
-       :engine 'claude-code :engine-id id
-       :title (drover-claude-code-transcripts--title data)
-       :directory (plist-get data :directory)
-       :project (plist-get data :project)
-       :branch (and branch (not (equal branch "HEAD")) branch)
-       :status (nth 0 status) :requests (nth 1 status) :detail (nth 2 status)
-       ;; A turn runs from the newest prompt, a wait from the newest message.
-       :since (pcase (nth 0 status)
-                ('idle nil)
-                ('working (or (plist-get data :prompted) (plist-get data :updated)))
-                (_ (plist-get data :updated)))
-       :updated (plist-get data :updated)
-       :created (plist-get data :created)
-       :agent (and mode (car (rassoc mode drover-claude-code-agent-modes)))
-       :model (and model (drover-claude-code-transcripts--model-name
-                          model (pcase catalog
-                                  ('none nil)
-                                  ('nil (drover-claude-code-catalog))
-                                  (_ catalog))))
-       :effort (plist-get data :effort)))))
+             :backend 'claude-code :id id
+             :engine 'claude-code :engine-id id
+             :title (drover-claude-code-transcripts--title data)
+             :directory (plist-get data :directory)
+             :project (plist-get data :project)
+             :branch (and branch (not (equal branch "HEAD")) branch)
+             :status (nth 0 status) :requests (nth 1 status) :detail (nth 2 status)
+             ;; A turn runs from the newest prompt, a wait from the newest
+             ;; message, and a turn ended from its end.
+             :since (pcase (nth 0 status)
+                      ('idle nil)
+                      ('working (or (plist-get data :prompted) (plist-get data :updated)))
+                      ((or 'done 'failed) (or (plist-get data :ended) (plist-get data :updated)))
+                      (_ (plist-get data :updated)))
+             :updated (plist-get data :updated)
+             :created (plist-get data :created)
+             :agent (and mode (car (rassoc mode drover-claude-code-agent-modes)))
+             :model (and model (drover-claude-code-transcripts--model-name model catalog))
+             :effort (plist-get data :effort)
+             :provider (plist-get run :provider)
+             :provider-name (plist-get run :provider-name)
+             :context-tokens (plist-get run :context-tokens)
+             :context-limit (plist-get run :context-limit)
+             :cache-expires (plist-get run :cache-expires)
+             :cache-ttl (plist-get run :cache-ttl)
+             :cache-tokens (plist-get run :cache-tokens)
+             :cache-prompt-tokens (plist-get run :cache-prompt-tokens)))))
 
 (defun drover-claude-code-transcripts--subagent-id (id agent)
   "Return the identifier of the subagent AGENT of conversation ID."
@@ -553,6 +818,43 @@ not read.  The backend's :recorded-times."
   (when-let* ((data (drover-claude-code-transcripts--data id)))
     (cons (plist-get data :created) (plist-get data :updated))))
 
+(defun drover-claude-code-transcripts--recorded-run (id)
+  "Return what conversation ID ran on, as its transcript tells, or nil.
+Keyword arguments of `drover-session-create' (see
+`drover-claude-code-transcripts--ran-on'), for a front end following it.
+The backend's :recorded-run."
+  (when-let* ((data (drover-claude-code-transcripts--data id)))
+    (drover-claude-code-transcripts--ran-on data (drover-claude-code-catalog))))
+
+(defun drover-claude-code-transcripts--seen-now (id)
+  "Return when the user sees conversation ID now, as its transcript dates replies.
+Now, or its newest reply's time when later, as a clock ahead of this
+one dates it: the reply the user sees is seen."
+  (max (float-time) (or (plist-get (drover-claude-code-transcripts--data id) :ended) 0)))
+
+(defun drover-claude-code-transcripts--mark-seen (session)
+  "Mark the ended turn of the conversation of SESSION seen.
+It is noted for good (see `drover-transcript-mark-seen'): the
+conversation idles.  The backend's :mark-seen."
+  (let ((id (car (drover-claude-code-transcripts--split (drover-session-id session)))))
+    (when (drover-transcript-mark-seen drover-claude-code-transcripts--name id
+                                       (drover-claude-code-transcripts--seen-now id))
+      (drover-backend-changed 'claude-code id))))
+
+(defun drover-claude-code-transcripts--recorded-seen (id)
+  "Note that the user saw conversation ID, which a front end follows, idle.
+Noted only when a reply would otherwise show unseen once the front end
+lets it go, or the transcript changed since read, which may hold one: so
+that a front end reporting the same conversation over and over writes
+nothing.  The backend's :recorded-seen."
+  (let* ((file (drover-claude-code-transcripts--file id))
+         (data (and file (drover-transcript-lookup (drover-claude-code-transcripts--current-index) file))))
+    (when (or (null data)
+              (drover-claude-code-transcripts--unseen data)
+              (drover-transcript-check (drover-claude-code-transcripts--current-index) file))
+      (drover-transcript-mark-seen drover-claude-code-transcripts--name id
+                                   (drover-claude-code-transcripts--seen-now id)))))
+
 (defun drover-claude-code-transcripts--split (id)
   "Return (CONVERSATION . AGENT) of ID, AGENT nil for a conversation."
   (if (string-match "\\`\\([^/]+\\)/\\(.+\\)\\'" id)
@@ -614,7 +916,7 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
   "Return where Claude Code's transcripts are, for the index."
   (list (list (drover-claude-code-projects-directory) 1 "\\.jsonl\\'")))
 
-(defconst drover-claude-code-transcripts--reader-version 2
+(defconst drover-claude-code-transcripts--reader-version 3
   "Version of `drover-claude-code-transcripts--read'.
 Raised when it reads anew what it read before, so that what an older
 one read and kept between Emacs sessions is read again.")
@@ -730,7 +1032,9 @@ backend's :open."
         (user-error "%s runs elsewhere: attach to it with claude attach %s"
                     (drover-session-display-title session) (or (plist-get agent :short) id)))
       (drover-resume 'claude-code id (drover-claude-code-transcripts--directory data)
-                     (drover-claude-code-transcripts--front-end data)))))
+                     (drover-claude-code-transcripts--front-end data))
+      ;; Resumed, its turn shows: seen.
+      (drover-claude-code-transcripts--mark-seen session))))
 
 (defun drover-claude-code-transcripts--respond (session)
   "Show the conversation of SESSION, where what it waits for is answered."
@@ -845,7 +1149,9 @@ its engine and identifier.  The backend's :search."
 
 (defun drover-claude-code-transcripts--start ()
   "Look at the transcripts from now on, and at what Claude Code runs elsewhere.
-The backend's :start."
+The first time, note it: replies before count as seen (see
+`drover-transcript-seen-since').  The backend's :start."
+  (drover-transcript-seen-since drover-claude-code-transcripts--name)
   (drover-transcript-start (drover-claude-code-transcripts--current-index)))
 
 (defun drover-claude-code-transcripts--register ()
@@ -855,6 +1161,9 @@ The backend's :start."
    :label "Claude Code"
    :recorded '(claude-code)
    :recorded-times #'drover-claude-code-transcripts--times
+   :recorded-run #'drover-claude-code-transcripts--recorded-run
+   :recorded-seen #'drover-claude-code-transcripts--recorded-seen
+   :caches t
    :start #'drover-claude-code-transcripts--start
    :sessions #'drover-claude-code-transcripts--sessions
    :session #'drover-claude-code-transcripts--session
@@ -865,6 +1174,7 @@ The backend's :start."
    :respond #'drover-claude-code-transcripts--respond
    :preview #'drover-claude-code-transcripts--preview
    :recap #'drover-claude-code-transcripts--recap
+   :mark-seen #'drover-claude-code-transcripts--mark-seen
    :delete #'drover-claude-code-transcripts--delete
    :fork #'drover-claude-code-transcripts--fork
    :supports #'drover-claude-code-transcripts--supports))
@@ -886,7 +1196,8 @@ so that its registration has this file's properties."
 An error is reported, and lets Emacs exit."
   (drover-with-reporting "keeping Claude Code's transcripts"
     (when-let* ((index (drover-claude-code-transcripts--current-index)))
-      (drover-transcript-save index t))))
+      (drover-transcript-save index t))
+    (drover-transcript-seen-save)))
 
 (defun drover-claude-code-transcripts-uninstall (front-end)
   "Stop listing Claude Code's conversations for FRONT-END.
