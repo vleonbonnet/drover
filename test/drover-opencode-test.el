@@ -2846,6 +2846,52 @@ Return a function telling how many times the backend called back."
       (should (= calls 1))
       (should (string-match-p "Broken continuation" (car warnings))))))
 
+(ert-deftest drover-opencode-test-requests-as-data ()
+  "Another host reads a session's requests as data, and answers them without anything asking here."
+  (drover-opencode-test-with-session
+    (let ((replied nil) (requests nil) (outcomes nil)
+          (form `((id . "form_1")
+                  (metadata (kind . "question"))
+                  (fields ((key . "q0") (type . "string") (title . "Which way?")
+                           (options ((label . "Left") (value . "left")) ((label . "Right") (value . "right"))))
+                          ((key . "q1") (type . "multiselect") (title . "What else?") (custom . t)
+                           (options ((label . "A") (value . "a"))))))))
+      (with-current-buffer buffer
+        (setq-local opencode-pending-permissions
+                    (list (list :id "per_1" :action "shell" :title "Shell command: ls" :detail "ls -la")))
+        (setq-local opencode-pending-forms
+                    (list (list :id "form_1" :form form :index 0 :answers (make-vector 2 nil)))))
+      (cl-letf (((symbol-function 'opencode--sync-requests)
+                 (lambda (callback) (funcall callback)))
+                ((symbol-function 'opencode-permission-reply)
+                 (lambda (permission decision &optional _message)
+                   (push (list (plist-get permission :id) decision) replied))))
+        (drover-backend-call session :requests (lambda (value) (setq requests value)))
+        (should (equal (mapcar (lambda (request) (plist-get request :id)) requests) '("per_1" "form_1")))
+        (should (equal (plist-get (car requests) :choices) '("once" "always" "reject")))
+        (should (equal (plist-get (car requests) :title) "Shell command: ls"))
+        (let ((fields (plist-get (cadr requests) :fields)))
+          (should (equal (mapcar (lambda (field) (plist-get field :options)) fields) '(("Left" "Right") ("A"))))
+          (should-not (plist-get (car fields) :custom))
+          (should (plist-get (cadr fields) :custom)))
+        (cl-flet ((outcome (id answer)
+                    (drover-backend-call session :answer id answer
+                                         (lambda () (push 'done outcomes))
+                                         (lambda (message) (push message outcomes)))))
+          (outcome "per_1" '(:decision "always"))
+          (should (equal replied '(("per_1" always))))
+          (outcome "per_1" '(:decision "sudo"))
+          (should (equal (car outcomes) "no such choice"))
+          ;; Labels stand for values; typed text only where the field takes it.
+          (outcome "form_1" '(:answer (("q0" . "Right") ("q1" . ["A" "Something else"]) ("q9" . "ignored"))))
+          (should (equal (car (car (last posts))) "/api/session/ses_1/form/form_1/reply"))
+          (should (equal (cdr (car (last posts))) '((answer (q0 . "right") (q1 . ["a" "Something else"])))))
+          (answer)
+          (should (eq (car outcomes) 'done))
+          (should-not (with-current-buffer buffer (opencode-open-forms)))
+          (outcome "form_1" '(:answer (("q0" . "Up"))))
+          (should (equal (car outcomes) "no such request pending")))))))
+
 (ert-deftest drover-opencode-test-session-opened-unseen ()
   "A session without a buffer is opened, undisplayed, to take options and prompts."
   (drover-opencode-test-with-session

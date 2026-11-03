@@ -415,6 +415,10 @@ Each request has an identifier, its host's name, epoch and a counter; the owner 
 
 The resumption seen in the live run is not a bug of resumption: a subscription holds the owner's epoch, and Core's new subscription to Reaver held Reaver's, which had not changed; resuming was right.  The bug was the other way: a remote layer started anew on a connection that stayed, as reloading a drover whose structures changed does, kept no subscription of its peer's, and the peer, greeted again on its kept connection, did not subscribe again, its rows of the restarted host frozen until the next drop.  =drover-remote-test-relayout-resubscribes= fails without the fix.
 
+** Measured
+
+=make bench-remote= through 127.0.0.1, 2511 sessions, before and after: a snapshot 382 and 375 ms, sessions appearing 256 and 246 ms, the owner's slices within 4.3 ms, the viewer's within 3.1, longest blocks as before (17 to 50 ms, garbage collections and the index taking the snapshot in).  What each record allows costs 51 µs of the owner's when drover's archive file is looked at for each record, which doubled the owner's work and made a session changed block 14 ms; the file is looked at once a message since.  =drover-core-generation= is 15: the bulk machinery's new kind.
+
 ** Tests
 
 Two batch Emacs, as before, the agent's fake backend performing every action and noting each, its confirmations held on command: each action's round trip, an answer read here, refusals by access there whatever this host checked, an older peer read only, an action surviving a drop and performed once, an action timing out, 300 sessions archived in a few requests, a restart keeping the rows, a layer restarted on the same connection resubscribed, the grace kept then expired then a quit dimming at once, the history bounded and keeping errors, tooltips across hosts, Markdown rendered in the view.

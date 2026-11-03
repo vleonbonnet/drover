@@ -56,7 +56,7 @@
 (require 'drover-ui)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 14))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -905,7 +905,10 @@ while the peer lags is sent once."
 (defun drover-remote--send-message (state sub deadline)
   "Send SUB the next message of its batch, until DEADLINE or a full one.
 Records are read from STATE as they are now."
-  (let ((records nil) (gone nil) (count 0))
+  (let ((records nil) (gone nil) (count 0)
+        ;; What each record allows reads drover's archive: its file is
+        ;; looked at once a message, not once a record.
+        (drover--archive-checking (or drover--archive-checking t)))
     (while (and (drover-remote--sub-keys sub)
                 (< count drover-remote-batch)
                 (or (zerop count) (< (float-time) deadline)))
@@ -2239,7 +2242,8 @@ more than once, and each answer goes as it comes, in messages of
 drover's own archive answers first, as source \"drover\"."
   (let ((operation (if (equal kind "history") :history :archived)))
     (cl-flet ((send (source sessions)
-                (let* ((records (seq-filter #'drover-remote--local-p sessions))
+                (let* ((drover--archive-checking (or drover--archive-checking t))
+                       (records (seq-filter #'drover-remote--local-p sessions))
                        (chunks (or (seq-partition records drover-remote-batch) (list nil)))
                        (count (length chunks)))
                   (seq-do-indexed
