@@ -119,6 +119,46 @@ subagent, \"busy\" works, under a subagent whose turn ended unseen."
                        '((:open "s" nil) (:respond "s") (:interrupt "s") (:archive "s")
                          (:mark-seen "s"))))))))
 
+(defun drover-test-asking-family ()
+  "Return sessions whose requests are in their own trees, as `drover-test-respond-in-tree' reads them.
+\"root\" asks nothing, its subagent \"near\" does, since 3.0, and
+\"deep\", below the quiet \"mid\", since 2.0.  \"own\" asks, since 4.0,
+and so does its subagent \"own-kid\", since 1.0.  Nothing in the tree
+of \"none\" asks."
+  (let ((request '((:kind question :summary "Which color?"))))
+    (list (drover-test-session "root" :status 'working)
+          (drover-test-session "mid" :parent "root" :status 'working)
+          (drover-test-session "deep" :parent "mid" :status 'waiting :since 2.0 :requests request)
+          (drover-test-session "near" :parent "root" :status 'waiting :since 3.0 :requests request)
+          (drover-test-session "busy" :parent "root" :status 'working)
+          (drover-test-session "own" :status 'waiting :since 4.0 :requests request)
+          (drover-test-session "own-kid" :parent "own" :status 'waiting :since 1.0 :requests request)
+          (drover-test-session "none" :status 'idle)
+          (drover-test-session "none-kid" :parent "none" :status 'idle))))
+
+(ert-deftest drover-test-respond-in-tree ()
+  "A session asking nothing answers the oldest request below it, at any depth; its own come first."
+  (drover-test-with-backend (drover-test-asking-family)
+    (cl-flet ((answers (id)
+                (setq drover-test-calls nil)
+                (drover-respond (drover-find 'fake id))
+                drover-test-calls))
+      ;; A subagent of a subagent, waiting the longest.
+      (should (equal (drover-session-id (drover-session-to-answer (drover-find 'fake "root"))) "deep"))
+      (should (equal (answers "root") '((:respond "deep"))))
+      ;; From a subagent's own row, its own.
+      (should (equal (answers "near") '((:respond "near"))))
+      (should (equal (answers "mid") '((:respond "deep"))))
+      ;; Its own request before an older one of its subagent.
+      (should (equal (answers "own") '((:respond "own"))))
+      ;; Nothing to answer: the backend tells.
+      (should-not (drover-session-to-answer (drover-find 'fake "none")))
+      (should (equal (answers "none") '((:respond "none"))))
+      ;; Once the deep one is answered, the next.
+      (setf (drover-session-requests (nth 2 drover-test-sessions)) nil)
+      (drover-backend-changed 'fake "deep")
+      (should (equal (answers "root") '((:respond "near")))))))
+
 (ert-deftest drover-test-recap ()
   "A recap comes from the backend once; a missing or failing :recap is a failure."
   (drover-test-with-backend nil

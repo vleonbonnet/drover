@@ -871,6 +871,32 @@ a list in a window.")
           (should-not (member key apt)))
         (should (member "z" apt))))))
 
+(ert-deftest drover-keys-test-dispatch-answer-in-tree ()
+  "A applies to a session with a request in its tree, its own or a subagent's at any depth."
+  (let ((request '((:kind question :summary "Which color?"))))
+    (drover-keys-test-with (list (drover-test-session "root" :status 'working)
+                                 (drover-test-session "mid" :parent "root" :status 'working)
+                                 (drover-test-session "deep" :parent "mid" :status 'waiting :since 1.0
+                                                      :requests request)
+                                 (drover-test-session "own" :status 'waiting :since 2.0 :requests request)
+                                 (drover-test-session "none" :status 'working)
+                                 (drover-test-session "none-kid" :parent "none" :status 'working))
+      ;; From a view's row, a list's, and a session's own buffer alike.
+      (dolist (kind '(view list nil))
+        (drover-keys-test-in kind "root"
+          (should (member "A" (drover-keys-test-apt 'drover-dispatch))))
+        (drover-keys-test-in kind "deep"
+          (should (member "A" (drover-keys-test-apt 'drover-dispatch))))
+        (drover-keys-test-in kind "own"
+          (should (member "A" (drover-keys-test-apt 'drover-dispatch))))
+        (drover-keys-test-in kind "none"
+          (should-not (member "A" (drover-keys-test-apt 'drover-dispatch)))))
+      ;; A backend that answers nothing leaves it inapt.
+      (setf (alist-get 'fake drover--backends)
+            (append (list :respond nil) (alist-get 'fake drover--backends)))
+      (drover-keys-test-in 'view "root"
+        (should-not (member "A" (drover-keys-test-apt 'drover-dispatch)))))))
+
 (ert-deftest drover-keys-test-dispatch-archive ()
   "z applies to a session not archived, by its backend or by drover; Z to one archived."
   (drover-keys-test-with (list (drover-test-session "s"))
