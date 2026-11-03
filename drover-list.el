@@ -2276,7 +2276,8 @@ buffer, as `with-temp-buffer' does all the time, costs a lookup.")
 (defvar-local drover-list--caches nil
   "Prompt caches drawn, live when last drawn, as plists.
 Each has :session, the record drawn, :start, a marker where its heading
-begins, :kind, `columns' for a field or `narrow' for a background,
+begins, which text inserted there, rows drawn before it, leaves after
+it, :kind, `columns' for a field or `narrow' for a background,
 :spec, the segments of a background line from `drover-list--assemble',
 :width, the width a background fills, :bar, the width of a field's bar,
 in pixels, and :overlay, the overlay of a background.  The time left a
@@ -2413,6 +2414,16 @@ properties it had, the section it belongs to included."
               (insert (apply #'propertize text properties))
               (delete-region (point) (+ (point) (- label-end label))))))))))
 
+(defun drover-list--drop-caches ()
+  "Forget the prompt caches drawn in the current list, their overlays and markers.
+The buffer keeps overlays its text no longer holds, empty where it was
+erased, until they are deleted."
+  (dolist (entry drover-list--caches)
+    (when-let* ((overlay (plist-get entry :overlay)))
+      (delete-overlay overlay))
+    (set-marker (plist-get entry :start) nil))
+  (setq drover-list--caches nil))
+
 (defun drover-list--draw-caches (&optional now ranges)
   "Redraw the prompt caches of the current list as they stand at NOW.
 NOW defaults to the current time.  Only the caches change: the display
@@ -2464,7 +2475,9 @@ KIND), see `drover-list--animated'."
         (end (or end (point-max)))
         (found nil))
     (while (setq position (text-property-not-all position end 'drover-list-frame nil))
-      (push (cons (copy-marker position) (get-text-property position 'drover-list-frame)) found)
+      ;; Advancing, as the marks of a prompt cache: a row drawn in place
+      ;; before a glyph beginning its line goes before it.
+      (push (cons (copy-marker position t) (get-text-property position 'drover-list-frame)) found)
       (setq position (1+ position)))
     (nreverse found)))
 
@@ -2936,11 +2949,13 @@ measures.  START is where the heading begins."
     (when (drover-list--row-state row)
       (puthash (drover-session-buffer session) t drover-list--session-buffers))
     (when (nth 1 heading)
-      (push (list :session session :start (copy-marker start) :kind (nth 1 heading) :spec (nth 2 heading)
+      ;; Rows drawn in place before this one go before its marks: in
+      ;; the sidebar, without a line prefix, they begin where it does.
+      (push (list :session session :start (copy-marker start t) :kind (nth 1 heading) :spec (nth 2 heading)
                   :width (plist-get layout :width)
                   :bar (* drover-list-cache-bar-width (plist-get layout :char))
                   :overlay (and (eq (nth 1 heading) 'narrow)
-                                (let ((overlay (make-overlay start start)))
+                                (let ((overlay (make-overlay start start nil t nil)))
                                   (overlay-put overlay 'face (drover-list--cache-line-face))
                                   ;; Under the highlights of the current section and
                                   ;; the region, whose backgrounds leave its underline.
@@ -3757,10 +3772,7 @@ scroll back (see `drover-list--unscroll')."
          (deactivate-mark nil))
     (drover-list--drop-stale)
     (drover-list--remember-visibility)
-    (mapc (lambda (entry)
-            (when-let* ((overlay (plist-get entry :overlay))) (delete-overlay overlay))
-            (set-marker (plist-get entry :start) nil))
-          drover-list--caches)
+    (drover-list--drop-caches)
     (pcase-dolist (`(,marker . ,_) drover-list--animated)
       (set-marker marker nil))
     (drover-list--release-markers)
@@ -5098,9 +5110,12 @@ Magit's selection in lists is drover's then (see
 
 (defun drover-list--on-kill ()
   "Stop following sessions, windows and the focus once the last list is killed.
-The list killed draws no recap later.  For `kill-buffer-hook'."
+The list killed draws no recap later, and a list whose mode changes,
+as a mode applied again, keeps no overlay of the caches it drew.  For
+`kill-buffer-hook' and `change-major-mode-hook'."
   (drover-with-reporting "list"
     (drover-list--forget)
+    (drover-list--drop-caches)
     (when (timerp drover-list--recap-timer)
       (cancel-timer drover-list--recap-timer))
     (when (timerp drover-list--deferred-timer)

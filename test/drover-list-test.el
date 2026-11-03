@@ -2838,10 +2838,30 @@ Redraws keep point on the session."
   "Return POSITION, a marker or a number, as a number."
   (if (markerp position) (marker-position position) position))
 
+(defun drover-list-test-marks ()
+  "Return what the current list follows in its text as data, by position.
+That is the prompt caches drawn, as (KEY KIND START BAR), BAR the span
+of the overlay of a background, and the animated glyphs, as (POSITION
+. KIND), both in order: a drawing in place must leave them where a
+drawing anew puts them."
+  (list (sort (mapcar (lambda (entry)
+                        (let ((overlay (plist-get entry :overlay)))
+                          (list (drover-session-key (plist-get entry :session))
+                                (plist-get entry :kind)
+                                (marker-position (plist-get entry :start))
+                                (and overlay (overlay-buffer overlay)
+                                     (cons (overlay-start overlay) (overlay-end overlay))))))
+                      drover-list--caches)
+              (lambda (a b) (< (nth 2 a) (nth 2 b))))
+        (sort (mapcar (lambda (entry) (cons (marker-position (car entry)) (cdr entry)))
+                      drover-list--animated)
+              (lambda (a b) (< (car a) (car b))))))
+
 (defun drover-list-test-fresh (&optional list)
   "Return LIST drawn anew, from nothing, in a buffer of its own.
 LIST is a list buffer, the current one by default.  The value is (TEXT
-SECTIONS HEADER-LINE), TEXT without sections.  The buffer has the
+SECTIONS HEADER-LINE MARKS), TEXT without sections, MARKS as
+`drover-list-test-marks' returns them.  The buffer has the
 visibility of LIST, is drawn for its width, and is killed."
   (let* ((list (or list (current-buffer)))
          ;; The sidebar's rows left for later, drawn.
@@ -2875,7 +2895,8 @@ visibility of LIST, is drawn for its width, and is killed."
                 (drover-list--draw-group group))))
           (list (drover-list-test-without-sections (buffer-string))
                 (drover-list-test-sections)
-                header-line-format))
+                header-line-format
+                (drover-list-test-marks)))
       (kill-buffer fresh))))
 
 (defun drover-list-test-drawn (&optional list)
@@ -2886,11 +2907,15 @@ The rows the sidebar left for later are drawn first."
       (drover-list--draw-deferred))
     (list (drover-list-test-without-sections (buffer-string))
           (drover-list-test-sections)
-          header-line-format)))
+          header-line-format
+          (drover-list-test-marks))))
 
 (defun drover-list-test-random-sessions (count)
   "Return COUNT fake sessions of random statuses, places and times, a third subagents.
-Some stand for sessions run elsewhere, their origin another harness."
+Some stand for sessions run elsewhere, their origin another harness.
+Every third holds a prompt cache, of an hour's window, so that the
+caches drawn move as the lines do; whether it does follows from its
+place alone, which leaves the random sessions as they were."
   (let ((sessions nil))
     (dotimes (index count)
       (let* ((id (format "r%02d" index))
@@ -2909,7 +2934,9 @@ Some stand for sessions run elsewhere, their origin another harness."
                :context-tokens (seq-random-elt '(nil 12000 180000))
                :context-limit 200000
                :origin (seq-random-elt '(nil nil opencode agent-shell))
-               :requests (and (eq status 'waiting) '((:kind question :summary "Which file?"))))
+               :requests (and (eq status 'waiting) '((:kind question :summary "Which file?")))
+               :cache-expires (and (zerop (% index 3)) (+ drover-test-now 600 (* 60 index)))
+               :cache-ttl (and (zerop (% index 3)) 3600))
               sessions)))
     (nreverse sessions)))
 
@@ -3005,8 +3032,8 @@ are drawn in place."
                   (cl-incf in-place))
                 (let ((drawn (drover-list-test-drawn))
                       (fresh (drover-list-test-fresh)))
-                  (should (equal (list mode width grouping sort descending step (nth 1 drawn) (nth 2 drawn))
-                                 (list mode width grouping sort descending step (nth 1 fresh) (nth 2 fresh))))
+                  (should (equal (list mode width grouping sort descending step (cdr drawn))
+                                 (list mode width grouping sort descending step (cdr fresh))))
                   (should (equal-including-properties (car drawn) (car fresh))))))
             (should (> in-place 15))))))))
 
@@ -5950,6 +5977,212 @@ it: the focus is looked at once those events settled."
             (should (= end (overlay-end overlay))))
           (should (equal-including-properties (car (drover-list-test-drawn))
                                               (car (drover-list-test-fresh)))))))))
+
+;;;; A prompt cache across turns
+
+(defun drover-list-test-turn-sessions ()
+  "Return a session at work with an hour's prompt cache, 50 minutes left, and two idle ones.
+Their ages read as wide all along, and so do the summaries of the turn
+of the second, so that the columns keep their widths."
+  (list (drover-list-test-titled "p" "Parent" :status 'working :since (drover-list-test-ago 600)
+                                 :updated (drover-list-test-ago 5) :detail "Step 0"
+                                 :cache-expires (+ drover-test-now 3000) :cache-ttl 3600)
+        (drover-list-test-titled "b" "Bravo" :status 'idle :updated (drover-list-test-ago 1800))
+        (drover-list-test-titled "c" "Charlie" :status 'idle :updated (drover-list-test-ago 3000))))
+
+(defun drover-list-test-change (id function)
+  "Change the session ID with FUNCTION, a function of its record, and report it.
+Return how many times the lists were drawn anew."
+  (funcall function (drover-list-test-find id))
+  (drover-backend-changed 'fake id)
+  (drover-list-test-counting-redraws (drover-changed-now)))
+
+(defun drover-list-test-cache-shown (id)
+  "Return how the current list shows the prompt cache of session ID, or nil for none.
+In columns, the field of its line, as `drover-list-test-cache-field'
+returns it; in two lines, the text its underline spans, in its
+properties, the widths of its spaces included, which must begin where
+the session's line does."
+  (when-let* ((entry (seq-find (lambda (entry) (equal (drover-session-id (plist-get entry :session)) id))
+                               drover-list--caches)))
+    (if (eq (plist-get entry :kind) 'columns)
+        (drover-list-test-cache-field id)
+      (let ((overlay (plist-get entry :overlay))
+            (start (save-excursion
+                     (drover-list-test-goto id)
+                     (+ (point) (length (drover-list--line-prefix
+                                         (drover-list--model-layout drover-list--model)))))))
+        (should (eq (overlay-buffer overlay) (current-buffer)))
+        (should (= (overlay-start overlay) start))
+        (buffer-substring start (overlay-end overlay))))))
+
+(defun drover-list-test-cache-across-turns (layout)
+  "Check that the current list shows the cache of a session gone idle until it expires.
+The list, in LAYOUT, is shown, its sessions those of
+`drover-list-test-turn-sessions', newest turn first: the session's line
+goes on showing its cache once idle, as another session's turn begins
+before it and goes on, and as its cache runs out, and none once out.
+Each change is drawn in place, as a drawing anew draws it."
+  (should (eq drover-list--layout layout))
+  (let ((narrow (eq layout 'narrow)))
+    ;; At work.
+    (should (equal (drover-list-test-order) '("p" "b" "c")))
+    (let ((shown (drover-list-test-cache-shown "p")))
+      (should (if narrow (string-match-p "Parent" shown) (equal (nth 2 shown) "50m"))))
+    ;; Idle, its cache live: it goes on showing.
+    (drover-list-test-change "p" (lambda (session)
+                                   (setf (drover-session-status session) 'idle
+                                         (drover-session-since session) nil
+                                         (drover-session-updated session) drover-test-now)))
+    (drover-list-test-is-fresh)
+    (should (equal (drover-list-test-order) '("p" "b" "c")))
+    (let ((shown (drover-list-test-cache-shown "p")))
+      (should (if narrow (string-match-p "Parent" shown) (equal (nth 2 shown) "50m"))))
+    ;; Another session's turn: its line comes before, in place.
+    (should (zerop (drover-list-test-change "b" (lambda (session)
+                                                  (setf (drover-session-status session) 'working
+                                                        (drover-session-since session) drover-test-now
+                                                        (drover-session-updated session) drover-test-now
+                                                        (drover-session-detail session) "Step 0")))))
+    (drover-list-test-is-fresh)
+    (should (equal (drover-list-test-order) '("b" "p" "c")))
+    (let ((shown (drover-list-test-cache-shown "p")))
+      (should (if narrow (string-match-p "Parent" shown) (equal (nth 2 shown) "50m"))))
+    (should-not (drover-list-test-cache-shown "b"))
+    ;; Its line drawn again and again as its turn goes on.
+    (dolist (step '(1 2 3))
+      (should (zerop (drover-list-test-change "b" (lambda (session)
+                                                    (setf (drover-session-detail session)
+                                                          (format "Step %s" step)))))))
+    (drover-list-test-is-fresh)
+    (let ((shown (drover-list-test-cache-shown "p")))
+      (should (if narrow (string-match-p "Parent" shown) (equal (nth 2 shown) "50m"))))
+    ;; The cache running out: 30 minutes left, then 10.
+    (let ((before (drover-list-test-cache-shown "p")))
+      (dolist (left '("30m" "10m"))
+        (setq drover-list-test-clock (+ drover-test-now (- 3000 (* 60 (string-to-number left)))))
+        (drover-list--draw-caches)
+        (let ((shown (drover-list-test-cache-shown "p")))
+          (if narrow
+              ;; Shorter: its spaces narrower, or its end sooner.
+              (progn (should-not (equal-including-properties shown before))
+                     (should (string-match-p (concat "expires in " left)
+                                             (save-excursion
+                                               (drover-list-test-goto "p")
+                                               (drover-list-test-help-at (point))))))
+            (should (equal (nth 2 shown) left)))
+          (setq before shown))))
+    ;; Out: none.
+    (setq drover-list-test-clock (+ drover-test-now 3000))
+    (drover-list--draw-caches)
+    (should-not (drover-list-test-cache-shown "p"))
+    (should-not drover-list--caches)
+    (unless narrow
+      (should (equal (drover-list-test-cache-field "p") '(0 0 nil))))))
+
+(defmacro drover-list-test-with-turns (&rest body)
+  "Run BODY in a list of `drover-list-test-turn-sessions', ungrouped, newest turn first."
+  (declare (indent 0) (debug t))
+  `(drover-list-test-with (drover-list-test-turn-sessions)
+     (cl-flet ((standard (symbol) (eval (car (get symbol 'standard-value)) t)))
+       (let ((drover-group-by nil)
+             (drover-sort-by (standard 'drover-sort-by))
+             (drover-sort-descending (standard 'drover-sort-descending)))
+         ,@body))))
+
+(ert-deftest drover-list-test-cache-line-across-turns ()
+  "In the sidebar's two lines, a session gone idle keeps its cache line until it expires.
+Another session's line drawn before its own, as that session's turn
+begins, left the marks of its cache on that line, which the next
+drawing of that line took away: the line of the idle session lost its
+cache, whose expiry was an hour away."
+  (drover-list-test-with-turns
+    (kill-buffer buffer)
+    (with-current-buffer (window-buffer (drover-list-side))
+      (drover-list-test-cache-across-turns 'narrow))))
+
+(ert-deftest drover-list-test-cache-column-across-turns ()
+  "In a sidebar wide enough for columns, a session gone idle keeps its cache field until it expires."
+  ;; The frame's size back once the sidebar is gone: shrunk under its
+  ;; side window, the frame would leave its other window that wide.
+  (let ((size (cons (frame-width) (frame-height))))
+    (unwind-protect
+        (drover-list-test-with-turns
+          (let ((drover-list-side-window-width 150))
+            (set-frame-size (selected-frame) 200 60)
+            (kill-buffer buffer)
+            (with-current-buffer (window-buffer (drover-list-side))
+              (drover-list-test-cache-across-turns 'columns))))
+      (set-frame-size (selected-frame) (car size) (cdr size)))))
+
+(ert-deftest drover-list-test-cache-across-turns-in-the-list ()
+  "In the list in an ordinary window, a session gone idle keeps its cache field until it expires."
+  (drover-list-test-with-turns
+    (drover-list-test-shown
+      (revert-buffer)
+      (drover-list-test-cache-across-turns 'columns))))
+
+(ert-deftest drover-list-test-cache-line-not-kept-by-mode-again ()
+  "Applying the sidebar's mode again leaves no overlay of a cache drawn before.
+The mode forgot the caches drawn, not their overlays: each application
+left one per cache, empty at the start of the buffer once erased."
+  (drover-list-test-with-turns
+    (kill-buffer buffer)
+    (with-current-buffer (window-buffer (drover-list-side))
+      (cl-flet ((overlays ()
+                  (seq-filter (lambda (overlay) (eql (overlay-get overlay 'priority) -50))
+                              (overlays-in (point-min) (point-max)))))
+        (should (equal (overlays) (list (plist-get (car drover-list--caches) :overlay))))
+        (dotimes (_ 2)
+          (drover-list-sidebar-mode)
+          (revert-buffer)
+          (should (equal (overlays) (list (plist-get (car drover-list--caches) :overlay)))))))))
+
+(ert-deftest drover-list-test-glyph-keeps-animating-under-a-line-drawn-before ()
+  "In the sidebar, a glyph beginning its line goes on animating as a line is drawn before it.
+Its mark stayed where the line drawn before begins, at that line's own
+glyph, which its next drawing took away with it: the glyph stood still."
+  (drover-list-test-with (list (drover-list-test-titled "p" "Parent" :status 'working
+                                                        :since (drover-list-test-ago 600)
+                                                        :updated (drover-list-test-ago 5))
+                               (drover-list-test-titled "b" "Bravo" :status 'idle
+                                                        :updated (drover-list-test-ago 1800)))
+    (let ((drover-group-by nil)
+          (opencode-session-status-animation-interval 1)
+          (opencode-session-status-animations '((working "1" "2" "3"))))
+      (kill-buffer buffer)
+      (with-current-buffer (window-buffer (drover-list-side))
+        (cl-flet ((glyphs ()
+                    (sort (mapcar (lambda (entry)
+                                    (should (eq (get-text-property (car entry) 'drover-list-frame) 'working))
+                                    (marker-position (car entry)))
+                                  drover-list--animated)
+                          #'<))
+                  (glyph-of (id)
+                    (save-excursion
+                      (drover-list-test-goto id)
+                      (text-property-not-all (point) (line-end-position) 'drover-list-frame nil))))
+          (should (equal (glyphs) (list (glyph-of "p"))))
+          (should (zerop (drover-list-test-change "b" (lambda (session)
+                                                        (setf (drover-session-status session) 'working
+                                                              (drover-session-since session) drover-test-now
+                                                              (drover-session-updated session) drover-test-now)))))
+          (should (equal (drover-list-test-order) '("b" "p")))
+          (drover-list-test-is-fresh)
+          (should (equal (glyphs) (list (glyph-of "b") (glyph-of "p"))))
+          (should (zerop (drover-list-test-change "b" (lambda (session)
+                                                        (setf (drover-session-detail session) "Step")))))
+          (should (equal (glyphs) (list (glyph-of "b") (glyph-of "p"))))
+          (let ((frames nil))
+            (dolist (step '(1 2 3))
+              (setq drover-list-test-clock (+ drover-test-now step))
+              (drover-list--draw-frames)
+              (let ((frame (nth (opencode-session-status-frame-index 3 drover-list-test-clock) '("1" "2" "3"))))
+                (push frame frames)
+                (dolist (id '("b" "p"))
+                  (should (equal (get-text-property (glyph-of id) 'display) frame)))))
+            ;; Each a frame of its own: the glyphs moved.
+            (should (= (length (delete-dups frames)) 3))))))))
 
 (ert-deftest drover-list-test-reordering-only-right-to-left ()
   "A list's lines are reordered for display only while it holds right-to-left text."
