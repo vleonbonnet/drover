@@ -731,13 +731,14 @@ PREDICATE, a function of the session, returns nil for it."
 
 (defun drover-dispatch-selection (operation &optional predicate)
   "Return non-nil when the dispatch menu may perform OPERATION on sessions.
-With several sessions selected (see `drover-selected-sessions'), when
-the backend of one of them performs OPERATION, a keyword, unless it is
-nil, and PREDICATE, a function of a session, if any, returns non-nil
-for it; otherwise as `drover-dispatch-session' tells of the session at
-point."
+With sessions selected (see `drover-selected-sessions'), when the
+backend of one of them performs OPERATION, a keyword, unless it is nil,
+and PREDICATE, a function of a session, if any, returns non-nil for it;
+otherwise as `drover-dispatch-session' tells of the session at point.
+A region may select a session alone that is not at point, point being
+on a group's heading."
   (let ((selection (plist-get (drover--scope) :selection)))
-    (if (cdr selection)
+    (if selection
         (seq-some (lambda (session)
                     (and (or (null operation) (drover-supports-p session operation))
                          (or (null predicate) (funcall predicate session))))
@@ -881,14 +882,17 @@ stays, then acts on the new session at point."
       (oset prefix scope (drover--context-again (oref prefix scope))))))
 
 (defun drover--dispatch-list-description ()
-  "Return the title of the dispatch menu's List group, naming the session at point.
+  "Return the title of the dispatch menu's List group, naming the session acted on.
+That is the session a region selects alone, else the session at point.
 With several sessions selected, it tells how many instead."
-  (let ((scope (drover--scope)))
-    (cond ((cdr (plist-get scope :selection))
-           (format "List: %d sessions selected" (length (plist-get scope :selection))))
-          ((plist-get scope :session)
+  (let* ((scope (drover--scope))
+         (selection (plist-get scope :selection))
+         (session (if selection (car selection) (plist-get scope :session))))
+    (cond ((cdr selection)
+           (format "List: %d sessions selected" (length selection)))
+          (session
            (concat "List: " (drover--menu-value
-                             (drover-session-display-title (plist-get scope :session))
+                             (drover-session-display-title session)
                              drover--menu-title-width)))
           (t "List"))))
 

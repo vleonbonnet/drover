@@ -87,11 +87,11 @@
 ;; subagent shows none: the user writes to its parent only, whose cache
 ;; is the one telling what the next turn costs.
 ;;
-;; An active region selects the sessions whose lines it spans, those
-;; Magit highlights: marking seen, interrupting, archiving, unarchiving
-;; and deleting act on all of them, copying (`kill-ring-save', M-w)
-;; copies their Org links, and the prompt quotes them with their last
-;; replies.
+;; An active region selects the rows of sessions it touches, those
+;; shown, and Magit highlights them; a group's heading selects nothing:
+;; marking seen, interrupting, archiving, unarchiving and deleting act
+;; on all of them, copying (`kill-ring-save', M-w) copies their Org
+;; links, and the prompt quotes them with their last replies.
 ;;
 ;; With `drover-show-archived', the list shows archived sessions too,
 ;; dimmed, after `opencode-archived-icon', in a group of their own when
@@ -105,7 +105,7 @@
 ;; than a few, and the trees a change makes are made once for both
 ;; lists; a list is drawn whole when its columns or its settings change.
 ;; The sessions of a collapsed group are drawn once it is expanded,
-;; searched, copied or selected, or a few at a time while Emacs is idle.
+;; searched or copied, or a few at a time while Emacs is idle.
 ;; A redraw keeps point on the same session, even when the session moved
 ;; to another group, keeps every section expanded or collapsed as it
 ;; was, and an active region active, on the same sessions.
@@ -2763,8 +2763,8 @@ the frame's: rows take a line or two, and the window may grow."
   "Insert the section of GROUP, a `drover-list--group', in LAYOUT.
 Without a value, its rows go alone, in the current section.  The rows
 of a collapsed group are drawn later, as Magit draws a collapsed body:
-once expanded, searched, copied or selected, or a few at a time while
-Emacs is idle (see `drover-list--defer').  So are the rows of the
+once expanded, searched or copied, or a few at a time while Emacs is
+idle (see `drover-list--defer').  So are the rows of the
 sidebar past the first screens, drawing it whole (see
 `drover-list--rows-left'), its trees drawn coming first."
   (let ((value (drover-list--group-value group)))
@@ -3417,7 +3417,9 @@ Point, in the buffer and in every window showing it, stays on the
 same session, and window starts on the same line.  An active region
 stays active, its mark on the same session too, so that it selects the
 same sessions: a list redraws whenever a session changes, many times a
-second during a turn."
+second during a turn.  The sidebar's side windows get its settings
+first, which the width depends on."
+  (drover-list--set-up-side-windows)
   (let* ((windows (get-buffer-window-list nil nil t))
          (anchor (drover-list--anchor (point)))
          (mark (and (region-active-p) (drover-list--anchor (mark))))
@@ -3577,7 +3579,9 @@ The sessions are those of `drover-changed-sessions', as the index has
 them now.  BODIES lists sessions whose details are drawn again even if
 they did not change, such as one whose recap arrived.  Return nil,
 drawing nothing, when that change cannot be drawn in place: the list
-must then be drawn anew."
+must then be drawn anew, as when the sidebar's side window had other
+settings, which change the width."
+  (drover-list--set-up-side-windows)
   (let ((model drover-list--model))
     (and model
          (not drover-list--stale)
@@ -4256,8 +4260,10 @@ they make are made once for every list (see `drover-list--sharing')."
   "Bring the current list up to date, now that it shows.
 Redraw it if it is stale or was drawn for another width; otherwise draw
 in place what changed while it was hidden, and bring the faces of
-titles and the timers up to date."
+titles and the timers up to date.  The sidebar's side windows get its
+settings first (see `drover-list--set-up-side-windows')."
   (when (drover-list--current-p)
+    (drover-list--set-up-side-windows)
     (if (or drover-list--stale (not (eql drover-list--width (drover-list--line-width))))
         (drover-list--render)
       (pcase-let ((`(,keys ,bodies ,times) drover-list--pending))
@@ -4715,7 +4721,9 @@ A theme may change fonts, which widths depend on, and the colour of
       (drover-list--update buffer))))
 
 (defun drover-list--watch ()
-  "Follow sessions, windows and the focus while a list buffer lives."
+  "Follow sessions, windows and the focus while a list buffer lives.
+Magit's selection in lists is drover's then (see
+`drover-list--region-advice')."
   (add-hook 'drover-changed-hook #'drover-list--on-change)
   (add-hook 'window-buffer-change-functions #'drover-list--windows-changed)
   (add-hook 'window-selection-change-functions #'drover-list--windows-changed)
@@ -4724,6 +4732,7 @@ A theme may change fonts, which widths depend on, and the colour of
   (add-hook 'kill-buffer-hook #'drover-list--buffer-killed)
   (add-hook 'enable-theme-functions #'drover-list--theme-changed)
   (add-hook 'disable-theme-functions #'drover-list--theme-changed)
+  (advice-add 'magit-region-sections :around #'drover-list--region-advice)
   (unless (advice-function-member-p #'drover-list--focus-changed after-focus-change-function)
     (setq drover-list--focused (drover-list--focus-state))
     (add-function :after after-focus-change-function #'drover-list--focus-changed)))
@@ -4747,6 +4756,7 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
       (remove-hook 'kill-buffer-hook #'drover-list--buffer-killed)
       (remove-hook 'enable-theme-functions #'drover-list--theme-changed)
       (remove-hook 'disable-theme-functions #'drover-list--theme-changed)
+      (advice-remove 'magit-region-sections #'drover-list--region-advice)
       (remove-function after-focus-change-function #'drover-list--focus-changed)
       (setq drover-list--windows nil)
       (drover-list--stop-timer 'drover-list--focus-timer)
@@ -4759,26 +4769,70 @@ The list killed draws no recap later.  For `kill-buffer-hook'."
 
 ;;;; Selection
 
-;; An active region selects the sessions whose headings it spans, as
-;; Magit selects sections: from the heading of one section to that of
-;; a sibling, which Magit highlights.  Group headings so selected stand
-;; for their sessions, as the heading of a collapsed group stands for
-;; them when moving.  A region Magit does not take for a selection, as
-;; one from a session to another group's, selects nothing, and shows as
-;; a region does elsewhere.
+;; An active region selects the rows of sessions it touches, those
+;; shown: the heading of a group selects nothing, and neither do the
+;; sessions of a collapsed group, which do not show.  So a region
+;; sweeping over a group's heading never acts on thousands of sessions
+;; the user does not see.  A region within the lines of one session
+;; selects nothing, as Magit's within one section: it is text to copy.
+;; Magit highlights the selection it reads from `magit-region-sections',
+;; which, in a list, returns drover's (`drover-list--region-advice').
+
+(defun drover-list--hidden-around (section)
+  "Return the outermost collapsed section holding SECTION, or nil."
+  (let ((hidden nil))
+    (while-let ((parent (oref section parent)))
+      (when (oref parent hidden)
+        (setq hidden parent))
+      (setq section parent))
+    hidden))
 
 (defun drover-list--selected-sections ()
-  "Return the session sections the region selects, in order, or nil.
-They are the sections `magit-region-sections' selects, whose headings
-Magit highlights, each group among them standing for its sessions."
-  (mapcan (lambda (section)
-            (cond ((object-of-class-p section 'drover-list-session-section) (list section))
-                  ((object-of-class-p section 'drover-list-group-section)
-                   ;; Its sessions must be drawn to stand for them.
-                   (when-let* ((group (drover-list--model-group section)))
-                     (drover-list--draw-group group))
-                   (drover-list--session-sections section))))
-          (magit-region-sections)))
+  "Return the session sections the active region selects, in order, or nil.
+They are those of the rows the region touches, from its beginning to
+its end, both included, that show: neither a group's heading nor the
+sessions of a collapsed group.  A region of some text within the lines
+of one session selects nothing; an empty one selects the session it is
+on, but as a click leaves it."
+  (when (and (region-active-p) magit-root-section)
+    (let* ((start (region-beginning))
+           (end (region-end))
+           (first (drover-list--session-section (magit-section-at start))))
+      (unless (if (= start end)
+                  (eq this-command #'mouse-drag-region)
+                (and first (eq first (drover-list--session-section (magit-section-at end)))))
+        (let ((position start)
+              (sections nil))
+          (while (<= position end)
+            (let* ((section (or (magit-section-at position) magit-root-section))
+                   (hidden (drover-list--hidden-around section))
+                   (session (and (not hidden) (drover-list--session-section section)))
+                   (next (cond (hidden (oref hidden end))
+                               (session (push session sections)
+                                        (oref session end))
+                               (t (save-excursion
+                                    (goto-char position)
+                                    (line-beginning-position 2))))))
+              (setq position (max (1+ position) next))))
+          (nreverse sections))))))
+
+(defun drover-list--region-advice (function &optional condition multiple)
+  "Return the sections the region selects, in a list as drover selects them.
+Around `magit-region-sections', which FUNCTION is, called with CONDITION
+and MULTIPLE outside drover's lists: Magit highlights what it returns,
+and shows the region as other buffers do when it returns nothing.  In a
+list, CONDITION and MULTIPLE apply as Magit applies them, MULTIPLE
+asking for two sessions at least."
+  (if (derived-mode-p 'drover-list-mode)
+      (drover-with-reporting "list selection"
+        (let ((sections (drover-list--selected-sections)))
+          (and sections
+               (or (not multiple) (cdr sections))
+               (or (not condition)
+                   (seq-every-p (lambda (section) (magit-section-match condition section))
+                                sections))
+               sections)))
+    (funcall function condition multiple)))
 
 (defun drover-list--selected-sessions ()
   "Return the current records of the sessions the region selects, or nil.
@@ -4887,6 +4941,11 @@ until the list leaves (see `drover-list--place-sidebar')."
       (setq drover-list--stale t))
     (drover-list--show (selected-window))))
 
+(defconst drover-list--side-window-parameters
+  '((no-delete-other-windows . t)
+    (no-other-window . t))
+  "Window parameters of the sidebar's side window.")
+
 (defun drover-list--display-alist (&optional place)
   "Return the action alist displaying the sidebar in a side window.
 PLACE is a plist of :side, :slot and :width, the place the sidebar had
@@ -4898,8 +4957,7 @@ one, the options say."
     (preserve-size . (t . nil))
     ;; Strongly dedicated, so that `switch-to-buffer' never replaces it.
     (dedicated . t)
-    (window-parameters . ((no-delete-other-windows . t)
-                          (no-other-window . t)))))
+    (window-parameters . ,drover-list--side-window-parameters)))
 
 (defun drover-list--show-side (&optional place)
   "Show the sidebar in a side window of the selected frame and return the window.
@@ -4916,7 +4974,7 @@ sidebar was before it stepped aside (see `drover-list--display-alist')."
                       (display-buffer-in-side-window buffer (drover-list--display-alist place))
                       (user-error "No room for the drover list"))))
       ;; Before drawing, which is for the width the fringes leave.
-      (drover-list--drop-fringes window)
+      (drover-list--set-up-side-window window)
       (drover-list--show window)
       window)))
 
@@ -5260,11 +5318,12 @@ act on the session at point; \\[drover-toggle-subagents] shows every subagent, t
 none, and \\[drover-refresh] redraws the list.  Text is drawn in the face
 `drover-list'.
 
-An active region selects the sessions whose lines it spans, as Magit
-highlights them: a group's heading stands for its sessions.  Marking
-seen, interrupting, archiving, unarchiving and deleting act on every
-selected session, \\[drover-list-copy] copies their links, and the prompt quotes
-them with their last replies (see `drover-prompt-dwim').
+An active region selects the rows of sessions it touches, those shown,
+as the list highlights them: a group's heading selects nothing, nor do
+the sessions of a collapsed group.  Marking seen, interrupting,
+archiving, unarchiving and deleting act on every selected session,
+\\[drover-list-copy] copies their links, and the prompt quotes them
+with their last replies (see `drover-prompt-dwim').
 
 \\{drover-list-mode-map}"
   :group 'drover-list
@@ -5330,20 +5389,39 @@ The commands folding sections do nothing: the sidebar folds nothing."
        (with-current-buffer (window-buffer window)
          (derived-mode-p 'drover-list-sidebar-mode))))
 
-(defun drover-list--drop-fringes (window)
-  "Take the fringes off WINDOW, a side window showing the sidebar.
-They are set on the window alone, not persistently: a window showing
-another buffer, or the sidebar shown in an ordinary window, takes the
-fringes of its buffer, as any window does."
-  (when (and (drover-list--sidebar-window-p window)
-             (not (equal (seq-take (window-fringes window) 2) '(0 0))))
-    (set-window-fringes window 0 0)))
+(defun drover-list--set-up-side-window (window)
+  "Give WINDOW, if a side window showing the sidebar, the sidebar's settings.
+They are those `drover-list--display-alist' displays it with, which a
+window shown by an older drover may lack: no fringes, strongly
+dedicated, its width preserved and `drover-list--side-window-parameters'.
+Only what differs is set, so that a window already set up does not
+change.  The fringes are set on the window alone, not persistently: a
+window showing another buffer, or the sidebar shown in an ordinary
+window, takes the fringes of its buffer, as any window does."
+  (when (drover-list--sidebar-window-p window)
+    (unless (equal (seq-take (window-fringes window) 2) '(0 0))
+      (set-window-fringes window 0 0))
+    (unless (eq (window-dedicated-p window) t)
+      (set-window-dedicated-p window t))
+    (pcase-dolist (`(,parameter . ,value) drover-list--side-window-parameters)
+      (unless (equal (window-parameter window parameter) value)
+        (set-window-parameter window parameter value)))
+    (unless (window-preserved-size window t)
+      (window-preserve-size window t t))))
+
+(defun drover-list--set-up-side-windows ()
+  "Give the side windows showing the current list, if the sidebar, its settings.
+As it draws, before measuring the width they leave (see
+`drover-list--set-up-side-window')."
+  (unless drover-list--folds
+    (dolist (window (get-buffer-window-list nil 'nomini t))
+      (drover-list--set-up-side-window window))))
 
 (defun drover-list--sidebar-shown (window)
-  "Take the fringes off WINDOW as it shows the sidebar, if a side window.
+  "Give WINDOW the sidebar's settings as it shows the sidebar, if a side window.
 For the sidebar's `window-buffer-change-functions'."
   (drover-with-reporting "sidebar window"
-    (drover-list--drop-fringes window)))
+    (drover-list--set-up-side-window window)))
 
 (define-derived-mode drover-list-sidebar-mode drover-list-mode "Drover"
   "Major mode of the sidebar, the list of agent sessions of a side window.
@@ -5362,6 +5440,11 @@ fringes.
   (setq-local magit-section-visibility-indicators nil)
   (remove-hook 'magit-section-set-visibility-hook #'drover-list--cached-visibility t)
   (add-hook 'window-buffer-change-functions #'drover-list--sidebar-shown nil t))
+
+(defun drover-list-unload-function ()
+  "Give Magit back its own selection, before `unload-feature' unloads the lists."
+  (advice-remove 'magit-region-sections #'drover-list--region-advice)
+  nil)
 
 (provide 'drover-list)
 ;;; drover-list.el ends here

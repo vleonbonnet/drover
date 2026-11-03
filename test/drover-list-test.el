@@ -6533,7 +6533,7 @@ Confirmations answer yes, their prompts pushed to `asked', newest first."
            ,@body)))))
 
 (ert-deftest drover-list-test-region-selects-sessions ()
-  "A region selects the sessions whose lines it spans, those Magit highlights."
+  "A region selects the rows of sessions it touches, those Magit highlights."
   (drover-list-test-selecting (drover-list-test-selection-sample)
     ;; Set within the line of a, point a line down: two sessions,
     ;; though the text of the region lies on a's line but for a few
@@ -6551,27 +6551,96 @@ Confirmations answer yes, their prompts pushed to `asked', newest first."
     ;; Point back on a's line: a alone.
     (drover-list-test-type "C-p C-p")
     (should (equal (drover-list-test-selected) '("a")))
-    ;; Into another group: Magit selects nothing, nor does drover, and
-    ;; the session at point stands alone.
+    (should (equal (drover-list-test-highlighted) '("a")))
+    ;; Some text of a's line is text: nothing is selected, and the
+    ;; session at point stands alone.
+    (drover-list-test-type "C-f C-f")
+    (should (region-active-p))
+    (should-not (drover-list--selected-sessions))
+    (should-not (drover-list-test-highlighted))
+    (should (equal (drover-list-test-selected) '("a")))
+    ;; Into another group: the rows of both it touches.
     (deactivate-mark)
     (drover-list-test-goto "c")
     (drover-list-test-type "C-SPC")
     (goto-char (oref (drover-list-test-section "w") start))
     (drover-list-test-type "C-e")
     (should (region-active-p))
-    (should-not (drover-list-test-highlighted))
-    (should-not (drover-list--selected-sessions))
-    (should (equal (drover-list-test-selected) '("w")))
-    ;; A group's heading selected stands for its sessions.
+    (should (equal (drover-list-test-highlighted) '("c" "w")))
+    (should (equal (drover-list-test-selected) '("c" "w")))
+    ;; A group's heading selects nothing, nor does the session at point
+    ;; stand for it there.
     (deactivate-mark)
     (drover-list-test-goto-group 'done)
     (drover-list-test-type "C-SPC")
-    (should (equal (drover-list-test-highlighted) '(done)))
-    (should (equal (drover-list-test-selected) '("a" "b" "c")))
+    (should-not (drover-list-test-highlighted))
+    (should-not (drover-list--selected-sessions))
+    (should-not (drover-list-test-selected))
+    (should-error (drover-selected-sessions) :type 'user-error)
     ;; Without a region, the session at point.
     (deactivate-mark)
     (drover-list-test-goto "b")
     (should (equal (drover-list-test-selected) '("b")))))
+
+(ert-deftest drover-list-test-region-selects-rows-only ()
+  "A region over a group's heading selects the rows it touches that show, never the group's."
+  (drover-list-test-selecting (drover-list-test-selection-sample)
+    (cl-flet ((calls ()
+                (prog1 (mapcar #'cadr (seq-filter (lambda (call) (eq (car call) :archive))
+                                                  (reverse drover-test-calls)))
+                  (setq drover-test-calls nil)))
+              (region (from to)
+                (deactivate-mark)
+                (goto-char from)
+                (drover-list-test-type "C-SPC")
+                (goto-char to)
+                ;; Moved through the command loop, so that Magit highlights.
+                (drover-list-test-type "C-e")))
+      ;; From Done's heading to b's row: a and b, not the group.
+      (region (save-excursion (drover-list-test-goto-group 'done) (point))
+              (oref (drover-list-test-section "b") start))
+      (should (equal (drover-list-test-selected) '("a" "b")))
+      (should (equal (drover-list-test-highlighted) '("a" "b")))
+      ;; From c's row to Working's heading: c alone, the heading
+      ;; adding nothing; the menu names it though point is on no session.
+      (region (oref (drover-list-test-section "c") start)
+              (save-excursion (drover-list-test-goto-group 'working) (point)))
+      (should-not (drover-session-at-point t))
+      (should (equal (drover-list-test-selected) '("c")))
+      (should (equal (drover-list-test-highlighted) '("c")))
+      (let ((scope (drover--context)))
+        (cl-letf (((symbol-function 'drover--scope) (lambda () scope)))
+          (should (equal (drover--dispatch-list-description) "List: Session c"))
+          (should (drover-dispatch-selection nil #'drover-archivable-p))
+          (should-not (drover-dispatch-selection :interrupt #'drover--running-p))))
+      ;; Done collapsed, from its heading to w's row: w alone, its
+      ;; sessions hidden; archiving acts on w, without asking.
+      (deactivate-mark)
+      (magit-section-hide (drover-list--group-section
+                           (drover-list-test-section "a")))
+      (should (drover-list-test-group-hidden-p 'done))
+      (region (save-excursion (drover-list-test-goto-group 'done) (point))
+              (oref (drover-list-test-section "w") start))
+      (should (drover-list-test-group-hidden-p 'done))
+      (should (equal (drover-list-test-selected) '("w")))
+      (should (equal (drover-list-test-highlighted) '("w")))
+      (let ((scope (drover--context)))
+        (cl-letf (((symbol-function 'drover--scope) (lambda () scope)))
+          (should (equal (drover--dispatch-list-description) "List: Session w"))))
+      (setq drover-test-calls nil)
+      (should (equal (drover-list-test-messages (drover-list-test-type "z"))
+                     '("Archived Session w")))
+      (should-not asked)
+      (should (equal (calls) '("w")))
+      ;; Over headings alone, the collapsed group's between: nothing,
+      ;; and nothing is archived.
+      (region (save-excursion (drover-list-test-goto-group 'done) (point))
+              (save-excursion (drover-list-test-goto-group 'working) (point)))
+      (should (region-active-p))
+      (should-not (drover-list--selected-sessions))
+      (should-not (drover-list-test-highlighted))
+      (should-error (call-interactively #'drover-archive) :type 'user-error)
+      (should-not (calls)))))
 
 (ert-deftest drover-list-test-region-survives-redraws ()
   "A redraw keeps the region and the sessions it selects."
@@ -6661,8 +6730,9 @@ Confirmations answer yes, their prompts pushed to `asked', newest first."
             (if (equal (drover-session-id session) "b")
                 (error "Gone already")
               (push (list :archive (drover-session-id session)) drover-test-calls))))
-    (drover-list-test-goto-group 'done)
-    (drover-list-test-type "C-SPC")
+    (drover-list-test-goto "a")
+    (drover-list-test-type "C-SPC C-n C-n")
+    (should (equal (drover-list-test-selected) '("a" "b" "c")))
     (should (equal (drover-list-test-messages (drover-list-test-type "z"))
                    '("Archived 2 sessions; failed for Session b (Gone already)")))
     (should (equal (reverse drover-test-calls) '((:archive "a") (:archive "c"))))))
@@ -6740,12 +6810,21 @@ Confirmations answer yes, their prompts pushed to `asked', newest first."
         (should (equal (drover-list-test-messages (drover-list-test-type "M-w"))
                        '("Copied a link to Session c")))
         (should (equal (car kill-ring) "[[test-session:c][Session c]]"))
-        ;; A region selecting no session copies its text.
+        ;; A region from one group into another copies the links of
+        ;; the rows it touches.
         (drover-list-test-goto "c")
         (drover-list-test-type "C-SPC")
         (goto-char (oref (drover-list-test-section "w") start))
         (drover-list-test-type "C-e M-w")
-        (should (string-match-p "Session c 10s\n\nWorking (1)\n.*Session w" (car kill-ring)))))))
+        (should (equal (car kill-ring) "[[test-session:c][Session c]]\n[[test-session:w][Session w]]"))
+        ;; A region selecting no session copies its text: some of a
+        ;; session's line, or headings alone.
+        (drover-list-test-goto "c")
+        (drover-list-test-type "C-SPC C-e M-w")
+        (should (string-match-p "Session c 10s\\'" (car kill-ring)))
+        (drover-list-test-goto-group 'done)
+        (drover-list-test-type "C-SPC C-e M-w")
+        (should (equal (substring-no-properties (car kill-ring)) "Done (3)"))))))
 
 (ert-deftest drover-list-test-copy-without-link-type ()
   "Without a link type storing sessions, their titles are copied."
@@ -6841,8 +6920,8 @@ The prompt shows nowhere; `prompt' returns its text."
                    (let ((timer (timer-create)))
                      (push (list time function arguments timer) timers)
                      timer))))
-        (drover-list-test-goto-group 'done)
-        (drover-list-test-type "C-SPC")
+        (drover-list-test-goto "a")
+        (drover-list-test-type "C-SPC C-n C-n")
         (should (equal (drover-list-test-messages (drover-prompt-dwim))
                        '("Fetching the last replies of 3 sessions… 0/3")))
         (should-not (prompt))
@@ -7312,6 +7391,73 @@ sets anew from it."
             ;; Nor does the list's window lose its own.
             (drover-list)
             (should-not set)))))))
+
+(ert-deftest drover-list-test-sidebar-window-set-up-as-drawn ()
+  "Drawing the sidebar gives its side window the sidebar's settings, if it lacks them.
+A side window shown by an older drover, with fringes, gets them as the
+sidebar draws, wholly or in place, or is brought up to date; the
+sidebar's buffer in an ordinary window, never."
+  (let ((fringes (make-hash-table :test #'eq))
+        (set nil))
+    (cl-letf (((symbol-function 'window-fringes)
+               (lambda (&optional window)
+                 (gethash (window-normalize-window window) fringes '(8 8 nil nil))))
+              ((symbol-function 'set-window-fringes)
+               (lambda (window left right &rest rest)
+                 (push (cons (window-normalize-window window) rest) set)
+                 (puthash (window-normalize-window window) (list left right nil nil) fringes))))
+      (drover-list-test-with (drover-list-test-side-sample)
+        (pcase-let ((`(,_first ,second) (drover-list-test--main)))
+          (let* ((side (drover-list-side))
+                 (sidebar (window-buffer side)))
+            (cl-flet ((older ()
+                        ;; As an older drover left it.
+                        (puthash side '(8 8 nil nil) fringes)
+                        (set-window-dedicated-p side nil)
+                        (set-window-parameter side 'no-other-window nil)
+                        (window-preserve-size side t nil)
+                        (setq set nil))
+                      (set-up-p ()
+                        (and (equal (window-fringes side) '(0 0 nil nil))
+                             (eq (window-dedicated-p side) t)
+                             (eq (window-parameter side 'no-other-window) t)
+                             (eq (window-parameter side 'no-delete-other-windows) t)
+                             (window-preserved-size side t)
+                             ;; On the window alone, not persistently.
+                             (equal set (list (list side))))))
+              (should (set-up-p))
+              ;; Drawn anew.
+              (older)
+              (with-current-buffer sidebar
+                (revert-buffer))
+              (should (set-up-p))
+              ;; Drawn in place.
+              (older)
+              (setf (drover-session-title (drover-list-test-find "done")) "Renamed")
+              (drover-backend-changed 'fake "done")
+              (drover-changed-now)
+              (with-current-buffer sidebar
+                (should (string-search "Renamed" (buffer-string))))
+              (should (set-up-p))
+              ;; Brought up to date, nothing having changed.
+              (older)
+              (with-current-buffer sidebar
+                (drover-list--refresh-if-needed))
+              (should (set-up-p))
+              ;; Set up already: nothing is set again.
+              (setq set nil)
+              (with-current-buffer sidebar
+                (revert-buffer))
+              (should-not set)
+              ;; The sidebar's buffer in an ordinary window keeps its
+              ;; fringes as it draws, and the window its settings.
+              (set-window-buffer second sidebar)
+              (with-current-buffer sidebar
+                (revert-buffer))
+              (should-not set)
+              (should (equal (window-fringes second) '(8 8 nil nil)))
+              (should-not (window-dedicated-p second))
+              (should-not (window-parameter second 'no-other-window)))))))))
 
 (provide 'drover-list-test)
 ;;; drover-list-test.el ends here
