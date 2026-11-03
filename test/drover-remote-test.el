@@ -585,7 +585,7 @@ Their sessions stay, as received."
         (should (derived-mode-p 'drover-remote-session-mode))
         (should (equal (drover-session-id (drover-session-at-point)) '(fake . "s1")))
         (drover-remote-test-wait (lambda () (save-excursion (goto-char (point-min))
-                                                            (search-forward "Reply of s1" nil t))))
+                                                            (search-forward "Prompt of s1" nil t))))
         (should (save-excursion (goto-char (point-min)) (search-forward "Preview of s1" nil t)))
         (kill-buffer))
       ;; An unknown session is refused by its host, on one line.

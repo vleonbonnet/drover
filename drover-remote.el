@@ -2954,7 +2954,8 @@ window, without taking another."
                       (when (and (buffer-live-p buffer) text)
                         (with-current-buffer buffer
                           (let ((inhibit-read-only t))
-                            (save-excursion (goto-char marker) (insert text)))))))
+                            (save-excursion (goto-char marker) (insert text))
+                            (set-buffer-modified-p nil))))))
             (unless (drover-session-stale session)
               (drover-remote--preview peer session
                                       (lambda (text)
@@ -2965,6 +2966,7 @@ window, without taking another."
                                                      "\n"))))
               (drover-remote--recap peer session
                                     (lambda (recap) (put recap-at (drover-remote--recap-text recap)))))))
+        (set-buffer-modified-p nil)
         (goto-char (point-min))))
     (when (and (memq (drover-session-status session) '(done failed))
                (not (drover-remote--refusal peer session "mark-seen")))
