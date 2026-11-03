@@ -4329,11 +4329,39 @@ that sessions of every backend show in the same windows."
         (select-window window))
       (drover-backend-call session :open nil))))
 
+(defun drover-session-to-answer (session)
+  "Return the session whose request answering SESSION answers, or nil.
+That is SESSION when it has requests, else the subagent below it, at
+any depth, waiting the longest for the user, so that a parent answers
+its subagents' requests from its own row or buffer, whether they run
+in the foreground or in the background.  Only sessions whose backend
+answers requests count; nil when none of the tree has requests."
+  (if (and (drover-session-requests session) (drover-supports-p session :respond))
+      session
+    (let ((seen (make-hash-table :test #'equal))
+          (stack (drover-index-children (drover-session-key session)))
+          (oldest nil))
+      (while stack
+        (let ((key (pop stack)))
+          (unless (gethash key seen)
+            (puthash key t seen)
+            (when-let* ((record (drover-index-session key))
+                        ((drover-session-requests record))
+                        ((drover-supports-p record :respond)))
+              (when (or (null oldest)
+                        (< (drover--time (drover-session-since record))
+                           (drover--time (drover-session-since oldest))))
+                (setq oldest record)))
+            (setq stack (append (drover-index-children key) stack)))))
+      oldest)))
+
 (defun drover-respond (session)
-  "Answer the oldest request of SESSION.
+  "Answer the oldest request of SESSION, else of its subagents.
+SESSION without a request of its own answers the subagent below it
+waiting the longest, at any depth: see `drover-session-to-answer'.
 Interactively, SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
-  (drover-backend-call session :respond))
+  (drover-backend-call (or (and session (drover-session-to-answer session)) session) :respond))
 
 (defun drover-interrupt (sessions)
   "Stop the running turns of SESSIONS, a session or a list of sessions.

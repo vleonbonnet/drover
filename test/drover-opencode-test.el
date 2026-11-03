@@ -1041,6 +1041,23 @@ nothing is fetched."
                        (opencode-session-archive "ses_1")
                        (opencode-session-view "ses_1")))))))
 
+(ert-deftest drover-opencode-test-respond-subagent ()
+  "Answering a parent asking nothing answers its subagent's oldest request, in place."
+  (drover-opencode-test-with
+      (list (drover-opencode-test-entry "ses_parent" :running t)
+            (drover-opencode-test-entry "ses_mid" :parent-id "ses_parent" :running t)
+            (drover-opencode-test-entry "ses_deep" :parent-id "ses_mid" :running t
+                                        :requests '((:kind question :id "frm_1" :summary "Color?" :time 100.0)))
+            (drover-opencode-test-entry "ses_near" :parent-id "ses_parent" :running t
+                                        :requests '((:kind permission :id "per_1" :summary "bash" :time 200.0))))
+    (should (equal (drover-session-id (drover-session-to-answer (drover-opencode-test-session "ses_parent")))
+                   "ses_deep"))
+    (drover-respond (drover-opencode-test-session "ses_parent"))
+    (drover-respond (drover-opencode-test-session "ses_near"))
+    (should (equal (reverse drover-opencode-test-calls)
+                   '((opencode-respond-session "ses_deep" nil t)
+                     (opencode-respond-session "ses_near" nil t))))))
+
 (ert-deftest drover-opencode-test-preview ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
     (let ((text nil))
