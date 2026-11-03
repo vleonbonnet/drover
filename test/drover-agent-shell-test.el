@@ -1663,18 +1663,19 @@ A Claude model goes by its compact name, as in opencode.el's mode line."
                    (lambda (format &rest arguments)
                      (push (apply #'format-message format arguments) messages))))
           (drover-archive (drover-agent-shell-test-session busy))
-          (should (equal messages '("Archived busy; its buffer closes once its turn ends")))
+          (should (equal messages '("Archived busy")))
           (drover-archive (drover-agent-shell-test-session restored))
           (drover-unarchive (drover-agent-shell-test-session restored))
           (should (buffer-live-p busy))
-          ;; The turn ends.
+          (setq messages nil)
+          ;; The turn ends: the buffer closes, without a word.
           (dolist (shell (list busy restored))
             (with-current-buffer shell
               (setq-local shell-maker--busy nil))
             (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn"))
           (drover-changed-now))
         (should-not (buffer-live-p busy))
-        (should (equal (car messages) "Closed busy, archived, now that its turn ended"))
+        (should-not messages)
         (should (buffer-live-p restored))
         (should-not drover--closing)))))
 

@@ -2567,7 +2567,7 @@ elsewhere, which its backend archives.  Their buffers, made by
       (with-current-buffer (drover-test-term-buffer "t")
         (insert "Next question"))
       (drover-archive (drover-find 'term "t"))
-      (should (equal messages '("Archived Term t; its buffer closes once its turn ends")))
+      (should (equal messages '("Archived Term t")))
       (should (get-buffer "*session t*"))
       (should (drover-session-archived-p (drover-find 'term "t")))
       (should (memq #'drover--close-pending drover-changed-hook))
@@ -2576,14 +2576,14 @@ elsewhere, which its backend archives.  Their buffers, made by
       (drover-backend-changed 'term)
       (drover-changed-now)
       (should (get-buffer "*session t*"))
-      ;; Ended: it closes, what was typed kept.
+      ;; Ended: it closes, what was typed kept, which alone is told.
       (setq messages nil
             sessions (list (drover-test-term "t" :status 'done)))
       (drover-backend-changed 'term)
       (drover-changed-now)
       (should-not (get-buffer "*session t*"))
       (should (equal kill-ring '("Next question")))
-      (should (equal messages '("Closed Term t, archived, now that its turn ended; its unsent input is in the kill ring")))
+      (should (equal messages '("The unsent input of Term t, archived, is in the kill ring")))
       (should-not drover--closing)
       (should-not (memq #'drover--close-pending drover-changed-hook))
       (should (drover-session-archived-p (car sessions))))))
@@ -2594,7 +2594,7 @@ elsewhere, which its backend archives.  Their buffers, made by
                                           :requests '((:kind question :summary "Go?"))))))
     (drover-test-with-terms sessions
       (drover-archive (drover-find 'term "t"))
-      (should (equal messages '("Archived Term t; it waits for you: its buffer closes once its turn ends")))
+      (should (equal messages '("Archived Term t; it waits for you")))
       (should (get-buffer "*session t*"))
       (setq sessions (list (drover-test-term "t" :status 'idle)))
       (drover-backend-changed 'term)
@@ -2608,7 +2608,7 @@ elsewhere, which its backend archives.  Their buffers, made by
     (drover-test-with-terms sessions
       (drover-archive (list (drover-find 'term "t") (drover-find 'term "u")))
       (should (equal (car messages)
-                     "Archived 2 sessions; the buffer of Term t closes once its turn ends; the buffer of Term u closes once its turn ends"))
+                     "Archived 2 sessions"))
       (should (= (length drover--closing) 2))
       (drover-unarchive (drover-find 'term "t"))
       (should (equal (mapcar #'car drover--closing) '((term . "u"))))

@@ -87,6 +87,44 @@ This follows the `opencode-state' contract."
     (push (cons function arguments) drover-opencode-test-calls)
     nil))
 
+(defvar drover-opencode-test-hold nil
+  "Non-nil to hold the answers to confirmed actions in `drover-opencode-test-held'.
+The stubs of `opencode-session-interrupt', `opencode-session-view' and
+`opencode-session-delete' answer at once otherwise, as the service took
+them.")
+
+(defvar drover-opencode-test-held nil
+  "Confirmed actions whose answers are held, newest first.
+Each is (FUNCTION ID THEN ELSE): THEN takes no argument, ELSE an
+`opencode-error'.")
+
+(defun drover-opencode-test--confirmer (function value)
+  "Return a stub of FUNCTION, of an ID, THEN and ELSE, recording its calls.
+THEN gets VALUE, or no argument when VALUE is `none', at once, unless
+`drover-opencode-test-hold' holds the answers."
+  (lambda (id &rest arguments)
+    (push (list function id) drover-opencode-test-calls)
+    ;; View takes IDLE first.
+    (let* ((callbacks (if (eq function 'opencode-session-view) (cdr arguments) arguments))
+           (then (nth 0 callbacks))
+           (else (nth 1 callbacks))
+           (answer (and then (lambda () (if (eq value 'none) (funcall then) (funcall then value))))))
+      (if drover-opencode-test-hold
+          (push (list function id answer else) drover-opencode-test-held)
+        (when answer (funcall answer))))
+    nil))
+
+(defun drover-opencode-test-answer-held (&optional refusal)
+  "Answer the oldest action held, refused with REFUSAL when given."
+  (let ((held (car (last drover-opencode-test-held))))
+    (should held)
+    (setq drover-opencode-test-held (butlast drover-opencode-test-held))
+    (if refusal
+        (funcall (or (nth 3 held) #'ignore)
+                 (opencode-error--make :status 409 :method 'post :path (concat "/api/session/" (nth 1 held))
+                                       :message refusal))
+      (funcall (or (nth 2 held) #'ignore)))))
+
 (defvar drover-opencode-test-fetched nil
   "Callback of the last stubbed `opencode-session-fetch'.")
 
@@ -125,6 +163,8 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (drover--closing nil)
          (drover--confirming nil)
          (drover-opencode-test-archives nil)
+         (drover-opencode-test-hold nil)
+         (drover-opencode-test-held nil)
          (drover-show-subagents 'active)
          (drover-show-history nil)
          (drover--history nil)
@@ -229,13 +269,14 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
                   (push (append (list 'opencode-session-open (alist-get 'id info) (selected-window)) arguments)
                         drover-opencode-test-calls)))
                ((symbol-function 'opencode-respond-session) (drover-opencode-test--recorder 'opencode-respond-session))
-               ((symbol-function 'opencode-session-interrupt) (drover-opencode-test--recorder 'opencode-session-interrupt))
+               ((symbol-function 'opencode-session-interrupt)
+                (drover-opencode-test--confirmer 'opencode-session-interrupt t))
                ((symbol-function 'opencode-session-archive)
                 (lambda (id &optional restore then else)
                   (push (if restore (list 'opencode-session-archive id t) (list 'opencode-session-archive id))
                         drover-opencode-test-calls)
                   (push (list id restore then else) drover-opencode-test-archives)))
-               ((symbol-function 'opencode-session-view) (drover-opencode-test--recorder 'opencode-session-view))
+               ((symbol-function 'opencode-session-view) (drover-opencode-test--confirmer 'opencode-session-view 'none))
                ((symbol-function 'opencode-session-last-reply)
                 (lambda (id callback &rest arguments)
                   (push (append (list 'opencode-session-last-reply id) arguments) drover-opencode-test-calls)
@@ -247,7 +288,8 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
                                           :changes '(("a.el" 3 1))))))
                ((symbol-function 'opencode-session-create) (drover-opencode-test--recorder 'opencode-session-create))
                ((symbol-function 'opencode-rename-session) (drover-opencode-test--recorder 'opencode-rename-session))
-               ((symbol-function 'opencode-session-delete) (drover-opencode-test--recorder 'opencode-session-delete))
+               ((symbol-function 'opencode-session-delete)
+                (drover-opencode-test--confirmer 'opencode-session-delete 'none))
                ((symbol-function 'opencode-session-fork) (drover-opencode-test--recorder 'opencode-session-fork))
                ((symbol-function 'opencode-session-compact) (drover-opencode-test--recorder 'opencode-session-compact)))
        (unwind-protect
@@ -1041,6 +1083,80 @@ nothing is fetched."
                        (opencode-session-archive "ses_1")
                        (opencode-session-view "ses_1")))))))
 
+(ert-deftest drover-opencode-test-actions-confirm ()
+  "Interrupting, marking seen and deleting are confirmed by the service.
+Acting on many sessions keeps `drover-bulk-requests' in flight at most,
+the next sent as answers come; a refusal is reported, the others done."
+  (dolist (property '(:interrupt-confirms :mark-seen-confirms :delete-confirms :archive-confirms))
+    (drover-opencode-test-with nil
+      (should (drover-backend-property 'opencode property))))
+  (pcase-dolist (`(,command ,function ,done)
+                 '((drover-interrupt opencode-session-interrupt "Interrupted 20 sessions")
+                   (drover-mark-seen opencode-session-view "Marked 20 sessions seen")
+                   (drover-delete opencode-session-delete "Deleted 19 sessions")))
+    (drover-opencode-test-with (mapcar (lambda (index)
+                                         (drover-opencode-test-entry (format "ses_%02d" index) :running t))
+                                       (number-sequence 1 20))
+      (let ((drover-bulk-requests 5)
+            (drover-opencode-test-hold t)
+            (sessions (mapcar (lambda (index) (drover-opencode-test-session (format "ses_%02d" index)))
+                              (number-sequence 1 20)))
+            (messages nil)
+            (warnings nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest arguments)
+                     (when format-string
+                       (push (apply #'format-message format-string arguments) messages))))
+                  ((symbol-function 'drover-warn)
+                   (lambda (format-string &rest arguments)
+                     (push (apply #'format-message format-string arguments) warnings))))
+          (funcall command sessions)
+          (should (= (length drover-opencode-test-held) 5))
+          (let ((most 0)
+                (refused (eq function 'opencode-session-delete)))
+            (while drover-opencode-test-held
+              (setq most (max most (length drover-opencode-test-held)))
+              (if refused
+                  (progn (drover-opencode-test-answer-held "Session is busy") (setq refused nil))
+                (drover-opencode-test-answer-held))
+              (accept-process-output nil 0.01))
+            (should (= most 5)))
+          (should (drover-test-wait-actions 2))
+          (should (equal (seq-uniq (mapcar #'car drover-opencode-test-calls)) (list function)))
+          (should (= (length drover-opencode-test-calls) 20))
+          (let ((report (car (or warnings messages))))
+            (should (string-prefix-p done report))
+            (when (eq function 'opencode-session-delete)
+              (should (string-search "failed for Title ses_01 (POST /api/session/ses_01 failed" report)))))))))
+
+(ert-deftest drover-opencode-test-action-refused-alone ()
+  "A refusal of an action on one session is told as a warning."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1" :running t))
+    (let ((drover-opencode-test-hold t)
+          (warnings nil))
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (format-string &rest arguments)
+                   (push (apply #'format-message format-string arguments) warnings))))
+        (drover-interrupt (drover-opencode-test-session "ses_1"))
+        (drover-opencode-test-answer-held "Session is busy")
+        (should (string-prefix-p "Could not interrupt Title ses_1: POST /api/session/ses_1 failed"
+                                 (car warnings)))))))
+
+(ert-deftest drover-opencode-test-pending-prompts ()
+  "The pending prompts of a session are counted and withdrawn through opencode.el."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1") (drover-opencode-test-entry "ses_2"))
+    (let ((withdrawn nil))
+      (cl-letf (((symbol-function 'opencode-pending-prompts)
+                 (lambda (id) (if (equal id "ses_1") 2 0)))
+                ((symbol-function 'opencode-edit-pending-prompt)
+                 (lambda (&rest arguments) (push arguments withdrawn))))
+        (should (= (drover-pending-prompts (drover-opencode-test-session "ses_1")) 2))
+        (should (= (drover-pending-prompts (drover-opencode-test-session "ses_2")) 0))
+        (drover-edit-pending-prompt (drover-opencode-test-session "ses_1"))
+        (should (equal withdrawn '((nil "ses_1"))))
+        (should-error (drover-edit-pending-prompt (drover-opencode-test-session "ses_2")) :type 'user-error)
+        (should (equal withdrawn '((nil "ses_1"))))))))
+
 (ert-deftest drover-opencode-test-respond-subagent ()
   "Answering a parent asking nothing answers its subagent's oldest request, in place."
   (drover-opencode-test-with
@@ -1471,8 +1587,7 @@ closes then, and the close tells only of the input kept."
           ;; Not before the service answered.
           (should (seq-every-p #'buffer-live-p buffers))
           (should (equal messages
-                         '("Archived Title ses_2; its buffer closes once the archive is confirmed"
-                           "Archived Title ses_1; its buffer closes once the archive is confirmed")))
+                         '("Archived Title ses_2" "Archived Title ses_1")))
           (setq messages nil)
           (drover-opencode-test-answer-archive "ses_2")
           (should-not (buffer-live-p (nth 1 buffers)))
@@ -1766,7 +1881,7 @@ A refusal is told on one line, as a warning, the session staying archived."
   ;; After drover's lists, in their column.
   (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                          (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                 '("j" "B" "b" "l" "L" "p" "S")))
+                 '("j" "B" "b" "l" "L" "p" "S" "X")))
   ;; The keys opencode.el's lists had are gone.
   (dolist (key '("1" "2" "3"))
     (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
@@ -1832,7 +1947,7 @@ A refusal is told on one line, as a warning, the session staying archived."
             (drover-opencode--install)
             (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                                    (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                           '("j" "B" "b" "l" "L" "p" "S"))))
+                           '("j" "B" "b" "l" "L" "p" "S" "X"))))
         (kill-buffer session-buffer)
         (drover-opencode--install)))))
 
@@ -1850,6 +1965,80 @@ A refusal is told on one line, as a warning, the session staying archived."
       (drover-opencode--uninstall)
       (should (eq opencode-old-input-function #'opencode-put-old-input))
       (drover-opencode--install))))
+
+(ert-deftest drover-opencode-test-withdrawn-function-installed ()
+  "drover edits withdrawn prompts in its prompt, unless the user chose a function."
+  (drover-opencode-test-with nil
+    (let ((opencode-withdrawn-prompt-function nil))
+      (drover-opencode--install)
+      (should (eq opencode-withdrawn-prompt-function #'drover-opencode-edit-withdrawn))
+      (drover-opencode--uninstall)
+      (should-not opencode-withdrawn-prompt-function)
+      (setq opencode-withdrawn-prompt-function #'opencode-put-old-input)
+      (drover-opencode--install)
+      (should (eq opencode-withdrawn-prompt-function #'opencode-put-old-input))
+      (drover-opencode--uninstall)
+      (should (eq opencode-withdrawn-prompt-function #'opencode-put-old-input))
+      (drover-opencode--install))))
+
+(ert-deftest drover-opencode-test-withdrawn-to-prompt ()
+  "A withdrawn prompt goes to drover's prompt with its attachments, which go when sent.
+They go to OpenCode sessions, each on its label; to others, the labels
+go as text, which is told."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (drover-opencode-test-with-buffers '("")
+      (let ((drover-prompt-buffer-name "*drover opencode prompt test*")
+            (drover-prompt-require-features nil)
+            (org-mode-hook nil)
+            (sent nil)
+            (warnings nil)
+            (text (opencode-inbox-payload-text
+                   '((text . "see @notes.txt")
+                     (files ((data . "bm90ZXM=") (mime . "text/plain") (name . "notes.txt")
+                             (source (type . "uri") (uri . "file:///tmp/notes.txt"))
+                             (mention (start . 4) (end . 14) (text . "@notes.txt"))))
+                     (agents ((name . "explore")))))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                      ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
+                      ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
+                      ((symbol-function 'drover-warn)
+                       (lambda (format-string &rest arguments)
+                         (push (apply #'format-message format-string arguments) warnings)))
+                      ((symbol-function 'opencode-session-send)
+                       (lambda (text &rest arguments)
+                         (push (list text (plist-get arguments :attachments)) sent))))
+              (drover-opencode-edit-withdrawn text (car buffers))
+              (with-current-buffer (drover-prompt-buffer)
+                (should (equal (buffer-string) "see @notes.txt @explore"))
+                (should (equal (plist-get drover-prompt--chosen-session :key) '(opencode . "ses_1")))
+                (let ((content (drover-prompt-content)))
+                  (should (equal (plist-get content :attachments)
+                                 '((opencode :file ((uri . "file:///tmp/notes.txt") (name . "notes.txt")))
+                                   (opencode :agent "explore"))))
+                  ;; Deleting a label whole drops its attachment.
+                  (goto-char (point-min))
+                  (search-forward " @explore")
+                  (delete-region (match-beginning 0) (match-end 0))
+                  (should (= (length (plist-get (drover-prompt-content) :attachments)) 1))
+                  (drover-prompt--deliver (drover-opencode-test-session "ses_1") nil
+                                          (plist-get content :text) nil (plist-get content :attachments))
+                  (should (equal sent '(("see @notes.txt @explore"
+                                         ((:file ((uri . "file:///tmp/notes.txt") (name . "notes.txt")))
+                                          (:agent "explore"))))))
+                  (should-not warnings)
+                  ;; Another backend's session gets the labels as text.
+                  (let ((other nil))
+                    (drover-test-register-simple
+                     'other (lambda () (list (drover-test-session "o1" :backend 'other)))
+                     :send (lambda (&rest arguments) (push arguments other)))
+                    (drover-prompt--deliver (drover-test-session "o1" :backend 'other) nil
+                                            "see @notes.txt" nil (plist-get content :attachments))
+                    (should (equal (mapcar #'length other) '(3)))
+                    (should (string-match-p "\\`2 attachments of OpenCode went to .* as text only\\'"
+                                            (car warnings)))))))
+          (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+            (kill-buffer prompt)))))))
 
 (ert-deftest drover-opencode-test-ret-on-earlier-prompt ()
   "RET on an earlier prompt puts it whole in drover's prompt, set to go to its session."

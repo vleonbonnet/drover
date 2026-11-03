@@ -908,9 +908,12 @@ The session is chosen first, then the time, which offers the end of
 the session's turn while one runs, whatever its front end.  Its text,
 or its active region, goes with the agent, model and effort chosen in
 it, and leaves the prompt as a send does; an empty prompt is read
-instead."
+instead.  A prompt with attachments is refused: the queue keeps text."
   (let* ((prompt (current-buffer))
          (content (drover-prompt-content prompt))
+         ;; The queue keeps text, which a label alone is.
+         (_ (when (plist-get content :attachments)
+              (user-error "A prompt with attachments cannot be scheduled: send it, or delete their labels")))
          (session (drover-prompt-read-target "Schedule for session: " :existing-only t :options-menu t))
          (buffer (or (drover-session-buffer session)
                      (user-error "%s has no live buffer" (drover-session-display-title session))))

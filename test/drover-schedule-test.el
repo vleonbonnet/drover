@@ -494,6 +494,18 @@ drawn.  Buffers of sessions BODY makes are killed."
           (should (drover-model-p (plist-get options :model)))
           (should (equal (drover-model-label (plist-get options :model)) (drover-model-label model))))))))
 
+(ert-deftest drover-schedule-test-prompt-attachments ()
+  "A prompt with attachments is refused and kept, since a scheduled prompt carries text only."
+  (drover-schedule-test-state
+    (drover-schedule-test-prompt nil
+      (goto-char (point-max))
+      (insert (drover-prompt-attachment-label "`notes.txt`" 'opencode '(:file ((uri . "file:///tmp/notes.txt")))))
+      (let ((text (buffer-string)))
+        (should-error (drover-schedule-prompt) :type 'user-error)
+        (should (equal (buffer-string) text))
+        (should-not picked)
+        (should-not (drover-schedule--jobs))))))
+
 (ert-deftest drover-schedule-test-prompt-region ()
   "With an active region, only the region is scheduled, and the rest of the prompt stays."
   (drover-schedule-test-state

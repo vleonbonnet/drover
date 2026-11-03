@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 11
+(defconst drover-core-generation 12
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -117,6 +117,7 @@ every display of sessions; this ranks them for drover's views."
   :group 'drover)
 
 (declare-function no-littering-expand-var-file-name "ext:no-littering" (file))
+(declare-function drover-dispatch-keys "drover-keys" (command))
 
 (defcustom drover-state-directory
   (if (fboundp 'no-littering-expand-var-file-name)
@@ -1524,6 +1525,15 @@ PROPERTIES is a plist of:
              and selects it first, giving no OTHER-WINDOW, so that the
              sessions of every backend show in the same windows.
  :respond    Function of a session answering its oldest request.
+ :pending-prompts
+             Function of a session returning how many of its prompts,
+             sent but not delivered yet, :edit-pending can withdraw, 0
+             when none.  Menus call it to tell whether it applies, so
+             it must be cheap.
+ :edit-pending
+             Function of a session withdrawing one of its pending
+             prompts, read when several, for it to be edited and sent
+             again, as `drover-prompt-edit-for' does with its text.
  :interrupt  Function of a session stopping its running turn.
  :archive    Function of a session archiving it.  Sessions of a
              backend without it drover archives itself (see
@@ -1666,6 +1676,9 @@ as `drover-model' describes them: explicit choices (:agent :model
              (nil without :check, or for a new session), submitting TEXT
              as a prompt once SESSION is ready.  A failure is reported
              with `drover-warn', saying the prompt is in the kill ring.
+             When the prompt carries attachments of this backend (see
+             `drover-prompt-attachment-label'), it is given a fourth
+             argument, the list of their data, in order; only then.
              A session drover archived is restored before (see
              `drover-unarchive-to-send'); one its backend archived, the
              backend restores as it sends, telling a refusal so.
@@ -3502,8 +3515,8 @@ session was restored meanwhile (see `drover--close-cancel').")
   "Archive SESSION through its backend, closing its buffer once the archive took.
 The backend's :archive tells later whether it took (:archive-confirms):
 the buffer closes then, as `drover--close-archived' closes it, which is
-told only when there is something to tell, such as unsent input kept
-or a buffer left until its turn ends; a refusal leaves the buffer open
+told only when there is something to tell, unsent input kept or a turn
+waiting for the user's answer; a refusal leaves the buffer open
 and is told on one line, as a warning.  Return `confirming' when
 SESSION has a buffer to close, else nil."
   (let ((key (drover-session-key session))
@@ -3530,7 +3543,7 @@ SESSION has a buffer to close, else nil."
                      (pcase outcome
                        (`(failed . ,message)
                         (drover-warn "Could not close the buffer of %s, archived: %s" title message))
-                       ((or 'kept 'later 'waiting)
+                       ((or 'kept 'waiting)
                         (drover-message "Archived %s; %s" title (drover--archive-note outcome nil))))))))
              (lambda (message)
                (drover-with-reporting "archive"
@@ -3783,9 +3796,11 @@ comes, closes nothing."
     (remove-hook 'drover-changed-hook #'drover--close-pending)))
 
 (defun drover--close-pending ()
-  "Close the buffers of archived sessions whose turns ended, and say so.
+  "Close the buffers of archived sessions whose turns ended.
 For `drover-changed-hook', while buffers wait (see `drover--closing').
-A buffer killed meanwhile, or showing another session, or whose session
+Closing is told only when the user would otherwise miss something:
+unsent input kept in the kill ring, or a failure, as a warning.  A
+buffer killed meanwhile, or showing another session, or whose session
 was restored, is forgotten."
   (dolist (entry (copy-sequence drover--closing))
     (pcase-let* ((`(,key . ,buffer) entry)
@@ -3798,30 +3813,27 @@ was restored, is forgotten."
         (when still
           (let ((title (drover-session-display-title record))
                 (outcome (drover--close record)))
-            (if (eq (car-safe outcome) 'failed)
-                (drover-warn "Could not close the buffer of %s, archived: %s" title (cdr outcome))
-              (message "%s" (concat (format "Closed %s, archived, now that its turn ended" title)
-                                    (if (eq outcome 'kept)
-                                        "; its unsent input is in the kill ring"
-                                      "")))))))))
+            (pcase outcome
+              (`(failed . ,message)
+               (drover-warn "Could not close the buffer of %s, archived: %s" title message))
+              ('kept (drover-message "The unsent input of %s, archived, is in the kill ring"
+                                     title))))))))
   (unless drover--closing
     (remove-hook 'drover-changed-hook #'drover--close-pending)))
 
 (defun drover--archive-note (outcome title)
   "Return the note on closing the buffer of a session archived, or nil.
 OUTCOME is what `drover-archive-session' returned; TITLE the session's
-title, or nil for a session acted on alone, which the report names."
+title, or nil for a session acted on alone, which the report names.
+Only what the user would otherwise miss, or must act on, is noted:
+unsent input kept, a turn waiting for their answer, a buffer that could
+not close.  When the buffer closes, at once, once its turn ends or once
+the archive is confirmed, is not: it closes, as archiving says."
   (pcase outcome
     ('kept (if title
                (format "the unsent input of %s is in the kill ring" title)
              "its unsent input is in the kill ring"))
-    ('later (if title
-                (format "the buffer of %s closes once its turn ends" title)
-              "its buffer closes once its turn ends"))
-    ('waiting (format "%s waits for you: its buffer closes once its turn ends" (or title "it")))
-    ('confirming (if title
-                     (format "the buffer of %s closes once the archive is confirmed" title)
-                   "its buffer closes once the archive is confirmed"))
+    ('waiting (format "%s waits for you" (or title "it")))
     (`(failed . ,message)
      (format "%s stays open: %s" (if title (format "the buffer of %s" title) "its buffer") message))))
 
@@ -4565,9 +4577,30 @@ Not while the minibuffer is in use, nor in the log of messages."
                (not (active-minibuffer-window)))
       (setf (drover--bulk-shown job) now)
       (let ((message-log-max nil))
-        (message "%s %d/%d sessions…%s" (drover--bulk-verb job)
+        (message "%s %d/%d sessions…  %s stops" (drover--bulk-verb job)
                  (drover--bulk-settled job) (drover--bulk-total job)
-                 (substitute-command-keys "  \\[drover-stop-actions] stops"))))))
+                 (drover--stop-actions-keys))))))
+
+(defun drover--stop-actions-keys ()
+  "Return the keys running `drover-stop-actions', as the echo area tells them.
+Its own global key, if any, else its entry in `drover-dispatch' after
+that menu's global key, else its name after the key of
+`execute-extended-command'."
+  (or (and (where-is-internal #'drover-stop-actions nil t)
+           (substitute-command-keys "\\[drover-stop-actions]"))
+      (and (fboundp 'drover-dispatch-keys)
+           (drover-dispatch-keys #'drover-stop-actions))
+      (substitute-command-keys "\\[drover-stop-actions]")))
+
+(defun drover-actions-progress ()
+  "Return how far the actions on several sessions running are, or nil.
+Such as \"Archiving 340/2202\", one per action, as `drover-dispatch'
+shows it beside Stop actions."
+  (when-let* ((jobs (drover--bulk-current)))
+    (mapconcat (lambda (job)
+                 (format "%s %d/%d" (drover--bulk-verb job)
+                         (drover--bulk-settled job) (drover--bulk-total job)))
+               jobs ", ")))
 
 (defun drover--bulk-report (job)
   "Return the report of JOB, done, on one bounded line."
@@ -4675,30 +4708,25 @@ Return how it went, as `drover--close-archived' tells it."
 (defun drover--archive-notes (noted)
   "Return the notes on closing the buffers of the sessions archived, NOTED.
 NOTED lists (OUTCOME . TITLE), OUTCOME as `drover--close-archived'
-returns it: told one by one when few, else counted."
-  (let ((noted (seq-remove (lambda (entry) (eq (car entry) 'closed)) noted)))
+returns it: told one by one when few, else counted.  Only the outcomes
+`drover--archive-note' notes are told."
+  (let ((noted (seq-filter (lambda (entry) (drover--archive-note (car entry) (cdr entry))) noted)))
     (if (<= (length noted) drover--bulk-named)
         (mapcar (lambda (entry) (drover--archive-note (car entry) (cdr entry))) noted)
-      (let ((kept 0) (later 0) (waiting 0) (failed 0) (message nil))
+      (let ((kept 0) (waiting 0) (failed 0) (message nil))
         (pcase-dolist (`(,outcome . ,_) noted)
           (pcase outcome
             ('kept (cl-incf kept))
-            ('later (cl-incf later))
             ('waiting (cl-incf waiting))
             (`(failed . ,text) (cl-incf failed) (setq message (or message text)))))
         (delq nil
               (list (and (> kept 0)
                          (format "the unsent input of %d buffer%s is in the kill ring"
                                  kept (if (= kept 1) "" "s")))
-                    (and (> later 0)
-                         (if (= later 1)
-                             "1 buffer closes once its turn ends"
-                           (format "%d buffers close once their turns end" later)))
                     (and (> waiting 0)
                          (if (= waiting 1)
-                             "1 session waits for you: its buffer closes once its turn ends"
-                           (format "%d sessions wait for you: their buffers close once their turns end"
-                                   waiting)))
+                             "1 session waits for you"
+                           (format "%d sessions wait for you" waiting)))
                     (and (> failed 0)
                          (format "%d buffer%s open: %s" failed (if (= failed 1) " stays" "s stay")
                                  message))))))))
@@ -5000,6 +5028,31 @@ waiting the longest, at any depth: see `drover-session-to-answer'.
 Interactively, SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
   (drover-backend-call (or (and session (drover-session-to-answer session)) session) :respond))
+
+(defun drover-pending-prompts (session)
+  "Return how many pending prompts of SESSION its backend can withdraw, maybe 0.
+They are prompts sent to SESSION that it has not taken yet, as those
+sent while a turn runs (see the backend properties :pending-prompts and
+:edit-pending).  It costs what the backend's count costs, little."
+  (let ((count (and (drover-supports-p session :edit-pending)
+                    (functionp (drover-backend-property session :pending-prompts))
+                    (drover-with-reporting "pending prompts"
+                      (drover-backend-call session :pending-prompts)))))
+    (if (natnump count) count 0)))
+
+(defun drover-edit-pending-prompt (session)
+  "Withdraw a pending prompt of SESSION to edit it and send it again.
+A pending prompt is one sent to SESSION that it has not taken yet, as
+one sent while a turn runs; with several, which one is read.  Its
+backend withdraws it, and its text, attachments included, goes where
+the backend puts a prompt to edit: for OpenCode sessions, drover's
+prompt, set to go to SESSION (see `drover-opencode-edit-old-input').
+The session needs no buffer shown.  Interactively, SESSION is the
+session at point."
+  (interactive (list (drover-session-at-point)))
+  (when (zerop (drover-pending-prompts session))
+    (user-error "No prompt of %s is pending" (drover-session-display-title session)))
+  (drover-backend-call session :edit-pending))
 
 (defun drover-interrupt (sessions)
   "Stop the running turns of SESSIONS, a session or a list of sessions.

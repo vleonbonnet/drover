@@ -2423,14 +2423,15 @@ body beginning with an aligned space would push the next line right."
         (drover-list-test-shown
           (drover-list-test-goto "s")
           (drover-list-test-press "z"))
-        (should (equal messages '("Archived Session s; its buffer closes once its turn ends")))
+        (should (equal messages '("Archived Session s")))
         (should (buffer-live-p session-buffer))
         (kill-buffer buffer)
+        (setq messages nil)
         (setf (drover-session-status (drover-list-test-find "s")) 'done)
         (drover-backend-changed 'fake "s")
         (drover-changed-now)
         (should-not (buffer-live-p session-buffer))
-        (should (equal (car messages) "Closed Session s, archived, now that its turn ended"))))))
+        (should-not messages)))))
 
 (ert-deftest drover-list-test-key-bindings ()
   (drover-list-test-with (list (drover-test-session "s" :status 'working))
@@ -2479,7 +2480,7 @@ Of their keys, only g is a session key, and it refreshes either way."
                           (should (eq theirs #'revert-buffer))
                         (should-not (commandp theirs)))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "U" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "U" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.

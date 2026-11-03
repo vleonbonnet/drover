@@ -41,7 +41,14 @@
 ;; sessions of its own: drover's list does.  The menu `drover-dispatch'
 ;; gains opencode.el's session search.  RET on an earlier prompt of a
 ;; session buffer puts it in drover's prompt, set to go to that session
-;; (`drover-opencode-edit-old-input', for `opencode-old-input-function').
+;; (`drover-opencode-edit-old-input', for `opencode-old-input-function'),
+;; and so does withdrawing a pending prompt, from its buffer or from the
+;; menu (`drover-opencode-edit-withdrawn', for
+;; `opencode-withdrawn-prompt-function'): its attachments come along,
+;; each on its label, and go with the prompt to OpenCode sessions.
+;; Interrupting, marking seen and deleting are confirmed, as archiving
+;; is, so that acting on thousands of sessions keeps a few requests in
+;; flight (:interrupt-confirms, :mark-seen-confirms, :delete-confirms).
 ;;
 ;; Older sessions, beyond those of the registry, come from the service
 ;; on demand (:history): every unarchived session, of every project;
@@ -81,12 +88,13 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 8))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 12))
   (load "drover-core" nil t))
 
 ;; Recent additions to opencode.el.
 (declare-function opencode-fetch-sessions "opencode-sessions" (query callback &optional else cursor accumulated))
-(declare-function opencode-session-delete "opencode-session" (id))
+(declare-function opencode-session-delete "opencode-session" (id &optional then else))
+(declare-function opencode-pending-prompts "opencode-inbox" (id))
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
 (declare-function opencode-session-last-turn "opencode-session" (id callback))
@@ -99,9 +107,11 @@
 (declare-function drover-schedule-read-prompt "drover-schedule" ())
 (declare-function drover-schedule-enqueue "drover-schedule" (target chosen text))
 (declare-function drover-prompt-edit-for "drover-prompt" (session text))
+(declare-function drover-prompt-attachment-label "drover-prompt" (label backend data))
 (defvar opencode--attachments)
 ;; From opencode.el's versions that edit earlier prompts.
 (defvar opencode-old-input-function)
+(defvar opencode-withdrawn-prompt-function)
 
 ;;;; The OpenCode engine
 
@@ -939,9 +949,19 @@ it asks, and the buffer, opened in the background if need be, records
 the answer."
   (opencode-respond-session (drover-session-id session) nil t))
 
-(defun drover-opencode--interrupt (session)
-  "Stop the running turn of SESSION."
-  (opencode-session-interrupt (drover-session-id session)))
+(defun drover-opencode--else (else)
+  "Return ELSE as opencode.el calls it, with an `opencode-error', or nil.
+ELSE gets the error's description, as drover's backends give a refusal."
+  (and else (lambda (error) (funcall else (opencode-error-describe error)))))
+
+(defun drover-opencode--interrupt (session &optional then else)
+  "Stop the running turn of SESSION; call THEN once done, ELSE if refused.
+THEN is called whether a turn ran still or had ended; ELSE gets the
+refusal's description, which opencode.el otherwise reports.  The
+backend's :interrupt, which confirms (:interrupt-confirms)."
+  (opencode-session-interrupt (drover-session-id session)
+                              (and then (lambda (_interrupted) (funcall then)))
+                              (drover-opencode--else else)))
 
 (defun drover-opencode--archive (session &optional then else)
   "Archive SESSION on the service; call THEN once it took, ELSE if refused.
@@ -975,9 +995,12 @@ there was some.  The backend's :close."
                       (buffer-substring-no-properties (process-mark process) (point-max))))))
       (drover-kill-buffer buffer))))
 
-(defun drover-opencode--mark-seen (session)
-  "Mark the ended turn of SESSION viewed on the service, for every client."
-  (opencode-session-view (drover-session-id session)))
+(defun drover-opencode--mark-seen (session &optional then else)
+  "Mark the ended turn of SESSION viewed on the service, for every client.
+THEN is called once it is, at once when it was seen already, ELSE with
+the refusal's description, which opencode.el otherwise tells.  The
+backend's :mark-seen, which confirms (:mark-seen-confirms)."
+  (opencode-session-view (drover-session-id session) nil then (drover-opencode--else else)))
 
 (defun drover-opencode--preview (session callback)
   "Call CALLBACK with the last reply of SESSION, or nil."
@@ -998,9 +1021,27 @@ drover's form already.  The backend's :recap."
   "Rename SESSION to TITLE on the service."
   (opencode-rename-session (drover-session-id session) title))
 
-(defun drover-opencode--delete (session)
-  "Delete SESSION on the service, without asking."
-  (opencode-session-delete (drover-session-id session)))
+(defun drover-opencode--delete (session &optional then else)
+  "Delete SESSION on the service, without asking.
+THEN is called once the service deleted it, its buffer killed, ELSE
+with the refusal's description, which opencode.el otherwise reports.
+The backend's :delete, which confirms (:delete-confirms)."
+  (opencode-session-delete (drover-session-id session) then (drover-opencode--else else)))
+
+(defun drover-opencode--pending-prompts (session)
+  "Return how many pending prompts of SESSION can be withdrawn, maybe 0.
+Its buffer keeps them: a session without one has none to withdraw.
+The backend's :pending-prompts."
+  (opencode-pending-prompts (drover-session-id session)))
+
+(defun drover-opencode--edit-pending (session)
+  "Withdraw a pending prompt of SESSION, read when several, to edit it.
+The service cancels it; its text, with its attachments, goes to
+`opencode-withdrawn-prompt-function', drover's prompt set to go to
+SESSION unless the user chose otherwise (see
+`drover-opencode-edit-withdrawn').  Its buffer need not be shown.
+The backend's :edit-pending."
+  (opencode-edit-pending-prompt nil (drover-session-id session)))
 
 (defun drover-opencode--fork (session)
   "Fork SESSION whole into a new session, and display it."
@@ -1179,20 +1220,22 @@ session's buffer or title, did not take the prompt."
       (drover-opencode--restore-failure session error)
     (format "%s did not take the prompt: %s" name (opencode-error-describe error))))
 
-(defun drover-opencode--send (session text token)
+(defun drover-opencode--send (session text token &optional attachments)
   "Send TEXT as a prompt of SESSION, with the metadata TOKEN holds.
-TOKEN is what `drover-opencode--check' returned.  The prompt goes
-straight to the service, past any input half typed in the buffer; the
-transcript shows it once the service delivered it.  The service queues
-or steers a prompt sent while a turn runs, so the session needs not be
-idle.  An archived session is restored first, by opencode.el, a refusal
-told as such.  The backend's :send."
+TOKEN is what `drover-opencode--check' returned.  ATTACHMENTS, the
+prompt's, as opencode.el's labels carry them, go with it (see
+`drover-opencode-edit-old-input').  The prompt goes straight to the
+service, past any input half typed in the buffer; the transcript shows
+it once the service delivered it.  The service queues or steers a
+prompt sent while a turn runs, so the session needs not be idle.  An
+archived session is restored first, by opencode.el, a refusal told as
+such.  The backend's :send."
   (drover-opencode--in-buffer
    session
    (lambda ()
      (let ((buffer (current-buffer)))
        (opencode-session-send
-        text :show t :metadata (and (consp token) token)
+        text :show t :metadata (and (consp token) token) :attachments attachments
         :else (lambda (error)
                 (drover-with-reporting "OpenCode prompt"
                   (drover-warn "%s; it is in the kill ring"
@@ -1387,12 +1430,16 @@ unknown.  The backend's :options."
    :open #'drover-opencode--open
    :respond #'drover-opencode--respond
    :interrupt #'drover-opencode--interrupt
+   :interrupt-confirms t
+   :pending-prompts #'drover-opencode--pending-prompts
+   :edit-pending #'drover-opencode--edit-pending
    :archive #'drover-opencode--archive
    :archive-confirms t
    :unarchive #'drover-opencode--unarchive
    :unarchive-confirms t
    :archived #'drover-opencode--archived
    :mark-seen #'drover-opencode--mark-seen
+   :mark-seen-confirms t
    :preview #'drover-opencode--preview
    :recap #'drover-opencode--recap
    :new #'drover-opencode--new
@@ -1400,6 +1447,7 @@ unknown.  The backend's :options."
    :close #'drover-opencode--close
    :rename #'drover-opencode--rename
    :delete #'drover-opencode--delete
+   :delete-confirms t
    :fork #'drover-opencode--fork
    :compact #'drover-opencode--compact
    :history #'drover-opencode--history
@@ -1502,19 +1550,53 @@ Everything after the process mark goes; \\[undo] brings it back."
 
 ;;;; Earlier prompts
 
+(defun drover-opencode--prompt-text (text)
+  "Return TEXT, a prompt as `opencode-old-input' returns one, for drover's prompt.
+The labels carrying an attachment, as their `opencode-sent-attachment'
+property, carry it in drover's prompt (see
+`drover-prompt-attachment-label'), for OpenCode sessions; the rest is
+text."
+  (let ((pos 0)
+        (length (length text))
+        (parts nil))
+    (while (< pos length)
+      (let ((attachment (get-text-property pos 'opencode-sent-attachment text))
+            (next (or (next-single-property-change pos 'opencode-sent-attachment text) length)))
+        (push (if attachment
+                  (drover-prompt-attachment-label (substring-no-properties text pos next)
+                                                  'opencode attachment)
+                (substring-no-properties text pos next))
+              parts)
+        (setq pos next)))
+    (apply #'concat (nreverse parts))))
+
 (defun drover-opencode-edit-old-input (text buffer)
   "Put TEXT, an earlier prompt of OpenCode session BUFFER, in drover's prompt.
 The prompt shows, set to go to BUFFER's session, which the prompt's
 send then reaches without the picker (see `drover-prompt-edit-for').
-Attachments do not go with it: their labels stay as text.  For
-`opencode-old-input-function', which drover sets to it when nil, so
-that RET on an earlier prompt edits it in drover's prompt; set that
-option to `opencode-put-old-input' to edit it in the session's input."
+Its attachments go with it, each on its label, files, subagents and
+skills, sent with the prompt to OpenCode sessions; to other sessions,
+their labels go as text.  For `opencode-old-input-function', which
+drover sets to it when nil, so that RET on an earlier prompt edits it
+in drover's prompt; set that option to `opencode-put-old-input' to
+edit it in the session's input."
   (require 'drover-prompt)
   (let ((session (with-current-buffer buffer
                    (or (drover-opencode--buffer-session)
                        (user-error "Not an OpenCode session buffer")))))
-    (drover-prompt-edit-for session (substring-no-properties text))))
+    (drover-prompt-edit-for session (drover-opencode--prompt-text text))))
+
+(defun drover-opencode-edit-withdrawn (text buffer)
+  "Put TEXT, a prompt withdrawn from OpenCode session BUFFER, in drover's prompt.
+It goes there as `drover-opencode-edit-old-input' puts an earlier
+prompt, attachments included, set to go to BUFFER's session, once the
+service cancelled it.  For `opencode-withdrawn-prompt-function', which
+drover sets to it when nil, so that a prompt withdrawn, from its buffer
+or from drover's menu (`drover-edit-pending-prompt'), is edited where an
+earlier prompt is; set that option to `opencode-put-old-input' to edit
+it in the session's input."
+  (drover-with-reporting "withdrawn prompt"
+    (drover-opencode-edit-old-input text buffer)))
 
 ;;;; The dispatch menu
 
@@ -1546,12 +1628,10 @@ They follow \"p\", the last of drover's commands listing sessions."
 (defun drover-opencode--command-keys (command)
   "Return the keys of `drover-dispatch' running opencode.el COMMAND, or nil.
 They are the global key of the menu followed by the key of the entry,
-such as \"C-\\=' A\".  For `opencode-command-keys-function'."
-  (when-let* ((drover (alist-get command drover-opencode--commands))
-              (menu (where-is-internal #'drover-dispatch nil t))
-              (key (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-dispatch drover)))
-                              :key)))
-    (concat (key-description menu) " " key)))
+such as \"C-\\=' A\" (see `drover-dispatch-keys').  For
+`opencode-command-keys-function'."
+  (when-let* ((drover (alist-get command drover-opencode--commands)))
+    (drover-dispatch-keys drover)))
 
 ;;;; Installing
 
@@ -1572,7 +1652,9 @@ chose a function of their own (see `drover-opencode-edit-old-input')."
   (unless opencode-command-keys-function
     (setq opencode-command-keys-function #'drover-opencode--command-keys))
   (unless (bound-and-true-p opencode-old-input-function)
-    (setq opencode-old-input-function #'drover-opencode-edit-old-input)))
+    (setq opencode-old-input-function #'drover-opencode-edit-old-input))
+  (unless (bound-and-true-p opencode-withdrawn-prompt-function)
+    (setq opencode-withdrawn-prompt-function #'drover-opencode-edit-withdrawn)))
 
 (defun drover-opencode--uninstall ()
   "Undo `drover-opencode--install'."
@@ -1584,7 +1666,9 @@ chose a function of their own (see `drover-opencode-edit-old-input')."
   (when (eq opencode-command-keys-function #'drover-opencode--command-keys)
     (setq opencode-command-keys-function nil))
   (when (eq (bound-and-true-p opencode-old-input-function) #'drover-opencode-edit-old-input)
-    (setq opencode-old-input-function nil)))
+    (setq opencode-old-input-function nil))
+  (when (eq (bound-and-true-p opencode-withdrawn-prompt-function) #'drover-opencode-edit-withdrawn)
+    (setq opencode-withdrawn-prompt-function nil)))
 
 (drover-opencode--install)
 
