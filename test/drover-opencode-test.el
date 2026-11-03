@@ -1952,11 +1952,17 @@ A refusal is told on one line, as a warning, the session staying archived."
         (drover-opencode--install)))))
 
 (ert-deftest drover-opencode-test-old-input-function-installed ()
-  "drover edits earlier prompts in its prompt, unless the user chose a function."
+  "drover quotes from earlier prompts in its prompt, unless the user chose a function."
   (drover-opencode-test-with nil
     (let ((opencode-old-input-function nil))
       (drover-opencode--install)
-      (should (eq opencode-old-input-function #'drover-opencode-edit-old-input))
+      (should (eq opencode-old-input-function #'drover-opencode-quote-old-input))
+      (drover-opencode--uninstall)
+      (should-not opencode-old-input-function)
+      ;; What earlier versions installed gives way.
+      (setq opencode-old-input-function #'drover-opencode-edit-old-input)
+      (drover-opencode--install)
+      (should (eq opencode-old-input-function #'drover-opencode-quote-old-input))
       (drover-opencode--uninstall)
       (should-not opencode-old-input-function)
       (setq opencode-old-input-function #'opencode-put-old-input)
@@ -2041,37 +2047,60 @@ go as text, which is told."
             (kill-buffer prompt)))))))
 
 (ert-deftest drover-opencode-test-ret-on-earlier-prompt ()
-  "RET on an earlier prompt puts it whole in drover's prompt, set to go to its session."
+  "RET on an earlier prompt quotes in drover's prompt what the prompt key quotes there.
+That is the line at point, or the region, as `drover-prompt-dwim' quotes
+it; nothing is sent, and the session's input stays."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1") (drover-opencode-test-entry "ses_2"))
     (drover-opencode-test-with-buffers '("half typed" "")
-      (let ((opencode-old-input-function #'drover-opencode-edit-old-input)
+      (let ((opencode-old-input-function #'drover-opencode-quote-old-input)
             (drover-prompt-buffer-name "*drover opencode prompt test*")
             (drover-prompt-require-features nil)
             (org-mode-hook nil)
+            (transient-mark-mode t)
             (sent nil))
-        (unwind-protect
-            (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
-                      ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
-                      ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
-                      ((symbol-function 'opencode-session-send)
-                       (lambda (text &rest _) (push text sent))))
-              (with-current-buffer (car buffers)
-                (let ((inhibit-read-only t))
-                  (goto-char (point-min))
-                  (insert (propertize "first line\nsecond line" 'opencode-prompt t) "\n"))
-                (goto-char (+ (point-min) 13))
-                (opencode-send-input)
-                (should-not sent)
-                (should (equal (buffer-substring-no-properties (opencode-pmark) (point-max)) "half typed")))
-              (with-current-buffer (drover-prompt-buffer)
-                (should (equal (buffer-string) "first line\nsecond line"))
-                (should (equal (plist-get drover-prompt--chosen-session :key) '(opencode . "ses_1")))
-                (cl-letf (((symbol-function 'completing-read)
-                           (lambda (&rest _) (ert-fail "The picker opened"))))
-                  (should (equal (drover-session-key (drover-prompt-read-target "Send to session: "))
-                                 '(opencode . "ses_1"))))))
-          (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
-            (kill-buffer prompt)))))))
+        (cl-flet ((quoted (thunk)
+                    ;; What the prompt key adds there, from a prompt of its own.
+                    (let ((drover-prompt-buffer-name "*drover opencode prompt expected*"))
+                      (unwind-protect
+                          (progn (funcall thunk)
+                                 (with-current-buffer (drover-prompt-buffer) (buffer-string)))
+                        (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+                          (kill-buffer prompt))))))
+          (unwind-protect
+              (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                        ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
+                        ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
+                        ((symbol-function 'opencode-session-send)
+                         (lambda (text &rest _) (push text sent))))
+                (with-current-buffer (car buffers)
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-min))
+                    (insert (propertize "first line\nsecond line" 'opencode-prompt t) "\n"))
+                  (goto-char (+ (point-min) 13))
+                  (let ((expected (quoted #'drover-prompt-dwim)))
+                    (should (string-match-p "second line" expected))
+                    (should-not (string-match-p "first line" expected))
+                    (opencode-send-input)
+                    (should-not sent)
+                    (should (equal (buffer-substring-no-properties (opencode-pmark) (point-max)) "half typed"))
+                    (with-current-buffer (drover-prompt-buffer)
+                      (should (equal (buffer-string) expected))
+                      ;; Quoting chooses no session, as the prompt key does not.
+                      (should-not drover-prompt--chosen-session)))
+                  ;; The region, when active.
+                  (kill-buffer (drover-prompt-buffer))
+                  (goto-char (+ (point-min) 6))
+                  (push-mark (point) t t)
+                  (goto-char (+ (point-min) 17))
+                  (let ((expected (quoted #'drover-prompt-dwim)))
+                    (should (string-match-p "line\nsecond" expected))
+                    (opencode-send-input)
+                    (deactivate-mark)
+                    (with-current-buffer (drover-prompt-buffer)
+                      (should (equal (buffer-string) expected))))
+                  (should-not sent)))
+            (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+              (kill-buffer prompt))))))))
 
 ;;;; The engine: models
 

@@ -50,10 +50,11 @@
 ;; `drover-prompt-explicit-options', `drover-prompt-options-for' and
 ;; `drover-prompt-apply-options'.
 ;;
-;; Front ends put an earlier prompt of a session in it to be edited with
-;; `drover-prompt-edit-for', which also chooses that session as where
-;; the prompt goes: sending skips the picker until the prompt is sent or
-;; cleared, or the session forgotten (`drover-prompt-forget-target').
+;; Front ends put a prompt of a session in it to be edited, such as one
+;; withdrawn before delivery, with `drover-prompt-edit-for', which also
+;; chooses that session as where the prompt goes: sending skips the
+;; picker until the prompt is sent or cleared, or the session forgotten
+;; (`drover-prompt-forget-target').
 ;; Its attachments come with it, each label carrying its own
 ;; (`drover-prompt-attachment-label'), and go with the prompt to the
 ;; sessions of their backend (see :send in `drover-register-backend').
@@ -770,8 +771,8 @@ TEXT following it after a blank line, which the echo area tells.
 SESSION becomes where the prompt goes: sending it, or scheduling it,
 skips the picker, until it is sent, cleared, or the session forgotten
 \(`drover-prompt-forget-target'); the header names it.  Nothing is sent.
-Front ends call this to have an earlier prompt edited in the prompt,
-as drover's OpenCode backend does for opencode.el.  The labels of its
+Front ends call this to have a prompt edited in the prompt, as
+drover's OpenCode backend does for the prompts opencode.el withdraws.  The labels of its
 attachments, made by `drover-prompt-attachment-label', carry them in
 TEXT: they go with the prompt to sessions of their backend."
   (let* ((buffer (drover-prompt-buffer t))
