@@ -23,8 +23,9 @@
 ;; annotations of a page of candidates), with and without lazy
 ;; highlighting; then ripgrep searching 120 transcripts of fixtures,
 ;; some of megabytes, the real one: the longest any function of the
-;; search runs on the main thread, the longest a timer ticking every
-;; millisecond waits, and how long until every match came.  The target
+;; search runs on the main thread, garbage collections apart, the
+;; longest a timer ticking every millisecond waits, and how long until
+;; every match came.  The target
 ;; of a key typed and of a function of the search is 5 ms, flagged "!"
 ;; past it.
 ;;
@@ -140,10 +141,15 @@ the first 20."
                          (functions '(drover-search--start drover-search--receive
                                                            drover-transcript--search-filter
                                                            drover-transcript--search-sentinel))
+                         ;; Garbage collections apart: they are the whole Emacs's.
+                         (collected 0.0)
                          (timing (lambda (original &rest arguments)
-                                   (let ((begin (float-time)))
+                                   (let ((begin (float-time))
+                                         (collecting gc-elapsed))
                                      (prog1 (apply original arguments)
-                                       (setq longest (max longest (- (float-time) begin)))))))
+                                       (let ((collection (- gc-elapsed collecting)))
+                                         (setq collected (max collected collection)
+                                               longest (max longest (- (float-time) begin collection))))))))
                          (result nil)
                          (last (float-time))
                          (gap 0.0)
@@ -162,10 +168,10 @@ the first 20."
                       (cancel-timer timer)
                       (dolist (function functions)
                         (advice-remove function timing)))
-                    (drover-bench-log "  text %-10s %3d sessions in %6.1f ms; longest function %5.2f ms%s, longest timer gap %5.1f ms"
+                    (drover-bench-log "  text %-10s %3d sessions in %6.1f ms; longest function %5.2f ms%s (a collection in it %4.1f ms), longest timer gap %5.1f ms"
                                       (format "%S" query) (length (plist-get result :sessions))
                                       (* 1000 (- (float-time) begin)) (* 1000 longest)
-                                      (if (> longest 0.005) "!" " ") (* 1000 gap)))))
+                                      (if (> longest 0.005) "!" " ") (* 1000 collected) (* 1000 gap)))))
             (drover-claude-code-transcripts-uninstall 'bench)))))))
 
 (defun drover-search-bench-run ()

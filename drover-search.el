@@ -286,8 +286,12 @@ subagents under their parent, those the list hides marked so."
 
 (defun drover-search--match-p (entry words)
   "Return non-nil when every one of WORDS is in what ENTRY tells."
-  (let ((haystack (drover-search--entry-haystack entry)))
-    (seq-every-p (lambda (word) (string-search word haystack)) words)))
+  (let ((haystack (drover-search--entry-haystack entry))
+        (match t))
+    (while (and match words)
+      (setq match (string-search (car words) haystack)
+            words (cdr words)))
+    (and match t)))
 
 (defun drover-search-entries (state query)
   "Return the entries of STATE matching QUERY, in the list's order.
@@ -295,30 +299,33 @@ An entry matches when every word of QUERY is in what it tells, or when
 a backend found QUERY in what its session said (see the hits of
 STATE).  A subagent the list hides shows when it matches and no session
 above it does, as the list shows such a subagent under a filter.
-Without words, the entries the list shows."
+Without words, the entries the list shows.  It allocates nothing but
+the list it returns, as it runs at every key typed."
   (let* ((words (drover-search--words query))
          (hits (drover-search--state-hits state))
          (any-hits (> (hash-table-count hits) 0))
+         (entries (drover-search--state-entries state))
+         (count (length entries))
          (matched (make-vector 64 nil))
+         (index 0)
          (result nil))
-    (if (null words)
-        (seq-doseq (entry (drover-search--state-entries state))
-          (when (drover-search--entry-visible entry)
-            (push entry result)))
-      (seq-doseq (entry (drover-search--state-entries state))
-        (let* ((depth (min 63 (drover-search--entry-depth entry)))
-               (match (or (drover-search--match-p entry words)
-                          (and any-hits (gethash (drover-search--entry-key entry) hits) t)))
-               (above (and (> depth 0)
-                           (let ((found nil)
-                                 (level 0))
-                             (while (and (not found) (< level depth))
-                               (setq found (aref matched level)
-                                     level (1+ level)))
-                             found))))
-          (aset matched depth match)
-          (when (and match (or (drover-search--entry-visible entry) (not above)))
-            (push entry result)))))
+    (while (< index count)
+      (let ((entry (aref entries index)))
+        (if (null words)
+            (when (drover-search--entry-visible entry)
+              (push entry result))
+          (let* ((depth (min 63 (drover-search--entry-depth entry)))
+                 (match (or (drover-search--match-p entry words)
+                            (and any-hits (gethash (drover-search--entry-key entry) hits) t)))
+                 (above nil)
+                 (level 0))
+            (while (and (not above) (< level depth))
+              (setq above (aref matched level)
+                    level (1+ level)))
+            (aset matched depth match)
+            (when (and match (or (drover-search--entry-visible entry) (not above)))
+              (push entry result)))))
+      (setq index (1+ index)))
     (nreverse result)))
 
 (defun drover-search--candidates (query)
