@@ -3977,6 +3977,119 @@ Each shows its own buffer."
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
         (should (eq (window-buffer side) (drover-list--buffer t)))))))
 
+(defun drover-list-test-posn (window position &optional x)
+  "Return a mouse position at POSITION of WINDOW's text, X pixels from its left."
+  (list window position (cons (or x 0) 0) 0 nil position '(0 . 0) nil '(0 . 0) '(1 . 1)))
+
+(defun drover-list-test-mouse (window position &rest kinds)
+  "Run the mouse events KINDS at POSITION of WINDOW through the command loop.
+Each kind is a symbol such as `down-mouse-1' or `double-mouse-1'; a drag
+is (drag-mouse-1 END), from POSITION to END.  The current buffer is the
+one current before."
+  (let ((buffer (current-buffer))
+        (posn (drover-list-test-posn window position)))
+    (execute-kbd-macro
+     (vconcat (mapcar (lambda (kind)
+                        (pcase kind
+                          (`(drag-mouse-1 ,end) (list 'drag-mouse-1 posn (drover-list-test-posn window end 40)))
+                          ((or 'double-down-mouse-1 'double-mouse-1) (list kind posn 2))
+                          ((or 'triple-down-mouse-1 'triple-mouse-1) (list kind posn 3))
+                          (_ (list kind posn))))
+                      kinds)))
+    (set-buffer buffer)))
+
+(ert-deftest drover-list-test-side-click-opens-as-ret ()
+  "A click on a session's row of the sidebar opens it as RET does, once.
+From the window where you work, the sidebar not selected, the session
+opens there, as RET in the sidebar opens it; a click on its second line
+too.  A click on a group's heading, or below the rows, does nothing,
+a double or triple click opens once, and the mouse drags no region.
+The list of an ordinary window keeps the global click."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (drover-list-test-showing
+      (pcase-let ((`(,first ,second) (drover-list-test--main)))
+        (let* ((side (drover-list-side '(4)))
+               (sidebar (window-buffer side))
+               (calls (lambda () (seq-filter (lambda (call) (eq (car call) :open)) drover-test-calls))))
+          (cl-flet ((row (id &optional line)
+                      (with-current-buffer sidebar
+                        (save-excursion
+                          (drover-list-test-goto id)
+                          (forward-line (or line 0))
+                          (+ (point) 3)))))
+            ;; RET, the reference.
+            (with-current-buffer sidebar
+              (drover-list-test-goto "done")
+              (execute-kbd-macro (kbd "RET")))
+            (let ((by-ret (car drover-test-calls)))
+              (should (equal by-ret (list :open "done" nil first)))
+              (setq drover-test-calls nil)
+              ;; The same from a click, the sidebar unselected.
+              (select-window first)
+              (switch-to-buffer "*other 1*")
+              (with-current-buffer sidebar
+                (drover-list-test-goto "work"))
+              (drover-list-test-mouse side (row "done") 'down-mouse-1 'mouse-1)
+              (should (equal (funcall calls) (list by-ret)))
+              (should (eq (selected-window) first))
+              (should (equal (buffer-name (window-buffer first)) "*session done*"))
+              (should (equal (buffer-name (window-buffer second)) "*other 2*"))
+              (should (eq (window-buffer side) sidebar))
+              (with-current-buffer sidebar
+                (should (= (window-point side) (oref (drover-list-test-section "done") start)))))
+            ;; Its second line.
+            (setq drover-test-calls nil)
+            (drover-list-test-mouse side (row "ask" 1) 'down-mouse-1 'mouse-1)
+            (should (equal (funcall calls) (list (list :open "ask" nil first))))
+            ;; A group's heading, or below the rows: nothing.
+            (setq drover-test-calls nil)
+            (select-window second)
+            (let ((heading (with-current-buffer sidebar
+                             (save-excursion (drover-list-test-goto-group 'idle) (+ (point) 2))))
+                  (point (window-point side)))
+              (drover-list-test-mouse side heading 'down-mouse-1 'mouse-1)
+              (drover-list-test-mouse side heading 'down-mouse-1 'mouse-1 'double-down-mouse-1 'double-mouse-1)
+              (drover-list-test-mouse side (with-current-buffer sidebar (point-max)) 'down-mouse-1 'mouse-1)
+              (should-not (funcall calls))
+              (should (eq (selected-window) second))
+              (should (= (window-point side) point))
+              (with-current-buffer sidebar
+                (should-not (drover-list-test-group-hidden-p 'idle))))
+            ;; A double click, a triple click: one session opened each.
+            (drover-list-test-mouse side (row "fail") 'down-mouse-1 'mouse-1
+                                    'double-down-mouse-1 'double-mouse-1)
+            (should (equal (funcall calls) (list (list :open "fail" nil second))))
+            (setq drover-test-calls nil)
+            (drover-list-test-mouse side (row "work") 'down-mouse-1 'mouse-1
+                                    'double-down-mouse-1 'double-mouse-1
+                                    'triple-down-mouse-1 'triple-mouse-1)
+            (should (equal (funcall calls) (list (list :open "work" nil second))))
+            ;; A drag selects nothing and opens nothing.
+            (setq drover-test-calls nil)
+            (let ((transient-mark-mode t))
+              (drover-list-test-mouse side (row "ask") 'down-mouse-1 `(drag-mouse-1 ,(row "done")))
+              (should-not (funcall calls))
+              (with-current-buffer sidebar
+                (should-not (region-active-p))))
+            (with-current-buffer sidebar
+              (dolist (key '("<down-mouse-1>" "<drag-mouse-1>" "<double-mouse-1>" "<triple-mouse-1>"))
+                (should (eq (keymap-lookup drover-list-sidebar-mode-map key) #'ignore))))
+            ;; The list of an ordinary window clicks as ever: a double
+            ;; click on a group's heading folds it.
+            (should-not (keymap-lookup drover-list-mode-map "<mouse-1>"))
+            (should-not (keymap-lookup drover-list-mode-map "<down-mouse-1>"))
+            (set-window-buffer second buffer)
+            (select-window second)
+            (with-current-buffer buffer
+              (revert-buffer)
+              (should (drover-list-test-group-hidden-p 'idle))
+              (let ((heading (save-excursion (drover-list-test-goto-group 'idle) (+ (point) 2))))
+                (drover-list-test-mouse second heading 'down-mouse-1 'mouse-1
+                                        'double-down-mouse-1 'double-mouse-1))
+              (should-not (drover-list-test-group-hidden-p 'idle)))
+            (should-not (funcall calls))))))))
+
 (ert-deftest drover-list-test-side-o-opens-beside-main-window ()
   "From the side window, o opens a session in another window than the main window."
   (drover-list-test-with (drover-list-test-side-sample)

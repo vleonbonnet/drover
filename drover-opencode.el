@@ -39,10 +39,10 @@
 ;; keys: each tells its session (`drover-session-at-point-function') and
 ;; its prompt actions (`drover-prompt-define').  opencode.el lists no
 ;; sessions of its own: drover's list does.  The menu `drover-dispatch'
-;; gains opencode.el's session search.  RET on an earlier prompt of a
-;; session buffer quotes its line or the region in drover's prompt, as
-;; `drover-prompt-dwim' does (`drover-opencode-quote-old-input', for
-;; `opencode-old-input-function').  Withdrawing a pending prompt, from
+;; gains opencode.el's session search.  RET anywhere in the transcript
+;; of a session buffer quotes its line or the region in drover's prompt,
+;; as `drover-prompt-dwim' does, without what the transcript hides
+;; (`drover-opencode-quote-old-input', for `opencode-old-input-function').  Withdrawing a pending prompt, from
 ;; its buffer or from the menu, puts it in drover's prompt, set to go to
 ;; that session (`drover-opencode-edit-withdrawn', for
 ;; `opencode-withdrawn-prompt-function'): its attachments come along,
@@ -108,6 +108,7 @@
 (declare-function drover-schedule-read-prompt "drover-schedule" ())
 (declare-function drover-schedule-enqueue "drover-schedule" (target chosen text))
 (declare-function drover-prompt-edit-for "drover-prompt" (session text))
+(declare-function drover-prompt-add-context "drover-prompt" (&optional text))
 (declare-function drover-prompt-attachment-label "drover-prompt" (label backend data))
 (defvar opencode--attachments)
 ;; From opencode.el's versions that edit earlier prompts.
@@ -1585,17 +1586,21 @@ their labels go as text.  A withdrawn prompt goes there through it
                        (user-error "Not an OpenCode session buffer")))))
     (drover-prompt-edit-for session (drover-opencode--prompt-text text))))
 
-(defun drover-opencode-quote-old-input (_text buffer)
-  "Quote BUFFER's line at point, or its region, in drover's prompt.
+(defun drover-opencode-quote-old-input (text buffer)
+  "Quote TEXT, BUFFER's line at point or its region, in drover's prompt.
 BUFFER is an OpenCode session buffer, where this does what
-`drover-prompt-dwim' does, the text opencode.el picked being the same.
-For `opencode-old-input-function', which drover
-sets to it when nil, so that RET on an earlier prompt does what
-\\[drover-dispatch] \" does; set that option to `opencode-put-old-input' to put
-the text in the session's input."
+`drover-prompt-dwim' does, the line linked as it links it, but quotes
+the text as opencode.el picked it: as the transcript shows it, what
+its overlays hide left out, such as the blocks of a collapsed group or
+the hidden prompt string (see `opencode-transcript-text').  For
+`opencode-old-input-function', which drover sets to it when nil, so
+that RET anywhere in a session's transcript, on an earlier prompt, the
+agent's text or a block's summary, does what \\[drover-dispatch] \" does; set that
+option to `opencode-put-old-input' to put the text in the session's
+input."
   (require 'drover-prompt)
   (with-current-buffer buffer
-    (drover-prompt-dwim)))
+    (drover-prompt-add-context (substring-no-properties text))))
 
 (defun drover-opencode-edit-withdrawn (text buffer)
   "Put TEXT, a prompt withdrawn from OpenCode session BUFFER, in drover's prompt.
@@ -1651,9 +1656,9 @@ such as \"C-\\=' A\" (see `drover-dispatch-keys').  For
 
 (defun drover-opencode--install ()
   "Fit opencode.el's session buffers, existing and future, into drover's keys.
-RET on their earlier prompts quotes in drover's prompt, and their
-withdrawn prompts are edited there, unless the user chose functions of
-their own (see `drover-opencode-quote-old-input')."
+RET in their transcripts quotes in drover's prompt, and their withdrawn
+prompts are edited there, unless the user chose functions of their own
+\(see `drover-opencode-quote-old-input')."
   (add-hook 'opencode-session-mode-hook #'drover-opencode--setup-session-buffer)
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer

@@ -2102,6 +2102,61 @@ it; nothing is sent, and the session's input stays."
             (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
               (kill-buffer prompt))))))))
 
+(ert-deftest drover-opencode-test-ret-anywhere-quotes-what-shows ()
+  "RET on any line of the transcript quotes it in drover's prompt, as the prompt key does.
+A region quotes what the transcript shows: text an overlay hides, such
+as the blocks of a collapsed group, is left out, while the prompt key
+quotes the buffer's text."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (drover-opencode-test-with-buffers '("")
+      (let ((opencode-old-input-function #'drover-opencode-quote-old-input)
+            (drover-prompt-buffer-name "*drover opencode prompt test*")
+            (drover-prompt-require-features nil)
+            (org-mode-hook nil)
+            (transient-mark-mode t)
+            (sent nil))
+        (cl-flet ((quoted (thunk)
+                    (let ((drover-prompt-buffer-name "*drover opencode prompt expected*"))
+                      (unwind-protect
+                          (progn (funcall thunk)
+                                 (with-current-buffer (drover-prompt-buffer) (buffer-string)))
+                        (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+                          (kill-buffer prompt))))))
+          (unwind-protect
+              (cl-letf (((symbol-function 'drover-prompt--display) #'ignore)
+                        ((symbol-function 'drover-prompt--schedule-refresh) #'ignore)
+                        ((symbol-function 'drover-prompt--fetch-defaults) #'ignore)
+                        ((symbol-function 'opencode-session-send)
+                         (lambda (text &rest _) (push text sent))))
+                (with-current-buffer (car buffers)
+                  (let ((inhibit-read-only t))
+                    (goto-char (point-min))
+                    (insert "Shown line\nHidden block\n"))
+                  (overlay-put (make-overlay (+ (point-min) 11) (+ (point-min) 24)) 'invisible t)
+                  ;; The agent's line, as the prompt key quotes it.
+                  (goto-char (+ (point-min) 26))
+                  (let ((expected (quoted #'drover-prompt-dwim)))
+                    (should (string-match-p "An answer" expected))
+                    (opencode-send-input)
+                    (with-current-buffer (drover-prompt-buffer)
+                      (should (equal (buffer-string) expected))))
+                  ;; A region over hidden text quotes what shows.
+                  (kill-buffer (drover-prompt-buffer))
+                  (goto-char (point-min))
+                  (push-mark (point) t t)
+                  (goto-char (+ (point-min) 33))
+                  (let ((expected (quoted (lambda () (drover-prompt-add-context "Shown line\nAn answer")))))
+                    (should (string-match-p "Shown line\nAn answer" expected))
+                    (should-not (string-match-p "Hidden" expected))
+                    (should (string-match-p "Hidden" (quoted #'drover-prompt-dwim)))
+                    (opencode-send-input)
+                    (deactivate-mark)
+                    (with-current-buffer (drover-prompt-buffer)
+                      (should (equal (buffer-string) expected))))
+                  (should-not sent)))
+            (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+              (kill-buffer prompt))))))))
+
 ;;;; The engine: models
 
 (ert-deftest drover-opencode-test-default-variant ()

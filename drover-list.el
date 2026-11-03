@@ -565,7 +565,24 @@ their glyphs, at the window's edge.")
 
 (defvar-keymap drover-list-group-section-map
   :doc "Keys on the heading of a group of sessions."
-  "RET" #'magit-section-toggle)
+  "RET" #'magit-section-toggle
+  ;; Magit's heading map binds these to toggle, which the sidebar's
+  ;; remapping misses when its window is not selected.
+  "<double-mouse-1>" #'drover-list-mouse-toggle-section
+  "<double-mouse-2>" #'drover-list-mouse-toggle-section
+  "<left-margin> <mouse-1>" #'drover-list-mouse-toggle-section)
+
+(defun drover-list-mouse-toggle-section (event)
+  "Toggle the section clicked, as Magit's `magit-mouse-toggle-section' does.
+In the sidebar, which folds nothing, do nothing: its window need not be
+selected, and the remapping of a command bound where a click lands then
+misses the sidebar's keymap, which remaps Magit's command away.  EVENT
+is the click."
+  (interactive "e")
+  (let ((window (posn-window (event-start event))))
+    (unless (and (window-live-p window)
+                 (not (buffer-local-value 'drover-list--folds (window-buffer window))))
+      (magit-mouse-toggle-section event))))
 
 (defclass drover-list-group-section (magit-section)
   ((keymap :initform 'drover-list-group-section-map))
@@ -5744,12 +5761,21 @@ with their last replies (see `drover-prompt-dwim').
 
 (defvar-keymap drover-list-sidebar-mode-map
   :doc "Keymap of `drover-list-sidebar-mode'.
-The commands folding sections do nothing: the sidebar folds nothing."
+The commands folding sections do nothing: the sidebar folds nothing.
+A click on a session's row opens it, as RET does there; the mouse
+drags no region, and a double or triple click does no more than the
+click it starts with."
   :parent drover-list-mode-map
+  "<mouse-1>" #'drover-list-sidebar-click
+  "<down-mouse-1>" #'ignore
+  "<drag-mouse-1>" #'ignore
+  "<double-mouse-1>" #'ignore
+  "<triple-mouse-1>" #'ignore
   "<remap> <magit-section-toggle>" #'ignore
   "<remap> <magit-section-cycle>" #'ignore
   "<remap> <magit-section-cycle-global>" #'ignore
   "<remap> <magit-mouse-toggle-section>" #'ignore
+  "<remap> <drover-list-mouse-toggle-section>" #'ignore
   "<remap> <magit-section-show-level-1>" #'ignore
   "<remap> <magit-section-show-level-2>" #'ignore
   "<remap> <magit-section-show-level-3>" #'ignore
@@ -5818,6 +5844,26 @@ where the highlight shows it."
 With COUNT, move that many rows, forwards when negative."
   (interactive "^p" drover-list-sidebar-mode)
   (drover-list-next-row (- (or count 1))))
+
+(defun drover-list-sidebar-click (event)
+  "Open the session of the row of the sidebar clicked, as RET does there.
+The sidebar's window is selected and point goes to the row, so that the
+session opens where RET at the row opens it, in the window where you
+work.  A click on a group's heading, or below the rows, does nothing:
+the sidebar folds nothing.  EVENT is the click."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (window (posn-window posn))
+         (position (posn-point posn)))
+    (when (and (window-live-p window) (null (posn-area posn)) (integerp position)
+               (with-current-buffer (window-buffer window)
+                 (and (derived-mode-p 'drover-list-sidebar-mode)
+                      (save-excursion
+                        (goto-char position)
+                        (drover-session-at-point t)))))
+      (select-window window)
+      (goto-char (or (drover-list--row-start position) position))
+      (drover-open-at-point))))
 
 (defun drover-list--sidebar-settle ()
   "Bring point back to the start of its row of the sidebar, and the mark too.
@@ -5947,7 +5993,9 @@ fringes.
 
 It shows no cursor: the row at point stands out (see
 `drover-list-sidebar-highlight-contrast'), and point stays at the start
-of a row, \\[drover-list-next-row] and \\[drover-list-previous-row] moving by rows.
+of a row, \\[drover-list-next-row] and \\[drover-list-previous-row] moving by rows.  A click on a
+session's row opens it, as \\[drover-open-at-point] does there; one on a group's heading
+does nothing, and the mouse drags no region.
 
 \\{drover-list-sidebar-mode-map}"
   :group 'drover-list
