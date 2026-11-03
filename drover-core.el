@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 11
+(defconst drover-core-generation 12
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -117,6 +117,7 @@ every display of sessions; this ranks them for drover's views."
   :group 'drover)
 
 (declare-function no-littering-expand-var-file-name "ext:no-littering" (file))
+(declare-function drover-dispatch-keys "drover-keys" (command))
 
 (defcustom drover-state-directory
   (if (fboundp 'no-littering-expand-var-file-name)
@@ -1524,6 +1525,15 @@ PROPERTIES is a plist of:
              and selects it first, giving no OTHER-WINDOW, so that the
              sessions of every backend show in the same windows.
  :respond    Function of a session answering its oldest request.
+ :pending-prompts
+             Function of a session returning how many of its prompts,
+             sent but not delivered yet, :edit-pending can withdraw, 0
+             when none.  Menus call it to tell whether it applies, so
+             it must be cheap.
+ :edit-pending
+             Function of a session withdrawing one of its pending
+             prompts, read when several, for it to be edited and sent
+             again, as `drover-prompt-edit-for' does with its text.
  :interrupt  Function of a session stopping its running turn.
  :archive    Function of a session archiving it.  Sessions of a
              backend without it drover archives itself (see
@@ -1666,6 +1676,9 @@ as `drover-model' describes them: explicit choices (:agent :model
              (nil without :check, or for a new session), submitting TEXT
              as a prompt once SESSION is ready.  A failure is reported
              with `drover-warn', saying the prompt is in the kill ring.
+             When the prompt carries attachments of this backend (see
+             `drover-prompt-attachment-label'), it is given a fourth
+             argument, the list of their data, in order; only then.
              A session drover archived is restored before (see
              `drover-unarchive-to-send'); one its backend archived, the
              backend restores as it sends, telling a refusal so.
@@ -4565,9 +4578,30 @@ Not while the minibuffer is in use, nor in the log of messages."
                (not (active-minibuffer-window)))
       (setf (drover--bulk-shown job) now)
       (let ((message-log-max nil))
-        (message "%s %d/%d sessions…%s" (drover--bulk-verb job)
+        (message "%s %d/%d sessions…  %s stops" (drover--bulk-verb job)
                  (drover--bulk-settled job) (drover--bulk-total job)
-                 (substitute-command-keys "  \\[drover-stop-actions] stops"))))))
+                 (drover--stop-actions-keys))))))
+
+(defun drover--stop-actions-keys ()
+  "Return the keys running `drover-stop-actions', as the echo area tells them.
+Its own global key, if any, else its entry in `drover-dispatch' after
+that menu's global key, else its name after the key of
+`execute-extended-command'."
+  (or (and (where-is-internal #'drover-stop-actions nil t)
+           (substitute-command-keys "\\[drover-stop-actions]"))
+      (and (fboundp 'drover-dispatch-keys)
+           (drover-dispatch-keys #'drover-stop-actions))
+      (substitute-command-keys "\\[drover-stop-actions]")))
+
+(defun drover-actions-progress ()
+  "Return how far the actions on several sessions running are, or nil.
+Such as \"Archiving 340/2202\", one per action, as `drover-dispatch'
+shows it beside Stop actions."
+  (when-let* ((jobs (drover--bulk-current)))
+    (mapconcat (lambda (job)
+                 (format "%s %d/%d" (drover--bulk-verb job)
+                         (drover--bulk-settled job) (drover--bulk-total job)))
+               jobs ", ")))
 
 (defun drover--bulk-report (job)
   "Return the report of JOB, done, on one bounded line."
@@ -5000,6 +5034,31 @@ waiting the longest, at any depth: see `drover-session-to-answer'.
 Interactively, SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
   (drover-backend-call (or (and session (drover-session-to-answer session)) session) :respond))
+
+(defun drover-pending-prompts (session)
+  "Return how many pending prompts of SESSION its backend can withdraw, maybe 0.
+They are prompts sent to SESSION that it has not taken yet, as those
+sent while a turn runs (see the backend properties :pending-prompts and
+:edit-pending).  It costs what the backend's count costs, little."
+  (let ((count (and (drover-supports-p session :edit-pending)
+                    (functionp (drover-backend-property session :pending-prompts))
+                    (drover-with-reporting "pending prompts"
+                      (drover-backend-call session :pending-prompts)))))
+    (if (natnump count) count 0)))
+
+(defun drover-edit-pending-prompt (session)
+  "Withdraw a pending prompt of SESSION to edit it and send it again.
+A pending prompt is one sent to SESSION that it has not taken yet, as
+one sent while a turn runs; with several, which one is read.  Its
+backend withdraws it, and its text, attachments included, goes where
+the backend puts a prompt to edit: for OpenCode sessions, drover's
+prompt, set to go to SESSION (see `drover-opencode-edit-old-input').
+The session needs no buffer shown.  Interactively, SESSION is the
+session at point."
+  (interactive (list (drover-session-at-point)))
+  (when (zerop (drover-pending-prompts session))
+    (user-error "No prompt of %s is pending" (drover-session-display-title session)))
+  (drover-backend-call session :edit-pending))
 
 (defun drover-interrupt (sessions)
   "Stop the running turns of SESSIONS, a session or a list of sessions.

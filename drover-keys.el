@@ -70,7 +70,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 12))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -562,6 +562,7 @@ Drover's views inherit it; `drover-session-keys-mode' binds it in
 other lists."
   "o" #'drover-open-other-window
   "A" #'drover-respond
+  "E" #'drover-edit-pending-prompt
   "K" #'drover-interrupt
   "s" #'drover-mark-seen
   "u" #'drover-open-parent
@@ -1728,6 +1729,39 @@ defaults, as the prompt's header dims it.  See `drover--option-target'."
 It names whether the choices go to a session or to a prompt."
   (if (eq (car-safe (drover--option-target 'model)) 'session) "Session runs" "Prompt runs"))
 
+(defun drover-dispatch-keys (command)
+  "Return the keys running COMMAND through `drover-dispatch', or nil.
+They are the menu's global key followed by COMMAND's key in it, such as
+\"C-\\=' X\"; nil when the menu has no global key or no entry for COMMAND."
+  (when-let* ((menu (where-is-internal #'drover-dispatch nil t))
+              (key (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-dispatch command)))
+                              :key)))
+    (concat (key-description menu) " " key)))
+
+(defun drover--dispatch-pending-description ()
+  "Return the description of Edit pending prompt in the dispatch menu.
+The count of the pending prompts of the session at point follows it,
+when it has some."
+  (let ((count (if-let* ((session (drover-dispatch-session :edit-pending)))
+                   (drover-pending-prompts session)
+                 0)))
+    (if (> count 0)
+        (concat "Edit pending prompt " (propertize (format "%d" count) 'face 'transient-value))
+      "Edit pending prompt")))
+
+(defun drover--dispatch-pending-p ()
+  "Return non-nil when the session at point has pending prompts to edit."
+  (when-let* ((session (drover-dispatch-session :edit-pending)))
+    (> (drover-pending-prompts session) 0)))
+
+(defun drover--dispatch-stop-description ()
+  "Return the description of Stop actions in the dispatch menu.
+How far the actions on several sessions running are follows it, as the
+menu opened or last refreshed."
+  (if-let* ((progress (drover-actions-progress)))
+      (concat "Stop actions " (propertize (drover--menu-value progress) 'face 'transient-value))
+    "Stop actions"))
+
 (defun drover--dispatch-send-description ()
   "Return the description of Send in the dispatch menu.
 It names where the prompt goes when `drover-dispatch-send-target-functions'
@@ -1846,8 +1880,11 @@ on sessions and prompts work everywhere; session commands act on the
 session at point, in lists and in prompt buffers; prompt commands
 perform the prompt actions of the current buffer; the view settings,
 shared by drover's lists, apply while one shows.  Commands that do not
-apply here are shown, greyed out.  Settings show their value beside
-their key, as Magit shows them, and changing one leaves the menu open.
+apply here are shown, greyed out, but Stop actions, shown only while
+actions on several sessions run, their progress beside it.  Settings
+show their value beside their key, as Magit shows them, and changing
+one leaves the menu open; Edit pending prompt shows how many prompts
+of the session at point wait pending.
 
 From a buffer telling no session, such as the prompt or a file, while
 one of drover's lists shows in a window of the frame, session commands
@@ -1870,7 +1907,9 @@ session chosen for it, else to one asked for, unshown."
     ("b" "Select" drover-select)
     ("l" "List" drover-list)
     ("L" "Side list" drover-list-side)
-    ("p" "Project" drover-select-project)]
+    ("p" "Project" drover-select-project)
+    ;; Only while an action on several sessions runs.
+    ("X" drover--dispatch-stop-description drover-stop-actions :if drover-actions-progress)]
    ["Prompt"
     ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
     ("n" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
@@ -1928,6 +1967,8 @@ session chosen for it, else to one asked for, unshown."
     ("s" "Mark seen" drover-mark-seen
      :inapt-if-not (lambda () (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p)))]
    [:advice* drover--dispatch-in-list
+    ("E" drover--dispatch-pending-description drover-edit-pending-prompt
+     :inapt-if-not drover--dispatch-pending-p)
     ("+" "New session" drover-new-session
      :inapt-if-not (lambda () (and (or (drover-dispatch-list-p) (drover-dispatch-session))
                                    (drover--can-start-p))))

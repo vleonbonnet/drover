@@ -54,6 +54,9 @@
 ;; `drover-prompt-edit-for', which also chooses that session as where
 ;; the prompt goes: sending skips the picker until the prompt is sent or
 ;; cleared, or the session forgotten (`drover-prompt-forget-target').
+;; Its attachments come with it, each label carrying its own
+;; (`drover-prompt-attachment-label'), and go with the prompt to the
+;; sessions of their backend (see :send in `drover-register-backend').
 
 ;;; Code:
 
@@ -73,7 +76,7 @@
 (require 'drover-codex)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 8))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 12))
   (load "drover-core" nil t))
 
 (declare-function org-id-get-create "org-id" (&optional force))
@@ -82,6 +85,11 @@
 (declare-function project-files "project" (project &optional dirs))
 
 ;;;; Options
+
+(defface drover-prompt-attachment '((t :inherit org-code))
+  "Face of the label of an attachment in the prompt.
+See `drover-prompt-attachment-label'."
+  :group 'drover)
 
 (defcustom drover-prompt-buffer-name "*drover*"
   "Name of the prompt buffer."
@@ -763,7 +771,9 @@ SESSION becomes where the prompt goes: sending it, or scheduling it,
 skips the picker, until it is sent, cleared, or the session forgotten
 \(`drover-prompt-forget-target'); the header names it.  Nothing is sent.
 Front ends call this to have an earlier prompt edited in the prompt,
-as drover's OpenCode backend does for opencode.el."
+as drover's OpenCode backend does for opencode.el.  The labels of its
+attachments, made by `drover-prompt-attachment-label', carry them in
+TEXT: they go with the prompt to sessions of their backend."
   (let* ((buffer (drover-prompt-buffer t))
          (title (drover-session-display-title session))
          (draft nil)
@@ -1056,12 +1066,42 @@ backticks in its content.  Everything else is kept as it is."
         (insert (replace-regexp-in-string "^." (lambda (line) (concat pad line)) markdown t t))))
     (buffer-substring-no-properties (point-min) (point-max))))
 
+(defun drover-prompt-attachment-label (label backend data)
+  "Return LABEL as the label of an attachment of BACKEND, DATA, in the prompt.
+LABEL is text, such as a file's name, which the prompt sends as text;
+the attachment goes with it to a session of BACKEND, a backend's name,
+whose :send receives DATA (see `drover-register-backend'), and to no
+other: there the label is text alone.  The label keeps it as long as
+any of it stays, deleting it whole drops it.  Front ends give the
+labels of a prompt's attachments to `drover-prompt-edit-for' in its
+text."
+  (propertize label
+              'drover-prompt-attachment (cons backend data)
+              'font-lock-face 'drover-prompt-attachment
+              'help-echo (format "Attached for %s sessions; deleting the label drops it"
+                                 (drover-backend-label backend))))
+
+(defun drover-prompt--attachments (start end)
+  "Return the attachments of the labels between START and END, in order.
+Each is (BACKEND . DATA), as `drover-prompt-attachment-label' made it."
+  (let ((attachments nil)
+        (pos start))
+    (while (< pos end)
+      (let ((attachment (get-text-property pos 'drover-prompt-attachment))
+            (next (next-single-property-change pos 'drover-prompt-attachment nil end)))
+        (when (and (consp attachment) (not (memq attachment attachments)))
+          (push attachment attachments))
+        (setq pos next)))
+    (nreverse attachments)))
+
 (defun drover-prompt-content (&optional buffer)
   "Return what the prompt BUFFER would send, or nil when it is blank.
 BUFFER defaults to the prompt buffer.  The value is a plist: :org, the
 Org text, trimmed; :text, it in Markdown; :start and :end, markers
 around it in BUFFER; :region, non-nil when it is the active region
-rather than the whole buffer.  Nil too without a prompt buffer."
+rather than the whole buffer; :attachments, those of its labels, each
+\(BACKEND . DATA) (see `drover-prompt-attachment-label').  Nil too
+without a prompt buffer."
   (let ((buffer (or buffer (drover-prompt-buffer))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
@@ -1074,7 +1114,8 @@ rather than the whole buffer.  Nil too without a prompt buffer."
                   :text (drover-prompt-to-markdown org)
                   :start (copy-marker start)
                   :end (copy-marker end)
-                  :region (and region t))))))))
+                  :region (and region t)
+                  :attachments (drover-prompt--attachments start end))))))))
 
 (defun drover-prompt--hide (buffer)
   "Delete the windows showing the prompt BUFFER, but the last of a frame."
@@ -1118,23 +1159,35 @@ Signal a `user-error' when there is none."
         ((drover-prompt-buffer))
         (t (user-error "No prompt"))))
 
-(defun drover-prompt--deliver (session buffer text token)
+(defun drover-prompt--deliver (session buffer text token &optional attachments)
   "Send TEXT with TOKEN through the backend of SESSION.
 BUFFER is the live buffer SESSION had when it was chosen, or nil for a
 new session; a SESSION whose BUFFER died meanwhile is reported, and so
-is a backend failing to send.  This may run from a process filter or a
-timer, so it signals nothing."
-  (let ((title (drover-session-display-title session))
-        (send (drover-backend-property session :send)))
+is a backend failing to send.  ATTACHMENTS, the prompt's, each
+\(BACKEND . DATA), go with it when of SESSION's backend, given to its
+:send; the others cannot, which is told, their labels going as text.
+This may run from a process filter or a timer, so it signals nothing."
+  (let* ((title (drover-session-display-title session))
+         (send (drover-backend-property session :send))
+         (backend (drover-session-backend session))
+         (own (mapcar #'cdr (seq-filter (lambda (attachment) (eq (car attachment) backend))
+                                        attachments)))
+         (others (seq-remove (lambda (attachment) (eq (car attachment) backend)) attachments)))
     (cond
      ((and buffer (not (buffer-live-p buffer)))
       (drover-warn "%s died before the prompt was sent; it is in the kill ring" title))
      ((not (functionp send))
       (drover-warn "%s takes no prompt; it is in the kill ring" title))
      (t
+      (when others
+        (drover-warn "%d attachment%s of %s went to %s as text only"
+                     (length others) (if (cdr others) "s" "")
+                     (drover-backend-label (car (car others))) title))
       (condition-case err
           (save-current-buffer
-            (funcall send session text token))
+            (if own
+                (funcall send session text token own)
+              (funcall send session text token)))
         (error
          (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
                       title (drover-error-message err))))))))
@@ -1158,7 +1211,8 @@ CONTENT leaves the prompt."
                  (drover-session-display-title session))
       (drover-unarchive-to-send session)
       (drover-prompt-apply-options session explicit
-                                   (lambda () (drover-prompt--deliver session target text token)))
+                                   (lambda () (drover-prompt--deliver session target text token
+                                                                        (plist-get content :attachments))))
       (drover-prompt-consume content buffer))))
 
 (defun drover-prompt--send-to-new (target content buffer)
@@ -1189,7 +1243,7 @@ CONTENT leaves the prompt, unless the backend refuses at once."
             (refused nil))
         (funcall create (buffer-local-value 'default-directory buffer) engine options
                  (lambda (session)
-                   (drover-prompt--deliver session nil text nil))
+                   (drover-prompt--deliver session nil text nil (plist-get content :attachments)))
                  (lambda (reason)
                    (drover-warn "No new %s: %s; the prompt is in the kill ring" label reason)
                    (unless returned

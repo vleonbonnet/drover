@@ -147,7 +147,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (equal (sort bindings (lambda (a b) (string< (car a) (car b))))
                    (sort (copy-sequence
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
-                            ("K" . drover-interrupt) ("s" . drover-mark-seen)
+                            ("E" . drover-edit-pending-prompt) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
                             ("Z" . drover-unarchive) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
@@ -663,7 +663,7 @@ B applies while a quiet session has a buffer."
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
     ("Conversation" ("t" "T" "C" "f" "." "O"))
-    ("Session" ("o" "u" "c" "v" "A" "K" "s") ("+" "g" "r" "x" "z" "Z"))
+    ("Session" ("o" "u" "c" "v" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
     ("View" ("= o" "= r" "= g" "U" "- o" "- z" "- f"))
     ("Filter" ("= p" "= s" "= a" "= m" "= v") ("= H" "= d" "= f" "= c"))
     ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s")))
@@ -796,6 +796,70 @@ agent, model, effort and directory of the next prompt are among them."
             (eval (car (get 'drover-default-prompt-buffer-function 'standard-value)) t))
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      '("j" "b" "l" "L" "p" "\"" "'" "#" "a" "m" "e" "d"))))))
+
+(defun drover-keys-test-description (function)
+  "Return what description FUNCTION gives in `drover-dispatch' set up here."
+  (let ((transient--prefix (transient--init-prefix 'drover-dispatch (list :scope (drover--context)))))
+    (substring-no-properties (funcall function))))
+
+(ert-deftest drover-keys-test-dispatch-pending-prompts ()
+  "E withdraws a pending prompt of the session at point, their count beside it.
+It applies only while the session has some, in lists and in its buffer."
+  (drover-keys-test-with (list (drover-test-session "s") (drover-test-session "t"))
+    (let ((counts '(("s" . 2) ("t" . 0)))
+          (withdrawn nil))
+      (setf (alist-get 'fake drover--backends)
+            (append (list :pending-prompts (lambda (session)
+                                             (alist-get (drover-session-id session) counts nil nil #'equal))
+                          :edit-pending (lambda (session) (push (drover-session-id session) withdrawn)))
+                    (alist-get 'fake drover--backends)))
+      (dolist (kind '(view list prompt))
+        (drover-keys-test-in kind "s"
+          (should (member "E" (drover-keys-test-apt 'drover-dispatch)))
+          (should (equal (drover-keys-test-description #'drover--dispatch-pending-description)
+                         "Edit pending prompt 2")))
+        (drover-keys-test-in kind "t"
+          (should-not (member "E" (drover-keys-test-apt 'drover-dispatch)))
+          (should (equal (drover-keys-test-description #'drover--dispatch-pending-description)
+                         "Edit pending prompt"))))
+      (drover-keys-test-in 'view "s"
+        (call-interactively #'drover-edit-pending-prompt)
+        (should (equal withdrawn '("s"))))
+      (drover-keys-test-in 'view "t"
+        (should-error (call-interactively #'drover-edit-pending-prompt) :type 'user-error))
+      ;; A backend without it offers nothing.
+      (setf (alist-get 'fake drover--backends)
+            (cl-loop for (key value) on (alist-get 'fake drover--backends) by #'cddr
+                     unless (memq key '(:edit-pending :pending-prompts))
+                     append (list key value)))
+      (drover-keys-test-in 'view "s"
+        (should (zerop (drover-pending-prompts (drover-find 'fake "s"))))
+        (should-not (member "E" (drover-keys-test-apt 'drover-dispatch)))))))
+
+(ert-deftest drover-keys-test-dispatch-stop-actions ()
+  "X stops the actions on several sessions, shown only while one runs, with its progress."
+  (drover-keys-test-with nil
+    (let ((drover--bulk-jobs nil))
+      (with-temp-buffer
+        (should-not (assoc "X" (car (cdr (assoc "Sessions" (drover-keys-test-menu 'drover-dispatch))))))
+        (push (drover--bulk-make :verb "Archiving" :total 2202 :settled 340) drover--bulk-jobs)
+        (should (assoc "X" (car (cdr (assoc "Sessions" (drover-keys-test-menu 'drover-dispatch))))))
+        (should (equal (drover-keys-test-description #'drover--dispatch-stop-description)
+                       "Stop actions Archiving 340/2202"))
+        (should (equal (drover-actions-progress) "Archiving 340/2202"))
+        ;; The echo area names the keys, through the menu.
+        (let ((map (make-sparse-keymap))
+              (global (current-global-map)))
+          (keymap-set map "C-'" #'drover-dispatch)
+          (use-global-map map)
+          (unwind-protect
+              (progn
+                (should (equal (drover-dispatch-keys #'drover-stop-actions) "C-' X"))
+                (should (equal (drover--stop-actions-keys) "C-' X")))
+            (use-global-map global)))
+        (should (equal (drover--stop-actions-keys) "M-x drover-stop-actions"))
+        (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "X")) :command)
+                    'drover-stop-actions))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-entries ()
   "The prompt's entries open it from anywhere, but from the prompt itself."
