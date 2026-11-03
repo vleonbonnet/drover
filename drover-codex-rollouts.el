@@ -42,6 +42,12 @@
 ;; out, unless `drover-codex-include-non-interactive' says otherwise; a
 ;; subagent's rollout names its parent.
 ;;
+;; A turn completed, or ended in an error, the user did not see is done,
+;; or failed, as an OpenCode session's (see `drover-transcript-unseen-p'),
+;; else idle; its newest count of tokens tells the size of its context
+;; and of the model's window.  OpenAI tells no lifetime of its prompt
+;; cache: none shows.
+;;
 ;; Opening a conversation resumes it in a front end able to
 ;; (`drover-resume'), agent-shell, loading it through ACP.  Archiving,
 ;; restoring and deleting one are the CLI's own commands, \"codex
@@ -192,7 +198,7 @@ Not those of its own, as the tools or the configuration it updates.")
   '("user_message" "agent_message" "agent_reasoning" "agent_reasoning_raw_content"
     "task_started" "turn_started" "task_complete" "turn_complete" "turn_aborted" "item_completed"
     "exec_command_end" "patch_apply_end" "mcp_tool_call_end" "web_search_end" "image_generation_end"
-    "entered_review_mode" "exited_review_mode" "context_compacted" "sub_agent_activity")
+    "entered_review_mode" "exited_review_mode" "context_compacted" "sub_agent_activity" "error")
   "The types of the events of a turn Codex records, as event_msg.
 Not those of its own, as the tokens counted or the settings applied.")
 
@@ -214,16 +220,85 @@ its own, the messages of the developer role."
            ("event_msg" (member (alist-get 'type payload) drover-codex-rollouts--turn-events)))
          t)))
 
+(defun drover-codex-rollouts--last-event (beg end)
+  "Return the newest event of a turn between BEG and END, parsed, or nil.
+See `drover-codex-rollouts--event-p'."
+  (drover-transcript-last
+   "\"timestamp\":\""
+   (lambda (record)
+     (and (drover-codex-rollouts--event-p record)
+          (drover-transcript-time (alist-get 'timestamp record))))
+   beg end))
+
 (defun drover-codex-rollouts--activity (beg end)
   "Return the time of the newest event of a turn between BEG and END, or nil.
 See `drover-codex-rollouts--event-p'."
-  (when-let* ((record (drover-transcript-last
-                       "\"timestamp\":\""
-                       (lambda (record)
-                         (and (drover-codex-rollouts--event-p record)
-                              (drover-transcript-time (alist-get 'timestamp record))))
-                       beg end)))
+  (when-let* ((record (drover-codex-rollouts--last-event beg end)))
     (drover-transcript-time (alist-get 'timestamp record))))
+
+(defun drover-codex-rollouts--outcome (record)
+  "Return how the turn whose newest event is RECORD left the conversation.
+`done' when the turn completed, or its newest event is the agent's
+message, as rollouts of a Codex not recording a turn's completion end;
+`failed' when it is an error; otherwise `idle': a turn interrupted,
+which the user did, or cut, its process gone in the middle."
+  (let* ((payload (alist-get 'payload record))
+         (type (alist-get 'type payload)))
+    (pcase (alist-get 'type record)
+      ("event_msg"
+       (pcase type
+         ((or "task_complete" "turn_complete" "agent_message") 'done)
+         ("item_completed"
+          (if (equal (alist-get 'type (alist-get 'item payload)) "AgentMessage") 'done 'idle))
+         ("error" 'failed)
+         (_ 'idle)))
+      ("response_item"
+       (if (and (equal type "message") (equal (alist-get 'role payload) "assistant")) 'done 'idle))
+      (_ 'idle))))
+
+(defun drover-codex-rollouts--end (beg end)
+  "Return how the conversation stands at its newest event from BEG to END.
+A plist of its time, :updated; :outcome, as
+`drover-codex-rollouts--outcome' tells it; :ended, its time again; and
+:error, the text of an error; nil without an event of a turn there."
+  (when-let* ((record (drover-codex-rollouts--last-event beg end)))
+    (let ((time (drover-transcript-time (alist-get 'timestamp record)))
+          (outcome (drover-codex-rollouts--outcome record)))
+      (list :updated time :outcome outcome :ended time
+            :error (and (eq outcome 'failed)
+                        (drover-transcript-text (alist-get 'message (alist-get 'payload record))))))))
+
+(defun drover-codex-rollouts--usage (beg end)
+  "Return the size of the context the newest count of tokens from BEG to END tells.
+A plist of :context, the tokens of the last request, its prompt and
+what it generated, which the next one sends again, as Codex counts
+those in the context window, and :context-window, the window Codex
+gives the model, if told; nil without a count."
+  (when-let* ((record (drover-transcript-last
+                       "\"type\":\"token_count\""
+                       (lambda (record)
+                         (let ((payload (alist-get 'payload record)))
+                           (and (drover-json-object-p payload)
+                                (equal (alist-get 'type payload) "token_count")
+                                (drover-json-object-p (alist-get 'info payload))
+                                (drover-json-object-p (alist-get 'last_token_usage
+                                                                 (alist-get 'info payload))))))
+                       beg end)))
+    (let* ((info (alist-get 'info (alist-get 'payload record)))
+           (last (alist-get 'last_token_usage info))
+           (total (alist-get 'total_tokens last))
+           (window (alist-get 'model_context_window info)))
+      (append (list :context (if (natnump total)
+                                 total
+                               (+ (let ((input (alist-get 'input_tokens last))) (if (natnump input) input 0))
+                                  (let ((output (alist-get 'output_tokens last))) (if (natnump output) output 0)))))
+              (and (natnump window) (> window 0) (list :context-window window))))))
+
+(defun drover-codex-rollouts--merge (data told)
+  "Return DATA with every member of TOLD, a plist, put in, nil ones included."
+  (while told
+    (setq data (plist-put data (pop told) (pop told))))
+  data)
 
 (defun drover-codex-rollouts--read-head (beg end)
   "Return what the records between BEG and END tell of the session's start.
@@ -244,28 +319,32 @@ first prompt and first model; members not told are left out."
                          (and (re-search-forward "\"source\":[ \t]*{[ \t]*\"subagent\"" meta t)
                               "subagent"))))
       (add :parent (sniff "parent_thread_id"))
+      (add :provider-id (sniff "model_provider"))
       (add :branch (sniff "branch"))
       (add :prompt (drover-codex-rollouts--first-prompt beg end))
       (pcase-let ((`(,model ,effort) (drover-codex-rollouts--turn beg end)))
         (add :model model)
         (add :effort effort))
-      ;; A tail of other records leaves the head's newest event as the
-      ;; last activity.
-      (add :updated (drover-codex-rollouts--activity beg end))
       (add :messages (drover-codex-rollouts--messages-p beg end)))
-    data))
+    ;; A tail of other records leaves the head's newest event as the
+    ;; last activity, and how it left the conversation.
+    (drover-codex-rollouts--merge data (append (drover-codex-rollouts--end beg end)
+                                               (drover-codex-rollouts--usage beg end)))))
 
 (defun drover-codex-rollouts--read-tail (beg end)
   "Return what the records between BEG and END tell of the conversation's end.
-A plist of the newest model, effort and activity there."
+A plist of the newest model and effort there, how its newest event of a
+turn left it (see `drover-codex-rollouts--end') and the size of its
+context (see `drover-codex-rollouts--usage'); members not told are left
+out."
   (let ((data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value)))))
       (pcase-let ((`(,model ,effort) (drover-codex-rollouts--turn beg end)))
         (add :model model)
         (add :effort effort))
-      (add :updated (drover-codex-rollouts--activity beg end))
       (add :messages (drover-codex-rollouts--messages-p beg end)))
-    data))
+    (drover-codex-rollouts--merge data (append (drover-codex-rollouts--end beg end)
+                                               (drover-codex-rollouts--usage beg end)))))
 
 (defun drover-codex-rollouts--read (file attributes old)
   "Return what rollout FILE, of ATTRIBUTES, tells of its conversation.
@@ -288,14 +367,14 @@ the index of `drover-transcript'."
                      (drover-codex-rollouts--read-head (point-min) (if (= tail (point-min))
                                                                        (point-max)
                                                                      tail)))))
-        (let* ((recent (drover-codex-rollouts--read-tail tail (point-max)))
-               (updated (or (plist-get recent :updated)
-                            (drover-transcript-look-before-tail
-                             file size tail grown #'drover-codex-rollouts--activity))))
-          (while recent
-            (setq data (plist-put data (pop recent) (pop recent))))
-          (when updated
-            (setq data (plist-put data :updated updated))))
+        (let ((recent (drover-codex-rollouts--read-tail tail (point-max))))
+          ;; What the tail does not tell, the lines before it may.
+          (setq recent (append recent
+                               (drover-transcript-look-before-tail-for
+                                file size tail grown
+                                (append (unless (plist-get recent :updated) (list #'drover-codex-rollouts--end))
+                                        (unless (plist-get recent :context) (list #'drover-codex-rollouts--usage))))))
+          (setq data (drover-codex-rollouts--merge data recent)))
         (setq data (plist-put data :id (drover-codex-rollouts--id file)))
         (setq data (plist-put data :archived (drover-codex-rollouts--archived-file-p file)))
         (let ((directory (plist-get data :cwd)))
@@ -371,29 +450,97 @@ See `drover-codex-history-days'."
       (> (or (plist-get data :updated) 0)
          (- (or now (float-time)) (* 86400 drover-codex-history-days)))))
 
+(defconst drover-codex-rollouts--name 'codex-rollouts
+  "The name of the index of Codex's rollouts, which what was seen keys.")
+
+(defun drover-codex-rollouts--unseen (data)
+  "Return how the conversation of DATA ended, `done' or `failed', unless seen.
+Nil when its newest event ended no turn, the user saw it since (see
+`drover-transcript-unseen-p'), or `codex exec' ran it, whose reply went
+to the program running it."
+  (let ((outcome (plist-get data :outcome)))
+    (and (memq outcome '(done failed))
+         (not (member (plist-get data :source) '("exec" "mcp")))
+         (drover-transcript-unseen-p drover-codex-rollouts--name (plist-get data :id)
+                                     (plist-get data :ended))
+         outcome)))
+
+(defun drover-codex-rollouts--context-limit (data model)
+  "Return the context window of the conversation of DATA, running MODEL, or nil.
+The window its newest count of tokens tells, else the one Codex's models
+cache gives MODEL, the share of it Codex fills (its
+effective_context_window_percent), as Codex computes it."
+  (or (plist-get data :context-window)
+      (when-let* ((entry (and model (drover-codex--catalog-model model)))
+                  (window (alist-get 'context_window entry))
+                  ((natnump window)))
+        (let ((percent (alist-get 'effective_context_window_percent entry)))
+          (if (and (numberp percent) (< 0 percent 100))
+              (floor (* window percent) 100)
+            window)))))
+
+(defun drover-codex-rollouts--provider (data)
+  "Return the provider of the conversation of DATA, as arguments of a record.
+The one its session's metadata names, OpenAI unless another is told."
+  (let ((id (or (plist-get data :provider-id) "openai")))
+    (drover-transcript-provider id (pcase id
+                                     ("openai" "OpenAI")
+                                     ("azure" "Azure")
+                                     ("ollama" "Ollama")
+                                     ("lmstudio" "LM Studio")
+                                     ("oss" "OSS")
+                                     (_ id)))))
+
+(defun drover-codex-rollouts--ran-on (data &optional models)
+  "Return what the conversation of DATA ran on, as arguments of a record.
+Keyword arguments of `drover-session-create': its provider, once a turn
+ran, and the size of its context and window.  Not its prompt cache:
+OpenAI caches prompts on its own, for a lifetime it does not tell, so no
+expiry is known to count down to.  MODELS caches the windows of models,
+a hash table, or nil."
+  (let ((model (plist-get data :model))
+        (tokens (plist-get data :context)))
+    (append (and model (drover-codex-rollouts--provider data))
+            (and (natnump tokens) (> tokens 0)
+                 (list :context-tokens tokens
+                       :context-limit (if models
+                                          (with-memoization (gethash (cons 'window model) models)
+                                            (drover-codex-rollouts--context-limit data model))
+                                        (drover-codex-rollouts--context-limit data model)))))))
+
 (defun drover-codex-rollouts--record (data names models)
   "Return the `drover-session' of the conversation DATA tells, or nil.
 NAMES are the names conversations were given; MODELS a hash table
-caching the names of models, which Codex's models cache gives."
+caching the names of models, which Codex's models cache gives.  A turn
+that ended unseen is done, or failed (see `drover-codex-rollouts--unseen')."
   (when (drover-codex-rollouts--listed-p data)
     (let* ((id (plist-get data :id))
-           (model (plist-get data :model)))
+           (model (plist-get data :model))
+           (status (or (drover-codex-rollouts--unseen data) 'idle))
+           ;; A window counted is the conversation's; a model's, every one's.
+           (run (drover-codex-rollouts--ran-on data (and (not (plist-get data :context-window)) models))))
       (drover-session-create
-       :backend 'codex :id id
-       :engine 'codex :engine-id id
-       :parent (plist-get data :parent)
-       :title (or (and names (gethash id names)) (plist-get data :prompt) id)
-       :directory (plist-get data :directory)
-       :project (plist-get data :project)
-       :branch (plist-get data :branch)
-       :status 'idle
-       :updated (plist-get data :updated)
-       :created (plist-get data :created)
-       :model (and model
-                   (with-memoization (gethash model models)
-                     (or (alist-get 'display_name (drover-codex--catalog-model model)) model)))
-       :effort (plist-get data :effort)
-       :archived (and (plist-get data :archived) t)))))
+             :backend 'codex :id id
+             :engine 'codex :engine-id id
+             :parent (plist-get data :parent)
+             :title (or (and names (gethash id names)) (plist-get data :prompt) id)
+             :directory (plist-get data :directory)
+             :project (plist-get data :project)
+             :branch (plist-get data :branch)
+             :status status
+             :since (and (not (eq status 'idle)) (or (plist-get data :ended) (plist-get data :updated)))
+             :detail (and (eq status 'failed) (plist-get data :error))
+             :updated (plist-get data :updated)
+             :created (plist-get data :created)
+             :model (and model
+                         (with-memoization (gethash model models)
+                           (or (alist-get 'display_name (drover-codex--catalog-model model)) model)))
+             :effort (plist-get data :effort)
+             :archived (and (plist-get data :archived) t)
+             :provider (plist-get run :provider)
+             :provider-name (plist-get run :provider-name)
+             :context-tokens (plist-get run :context-tokens)
+             :context-limit (plist-get run :context-limit)))))
 
 (defun drover-codex-rollouts--records (predicate)
   "Return the records of the conversations PREDICATE keeps.
@@ -452,6 +599,39 @@ rollout was not read.  The backend's :recorded-times."
   (when-let* ((data (drover-codex-rollouts--data id)))
     (cons (plist-get data :created) (plist-get data :updated))))
 
+(defun drover-codex-rollouts--recorded-run (id)
+  "Return what conversation ID ran on, as its rollout tells, or nil.
+Keyword arguments of `drover-session-create' (see
+`drover-codex-rollouts--ran-on'), for a front end following it.  The
+backend's :recorded-run."
+  (when-let* ((data (drover-codex-rollouts--data id)))
+    (drover-codex-rollouts--ran-on data)))
+
+(defun drover-codex-rollouts--seen-now (id)
+  "Return when the user sees conversation ID now, as its rollout dates events.
+Now, or its newest event's time when later (see
+`drover-claude-code-transcripts--seen-now')."
+  (max (float-time) (or (plist-get (drover-codex-rollouts--data id) :ended) 0)))
+
+(defun drover-codex-rollouts--mark-seen (session)
+  "Mark the ended turn of the conversation of SESSION seen, for good.
+The backend's :mark-seen."
+  (let ((id (drover-session-id session)))
+    (when (drover-transcript-mark-seen drover-codex-rollouts--name id
+                                       (drover-codex-rollouts--seen-now id))
+      (drover-backend-changed 'codex id))))
+
+(defun drover-codex-rollouts--recorded-seen (id)
+  "Note that the user saw conversation ID, which a front end follows, idle.
+As `drover-claude-code-transcripts--recorded-seen' notes it.  The
+backend's :recorded-seen."
+  (let* ((file (drover-codex-rollouts--file id))
+         (data (and file (drover-transcript-lookup (drover-codex-rollouts--current-index) file))))
+    (when (or (null data)
+              (drover-codex-rollouts--unseen data)
+              (drover-transcript-check (drover-codex-rollouts--current-index) file))
+      (drover-transcript-mark-seen drover-codex-rollouts--name id (drover-codex-rollouts--seen-now id)))))
+
 (defun drover-codex-rollouts--session (id)
   "Return the record of conversation ID, as :sessions lists it, or nil.
 Its rollout is looked at again soon when it changed since it was read.
@@ -484,7 +664,7 @@ The backend's :session."
     (list (list (expand-file-name "sessions" drover-codex-home) 3 regexp)
           (list (drover-codex-rollouts--archived-directory) 0 regexp))))
 
-(defconst drover-codex-rollouts--reader-version 2
+(defconst drover-codex-rollouts--reader-version 3
   "Version of `drover-codex-rollouts--read'.
 Raised when it reads anew what it read before, so that what an older
 one read and kept between Emacs sessions is read again.")
@@ -559,7 +739,9 @@ OTHER-WINDOW is non-nil.  The backend's :open."
         (unless (and directory (file-directory-p directory))
           (user-error "The directory of %s is gone: %s" (drover-session-display-title session)
                       (or directory "unknown")))
-        (drover-resume 'codex id directory)))))
+        (drover-resume 'codex id directory)
+        ;; Resumed, its turn shows: seen.
+        (drover-codex-rollouts--mark-seen session)))))
 
 (defun drover-codex-rollouts--recap (session callback)
   "Call CALLBACK at once with a recap of the last turn of SESSION.
@@ -634,7 +816,10 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
 ;;;; Installing
 
 (defun drover-codex-rollouts--start ()
-  "Look at the rollouts from now on.  The backend's :start."
+  "Look at the rollouts from now on.  The backend's :start.
+The first time, note it: replies before count as seen (see
+`drover-transcript-seen-since')."
+  (drover-transcript-seen-since drover-codex-rollouts--name)
   (drover-transcript-start (drover-codex-rollouts--current-index)))
 
 (defun drover-codex-rollouts--register ()
@@ -644,6 +829,8 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
    :label "Codex"
    :recorded '(codex)
    :recorded-times #'drover-codex-rollouts--times
+   :recorded-run #'drover-codex-rollouts--recorded-run
+   :recorded-seen #'drover-codex-rollouts--recorded-seen
    :start #'drover-codex-rollouts--start
    :sessions #'drover-codex-rollouts--sessions
    :session #'drover-codex-rollouts--session
@@ -654,6 +841,7 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
    :open #'drover-codex-rollouts--open
    :preview #'drover-codex-rollouts--preview
    :recap #'drover-codex-rollouts--recap
+   :mark-seen #'drover-codex-rollouts--mark-seen
    :archive #'drover-codex-rollouts--archive
    :unarchive #'drover-codex-rollouts--unarchive
    :delete #'drover-codex-rollouts--delete
@@ -664,7 +852,8 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
 An error is reported, and lets Emacs exit."
   (drover-with-reporting "keeping Codex's rollouts"
     (when-let* ((index (drover-codex-rollouts--current-index)))
-      (drover-transcript-save index t))))
+      (drover-transcript-save index t))
+    (drover-transcript-seen-save)))
 
 (defun drover-codex-rollouts-install (front-end)
   "List Codex's conversations, for FRONT-END to resume them.

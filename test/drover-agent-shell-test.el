@@ -1244,6 +1244,30 @@ A Claude model goes by its compact name, as in opencode.el's mode line."
       (drover-agent-shell-test-options claude '("model" "model" "claude opus" "claude opus"))
       (should (equal (drover-session-model (drover-agent-shell-test-session claude)) "Opus")))))
 
+(ert-deftest drover-agent-shell-test-recorded-run ()
+  "A shell of Claude Code tells the provider, context and cache its transcript tells.
+One of OpenCode keeps the provider it names, and has nothing recorded."
+  (drover-agent-shell-test-with
+      (drover-claude-code-transcripts-install 'test)
+      (unwind-protect
+          (let* ((project (file-name-as-directory (expand-file-name "work" home)))
+                 (file (drover-fixture-claude "abc" project))
+                 (claude (drover-agent-shell-test-shell 'claude-code)))
+            (drover-fixture-claude-append
+             file
+             (drover-fixture-claude-user "abc" project 1790000100.0 "Go on")
+             (drover-fixture-claude-assistant "abc" project 1790000101.0 "Done." :parent "abc-u1790000100"
+                                              :usage (drover-fixture-claude-usage :input 10 :minutes 500
+                                                                                  :read 9500)))
+            (drover-transcript-scan drover-claude-code-transcripts--index)
+            (drover-agent-shell-test-initialize claude "abc")
+            (let ((session (drover-agent-shell-test-session claude)))
+              (should (equal (list (drover-session-provider-name session) (drover-session-context-tokens session)
+                                   (drover-session-cache-expires session) (drover-session-cache-ttl session))
+                             (list "Anthropic" 10010 (+ 1790000100.0 300) 300))))
+            (should (drover-backend-caches-p 'agent-shell)))
+        (drover-claude-code-transcripts-uninstall 'test))))
+
 (ert-deftest drover-agent-shell-test-project-cached ()
   "A shell looks its project up once per directory."
   (drover-agent-shell-test-with

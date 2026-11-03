@@ -75,7 +75,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 14))
   (load "drover-core" nil t))
 
 ;; Drover does not require claude-code-ide, so this file compiles
@@ -628,7 +628,9 @@ what was read.  Nil without a turn."
                :engine 'claude-code
                ;; Never a guess: drover merges sessions of one engine identifier.
                :engine-id id
-               (and id directory (drover-claude-code-ide--run id directory)))))))
+               ;; Its context and cache, which a terminal does not tell.
+               (append (and id directory (drover-claude-code-ide--run id directory))
+                       (drover-recorded-run 'claude-code id)))))))
 
 (defun drover-claude-code-ide--sessions ()
   "Return the sessions of the Claude terminals."
@@ -1185,6 +1187,8 @@ With several, the most recently used."
   (drover-register-backend
    'claude-code-ide
    :label "Claude Code IDE"
+   ;; From the transcripts, see `drover-recorded-run'.
+   :caches t
    :sessions #'drover-claude-code-ide--sessions
    :open #'drover-claude-code-ide--open
    :respond #'drover-claude-code-ide--respond

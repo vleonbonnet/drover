@@ -84,15 +84,21 @@ ENTRYPOINT and BRANCH are recorded; META marks a note the CLI added."
                        :version "2.1.316" :gitBranch branch))))
 
 (cl-defun drover-fixture-claude-assistant (id directory time text &key (model "claude-opus-5-5") effort
-                                             (entrypoint "cli") (branch "main") sidechain)
+                                             (entrypoint "cli") (branch "main") sidechain
+                                             (stop "end_turn") usage parent message)
   "Return the record of a reply TEXT of conversation ID in DIRECTORY at TIME.
-MODEL and EFFORT ran it; SIDECHAIN marks a subagent's."
+MODEL and EFFORT ran it; SIDECHAIN marks a subagent's.  It stopped for
+STOP, and the API counted USAGE, a plist as `drover-fixture-claude-usage'
+makes it, or none.  PARENT is the record it follows, by default the
+prompt of the same second; MESSAGE its message's identifier, by
+default one of its second: the records of one message share it."
   (apply #'drover-fixture-line
-         :parentUuid (format "%s-u%d" id (truncate time))
+         :parentUuid (or parent (format "%s-u%d" id (truncate time)))
          :isSidechain (if sidechain t :false)
-         :message (list :model model :id (format "msg_%d" (truncate time)) :type "message"
-                        :role "assistant" :content (vector (list :type "text" :text text))
-                        :stop_reason "end_turn")
+         :message (append (list :model model :id (or message (format "msg_%d" (truncate time))) :type "message"
+                                :role "assistant" :content (vector (list :type "text" :text text))
+                                :stop_reason (or stop :null))
+                          (and usage (list :usage usage)))
          :requestId (format "req_%d" (truncate time)) :requestedModel model :type "assistant"
          :uuid (format "%s-a%d" id (truncate time)) :timestamp (drover-fixture-time time)
          (append (and effort (list :effort effort))
@@ -199,6 +205,46 @@ transcript only."
           (drover-fixture-line :type "cost-state" :sessionId id :totalCostUSD 0)
           (drover-fixture-line :type "tools-used" :sessionId id :tools []))))
 
+(cl-defun drover-fixture-claude-usage (&key (input 6) (hour 0) (minutes 0) (read 0) (output 120))
+  "Return the usage the API counts for a reply, as Claude Code records it.
+INPUT tokens of the prompt uncached, HOUR and MINUTES written into the
+cache of an hour and of five minutes, READ read from it, and OUTPUT."
+  (list :input_tokens input :cache_creation_input_tokens (+ hour minutes) :cache_read_input_tokens read
+        :output_tokens output :server_tool_use (list :web_search_requests 0 :web_fetch_requests 0)
+        :service_tier "standard"
+        :cache_creation (list :ephemeral_1h_input_tokens hour :ephemeral_5m_input_tokens minutes)
+        :inference_geo "" :iterations [] :speed "standard"))
+
+(defun drover-fixture-claude-tool-result (id directory time)
+  "Return the record of a tool's result of conversation ID in DIRECTORY at TIME."
+  (drover-fixture-line
+   :parentUuid (format "%s-a%d" id (1- (truncate time))) :isSidechain :false :promptId (concat "prompt-" id)
+   :type "user" :message (list :role "user" :content (vector (list :tool_use_id "toolu_1" :type "tool_result"
+                                                                   :content "ok")))
+   :uuid (format "%s-u%d" id (truncate time)) :timestamp (drover-fixture-time time)
+   :userType "external" :entrypoint "cli" :cwd directory :sessionId id :version "2.1.316"
+   :gitBranch "main"))
+
+(defun drover-fixture-claude-api-error (id directory time text)
+  "Return the record of an error of the API ending a turn of conversation ID at TIME.
+TEXT is what the CLI tells of it, in DIRECTORY."
+  (drover-fixture-line
+   :parentUuid (format "%s-u%d" id (truncate time)) :isSidechain :false
+   :message (list :id (format "err_%d" (truncate time)) :container :null :model "<synthetic>"
+                  :role "assistant" :stop_reason "stop_sequence" :stop_sequence ""
+                  :type "message" :usage (drover-fixture-claude-usage :input 0 :output 0)
+                  :content (vector (list :type "text" :text text)))
+   :type "assistant" :uuid (format "%s-e%d" id (truncate time)) :timestamp (drover-fixture-time time)
+   :error "server_error" :isApiErrorMessage t :userType "external" :entrypoint "cli" :cwd directory
+   :sessionId id :version "2.1.316" :gitBranch "main"))
+
+(defun drover-fixture-claude-exit (id directory time)
+  "Return the records of /exit typed in conversation ID in DIRECTORY at TIME."
+  (list (drover-fixture-claude-user id directory time
+                                    "<command-name>/exit</command-name>\n<command-message>exit</command-message>")
+        (drover-fixture-claude-user id directory time
+                                    "<local-command-stdout>Bye!</local-command-stdout>")))
+
 ;;;; Codex
 
 (defun drover-fixture-codex-file (id time &optional archived)
@@ -284,6 +330,26 @@ the tokens counted and what it tells the model as the developer."
                                :payload (list :cwd directory :model "gpt-5.5" :effort "high"))
           (drover-fixture-line :timestamp stamp :type "event_msg"
                                :payload (list :type "token_count" :info :null)))))
+
+(defun drover-fixture-codex-event (time type &rest members)
+  "Return an event of TYPE Codex records at TIME, with MEMBERS, a plist."
+  (drover-fixture-line :timestamp (drover-fixture-time time) :type "event_msg"
+                       :payload (append (list :type type) members)))
+
+(cl-defun drover-fixture-codex-tokens (time &key (input 30000) (cached 20000) (output 400) window)
+  "Return the count of tokens Codex records at TIME of its last request.
+INPUT tokens of the prompt, CACHED of them read from the cache, OUTPUT
+generated; WINDOW the model's context window, as Codex fills it."
+  (drover-fixture-codex-event
+   time "token_count"
+   :info (append (list :total_token_usage (list :input_tokens (* 3 input) :cached_input_tokens (* 2 cached)
+                                                :output_tokens (* 3 output) :reasoning_output_tokens 0
+                                                :total_tokens (* 3 (+ input output)))
+                       :last_token_usage (list :input_tokens input :cached_input_tokens cached
+                                               :output_tokens output :reasoning_output_tokens 0
+                                               :total_tokens (+ input output)))
+                 (and window (list :model_context_window window)))
+   :rate_limits :null))
 
 (defun drover-fixture-codex-name (id name)
   "Append to session_index.jsonl the NAME Codex gave conversation ID."

@@ -307,6 +307,116 @@ same."
         (should (equal (length warnings) 1))
         (should (string-match-p "\\`Codex could not delete" (car warnings)))))))
 
+;;;; Turns ended and context
+
+(defun drover-codex-rollouts-test-since (time)
+  "Make TIME when drover first read Codex's rollouts."
+  (puthash (list drover-codex-rollouts--name) (float time) (drover-transcript--seen-table)))
+
+(defun drover-codex-rollouts-test-state (id)
+  "Return (STATUS SINCE DETAIL) of conversation ID as listed."
+  (let ((session (drover-find 'codex id)))
+    (list (drover-session-status session) (drover-session-since session) (drover-session-detail session))))
+
+(ert-deftest drover-codex-rollouts-test-turn-ended ()
+  "A turn that completed unseen is done, one ending in an error failed, until seen.
+One the user interrupted, or cut in the middle, is idle; a turn of
+`codex exec' is idle too, its reply gone to its program."
+  (drover-codex-rollouts-test-with
+    (let* ((start (+ (ffloor (float-time)) 10000))
+           (project (expand-file-name "work/" home))
+           (id drover-codex-rollouts-test-a)
+           (file (drover-fixture-codex id project :start start)))
+      (drover-codex-rollouts-test-since (- start 100))
+      (drover-codex-rollouts-test-scan)
+      ;; Its newest event is the agent's message: done.
+      (should (equal (drover-codex-rollouts-test-state id) (list 'done (+ start 5) nil)))
+      (drover-mark-seen (drover-find 'codex id))
+      (drover-changed-now)
+      (should (equal (drover-codex-rollouts-test-state id) '(idle nil nil)))
+      (cl-flet ((turn (time &rest events)
+                  (drover-fixture-write file (cons (drover-fixture-codex-event time "user_message" :message "Go on")
+                                                   events)
+                                        t)
+                  (drover-codex-rollouts-test-scan)
+                  (drover-codex-rollouts-test-state id)))
+        (should (equal (turn (+ start 100)
+                             (drover-fixture-codex-event (+ start 101) "agent_message" :message "Done.")
+                             (drover-fixture-codex-tokens (+ start 101))
+                             (drover-fixture-codex-event (+ start 102) "task_complete" :last_agent_message "Done."))
+                       (list 'done (+ start 102) nil)))
+        (should (equal (turn (+ start 200)
+                             (drover-fixture-codex-event (+ start 201) "error" :message "stream disconnected"))
+                       (list 'failed (+ start 201) "stream disconnected")))
+        (should (equal (turn (+ start 300)
+                             (drover-fixture-codex-event (+ start 301) "turn_aborted" :reason "interrupted"))
+                       '(idle nil nil)))
+        (should (equal (turn (+ start 400)
+                             (drover-fixture-line :timestamp (drover-fixture-time (+ start 401))
+                                                  :type "response_item"
+                                                  :payload (list :type "function_call" :name "shell"
+                                                                 :arguments "{}" :call_id "c1")))
+                       '(idle nil nil)))
+        ;; As a newer Codex records an agent's message, completed.
+        (should (equal (turn (+ start 500)
+                             (drover-fixture-codex-event (+ start 501) "item_completed"
+                                                         :item (list :type "AgentMessage" :id "m1")))
+                       (list 'done (+ start 501) nil))))
+      ;; A turn of `codex exec': idle.
+      (let ((drover-codex-include-non-interactive t))
+        (drover-fixture-codex drover-codex-rollouts-test-b project :start start :source "exec")
+        (drover-codex-rollouts-test-scan)
+        (should (eq (drover-session-status (drover-find 'codex drover-codex-rollouts-test-b)) 'idle))))))
+
+(ert-deftest drover-codex-rollouts-test-flood-guard ()
+  "Turns ended before drover first read the rollouts count as seen."
+  (drover-codex-rollouts-test-with
+    (drover-fixture-codex drover-codex-rollouts-test-a (expand-file-name "work/" home))
+    (drover-codex-rollouts--start)
+    (drover-transcript-stop drover-codex-rollouts--index)
+    (drover-codex-rollouts-test-scan)
+    (should (eq (drover-session-status (drover-find 'codex drover-codex-rollouts-test-a)) 'idle))
+    (should (<= (- (float-time) 60) (drover-transcript-seen-since drover-codex-rollouts--name) (float-time)))))
+
+(ert-deftest drover-codex-rollouts-test-context ()
+  "The context is the newest count of tokens' last request, against the window Codex gives the model.
+The window the count tells, else the models cache's, the share Codex
+fills of it; the provider is the one the session names, OpenAI as
+OpenCode shows it; and no prompt cache, OpenAI telling no lifetime."
+  (drover-codex-rollouts-test-with
+    (drover-test-write (expand-file-name "models_cache.json" drover-codex-home)
+                       (replace-regexp-in-string
+                        "\"display_name\": \"GPT-5.5\","
+                        "\"display_name\": \"GPT-5.5\", \"context_window\": 272000, \"effective_context_window_percent\": 95,"
+                        drover-test-codex-models-cache t t))
+    (let* ((project (expand-file-name "work/" home))
+           (id drover-codex-rollouts-test-a)
+           (file (drover-fixture-codex id project)))
+      (drover-codex-rollouts-test-scan)
+      (let ((session (drover-find 'codex id)))
+        (should-not (drover-session-context-tokens session))
+        (should (equal (drover-session-provider-name session) "OpenAI"))
+        (should (equal (drover-session-provider session) (cdr (assoc "\\`openai\\'" opencode-provider-icons)))))
+      (drover-fixture-write file (list (drover-fixture-codex-tokens 1790000010.0 :input 30000 :output 400)) t)
+      (drover-codex-rollouts-test-scan)
+      (let ((session (drover-find 'codex id)))
+        (should (equal (list (drover-session-context-tokens session) (drover-session-context-limit session))
+                       '(30400 258400)))
+        (should-not (drover-session-cache-expires session))
+        (should-not (drover-session-shown-cache-fraction session)))
+      (drover-fixture-write file (list (drover-fixture-codex-tokens 1790000020.0 :input 50000 :output 100
+                                                                   :window 300000))
+                            t)
+      (drover-codex-rollouts-test-scan)
+      (should (equal (drover-session-context-limit (drover-find 'codex id)) 300000))
+      (should (equal (drover-session-context-tokens (drover-find 'codex id)) 50100))
+      (should (equal (plist-get (drover-recorded-run 'codex id) :context-tokens) 50100))
+      ;; Read whole, the same.
+      (let ((data (drover-codex-rollouts--read file (file-attributes file) nil)))
+        (should (equal (list (plist-get data :context) (plist-get data :context-window)
+                             (plist-get data :provider-id))
+                       '(50100 300000 "openai")))))))
+
 (ert-deftest drover-codex-rollouts-test-prints-in-proportion ()
   "The index of rollouts prints in proportion to the conversations it read.
 Emacs prints a value whole in an error's data, or as `format' does: an
@@ -318,6 +428,8 @@ entry or a record leading back to the index would print it all again."
                             :prompt (format "Prompt %d" i)))
     (drover-codex-rollouts-test-scan)
     (should (= (length (drover-sessions)) 100))
+    (dolist (session (drover-sessions))
+      (drover-transcript-mark-seen drover-codex-rollouts--name (drover-session-id session)))
     (drover-test-prints-in-proportion
      100 (list (cons "an entry" (car (hash-table-values (drover-transcript-index-entries
                                                           drover-codex-rollouts--index))))

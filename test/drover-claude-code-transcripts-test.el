@@ -735,6 +735,504 @@ Not even where starting a process takes a second, as on a managed Mac."
   (should (equal (drover-claude-code--hash "") "0"))
   (should (equal (drover-claude-code--hash "C:\\Users\\val") "686f3c")))
 
+;;;; Turns ended, context and cache
+
+(defun drover-claude-code-transcripts-test-since (time)
+  "Make TIME when drover first read Claude Code's transcripts.
+Replies after it are unseen until seen."
+  (puthash (list drover-claude-code-transcripts--name) (float time) (drover-transcript--seen-table)))
+
+(defun drover-claude-code-transcripts-test-state (id)
+  "Return (STATUS SINCE DETAIL) of conversation ID as listed."
+  (let ((session (drover-find 'claude-code id)))
+    (list (drover-session-status session) (drover-session-since session) (drover-session-detail session))))
+
+(ert-deftest drover-claude-code-transcripts-test-turn-ended ()
+  "A turn that ended in a reply the user did not see is done until seen, as OpenCode's.
+One ending in an error of the API failed; one the user interrupted or
+left with /exit, or a reply cut in the middle, is idle; seen, done or
+failed idles, for good, until the next turn ends."
+  (drover-claude-code-transcripts-test-with
+    ;; Its replies dated ahead, as by a clock ahead of this one: seen as
+    ;; they show, not as of now.
+    (let* ((start (+ (ffloor (float-time)) 10000))
+           (project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "d1" project :start start)))
+      (drover-claude-code-transcripts-test-since (- start 100))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") (list 'done (+ start 2) nil)))
+      (should (drover-session-attention-p (drover-find 'claude-code "d1")))
+      (should (drover-supports-p (drover-find 'claude-code "d1") :mark-seen))
+      ;; Marked seen, it idles, and stays so for drover read anew.
+      (drover-mark-seen (drover-find 'claude-code "d1"))
+      (drover-changed-now)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") '(idle nil nil)))
+      (drover-transcript-seen-save)
+      (setq drover-transcript--seen nil)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") '(idle nil nil)))
+      ;; The next turn ends: done again.
+      (drover-fixture-claude-append file
+                                    (drover-fixture-claude-user "d1" project (+ start 100) "Go on")
+                                    (drover-fixture-claude-assistant "d1" project (+ start 101) "Done."))
+      ;; Seen at a time of its own, before the CLI wrote it.
+      (drover-transcript-mark-seen drover-claude-code-transcripts--name "d1" (+ start 50))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") (list 'done (+ start 101) nil)))
+      ;; A turn ending in an error of the API failed, its error told.
+      (drover-fixture-claude-append file
+                                    (drover-fixture-claude-user "d1" project (+ start 200) "Again")
+                                    (drover-fixture-claude-api-error
+                                     "d1" project (+ start 201) "API Error: 500 capture. This is a server-side issue."))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1")
+                     (list 'failed (+ start 201) "API Error: 500 capture. This is a server-side issue.")))
+      (should (equal (drover-session-summary (drover-find 'claude-code "d1"))
+                     "API Error: 500 capture. This is a server-side issue."))
+      ;; The reply after it ends the next turn: done, no error.
+      (drover-fixture-claude-append file
+                                    (drover-fixture-claude-user "d1" project (+ start 300) "Retry")
+                                    (drover-fixture-claude-assistant "d1" project (+ start 301) "Now done."))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") (list 'done (+ start 301) nil)))
+      ;; Left with /exit: the user saw it.
+      (apply #'drover-fixture-claude-append file (drover-fixture-claude-exit "d1" project (+ start 302)))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") '(idle nil nil)))
+      ;; Interrupted: the user was there.
+      (drover-fixture-claude-append file
+                                    (drover-fixture-claude-user "d1" project (+ start 400) "Once more")
+                                    (drover-fixture-claude-assistant "d1" project (+ start 401) "Calling."
+                                                                     :stop "tool_use")
+                                    (drover-fixture-claude-user "d1" project (+ start 402)
+                                                                "[Request interrupted by user for tool use]"))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") '(idle nil nil)))
+      ;; A turn cut in the middle, its terminal gone: nothing to see.
+      (drover-fixture-claude-append file
+                                    (drover-fixture-claude-user "d1" project (+ start 500) "Last")
+                                    (drover-fixture-claude-assistant "d1" project (+ start 501) "Calling."
+                                                                     :stop "tool_use")
+                                    (drover-fixture-claude-tool-result "d1" project (+ start 502))
+                                    (drover-fixture-claude-assistant "d1" project (+ start 503) "Writing"
+                                                                     :stop nil))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-state "d1") '(idle nil nil)))
+      ;; The same read whole, not appended to.
+      (let ((data (drover-claude-code-transcripts--read file (file-attributes file) nil)))
+        (should (eq (plist-get data :outcome) 'idle))
+        (should (eql (plist-get data :ended) (+ start 503)))))))
+
+(ert-deftest drover-claude-code-transcripts-test-batch-turns ()
+  "A turn of \"claude -p\" or an SDK's program is idle: its reply went to the program."
+  (drover-claude-code-transcripts-test-with
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let ((project (expand-file-name "work/" home)))
+      (drover-fixture-claude "p1" project :entrypoint "sdk-cli")
+      (drover-fixture-claude "p2" project :entrypoint "sdk-py")
+      (drover-fixture-claude "p3" project :entrypoint "sdk-ts")
+      (drover-fixture-claude "p4" project :entrypoint "claude-desktop")
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (mapcar (lambda (id) (drover-session-status (drover-find 'claude-code id)))
+                             '("p1" "p2" "p3" "p4"))
+                     '(idle idle done done))))))
+
+(ert-deftest drover-claude-code-transcripts-test-flood-guard ()
+  "Replies before drover first read the transcripts count as seen.
+So that a first look at hundreds of conversations asks the user to see
+none: only a reply since, or a conversation coming since, is done.  When
+that was is kept with what the user saw, bounded to the conversations
+recorded."
+  (drover-claude-code-transcripts-test-with
+    (let ((project (expand-file-name "work/" home))
+          (now (float-time)))
+      (dotimes (i 30)
+        (drover-fixture-claude (format "old%02d" i) project :start (- now 86400 (* 60 i))))
+      (drover-claude-code-transcripts--start)
+      (drover-transcript-stop index)
+      (drover-claude-code-transcripts-test-scan)
+      (let ((since (drover-transcript-seen-since drover-claude-code-transcripts--name)))
+        (should (<= now since (float-time)))
+        (should (seq-every-p (lambda (session) (eq (drover-session-status session) 'idle)) (drover-sessions)))
+        (should-not (drover-attention-sessions))
+        ;; A reply since is unseen.
+        (drover-fixture-claude-append (drover-fixture-claude-file "old03" project)
+                                      (drover-fixture-claude-user "old03" project (+ (ffloor since) 1) "Go on")
+                                      (drover-fixture-claude-assistant "old03" project (+ (ffloor since) 2) "Done."))
+        (drover-fixture-claude "new" project :start (+ (ffloor since) 10))
+        (drover-claude-code-transcripts-test-scan)
+        (should (equal (sort (mapcar #'drover-session-id (drover-attention-sessions)) #'string<)
+                       '("new" "old03")))
+        ;; Kept: the next Emacs reads the same time, and does not move it.
+        (drover-transcript-seen-save)
+        (setq drover-transcript--seen nil)
+        (drover-claude-code-transcripts--start)
+        (drover-transcript-stop index)
+        (should (eql (drover-transcript-seen-since drover-claude-code-transcripts--name) since))
+        (should (equal (drover-claude-code-transcripts-test-state "new") (list 'done (+ (ffloor since) 12) nil)))
+        ;; Seen, then gone: forgotten after the next full look.
+        (drover-mark-seen (drover-find 'claude-code "new"))
+        (should (gethash (cons drover-claude-code-transcripts--name "new") (drover-transcript--seen-table)))
+        (delete-file (drover-fixture-claude-file "new" project))
+        (drover-claude-code-transcripts-test-scan)
+        (should-not (gethash (cons drover-claude-code-transcripts--name "new") (drover-transcript--seen-table)))
+        (should (gethash (list drover-claude-code-transcripts--name) (drover-transcript--seen-table)))
+        ;; Its file holds one entry per conversation seen, and the time.
+        (drover-mark-seen (drover-find 'claude-code "old03"))
+        (drover-transcript-seen-save)
+        (should (equal (drover-read-data (drover-transcript-seen-file) 1 :seen)
+                       `((claude-code-transcripts nil ,since)
+                         (claude-code-transcripts "old03"
+                                                  ,(gethash (cons drover-claude-code-transcripts--name "old03")
+                                                            (drover-transcript--seen-table))))))))))
+
+(ert-deftest drover-claude-code-transcripts-test-seen-bounded ()
+  "What the user saw is kept for `drover-transcript-seen-limit' conversations at most.
+Those seen longest ago go; another Emacs's times are merged in."
+  (drover-claude-code-transcripts-test-with
+    (let ((drover-transcript-seen-limit 5))
+      (drover-claude-code-transcripts-test-since 1000)
+      (dotimes (i 8)
+        (drover-transcript-mark-seen drover-claude-code-transcripts--name (format "c%d" i) (+ 2000 i)))
+      (drover-transcript-seen-save)
+      (should (equal (mapcar #'cadr (drover-read-data (drover-transcript-seen-file) 1 :seen))
+                     '(nil "c3" "c4" "c5" "c6" "c7")))
+      ;; Another Emacs saw c3 later, and c9.
+      (drover-write-data (drover-transcript-seen-file) "test" 1 :seen
+                         '((claude-code-transcripts nil 1000.0) (claude-code-transcripts "c3" 3000.0)
+                           (claude-code-transcripts "c9" 2500.0)))
+      (drover-transcript-mark-seen drover-claude-code-transcripts--name "c8" 2008)
+      (drover-transcript-seen-save)
+      (should (equal (drover-read-data (drover-transcript-seen-file) 1 :seen)
+                     '((claude-code-transcripts nil 1000.0) (claude-code-transcripts "c3" 3000.0)
+                       (claude-code-transcripts "c6" 2006.0) (claude-code-transcripts "c7" 2007.0)
+                       (claude-code-transcripts "c8" 2008.0) (claude-code-transcripts "c9" 2500.0))))
+      ;; A file that does not read is told once, and every reply counts as seen.
+      (with-temp-file (drover-transcript-seen-file) (insert "(:version 1 :seen (oops"))
+      (setq drover-transcript--seen nil
+            drover-transcript--seen-warned nil)
+      (let ((warnings nil))
+        (cl-letf (((symbol-function 'drover-warn) (lambda (&rest args) (push args warnings))))
+          (should (>= (drover-transcript-seen-since drover-claude-code-transcripts--name) (- (float-time) 5)))
+          (drover-transcript-seen-time drover-claude-code-transcripts--name "c3"))
+        (should (= (length warnings) 1))))))
+
+(ert-deftest drover-claude-code-transcripts-test-front-end-saw ()
+  "A turn the user saw in a front end is seen once the front end lets it go.
+A front end following the conversation reports it idle once its turn
+was seen; one closed while its turn ended unseen leaves it done."
+  (drover-claude-code-transcripts-test-with
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let ((project (expand-file-name "work/" home))
+          (terminals nil)
+          (status 'idle))
+      (drover-fixture-claude "s1" project)
+      (drover-fixture-claude "s2" project)
+      (cl-flet ((terminal (id) (drover-session-create :backend 'term :id (concat "terminal-" id)
+                                                      :status status :engine 'claude-code :engine-id id)))
+        (drover-test-register-simple 'term (lambda () (mapcar #'terminal terminals))
+                                     :session (lambda (id)
+                                                (seq-some (lambda (conversation)
+                                                            (and (equal id (concat "terminal-" conversation))
+                                                                 (terminal conversation)))
+                                                          terminals)))
+        (drover-claude-code-transcripts-test-scan)
+        (drover-index)
+        (should (eq (drover-session-status (drover-index-session '(claude-code . "s1"))) 'done))
+        ;; A terminal resumes s1, its turn seen; s2, its turn unseen.
+        (setq terminals '("s1"))
+        (drover-backend-changed 'term "terminal-s1")
+        (drover-changed-now)
+        (setq status 'done
+              terminals '("s1" "s2"))
+        (drover-backend-changed 'term "terminal-s2")
+        (drover-changed-now)
+        ;; Both closed.
+        (setq terminals nil)
+        (drover-backend-changed 'term "terminal-s1")
+        (drover-backend-changed 'term "terminal-s2")
+        (drover-changed-now)
+        (should (eq (drover-session-status (drover-index-session '(claude-code . "s1"))) 'idle))
+        (should (eq (drover-session-status (drover-index-session '(claude-code . "s2"))) 'done))
+        ;; Records of another host tell nothing of this one's conversations.
+        (should-not (progn (drover--note-followed
+                            (drover-session-create :backend 'remote:core :id '(term . "t") :host "core"
+                                                   :status 'idle :engine 'claude-code :engine-id "s2"))
+                           (gethash (cons drover-claude-code-transcripts--name "s2")
+                                    (drover-transcript--seen-table))))))))
+
+(ert-deftest drover-claude-code-transcripts-test-open-marks-seen ()
+  "Opening a closed conversation resumes it, its turn shown: seen."
+  (drover-claude-code-transcripts-test-with
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let ((project (expand-file-name "work/" home)))
+      (drover-fixture-claude "o1" project)
+      (drover-claude-code-transcripts-test-scan)
+      (should (eq (drover-session-status (drover-find 'claude-code "o1")) 'done))
+      (drover-register-resumer 'claude-code 'claude-code-ide #'ignore)
+      (drover-open (drover-find 'claude-code "o1"))
+      (drover-changed-now)
+      (should (eq (drover-session-status (drover-find 'claude-code "o1")) 'idle)))))
+
+(defun drover-claude-code-transcripts-test-turn (file id project time usage &optional model)
+  "Append to FILE a turn of conversation ID in PROJECT at TIME, its reply counting USAGE.
+The reply of MODEL comes in two records of one message, its thinking a
+second after the prompt, its text a minute after."
+  (drover-fixture-claude-append
+   file
+   (drover-fixture-claude-user id project time "Go on")
+   (drover-fixture-claude-assistant id project (+ time 1) "Thinking" :stop nil :usage usage
+                                    :model (or model "claude-opus-5-5")
+                                    :parent (format "%s-u%d" id (truncate time))
+                                    :message (format "msg_%d" (truncate time)))
+   (drover-fixture-claude-assistant id project (+ time 60) "Done." :usage usage
+                                    :model (or model "claude-opus-5-5")
+                                    :parent (format "%s-a%d" id (1+ (truncate time)))
+                                    :message (format "msg_%d" (truncate time)))))
+
+(ert-deftest drover-claude-code-transcripts-test-context ()
+  "The context is the prompt of the newest reply, as the API counted it, against its model's size.
+Uncached, written into the cache and read from it; the model's size is
+the table's, else the catalog's, else the default, and a million once
+the context passed it.  The provider is Anthropic, as OpenCode shows it."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "k1" project))
+           (start 1790000100.0))
+      (drover-claude-code-transcripts-test-scan)
+      ;; A reply without usage tells no context.
+      (let ((session (drover-find 'claude-code "k1")))
+        (should-not (drover-session-context-tokens session))
+        (should (equal (drover-session-provider-name session) "Anthropic"))
+        (should (equal (drover-session-provider session) (cdr (assoc "\\`anthropic\\'" opencode-provider-icons)))))
+      (drover-claude-code-transcripts-test-turn file "k1" project start
+                                                (drover-fixture-claude-usage :input 10 :hour 2000 :read 48000))
+      (drover-claude-code-transcripts-test-scan)
+      (let ((session (drover-find 'claude-code "k1")))
+        (should (equal (list (drover-session-context-tokens session) (drover-session-context-limit session))
+                       '(50010 1000000)))
+        (should (= (drover-session-context-fraction session) 0.05001)))
+      ;; Of a model the catalog gives no size: the default.
+      (drover-claude-code-transcripts-test-turn file "k1" project (+ start 100)
+                                                (drover-fixture-claude-usage :input 10 :read 150000)
+                                                "claude-sonnet-5-5")
+      (drover-claude-code-transcripts-test-scan)
+      (should (eql (drover-session-context-limit (drover-find 'claude-code "k1")) 200000))
+      ;; Past it: a million.
+      (drover-claude-code-transcripts-test-turn file "k1" project (+ start 200)
+                                                (drover-fixture-claude-usage :input 10 :read 250000)
+                                                "claude-sonnet-5-5")
+      (drover-claude-code-transcripts-test-scan)
+      (should (eql (drover-session-context-limit (drover-find 'claude-code "k1")) 1000000))
+      ;; The table first: a [1m] model, and the user's own.
+      (should (eql (drover-claude-code-transcripts--context-limit "claude-sonnet-5-5[1m]" 10 nil) 1000000))
+      (let ((drover-claude-code-context-limits '(("opus" . 500000))))
+        (should (eql (drover-claude-code-transcripts--context-limit "claude-opus-5-5" 10
+                                                                    (drover-claude-code-catalog))
+                     500000)))
+      ;; A subagent's reply tells nothing of the conversation's context.
+      (drover-fixture-claude-append file (drover-fixture-claude-assistant
+                                          "k1" project (+ start 300) "Sub" :sidechain t
+                                          :usage (drover-fixture-claude-usage :input 5)))
+      (drover-claude-code-transcripts-test-scan)
+      (should (eql (drover-session-context-tokens (drover-find 'claude-code "k1")) 250010)))))
+
+(ert-deftest drover-claude-code-transcripts-test-cache ()
+  "The prompt cache expires its lifetime after its last request was sent.
+An hour when the request wrote into the hour's cache, five minutes when
+into the five minutes' alone; a request reading the cache without
+writing keeps the lifetime of the newest write."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "h1" project))
+           (start 1790000100.0))
+      (cl-flet ((cache ()
+                  (drover-claude-code-transcripts-test-scan)
+                  (let ((session (drover-find 'claude-code "h1")))
+                    (list (drover-session-cache-expires session) (drover-session-cache-ttl session)
+                          (drover-session-cache-tokens session) (drover-session-cache-prompt-tokens session)))))
+        (should (equal (cache) '(nil nil nil nil)))
+        ;; Written into the hour's: an hour from the prompt it answers.
+        (drover-claude-code-transcripts-test-turn file "h1" project start
+                                                  (drover-fixture-claude-usage :input 10 :hour 2000 :read 8000))
+        (should (equal (cache) (list (+ start 3600) 3600 10000 10010)))
+        ;; Read alone, an hour still, from the new prompt.
+        (drover-claude-code-transcripts-test-turn file "h1" project (+ start 1000)
+                                                  (drover-fixture-claude-usage :input 10 :read 10000))
+        (should (equal (cache) (list (+ start 1000 3600) 3600 10000 10010)))
+        ;; Written into the five minutes' alone: five minutes.
+        (drover-claude-code-transcripts-test-turn file "h1" project (+ start 2000)
+                                                  (drover-fixture-claude-usage :input 10 :minutes 500 :read 10000))
+        (should (equal (cache) (list (+ start 2000 300) 300 10500 10510)))
+        (drover-claude-code-transcripts-test-turn file "h1" project (+ start 3000)
+                                                  (drover-fixture-claude-usage :input 10 :read 10500))
+        (should (equal (cache) (list (+ start 3000 300) 300 10500 10510)))
+        ;; Both: the hour's holds the start of the prompt.
+        (drover-claude-code-transcripts-test-turn file "h1" project (+ start 4000)
+                                                  (drover-fixture-claude-usage :input 10 :hour 100 :minutes 500
+                                                                               :read 10000))
+        (should (equal (cache) (list (+ start 4000 3600) 3600 10600 10610)))
+        ;; Nothing cached: no cache.
+        (drover-claude-code-transcripts-test-turn file "h1" project (+ start 5000)
+                                                  (drover-fixture-claude-usage :input 900))
+        (should (equal (cache) '(nil nil nil nil))))
+      ;; Live, the list shows its bar, as for an OpenCode session.
+      (let ((session (drover-find 'claude-code "h1")))
+        (setf (drover-session-cache-expires session) (+ (float-time) 1800)
+              (drover-session-cache-ttl session) 3600)
+        (should (< 0.49 (drover-session-shown-cache-fraction session) 0.51))
+        (should (drover-backend-caches-p 'claude-code))))))
+
+(ert-deftest drover-claude-code-transcripts-test-front-end-run ()
+  "A front end following a conversation takes its provider, context and cache from the transcript."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "u1" project)))
+      (drover-claude-code-transcripts-test-turn file "u1" project 1790000100.0
+                                                (drover-fixture-claude-usage :input 10 :hour 2000 :read 8000))
+      (drover-claude-code-transcripts-test-scan)
+      (let ((run (drover-recorded-run 'claude-code "u1"))
+            (record (drover-find 'claude-code "u1")))
+        (should (equal (plist-get run :context-tokens) 10010))
+        (should (equal (plist-get run :context-limit) 1000000))
+        (should (equal (plist-get run :cache-expires) (+ 1790000100.0 3600)))
+        (should (equal (plist-get run :provider-name) "Anthropic"))
+        (let ((terminal (apply #'drover-session-create :backend 'term :id "t" :status 'working
+                               :engine 'claude-code :engine-id "u1" run)))
+          (dolist (slot '(provider provider-name context-tokens context-limit cache-expires cache-ttl
+                                   cache-tokens cache-prompt-tokens))
+            (should (equal (cl-struct-slot-value 'drover-session slot terminal)
+                           (cl-struct-slot-value 'drover-session slot record))))))
+      (should-not (drover-recorded-run 'claude-code "unknown"))
+      (should-not (drover-recorded-run 'opencode "u1")))))
+
+(defun drover-claude-code-transcripts-test-row (session)
+  "Return what the list's line of SESSION shows, field by field, without its title.
+Its status glyph, its title's faces, and each field's text with its
+faces, the prompt cache's bar and the time it tells, as drawn at a time
+of its own."
+  (let* ((now 1790000200.0)
+         (metrics (list :now now :char 8)))
+    (append
+     (list (drover-session-status session)
+           (get-text-property 0 'face (drover-list--title-text session 0 nil))
+           (drover-list--cache-fraction session now))
+     (mapcar (lambda (field)
+               (let ((text (drover-list--text field session nil metrics)))
+                 (cons field (and (stringp text) (substring-no-properties text)))))
+             '(model provider context age summary)))))
+
+(ert-deftest drover-claude-code-transcripts-test-rows-as-opencode ()
+  "A conversation of a transcript shows as an OpenCode session telling the same.
+Its status, title's faces, model, provider, context, cache, age and
+summary, done or idle, and so does the same record of another host."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "v1" project :ai-title "Keep the page")))
+      (drover-claude-code-transcripts-test-turn file "v1" project 1790000100.0
+                                                (drover-fixture-claude-usage :input 10 :hour 2000 :read 48000))
+      (drover-claude-code-transcripts-test-scan)
+      (dolist (seen '(nil t))
+        (when seen
+          (drover-mark-seen (drover-find 'claude-code "v1"))
+          (drover-changed-now))
+        (let* ((record (drover-find 'claude-code "v1"))
+               (opencode (drover-session-create
+                          :backend 'opencode :id "ses_v1" :engine 'opencode :engine-id "ses_v1"
+                          :title "Keep the page" :directory project
+                          :status (if seen 'idle 'done) :since (and (not seen) 1790000160.0)
+                          :updated 1790000160.0 :created 1790000000.0
+                          :model "Opus 5.5"
+                          :provider (cdr (assoc "\\`anthropic\\'" opencode-provider-icons))
+                          :provider-name "Anthropic"
+                          :context-tokens 50010 :context-limit 1000000
+                          :cache-expires (+ 1790000100.0 3600) :cache-ttl 3600
+                          :cache-tokens 50000 :cache-prompt-tokens 50010)))
+          (should (eq (drover-session-status record) (if seen 'idle 'done)))
+          (should (equal (drover-claude-code-transcripts-test-row record)
+                         (drover-claude-code-transcripts-test-row opencode)))
+          (should (equal (memq 'drover-dim (ensure-list (get-text-property
+                                                         0 'face (drover-list--title-text record 0 nil))))
+                         (and seen '(drover-dim)))))))))
+
+(ert-deftest drover-claude-code-transcripts-test-remote-rows ()
+  "A conversation of another host's transcript shows as this host's does.
+Its owner reads its status, context and cache, and sends them with the
+record: they show alike, the cache's expiry by the owner's clock."
+  (skip-unless (and (require 'spyglass nil t) (fboundp 'spyglass-channel-encode)
+                    (require 'drover-remote nil t)))
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "w1" project :ai-title "On Core")))
+      (drover-claude-code-transcripts-test-turn file "w1" project 1790000100.0
+                                                (drover-fixture-claude-usage :input 10 :hour 2000 :read 48000))
+      (drover-claude-code-transcripts-test-scan)
+      (dolist (offset '(0 30))
+        (let* ((record (drover-find 'claude-code "w1"))
+               (received (drover-remote-decode-record
+                          (spyglass-channel-decode
+                           (spyglass-channel-encode
+                            (drover-remote-encode-record (drover-session-key record) record)))
+                          "core" 'remote:core offset)))
+          (should (eq (drover-session-status received) 'done))
+          (should (equal (drover-session-host received) "core"))
+          (dolist (slot '(status provider provider-name context-tokens context-limit cache-ttl
+                                 cache-tokens cache-prompt-tokens model title))
+            (should (equal (cl-struct-slot-value 'drover-session slot received)
+                           (cl-struct-slot-value 'drover-session slot record))))
+          (should (= (drover-session-cache-expires received) (- (drover-session-cache-expires record) offset)))
+          (when (zerop offset)
+            (should (equal (drover-claude-code-transcripts-test-row received)
+                           (drover-claude-code-transcripts-test-row record)))))))))
+
+
+(ert-deftest drover-claude-code-transcripts-test-reader-version ()
+  "What an older reader read and kept is read again, in slices, as a look goes.
+Its entries lack how turns ended and what they ran on."
+  (drover-claude-code-transcripts-test-with
+    (let ((project (expand-file-name "work/" home)))
+      (dotimes (i 3)
+        (drover-fixture-claude (format "v%d" i) project))
+      (drover-claude-code-transcripts-test-scan)
+      (should (eql (plist-get (drover-claude-code-transcripts--data "v0") :reader)
+                   drover-claude-code-transcripts--reader-version))
+      (should (eq (plist-get (drover-claude-code-transcripts--data "v0") :outcome) 'done))
+      ;; Kept by the reader before.
+      (maphash (lambda (_ entry)
+                 (let ((data (copy-sequence (drover-transcript-data entry))))
+                   (dolist (key '(:outcome :ended :error :context :cache-tokens :cache-prompt-tokens
+                                           :requested :cache-ttl))
+                     (setq data (map-delete data key)))
+                   (setf (drover-transcript-data entry)
+                         (plist-put data :reader (1- drover-claude-code-transcripts--reader-version)))))
+               (drover-transcript-index-entries index))
+      (setf (drover-transcript-index-dirty index) t)
+      (drover-transcript-save index t)
+      (let* ((again (drover-claude-code-transcripts--make-index))
+             (read (car (cl-letf (((symbol-function 'drover-backend-changed) #'ignore))
+                          (drover-claude-code-transcripts-test-counting-reads
+                            (drover-transcript-load again)
+                            (should (zerop (hash-table-count (drover-transcript-index-entries again))))
+                            (drover-transcript--begin again)
+                            ;; A slice reads what it has time for.
+                            (let ((drover-transcript-slice 0))
+                              (setf (drover-transcript-index-active again) t)
+                              (drover-transcript--work again)
+                              (should (< (hash-table-count (drover-transcript-index-entries again)) 3))
+                              (drover-transcript-stop again))
+                            (drover-transcript-scan again))))))
+        (should (> read 0))
+        (should (= (hash-table-count (drover-transcript-index-entries again)) 3))
+        (drover-transcript-map (lambda (_ data)
+                                 (should (eq (plist-get data :outcome) 'done))
+                                 (should (eql (plist-get data :reader)
+                                              drover-claude-code-transcripts--reader-version)))
+                               again)))))
 
 (ert-deftest drover-claude-code-transcripts-test-prints-in-proportion ()
   "The index of transcripts prints in proportion to the conversations it read.
@@ -748,6 +1246,9 @@ entry or a record leading back to the index would print it all again."
                              :subagents (and (zerop (% i 10)) '(("agent-a1" "Look around" "Explore")))))
     (drover-claude-code-transcripts-test-scan)
     (should (>= (length (drover-sessions)) 100))
+    ;; What the user saw is kept a time a conversation.
+    (dolist (session (drover-sessions))
+      (drover-transcript-mark-seen drover-claude-code-transcripts--name (drover-session-id session)))
     (drover-test-prints-in-proportion
      100 (list (cons "an entry" (car (hash-table-values (drover-transcript-index-entries index))))
                (cons "a record" (drover-find 'claude-code "c001"))))))
