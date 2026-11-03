@@ -123,7 +123,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 13))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -2303,11 +2303,9 @@ after it are kept by markers.")
 
 (defun drover-list--cache-fraction (session now)
   "Return what the prompt cache of SESSION shows of its lifetime left at NOW.
-It is `drover-session-cache-fraction', but nil for a subagent: the user
-sends to its parent, never to it, so its cache tells nothing they can
-act on, and its bar would only stand beside the one that does."
-  (and (not (drover-session-parent session))
-       (drover-session-cache-fraction session now)))
+It is `drover-session-shown-cache-fraction': nil for a subagent, whose
+bar would only stand beside the one the user's next turn reuses."
+  (drover-session-shown-cache-fraction session now))
 
 (defun drover-list--caching-p (session metrics)
   "Return non-nil when SESSION may show a prompt cache, live or not.
