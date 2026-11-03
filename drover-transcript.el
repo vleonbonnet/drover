@@ -52,7 +52,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
   (load "drover-core" nil t))
 
 (defcustom drover-transcript-scan-interval 15

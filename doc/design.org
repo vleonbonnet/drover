@@ -630,7 +630,7 @@ OpenAI caches prompts on its own, for minutes to hours of inactivity as load all
 
 *** Front ends
 
-A terminal of claude-code-ide or a shell of agent-shell tells its status and model, not its provider, context nor cache: it takes them from its conversation as recorded (=:recorded-run=, =drover-recorded-run=), its own arguments first, as it takes its times (=drover-recorded-times=), and is taken again as the transcript changes (=drover--index-followers=).  Both report caches: claude-code-ide always, agent-shell while Claude Code's transcripts are listed.  =drover-core-generation= is 14 since, which both need.
+A terminal of claude-code-ide or a shell of agent-shell tells its status and model, not its provider, context nor cache: it takes them from its conversation as recorded (=:recorded-run=, =drover-recorded-run=), its own arguments first, as it takes its times (=drover-recorded-times=), and is taken again as the transcript changes (=drover--index-followers=).  Both report caches: claude-code-ide always, agent-shell while Claude Code's transcripts are listed.  =drover-core-generation= is 15 since, which both need, and the readers, whose :recorded-seen the core calls.
 
 *** Read again
 
