@@ -861,6 +861,71 @@ It applies only while the session has some, in lists and in its buffer."
         (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "X")) :command)
                     'drover-stop-actions))))))
 
+(ert-deftest drover-keys-test-dispatch-key-names ()
+  "The echo area and hints name the menu's key as Emacs's help does, or as the user says."
+  (let ((map (make-sparse-keymap))
+        (global (current-global-map))
+        (drover-dispatch-key nil))
+    (should-not (drover-dispatch-key-description))
+    (should-not (drover-dispatch-keys #'drover-stop-actions))
+    ;; A name stands without a key, as the key Emacs knows may be none.
+    (let ((drover-dispatch-key "Caps Lock"))
+      (should (equal (drover-dispatch-key-description) "Caps Lock")))
+    (keymap-set map "C-'" #'drover-dispatch)
+    (use-global-map map)
+    (unwind-protect
+        (progn
+          (should (equal (drover-dispatch-key-description) "C-'"))
+          ;; In the face of keys in help, as `substitute-command-keys' gives them.
+          (should (equal-including-properties (drover-dispatch-key-description t)
+                                              (substitute-command-keys "\\[drover-dispatch]")))
+          ;; The key Emacs's help names, of several.
+          (keymap-set map "<f19>" #'drover-dispatch)
+          (should (equal (drover-dispatch-key-description)
+                         (substitute-command-keys "\\[drover-dispatch]")))
+          (let ((drover-dispatch-key "Caps Lock"))
+            (should (equal (drover-dispatch-key-description) "Caps Lock"))
+            (should (eq (get-text-property 0 'face (drover-dispatch-key-description t))
+                        'help-key-binding))
+            (should (equal (drover-dispatch-keys #'drover-stop-actions) "Caps Lock X"))
+            (should (equal (drover--stop-actions-keys) "Caps Lock X"))))
+      (use-global-map global))))
+
+(ert-deftest drover-keys-test-dispatch-closing-keys ()
+  "Each key opening the menu closes it, but the keys of its own entries."
+  (let ((map (make-sparse-keymap))
+        setups)
+    (keymap-set map "C-'" #'drover-dispatch)
+    (keymap-set map "<f19>" #'drover-dispatch)
+    (keymap-set map "s-'" #'drover-dispatch)
+    ;; A key of an entry keeps its command.
+    (keymap-set map "j" #'drover-dispatch)
+    (with-temp-buffer
+      (use-local-map map)
+      (cl-letf (((symbol-function 'transient-setup)
+                 (lambda (name &rest arguments) (push (cons name arguments) setups))))
+        (call-interactively #'drover-dispatch)))
+    (should (equal (car (car setups)) 'drover-dispatch))
+    (should (equal (sort (mapcar #'key-description drover--dispatch-close-keys) #'string<)
+                   '("<f19>" "C-'" "s-'")))
+    (let ((entries (drover--dispatch-close-entries nil)))
+      (should (= (length entries) 3))
+      (should (equal (sort (mapcar (lambda (entry) (plist-get (cdr entry) :key)) entries) #'string<)
+                     '("<f19>" "C-'" "s-'")))
+      (dolist (entry entries)
+        (should (eq (plist-get (cdr entry) :command) 'transient-quit-one))))
+    ;; Opened by none, as with M-x, nothing closes it but the usual keys.
+    (with-temp-buffer
+      (use-local-map (make-sparse-keymap))
+      (let ((global (current-global-map)))
+        (use-global-map (make-sparse-keymap))
+        (unwind-protect
+            (cl-letf (((symbol-function 'transient-setup) #'ignore))
+              (call-interactively #'drover-dispatch))
+          (use-global-map global))))
+    (should-not drover--dispatch-close-keys)
+    (should-not (drover--dispatch-close-entries nil))))
+
 (ert-deftest drover-keys-test-dispatch-prompt-entries ()
   "The prompt's entries open it from anywhere, but from the prompt itself."
   (should (equal (cdr (assoc "Prompt" (drover-keys-test-keys 'drover-dispatch)))
@@ -1084,8 +1149,6 @@ shows, so they apply only there."
     (should (= (length setups) 2))
     (dolist (setup setups)
       (should (equal (plist-get (nthcdr 3 setup) :display-action) drover-menu-display-action))))
-  (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "C-'")) :command)
-              'transient-quit-one))
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-view "V")) :command)
               'transient-quit-one))
   ;; A bottom side window, such as the prompt's, stays shown with the menu.

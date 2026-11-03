@@ -560,11 +560,12 @@ prompt and wherever Send sends the prompt (see `drover-prompt-target')."
 
 (defun drover-prompt--header-line ()
   "Return the header line of the prompt: its keys and what it runs.
-The keys are those of `drover-dispatch', after the key it is bound to;
-scheduling shows when the buffer defines it.  The session chosen to
-send to, if any, follows them."
+The keys are those of `drover-dispatch', after the name of its key (see
+`drover-dispatch-key-description'); scheduling shows when the buffer
+defines it.  The session chosen to send to, if any, follows them."
   (let* ((options (drover-prompt-effective-options))
-         (dispatch (substitute-command-keys "\\[drover-dispatch]"))
+         (dispatch (or (drover-dispatch-key-description t)
+                       (substitute-command-keys "\\[drover-dispatch]")))
          (directory (plist-get options :directory))
          (model (plist-get options :model))
          (variant (plist-get options :variant))
@@ -762,7 +763,8 @@ prompt begins in the current buffer's directory."
 (defun drover-prompt--send-keys ()
   "Return the keys sending the prompt, such as \"C-\\=' RET\", or nil."
   (when-let* ((key (drover-prompt--menu-key #'drover-prompt-send)))
-    (concat (substitute-command-keys "\\[drover-dispatch]") " " key)))
+    (concat (or (drover-dispatch-key-description t) (substitute-command-keys "\\[drover-dispatch]"))
+            " " key)))
 
 ;;;###autoload
 (defun drover-prompt-edit-for (session text)

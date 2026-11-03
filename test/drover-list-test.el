@@ -6495,6 +6495,19 @@ buffer."
     (execute-kbd-macro (kbd "C-g"))
     (should (equal (drover-list-test-at-side side) "fail"))))
 
+(ert-deftest drover-list-test-dispatch-closed-by-its-keys ()
+  "Any key opening the menu closes it, the one that opened it or another."
+  (drover-list-test-elsewhere
+    (keymap-set (current-local-map) "<f19>" #'drover-dispatch)
+    (unwind-protect
+        (dolist (keys '(("C-'" "C-'") ("<f19>" "<f19>") ("C-'" "<f19>") ("<f19>" "C-'")))
+          (execute-kbd-macro (kbd (car keys)))
+          (should (eq (oref transient--prefix command) 'drover-dispatch))
+          (execute-kbd-macro (kbd (cadr keys)))
+          (should-not transient--prefix)
+          (should (eq (selected-window) first)))
+      (keymap-unset (current-local-map) "<f19>" t))))
+
 (ert-deftest drover-list-test-dispatch-view-elsewhere ()
   "The dispatch menu opened from a code buffer sets the list's follow mode."
   (drover-list-test-elsewhere

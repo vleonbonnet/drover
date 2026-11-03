@@ -98,7 +98,7 @@ Drover binds no global key. Its commands are gathered in one menu, =drover-dispa
   (keymap-global-set "C-'" #'drover-dispatch)
 #+end_src
 
-or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in four sets, and no key belongs to two, so the menu holds them all: the global keys everywhere, the session keys in lists of sessions and in prompt buffers, the prompt keys in prompt buffers, the view keys wherever one of drover's lists is in sight. What does not apply where you are is greyed out rather than hidden, and a group none of whose entries applies has its title greyed out too.
+or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in four sets, and no key belongs to two, so the menu holds them all: the global keys everywhere, the session keys in lists of sessions and in prompt buffers, the prompt keys in prompt buffers, the view keys wherever one of drover's lists is in sight. What does not apply where you are is greyed out rather than hidden, and a group none of whose entries applies has its title greyed out too. You may bind the menu to several keys: whichever opened it closes it. The echo area and the hints, such as =C-' X stops=, name the key Emacs's help names for the menu; set =drover-dispatch-key= to name it otherwise, such as ="Caps Lock"= when a key remapper sends that key to Emacs as =<f19>=.
 
 ** Values and layout
 
