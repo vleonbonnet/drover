@@ -1545,6 +1545,13 @@ PROPERTIES is a plist of:
              with a message once the restore was refused, at most one
              of them once.  The record of the session fetched among
              the archived ones is forgotten after THEN.
+ :interrupt-confirms, :mark-seen-confirms, :delete-confirms
+             Likewise for :interrupt, :mark-seen and :delete: the
+             operation is then called with a session, THEN and ELSE.
+             Acting on several sessions, drover keeps
+             `drover-bulk-requests' operations awaiting their answers
+             at most, the next sent as answers come; an operation not
+             confirmed, as many sent per hundredth of a second.
  :archived   Function of a CALLBACK fetching the backend's archived
              sessions, and calling CALLBACK with them as
              `drover-session' records, their ARCHIVED set, as soon as
@@ -2270,11 +2277,13 @@ nor the next changes.  The index failing to take the changes in is
 dropped, and views draw everything anew from an index made again."
   (setq drover--change-timer nil)
   (unless (drover-with-reporting "index of sessions"
-            (drover--apply-changed)
+            (let ((drover--archive-checking t))
+              (drover--apply-changed))
             t)
     (setq drover--index nil
           drover--changed-all t))
-  (let ((drover-changed-sessions (if drover--changed-all
+  (let ((drover--archive-checking t)
+        (drover-changed-sessions (if drover--changed-all
                                      t
                                    (if (listp drover--changed-applied)
                                        (delete-dups drover--changed-applied)
@@ -2654,9 +2663,10 @@ session, to merge, or while parents form a cycle."
   "Return the index of the live sessions, made if needed.
 Views use it to draw only what changed, as `drover-changed-sessions'
 tells it while `drover-changed-hook' runs."
-  (if (drover--index-current)
-      (drover--apply-changed)
-    (setq drover--index (drover--index-build)))
+  (let ((drover--archive-checking (or drover--archive-checking t)))
+    (if (drover--index-current)
+        (drover--apply-changed)
+      (setq drover--index (drover--index-build))))
   drover--index)
 
 (defun drover-index-incremental-p ()
@@ -3219,6 +3229,27 @@ PLIST holds :time, when, and the fields of `drover--archive-fields'.")
   "Non-nil once a problem with the archive's file was reported.
 It is reported once per Emacs session, as sessions are listed often.")
 
+(defvar drover--archive-table nil
+  "The conversations of `drover--archive' by engine key, as (ARCHIVE . TABLE).
+TABLE, a hash table, maps each key of ARCHIVE to its plist, the first
+of that key; it is made anew once `drover--archive' is another list.
+Every listing looks up each session there.")
+
+(defvar drover--archive-deferring nil
+  "Non-nil while `drover--archive-write' only notes what it would write.
+As while drover acts on several sessions (see `drover--bulk-run'): the
+file is written once, at the end, rather than whole for each session.")
+
+(defvar drover--archive-checking nil
+  "Non-nil while the archive's file is looked at once, `checked' once it was.
+Bound while drover takes in changes, or acts on sessions: listing a
+backend looks up every session in the archive, and looking at the file
+for each cost a system call each.")
+
+(defvar drover--archive-unwritten nil
+  "Non-nil while drover's archive holds what its file does not, yet.
+The file is not read again meanwhile (see `drover--archive-flush').")
+
 (defun drover-archive-file ()
   "Return the file of the sessions drover archived, in `drover-state-directory'."
   (expand-file-name "archive.eld" drover-state-directory))
@@ -3261,27 +3292,66 @@ and ignored."
 
 (defun drover--archive ()
   "Return the conversations drover archived, reading the file when it changed."
-  (let ((stamp (file-attribute-modification-time (file-attributes (drover-archive-file)))))
-    (unless (equal stamp drover--archive-stamp)
-      (setq drover--archive (drover--archive-read)
-            drover--archive-stamp stamp))
-    drover--archive))
+  (unless (or drover--archive-unwritten (eq drover--archive-checking 'checked))
+    (let ((stamp (file-attribute-modification-time (file-attributes (drover-archive-file)))))
+      (unless (equal stamp drover--archive-stamp)
+        (setq drover--archive (drover--archive-read)
+              drover--archive-stamp stamp)))
+    (when drover--archive-checking
+      (setq drover--archive-checking 'checked)))
+  drover--archive)
 
 (defun drover--archive-write (archive)
   "Make ARCHIVE the conversations drover archived, and write it to its file.
-A failure is reported once; ARCHIVE stays for this Emacs session."
+A failure is reported once; ARCHIVE stays for this Emacs session.
+While `drover--archive-deferring' is set, the file is written later,
+by `drover--archive-flush'."
   (setq drover--archive archive)
-  (let ((file (drover-archive-file)))
-    (condition-case err
-        (drover-write-data file "Sessions drover archived" drover--archive-version :sessions archive)
-      (error (drover--archive-warn "Could not remember the sessions drover archived in %s: %s"
-                                   (abbreviate-file-name file) (drover-error-message err))))
-    (setq drover--archive-stamp (file-attribute-modification-time (file-attributes file)))))
+  (if drover--archive-deferring
+      (setq drover--archive-unwritten t)
+    (setq drover--archive-unwritten nil)
+    (let ((file (drover-archive-file)))
+      (condition-case err
+          (drover-write-data file "Sessions drover archived" drover--archive-version :sessions archive)
+        (error (drover--archive-warn "Could not remember the sessions drover archived in %s: %s"
+                                     (abbreviate-file-name file) (drover-error-message err))))
+      (setq drover--archive-stamp (file-attribute-modification-time (file-attributes file))))))
+
+(defun drover--archive-flush ()
+  "Write drover's archive to its file, if it holds what the file does not."
+  (when drover--archive-unwritten
+    (let ((drover--archive-deferring nil))
+      (drover--archive-write drover--archive))))
+
+(defun drover--archive-lookup (key)
+  "Return what drover's archive holds of the conversation of engine KEY, or nil."
+  (when-let* ((archive (drover--archive)))
+    (unless (eq (car drover--archive-table) archive)
+      (let ((table (make-hash-table :test #'equal :size (length archive))))
+        (dolist (entry archive)
+          (unless (gethash (car entry) table)
+            (puthash (car entry) (cdr entry) table)))
+        (setq drover--archive-table (cons archive table))))
+    (gethash key (cdr drover--archive-table))))
+
+(defun drover--archive-put (key entry)
+  "Make ENTRY what drover's archive holds for the conversation of engine KEY.
+The table of `drover--archive-lookup' follows, rather than being made
+anew: archiving a selection puts thousands."
+  (let* ((old (drover--archive))
+         (archive (cons (cons key entry)
+                        (if (drover--archive-lookup key)
+                            (seq-remove (lambda (other) (equal (car other) key)) old)
+                          old))))
+    (when (and old (eq (car drover--archive-table) old))
+      (puthash key entry (cdr drover--archive-table))
+      (setq drover--archive-table (cons archive (cdr drover--archive-table))))
+    (drover--archive-write archive)))
 
 (defun drover--archive-entry (session)
   "Return what drover keeps of SESSION's conversation, archived, or nil."
   (when-let* ((key (drover-session-engine-key session)))
-    (alist-get key (drover--archive) nil nil #'equal)))
+    (drover--archive-lookup key)))
 
 (defun drover--unarchived (sessions)
   "Return SESSIONS but those archived: by their backend, or by drover.
@@ -3293,7 +3363,7 @@ all the same."
                   (or (drover-session-archived session)
                       (and archive
                            (when-let* ((key (drover-session-engine-key session)))
-                             (assoc key archive)))))
+                             (drover--archive-lookup key)))))
                 sessions)))
 
 (defun drover--mark-archived (session)
@@ -3386,23 +3456,26 @@ is, and the value is `confirming' when there is one to close."
      ((not (drover-session-engine-key session))
       (user-error "%s cannot be archived before its conversation is known" title))
      (t
-      (cl-flet ((text (value) (and (stringp value) (substring-no-properties value))))
-        (let ((archive (copy-alist (drover--archive)))
-              (entry (list :time (float-time)
-                           :backend (drover-session-backend session)
-                           :title (text (drover-session-title session))
-                           :directory (text (drover-session-directory session))
-                           :project (text (drover-session-project session))
-                           :branch (text (drover-session-branch session))
-                           :agent (text (drover-session-agent session))
-                           :model (text (drover-session-model session))
-                           :effort (text (drover-session-effort session))
-                           :created (drover-session-created session)
-                           :updated (drover-session-updated session))))
-          (setf (alist-get (drover-session-engine-key session) archive nil nil #'equal) entry)
-          (drover--archive-write archive)
-          (drover--archive-changed session)
-          (drover--close-archived session)))))))
+      (drover--archive-own session)
+      (drover--close-archived session)))))
+
+(defun drover--archive-own (session)
+  "Archive SESSION in drover's own archive, by conversation, and say it changed.
+Its engine key is known."
+  (cl-flet ((text (value) (and (stringp value) (substring-no-properties value))))
+    (drover--archive-put (drover-session-engine-key session)
+                         (list :time (float-time)
+                               :backend (drover-session-backend session)
+                               :title (text (drover-session-title session))
+                               :directory (text (drover-session-directory session))
+                               :project (text (drover-session-project session))
+                               :branch (text (drover-session-branch session))
+                               :agent (text (drover-session-agent session))
+                               :model (text (drover-session-model session))
+                               :effort (text (drover-session-effort session))
+                               :created (drover-session-created session)
+                               :updated (drover-session-updated session)))
+    (drover--archive-changed session)))
 
 (defvar drover--confirming nil
   "Archives asked of backends that confirm them, and not answered yet.
@@ -3525,7 +3598,7 @@ KEY is an engine key, (ENGINE . ENGINE-ID).  The session is the record
 of a backend following the conversation live, else of one listing what
 its engine records, else the record drover kept of it, when its backend
 is still registered.  Nil when drover did not archive it."
-  (when-let* ((entry (alist-get key (drover--archive) nil nil #'equal)))
+  (when-let* ((entry (drover--archive-lookup key)))
     (or (seq-find (lambda (session) (equal (drover-session-engine-key session) key))
                   (drover--live-sessions))
         (and (drover--recording-backends (car key))
@@ -3539,11 +3612,11 @@ They are left out of `drover-sessions', yet have buffers a prompt may
 go to, restoring them (see `drover-unarchive-to-send').  Records of
 different backends showing one conversation are merged as
 `drover-sessions' merges them."
-  (when-let* ((archive (drover--archive)))
+  (when (drover--archive)
     (drover--merge-duplicates
      (seq-filter (lambda (session)
                    (when-let* ((key (drover-session-engine-key session)))
-                     (assoc key archive)))
+                     (drover--archive-lookup key)))
                  (drover--live-sessions)))))
 
 (defun drover-archived-left (backend id)
@@ -3575,9 +3648,13 @@ whether drover's archive hides it or not: restored, it shows again."
 (defun drover--archive-forget (session)
   "Remove SESSION's conversation from drover's archive, if there."
   (when-let* ((key (drover-session-engine-key session))
-              ((assoc key (drover--archive))))
-    (drover--archive-write (seq-remove (lambda (entry) (equal (car entry) key))
-                                       (drover--archive)))))
+              ((drover--archive-lookup key)))
+    (let ((archive (seq-remove (lambda (entry) (equal (car entry) key)) (drover--archive)))
+          (table (cdr drover--archive-table)))
+      ;; The table follows, as `drover--archive-put' has it follow.
+      (remhash key table)
+      (setq drover--archive-table (cons archive table))
+      (drover--archive-write archive))))
 
 ;;;; Closing the buffers of archived sessions
 
@@ -4062,67 +4139,598 @@ DOING telling what none does, such as \"runs a turn\"."
                 40 nil nil (truncate-string-ellipsis)))
              sessions ", "))
 
+(defconst drover--confirm-named 5
+  "Sessions a confirmation names at most, the others counted.")
+
 (defun drover--confirm (verb sessions &optional suffix strongly)
   "Ask whether to VERB SESSIONS, signalling a `user-error' unless the user agrees.
 SESSIONS is a session or a list of them.  VERB is capitalized, such
 as \"Archive\", and SUFFIX, such as \" for good\", follows what it acts
 on: a session by its title, several by their count, then their
-titles, as \"Archive 3 sessions: A, B, C? \".  With STRONGLY, the
+titles, as \"Archive 3 sessions: A, B, C? \", the first
+`drover--confirm-named' of them, the others counted.  With STRONGLY, the
 answer is typed in full."
   (let ((sessions (if (drover-session-p sessions) (list sessions) sessions)))
     (unless (funcall (if strongly #'yes-or-no-p #'y-or-n-p)
                      (if (cdr sessions)
-                         (format "%s %d sessions%s: %s? " verb (length sessions) (or suffix "")
-                                 (drover--session-names sessions))
+                         (format "%s %d sessions%s: %s%s? " verb (length sessions) (or suffix "")
+                                 (drover--session-names (seq-take sessions drover--confirm-named))
+                                 (if (> (length sessions) drover--confirm-named)
+                                     (format " and %d more" (- (length sessions) drover--confirm-named))
+                                   ""))
                        (format "%s %s%s? " verb (drover-session-display-title (car sessions))
                                (or suffix ""))))
       (user-error "Abort"))))
 
-(defun drover--act (sessions operation done &optional note)
+(defun drover--confirms-property (operation)
+  "Return the property telling that a backend confirms OPERATION later.
+Such as :archive-confirms for :archive (see `drover-register-backend')."
+  (intern (concat (symbol-name operation) "-confirms")))
+
+(defun drover--call-confirming (session operation then else)
+  "Perform OPERATION on SESSION; call THEN once it took, ELSE if refused.
+OPERATION is a keyword.
+A backend confirming OPERATION later (see `drover--confirms-property')
+is given THEN and ELSE; otherwise THEN is called once OPERATION
+returned.  ELSE receives a message, bounded here."
+  (if (drover-backend-property session (drover--confirms-property operation))
+      (drover-backend-call session operation then
+                           (lambda (message)
+                             (funcall else (or (drover-bound-line message drover-error-length)
+                                               "refused"))))
+    (drover-backend-call session operation)
+    (funcall then)))
+
+(defun drover--act (sessions operation done &rest properties)
   "Perform OPERATION on SESSIONS, a session or a list, and say so.
 OPERATION is a keyword, the backend operation, or a function of a
 session.  DONE is a format string for what was done, given the title of
 a session or a count of sessions, such as \"Archived %s\".  A session
 alone failing signals, as `drover-backend-call' does; of a list, each
 session is acted on whatever happens to the others, and those failing
-are named after how many were acted on.  NOTE, if any, is a function of
-what OPERATION returned for a session and of its title, nil for a
-session acted on alone, returning a note on the outcome, or nil: the
-notes follow what was done.  Acting on a list in a buffer selecting
-sessions ends its selection."
-  (cl-flet ((perform (session)
-              (if (keywordp operation)
-                  (drover-backend-call session operation)
-                (funcall operation session)))
-            (notes (texts)
-              (mapconcat (lambda (text) (concat "; " text)) (delq nil texts) "")))
-    (if (drover-session-p sessions)
-        (let ((value (perform sessions)))
-          (message "%s" (concat (format done (drover-session-display-title sessions))
-                                (notes (list (and note (funcall note value nil)))))))
-      (let ((failures nil)
-            (noted nil))
-        (dolist (session sessions)
-          (condition-case err
-              (let ((value (perform session)))
-                (when note
-                  (push (funcall note value (drover-session-display-title session)) noted)))
-            (error (push (format "%s (%s)" (drover--session-names (list session))
-                                 (drover-error-message err))
-                         failures))))
-        ;; Done with the selection, as Magit's commands are: kept, it
-        ;; would select other sessions once these went.
-        (when drover-selected-sessions-function
-          (deactivate-mark))
-        (let ((count (- (length sessions) (length failures))))
-          (message "%s" (concat
-                         (format done (if (and (= count 1) (null failures))
-                                          (drover-session-display-title (car sessions))
-                                        (format "%d session%s" count (if (= count 1) "" "s"))))
-                         (notes (nreverse noted))
-                         (if failures
-                             (format "; failed for %s" (string-join (nreverse failures) ", "))
-                           ""))))))))
+are named after how many were acted on.  Acting on a list in a buffer
+selecting sessions ends its selection.
+
+PROPERTIES are a plist.  :note is a function of what OPERATION returned
+for a session alone and of nil, returning a note on the outcome, or nil,
+which follows what was done.  The others tell how to act on a list, as
+`drover--bulk-start' does: :verb, :step, :kind, :finish and :notes.
+Without :step, OPERATION is the step, a request to the backend for a
+keyword, which a backend may confirm later (see
+`drover--confirms-property'), otherwise work in Emacs."
+  (if (drover-session-p sessions)
+      (let* ((title (drover-session-display-title sessions))
+             (value (if (keywordp operation)
+                        (drover--call-confirming
+                         sessions operation #'ignore
+                         (lambda (message)
+                           (drover-with-reporting (drover--operation-name operation)
+                             (drover-warn "Could not %s %s: %s"
+                                          (drover--operation-name operation) title message))))
+                      (funcall operation sessions)))
+             (note (plist-get properties :note)))
+        (drover-message "%s" (concat (format done title)
+                                     (when-let* ((text (and note (funcall note value nil))))
+                                       (concat "; " text)))))
+    ;; Done with the selection, as Magit's commands are: kept, it would
+    ;; select other sessions once these went.
+    (when drover-selected-sessions-function
+      (deactivate-mark))
+    (drover--bulk-start
+     sessions done
+     (or (plist-get properties :verb) "Acting on")
+     (or (plist-get properties :step)
+         (if (keywordp operation)
+             (lambda (session settle)
+               (drover--call-confirming session operation
+                                        (lambda () (funcall settle t))
+                                        (lambda (message) (funcall settle nil message))))
+           (lambda (session settle)
+             (funcall settle t (funcall operation session)))))
+     (or (plist-get properties :kind)
+         (if (keywordp operation)
+             (lambda (session)
+               (if (drover-backend-property session (drover--confirms-property operation))
+                   'confirmed
+                 'request))
+           (lambda (_session) 'local)))
+     (plist-get properties :finish)
+     (plist-get properties :notes))))
+
+;;;; Acting on several sessions
+
+;; A selection may hold thousands of sessions, as when the user
+;; archives all those a list shows.  Acting on all of them in the
+;; command kept Emacs for minutes, each request and buffer closed in
+;; turn, and then the answers all at once.  An action on several
+;; sessions is a job, `drover--bulk', run in slices of a few
+;; milliseconds from a timer, between which Emacs redisplays and reads
+;; input: a few requests in flight at most, the next sent as answers
+;; come, the buffers of sessions archived closed a few at a time.
+;; Echo area tells its progress, `drover-stop-actions' stops it, and
+;; one bounded line reports it at the end.  A small selection, done in
+;; the first slice, is done and reported in the command, as before.
+;; What sessions report as they change goes to the index as any change
+;; does, coalesced: lists draw once things settle (see
+;; `drover-changed-hook').
+
+(defcustom drover-bulk-requests 8
+  "Most requests drover keeps in flight acting on several sessions.
+Acting on a selection, a backend's action that is a request answered
+later, such as OpenCode's archive, is sent for this many sessions at
+most, the next as answers come; a request of which no answer is
+awaited, for this many per hundredth of a second."
+  :type 'natnum
+  :group 'drover)
+
+(defcustom drover-bulk-timeout 120
+  "Seconds drover awaits a backend's answer to an action on a session.
+Acting on several sessions, a session whose backend has not told
+whether its action took in this time is reported as failed, so that
+the others go on."
+  :type 'number
+  :group 'drover)
+
+(defconst drover--bulk-slice 0.008
+  "Seconds of work a slice of an action on several sessions takes at most.")
+
+(defconst drover--bulk-least 4
+  "Sessions a slice acts on at least, however long they take.
+A selection of this many is acted on in the command, as one alone.")
+
+(defconst drover--bulk-pace 0.01
+  "Seconds between slices sending requests whose answers are not awaited.")
+
+(defconst drover--bulk-progress-delay 0.5
+  "Seconds an action on several sessions runs before its progress shows.")
+
+(defconst drover--bulk-progress-interval 0.25
+  "Seconds at least between two messages of an action's progress.")
+
+(defconst drover--bulk-named 3
+  "Failures a report names, and notes it gives one by one, at most.")
+
+(cl-defstruct (drover--bulk (:constructor drover--bulk-make)
+                            (:copier nil))
+  "An action on several sessions, run in slices (see `drover--bulk-run')."
+  ;; First, whatever the version: see `drover-layout-current-p'.
+  (stamp (drover-layout 'drover--bulk 'drover-session)
+         :documentation "The layouts of the types it was made of, as `drover-layout' tells them.")
+  (verb nil :documentation "What it does, for its progress, such as \"Archiving\".")
+  (done nil :documentation "A format string for what was done, such as \"Archived %s\".")
+  (step nil :documentation "Function of a session and SETTLE acting on the session.")
+  (kind nil :documentation "Function of a session telling what acting on it is.
+`confirmed', `request' or `local'.")
+  (finish nil :documentation "Function of a session settled and its value, or nil.
+It runs in slices.")
+  (notes nil :documentation "Function of the notes, (VALUE . TITLE), returning texts, or nil.")
+  (queue nil :documentation "The sessions not acted on yet, in order.")
+  (keys nil :documentation "The keys of the sessions it acts on, a hash table.")
+  (total 0 :documentation "How many sessions it acts on.")
+  (flight 0 :documentation "How many answers it awaits.")
+  (waiting nil :documentation "The sessions whose answers it awaits, by key.
+Each is (DEADLINE . SETTLE).")
+  (settled 0 :documentation "How many sessions settled, whichever way.")
+  (finishing nil :documentation "The sessions settled to finish, (SESSION . VALUE), newest first.")
+  (noted nil :documentation "The notes on outcomes, (VALUE . TITLE), newest first.")
+  (failures nil :documentation "The first sessions that failed, with their messages, newest first.")
+  (failed 0 :documentation "How many sessions failed.")
+  (title nil :documentation "The title of the last session acted on, for a report of one.")
+  (started nil :documentation "When it started, a float time.")
+  (shown nil :documentation "When its progress last showed, or nil.")
+  (stopped nil :documentation "Non-nil once stopped, the sessions not acted on left.")
+  (async nil :documentation "Non-nil once the command starting it returned."))
+
+(drover-note-layout 'drover--bulk)
+
+(defvar drover--bulk-jobs nil
+  "The actions on several sessions running, oldest first.")
+
+(defvar drover--bulk-timer nil
+  "Timer running the next slice of the actions on several sessions.")
+
+(defvar drover--bulk-due nil
+  "When `drover--bulk-timer' runs, a float time.")
+
+(defun drover--bulk-current ()
+  "Return the actions on several sessions running.
+Those made by another version of drover are dropped."
+  (let ((stale (seq-remove (lambda (job) (drover-layout-current-p job 'drover--bulk))
+                           drover--bulk-jobs)))
+    (when stale
+      (setq drover--bulk-jobs (seq-difference drover--bulk-jobs stale #'eq))
+      (drover-stale-layout "action on several sessions")))
+  drover--bulk-jobs)
+
+(defun drover--bulk-start (sessions done verb step kind &optional finish notes)
+  "Act on SESSIONS, a list, in slices, and report it once all settled.
+DONE is a format string for what was done, given a title or a count of
+sessions, such as \"Archived %s\"; VERB tells the progress, such as
+\"Archiving\".  STEP is a function of a session and SETTLE, which it
+calls once, sooner or later, with non-nil and a value once the session
+was acted on, or nil and a message, a line, when it failed; a step
+signalling fails.  KIND, a function of a session, tells what STEP is:
+`confirmed', a request whose answer is awaited, of which
+`drover-bulk-requests' are in flight at most; `request', one whose
+answer is not, as many sent per hundredth of a second at most; or
+`local', work in Emacs.  FINISH, if any, is a function of a session and
+its value, run in slices once the session settled, as closing its
+buffer: what it returns is noted instead.  NOTES, if any, is a function
+of the notes, the non-nil values (VALUE . TITLE) in order, returning
+the texts the report gives after what was done.
+
+A session listed twice, or acted on already by an action of DONE still
+running, is acted on once: when all are, that is all said.  The first
+slice runs at once: a selection done in it is reported before this
+returns."
+  (let* ((keys (make-hash-table :test #'equal))
+         (others (seq-filter (lambda (job) (equal (drover--bulk-done job) done))
+                             (drover--bulk-current)))
+         (queue (seq-filter (lambda (session)
+                              (let ((key (drover-session-key session)))
+                                (unless (or (gethash key keys)
+                                            (seq-some (lambda (job) (gethash key (drover--bulk-keys job)))
+                                                      others))
+                                  (puthash key t keys))))
+                            sessions))
+         (job (drover--bulk-make :verb verb :done done :step step :kind kind
+                                 :finish finish :notes notes :queue queue :keys keys
+                                 :total (length queue) :waiting (make-hash-table :test #'equal)
+                                 :started (float-time))))
+    (if (and sessions (null queue))
+        (drover-message "%s %s already" verb (if (cdr sessions)
+                                                 (format "%d sessions" (length sessions))
+                                               (drover-session-display-title (car sessions))))
+      (setq drover--bulk-jobs (append drover--bulk-jobs (list job)))
+      (drover--bulk-run)
+      (when (memq job drover--bulk-jobs)
+        (setf (drover--bulk-async job) t)))))
+
+(defun drover--bulk-over-p (job)
+  "Return non-nil when nothing is left to do of JOB."
+  (and (null (drover--bulk-queue job))
+       (zerop (drover--bulk-flight job))
+       (null (drover--bulk-finishing job))))
+
+(defun drover--bulk-note (job value title)
+  "Note VALUE, of the session of TITLE, for the report of JOB, unless nil.
+Only for a job taking notes (see `drover--bulk-start')."
+  (when (and value (drover--bulk-notes job))
+    (push (cons value title) (drover--bulk-noted job))))
+
+(defun drover--bulk-settler (job session confirmed)
+  "Return the function settling SESSION in JOB, for its step.
+It acts once, however often called.  CONFIRMED non-nil tells that JOB
+awaits its answer."
+  (let ((link (drover-link job))
+        (key (drover-session-key session))
+        (settled nil))
+    (lambda (ok &optional value)
+      (unless settled
+        (setq settled t)
+        (drover-with-reporting "action on several sessions"
+          (when-let* ((job (drover-linked link))
+                      ((drover-layout-current-p job 'drover--bulk)))
+            (when confirmed
+              (cl-decf (drover--bulk-flight job))
+              (remhash key (drover--bulk-waiting job)))
+            (cl-incf (drover--bulk-settled job))
+            (if ok
+                (progn
+                  (setf (drover--bulk-title job) (drover-session-display-title session))
+                  (if (drover--bulk-finish job)
+                      (push (cons session value) (drover--bulk-finishing job))
+                    (drover--bulk-note job value (drover-session-display-title session))))
+              (cl-incf (drover--bulk-failed job))
+              (when (<= (drover--bulk-failed job) drover--bulk-named)
+                (push (format "%s (%s)" (drover--session-names (list session))
+                              (or (drover-bound-line (format "%s" value) drover-error-length)
+                                  "failed"))
+                      (drover--bulk-failures job))))
+            (when (memq job drover--bulk-jobs)
+              (if (and (drover--bulk-async job) (drover--bulk-over-p job))
+                  (drover--bulk-end job)
+                (drover--bulk-schedule 0)))))))))
+
+(defun drover--bulk-capacity (kind sent)
+  "Return non-nil when a session of KIND may be acted on now.
+SENT is how many requests whose answers are not awaited this slice sent."
+  (pcase kind
+    ('confirmed (< (apply #'+ (mapcar #'drover--bulk-flight drover--bulk-jobs))
+                   (max 1 drover-bulk-requests)))
+    ('request (< sent (max 1 drover-bulk-requests)))
+    (_ t)))
+
+(defun drover--bulk-expire (job now)
+  "Fail the sessions of JOB whose answers did not come by NOW."
+  (let ((late nil))
+    (maphash (lambda (_key entry) (when (< (car entry) now) (push (cdr entry) late)))
+             (drover--bulk-waiting job))
+    (dolist (settle late)
+      (funcall settle nil (format "no answer after %s seconds" drover-bulk-timeout)))))
+
+(defun drover--bulk-run ()
+  "Run a slice of the actions on several sessions, and schedule the next.
+A slice finishes sessions settled (see `drover--bulk-start'), then acts
+on the next ones, as long as requests may go and for
+`drover--bulk-slice' seconds, `drover--bulk-least' sessions at least."
+  (drover-with-reporting "action on several sessions"
+    (when (timerp drover--bulk-timer)
+      (cancel-timer drover--bulk-timer))
+    (setq drover--bulk-timer nil)
+    (let* ((now (float-time))
+           (deadline (+ now drover--bulk-slice))
+           (count 0)
+           (sent 0)
+           (paced nil)
+           (drover--archive-deferring t)
+           (drover--archive-checking (or drover--archive-checking t)))
+      (cl-labels ((more () (or (< count drover--bulk-least) (< (float-time) deadline)))
+                  (finish (job)
+                    (when-let* ((finishing (drover--bulk-finishing job)))
+                      (setf (drover--bulk-finishing job) nil)
+                      (setq finishing (nreverse finishing))
+                      (while (and finishing (more))
+                        (pcase-let ((`(,session . ,value) (pop finishing)))
+                          (cl-incf count)
+                          (drover--bulk-note job
+                                             (condition-case err
+                                                 (funcall (drover--bulk-finish job) session value)
+                                               (error (cons 'failed (drover-error-message err))))
+                                             (drover-session-display-title session))))
+                      ;; Those left, and any settled meanwhile, newest first.
+                      (setf (drover--bulk-finishing job)
+                            (append (drover--bulk-finishing job) (nreverse finishing))))))
+        (dolist (job (copy-sequence (drover--bulk-current)))
+          (drover--bulk-expire job now)
+          (finish job)
+          (while (and (drover--bulk-queue job) (not (drover--bulk-stopped job)) (more)
+                      (let ((kind (funcall (drover--bulk-kind job) (car (drover--bulk-queue job)))))
+                        (or (drover--bulk-capacity kind sent)
+                            (progn (when (eq kind 'request) (setq paced t))
+                                   nil))))
+            (let* ((session (pop (drover--bulk-queue job)))
+                   (kind (funcall (drover--bulk-kind job) session))
+                   (settle (drover--bulk-settler job session (eq kind 'confirmed))))
+              (cl-incf count)
+              (pcase kind
+                ('confirmed
+                 (cl-incf (drover--bulk-flight job))
+                 (puthash (drover-session-key session) (cons (+ (float-time) drover-bulk-timeout) settle)
+                          (drover--bulk-waiting job)))
+                ('request (cl-incf sent)))
+              (condition-case err
+                  (funcall (drover--bulk-step job) session settle)
+                (error (funcall settle nil (drover-error-message err))))))
+          ;; Those settled at once, such as archived by drover.
+          (finish job)
+          (when (drover--bulk-stopped job)
+            (setf (drover--bulk-queue job) nil))
+          (if (drover--bulk-over-p job)
+              (drover--bulk-end job)
+            (drover--bulk-progress job))))
+      (unless drover--bulk-jobs
+        (drover--archive-flush))
+      (drover--bulk-schedule-next paced))))
+
+(defun drover--bulk-schedule (delay)
+  "Run a slice of the actions on several sessions in DELAY seconds, or sooner."
+  (let ((due (+ (float-time) delay)))
+    (unless (and (timerp drover--bulk-timer) drover--bulk-due (<= drover--bulk-due due))
+      (when (timerp drover--bulk-timer)
+        (cancel-timer drover--bulk-timer))
+      (setq drover--bulk-timer (run-at-time delay nil #'drover--bulk-run)
+            drover--bulk-due due))))
+
+(defun drover--bulk-schedule-next (paced)
+  "Schedule the next slice of the actions on several sessions, if any is due.
+At once while sessions may be acted on or finished now; after
+`drover--bulk-pace' seconds when PACED, requests whose answers are not
+awaited having been sent as many as may be; otherwise in a second, to
+fail answers late, the answers that come running slices sooner."
+  (when drover--bulk-jobs
+    (cond ((seq-some (lambda (job)
+                       (or (drover--bulk-finishing job)
+                           (and (drover--bulk-queue job)
+                                (drover--bulk-capacity
+                                 (funcall (drover--bulk-kind job) (car (drover--bulk-queue job))) 0)
+                                (not paced))))
+                     drover--bulk-jobs)
+           (drover--bulk-schedule 0))
+          (paced (drover--bulk-schedule drover--bulk-pace))
+          (t (drover--bulk-schedule 1)))))
+
+(defun drover--bulk-progress (job)
+  "Tell in the echo area how far JOB is, now and then, once it took a while.
+Not while the minibuffer is in use, nor in the log of messages."
+  (let ((now (float-time)))
+    (when (and (drover--bulk-async job)
+               (> (- now (drover--bulk-started job)) drover--bulk-progress-delay)
+               (or (null (drover--bulk-shown job))
+                   (> (- now (drover--bulk-shown job)) drover--bulk-progress-interval))
+               (not (active-minibuffer-window)))
+      (setf (drover--bulk-shown job) now)
+      (let ((message-log-max nil))
+        (message "%s %d/%d sessions…%s" (drover--bulk-verb job)
+                 (drover--bulk-settled job) (drover--bulk-total job)
+                 (substitute-command-keys "  \\[drover-stop-actions] stops"))))))
+
+(defun drover--bulk-report (job)
+  "Return the report of JOB, done, on one bounded line."
+  (let* ((failed (drover--bulk-failed job))
+         (count (- (drover--bulk-settled job) failed))
+         (left (- (drover--bulk-total job) (drover--bulk-settled job)))
+         (noted (reverse (drover--bulk-noted job)))
+         (notes (and noted (funcall (drover--bulk-notes job) noted))))
+    (drover-format-message
+     "%s"
+     (concat (format (drover--bulk-done job)
+                     (if (and (= count 1) (zerop failed) (zerop left))
+                         (drover--bulk-title job)
+                       (format "%d session%s" count (if (= count 1) "" "s"))))
+             (when (drover--bulk-stopped job)
+               (format "; stopped, %d left as they were" left))
+             (mapconcat (lambda (text) (concat "; " text)) (delq nil notes) "")
+             (when (> failed 0)
+               (concat (if (> failed 1) (format "; %d failed: " failed) "; failed for ")
+                       (string-join (reverse (drover--bulk-failures job)) ", ")
+                       (when (> failed drover--bulk-named)
+                         (format " and %d more" (- failed drover--bulk-named)))))))))
+
+(defun drover--bulk-end (job)
+  "Report JOB, done, and forget it.
+In the command that started it, as a message; later, as a warning
+when sessions failed, the report then being the only trace."
+  (setq drover--bulk-jobs (delq job drover--bulk-jobs))
+  (unless drover--bulk-jobs
+    (drover--archive-flush))
+  (let ((report (drover--bulk-report job)))
+    (if (and (drover--bulk-async job) (> (drover--bulk-failed job) 0))
+        (drover-warn "%s" report)
+      (message "%s" report))))
+
+(defun drover-stop-actions ()
+  "Stop the actions on several sessions in progress, as archiving a selection.
+The sessions not acted on yet are left as they are; those whose answers
+are awaited settle, and the buffers of those archived still close.
+Each action then reports what it did."
+  (interactive)
+  (unless (drover--bulk-current)
+    (user-error "No action on several sessions in progress"))
+  (dolist (job drover--bulk-jobs)
+    (setf (drover--bulk-stopped job) t))
+  (drover--bulk-run))
+
+(defun drover--archive-kind (session)
+  "Return what archiving SESSION is, for `drover--bulk-start'."
+  (cond ((drover-session-archived-p session) 'local)
+        ((drover--native-archive-p session)
+         (if (drover-backend-property session :archive-confirms) 'confirmed 'request))
+        (t 'local)))
+
+(defun drover--archive-step (session settle)
+  "Archive SESSION as `drover-archive-session' does, then SETTLE.
+Its buffer is closed later, by `drover--archive-finish'.
+For `drover--bulk-start': SETTLE is given t once SESSION is archived,
+its buffer to close (see `drover--archive-finish'), or nil when a
+confirmation came once SESSION was restored meanwhile, or when SESSION
+was archived already."
+  (let ((title (drover-session-display-title session)))
+    (cond
+     ((drover-session-archived-p session) (funcall settle t nil))
+     ((and (drover--native-archive-p session) (drover-backend-property session :archive-confirms))
+      (let ((key (drover-session-key session))
+            (token (list 'archive))
+            (asked nil))
+        (cl-flet ((settle-token ()
+                    ;; Non-nil when this archive is still the one awaited.
+                    (when (eq (alist-get key drover--confirming nil nil #'equal) token)
+                      (drover--confirming-forget key)
+                      t)))
+          (setf (alist-get key drover--confirming nil nil #'equal) token)
+          (unwind-protect
+              (progn
+                (drover-backend-call
+                 session :archive
+                 (lambda ()
+                   (drover-with-reporting "archive"
+                     (funcall settle t (settle-token))))
+                 (lambda (message)
+                   (drover-with-reporting "archive"
+                     (settle-token)
+                     (funcall settle nil (or (drover-bound-line message drover-error-length) "refused")))))
+                (setq asked t))
+            (unless asked
+              (drover--confirming-forget key))))))
+     ((drover--native-archive-p session)
+      (drover-backend-call session :archive)
+      (funcall settle t t))
+     ((drover-session-host session)
+      (user-error "%s is archived by its host, %s" title (drover-host-label (drover-session-host session))))
+     ((not (drover-session-engine-key session))
+      (user-error "%s cannot be archived before its conversation is known" title))
+     (t
+      (drover--archive-own session)
+      (funcall settle t t)))))
+
+(defun drover--archive-finish (session close)
+  "Close the buffer of SESSION, archived, when CLOSE is non-nil, in a slice.
+Return how it went, as `drover--close-archived' tells it."
+  (and close (drover--close-archived session)))
+
+(defun drover--archive-notes (noted)
+  "Return the notes on closing the buffers of the sessions archived, NOTED.
+NOTED lists (OUTCOME . TITLE), OUTCOME as `drover--close-archived'
+returns it: told one by one when few, else counted."
+  (let ((noted (seq-remove (lambda (entry) (eq (car entry) 'closed)) noted)))
+    (if (<= (length noted) drover--bulk-named)
+        (mapcar (lambda (entry) (drover--archive-note (car entry) (cdr entry))) noted)
+      (let ((kept 0) (later 0) (waiting 0) (failed 0) (message nil))
+        (pcase-dolist (`(,outcome . ,_) noted)
+          (pcase outcome
+            ('kept (cl-incf kept))
+            ('later (cl-incf later))
+            ('waiting (cl-incf waiting))
+            (`(failed . ,text) (cl-incf failed) (setq message (or message text)))))
+        (delq nil
+              (list (and (> kept 0)
+                         (format "the unsent input of %d buffer%s is in the kill ring"
+                                 kept (if (= kept 1) "" "s")))
+                    (and (> later 0)
+                         (if (= later 1)
+                             "1 buffer closes once its turn ends"
+                           (format "%d buffers close once their turns end" later)))
+                    (and (> waiting 0)
+                         (if (= waiting 1)
+                             "1 session waits for you: its buffer closes once its turn ends"
+                           (format "%d sessions wait for you: their buffers close once their turns end"
+                                   waiting)))
+                    (and (> failed 0)
+                         (format "%d buffer%s open: %s" failed (if (= failed 1) " stays" "s stay")
+                                 message))))))))
+
+(defun drover--unarchive-kind (session)
+  "Return what restoring SESSION is, for `drover--bulk-start'."
+  (cond ((drover--archive-entry session) 'local)
+        ((drover-session-archived session)
+         (if (drover-backend-property session :unarchive-confirms) 'confirmed 'request))
+        (t 'local)))
+
+(defun drover--unarchive-step (session settle)
+  "Restore SESSION as `drover-unarchive-session' does, then SETTLE.
+For `drover--bulk-start'.  A backend confirming restores settles SESSION
+once it answered; a session not archived settles at once."
+  (cond
+   ((and (not (drover--archive-entry session))
+         (drover-session-archived session)
+         (drover-backend-property session :unarchive-confirms))
+    (let ((backend (drover-session-backend session))
+          (id (drover-session-id session)))
+      (drover-backend-call session :unarchive
+                           (lambda ()
+                             (drover-with-reporting "unarchive"
+                               (drover-archived-left backend id)
+                               (funcall settle t)))
+                           (lambda (message)
+                             (drover-with-reporting "unarchive"
+                               (funcall settle nil (or (drover-bound-line message drover-error-length)
+                                                       "refused")))))
+      (drover--close-cancel session)))
+   ((drover-session-archived-p session)
+    (drover-unarchive-session session)
+    (funcall settle t))
+   (t (funcall settle t))))
+
+(defun drover--delete-kind (session)
+  "Return what deleting SESSION is, for `drover--bulk-start'."
+  (if (drover-backend-property session :delete-confirms) 'confirmed 'request))
+
+(defun drover--delete-step (session settle)
+  "Delete SESSION as `drover-delete-session' does, then SETTLE.
+For `drover--bulk-start'."
+  (drover-delete-session session
+                         (lambda () (funcall settle t))
+                         (lambda (message) (funcall settle nil message))))
 
 ;;;; Prompt actions
 
@@ -4342,7 +4950,7 @@ the session at point (see `drover--selected-for'), after confirmation."
   (interactive (let ((sessions (drover--selected-for :interrupt #'drover--running-p "runs a turn")))
                  (drover--confirm "Interrupt" sessions)
                  (list sessions)))
-  (drover--act sessions :interrupt "Interrupted %s"))
+  (drover--act sessions :interrupt "Interrupted %s" :verb "Interrupting"))
 
 (defun drover-archive (sessions)
   "Archive SESSIONS, a session or a list of sessions, and close their buffers.
@@ -4353,7 +4961,10 @@ the selected sessions that may be archived, or the session at point, as
 `drover--selected-for' tells, without confirmation: the conversations
 stay, and what a buffer holds unsent goes to the kill ring."
   (interactive (list (drover--selected-for nil #'drover-archivable-p "can be archived")))
-  (drover--act sessions #'drover-archive-session "Archived %s" #'drover--archive-note))
+  (drover--act sessions #'drover-archive-session "Archived %s"
+               :note #'drover--archive-note :verb "Archiving" :step #'drover--archive-step
+               :kind #'drover--archive-kind :finish #'drover--archive-finish
+               :notes #'drover--archive-notes))
 
 (defun drover-unarchive (sessions)
   "Restore SESSIONS from the archive, a session or a list of sessions.
@@ -4363,7 +4974,8 @@ sessions that are archived, or the session at point (see
 `drover--selected-for'); archived sessions show while
 `drover-show-archived' is set."
   (interactive (list (drover--selected-for nil #'drover-unarchivable-p "is archived")))
-  (drover--act sessions #'drover-unarchive-session "Unarchived %s"))
+  (drover--act sessions #'drover-unarchive-session "Unarchived %s"
+               :verb "Restoring" :step #'drover--unarchive-step :kind #'drover--unarchive-kind))
 
 (defun drover-mark-seen (sessions)
   "Mark the ended turns of SESSIONS seen, a session or a list of sessions.
@@ -4371,7 +4983,7 @@ Interactively, SESSIONS are the selected sessions whose turn ended
 unseen, or the session at point (see `drover--selected-for')."
   (interactive (list (drover--selected-for :mark-seen #'drover--ended-unseen-p
                                            "ended a turn unseen")))
-  (drover--act sessions :mark-seen "Marked %s seen"))
+  (drover--act sessions :mark-seen "Marked %s seen" :verb "Marking seen"))
 
 (defun drover-preview (session callback)
   "Call CALLBACK with a string showing where SESSION stands, or nil.
@@ -4456,15 +5068,29 @@ its current title as the default."
                  (list session title)))
   (drover-backend-call session :rename title))
 
-(defun drover-delete-session (session)
+(defun drover-delete-session (session &optional then else)
   "Delete SESSION for good through its backend, without asking.
 Drover then forgets it: the records of it fetched as older or archived,
-and its conversation in drover's own archive."
-  (drover-backend-call session :delete)
-  (drover--forget-fetched session)
-  (drover--archive-forget session)
-  (drover--close-cancel session)
-  (drover--archive-changed session))
+and its conversation in drover's own archive.  THEN, if any, is called
+with no argument once SESSION is deleted; ELSE with a message, if the
+backend refused, which is otherwise told as a warning.  A backend
+confirming deletions (:delete-confirms) tells later."
+  (let ((title (drover-session-display-title session)))
+    (drover--call-confirming
+     session :delete
+     (lambda ()
+       (drover-with-reporting "delete"
+         (drover--forget-fetched session)
+         (drover--archive-forget session)
+         (drover--close-cancel session)
+         (drover--archive-changed session)
+         (when then
+           (funcall then))))
+     (lambda (message)
+       (drover-with-reporting "delete"
+         (if else
+             (funcall else message)
+           (drover-warn "Could not delete %s: %s" title message)))))))
 
 (defun drover-delete (sessions)
   "Delete SESSIONS for good, a session or a list of sessions.
@@ -4474,7 +5100,8 @@ typed in full."
   (interactive (let ((sessions (drover--selected-for :delete nil "can be deleted")))
                  (drover--confirm "Delete" sessions " for good" t)
                  (list sessions)))
-  (drover--act sessions #'drover-delete-session "Deleted %s"))
+  (drover--act sessions #'drover-delete-session "Deleted %s"
+               :verb "Deleting" :step #'drover--delete-step :kind #'drover--delete-kind))
 
 (defun drover-fork (&optional session)
   "Fork SESSION whole into a new session, which its backend displays.

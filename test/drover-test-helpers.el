@@ -241,6 +241,11 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover--fetched-layout (drover-layout 'drover-session))
          (drover--archive nil)
          (drover--archive-stamp 'unread)
+         (drover--archive-unwritten nil)
+         (drover--archive-deferring nil)
+         (drover--bulk-jobs nil)
+         (drover--bulk-timer nil)
+         (drover--bulk-due nil)
          (drover-test-sessions ,sessions)
          (drover-test-calls nil)
          (drover-test-backend-engines '(fake))
@@ -256,7 +261,9 @@ PROPERTIES are more properties of `drover-register-backend', such as
      (unwind-protect
          (progn (drover-test-register) ,@body)
        (when (timerp drover--change-timer)
-         (cancel-timer drover--change-timer)))))
+         (cancel-timer drover--change-timer))
+       (when (timerp drover--bulk-timer)
+         (cancel-timer drover--bulk-timer)))))
 
 ;;;; Drover's state
 
@@ -268,6 +275,7 @@ are given again."
   `(let ((drover-state-directory (file-name-as-directory (make-temp-file "drover-state" t)))
          (drover--archive nil)
          (drover--archive-stamp 'unread)
+         (drover--archive-unwritten nil)
          (drover--archive-warned nil))
      (unwind-protect
          (progn ,@body)
@@ -425,6 +433,14 @@ SECONDS defaults to 10.  Return non-nil when they all ended."
                 (< (float-time) deadline))
       (accept-process-output nil 0.02))
     (zerop (hash-table-count drover-command--jobs))))
+
+(defun drover-test-wait-actions (&optional seconds)
+  "Wait for the actions on several sessions to end, SECONDS at most.
+SECONDS defaults to 10.  Return non-nil when they all ended."
+  (let ((deadline (+ (float-time) (or seconds 10))))
+    (while (and drover--bulk-jobs (< (float-time) deadline))
+      (accept-process-output nil 0.005))
+    (null drover--bulk-jobs)))
 
 (defun drover-test-lag (function)
   "Call FUNCTION, and return the longest Emacs went meanwhile without running timers.

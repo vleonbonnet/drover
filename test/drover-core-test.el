@@ -2298,9 +2298,11 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
         (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("b")))
         (funcall (nth 2 (car asked)) (concat "Refused\n" (make-string 1000 ?x)))
         (should (equal (mapcar #'drover-session-id (drover-archived-sessions)) '("b")))
+        ;; Told once both answered, on one line.
         (should (= (length warnings) 1))
-        (should (string-prefix-p "Could not restore Session b from the archive: Refused" (car warnings)))
-        (should-not (string-search "\n" (car warnings))))
+        (should (string-prefix-p "Unarchived 1 session; failed for Session b (Refused" (car warnings)))
+        (should-not (string-search "\n" (car warnings)))
+        (should-not drover--bulk-jobs))
       ;; Forgetting a record not fetched changes nothing.
       (setq drover--changed-backends nil)
       (should-not (drover-archived-left 'fake "a"))

@@ -38,7 +38,7 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test test-alone lint clean bench bench-idle bench-remote real-data
+.PHONY: all compile compile-standalone test test-alone lint clean bench bench-bulk bench-idle bench-remote real-data
 
 all: compile test
 
@@ -119,6 +119,14 @@ bench: compile
 	  fi; \
 	fi; \
 	rm -rf "$$opencode"; exit $$status
+
+# Times an action on every one of thousands of sessions at once, the
+# list showing them: the longest Emacs is kept from its timers, and
+# until the last session settled.  `make bench' runs it too; EMACS_GUI
+# as for bench.  See test/drover-bulk-bench.el.
+bench-bulk:
+	@$(MAKE) --no-print-directory bench \
+	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-bulk-bench.el --eval '(drover-bulk-bench-main)'"
 
 # Measures what drover costs in a graphical Emacs while nothing happens,
 # while a session streams, and once Emacs lost focus: processor time,

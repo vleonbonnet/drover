@@ -4221,6 +4221,25 @@ They are drawn in place once the list shows; past
                 drover-list--pending nil)
         (setq drover-list--pending (list keys bodies (or old-times times)))))))
 
+(defun drover-list--draw-whole-p (keys bodies)
+  "Return non-nil when the change of KEYS and BODIES is drawn whole, not in place.
+BODIES are as for `drover-list--follow'.  A session that changed costs
+about a row to draw in place, so that past `drover-list--pending-limit'
+of them drawing whole costs about the same.  Sessions leaving cost
+little in place, the trees they leave too, as when archiving a
+selection takes hundreds away: while more leave than change, the
+change is drawn in place, unless as many leave as the list holds rows,
+which drawing whole empties at once."
+  (let* ((rows (and drover-list--model (drover-list--model-rows drover-list--model)))
+         (gone 0)
+         (changed (length bodies)))
+    (dolist (key keys)
+      (if (drover-index-session key) (cl-incf changed) (cl-incf gone)))
+    (if (> gone changed)
+        (and (> gone drover-list--pending-limit)
+             (>= gone (if rows (hash-table-count rows) 0)))
+      (> changed drover-list--pending-limit))))
+
 (defun drover-list--update-sessions (buffer keys &optional bodies)
   "Bring list BUFFER up to date with the change of the sessions KEYS.
 Draw it in place if displayed, and anew when it cannot; otherwise note
@@ -4234,7 +4253,7 @@ list anew."
           ((or drover-show-history drover-show-archived)
            (drover-list--render))
           ((not (or keys bodies)))
-          ((> (+ (length keys) (length bodies)) drover-list--pending-limit)
+          ((drover-list--draw-whole-p keys bodies)
            (drover-list--render))
           ((drover-list--follow keys bodies))
           (t (drover-list--render)))))

@@ -38,6 +38,9 @@
 ;; reading it again; the list drawn whole with them, listing them anew,
 ;; and terminals opening and closing them, drawn in place.
 ;;
+;; Last, it times actions on every one of the sessions at once, as
+;; test/drover-bulk-bench.el does.
+;;
 ;; It runs in batch, or in a graphical Emacs, where measuring text and
 ;; collecting garbage cost what they cost the user:
 ;;
@@ -710,16 +713,23 @@ buffer, alone in the selected window."
                         (- 20 redraws) (if same "yes" "NO")))
     (drover-unregister-backend 'fake)))
 
+(defun drover-bench-bulk ()
+  "Time actions on every session at once, as test/drover-bulk-bench.el does."
+  (require 'drover-bulk-bench)
+  (funcall 'drover-bulk-bench-run))
+
 (defun drover-bench-main ()
   "Run the bench, and print the results; a graphical Emacs then exits."
   (if (not drover-bench-output)
       (progn (drover-bench-run)
-             (drover-bench-history))
+             (drover-bench-history)
+             (drover-bench-bulk))
     ;; A graphical Emacs ends with the bench, whatever happens.
     (unwind-protect
         (condition-case err
             (progn (drover-bench-run)
-                   (drover-bench-history))
+                   (drover-bench-history)
+                   (drover-bench-bulk))
           (error (drover-bench-log "drover bench failed: %s" (drover-error-string err))))
       (kill-emacs 0))))
 
