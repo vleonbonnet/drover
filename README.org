@@ -127,10 +127,12 @@ The menu has no fixed shape: its groups fill columns of balanced height as wide 
 
 In every list of sessions (drover's list, and the lists of other front ends that turn on =drover-session-keys-mode=) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
 
+=A= answers in place, from where you are. A session with no request of its own answers the request of its subagent, at any depth, waiting the longest, whether its parent runs it in the foreground or in the background, so you need not go to the subagent first; its own request comes first. It applies when a session of the tree waits for an answer.
+
 | Key | Command                    | Action                                                         |
 |-----+----------------------------+----------------------------------------------------------------|
 | =o= | =drover-open-other-window= | open it in another window than =RET= would                     |
-| =A= | =drover-respond=           | answer its question or permission request, in place            |
+| =A= | =drover-respond=           | answer its question or permission request, else its subagents' |
 | =K= | =drover-interrupt=         | interrupt its turn, after confirmation                         |
 | =s= | =drover-mark-seen=         | mark its ended turn seen                                       |
 | =u= | =drover-open-parent=       | open its parent session                                        |

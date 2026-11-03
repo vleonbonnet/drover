@@ -1900,7 +1900,7 @@ sends prompts, where RET stays Send."
     ("v" "Peek" drover-peek
      :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
     ("A" "Answer" drover-respond
-     :inapt-if-not (lambda () (drover-dispatch-session :respond #'drover-session-requests)))
+     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
     ("K" "Interrupt" drover-interrupt
      :inapt-if-not (lambda () (drover-dispatch-selection :interrupt #'drover--running-p)))
     ("s" "Mark seen" drover-mark-seen
