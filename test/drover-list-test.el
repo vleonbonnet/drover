@@ -687,7 +687,8 @@ next, drawn in place as drawn anew; all of them, it shows idle too."
           (should (equal (drover-list-test-groups) '((working "root")))))))))
 
 (ert-deftest drover-list-test-subagents-toggle ()
-  "U cycles every view through active, no and all subagents, redrawn at once."
+  "=u cycles every view through active, no and all subagents, redrawn at once.
+The View menu of the list holds it, in its Filter group."
   (drover-list-test-with (list (drover-test-session "root" :status 'working)
                                (drover-test-session "child" :parent "root" :status 'working)
                                (drover-test-session "ended" :parent "root" :status 'done
@@ -700,8 +701,8 @@ next, drawn in place as drawn anew; all of them, it shows idle too."
     (forward-char 3)
     (let ((offset (- (point) (line-beginning-position))))
       (drover-list-test-shown
-        (should (eq (key-binding (kbd "U")) #'drover-toggle-subagents))
-        (drover-list-test-press "U")
+        (should-not (eq (key-binding (kbd "U")) #'drover-toggle-subagents))
+        (drover-list-test-type "V = u C-g")
         ;; The setting is global, not the list's own.
         (should-not (local-variable-p 'drover-show-subagents))
         (should (eq drover-show-subagents 'none))
@@ -715,7 +716,7 @@ next, drawn in place as drawn anew; all of them, it shows idle too."
         (save-excursion
           (goto-char (point-min))
           (should (equal (drover-list-test-line) "Working (1)")))
-        (drover-list-test-press "U")
+        (drover-list-test-type "V = u C-g")
         (should (eq drover-show-subagents 'all))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "ended" "child"))))
         (should (string-prefix-p "        ◐ Session child" (drover-list-test-heading "child")))
@@ -724,7 +725,7 @@ next, drawn in place as drawn anew; all of them, it shows idle too."
         (save-excursion
           (goto-char (point-min))
           (should (equal (drover-list-test-line) "Needs you (4)")))
-        (drover-list-test-press "U")
+        (drover-list-test-type "V = u C-g")
         (should (eq drover-show-subagents 'active))
         (should (equal (drover-list-test-groups) '((waiting "root" "asking" "child"))))
         (should (equal (drover-list-test-id-at-point) "root"))
@@ -2441,7 +2442,6 @@ body beginning with an aligned space would push the next line right."
     (should (eq (key-binding (kbd "q")) #'drover-list-quit))
     (should (eq (key-binding (kbd "g")) #'drover-refresh))
     (should (eq (key-binding (kbd "c")) #'drover-open-subagent))
-    (should (eq (key-binding (kbd "U")) #'drover-toggle-subagents))
     (should (eq (key-binding (kbd "V")) #'drover-view))
     (should (eq (key-binding (kbd "K")) #'drover-interrupt))
     ;; The standard keys of Magit sections and special-mode stay.
@@ -2480,7 +2480,7 @@ Of their keys, only g is a session key, and it refreshes either way."
                           (should (eq theirs #'revert-buffer))
                         (should-not (commandp theirs)))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "U" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.
@@ -2533,11 +2533,11 @@ Redraws keep point on the session."
                                '((waiting "root" "s") (failed "new") (working "other"))))
                 ;; From active subagents to none: s hides, and its
                 ;; parent leaves the group s placed it in.
-                (drover-list-test-type "U")
+                (drover-list-test-type "V = u C-g")
                 (should (eq drover-show-subagents 'none))
                 (should (equal (drover-list-test-groups) '((failed "new") (working "other" "root"))))
                 ;; Then to all of them.
-                (drover-list-test-type "U")
+                (drover-list-test-type "V = u C-g")
                 (should (eq drover-show-subagents 'all))
                 (should (equal (drover-list-test-groups)
                                '((waiting "root" "s" "kid") (failed "new") (working "other"))))
@@ -6539,7 +6539,7 @@ set is that of the list in sight."
     (cl-flet ((apt (key) (not (oref (seq-find (lambda (suffix) (equal (oref suffix key) key))
                                               transient--suffixes)
                                     inapt))))
-      (dolist (key '("U" "=o" "=r" "=g" "=p" "=c" "-f" "-l"))
+      (dolist (key '("=u" "=o" "=r" "=g" "=p" "=c" "-f" "-l"))
         (should (apt key)))
       ;; Peeking needs a list: it would peek at the buffer's own session.
       (should-not (apt "v")))
@@ -6550,7 +6550,7 @@ set is that of the list in sight."
     (should (buffer-local-value 'drover-follow-mode buffer))
     (execute-kbd-macro (kbd "- f"))
     (should-not (buffer-local-value 'drover-follow-mode buffer))
-    (execute-kbd-macro (kbd "U"))
+    (execute-kbd-macro (kbd "= u"))
     (should (eq (default-value 'drover-show-subagents) 'none))
     (should (eq (oref transient--prefix command) 'drover-dispatch))
     (execute-kbd-macro (kbd "C-g"))
@@ -6573,7 +6573,9 @@ set is that of the list in sight."
   "The menu lays its groups out in rows as wide as its window, in few lines.
 The old menu took 24 lines at any width, its View menu apart."
   (drover-list-test-elsewhere
-    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 18) (100 . 27) (60 . 60)))
+    ;; At 240 columns, the Filter group, too wide for two columns of its
+    ;; own beside the others, shows in one.
+    (pcase-dolist (`(,width . ,bound) '((240 . 13) (160 . 18) (100 . 27) (60 . 60)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))
@@ -6597,13 +6599,13 @@ The old menu took 24 lines at any width, its View menu apart."
                ;; Every group in a column of its own, on one row.
                (wide (list (make-list count (list 0)))))
           (oset transient--prefix plan wide)
-          (execute-kbd-macro (kbd "U"))
+          (execute-kbd-macro (kbd "= u"))
           (should (equal (oref transient--prefix plan) wide))
           ;; As high as the highest group: a title and seven entries.
           (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 8))
           ;; Narrower than it, the menu is laid out anew.
           (setq width 160)
-          (execute-kbd-macro (kbd "U"))
+          (execute-kbd-macro (kbd "= u"))
           (should-not (equal (oref transient--prefix plan) wide))
           (should (<= (apply #'max (mapcar #'string-width (split-string (drover-list-test-menu-text) "\n")))
                       160)))
@@ -6614,7 +6616,7 @@ The old menu took 24 lines at any width, its View menu apart."
   (drover-list-test-elsewhere
     (execute-kbd-macro (kbd "C-'"))
     (should (string-search "=g group status" (drover-list-test-menu-text)))
-    (should (string-search "U subagents [all|active|none]" (drover-list-test-menu-text)))
+    (should (string-search "=u subagents [all|active|none]" (drover-list-test-menu-text)))
     (cl-flet ((face-of (text)
                 (with-current-buffer " *transient*"
                   (goto-char (point-min))
@@ -6626,7 +6628,7 @@ The old menu took 24 lines at any width, its View menu apart."
       (should (eq (oref transient--prefix command) 'drover-dispatch))
       (should-not drover-group-by)
       (should (string-search "=g group nothing" (drover-list-test-menu-text)))
-      (execute-kbd-macro (kbd "U"))
+      (execute-kbd-macro (kbd "= u"))
       (should (eq (face-of "none") 'transient-value))
       (should (eq (face-of "active") 'transient-inactive-value))
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "redirect")))

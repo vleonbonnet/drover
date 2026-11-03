@@ -47,6 +47,11 @@
   :type 'directory
   :group 'drover)
 
+(defun drover-codex-recorded-p ()
+  "Return non-nil when Codex recorded conversations, archived or not."
+  (or (file-directory-p (expand-file-name "sessions" drover-codex-home))
+      (file-directory-p (expand-file-name "archived_sessions" drover-codex-home))))
+
 ;;;; Defaults
 
 (defun drover-codex-config ()

@@ -783,8 +783,14 @@ search; its RET, or C-', searches again with the text."
   (drover-search--show-status state))
 
 (defun drover-search--prompt ()
-  "Return the prompt of the search, telling what scopes it."
+  "Return the prompt of the search, telling what scopes it.
+That is what the Filter group of its menu sets: the filter, the older
+and archived sessions shown, and the subagents shown, but the active
+ones, the default."
   (let ((scope (delq nil (list (drover-filter-description)
+                               (pcase (default-value 'drover-show-subagents)
+                                 ('all "+subagents")
+                                 ('none "-subagents"))
                                (and drover-show-history "+older")
                                (and drover-show-archived "+archived")))))
     (format "Search sessions%s: "
@@ -903,8 +909,8 @@ See `drover-search--menu-keys'."
 
 (transient-define-prefix drover-search-menu (&optional input)
   "Choose what the search of sessions searches, then search INPUT again.
-The entries are the view settings of `drover-dispatch', on the same
-keys: the filter, the older and archived sessions, the subagents shown.
+The entries are the Filter group of `drover-dispatch', on the same
+keys: the subagents, older and archived sessions shown, and the filter.
 They scope the list too, which shares them.  RET, C-' or the key of
 `drover-dispatch', those leaving the minibuffer for it, search again
 with the text typed."
@@ -912,22 +918,22 @@ with the text typed."
   :refresh-suffixes t
   [:class drover--menu-flow
    [:description drover-search--menu-description
-    ("RET" "Search" drover-search-resume)
-    ("U" "subagents" drover-toggle-subagents
+    ("RET" "Search" drover-search-resume)]
+   ["Filter"
+    ("=u" "subagents" drover-toggle-subagents
      :class drover--setting
      :getter (lambda () (default-value 'drover-show-subagents))
      :setter drover-set-show-subagents
      :chooser drover-next-subagent-mode
      :options ,drover-subagent-mode-labels)
-    ("-o" drover-view--history :inapt-if-not drover-history-available-p)
-    ("-z" drover-view--archived :inapt-if-not drover-archived-available-p)]
-   ["Filter"
+    ("=O" drover-view--history :inapt-if-not drover-history-available-p)
+    ("=z" drover-view--archived :inapt-if-not drover-archived-available-p)
     ("=p" drover-view--filter-project)
     ("=s" drover-view--filter-statuses)
     ("=a" drover-view--filter-agent)
-    ("=m" drover-view--filter-model)
-    ("=v" drover-view--filter-provider)]
-   [("=H" drover-view--filter-harness)
+    ("=m" drover-view--filter-model)]
+   [("=v" drover-view--filter-provider)
+    ("=H" drover-view--filter-harness)
     ("=h" drover-view--filter-host)
     ("=d" drover-view--filter-since)
     ("=f" drover-view--filter-search)

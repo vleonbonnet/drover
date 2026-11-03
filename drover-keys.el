@@ -34,8 +34,10 @@
 ;; - Global keys work everywhere, through the menu.
 ;; - View keys change the settings drover's lists share, wherever one of
 ;;   them is in sight, through the menu: options on `=', switches on
-;;   `-', as in Magit's menus, and U.  `drover-view', the View menu, V in
-;;   the lists, shows them alone, on the same keys.
+;;   `-', as in Magit's menus; the subagents, older and archived
+;;   sessions shown are options of the Filter group, as they keep
+;;   sessions out as the filter does.  `drover-view', the View menu, V
+;;   in the lists, shows them alone, on the same keys.
 ;;
 ;; Settings show their value beside their key, and changing one leaves
 ;; the menu open.  The menu has no fixed shape: its groups fill columns
@@ -578,7 +580,6 @@ other lists."
   "g" #'drover-refresh
   "+" #'drover-new-session
   "v" #'drover-peek
-  "U" #'drover-toggle-subagents
   "V" #'drover-view)
 
 (define-minor-mode drover-session-keys-mode
@@ -775,7 +776,7 @@ buffer, a session buffer included.  The View menu opens in a view only."
       (plist-get (drover--scope) :shown)))
 
 (defun drover--dispatch-foreign-subagents-p ()
-  "Return non-nil when U of the menu acts on a list of another front end.
+  "Return non-nil when =u of the menu acts on a list of another front end.
 That is a list drover does not draw, current, which shows or hides its
 subagents itself (see `drover-toggle-subagents-function')."
   (unless (drover--view-menu-p)
@@ -787,7 +788,7 @@ subagents itself (see `drover-toggle-subagents-function')."
            t))))
 
 (defun drover--dispatch-subagents-p ()
-  "Return non-nil when U of the menu applies.
+  "Return non-nil when =u of the menu applies.
 It does in a list of another front end showing its subagents itself,
 and wherever the view settings apply."
   (or (drover--dispatch-foreign-subagents-p) (drover-dispatch-view-shown-p)))
@@ -967,16 +968,54 @@ CURRENT is the value now, offered as the default."
          (name (completing-read (format-prompt prompt default) names nil t nil nil default)))
     (car (rassoc name labels))))
 
+(defconst drover-filter-any "(any)"
+  "The first candidate of every filter picker: choosing it clears the filter.")
+
+(defun drover--filter-table (names)
+  "Return a completion table of NAMES, strings, in their order.
+`drover-filter-any' comes first.  Completion UIs keep the order rather
+than sorting, so that RET on an empty input, which chooses the first
+candidate in some, clears the filter as it does in the others."
+  (let ((candidates (cons drover-filter-any names)))
+    (lambda (string predicate action)
+      (if (eq action 'metadata)
+          '(metadata (display-sort-function . identity) (cycle-sort-function . identity))
+        (complete-with-action action candidates string predicate)))))
+
+(defun drover--read-filter (prompt names current &optional multiple)
+  "Read the new value of a filter member with PROMPT, or nil to clear it.
+NAMES is an alist (NAME . VALUE) of the values offered, in order;
+CURRENT is the value now, a value of NAMES, or with MULTIPLE a list of
+them read with `completing-read-multiple', or nil when unset.  The
+input starts with the names of CURRENT, offered first: RET keeps them,
+editing changes them, deleting one drops it.  An empty answer, or one
+choosing `drover-filter-any', offered first, clears the filter."
+  (let* ((current (if multiple current (and current (list current))))
+         (chosen (delq nil (mapcar (lambda (value) (rassoc value names)) current)))
+         (names (append chosen (seq-remove (lambda (entry) (memq entry chosen)) names)))
+         (table (drover--filter-table (mapcar #'car names)))
+         (initial (and chosen (mapconcat #'car chosen ",")))
+         (prompt (format "%s (empty for any): " prompt)))
+    (if multiple
+        (let ((answer (completing-read-multiple prompt table nil t initial)))
+          (unless (member drover-filter-any answer)
+            (delete-dups (delq nil (mapcar (lambda (name) (cdr (assoc name names))) answer)))))
+      (let ((answer (completing-read prompt table nil t initial)))
+        (unless (or (string-empty-p answer) (equal answer drover-filter-any))
+          (cdr (assoc answer names)))))))
+
 (defun drover--read-known (prompt field current)
   "Read one of the values of FIELD among known sessions, with PROMPT.
 FIELD is a function of a session, such as `drover-session-agent';
-CURRENT is the value now, or nil.  An empty answer returns nil."
-  (let* ((values (sort (delete-dups (delq nil (mapcar field (drover-known-sessions)))) #'string<))
-         (answer (completing-read (if current
-                                      (format "%s (now %s, empty for any): " prompt current)
-                                    (format "%s (empty for any): " prompt))
-                                  values nil t)))
-    (unless (string-empty-p answer) answer)))
+CURRENT is the value now, or nil.  Return nil to clear the filter (see
+`drover--read-filter')."
+  (let ((values (sort (delete-dups (delq nil (mapcar field (drover-known-sessions)))) #'string<)))
+    (drover--read-filter prompt
+                         (mapcar (lambda (value) (cons value value))
+                                 (if (and current (not (member current values)))
+                                     (cons current values)
+                                   values))
+                         current)))
 
 (defun drover--read-filter-project (current)
   "Read the project to list, CURRENT being the one listed now, or nil."
@@ -997,44 +1036,48 @@ CURRENT is the value now, or nil.  An empty answer returns nil."
 (defun drover--read-filter-harness (current)
   "Read the harness whose sessions to list, CURRENT being the one now, or nil.
 Harnesses are read by name, among those of the sessions known."
-  (let* ((names (mapcar (lambda (harness) (cons (drover-harness-name harness) harness))
-                        (delete-dups (mapcar #'drover-session-harness (drover-known-sessions)))))
-         (answer (completing-read (if current
-                                      (format "Harness (now %s, empty for any): " (drover-harness-name current))
-                                    "Harness (empty for any): ")
-                                  (sort (mapcar #'car names) :key #'downcase) nil t)))
-    (unless (string-empty-p answer)
-      (cdr (assoc answer names)))))
+  (let ((harnesses (delete-dups (mapcar #'drover-session-harness (drover-known-sessions)))))
+    (when (and current (not (memq current harnesses)))
+      (push current harnesses))
+    (drover--read-filter "Harness"
+                         (sort (mapcar (lambda (harness) (cons (drover-harness-name harness) harness))
+                                       harnesses)
+                               :key (lambda (entry) (downcase (car entry))))
+                         current)))
 
 (defun drover--read-filter-statuses (current)
   "Read the statuses to list, CURRENT being those listed now."
-  (let* ((labels (mapcar (lambda (status) (cons (opencode-session-status-label status) status))
-                         drover-status-order))
-         (chosen (completing-read-multiple
-                  "Statuses (empty for any): " labels nil t
-                  (and current (mapconcat #'opencode-session-status-label current ",")))))
-    (delete-dups (delq nil (mapcar (lambda (label) (cdr (assoc label labels))) chosen)))))
+  (drover--read-filter "Statuses"
+                       (mapcar (lambda (status) (cons (opencode-session-status-label status) status))
+                               drover-status-order)
+                       current t))
 
-(defun drover--read-filter-since (_current)
-  "Read since when sessions must have been active to be listed."
-  (drover--parse-since
-   (completing-read "Updated since (today, 24h, 7 days, 3d…; empty for any): "
-                    '("today" "24h" "7 days" "30 days"))))
+(defun drover--read-filter-since (current)
+  "Read since when sessions must have been active to be listed.
+CURRENT, the time now, is named in the prompt.  An empty answer, or
+`drover-filter-any', offered first, clears the filter."
+  (let ((answer (completing-read
+                 (format "Updated since (%stoday, 24h, 7 days, 3d…; empty for any): "
+                         (if current (format "now %s; " (drover-filter-since-label current)) ""))
+                 (drover--filter-table '("today" "24h" "7 days" "30 days")))))
+    (unless (equal answer drover-filter-any)
+      (drover--parse-since answer))))
 
 (defun drover--read-filter-search (current)
-  "Read the text sessions must contain to be listed, CURRENT being the one now."
+  "Read the text sessions must contain to be listed, CURRENT being the one now.
+The input starts with CURRENT; an empty answer clears the filter."
   (let ((search (read-string "Search (empty for any): " current)))
     (unless (string-empty-p (string-trim search)) search)))
 
 (defun drover--read-filter-host (current)
   "Read the hosts whose sessions to list, CURRENT being those listed now.
 This host is `local'; an empty answer lists every host's sessions."
-  (let* ((names (cons (cons (format "%s (this host)" drover-host) 'local)
-                      (mapcar (lambda (host) (cons host host)) (drover-hosts))))
-         (chosen (completing-read-multiple
-                  "Hosts (empty for any): " names nil t
-                  (and current (mapconcat (lambda (host) (car (rassoc host names))) current ",")))))
-    (delete-dups (delq nil (mapcar (lambda (name) (cdr (assoc name names))) chosen)))))
+  (let ((names (cons (cons (format "%s (this host)" drover-host) 'local)
+                     (mapcar (lambda (host) (cons host host)) (drover-hosts)))))
+    (dolist (host current)
+      (unless (rassoc host names)
+        (setq names (append names (list (cons (format "%s" host) host))))))
+    (drover--read-filter "Hosts" names current t)))
 
 (defun drover--filter-label (key value)
   "Return VALUE of the filter member KEY as the View menu shows it."
@@ -1838,18 +1881,29 @@ when inherited from the defaults or when the entry does not apply.")
   (and (drover-dispatch-view-shown-p) (drover-archived-available-p)))
 
 (defun drover--view-description ()
-  "Return the title of the View group, dimmed unless the view settings apply.
-The group itself applies, as U may in a list of another front end."
+  "Return the title of the View group, dimmed unless the view settings apply."
   (if (drover-dispatch-view-shown-p)
       "View"
     (propertize "View" 'face 'transient-inapt-suffix)))
+
+(defun drover--filter-description ()
+  "Return the title of the Filter group, dimmed unless one of its entries applies.
+The group applies wherever the view settings do, and =u in a list of
+another front end."
+  (if (drover--dispatch-subagents-p)
+      "Filter"
+    (propertize "Filter" 'face 'transient-inapt-suffix)))
 
 (transient-define-group drover--view-columns
   [:description drover--view-description
    ("=o" drover-view--sort-by :inapt-if-not drover-dispatch-view-shown-p)
    ("=r" drover-view--sort-order :inapt-if-not drover-dispatch-view-shown-p)
    ("=g" drover-view--group-by :inapt-if-not drover-dispatch-view-shown-p)
-   ("U" "subagents" drover-toggle-subagents
+   ("-f" drover-view--follow)]
+  ;; What shows beside what matches: settings that keep sessions out, as
+  ;; the filter does, on the filter's keys.
+  [:description drover--filter-description
+   ("=u" "subagents" drover-toggle-subagents
     :class drover--setting
     :getter (lambda () (unless (drover--dispatch-foreign-subagents-p)
                          (default-value 'drover-show-subagents)))
@@ -1857,17 +1911,14 @@ The group itself applies, as U may in a list of another front end."
     :chooser drover-next-subagent-mode
     :options ,drover-subagent-mode-labels
     :inapt-if-not drover--dispatch-subagents-p)
-   ("-o" drover-view--history :inapt-if-not drover--dispatch-history-p)
-   ("-z" drover-view--archived :inapt-if-not drover--dispatch-archived-p)
-   ("-f" drover-view--follow)]
-  ["Filter"
-   :inapt-if-not drover-dispatch-view-shown-p
-   ("=p" drover-view--filter-project)
-   ("=s" drover-view--filter-statuses)
-   ("=a" drover-view--filter-agent)
-   ("=m" drover-view--filter-model)
-   ("=v" drover-view--filter-provider)]
+   ("=O" drover-view--history :inapt-if-not drover--dispatch-history-p)
+   ("=z" drover-view--archived :inapt-if-not drover--dispatch-archived-p)
+   ("=p" drover-view--filter-project :inapt-if-not drover-dispatch-view-shown-p)
+   ("=s" drover-view--filter-statuses :inapt-if-not drover-dispatch-view-shown-p)
+   ("=a" drover-view--filter-agent :inapt-if-not drover-dispatch-view-shown-p)
+   ("=m" drover-view--filter-model :inapt-if-not drover-dispatch-view-shown-p)]
   [:inapt-if-not drover-dispatch-view-shown-p
+   ("=v" drover-view--filter-provider)
    ("=H" drover-view--filter-harness)
    ("=h" drover-view--filter-host)
    ("=d" drover-view--filter-since)
@@ -2063,9 +2114,9 @@ Its entries are the view settings of `drover-dispatch', on the same
 keys, for lists that bind it to V.  Each setting shows its value;
 changing one redraws the lists at once, and the menu stays open.
 Sorting keeps subagents under their parent.  A filter left empty keeps
-every session.  U cycles the subagents shown (all, active, none), -o
-shows older sessions, -z archived ones, -f turns follow mode on in the
-list.  The columns are the fields the list may show, as room allows:
+every session; its pickers clear it on an empty answer or (any).  =u
+cycles the subagents shown (all, active, none), =O shows older
+sessions, =z archived ones, -f turns follow mode on in the list.  The columns are the fields the list may show, as room allows:
 each switch lets a field show, or hides it, for this session
 \(`drover-list-hidden-fields' keeps the choice)."
   :class 'drover--menu-prefix

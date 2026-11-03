@@ -40,7 +40,7 @@ They are opencode.el's, which its mode line and session pickers show too: =openc
 
 The first three need you (=drover-attention-statuses=). Sessions are ranked by =drover-status-order=, and among those that need you the longest wait comes first; among the others, the newest turn or the latest activity, as the order of last activity places them. Whether you saw a finished turn is the backend's to know: OpenCode records it in the service, so a turn read in any client, the TUI, the desktop app or Emacs, is no longer Done.
 
-Subagent sessions show under their parent, their icon under its title. Which of them show, =drover-show-subagents= says, and =U= in the list cycles it:
+Subagent sessions show under their parent, their icon under its title. Which of them show, =drover-show-subagents= says, and ~=u~ in the Filter group of the menu (=V= in the list) cycles it:
 
 | Mode     | Shows                                                                                          |
 |----------+------------------------------------------------------------------------------------------------|
@@ -48,7 +48,7 @@ Subagent sessions show under their parent, their icon under its title. Which of 
 | =active= | the subagents in the middle of a turn: working, waiting to retry, or waiting for you (default) |
 | =none=   | no subagent                                                                                    |
 
-The list says nothing of the subagents it hides: the mode is the menu's to show (=U=), and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count, =drover-next= and =drover-select= follow the mode too, the filter aside: they count, visit and offer the sessions the list would show without a filter, and every subagent waiting for you whatever the mode, since it blocks its parent until you answer (=drover-surfaced-sessions=).
+The list says nothing of the subagents it hides: the mode is the menu's to show (~=u~), and the list's mode line adds =+subagents= or =-subagents= while not on =active=. A subagent whose turn ended, unseen or not, is not active: it hides by default, and its parent no longer stays among the Done sessions because of it. A parent goes where the most urgent session of its visible tree belongs, so one whose subagent waits for you is listed with the sessions that need you, the subagent beneath it; a hidden subagent never places its parent in a group. A subagent matching the filter shows under its parent whatever the mode, even =none=, since it explains why its tree is listed. The mode-line count, =drover-next= and =drover-select= follow the mode too, the filter aside: they count, visit and offer the sessions the list would show without a filter, and every subagent waiting for you whatever the mode, since it blocks its parent until you answer (=drover-surfaced-sessions=).
 
 Shown or not, a session whose subagents (at any depth) are active says so beside its status icon:
 
@@ -107,19 +107,19 @@ Settings show their value beside the key that changes it, as Magit's menus show 
 The menu has no fixed shape: its groups fill columns of balanced height as wide as its window, one after the other as text fills a newspaper's columns, and in rows of such columns when the window is narrow, so that it takes as few lines as the width allows: across 240 columns, eight to eleven; across 100, about twenty-five, in rows. A group may show in two or three columns side by side, or in one, as the room asks. While the menu stays open, its groups keep their place as long as they fit, as values change or you move in the list. In drover's prompt, 160 columns wide, with the OpenCode backend, it reads:
 
 #+begin_example
-  Sessions            Prompt runs                Conversation      Session          View                              Filter               Columns
-   j Next              a Agent plan               t Revert here     o Other window   =o sort urgency                   =p project drover    -h host
-   B Bury quiet        m Model Opus 5.5           T Cancel revert   u Parent         =r order [ascending|descending]   =s status any        -H harness
-   b Select            e Effort max               C Compact         c Subagent       =g group status                   =a agent any         -l location
-   l List              d Directory ~/src/drover   f Fork            v Peek           U subagents [all|active|none]     =m model any         -b branch
-   L Side list                                    . Last answer     A Answer         -o older [hidden|shown]           =v provider any      -a agent
-   p Project          Input                       O Open link       K Interrupt      -z archived [hidden|shown]        =H harness any       -m model
-   S Search sessions   RET Send                                     s Mark seen      -f follow [off|on]                =d updated any       -r provider
-                       S-<return> Schedule                          E Edit pending prompt 1                            =f text any          -x context
-  Prompt               i Attach                                     + New session                                      =c clear             -c created
-   " Prompt            k Clear                                      g Refresh                                                               -t age
-   n Task prompt       / Slash command                              r Rename                                                                -p cache
-   ' Show prompt       @ Mention                                    x Delete                                                                -s summary
+  Sessions            Prompt runs                Conversation      Session          View                              Filter                           Columns
+   j Next              a Agent plan               t Revert here     o Other window   =o sort urgency                   =u subagents [all|active|none]   -h host
+   B Bury quiet        m Model Opus 5.5           T Cancel revert   u Parent         =r order [ascending|descending]   =O older [hidden|shown]          -H harness
+   b Select            e Effort max               C Compact         c Subagent       =g group status                   =z archived [hidden|shown]       -l location
+   l List              d Directory ~/src/drover   f Fork            v Peek           -f follow [off|on]                =p project drover                -b branch
+   L Side list                                    . Last answer     A Answer                                           =s status any                    -a agent
+   p Project          Input                       O Open link       K Interrupt                                        =a agent any                     -m model
+   S Search sessions   RET Send                                     s Mark seen                                        =m model any                     -r provider
+                       S-<return> Schedule                          E Edit pending prompt 1                            =v provider any                  -x context
+  Prompt               i Attach                                     + New session                                      =H harness any                   -c created
+   " Prompt            k Clear                                      g Refresh                                          =d updated any                   -t age
+   n Task prompt       / Slash command                              r Rename                                           =f text any                      -p cache
+   ' Show prompt       @ Mention                                    x Delete                                           =c clear                         -s summary
    # Scheduled         y Copy block                                 z Archive
                                                                     Z Unarchive
 #+end_example
@@ -148,7 +148,6 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =g= | =drover-refresh=           | refresh the list, or reload the session's buffer               |
 | =+= | =drover-new-session=       | start a session in its directory                               |
 | =v= | =drover-peek=              | preview where it stands, without opening (lists)               |
-| =U= | =drover-toggle-subagents=  | show all, active or no subagents, in turn (a view key too)     |
 | =V= | =drover-view=              | the View menu: the view keys alone (drover's list)             |
 
 =RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds (but in the sidebar, which folds nothing), =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or either list. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
@@ -257,10 +256,10 @@ Wherever one of drover's lists is in sight (see [[*The menu beside the list][The
 | ~=o~ | =drover-view--sort-by=          | sort by a field                                      |
 | ~=r~ | =drover-view--sort-order=       | ascending or descending                              |
 | ~=g~ | =drover-view--group-by=         | group by a field, or nothing                         |
-| =U=  | =drover-toggle-subagents=       | every subagent, the active ones, or none             |
-| =-o= | =drover-view--history=          | older sessions, shown or hidden                      |
-| =-z= | =drover-view--archived=         | archived sessions, shown or hidden                   |
 | =-f= | =drover-view--follow=           | follow mode of the list                              |
+| ~=u~ | =drover-toggle-subagents=       | every subagent, the active ones, or none             |
+| ~=O~ | =drover-view--history=          | older sessions, shown or hidden                      |
+| ~=z~ | =drover-view--archived=         | archived sessions, shown or hidden                   |
 | ~=p~ | =drover-view--filter-project=   | filter by project                                    |
 | ~=s~ | =drover-view--filter-statuses=  | filter by status                                     |
 | ~=a~ | =drover-view--filter-agent=     | filter by agent                                      |
@@ -277,7 +276,7 @@ Wherever one of drover's lists is in sight (see [[*The menu beside the list][The
 |      |                                 | =-r= provider, =-x= context, =-c= created, =-t= age, |
 |      |                                 | =-p= cache, =-s= summary                             |
 
-Earlier versions reached these through =V= only, on keys of its own: =o=, =r= and =g= are now ~=o~, ~=r~ and ~=g~; the filters =p=, =s=, =a=, =m=, =v=, =h=, =d=, =f= and =c= are ~=p~ … ~=c~; =F= is =-f=, =O= is =-o= and =A= is =-z=; =U= and the columns keep their keys.
+Earlier versions reached these through =V= only, on keys of its own: =o=, =r= and =g= are now ~=o~, ~=r~ and ~=g~; the filters =p=, =s=, =a=, =m=, =v=, =h=, =d=, =f= and =c= are ~=p~ … ~=c~; =F= is =-f=; the columns keep their keys.  The subagents, older and archived sessions shown keep sessions out as the filter does: they moved from the View group to the Filter group, and from =U=, =-o= and =-z= to ~=u~, ~=O~ and ~=z~ (~=o~ sorts); the list no longer binds =U= of its own.
 
 ** Adding to the menu
 
@@ -407,20 +406,21 @@ While Emacs has no focus, as when you work in another application with a list in
 The view settings are the View, Filter and Columns groups of =C-'=, wherever one of drover's lists is in sight, and the View menu that =V= opens in the list, the same entries on the same keys (see [[*View keys][View keys]]). Either menu stays open as you change its settings and redraws the lists at once:
 
 #+begin_example
-  View                                  Filter                                 Columns
-   =o sort last activity                 =p project drover   =H harness any     -h host       -a agent      -c created
-   =r order [ascending|descending]       =s status any       =d updated any     -H harness    -m model      -t age
-   =g group nothing                      =a agent any        =f text any        -l location   -r provider   -p cache
-   U subagents [all|active|none]         =m model any        =c clear           -b branch     -x context    -s summary
-   -o older [hidden|shown]               =v provider any
-   -z archived [hidden|shown]
-   -f follow [off|on]
+  View                              Filter                                             Columns
+   =o sort last activity             =u subagents [all|active|none]   =v provider any   -h host       -a agent      -c created
+   =r order [ascending|descending]   =O older [hidden|shown]          =H harness any    -H harness    -m model      -t age
+   =g group nothing                  =z archived [hidden|shown]       =d updated any    -l location   -r provider   -p cache
+   -f follow [off|on]                =p project drover                =f text any       -b branch     -x context    -s summary
+                                     =s status any                    =c clear
+                                     =a agent any
+                                     =m model any
 #+end_example
 
 - Sort by last activity (see [[*The order of last activity][The order of last activity]]), the default, newest first, by urgency, the most urgent first, by title, project, branch, agent, model, provider, harness (by its name) or creation, either way (~=r~, descending by default). Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
 - Group by nothing, the default, status, project, branch, agent, model, provider (each group named after the provider, behind its icon), harness (likewise, its sessions not repeating it) or last activity (today, yesterday, this week, older).
-- Filter by project, status, agent, model, provider (by name, among the providers of the sessions drover knows), harness (likewise), host, once other hosts are known, last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. An empty answer removes a filter; ~=c~ clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
-- Which subagents show (all, the active ones, none: =U= cycles them, as in the list), older sessions (=-o=): those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session, and archived sessions (=-z=, see [[*Archived sessions][Archived sessions]]). Both are fetched when shown, and again by =g=. =-f= turns the list's follow mode on or off.
+- Filter by project, status, agent, model, provider (by name, among the providers of the sessions drover knows), harness (likewise), host, once other hosts are known, last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. Each picker starts with the value now, which =RET= keeps; the values of status and host are several, separated by commas, and deleting one drops it. An empty answer, or =(any)=, the first candidate, removes the filter, so that =RET= on an empty input clears it whatever your completion UI; ~=c~ clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
+- Filter too which subagents show (all, the active ones, none: ~=u~ cycles them), older sessions (~=O~): those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session, and archived sessions (~=z~, see [[*Archived sessions][Archived sessions]]). Both are fetched when shown, and again by =g=.
+- =-f= turns the list's follow mode on or off.
 - Choose the columns: each switch lets a field show, highlighted, or hides it, dimmed, at once; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
 
 The lists follow sessions as they change while they are displayed; hidden, a list notes which sessions changed, draws nothing meanwhile, and draws them in place once shown again, or whole when many did. Only what changed is drawn: the lines of the sessions that changed, in place, and a session moving, coming or going alone, so that a list of thousands of sessions follows a running turn in a millisecond or two; with the sidebar and the other list both shown, each draws its own lines, but what a change makes is made once for both. A list is drawn whole only when its columns change width, a setting changes, or =g= refreshes it; =g= draws from what the backends reported, then lists every session anew, for what they change without telling, such as a branch, and draws what changed. The sessions of a collapsed group, such as Idle, often most of them, are drawn once it is expanded, searched with Isearch, copied or selected, and otherwise a few at a time while Emacs is idle and the list shown, stopping as you type (=drover-list-deferred-delay=), so that Occur or Consult find them too.
@@ -435,7 +435,7 @@ Ascending, oldest first, the running sessions come last. The order of urgency am
 
 ** Archived sessions
 
-Archived sessions leave the list, the mode-line count and every session picker. The view key =-z= shows them in the list too, dimmed, after =opencode-archived-icon= (=nf-md-archive=), whose tooltip tells how long ago they were archived; grouped by status, they gather in a group of their own, Archived, last, whose heading counts them, and they never count as needing you. They are fetched when shown, without waiting, and again by =g=; =Z= restores those selected, or the one at point.
+Archived sessions leave the list, the mode-line count and every session picker. The view key ~=z~ shows them in the list too, dimmed, after =opencode-archived-icon= (=nf-md-archive=), whose tooltip tells how long ago they were archived; grouped by status, they gather in a group of their own, Archived, last, whose heading counts them, and they never count as needing you. They are fetched when shown, without waiting, and again by =g=; =Z= restores those selected, or the one at point.
 
 Each front end archives what it can:
 
@@ -481,20 +481,20 @@ Once you pause (=drover-search-delay=, a quarter of a second) with three charact
 | =C-l= | show its row in the list, a group collapsed around it expanded                 |
 | =C-'= | leave for the menu of what the search searches, keeping what you typed         |
 
-The menu =C-'= opens holds the view keys that scope the search, those of the list's menu on the same keys, since the list shares them: the filter (~=p~ project, ~=s~ status, ~=a~ agent, ~=m~ model, ~=v~ provider, ~=H~ harness, ~=h~ host, ~=d~ since, ~=f~ text, ~=c~ clear), the older and archived sessions (=-o=, =-z=) and the subagents shown (=U=); each shows its value, and changing one leaves the menu open, the list following. The key you bind =drover-dispatch= to opens that menu from the minibuffer too, whatever it is. =RET=, or the key that opened the menu again, searches again with what you typed, in the new scope, which the prompt names, such as =Search sessions (project drover, +older):=. Opening a conversation found in what was said resumes it as =RET= in the list does, at its end: no front end shows a position yet.
+The menu =C-'= opens holds the view keys that scope the search, those of the list's menu on the same keys, since the list shares them: the filter (~=p~ project, ~=s~ status, ~=a~ agent, ~=m~ model, ~=v~ provider, ~=H~ harness, ~=h~ host, ~=d~ since, ~=f~ text, ~=c~ clear), with the subagents, older and archived sessions shown (~=u~, ~=O~, ~=z~), the Filter group of the list's menu; each shows its value, and changing one leaves the menu open, the list following. The key you bind =drover-dispatch= to opens that menu from the minibuffer too, whatever it is. =RET=, or the key that opened the menu again, searches again with what you typed, in the new scope, which the prompt names, such as =Search sessions (project drover, +subagents, +older):=. Opening a conversation found in what was said resumes it as =RET= in the list does, at its end: no front end shows a position yet.
 
 The candidates work with any completion UI, Vertico, Icomplete or the =*Completions*= buffer: the search matches them with a completion style of its own, =drover-search=, for its category, =drover-session=.
 
 * Closed conversations
 
-Claude Code and Codex record every conversation, whichever front end ran it, in Emacs or not: Claude Code a transcript under =~/.claude/projects/=, Codex a rollout under =~/.codex/sessions/=. Drover lists them, with claude-code-ide or agent-shell loaded, as the CLIs' own pickers list them: titled as the CLI titled them, else by the first line of their first prompt, at most 300 characters, however long the prompt, in their directory and branch, with the model and effort of their last turn, idle, by their last activity among the other sessions (in the Idle group when grouped by status); Codex's archived ones among the archived sessions, and Claude Code's subagents under their conversation. Their last activity is the time of their newest message, not of the records the CLIs append of their own as a conversation is opened again, nor of the file's change: a conversation of two weeks ago resumed is two weeks old until a new exchange. A conversation a terminal or shell follows is that front end's session, listed once, with its live status, as old as the conversation until a turn there; closed, it is listed again as recorded, in place.
+Claude Code and Codex record every conversation, whichever front end ran it, in Emacs or not: Claude Code a transcript under =~/.claude/projects/=, Codex a rollout under =~/.codex/sessions/=. =drover-transcript-engines= names the engines whose conversations drover lists, both by default; one that recorded nothing yet is looked for again at each start. Drover lists them from the time it starts (=drover-attention-mode= or a list starting it), whether or not a front end is loaded, as the CLIs' own pickers list them: titled as the CLI titled them, else by the first line of their first prompt, at most 300 characters, however long the prompt, in their directory and branch, with the model and effort of their last turn, idle, by their last activity among the other sessions (in the Idle group when grouped by status); Codex's archived ones among the archived sessions, and Claude Code's subagents under their conversation. Their last activity is the time of their newest message, not of the records the CLIs append of their own as a conversation is opened again, nor of the file's change: a conversation of two weeks ago resumed is two weeks old until a new exchange. A conversation a terminal or shell follows is that front end's session, listed once, with its live status, as old as the conversation until a turn there; closed, it is listed again as recorded, in place.
 
-- =RET= resumes it: in claude-code-ide, =claude --resume ID= in a terminal started in its directory; in agent-shell, a shell of its engine loading it by its identifier. Of the front ends loaded, the one it ran in comes first, as Claude Code's transcript tells it, unless =drover-resume-front-ends= names the ones you prefer, such as =((claude-code agent-shell))=. One a front end follows opens there.
+- =RET= resumes it: in claude-code-ide, =claude --resume ID= in a terminal started in its directory; in agent-shell, a shell of its engine loading it by its identifier. Of the front ends loaded, the one it ran in comes first, as Claude Code's transcript tells it, unless =drover-resume-front-ends= names the ones you prefer, such as =((claude-code agent-shell))=. With none loaded, as after Emacs started, drover loads one installed first, in that order, then claude-code-ide for Claude Code and agent-shell, agent-shell for Codex; with none installed, one line says which to install. One a front end follows opens there. Scheduled prompts and Org links resume alike.
 - Its recap and =v= preview come from the end of its transcript or rollout, without resuming it.
 - A session =claude agents --json= lists as running, in the background or in another terminal, shows working, or waiting with =claude attach ID= as what it waits for; it is attached to there, not resumed here. Drover runs the command at most every =drover-claude-code-agents-interval= seconds, 30, while a list shows; nil never runs it. Commands such as this one, or =codex archive=, are started by a shell drover starts once (=drover-command-shell=), so that Emacs never waits for a program to start, which security agents on a managed Mac may make last seconds; one taking more than =drover-command-timeout= seconds, 60, is stopped.
 - =z=, =Z= and =x= archive, restore and delete them as the table of [[*Archived sessions][Archived sessions]] says; Codex's through its CLI, =drover-codex-program=, when found.
 
-Drover reads only what it needs of each file, its head and tail, then what was appended, and looks at the files every =drover-transcript-scan-interval= seconds, in slices that give way to your typing: those of the last day at every look, every file every eighth look. What it read it keeps in =drover-state-directory=, =claude-code-transcripts.eld= and =codex-rollouts.eld=, a cache checked against the files, so that an Emacs starting reads only what changed. =drover-claude-code-history-days= and =drover-codex-history-days= move conversations idle longer among the older sessions, shown on demand (the view key =-o=); nil, the default, lists them all. =drover-codex-include-non-interactive= lists what =codex exec= ran too.
+Drover reads only what it needs of each file, its head and tail, then what was appended, and looks at the files every =drover-transcript-scan-interval= seconds, in slices that give way to your typing: those of the last day at every look, every file every eighth look. What it read it keeps in =drover-state-directory=, =claude-code-transcripts.eld= and =codex-rollouts.eld=, a cache checked against the files, so that an Emacs starting reads only what changed. =drover-claude-code-history-days= and =drover-codex-history-days= move conversations idle longer among the older sessions, shown on demand (the view key ~=O~); nil, the default, lists them all. =drover-codex-include-non-interactive= lists what =codex exec= ran too.
 
 * The prompt
 

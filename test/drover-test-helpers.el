@@ -57,6 +57,11 @@
 (let ((directory drover-state-directory))
   (add-hook 'kill-emacs-hook (lambda () (delete-directory directory t))))
 
+;; Nor list what the engines recorded as drover starts, nor load a
+;; front end to resume a conversation, but in the tests binding them.
+(setq drover-transcript-engines nil
+      drover--front-end-backends nil)
+
 ;; Nor the conversations the engines recorded: their homes are empty
 ;; directories, but in the tests binding others.
 (let ((home (make-temp-file "drover-test-home" t)))

@@ -151,7 +151,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
                             ("Z" . drover-unarchive) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
-                            ("U" . drover-toggle-subagents) ("V" . drover-view)))
+                            ("V" . drover-view)))
                          (lambda (a b) (string< (car a) (car b))))))
     (dolist (binding bindings)
       (should (commandp (cdr binding))))))
@@ -249,7 +249,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
 ;;;; Lists
 
 (ert-deftest drover-keys-test-toggle-subagents ()
-  "U cycles every view through all, active and no subagents."
+  "`drover-toggle-subagents' cycles every view through all, active and no subagents."
   (drover-keys-test-with nil
     (let ((runs 0)
           (said nil))
@@ -664,8 +664,8 @@ B applies while a quiet session has a buffer."
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
     ("Conversation" ("t" "T" "C" "f" "." "O"))
     ("Session" ("o" "u" "c" "v" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
-    ("View" ("= o" "= r" "= g" "U" "- o" "- z" "- f"))
-    ("Filter" ("= p" "= s" "= a" "= m" "= v") ("= H" "= d" "= f" "= c"))
+    ("View" ("= o" "= r" "= g" "- f"))
+    ("Filter" ("= u" "= O" "= z" "= p" "= s" "= a" "= m") ("= v" "= H" "= d" "= f" "= c"))
     ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.")
 
@@ -774,8 +774,8 @@ the prefix of the other's, which would hide it."
                 (cdr entry))))
   ;; The view settings, the View menu's.
   (dolist (entry '(("=o" . drover-view--sort-by) ("=r" . drover-view--sort-order)
-                   ("=g" . drover-view--group-by) ("U" . drover-toggle-subagents)
-                   ("-o" . drover-view--history) ("-z" . drover-view--archived)
+                   ("=g" . drover-view--group-by) ("=u" . drover-toggle-subagents)
+                   ("=O" . drover-view--history) ("=z" . drover-view--archived)
                    ("-f" . drover-view--follow) ("=p" . drover-view--filter-project)
                    ("=s" . drover-view--filter-statuses) ("=a" . drover-view--filter-agent)
                    ("=m" . drover-view--filter-model) ("=v" . drover-view--filter-provider)
@@ -965,7 +965,7 @@ It applies only while the session has some, in lists and in its buffer."
       (should-not (member "n" (drover-keys-test-apt 'drover-dispatch))))))
 
 (defconst drover-keys-test-view-keys
-  '("= o" "= r" "= g" "U" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c"
+  '("= o" "= r" "= g" "= u" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c"
     "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s")
   "The keys of the view settings that apply in one of drover's views.
 Older and archived sessions need a backend keeping them, and follow mode
@@ -1066,20 +1066,20 @@ a list in a window.")
           (should-not (member "Z" apt)))))))
 
 (ert-deftest drover-keys-test-dispatch-in-foreign-list ()
-  "In a list drover does not draw, U toggles its subagents, if it does.
+  "In a list drover does not draw, =u toggles its subagents, if it does.
 Drover's view settings apply only while one of drover's views shows."
   (drover-keys-test-with (list (drover-test-session "s"))
     (drover-keys-test-in 'list "s"
       (let ((apt (drover-keys-test-apt 'drover-dispatch)))
         (should (member "v" apt))
-        (dolist (key '("U" "= o" "- l"))
+        (dolist (key '("= u" "= o" "- l"))
           (should-not (member key apt))))
       (setq-local drover-toggle-subagents-function #'ignore)
       (let ((apt (drover-keys-test-apt 'drover-dispatch)))
-        (should (member "U" apt))
+        (should (member "= u" apt))
         (should-not (member "= o" apt)))
       ;; Its subagents are its own: drover's mode is not shown as its.
-      (should-not (drover-keys-test-highlighted (drover-keys-test-value "U" 'drover-dispatch))))))
+      (should-not (drover-keys-test-highlighted (drover-keys-test-value "=u" 'drover-dispatch))))))
 
 (ert-deftest drover-keys-test-dispatch-in-prompt ()
   (drover-keys-test-with (list (drover-test-session "s" :status 'working))
@@ -1311,9 +1311,9 @@ The value is (PLAN . LINES)."
                                        " =m model any" " =v provider any" " =H harness any"
                                        " =d updated any"
                                        " =f text any" " =c clear"
-                                       " -f follow [off|on]" " U subagents [all|active|none]"
-                                       " -o older [hidden|shown]"
-                                       " -z archived [hidden|shown]"
+                                       " -f follow [off|on]" " =u subagents [all|active|none]"
+                                       " =O older [hidden|shown]"
+                                       " =z archived [hidden|shown]"
                                        " -h host" " -H harness" " -l location" " -b branch" " -a agent"
                                        " -m model" " -r provider"
                                        " -x context" " -c created"
@@ -1372,8 +1372,8 @@ MENU is `drover-view' by default."
     (with-temp-buffer
       (setq-local drover-view-p t)
       (should (equal (drover-keys-test-keys 'drover-view)
-                     '(("View" "= o" "= r" "= g" "U" "- o" "- z" "- f")
-                       ("Filter" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c")
+                     '(("View" "= o" "= r" "= g" "- f")
+                       ("Filter" "= u" "= O" "= z" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c")
                        ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
       ;; Hosts are filtered once there are others.
       (let ((drover-hosts-function (lambda () '("core"))))
@@ -1382,15 +1382,15 @@ MENU is `drover-view' by default."
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
         (should (equal keys (delete-dups (copy-sequence keys)))))
       ;; Older sessions need a backend keeping them.
-      (should-not (member "- o" (drover-keys-test-apt 'drover-view)))
+      (should-not (member "= O" (drover-keys-test-apt 'drover-view)))
       (setf (alist-get 'fake drover--backends)
             (append (list :history #'ignore) (alist-get 'fake drover--backends)))
-      (should (member "- o" (drover-keys-test-apt 'drover-view)))
+      (should (member "= O" (drover-keys-test-apt 'drover-view)))
       ;; Archived sessions too, or drover's archive holding some.
-      (should-not (member "- z" (drover-keys-test-apt 'drover-view)))
+      (should-not (member "= z" (drover-keys-test-apt 'drover-view)))
       (setf (alist-get 'fake drover--backends)
             (append (list :archived #'ignore) (alist-get 'fake drover--backends)))
-      (should (member "- z" (drover-keys-test-apt 'drover-view))))))
+      (should (member "= z" (drover-keys-test-apt 'drover-view))))))
 
 (ert-deftest drover-keys-test-view-only-in-views ()
   (with-temp-buffer
@@ -1452,6 +1452,12 @@ MENU is `drover-view' by default."
         (should (eq drover-group-by 'branch))
         (should (= runs 5))))))
 
+(defun drover-keys-test-candidates (table)
+  "Return the candidates of TABLE, a completion table, in the order it keeps."
+  (let ((candidates (all-completions "" table))
+        (sort (completion-metadata-get (completion-metadata "" table nil) 'display-sort-function)))
+    (if sort (funcall sort candidates) candidates)))
+
 (ert-deftest drover-keys-test-view-filters ()
   (drover-keys-test-with (list (drover-test-session "a" :project "drover" :agent "build" :model "opus")
                                (drover-test-session "b" :project "opencode" :agent "plan")
@@ -1464,8 +1470,8 @@ MENU is `drover-view' by default."
         (should (eq (get-text-property 0 'face (drover-keys-test-value "=p")) 'transient-inactive-value))
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (_prompt candidates &rest _)
-                     ;; The projects of the sessions.
-                     (should (equal candidates '("drover" "opencode")))
+                     ;; The projects of the sessions, after the one clearing the filter.
+                     (should (equal (drover-keys-test-candidates candidates) '("(any)" "drover" "opencode")))
                      "drover")))
           (drover-keys-test-choose "=p"))
         (should (equal drover-filter '(:project "drover")))
@@ -1474,20 +1480,21 @@ MENU is `drover-view' by default."
         (should (eq (get-text-property 0 'face (drover-keys-test-value "=p")) 'transient-value))
         (cl-letf (((symbol-function 'completing-read-multiple)
                    (lambda (_prompt candidates &rest _)
-                     (should (equal (mapcar #'cdr candidates) drover-status-order))
+                     (should (equal (drover-keys-test-candidates candidates)
+                                    (cons "(any)" (mapcar #'opencode-session-status-label drover-status-order))))
                      '("Needs you" "Done"))))
           (drover-keys-test-choose "=s"))
         (should (equal (plist-get drover-filter :statuses) '(waiting done)))
         (should (equal (drover-keys-test-value "=s") "needs you or done"))
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (_prompt candidates &rest _)
-                     (should (equal candidates '("build" "plan")))
+                     (should (equal (drover-keys-test-candidates candidates) '("(any)" "build" "plan")))
                      "plan")))
           (drover-keys-test-choose "=a"))
         (should (equal (plist-get drover-filter :agent) "plan"))
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (_prompt candidates &rest _)
-                     (should (equal candidates '("opus")))
+                     (should (equal (drover-keys-test-candidates candidates) '("(any)" "opus")))
                      "opus")))
           (drover-keys-test-choose "=m"))
         (should (equal (drover-keys-test-value "=m") "opus"))
@@ -1508,6 +1515,91 @@ MENU is `drover-view' by default."
         (drover-filter-clear)
         (should-not drover-filter)
         (should (= runs 8))))))
+
+(ert-deftest drover-keys-test-filter-pickers-clear ()
+  "Every filter picker starts with the value now, and clears on empty or (any).
+Single values and several alike: the input holds the current names, to
+keep with RET, edit or delete; deleting one of several keeps the others."
+  (drover-keys-test-with (list (drover-test-session "a" :project "drover" :agent "build" :model "opus"
+                                                    :provider-name "Anthropic")
+                               (drover-test-session "b" :project "opencode" :agent "plan"))
+    (with-temp-buffer
+      (setq-local drover-view-p t)
+      (let ((drover-hosts-function (lambda () '("core"))))
+        (pcase-dolist (`(,key ,member ,value ,name ,multiple)
+                       `(("=p" :project "opencode" "opencode")
+                         ("=a" :agent "plan" "plan")
+                         ("=m" :model "opus" "opus")
+                         ("=v" :provider "Anthropic" "Anthropic")
+                         ("=H" :harness fake "Fake")
+                         ("=s" :statuses (done) "Done" t)
+                         ("=h" :host ("core") "core" t)))
+          (ert-info (key)
+            (dolist (clearing (list "" "(any)"))
+              (drover-set-filter member value)
+              (let ((seen nil))
+                (cl-letf (((symbol-function (if multiple 'completing-read-multiple 'completing-read))
+                           (lambda (_prompt table _predicate require-match initial &rest _)
+                             (setq seen (list (car (drover-keys-test-candidates table)) require-match initial))
+                             (if multiple
+                                 (and (not (string-empty-p clearing)) (list clearing))
+                               clearing))))
+                  (drover-keys-test-choose key))
+                ;; (any) first, the current names in the input.
+                (should (equal seen (list "(any)" t name))))
+              (should-not (plist-member drover-filter member))
+              (should (equal (drover-keys-test-value key) "any")))
+            ;; The current value is offered right after (any).
+            (drover-set-filter member value)
+            (cl-letf (((symbol-function (if multiple 'completing-read-multiple 'completing-read))
+                       (lambda (_prompt table &rest _)
+                         (should (equal (cadr (drover-keys-test-candidates table)) name))
+                         (if multiple (list name) name))))
+              (drover-keys-test-choose key))
+            (should (equal (plist-get drover-filter member) value))))
+        ;; Of several, the ones deleted from the input go, the others stay.
+        (drover-set-filter :statuses '(waiting done))
+        (cl-letf (((symbol-function 'completing-read-multiple)
+                   (lambda (_prompt _table _predicate _require-match initial &rest _)
+                     (should (equal initial "Needs you,Done"))
+                     '("Done"))))
+          (drover-keys-test-choose "=s"))
+        (should (equal (plist-get drover-filter :statuses) '(done)))
+        ;; (any) among others clears too.
+        (cl-letf (((symbol-function 'completing-read-multiple) (lambda (&rest _) '("Done" "(any)"))))
+          (drover-keys-test-choose "=s"))
+        (should-not (plist-member drover-filter :statuses))
+        ;; A value no session has any more is still offered, to keep.
+        (drover-set-filter :project "gone")
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt table _predicate _require-match initial &rest _)
+                     (should (equal initial "gone"))
+                     (should (member "gone" (drover-keys-test-candidates table)))
+                     "gone")))
+          (drover-keys-test-choose "=p"))
+        (should (equal (plist-get drover-filter :project) "gone"))
+        ;; Since and text: (any) or empty clears.
+        (dolist (clearing '("" "(any)"))
+          (drover-set-filter :since (- (float-time) 3600))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt table &rest _)
+                       (should (string-search "now since" prompt))
+                       (should (equal (car (drover-keys-test-candidates table)) "(any)"))
+                       clearing)))
+            (drover-keys-test-choose "=d"))
+          (should-not (plist-member drover-filter :since)))
+        (drover-set-filter :search "auth")
+        (cl-letf (((symbol-function 'read-string)
+                   (lambda (_prompt initial &rest _)
+                     (should (equal initial "auth"))
+                     "")))
+          (drover-keys-test-choose "=f"))
+        (should-not (plist-member drover-filter :search))
+        ;; =c clears them all.
+        (drover-set-filter :project "drover")
+        (drover-set-filter :statuses '(done))
+        (drover-filter-clear)
+        (should-not drover-filter)))))
 
 (ert-deftest drover-keys-test-view-provider ()
   "The View menu sorts, groups and filters sessions by their provider's name."
@@ -1540,7 +1632,7 @@ MENU is `drover-view' by default."
         (cl-letf (((symbol-function 'completing-read)
                    (lambda (prompt candidates &rest _)
                      (should (equal prompt "Provider (empty for any): "))
-                     (should (equal candidates '("Anthropic" "OpenAI")))
+                     (should (equal (drover-keys-test-candidates candidates) '("(any)" "Anthropic" "OpenAI")))
                      "OpenAI")))
           (drover-keys-test-choose "=v"))
         (should (equal drover-filter '(:provider "OpenAI")))
@@ -1585,7 +1677,8 @@ host standing for none."
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (prompt candidates &rest _)
                    (should (equal prompt "Harness (empty for any): "))
-                   (should (equal candidates '("agent-shell" "Claude IDE" "Fake" "OpenCode")))
+                   (should (equal (drover-keys-test-candidates candidates)
+                                  '("(any)" "agent-shell" "Claude IDE" "Fake" "OpenCode")))
                    "OpenCode")))
         (drover-keys-test-choose "=H"))
       (should (equal drover-filter '(:harness opencode)))
@@ -1603,20 +1696,20 @@ host standing for none."
         (drover-keys-test-in 'view "a"
           (switch-to-buffer (current-buffer))
           ;; Three values, the current one highlighted, cycled in turn.
-          (should (equal (substring-no-properties (drover-keys-test-value "U")) "[all|active|none]"))
-          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("active")))
-          (drover-keys-test-choose "U")
+          (should (equal (substring-no-properties (drover-keys-test-value "=u")) "[all|active|none]"))
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=u")) '("active")))
+          (drover-keys-test-choose "=u")
           (should (eq (default-value 'drover-show-subagents) 'none))
-          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "U")) '("none")))
-          (drover-keys-test-choose "U")
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=u")) '("none")))
+          (drover-keys-test-choose "=u")
           (should (eq drover-show-subagents 'all))
-          (drover-keys-test-choose "U")
+          (drover-keys-test-choose "=u")
           (should (eq drover-show-subagents 'active))
-          (drover-keys-test-choose "-o")
+          (drover-keys-test-choose "=O")
           (should drover-show-history)
           (should (= fetched 1))
-          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "-o")) '("shown")))
-          (drover-keys-test-choose "-o")
+          (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=O")) '("shown")))
+          (drover-keys-test-choose "=O")
           (should-not drover-show-history)
           ;; Follow mode is the list's own.
           (should (equal (drover-keys-test-highlighted (drover-keys-test-value "-f")) '("off")))
