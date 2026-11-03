@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 13
+(defconst drover-core-generation 14
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -5115,6 +5115,14 @@ Signal a `user-error' when WINDOW cannot be split either."
         (ignore-errors (split-window window))
         (user-error "No window to show the session in"))))
 
+(defun drover-session-window ()
+  "Return the window `drover-open' shows a session in, from the current buffer.
+It is the window the current buffer's `drover-main-window-function'
+returns, such as the window where the user works beside a list in a
+side window, when live, else the selected window."
+  (let ((main (and drover-main-window-function (funcall drover-main-window-function))))
+    (if (window-live-p main) main (selected-window))))
+
 (defun drover-open (session &optional other-window)
   "Display SESSION and select its window; with OTHER-WINDOW, in another one.
 SESSION shows where the current buffer sends sessions: in the window
@@ -5126,8 +5134,7 @@ selected before the backend's :open runs, given no OTHER-WINDOW, so
 that sessions of every backend show in the same windows."
   (if (not (drover-supports-p session :open))
       (drover-backend-call session :open nil)
-    (let* ((main (and drover-main-window-function (funcall drover-main-window-function)))
-           (window (if (window-live-p main) main (selected-window))))
+    (let ((window (drover-session-window)))
       (when other-window
         (setq window (drover-other-window window (drover-session-buffer session))))
       (unless (eq window (selected-window))
