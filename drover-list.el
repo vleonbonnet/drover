@@ -337,7 +337,8 @@ PROPERTIES is a plist of:
             take what is left of the line.
  :align     `right' to align the field on the right of its column.
  :narrow    Where the field goes when the list is too narrow for
-            columns: `line', on the line of the title, flush right;
+            columns: `line', on the line of the title, flush right,
+            the harness's icon last, in a cell lining icons up;
             `below', on a second line, under the title, for the
             sessions that need you; `background', as the background
             of the line; nil, not shown.
@@ -346,14 +347,19 @@ PROPERTIES is a plist of:
 Characters count as wide as the letter x in the face `drover-list'.
 The list shows the fields with something to show, by priority, as long
 as their :min fit in the window, but those of
-`drover-list-hidden-fields'; it uses columns when those include every
-field the narrow layout places, else the narrow layout, which shows all
-of those.  Columns are named in the header line, and are at least as
-wide as their name, room allowing.  On a line too narrow for every
-column, the summary gives up room first, then the names of the columns
-of short texts, then the title, then the other fields in proportion;
-the model keeps its effort, cutting its name, and the harness its icon,
-leaving its name out.  In two lines, the harness shows its icon alone."
+`drover-list-hidden-fields': the summary and the prompt cache, which
+come and go with turns, count as shown whenever a session listed may
+show them, and the title's room counts from the glyph of a session
+alone, so that a turn changes no field shown.  It uses columns when
+those include every field the narrow layout places, else the narrow
+layout, which shows all of those.  Columns are named in the header
+line, and are at least as wide as their name, room allowing.  On a
+line too narrow for every column, the summary gives up room first,
+then the names of the columns of short texts, then the title, then the
+other fields in proportion; the model keeps its effort, cutting its
+name, and the harness its icon, leaving its name out.  In two lines,
+the harness shows its icon alone, at the end of the title's line,
+where icons line up."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
@@ -436,6 +442,7 @@ narrow window.")
   (state nil :documentation "Where the session is in Emacs, see `drover-list--title-state'.")
   (texts nil :documentation "Alist (FIELD . TEXT) of the other fields.")
   (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil.")
+  (caching nil :documentation "Non-nil when it may show a prompt cache, see `drover-list--caching-p'.")
   (inputs nil :documentation "What the row was made of, see `drover-list--row-inputs'.")
   (measures nil :documentation "What the layout needs of it, see `drover-list--row-measures'.")
   (heading nil :documentation "Its heading as drawn, see `drover-list--heading', or nil.")
@@ -1259,7 +1266,9 @@ of the animated status glyphs, their frames and widths (see
 `drover-list--frames') and the right of the status cell, :active,
 ACTIVE, the table of the active subagents of each session (see
 `drover-tree-active-subagents'), or nil, and :places, PLACES, where
-buffers are shown (see `drover-list--places'), or nil.  The status cell
+buffers are shown (see `drover-list--places'), or nil, and :caching,
+the backends that may report prompt caches (see
+`drover-list--caching').  The status cell
 holds every status glyph and frame, so that titles line up whatever
 the status; the subagent cell both glyphs of `opencode-subagent-icons'.
 Widths are in pixels; the lines of a list that folds leave room for the
@@ -1291,7 +1300,8 @@ share them (see `drover-list--peer-rows')."
                                                                    '(waiting working)))
                          :frames (mapcar (lambda (entry) (append entry (list (cdr status-cell)))) frames)
                          :active active
-                         :places places)))
+                         :places places
+                         :caching (drover-list--caching))))
       (append metrics (list :stamp (drover-list--metrics-stamp metrics))))))
 
 (defun drover-list--metrics-stamp (metrics)
@@ -1306,7 +1316,9 @@ place, is the same row; see `drover-list--inputs'."
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
         ;; Printed with each row, so a digest of the harnesses, not them.
         (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon)))
-        drover-list--text-fields drover-list--measuring))
+        drover-list--text-fields (plist-get metrics :caching)
+        ;; Last: `drover-list--peers-of' compares the others.
+        drover-list--measuring))
 
 (defvar drover-list--reuse nil
   "Rows a drawing may reuse, by session key, or nil.
@@ -1430,6 +1442,7 @@ of another list, copied (see `drover-list--peer-rows')."
           :texts (mapcar (lambda (field) (cons field (drover-list--text field session group metrics)))
                          drover-list--text-fields)
           :cache (drover-list--cache-fraction session (plist-get metrics :now))
+          :caching (drover-list--caching-p session metrics)
           :inputs inputs))))))
 
 (defun drover-list--tree-rows (nodes group metrics &optional depth indent)
@@ -1479,11 +1492,11 @@ DEPTH, INDENT, GROUP and METRICS are as for `drover-list--tree-rows'."
 (defun drover-list--measures (row)
   "Return what the layout needs of ROW, as a vector, measured once.
 Its elements are: where its title begins, where it ends, 1 when it
-shows a prompt cache, then for each of `drover-list--text-fields' the
-width of its text, nil when empty, then for each the width an ellipsis
-and the tail to keep whole take (see `drover-list--kept'), or the head
-to keep (see `drover-list--kept-head'), nil without either.  Widths are
-in pixels."
+shows a prompt cache or may show one (see `drover-list--caching-p'),
+then for each of `drover-list--text-fields' the width of its text, nil
+when empty, then for each the width an ellipsis and the tail to keep
+whole take (see `drover-list--kept'), or the head to keep (see
+`drover-list--kept-head'), nil without either.  Widths are in pixels."
   (or (drover-list--row-measures row)
       (setf (drover-list--row-measures row)
             (let ((measures (make-vector drover-list--measure-count nil))
@@ -1491,7 +1504,7 @@ in pixels."
                   (count (length drover-list--text-fields)))
               (aset measures 0 start)
               (aset measures 1 (+ start (drover-list--pixel-width (drover-list--row-title row))))
-              (aset measures 2 (and (drover-list--row-cache row) 1))
+              (aset measures 2 (and (or (drover-list--row-cache row) (drover-list--row-caching row)) 1))
               (cl-loop for field in drover-list--text-fields
                        for index from 3
                        do (let ((text (alist-get field (drover-list--row-texts row))))
@@ -1556,9 +1569,14 @@ in pixels."
     summary))
 
 (defun drover-list--has-p (field summary)
-  "Return non-nil when a row of SUMMARY has something to show for FIELD."
+  "Return non-nil when a row of SUMMARY has something to show for FIELD.
+What comes and goes with a session's turns counts whether it shows now
+or not, so that a turn changes no field the list shows: the summary for
+any row, as any session may come to need the user, and the prompt
+cache for a row that may show one (see `drover-list--caching-p')."
   (pcase field
     ('title t)
+    ('summary (drover-list--tally-any-p (aref summary 1)))
     ('cache (drover-list--tally-any-p (aref summary 2)))
     (_ (drover-list--tally-any-p (aref summary (drover-list--text-index field))))))
 
@@ -1629,24 +1647,38 @@ measures of lines."
 METRICS are the measures of lines."
   (- (drover-list--tally-max (aref summary 0)) (plist-get metrics :margin)))
 
+(defun drover-list--least-prefix (metrics)
+  "Return the room in pixels before the title of a session alone, from the margin.
+That is the room of the status glyph, in its cell, and a space, as the
+title of a session at the top of a tree, without active subagents,
+begins; METRICS are the measures of lines.  Subagents shown under a
+session, and the glyphs telling that they work, come and go with turns:
+the fields shown do not depend on them."
+  (let ((cell (plist-get metrics :status-cell)))
+    (+ (car cell) (cdr cell) (plist-get metrics :space))))
+
 (defun drover-list--choose (summary metrics)
   "Return the layout of the rows of SUMMARY in lines of the width of METRICS.
 The value is (LAYOUT . FIELDS): LAYOUT is `columns' or `narrow', and
 FIELDS the entries of `drover-list-fields' shown, in their order.  The
-fields with something to show for the rows are taken by priority, as
-long as the fewest pixels each needs fit (see `drover-list--narrowest'),
-and the title always; the fields of `drover-list-hidden-fields' never.
-Columns are used when they include every field the narrow layout
-places; else the narrow layout shows those fields, which need no room
-of their own but on the title's line, where they give way to the
-title."
+fields with something to show for the rows (see `drover-list--has-p')
+are taken by priority, as long as the fewest pixels each needs fit (see
+`drover-list--narrowest'), the title's counted from the glyph of a
+session alone (see `drover-list--least-prefix'), and the title always;
+the fields of `drover-list-hidden-fields' never.  Columns are used when
+they include every field the narrow layout places; else the narrow
+layout shows those fields, which need no room of their own but on the
+title's line, where they give way to the title.  So the fields shown
+change with the width, the settings and the sessions listed, not with
+what a session's turn changes: whether it needs the user, its prompt
+cache, its subagents at work."
   (let* ((gap (plist-get metrics :gap))
          (present (seq-filter (lambda (entry)
                                 (and (drover-list--has-p (car entry) summary)
                                      (or (eq (car entry) 'title)
                                          (not (memq (car entry) drover-list-hidden-fields)))))
                               drover-list-fields))
-         (used (+ (plist-get metrics :lead) (drover-list--title-prefix summary metrics)))
+         (used (+ (plist-get metrics :lead) (drover-list--least-prefix metrics)))
          (chosen nil))
     (catch 'full
       (dolist (entry (seq-sort-by (lambda (entry) (or (plist-get (cdr entry) :priority) 99)) #'<
@@ -1700,8 +1732,13 @@ column then as wide as the icon; the title; the other fields, in
 proportion to what they would lose.  So the ages and the effort show
 whole while the summary or the title has room to give, the project and
 model whole while the title has, and no column is narrowed while the
-line has room."
+line has room.  The title gives up room down to its fewest pixels from
+the glyph of a session alone, as `drover-list--choose' counts them: the
+titles of subagents, further in, are cut more.  A column no row has
+anything for yet, the summary's kept for the sessions that will need
+the user (see `drover-list--has-p'), gives up all its room."
   (let* ((prefix (drover-list--title-prefix summary metrics))
+         (least (drover-list--least-prefix metrics))
          (room (- (plist-get metrics :width) (plist-get metrics :lead)
                   (* (plist-get metrics :gap) (max 0 (1- (length fields))))))
          (widths (make-vector (length fields) 0))
@@ -1715,7 +1752,11 @@ line has room."
               (natural (drover-list--natural field summary metrics))
               (want (if max (min natural (+ extra (* (plist-get metrics :char) max))) natural)))
          (aset widths index want)
-         (aset floors index (min want (+ extra (drover-list--narrowest entry summary metrics))))
+         ;; Empty, a column lends all its room until its text comes.
+         (aset floors index (if (zerop (drover-list--content-width field summary metrics))
+                                0
+                              (min want (+ (if (eq field 'title) least 0)
+                                           (drover-list--narrowest entry summary metrics)))))
          (push index (nth (cond ((drover-list--whole-p field) 1)
                                 ((null max) 0)
                                 ((drover-list--compact-p field) 2)
@@ -1741,17 +1782,60 @@ line has room."
 Add :layout, `columns' or `narrow', and :fields, the fields shown; in
 columns, :columns, a list of (FIELD X WIDTH ALIGN) giving where each
 field begins and how wide it is, in pixels, the first at the lead of
-METRICS."
+METRICS; in the narrow layout, :edges, see `drover-list--edges'.  In
+the sidebar, which folds nothing, the columns of the fields showing
+their head alone come after those of short texts (see
+`drover-list--compact-after-whole'), as in two lines."
   (pcase-let* ((`(,layout . ,fields) (drover-list--choose summary metrics))
                (columns nil))
+    (when (and (eq layout 'columns) (not (plist-get metrics :folds)))
+      (setq fields (drover-list--compact-after-whole fields)))
     (when (eq layout 'columns)
       (let ((x (plist-get metrics :lead)))
         (cl-mapc (lambda (entry width)
                    (push (list (car entry) x width (plist-get (cdr entry) :align)) columns)
                    (setq x (+ x width (plist-get metrics :gap))))
                  fields (drover-list--column-widths fields summary metrics))))
-    (append (list :layout layout :fields (mapcar #'car fields) :columns (nreverse columns))
+    (append (list :layout layout :fields (mapcar #'car fields) :columns (nreverse columns)
+                  :edges (and (eq layout 'narrow) (drover-list--edges (mapcar #'car fields) summary)))
             metrics)))
+
+(defun drover-list--compact-after-whole (fields)
+  "Return FIELDS, those showing their head alone after those of short texts.
+FIELDS are entries of `drover-list-fields'.  Those showing their head
+alone, such as the harness's icon (see `drover-list--compact-p'), come
+right after the last of FIELDS of a short text (see
+`drover-list--whole-p'), the age and the prompt cache: in the sidebar,
+the harness's icon follows them, as in two lines, where it ends the
+title's line, the summary's column after it, which its texts of every
+width would move."
+  (let* ((compact (seq-filter (lambda (entry) (drover-list--compact-p (car entry))) fields))
+         (others (seq-difference fields compact #'eq))
+         (last-whole (seq-reduce (lambda (last entry) (if (drover-list--whole-p (car entry)) entry last))
+                                 others nil)))
+    (if (or (null compact) (null last-whole))
+        fields
+      (let ((tail (memq last-whole others)))
+        (append (seq-take others (- (length others) (length tail)))
+                (list last-whole) compact (cdr tail))))))
+
+(defun drover-list--edges (fields summary)
+  "Return the cells ending the title's line in two lines, for the rows of SUMMARY.
+FIELDS are the fields shown.  The value is a list of (FIELD . WIDTH),
+from the right edge leftwards: each field of FIELDS placed on the
+title's line that shows its head alone (see `drover-list--compact-p'),
+such as the harness's icon, in a cell as wide as the widest head it
+shows, in pixels.  So its icons line up from line to line, whatever
+stands before them, the ages of other widths; a line without one
+keeps its cell empty."
+  (let ((edges nil))
+    (dolist (field fields)
+      (when (and (drover-list--compact-p field)
+                 (eq (plist-get (drover-list--field-spec field) :narrow) 'line))
+        (let ((width (drover-list--tally-max (aref summary (drover-list--kept-index field)))))
+          (when (> width 0)
+            (push (cons field width) edges)))))
+    edges))
 
 (defun drover-list--layout (rows metrics)
   "Return METRICS with the layout of ROWS added, see `drover-list--layout-of'."
@@ -1762,7 +1846,7 @@ METRICS."
 Two layouts of the same key draw rows alike: a heading drawn for one is
 the heading for the other."
   (list (plist-get layout :layout) (plist-get layout :fields) (plist-get layout :columns)
-        (plist-get layout :width) (plist-get layout :margin) (plist-get layout :lead)
+        (plist-get layout :edges) (plist-get layout :width) (plist-get layout :margin) (plist-get layout :lead)
         (plist-get layout :folds) (plist-get layout :char)
         (plist-get layout :gap) (plist-get layout :space) (plist-get layout :stamp)))
 
@@ -1913,7 +1997,9 @@ the sidebar, which hides no line."
   "Return the heading of ROW in the narrow layout of LAYOUT, and its bar.
 The value is (HEADING . SPEC).  HEADING is one or two lines: the glyph,
 the title and the fields placed on its line, flush right, as they show
-where room is short (see `drover-list--compact'), then, for a session
+where room is short (see `drover-list--compact'), those showing their
+head alone last, in the cells of :edges of LAYOUT, so that they line
+up (see `drover-list--edges'), then, for a session
 that needs the user, the fields placed below, under the title; it
 begins with PREFIX, if any, its second line with the line prefix of
 LAYOUT.  SPEC tells where the first line's segments lie, from
@@ -1929,11 +2015,21 @@ background, else nil."
                    (seq-filter (lambda (field)
                                  (eq (plist-get (drover-list--field-spec field) :narrow) place))
                                (remq 'title (plist-get layout :fields)))))
+         (edges (plist-get layout :edges))
          (right nil)
          (end width))
-    ;; The fields on the title's line, from the right edge leftwards.
+    ;; The cells at the edge, then the other fields on the title's line,
+    ;; flush right, from the right edge leftwards.
+    (pcase-dolist (`(,field . ,cell) edges)
+      (let ((text (drover-list--compact (or (alist-get field texts) "")))
+            (start (- end cell)))
+        (when (> start (+ title-start space))
+          (unless (string-empty-p text)
+            (setq right (append (list (list 'align start) (drover-list--text-segment text start))
+                                right)))
+          (setq end (- start space)))))
     (dolist (field (reverse (funcall narrow 'line)))
-      (let ((text (drover-list--compact (or (alist-get field texts) ""))))
+      (let ((text (if (assq field edges) "" (drover-list--compact (or (alist-get field texts) "")))))
         (unless (string-empty-p text)
           (let ((start (- end (drover-list--pixel-width text))))
             (when (> start (+ title-start space))
@@ -1942,7 +2038,7 @@ background, else nil."
                     end (- start space)))))))
     (let* ((cache (and (memq 'cache (funcall narrow 'background)) (drover-list--row-cache row)))
            (line (drover-list--assemble
-                  (append (drover-list--title-segments row (- (if right end width) title-start) shift)
+                  (append (drover-list--title-segments row (- end title-start) shift)
                           right)
                   (and cache width)))
            (below (and (drover-session-attention-p session)
@@ -1989,6 +2085,16 @@ sends to its parent, never to it, so its cache tells nothing they can
 act on, and its bar would only stand beside the one that does."
   (and (not (drover-session-parent session))
        (drover-session-cache-fraction session now)))
+
+(defun drover-list--caching-p (session metrics)
+  "Return non-nil when SESSION may show a prompt cache, live or not.
+That is a session at the top of its tree, whose cache shows (see
+`drover-list--cache-fraction'), of a backend of the :caching of METRICS,
+which may report caches: its cache is live from one turn's answers to
+some minutes after, and the list keeps its room meanwhile."
+  (and (not (drover-session-parent session))
+       (memq (drover-session-backend session) (plist-get metrics :caching))
+       t))
 
 (defun drover-list--cache-help (session now)
   "Return the line telling how the prompt cache of SESSION stands at NOW."
@@ -3069,7 +3175,13 @@ unless the user hides it.  In two lines, it does not show."
         (copy-tree drover-filter)
         drover-show-subagents drover-show-history drover-show-archived
         drover-list-hidden-fields (copy-tree drover-list-fields)
-        drover-status-order drover-attention-statuses))
+        drover-status-order drover-attention-statuses
+        (drover-list--caching)))
+
+(defun drover-list--caching ()
+  "Return the backends that may report prompt caches now.
+See `drover-backend-caches-p'."
+  (seq-filter #'drover-backend-caches-p (drover-backends)))
 
 (defun drover-list--before-p (a b)
   "Return non-nil when tree A comes before tree B in the order of urgency.

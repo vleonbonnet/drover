@@ -2002,5 +2002,91 @@ user told why on one line."
         (setq-local drover-prompt--chosen-session (list :key '(fake . "a") :title "Session a"))
         (should-not (drover-prompt--menu-send-target))))))
 
+;;;; Sending the prompt from anywhere
+
+(defun drover-prompt-test--send-entries ()
+  "Return the entries of Send and Open the dispatch menu shows here, as drawn."
+  (seq-filter (lambda (line) (string-match-p "\\` \\(M-\\)?RET \\(Send\\|Open\\)" line))
+              (drover-keys-test-render 'drover-dispatch)))
+
+(defun drover-prompt-test--sends ()
+  "Return the sessions sent to, as identifiers, oldest first."
+  (reverse (seq-keep (lambda (call) (and (eq (car call) :send) (nth 1 call))) drover-test-calls)))
+
+(ert-deftest drover-prompt-test-send-from-anywhere ()
+  "RET of the menu sends the prompt from any buffer, as from the prompt, unshown.
+To the session chosen for it, which Send names, else to one the picker
+asks for, with the options chosen in the prompt.  A prompt of blanks is
+nothing to send: Send does not apply, nor RET from elsewhere."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a")))
+      (drover-prompt-test--session "b")
+      (drover-prompt-edit-for session "Fix the build")
+      (with-current-buffer (drover-prompt-buffer)
+        (setq drover-prompt-picked-agent "plan"))
+      (with-temp-buffer
+        (setq default-directory "/")
+        (should (equal (drover-prompt-test--send-entries) '(" RET Send Session a")))
+        (should (member "RET" (drover-keys-test-apt 'drover-dispatch)))
+        (drover-prompt-test-without-picker
+          (call-interactively #'drover-prompt-send))
+        (should (equal (drover-prompt-test--sends) '("a")))
+        (should (member '(:apply-options "a" (:agent "plan" :model nil :variant nil)) drover-test-calls))
+        ;; Sent, the prompt is done with: nothing more to send.
+        (should-not (drover-prompt-buffer))
+        (should (equal (drover-prompt-test--send-entries) '(" RET Send")))
+        (should-not (member "RET" (drover-keys-test-apt 'drover-dispatch)))
+        (should-error (call-interactively #'drover-prompt-send) :type 'user-error)
+        ;; Blanks are nothing either.
+        (with-current-buffer (drover-prompt-buffer t)
+          (insert "  \n\t\n"))
+        (should-not (member "RET" (drover-keys-test-apt 'drover-dispatch)))
+        (should-error (call-interactively #'drover-prompt-send) :type 'user-error)
+        ;; No session chosen: the picker asks, as in the prompt.
+        (with-current-buffer (drover-prompt-buffer)
+          (insert "Second prompt"))
+        (should (equal (drover-prompt-test--send-entries) '(" RET Send")))
+        (should (member "RET" (drover-keys-test-apt 'drover-dispatch)))
+        (drover-prompt-test-choosing (lambda (offered)
+                                       (should (member "session b" offered))
+                                       "session b")
+          (call-interactively #'drover-prompt-send))
+        (should (equal (drover-prompt-test--sends) '("a" "b")))
+        (should-not (drover-prompt-buffer))))))
+
+(ert-deftest drover-prompt-test-send-beside-a-list ()
+  "With a prompt to send, RET sends it from a buffer beside a list, and M-RET from the list.
+From another buffer, the menu acting on a list in sight, RET sends; in
+the list, RET opens the session at point, as there, and M-RET sends.
+The menu never shows the two RET at once."
+  (require 'drover-keys-test)
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a"))
+          (list (generate-new-buffer " list")))
+      (unwind-protect
+          (save-window-excursion
+            (with-current-buffer list
+              (setq-local drover-view-p t
+                          drover-session-at-point-function (lambda () session)))
+            (delete-other-windows)
+            (set-window-buffer (split-window-right) list)
+            (with-temp-buffer
+              (set-window-buffer (selected-window) (current-buffer))
+              ;; Nothing to send: RET opens the list's session at point.
+              (should (equal (drover-prompt-test--send-entries) '(" RET Open" " M-RET Send")))
+              (drover-prompt-edit-for session "Fix the build")
+              (should (equal (drover-prompt-test--send-entries) '(" RET Send Session a")))
+              ;; In the list itself.
+              (with-current-buffer list
+                (should (equal (drover-prompt-test--send-entries) '(" RET Open" " M-RET Send Session a")))
+                (should (member "M-RET" (drover-keys-test-apt 'drover-dispatch)))
+                (drover-prompt-test-without-picker
+                  (call-interactively #'drover-prompt-send))
+                (should (equal (drover-prompt-test--sends) '("a")))
+                (should (equal (drover-prompt-test--send-entries) '(" RET Open" " M-RET Send")))
+                (should-not (member "M-RET" (drover-keys-test-apt 'drover-dispatch))))))
+        (kill-buffer list)))))
+
 (provide 'drover-prompt-test)
 ;;; drover-prompt-test.el ends here

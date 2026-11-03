@@ -92,8 +92,8 @@ settings of the list are their defaults, and the clock stands still at
            (opencode-session-status-animations '((working "1" "2" "3") (retrying "a" "b")))
            (opencode-session-status-animation-interval nil)
            ;; The harness, the same for every fake session, shows in the
-           ;; tests of it and of the sidebar, where its icon stands
-           ;; between the title and the age (`drover-list-test-showing').
+           ;; tests of it and of the sidebar, where its icon ends the
+           ;; line (`drover-list-test-showing').
            (drover-list-hidden-fields '(harness))
            (drover-harness-default-icon "▣")
            (buffer nil))
@@ -1102,14 +1102,17 @@ an x and of 100 show what the README says."
         (should (= columns-from 330))))))
 
 (ert-deftest drover-list-test-fields-without-content-take-no-room ()
-  "A field no session has anything for is left out, leaving its room."
+  "A field no session has anything for is left out, leaving its room.
+But the summary, which any session may come to need, keeps its column."
   (drover-list-test-with (list (drover-list-test-titled "a" "Alpha" :status 'working :model "opus"
                                                         :updated (drover-list-test-ago 300)))
     (drover-list-test-with-font
-      ;; Neither cache, summary, location nor agent: the model comes
-      ;; after the age, 109 + 35 + 70.
-      (should (equal (drover-list-test-layout-at 230) '(columns title model age)))
-      (should (equal (drover-list-test-layout-at 200) '(columns title age))))))
+      ;; Neither cache, location nor agent: the summary comes after the
+      ;; age, 109 + 35 + 98 = 242, then the model, 70 more, Magit's
+      ;; ellipsis taking 7 pixels.
+      (should (equal (drover-list-test-layout-at 330) '(columns title model age summary)))
+      (should (equal (drover-list-test-layout-at 250) '(columns title age summary)))
+      (should (equal (drover-list-test-layout-at 240) '(narrow title age summary))))))
 
 (ert-deftest drover-list-test-fields-are-data ()
   "Priorities and minimum widths come from `drover-list-fields'."
@@ -1196,22 +1199,24 @@ an x and of 100 show what the README says."
                                      :requests '((:kind question
                                                   :summary "Which of the many files should I edit before the tests run?"))))
       (drover-list-test-with-font
-        (let ((drover-list-test-width 250))
+        (let ((drover-list-test-width 240))
           (revert-buffer)
           (should (eq drover-list--layout 'narrow))
-          ;; Lines end 243 pixels in, before Magit's ellipsis.
+          ;; Lines end 233 pixels in, before Magit's ellipsis: too few for
+          ;; the summary's column, past the title and the age, from the
+          ;; glyph of a session alone, 25 + 84 + 35 + 98 = 242.
           (let* ((cells (drover-list-test-cells "long"))
                  (title-cell (car cells))
                  (age-cell (car (last cells)))
                  (shown (substring-no-properties (cdr title-cell) 4)))
             ;; The age, "2h", is 14 pixels: flush right.
             (should (equal (cdr age-cell) "2h"))
-            (should (= (car age-cell) (- 243 14)))
+            (should (= (car age-cell) (- 233 14)))
             ;; The title ends in an ellipsis before it, with a space to
             ;; spare, and one more character would not fit.  It begins
             ;; past the glyph of the subagent waiting, 25 + 11 pixels in.
             (should (string-suffix-p "…" shown))
-            (let ((room (- 243 14 4 36))
+            (let ((room (- 233 14 4 36))
                   (kept (substring shown 0 -1)))
               (should (<= (drover-list-test-fake-width shown) room))
               (should (> (drover-list-test-fake-width (concat (substring title 0 (1+ (length kept))) "…"))
@@ -1228,7 +1233,7 @@ an x and of 100 show what the README says."
               (should (get-text-property 0 'invisible line))
               (should (equal (get-text-property 1 'display line) '(space :align-to (47))))
               (should (string-suffix-p "…" summary))
-              (should (<= (drover-list-test-fake-width summary) (- 243 47))))))))))
+              (should (<= (drover-list-test-fake-width summary) (- 233 47))))))))))
 
 (ert-deftest drover-list-test-redraws-on-width-change ()
   (drover-list-test-with (list (drover-test-session "s" :status 'waiting
@@ -2068,8 +2073,13 @@ START and END bound its overlay."
                                  :created (drover-list-test-ago 7200)))
     (drover-list-test-goto "s")
     (magit-section-show (magit-current-section))
-    (should-not (string-match-p "^ +\\(Model\\|Provider\\|Context\\|Project\\|Agent\\|Created\\|Directory\\) "
-                                (drover-list-test-visible-text)))
+    ;; The line shows the project, the model, the provider and the
+    ;; context, and keeps the summary's column, for when the session
+    ;; needs you: the agent and the creation, left out, are told below.
+    (let ((text (drover-list-test-visible-text)))
+      (should-not (string-match-p "^ +\\(Model\\|Provider\\|Context\\|Project\\|Directory\\) " text))
+      (should (string-match-p "^    Agent    @build$" text))
+      (should (string-match-p "^    Created  2h ago$" text)))
     (setq drover-list-hidden-fields '(location agent model provider context created))
     (revert-buffer)
     (let ((text (drover-list-test-visible-text)))
@@ -3854,14 +3864,14 @@ Each shows its own buffer."
         ;; the continuation glyph, as the window has no fringe; the
         ;; divider takes the last.  The sidebar leaves no room for
         ;; Magit's ellipsis, as it collapses nothing.  The harness's
-        ;; icon stands between the title and the age.
+        ;; icon ends the title's line, where the icons line up.
         (cl-flet ((flush (left right) (concat left (make-string (- 34 (length left) (length right)) ?\s)
                                               right)))
           (should (equal (drover-list-test-entry "ask")
-                         (concat (flush "! Session ask" "▣ 3m") "\n  asks: Which branch?")))
+                         (concat (flush "! Session ask" "3m ▣") "\n  asks: Which branch?")))
           (should (equal (drover-list-test-entry "fail")
-                         (concat (flush "✗ Session fail" "▣ 30s") "\n  Rate limited")))
-          (should (equal (drover-list-test-entry "work") (flush "◐ Session work" "▣ 1m"))))))))
+                         (concat (flush "✗ Session fail" "30s ▣") "\n  Rate limited")))
+          (should (equal (drover-list-test-entry "work") (flush "◐ Session work" "1m ▣"))))))))
 
 ;; Opening a session from the side window, with RET, o or C-o, must not
 ;; replace the list in its dedicated window: `drover-open' opens
@@ -4305,7 +4315,7 @@ Each shows its own buffer."
           ;; Two lines: the summary does not fit in a column.
           (should (eq drover-list--layout 'narrow))
           (should-not header-line-format)
-          (should (string-suffix-p "1m" (drover-list-test-heading "a")))
+          (should (string-suffix-p "1m ▣" (drover-list-test-heading "a")))
           ;; Every column of the line: the sidebar leaves no room for
           ;; Magit's ellipsis, as it collapses nothing.
           (should (= (string-width (drover-list-test-heading "a")) before))
@@ -4314,11 +4324,12 @@ Each shows its own buffer."
           (drover-list--on-window-change side)
           (should (= drover-list--width (+ before 6)))
           ;; Now it does: one line, in columns, from the left edge; the
-          ;; harness shows its name, room allowing.
+          ;; harness shows its name, room allowing, after the age, as in
+          ;; two lines.
           (should (eq drover-list--layout 'columns))
-          (should (equal (drover-list-test-entry "a") "! Session a  ▣ Fake    1m  asks: Go?"))
+          (should (equal (drover-list-test-entry "a") "! Session a   1m  ▣ Fake   asks: Go?"))
           ;; Named in the header line, which two lines lack.
-          (should (equal (drover-list-test-displayed header-line-format) "Session      Harness  Age  Summary")))))))
+          (should (equal (drover-list-test-displayed header-line-format) "Session      Age  Harness  Summary")))))))
 
 ;;;; The sidebar draws its first screens
 
@@ -5041,8 +5052,8 @@ The subagent's glyph stands under its parent's title."
       (with-current-buffer (window-buffer (drover-list--show-side))
         (should (eq drover-list--layout 'narrow))
         ;; The sidebar's lines begin with their glyphs.
-        (should (string-match-p "\\`· \\? Session p +▣ 1m\\'" (drover-list-test-entry "p")))
-        (should (string-match-p "\\`    ! Session a +▣ 2m\n      asks: Go\\?\\'" (drover-list-test-entry "a")))))))
+        (should (string-match-p "\\`· \\? Session p +1m ▣\\'" (drover-list-test-entry "p")))
+        (should (string-match-p "\\`    ! Session a +2m ▣\n      asks: Go\\?\\'" (drover-list-test-entry "a")))))))
 
 ;;;; Open sessions
 
@@ -7169,11 +7180,14 @@ several."
 (ert-deftest drover-list-test-harness-icon-where-room-is-short ()
   "A column too narrow for its name shows the harness's icon alone, never a name cut.
 The column is then as wide as the icon; in two lines, the icon alone
-stands on the title's line."
+ends the title's line.  A session asks a question: the summary's
+column, which keeps its room, gives none."
   (drover-list-test-with nil
     (drover-list-test-showing
       (let ((drover-harnesses drover-list-test-harnesses))
         (drover-list-test-register-harnesses)
+        (drover-test-register-simple 'fake (list (drover-test-session "ask" :status 'waiting
+                                                                      :requests '((:kind question :summary "Go?")))))
         (drover-list-test-with-font
           (let ((seen nil))
             (cl-loop for width from 1000 downto 150 by 10
@@ -7204,7 +7218,7 @@ stands on the title's line."
             (should (memq 'icon seen)))
           ;; In two lines.
           (should (eq (car (drover-list-test-layout-at 150)) 'narrow))
-          (should (string-match-p "\\` +· Open +O +4m\\'" (drover-list-test-remote-line '(opencode . "o")))))))))
+          (should (string-match-p "\\` +· Open +4m +O\\'" (drover-list-test-remote-line '(opencode . "o")))))))))
 
 (ert-deftest drover-list-test-harness-in-view-menu ()
   "The View menu's Columns switch the harness's column, -H."
@@ -7251,33 +7265,170 @@ Its sessions do not repeat it; the filter keeps those of one harness."
 
 ;;;; The sidebar
 
-(ert-deftest drover-list-test-sidebar-harness-between-title-and-age ()
-  "In the sidebar, the harness's icon stands between the title and the age.
-In two lines, on the title's line, after the host of a session of
-another host; in columns, in its column, the title's on its left, the
-age's on its right."
-  (drover-list-test-with (list (drover-test-session "ask" :status 'waiting :since (drover-list-test-ago 180)
-                                                    :requests '((:kind question :summary "Which branch?"))))
+(defun drover-list-test-key-cells (key)
+  "Return the cells of the first line of the session KEY, of any backend.
+As `drover-list-test-cells' returns them, a list of (X . TEXT), the
+first at 0 when the line begins with text, as in the sidebar.  The
+spaces stretched for a prompt cache's background, of no width, end no
+cell."
+  (drover-list--draw-deferred)
+  (save-excursion
+    (goto-char (oref (drover-list--find-session key) start))
+    (let ((line (buffer-substring (line-beginning-position) (line-end-position)))
+          (cells (list (cons 0 ""))))
+      (dotimes (index (length line))
+        (pcase (get-text-property index 'display line)
+          ((guard (get-text-property index 'invisible line)))
+          (`(space :align-to (,x)) (push (cons x "") cells))
+          ('(space :width (0)))
+          (_ (setcdr (car cells) (concat (cdar cells) (substring line index (1+ index)))))))
+      (seq-remove (lambda (cell) (string-empty-p (cdr cell))) (nreverse cells)))))
+
+(ert-deftest drover-list-test-sidebar-harness-ends-the-line ()
+  "In the sidebar, the harness's icon ends each line, where the icons line up.
+In two lines, at the end of the title's line, after the age, whatever
+its width, in a cell as wide as the widest icon; in columns, in the last
+column, after the age's and the prompt cache's, which a session without
+a live cache leaves empty.  The positions are the pixels lines align
+their parts to."
+  (drover-list-test-with nil
     (drover-list-test-showing
       (let ((drover-harnesses drover-list-test-harnesses))
         (drover-list-test-register-harnesses)
-        (let ((side (drover-list--show-side)))
+        ;; OpenCode's session has a live cache: its backend reports caches.
+        (drover-test-register-simple
+         'opencode (list (drover-session-create :backend 'opencode :id "o" :title "Open" :status 'idle
+                                                :engine 'opencode :engine-id "o"
+                                                :updated (drover-list-test-ago 240)
+                                                :cache-expires (+ drover-test-now 200) :cache-ttl 300))
+         :caches t)
+        (let ((side (drover-list--show-side))
+              (keys drover-list-test-harness-keys))
           (with-current-buffer (window-buffer side)
             (should (eq drover-list--layout 'narrow))
-            (should (string-match-p "\\`· Open +O 4m\\'" (drover-list-test-remote-line '(opencode . "o"))))
-            (should (string-match-p "\\`· Shell +A 5m\\'" (drover-list-test-remote-line '(agent-shell . "s"))))
-            (should (string-match-p "\\`· Remote +core C 6m\\'"
-                                    (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
-            ;; Wider, in columns.
-            (window-resize side 10 t nil t)
+            (let* ((layout (drover-list--model-layout drover-list--model))
+                   (edge (alist-get 'harness (plist-get layout :edges)))
+                   (x (- (plist-get layout :width) edge)))
+              ;; Ages of two and three characters: 4m, 10m.
+              (should (string-match-p "\\`· Open +4m O\\'" (drover-list-test-remote-line '(opencode . "o"))))
+              (should (string-match-p "\\`· Transcript +10m T\\'"
+                                      (drover-list-test-remote-line '(claude-code . "t"))))
+              (should (string-match-p "\\`· Remote +core 6m C\\'"
+                                      (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
+              (dolist (key keys)
+                (let* ((cells (drover-list-test-key-cells key))
+                       (icon (car (last cells)))
+                       (age (car (last cells 2))))
+                  ;; Every icon begins at the same pixel, past the age.
+                  (should (= (car icon) x))
+                  (should (equal (substring-no-properties (cdr icon))
+                                 (plist-get (alist-get (if (eq (car key) 'remote:core) 'claude-code-ide (car key))
+                                                       drover-harnesses)
+                                            :icon)))
+                  (should (<= (+ (car age) (string-pixel-width (cdr age))) (- x (plist-get layout :space)))))))
+            (drover-list-test-is-fresh)
+            ;; Wider, in columns: the harness's column follows the age's
+            ;; and the cache's, the summary's after it.
+            (window-resize side 24 t nil t)
             (drover-list--on-window-change side)
             (should (eq drover-list--layout 'columns))
-            (let ((fields drover-list--fields))
-              (should (< (seq-position fields 'title) (seq-position fields 'harness) (seq-position fields 'age))))
-            (let* ((line (drover-list-test-remote-line '(opencode . "o")))
-                   (title (string-search "Open" line))
-                   (icon (string-search " O" line (+ title 4))))
-              (should (and icon (< title icon (string-search "4m" line)))))))))))
+            (should (equal drover-list--fields '(title host age cache harness summary)))
+            (let* ((columns (plist-get (drover-list--model-layout drover-list--model) :columns))
+                   (cache (assq 'cache columns))
+                   (harness (assq 'harness columns)))
+              (dolist (key keys)
+                (let ((cells (drover-list-test-key-cells key)))
+                  ;; Each icon in the harness's column, its own last cell.
+                  (should (= (car (car (last cells))) (nth 1 harness)))
+                  ;; The cache only on the line of the session that has one.
+                  (should (eq (and (assoc (nth 1 cache) cells) t) (equal key '(opencode . "o")))))))
+            (drover-list-test-is-fresh)))))))
+
+(ert-deftest drover-list-test-send-keeps-the-fields ()
+  "Sending a prompt changes no field either list shows, nor where lines place them.
+The session asked a question, its prompt cache expired meanwhile; the
+prompt answers it.  On its way, the options of the prompt change the
+agent and the model, whose effort is not known until the catalogs come,
+the session goes to work, without anything to tell until it answers,
+the prompt arrives, its first answer makes a cache, and a subagent
+starts.  The sidebar is wide enough for the title, the harness, the age
+and the model, too narrow for the prompt cache besides them: when no
+session needed you and no cache was live, as between the prompt sent
+and its first answer, the model's column showed for a moment.  Each
+step is drawn in place as a drawing anew draws it."
+  (drover-list-test-with
+      (list (drover-list-test-titled "s" "Sent to" :status 'waiting :since (drover-list-test-ago 900)
+                                     :updated (drover-list-test-ago 900)
+                                     :agent "build" :model "Opus" :effort "high"
+                                     :requests '((:kind question :summary "Which branch?")))
+            (drover-list-test-titled "q" "Quiet" :status 'idle :updated (drover-list-test-ago 3600)
+                                     :agent "build" :model "Opus" :effort "high"))
+    (drover-list-test-showing
+      (drover-list-test-with-font
+        ;; The fake backend reports prompt caches, as OpenCode's does.
+        (apply #'drover-register-backend 'fake :caches t (alist-get 'fake drover--backends))
+        (cl-letf (((symbol-function 'drover-list--line-width)
+                   (lambda () (if drover-list--folds 600 240))))
+          (drover-list-test-shown
+            (revert-buffer)
+            (let* ((side (window-buffer (drover-list--show-side)))
+                   (lists (list buffer side))
+                   ;; The sidebar's lines, in two, place the same fields
+                   ;; alike; the list's columns follow the widths of
+                   ;; their texts, as the model's name changes.
+                   (shape (lambda (list)
+                            (with-current-buffer list
+                              (let ((layout (drover-list--model-layout drover-list--model)))
+                                (list drover-list--layout drover-list--fields
+                                      (and (eq list side) (plist-get layout :edges)))))))
+                   (shapes (mapcar shape lists))
+                   (step (lambda (change)
+                           (let ((session (copy-sequence (drover-list-test-find "s"))))
+                             (funcall change session)
+                             (setq drover-test-sessions
+                                   (cons session (seq-remove (lambda (old) (equal (drover-session-id old) "s"))
+                                                             drover-test-sessions)))
+                             (drover-backend-changed 'fake "s")
+                             (drover-changed-now)
+                             (dolist (list lists)
+                               (should (equal (funcall shape list) (nth (seq-position lists list) shapes)))
+                               (with-current-buffer list
+                                 (drover-list-test-is-fresh)))))))
+              (with-current-buffer side
+                (should (eq drover-list--layout 'narrow))
+                (should-not (memq 'model drover-list--fields)))
+              (with-current-buffer buffer
+                (should (eq drover-list--layout 'columns)))
+              ;; The options of the prompt.
+              (funcall step (lambda (session)
+                              (setf (drover-session-agent session) "plan"
+                                    (drover-session-model session) "Sonnet"
+                                    (drover-session-effort session) nil)))
+              ;; At work: the question answered, nothing to tell yet.
+              (funcall step (lambda (session)
+                              (setf (drover-session-status session) 'working
+                                    (drover-session-requests session) nil
+                                    (drover-session-since session) drover-test-now)))
+              ;; The prompt arrives.
+              (funcall step (lambda (session) (setf (drover-session-updated session) drover-test-now)))
+              ;; The catalogs: the effort the model runs by default.
+              (funcall step (lambda (session) (setf (drover-session-effort session) "medium")))
+              ;; Its first answer: a cache, five minutes long.
+              (funcall step (lambda (session)
+                              (setf (drover-session-cache-expires session) (+ drover-test-now 300)
+                                    (drover-session-cache-ttl session) 300)))
+              ;; A subagent starts, under it.
+              (push (drover-test-session "k" :parent "s" :status 'working :updated drover-test-now)
+                    drover-test-sessions)
+              (drover-backend-changed 'fake "k")
+              (funcall step #'ignore)
+              ;; The turn ends; the subagent's too.
+              (setq drover-test-sessions (seq-remove (lambda (old) (equal (drover-session-id old) "k"))
+                                                     drover-test-sessions))
+              (drover-backend-changed 'fake "k")
+              (funcall step (lambda (session)
+                              (setf (drover-session-status session) 'done
+                                    (drover-session-since session) drover-test-now))))))))))
 
 (ert-deftest drover-list-test-sidebar-folds-nothing ()
   "The sidebar expands no session and collapses no group: no key, click nor indicator does.

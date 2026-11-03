@@ -540,8 +540,11 @@ A click on the session's name forgets it."
 (defun drover-prompt--menu-send-target ()
   "Return the title of the session the prompt goes to, or nil.
 For `drover-dispatch-send-target-functions': Send in the menu names the
-session `drover-prompt-edit-for' chose, as the header does."
-  (when-let* ((title (and drover-prompt-mode (plist-get drover-prompt--chosen-session :title))))
+session `drover-prompt-edit-for' chose, as the header does, in the
+prompt and wherever Send sends the prompt (see `drover-prompt-target')."
+  (when-let* ((buffer (if drover-prompt-mode (current-buffer) (drover-prompt-target 'send)))
+              ((buffer-local-value 'drover-prompt-mode buffer))
+              (title (plist-get (buffer-local-value 'drover-prompt--chosen-session buffer) :title)))
     (format "%s" title)))
 
 (add-hook 'drover-dispatch-send-target-functions #'drover-prompt--menu-send-target)
@@ -607,6 +610,24 @@ with `drover-prompt-display-action'."
         (select-window window))
     (when-let* ((window (display-buffer buffer drover-prompt-display-action)))
       (select-window window))))
+
+(defun drover-prompt-prepared-buffer ()
+  "Return the prompt buffer when it holds a prompt to send, else nil.
+It holds one when `drover-prompt-content' finds something to send: the
+active region, else the buffer, has more than blanks.  It is
+`drover-prepared-prompt-function', so that Send sends that prompt from
+any buffer, as from the prompt, the prompt staying where it is."
+  (when-let* ((buffer (drover-prompt-buffer))
+              ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (let ((region (use-region-p)))
+        (save-excursion
+          (goto-char (if region (region-beginning) (point-min)))
+          ;; The blanks `string-trim' trims there.
+          (and (re-search-forward "[^ \t\n\r]" (if region (region-end) (point-max)) t)
+               buffer))))))
+
+(setq drover-prepared-prompt-function #'drover-prompt-prepared-buffer)
 
 ;;;###autoload
 (defun drover-prompt-default-buffer ()

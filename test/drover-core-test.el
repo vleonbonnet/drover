@@ -1216,36 +1216,77 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
         (should (drover-prompt-defines-p other 'attach))))))
 
 (ert-deftest drover-test-prompt-target-current-buffer ()
-  (with-temp-buffer
-    (should-not (drover-prompt-target 'send))
-    (drover-prompt-define 'send #'ignore)
-    (should (eq (drover-prompt-target 'send) (current-buffer)))
-    (should-not (drover-prompt-target 'revert))))
+  (let ((drover-prepared-prompt-function nil))
+    (with-temp-buffer
+      (should-not (drover-prompt-target 'send))
+      (drover-prompt-define 'send #'ignore)
+      (should (eq (drover-prompt-target 'send) (current-buffer)))
+      (should-not (drover-prompt-target 'revert)))))
+
+(ert-deftest drover-test-prompt-target-prepared-prompt ()
+  "Send applies from anywhere to a prompt ready to send, a list included.
+A buffer of its own to send comes first; the prompt counts only when it
+defines Send, and a function failing tells none."
+  (let* ((prepared (generate-new-buffer " prepared"))
+         (ready t)
+         (drover-prepared-prompt-function (lambda () (and ready prepared)))
+         (drover-test-actions nil))
+    (unwind-protect
+        (progn
+          (with-current-buffer prepared
+            (drover-prompt-define 'send (drover-test-action 'send)))
+          (with-temp-buffer
+            (should (eq (drover-prompt-target 'send) prepared))
+            ;; Only Send.
+            (should-not (drover-prompt-target 'revert))
+            (drover-prompt-run 'send)
+            (should (equal (car (car drover-test-actions)) 'send))
+            (should (eq (nth 1 (car drover-test-actions)) prepared))
+            ;; In a list too.
+            (setq-local drover-view-p t)
+            (should (eq (drover-prompt-target 'send) prepared))
+            (kill-local-variable 'drover-view-p)
+            ;; Its own first.
+            (drover-prompt-define 'send #'ignore)
+            (should (eq (drover-prompt-target 'send) (current-buffer))))
+          (with-temp-buffer
+            (setq ready nil)
+            (should-not (drover-prompt-target 'send))
+            (should-error (drover-prompt-run 'send) :type 'user-error)
+            (setq ready t)
+            (with-current-buffer prepared
+              (drover-prompt-define 'send nil))
+            (should-not (drover-prompt-target 'send))
+            (let ((drover-prepared-prompt-function (lambda () (error "Broken"))))
+              (should-not (drover-prompt-target 'send)))))
+      (kill-buffer prepared))))
 
 (ert-deftest drover-test-prompt-target-session-buffer-in-list ()
-  (drover-test-with-buffers (list (drover-test-session "s"))
-      (list (cons "s" (generate-new-buffer " s")))
-    (with-current-buffer (cdr (assoc "s" buffers))
-      (drover-prompt-define 'agent (drover-test-action 'agent))
-      (drover-prompt-define 'revert (drover-test-action 'revert))
-      (drover-prompt-define 'fork (drover-test-action 'fork)))
-    (drover-test-at-point "s"
-      ;; Outside a list, the session's buffer does not count.
-      (should-not (drover-prompt-target 'agent))
-      (setq-local drover-view-p t)
-      (should (eq (drover-prompt-target 'agent) (cdr (assoc "s" buffers))))
-      ;; Editing a prompt needs the prompt in sight: never from a list.
-      (should-not (drover-prompt-target 'revert))
-      (should-not (drover-prompt-target 'send))
-      ;; In a list, forking acts on the whole session through its backend.
-      (should-not (drover-prompt-target 'fork))
-      (drover-prompt-run 'agent)
-      (should (equal (car (car drover-test-actions)) 'agent))
-      (should (eq (nth 1 (car drover-test-actions)) (cdr (assoc "s" buffers)))))))
+  (let ((drover-prepared-prompt-function nil))
+    (drover-test-with-buffers (list (drover-test-session "s"))
+        (list (cons "s" (generate-new-buffer " s")))
+      (with-current-buffer (cdr (assoc "s" buffers))
+        (drover-prompt-define 'agent (drover-test-action 'agent))
+        (drover-prompt-define 'revert (drover-test-action 'revert))
+        (drover-prompt-define 'fork (drover-test-action 'fork)))
+      (drover-test-at-point "s"
+        ;; Outside a list, the session's buffer does not count.
+        (should-not (drover-prompt-target 'agent))
+        (setq-local drover-view-p t)
+        (should (eq (drover-prompt-target 'agent) (cdr (assoc "s" buffers))))
+        ;; Editing a prompt needs the prompt in sight: never from a list.
+        (should-not (drover-prompt-target 'revert))
+        (should-not (drover-prompt-target 'send))
+        ;; In a list, forking acts on the whole session through its backend.
+        (should-not (drover-prompt-target 'fork))
+        (drover-prompt-run 'agent)
+        (should (equal (car (car drover-test-actions)) 'agent))
+        (should (eq (nth 1 (car drover-test-actions)) (cdr (assoc "s" buffers))))))))
 
 (ert-deftest drover-test-prompt-target-default-buffer ()
   (let ((default (generate-new-buffer " default"))
-        (drover-default-prompt-buffer-function nil))
+        (drover-default-prompt-buffer-function nil)
+        (drover-prepared-prompt-function nil))
     (unwind-protect
         (progn
           (with-current-buffer default
@@ -1313,9 +1354,10 @@ BUFFERS is an alist (ID . BUFFER) of live buffers, killed afterwards."
               (should (eq (selected-window) origin)))))))))
 
 (ert-deftest drover-test-prompt-run-without-target ()
-  (with-temp-buffer
-    (should-error (drover-prompt-run 'send) :type 'user-error)
-    (should-error (drover-prompt-run 'last-answer) :type 'user-error)))
+  (let ((drover-prepared-prompt-function nil))
+    (with-temp-buffer
+      (should-error (drover-prompt-run 'send) :type 'user-error)
+      (should-error (drover-prompt-run 'last-answer) :type 'user-error))))
 
 (ert-deftest drover-test-fork-and-compact-dispatch ()
   (drover-test-with-backend (list (drover-test-session "s"))
