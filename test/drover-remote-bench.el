@@ -163,7 +163,7 @@ changes in at once: views follow them as they do in use, after
 
 (defun drover-remote-bench--sources ()
   "Return the files the agent needs."
-  (append (mapcar #'locate-library '("drover-core.el" "drover-remote.el" "drover-remote-agent.el"
+  (append (mapcar #'locate-library '("drover-core.el" "drover-ui.el" "drover-remote.el" "drover-remote-agent.el"
                                      "opencode-look.el" "opencode-common.el"))
           (file-expand-wildcards
            (expand-file-name "spyglass*.el" (file-name-directory (locate-library "spyglass.el"))))))
@@ -178,7 +178,7 @@ With BACK, the agent will be told to dial this host back."
     (dolist (file (drover-remote-bench--sources))
       (drover-remote-bench--copy file dir))
     (drover-remote-bench--remote-run
-     (format "cd %s && timeout 300 %s -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile opencode-common.el opencode-look.el spyglass*.el drover-core.el drover-remote.el 2>&1"
+     (format "cd %s && timeout 300 %s -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile opencode-common.el opencode-look.el spyglass*.el drover-core.el drover-ui.el drover-remote.el 2>&1"
              dir emacs))
     (setq drover-remote-test--agent-output nil
           drover-remote-test--agent-pending ""

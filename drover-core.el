@@ -2268,6 +2268,9 @@ depth, the root or a session below it of KEYS, to t."
       (mapc #'walk nodes))
     holding))
 
+;; Defined with the filter's commands, below.
+(defvar drover-filter)
+
 (defun drover--view-positions (sessions keys now)
   "Return where views draw the sessions of KEYS among SESSIONS.
 KEYS is a hash table of session keys.  The value is a hash table
@@ -2455,6 +2458,10 @@ See `drover--changed-applied'."
                 (append drover--changed-applied changed)))))))
 
 (defvar drover--index)
+
+;; Defined with drover's archive, below: special here too, else the
+;; binding below would be lexical where this file is compiled alone.
+(defvar drover--archive-checking)
 
 (defun drover--run-changed ()
   "Bring the index up to date, then run `drover-changed-hook'.
