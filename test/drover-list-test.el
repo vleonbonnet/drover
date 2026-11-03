@@ -3977,6 +3977,119 @@ Each shows its own buffer."
         (should (equal (buffer-name (window-buffer second)) "*other 2*"))
         (should (eq (window-buffer side) (drover-list--buffer t)))))))
 
+(defun drover-list-test-posn (window position &optional x)
+  "Return a mouse position at POSITION of WINDOW's text, X pixels from its left."
+  (list window position (cons (or x 0) 0) 0 nil position '(0 . 0) nil '(0 . 0) '(1 . 1)))
+
+(defun drover-list-test-mouse (window position &rest kinds)
+  "Run the mouse events KINDS at POSITION of WINDOW through the command loop.
+Each kind is a symbol such as `down-mouse-1' or `double-mouse-1'; a drag
+is (drag-mouse-1 END), from POSITION to END.  The current buffer is the
+one current before."
+  (let ((buffer (current-buffer))
+        (posn (drover-list-test-posn window position)))
+    (execute-kbd-macro
+     (vconcat (mapcar (lambda (kind)
+                        (pcase kind
+                          (`(drag-mouse-1 ,end) (list 'drag-mouse-1 posn (drover-list-test-posn window end 40)))
+                          ((or 'double-down-mouse-1 'double-mouse-1) (list kind posn 2))
+                          ((or 'triple-down-mouse-1 'triple-mouse-1) (list kind posn 3))
+                          (_ (list kind posn))))
+                      kinds)))
+    (set-buffer buffer)))
+
+(ert-deftest drover-list-test-side-click-opens-as-ret ()
+  "A click on a session's row of the sidebar opens it as RET does, once.
+From the window where you work, the sidebar not selected, the session
+opens there, as RET in the sidebar opens it; a click on its second line
+too.  A click on a group's heading, or below the rows, does nothing,
+a double or triple click opens once, and the mouse drags no region.
+The list of an ordinary window keeps the global click."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (drover-list-test-showing
+      (pcase-let ((`(,first ,second) (drover-list-test--main)))
+        (let* ((side (drover-list-side '(4)))
+               (sidebar (window-buffer side))
+               (calls (lambda () (seq-filter (lambda (call) (eq (car call) :open)) drover-test-calls))))
+          (cl-flet ((row (id &optional line)
+                      (with-current-buffer sidebar
+                        (save-excursion
+                          (drover-list-test-goto id)
+                          (forward-line (or line 0))
+                          (+ (point) 3)))))
+            ;; RET, the reference.
+            (with-current-buffer sidebar
+              (drover-list-test-goto "done")
+              (execute-kbd-macro (kbd "RET")))
+            (let ((by-ret (car drover-test-calls)))
+              (should (equal by-ret (list :open "done" nil first)))
+              (setq drover-test-calls nil)
+              ;; The same from a click, the sidebar unselected.
+              (select-window first)
+              (switch-to-buffer "*other 1*")
+              (with-current-buffer sidebar
+                (drover-list-test-goto "work"))
+              (drover-list-test-mouse side (row "done") 'down-mouse-1 'mouse-1)
+              (should (equal (funcall calls) (list by-ret)))
+              (should (eq (selected-window) first))
+              (should (equal (buffer-name (window-buffer first)) "*session done*"))
+              (should (equal (buffer-name (window-buffer second)) "*other 2*"))
+              (should (eq (window-buffer side) sidebar))
+              (with-current-buffer sidebar
+                (should (= (window-point side) (oref (drover-list-test-section "done") start)))))
+            ;; Its second line.
+            (setq drover-test-calls nil)
+            (drover-list-test-mouse side (row "ask" 1) 'down-mouse-1 'mouse-1)
+            (should (equal (funcall calls) (list (list :open "ask" nil first))))
+            ;; A group's heading, or below the rows: nothing.
+            (setq drover-test-calls nil)
+            (select-window second)
+            (let ((heading (with-current-buffer sidebar
+                             (save-excursion (drover-list-test-goto-group 'idle) (+ (point) 2))))
+                  (point (window-point side)))
+              (drover-list-test-mouse side heading 'down-mouse-1 'mouse-1)
+              (drover-list-test-mouse side heading 'down-mouse-1 'mouse-1 'double-down-mouse-1 'double-mouse-1)
+              (drover-list-test-mouse side (with-current-buffer sidebar (point-max)) 'down-mouse-1 'mouse-1)
+              (should-not (funcall calls))
+              (should (eq (selected-window) second))
+              (should (= (window-point side) point))
+              (with-current-buffer sidebar
+                (should-not (drover-list-test-group-hidden-p 'idle))))
+            ;; A double click, a triple click: one session opened each.
+            (drover-list-test-mouse side (row "fail") 'down-mouse-1 'mouse-1
+                                    'double-down-mouse-1 'double-mouse-1)
+            (should (equal (funcall calls) (list (list :open "fail" nil second))))
+            (setq drover-test-calls nil)
+            (drover-list-test-mouse side (row "work") 'down-mouse-1 'mouse-1
+                                    'double-down-mouse-1 'double-mouse-1
+                                    'triple-down-mouse-1 'triple-mouse-1)
+            (should (equal (funcall calls) (list (list :open "work" nil second))))
+            ;; A drag selects nothing and opens nothing.
+            (setq drover-test-calls nil)
+            (let ((transient-mark-mode t))
+              (drover-list-test-mouse side (row "ask") 'down-mouse-1 `(drag-mouse-1 ,(row "done")))
+              (should-not (funcall calls))
+              (with-current-buffer sidebar
+                (should-not (region-active-p))))
+            (with-current-buffer sidebar
+              (dolist (key '("<down-mouse-1>" "<drag-mouse-1>" "<double-mouse-1>" "<triple-mouse-1>"))
+                (should (eq (keymap-lookup drover-list-sidebar-mode-map key) #'ignore))))
+            ;; The list of an ordinary window clicks as ever: a double
+            ;; click on a group's heading folds it.
+            (should-not (keymap-lookup drover-list-mode-map "<mouse-1>"))
+            (should-not (keymap-lookup drover-list-mode-map "<down-mouse-1>"))
+            (set-window-buffer second buffer)
+            (select-window second)
+            (with-current-buffer buffer
+              (revert-buffer)
+              (should (drover-list-test-group-hidden-p 'idle))
+              (let ((heading (save-excursion (drover-list-test-goto-group 'idle) (+ (point) 2))))
+                (drover-list-test-mouse second heading 'down-mouse-1 'mouse-1
+                                        'double-down-mouse-1 'double-mouse-1))
+              (should-not (drover-list-test-group-hidden-p 'idle)))
+            (should-not (funcall calls))))))))
+
 (ert-deftest drover-list-test-side-o-opens-beside-main-window ()
   "From the side window, o opens a session in another window than the main window."
   (drover-list-test-with (drover-list-test-side-sample)
@@ -4962,6 +5075,79 @@ activity first."
                                  (list grouping step (buffer-name) (cdr fresh))))
                   (should (equal-including-properties (car drawn) (car fresh))))))))
         (should (> in-place 10))))))
+
+;;;; The order of the sessions needing the user
+
+(defun drover-list-test-attention-order ()
+  "Return the identifiers of the sessions needing the user in the order to visit them.
+At the clock of the tests, as a pair (CACHED . OTHERS): those with a
+live prompt cache, and the others, both in order."
+  (let ((order (drover-attention-order (drover-attention-sessions) drover-list-test-clock)))
+    (cons (mapcar #'drover-session-id
+                  (seq-filter (lambda (session)
+                                (drover-session-shown-cache-fraction session drover-list-test-clock))
+                              order))
+          (mapcar #'drover-session-id
+                  (seq-remove (lambda (session)
+                                (drover-session-shown-cache-fraction session drover-list-test-clock))
+                              order)))))
+
+(ert-deftest drover-list-test-attention-order-follows-both-lists ()
+  "Sessions with a live cache come first, then the others as both lists draw them.
+The caches to expire soonest first, a subagent's counting as none; the
+others in the order of the sidebar and of the list in an ordinary
+window, which share the view settings, under several of them."
+  (pcase-dolist (`(,mode ,grouping ,sort ,descending)
+                 '((active status urgency nil) (all nil updated t) (active project title nil)
+                   (all updated created t) (active model updated nil) (all status updated t)
+                   (active nil urgency t) (all harness title t)))
+    (random (format "drover attention order %s %s %s %s" mode grouping sort descending))
+    (drover-list-test-two-lists
+      (setq drover-test-sessions (drover-list-test-random-sessions 40))
+      (drover-backend-changed 'fake)
+      (drover-set-show-subagents mode)
+      (drover-set-group-by grouping)
+      (drover-set-sort sort descending)
+      (pcase-let* ((`(,cached . ,others) (drover-list-test-attention-order))
+                   (records (mapcar (lambda (id) (drover-list-test-find id)) cached))
+                   (expiries (mapcar #'drover-session-cache-expires records)))
+        (should cached)
+        (should others)
+        (should (equal expiries (sort (copy-sequence expiries) #'<)))
+        (should-not (seq-some #'drover-session-parent records))
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (should (equal (list mode grouping sort descending
+                                 (seq-filter (lambda (id) (member id others)) (drover-list-test-order)))
+                           (list mode grouping sort descending others)))))))))
+
+(ert-deftest drover-list-test-attention-order-filter ()
+  "The sessions the filter leaves out come after those both lists draw.
+Those in the order the lists would draw them without the filter."
+  (random "drover attention order filter")
+  (drover-list-test-two-lists
+    (setq drover-test-sessions (mapcar (lambda (session)
+                                         (setf (drover-session-cache-expires session) nil)
+                                         session)
+                                       (drover-list-test-random-sessions 40)))
+    (drover-backend-changed 'fake)
+    (drover-set-show-subagents 'all)
+    (drover-set-group-by nil)
+    (drover-set-sort 'updated t)
+    (let ((whole (cdr (drover-list-test-attention-order))))
+      (drover-set-filter :project "alpha")
+      (let* ((order (cdr (drover-list-test-attention-order)))
+             (drawn (with-current-buffer sidebar
+                      (seq-filter (lambda (id) (member id order)) (drover-list-test-order))))
+             (left (seq-remove (lambda (id) (member id drawn)) order)))
+        (should drawn)
+        (should left)
+        (should (equal (seq-take order (length drawn)) drawn))
+        (should (equal (nthcdr (length drawn) order)
+                       (seq-filter (lambda (id) (member id left)) whole)))
+        (with-current-buffer buffer
+          (should (equal (seq-filter (lambda (id) (member id order)) (drover-list-test-order))
+                         drawn)))))))
 
 (ert-deftest drover-list-test-two-lists-share-rows ()
   "A row made for one list, the other copies: its texts are made and measured once."
@@ -6308,6 +6494,19 @@ buffer."
                           transient--suffixes))
     (execute-kbd-macro (kbd "C-g"))
     (should (equal (drover-list-test-at-side side) "fail"))))
+
+(ert-deftest drover-list-test-dispatch-closed-by-its-keys ()
+  "Any key opening the menu closes it, the one that opened it or another."
+  (drover-list-test-elsewhere
+    (keymap-set (current-local-map) "<f19>" #'drover-dispatch)
+    (unwind-protect
+        (dolist (keys '(("C-'" "C-'") ("<f19>" "<f19>") ("C-'" "<f19>") ("<f19>" "C-'")))
+          (execute-kbd-macro (kbd (car keys)))
+          (should (eq (oref transient--prefix command) 'drover-dispatch))
+          (execute-kbd-macro (kbd (cadr keys)))
+          (should-not transient--prefix)
+          (should (eq (selected-window) first)))
+      (keymap-unset (current-local-map) "<f19>" t))))
 
 (ert-deftest drover-list-test-dispatch-view-elsewhere ()
   "The dispatch menu opened from a code buffer sets the list's follow mode."

@@ -358,7 +358,12 @@ In STATE, by default a search made now."
   (should (eq (keymap-lookup drover-search-minibuffer-map "C-'") #'drover-search-scope))
   (should (eq (keymap-lookup drover-search-minibuffer-map "C-l") #'drover-search-locate))
   (should (eq (keymap-lookup drover-search-minibuffer-map "<remap> <drover-dispatch>")
-              #'drover-search-scope)))
+              #'drover-search-scope))
+  ;; From the menu, the keys that left the minibuffer search again.
+  (let ((drover-search--menu-keys (list (kbd "C-'") (kbd "<f19>"))))
+    (should (equal (mapcar (lambda (entry) (list (plist-get (cdr entry) :key) (plist-get (cdr entry) :command)))
+                           (drover-search--menu-return-entries nil))
+                   '(("C-'" drover-search-resume) ("<f19>" drover-search-resume))))))
 
 ;;;; Searching what was said
 

@@ -876,6 +876,19 @@ start with."
       (concat "Search " (propertize (drover--menu-value (format "\"%s\"" input) 40)
                                     'face 'transient-value)))))
 
+(defvar drover-search--menu-keys nil
+  "The keys searching again from the search menu, besides RET.
+C-' and the keys of `drover-dispatch', which open the menu from the
+minibuffer of the search.")
+
+(defun drover-search--menu-return-entries (_children)
+  "Return the entries of the search menu searching again on its other keys.
+See `drover-search--menu-keys'."
+  (transient-parse-suffixes 'drover-search-menu
+                            (mapcar (lambda (key)
+                                      (list (key-description key) "Search" 'drover-search-resume))
+                                    drover-search--menu-keys)))
+
 (defun drover-search-resume ()
   "Search again, with the text typed before the menu opened."
   (interactive)
@@ -885,8 +898,9 @@ start with."
   "Choose what the search of sessions searches, then search INPUT again.
 The entries are the view settings of `drover-dispatch', on the same
 keys: the filter, the older and archived sessions, the subagents shown.
-They scope the list too, which shares them.  RET, or C-', searches
-again with the text typed."
+They scope the list too, which shares them.  RET, C-' or the key of
+`drover-dispatch', those leaving the minibuffer for it, search again
+with the text typed."
   :class 'drover--menu-prefix
   :refresh-suffixes t
   [:class drover--menu-flow
@@ -911,9 +925,12 @@ again with the text typed."
     ("=d" drover-view--filter-since)
     ("=f" drover-view--filter-search)
     ("=c" "clear" drover-filter-clear :transient t)]]
-  [:hide always
-   ("C-'" "Search" drover-search-resume)]
+  ;; The keys leaving the minibuffer for the menu come back.
+  [:class transient-column
+   :hide always
+   :setup-children drover-search--menu-return-entries]
   (interactive)
+  (setq drover-search--menu-keys (delete-dups (cons (kbd "C-'") (drover--dispatch-own-keys))))
   (transient-setup 'drover-search-menu nil nil :scope (or input "")
                    :display-action drover-menu-display-action))
 

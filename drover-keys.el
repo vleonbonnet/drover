@@ -56,6 +56,10 @@
 ;; after "'", the Prompt group's last key (", n and '), before the
 ;; scheduled prompts of "#", or after "b"; more lists of sessions after
 ;; "p"; more prompt commands after "O".
+;;
+;; Any key opening the menu closes it.  The echo area and hints name the
+;; key Emacs's help names for the menu, or the name `drover-dispatch-key'
+;; gives it, such as Caps Lock for a keyboard sending it as <f19>.
 
 ;;; Code:
 
@@ -1729,14 +1733,38 @@ defaults, as the prompt's header dims it.  See `drover--option-target'."
 It names whether the choices go to a session or to a prompt."
   (if (eq (car-safe (drover--option-target 'model)) 'session) "Session runs" "Prompt runs"))
 
+(defcustom drover-dispatch-key nil
+  "How drover's messages and hints name the key of `drover-dispatch'.
+nil names the key Emacs's help names for the command, here
+\\[drover-dispatch]; a string names it as written, such as \"Caps Lock\"
+when the keyboard sends that key to Emacs as another one, such as
+<f19>.  Either way, every key of the command closes the menu."
+  :type '(choice (const :tag "The key Emacs's help names" nil)
+                 (string :tag "Name"))
+  :group 'drover)
+
+(defun drover-dispatch-key-description (&optional fontify)
+  "Return how drover names the key of `drover-dispatch', or nil.
+It is `drover-dispatch-key' when set, else the key Emacs's help names
+for the command, nil when the command has none.  With FONTIFY non-nil,
+the name has the face of keys in help, as `substitute-command-keys'
+gives them."
+  (when-let* ((name (or drover-dispatch-key
+                        (when-let* ((key (where-is-internal #'drover-dispatch nil t)))
+                          (key-description key)))))
+    (if fontify
+        (propertize name 'font-lock-face 'help-key-binding 'face 'help-key-binding)
+      name)))
+
 (defun drover-dispatch-keys (command)
   "Return the keys running COMMAND through `drover-dispatch', or nil.
 They are the menu's global key followed by COMMAND's key in it, such as
-\"C-\\=' X\"; nil when the menu has no global key or no entry for COMMAND."
-  (when-let* ((menu (where-is-internal #'drover-dispatch nil t))
+\"C-\\=' X\", the menu's key named as `drover-dispatch-key-description'
+names it; nil when the menu has no global key or no entry for COMMAND."
+  (when-let* ((menu (drover-dispatch-key-description))
               (key (plist-get (cdr (ignore-errors (transient-get-suffix 'drover-dispatch command)))
                               :key)))
-    (concat (key-description menu) " " key)))
+    (concat menu " " key)))
 
 (defun drover--dispatch-pending-description ()
   "Return the description of Edit pending prompt in the dispatch menu.
@@ -1861,6 +1889,27 @@ The group itself applies, as U may in a list of another front end."
    ("-t" drover-view--column-age)
    ("-p" drover-view--column-cache)
    ("-s" drover-view--column-summary)])
+
+(defvar drover--dispatch-close-keys nil
+  "The keys of `drover-dispatch' where it last opened, which close it.")
+
+(defun drover--dispatch-own-keys ()
+  "Return the keys running `drover-dispatch' in the current buffer.
+Those of the menu's own entries, which keep their command there, and
+those of menus and remappings are left out."
+  (seq-remove (lambda (key)
+                (or (memq (aref key 0) '(menu-bar tool-bar tab-bar remap))
+                    (ignore-errors (transient-get-suffix 'drover-dispatch (key-description key)))))
+              (where-is-internal #'drover-dispatch)))
+
+(defun drover--dispatch-close-entries (_children)
+  "Return the entries of `drover-dispatch' closing it.
+Each key of `drover--dispatch-close-keys' closes it, so that the key
+that opened the menu, whichever it was, closes it again."
+  (transient-parse-suffixes 'drover-dispatch
+                            (mapcar (lambda (key)
+                                      (list (key-description key) "Close" 'transient-quit-one))
+                                    drover--dispatch-close-keys)))
 
 ;;;###autoload(autoload 'drover-dispatch "drover-keys" nil t)
 (defcustom drover-menu-display-action
@@ -1999,10 +2048,12 @@ session chosen for it, else to one asked for, unshown."
      :advice* drover--dispatch-in-list
      :if drover-dispatch-list-return-p
      :inapt-if-not (lambda () (drover-dispatch-session :open)))]]
-  ;; The key opening the menu closes it, as users bind it globally.
-  [:hide always
-   ("C-'" "Close" transient-quit-one)]
+  ;; The keys opening the menu close it, as users bind it globally.
+  [:class transient-column
+   :hide always
+   :setup-children drover--dispatch-close-entries]
   (interactive)
+  (setq drover--dispatch-close-keys (drover--dispatch-own-keys))
   (transient-setup 'drover-dispatch nil nil :scope (drover--context)
                    :display-action drover-menu-display-action))
 

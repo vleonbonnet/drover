@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 12
+(defconst drover-core-generation 13
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -916,6 +916,15 @@ the cache is expired or its expiry or lifetime is unknown."
               (ttl (drover-session-cache-ttl session))
               ((and (numberp ttl) (> ttl 0))))
     (min 1.0 (/ remaining (float ttl)))))
+
+(defun drover-session-shown-cache-fraction (session &optional now)
+  "Return what the prompt cache of SESSION shows of its lifetime left at NOW.
+It is `drover-session-cache-fraction', but nil for a subagent: the user
+sends to its parent, never to it, so its cache tells nothing they can
+act on.  Lists draw a cache's bar from it, and `drover-attention-order'
+visits first the sessions it tells a live cache of."
+  (and (not (drover-session-parent session))
+       (drover-session-cache-fraction session now)))
 
 (defun drover-session-context-fraction (session)
   "Return how much of its model's context the context of SESSION fills.
@@ -2208,6 +2217,94 @@ They are those of `drover-surfaced-sessions' whose status is one of
 those waiting for the user."
   (drover-sort (seq-filter #'drover-session-attention-p (drover-surfaced-sessions))))
 
+(defun drover--trees-holding (nodes keys)
+  "Return the trees of NODES holding a session of KEYS, as a hash table.
+KEYS is a hash table of session keys; the value maps each tree, at any
+depth, the root or a session below it of KEYS, to t."
+  (let ((holding (make-hash-table :test #'eq)))
+    (cl-labels ((walk (node)
+                  (let ((held (gethash (drover-session-key (drover-node-session node)) keys)))
+                    (dolist (child (drover-node-children node))
+                      (when (walk child)
+                        (setq held t)))
+                    (when held
+                      (puthash node t holding))
+                    held)))
+      (mapc #'walk nodes))
+    holding))
+
+(defun drover--view-positions (sessions keys now)
+  "Return where views draw the sessions of KEYS among SESSIONS.
+KEYS is a hash table of session keys.  The value is a hash table
+mapping each of those among SESSIONS to its place, from 0: the order of
+`drover-view-groups' at NOW, groups in their order, trees sorted in
+each, every session before its subagents, the way to a session of KEYS
+shown whatever `drover-show-subagents' says, as a match of
+`drover-filter' shows (see `drover-tree-visible').  The sessions the
+filter leaves out come after, in the order views would draw them
+without it."
+  (let ((positions (make-hash-table :test #'equal))
+        (position -1)
+        (trees (drover-tree sessions)))
+    (cl-flet ((place (nodes &optional shown)
+                (let ((holding (drover--trees-holding nodes keys)))
+                  (dolist (session (drover-tree-sessions
+                                    (apply #'append
+                                           (mapcar #'cdr
+                                                   (drover-view-arrange
+                                                    (drover-tree-visible
+                                                     nodes (lambda (node)
+                                                             (or (gethash node holding)
+                                                                 (and shown (funcall shown node)))))
+                                                    now)))))
+                    (let ((key (drover-session-key session)))
+                      (when (and (gethash key keys) (not (gethash key positions)))
+                        (puthash key (cl-incf position) positions)))))))
+      (when (drover-filter-active-p)
+        (pcase-let ((`(,kept . ,shown) (drover--filter-trees trees drover-filter)))
+          (place kept (lambda (node) (gethash (drover-session-key (drover-node-session node)) shown)))))
+      (when (< (hash-table-count positions) (hash-table-count keys))
+        (place trees)))
+    positions))
+
+(defun drover-attention-order (sessions &optional now)
+  "Return SESSIONS, sessions needing the user, in the order to visit them.
+First come those with a live prompt cache at NOW, the current time by
+default, the cache to expire soonest first: a turn sent while it lives
+reuses it.  A cache is live as lists show it (see
+`drover-session-shown-cache-fraction'): a subagent's never is.  The
+others follow in the order lists draw them (see `drover-view-groups'),
+as `drover-group-by' groups them and `drover-sort-by' sorts them, each
+subagent under its parent: a subagent lists hide but come in the place
+they would draw it, and a session `drover-filter' leaves out after
+those it keeps, in the order lists would draw it without the filter
+\(see `drover--view-positions').  Caches expiring alike come in that
+order too.  `drover-next' visits sessions in this order, the mode
+line's tooltip lists them in it, and `drover-select' offers them in it."
+  (when sessions
+    (let ((now (or now (float-time)))
+          (keys (make-hash-table :test #'equal)))
+      (dolist (session sessions)
+        (puthash (drover-session-key session) t keys))
+      (let* ((positions (drover--view-positions (drover--listed-sessions) keys now))
+             (keyed (mapcar (lambda (session)
+                              (list session
+                                    (and (drover-session-shown-cache-fraction session now)
+                                         (drover-session-cache-expires session))
+                                    (gethash (drover-session-key session) positions
+                                             most-positive-fixnum)))
+                            sessions)))
+        ;; `sort' is stable: sessions lists do not draw keep the order of
+        ;; SESSIONS.
+        (mapcar #'car
+                (sort keyed
+                      (pcase-lambda (`(,_ ,expires-a ,position-a) `(,_ ,expires-b ,position-b))
+                        (cond ((and expires-a expires-b (/= expires-a expires-b))
+                               (< expires-a expires-b))
+                              ((and expires-a (not expires-b)) t)
+                              ((and expires-b (not expires-a)) nil)
+                              (t (< position-a position-b))))))))))
+
 (defun drover-find (backend id)
   "Return the session ID of BACKEND, or nil.
 A live session is preferred, whether or not drover archived it; while
@@ -2746,6 +2843,20 @@ records of several backends make one session."
     (if (> (drover--index-shared index) 0)
         (drover--merge-duplicates sessions)
       sessions)))
+
+(defun drover--listed-sessions ()
+  "Return the live sessions lists draw, in the order they take them.
+They are those of `drover-sessions' and, while older or archived
+sessions show, those of `drover-known-sessions'.  Lists of the live
+sessions alone take them in the order of the index, which places the
+trees that rank alike (see `drover-index-sessions'); the records are
+the backends' own, as `drover-surfaced-sessions' reads them."
+  (if (or drover-show-history drover-show-archived)
+      (drover-known-sessions)
+    (let ((serials (drover--index-serials (drover-index))))
+      (sort (drover-sessions)
+            :key (lambda (session)
+                   (gethash (drover-session-key session) serials most-positive-fixnum))))))
 
 (defun drover-index-session (key)
   "Return the record of the session whose key is KEY in the index, or nil."
