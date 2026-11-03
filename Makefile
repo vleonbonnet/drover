@@ -38,7 +38,7 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
 
-.PHONY: all compile compile-standalone test test-alone lint clean bench bench-bulk bench-idle bench-remote real-data
+.PHONY: all compile compile-standalone test test-alone lint clean bench bench-bulk bench-search bench-idle bench-remote real-data
 
 all: compile test
 
@@ -127,6 +127,14 @@ bench: compile
 bench-bulk:
 	@$(MAKE) --no-print-directory bench \
 	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-bulk-bench.el --eval '(drover-bulk-bench-main)'"
+
+# Times the search of sessions over thousands of them, each key typed
+# and its candidates, then ripgrep searching transcripts of fixtures and
+# what it costs Emacs's main thread.  `make bench' runs it too; EMACS_GUI
+# as for bench.  See test/drover-search-bench.el.
+bench-search:
+	@$(MAKE) --no-print-directory bench \
+	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-search-bench.el --eval '(drover-search-bench-run)'"
 
 # Measures what drover costs in a graphical Emacs while nothing happens,
 # while a session streams, and once Emacs lost focus: processor time,

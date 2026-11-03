@@ -791,5 +791,233 @@ system: readers ask for it as they read, out of commands."
                           (project-name project))))
                  drover-transcript--projects)))))
 
+;;;; Searching what was said
+
+;; A search of what was said in conversations runs ripgrep over their
+;; files, in a process of its own, so that Emacs never reads a line of
+;; megabytes: the regular expression finds a match within the text of a
+;; prompt or a reply, after the members that begin it, and ripgrep
+;; prints only the snippet around it, a capture group, which its
+;; default engine finds in linear time.  Tool calls, their results, the
+;; API requests recorded whole and the engines' own records begin
+;; otherwise, and are not searched.  It runs as a process of Emacs's
+;; own rather than through `drover-command-run', whose commands give
+;; their output once ended and in files: matches stream as found, and
+;; a search typed on is stopped at once.
+
+(defcustom drover-transcript-ripgrep "rg"
+  "The ripgrep program searching what was said in conversations, or nil.
+Without it, a search of sessions matches what they tell and their
+prompts alone (see `drover-search')."
+  :type '(choice (string :tag "Program") (const :tag "None" nil))
+  :group 'drover)
+
+(defconst drover-transcript-search-context 60
+  "Characters of a snippet around a match, before it and after it.")
+
+(defconst drover-transcript-search-per-file 1
+  "Lines at most a search takes of one file.
+A session shows one snippet: more would spend the matches a search
+takes on the conversations found first.")
+
+(defconst drover-transcript-search-query-limit 100
+  "Characters at most of a text searched for.")
+
+(defconst drover-transcript-search-arguments-limit
+  (if (eq system-type 'windows-nt) 24000 200000)
+  "Characters at most of the names of the files one search is given.
+A command line of Windows holds 32767 characters.")
+
+(defvar drover-transcript--ripgrep-told nil
+  "Non-nil once a search told that ripgrep is missing.")
+
+(defun drover-transcript--ripgrep ()
+  "Return ripgrep's executable, or nil, telling once that it is missing."
+  (or (and drover-transcript-ripgrep (executable-find drover-transcript-ripgrep))
+      (progn
+        (when (and drover-transcript-ripgrep (not drover-transcript--ripgrep-told))
+          (setq drover-transcript--ripgrep-told t)
+          (drover-message "Drover: %s is not found: searches match what sessions tell and their prompts"
+                          drover-transcript-ripgrep))
+        nil)))
+
+(defun drover-transcript--rust-quote (string)
+  "Return STRING quoted for the default engine of ripgrep, matching itself.
+Each character of the syntax of its regular expressions is escaped; a
+quote and a backslash as a JSON string has them, escaped too."
+  (mapconcat (lambda (char)
+               (cond ((eq char ?\") "\\\\\"")
+                     ((eq char ?\\) "\\\\\\\\")
+                     ((memq char '(?. ?+ ?* ?? ?\( ?\) ?| ?\[ ?\] ?{ ?} ?^ ?$ ?# ?& ?- ?~))
+                      (string ?\\ char))
+                     (t (string char))))
+             string ""))
+
+(defun drover-transcript-search-regexp (starts query)
+  "Return the regular expression finding QUERY in strings STARTS begin.
+STARTS are expressions of ripgrep's default engine matching what comes
+before the text of a prompt or reply, its opening quote included.  The
+group `s' is the snippet: the first match of QUERY in that text, case
+ignored, with `drover-transcript-search-context' characters around it.
+Words of QUERY match across any blanks, as escaped in JSON."
+  (let* ((unit "(?:[^\"\\\\]|\\\\.)")
+         (words (split-string (substring query 0 (min (length query) drover-transcript-search-query-limit))
+                              "[ \t\n\r]+" t))
+         (text (mapconcat #'drover-transcript--rust-quote words "(?:[ \\t]|\\\\[nrt])+"))
+         (context (format "%s{0,%d}" unit drover-transcript-search-context)))
+    (format "(?:%s)%s*?(?P<s>%s(?i:%s)%s)"
+            (string-join starts "|") unit context text context)))
+
+(defun drover-transcript-decode-json (string)
+  "Return STRING, a piece of a JSON string, with its escapes decoded.
+Line breaks and tabs become spaces; an escape cut at an end is dropped."
+  (let ((case-fold-search nil))
+    (replace-regexp-in-string
+     "\\\\\\(?:u\\([[:xdigit:]]\\{4\\}\\)\\(?:\\\\u\\([[:xdigit:]]\\{4\\}\\)\\)?\\|u[[:xdigit:]]\\{0,3\\}\\'\\|\\(.\\)\\|\\'\\)"
+     (lambda (match)
+       (cond
+        ((match-beginning 1)
+         (let ((high (string-to-number (match-string 1 match) 16))
+               (low (and (match-beginning 2) (string-to-number (match-string 2 match) 16))))
+           (cond ((and low (<= #xd800 high #xdbff) (<= #xdc00 low #xdfff))
+                  (string (+ #x10000 (ash (- high #xd800) 10) (- low #xdc00))))
+                 ((<= #xd800 high #xdfff) (if low (string (if (<= #xd800 low #xdfff) ?\s low)) ""))
+                 (t (concat (string high) (if low (string (if (<= #xd800 low #xdfff) ?\s low)) ""))))))
+        ((match-beginning 3)
+         (pcase (aref (match-string 3 match) 0)
+           ((or ?n ?r ?t) " ")
+           (?b "") (?f "")
+           (char (string char))))
+        (t "")))
+     string t t)))
+
+(defun drover-transcript--search-files (files)
+  "Return FILES to search, a list of (FILE ID UPDATED), the newest first.
+The value is (TABLE . NAMES): TABLE a hash table of the identifiers by
+file, NAMES the files, as many as fit in
+`drover-transcript-search-arguments-limit'."
+  (let ((table (make-hash-table :test #'equal))
+        (names nil)
+        (room drover-transcript-search-arguments-limit))
+    (dolist (file (sort (copy-sequence files) :key (lambda (file) (or (nth 2 file) 0)) :reverse t))
+      (let ((name (expand-file-name (car file))))
+        (when (> (setq room (- room (length name) 1)) 0)
+          (puthash name (nth 1 file) table)
+          (push name names))))
+    (cons table (nreverse names))))
+
+(defun drover-transcript-search (files starts query callback &optional limit)
+  "Search FILES for QUERY said in prompts and replies, for CALLBACK.
+FILES is a list of (FILE ID UPDATED), the conversation ID each records
+and when it was last active, the newest searched first when they are
+too many for one command.  STARTS are what comes before the text of a
+prompt or reply in a record (see `drover-transcript-search-regexp').
+CALLBACK gets lists of matches, plists of :id, :snippet, the text
+around the match, bounded and decoded, and :position, its line in the
+file, as ripgrep finds them, at most `drover-transcript-search-per-file'
+lines of a file and LIMIT matches in all; then `done', or (:failure
+MESSAGE).  Return a function stopping the search, after which CALLBACK
+is not called; nil when there is nothing to search or no ripgrep, and
+CALLBACK is never called."
+  (let ((program (and files (not (string-blank-p query)) (drover-transcript--ripgrep))))
+    (when program
+      (pcase-let* ((`(,table . ,names) (drover-transcript--search-files files))
+                   (default-directory temporary-file-directory)
+                   (process
+                    (make-process
+                     :name "drover-search" :buffer nil :noquery t :connection-type 'pipe
+                     :coding '(utf-8 . utf-8)
+                     :command (append (list program "--no-config" "--no-messages" "--color" "never"
+                                            "--no-heading" "--with-filename" "--null" "--line-number"
+                                            "--only-matching" "--replace" "${s}"
+                                            "--max-count" (number-to-string drover-transcript-search-per-file)
+                                            "--max-columns" "2000" "--max-columns-preview"
+                                            "-e" (drover-transcript-search-regexp starts query) "--")
+                                      names)
+                     :filter #'drover-transcript--search-filter
+                     :sentinel #'drover-transcript--search-sentinel)))
+        (process-put process 'drover-ids table)
+        (process-put process 'drover-callback callback)
+        (process-put process 'drover-partial "")
+        (process-put process 'drover-left (or limit most-positive-fixnum))
+        (lambda ()
+          (process-put process 'drover-callback nil)
+          (when (process-live-p process)
+            (delete-process process)))))))
+
+(defun drover-transcript--search-line (process line)
+  "Return the match LINE of PROCESS tells, a plist, or nil when it tells none.
+A line not of a match, an error of ripgrep, is kept for the end."
+  (let ((null (string-search "\0" line)))
+    (if (not (and null
+                  (eq (string-match "[0-9]+:" line (1+ null)) (1+ null))))
+        (progn
+          (when (< (length (process-get process 'drover-errors)) 3)
+            (process-put process 'drover-errors
+                         (cons (drover-bound-line line drover-error-length)
+                               (process-get process 'drover-errors))))
+          nil)
+      (when-let* ((id (gethash (substring line 0 null) (process-get process 'drover-ids))))
+        (list :id id
+              :position (string-to-number (substring line (1+ null) (1- (match-end 0))))
+              :snippet (drover-bound-line
+                        (drover-transcript-decode-json
+                         (substring line (match-end 0)
+                                    (min (length line) (+ (match-end 0) (* 8 drover-transcript-search-context)))))
+                        (* 3 drover-transcript-search-context)))))))
+
+(defun drover-transcript--search-deliver (process matches)
+  "Give MATCHES, in order, to the callback of PROCESS, within its limit.
+Past the limit, the search ends, its callback told it is done."
+  (when-let* ((callback (process-get process 'drover-callback)))
+    (let* ((left (process-get process 'drover-left))
+           (taken (seq-take matches left)))
+      (process-put process 'drover-left (- left (length taken)))
+      (when taken
+        (funcall callback taken))
+      (when (<= (process-get process 'drover-left) 0)
+        (process-put process 'drover-callback nil)
+        (delete-process process)
+        (funcall callback 'done)))))
+
+(defun drover-transcript--search-filter (process output)
+  "Take OUTPUT of the search PROCESS, telling its callback the matches it ends."
+  (drover-with-reporting "search of transcripts"
+    (when (process-get process 'drover-callback)
+      (let* ((text (concat (process-get process 'drover-partial) output))
+             (end (string-search "\n" text))
+             (start 0)
+             (matches nil))
+        (while end
+          (when-let* ((match (drover-transcript--search-line process (substring text start end))))
+            (push match matches))
+          (setq start (1+ end)
+                end (string-search "\n" text start)))
+        ;; A line is bounded by --max-columns; anything longer is noise.
+        (process-put process 'drover-partial
+                     (let ((rest (substring text start)))
+                       (if (> (length rest) 65536) "" rest)))
+        (drover-transcript--search-deliver process (nreverse matches))))))
+
+(defun drover-transcript--search-sentinel (process _event)
+  "Tell the callback of the search PROCESS that it ended, and how."
+  (drover-with-reporting "search of transcripts"
+    (unless (process-live-p process)
+      (when (process-get process 'drover-callback)
+        (let ((rest (process-get process 'drover-partial)))
+          (when (and rest (not (string-empty-p rest)))
+            (process-put process 'drover-partial "")
+            (drover-transcript--search-filter process "\n")))
+        (when-let* ((callback (process-get process 'drover-callback)))
+          (process-put process 'drover-callback nil)
+          (let ((status (process-exit-status process))
+                (errors (process-get process 'drover-errors)))
+            (funcall callback
+                     (if (or (memq status '(0 1)) (and (eq status 2) (null errors)))
+                         'done
+                       (list :failure (or (car (last errors))
+                                          (format "%s ended with status %s"
+                                                  drover-transcript-ripgrep status)))))))))))
+
 (provide 'drover-transcript)
 ;;; drover-transcript.el ends here

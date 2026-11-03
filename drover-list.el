@@ -5272,6 +5272,29 @@ so is any region with prefix argument PLAIN."
                           (and (not (eq container magit-root-section)) container))))
     (goto-char (drover-list--visible-start target))))
 
+(defun drover-list-reveal (session)
+  "Show the row of SESSION in drover's list, and select it.
+In the list shown on the selected frame, the one used last of several,
+the sidebar included, else in the list `drover-list' shows.  A group
+collapsed around the row expands.  Signal a `user-error' when the list
+does not show SESSION, filtered out or a subagent it hides."
+  (let ((window (or (drover--shown-list-window)
+                    (progn (drover-list) (selected-window)))))
+    (select-window window)
+    (drover-list--refresh-if-needed)
+    (let* ((key (drover-session-key session))
+           (section (or (drover-list--find-session key)
+                        (progn (drover-list--draw-deferred)
+                               (drover-list--find-session key)))))
+      (unless section
+        (user-error "The list does not show %s" (drover-session-display-title session)))
+      (let ((parent (oref section parent)))
+        (while parent
+          (when (oref parent hidden)
+            (magit-section-show parent))
+          (setq parent (oref parent parent))))
+      (goto-char (oref section start)))))
+
 (defun drover-list--buffer (&optional side)
   "Return the buffer of the list, creating it if needed.
 With SIDE non-nil, the sidebar's, which `drover-list-side' shows, in

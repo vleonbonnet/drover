@@ -1873,15 +1873,18 @@ A refusal is told on one line, as a warning, the session staying archived."
           (should (< (length (car warnings)) 400)))))))
 
 (ert-deftest drover-opencode-test-dispatch ()
+  "The menu's S is drover's search, which searches OpenCode's sessions too."
   (let ((keys (mapcar (lambda (key)
                         (plist-get (cdr (transient-get-suffix 'drover-dispatch key)) :command))
                       '("l" "L" "p" "S"))))
-    (should (equal keys '(drover-list drover-list-side drover-select-project
-                                      opencode-consult-sessions))))
-  ;; After drover's lists, in their column.
+    (should (equal keys '(drover-list drover-list-side drover-select-project drover-search))))
   (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                          (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
                  '("j" "B" "b" "l" "L" "p" "S" "X")))
+  ;; opencode.el's search of open buffers stays, unbound.
+  (should (fboundp 'opencode-consult-sessions))
+  (should-not (ignore-errors (transient-get-suffix 'drover-dispatch 'opencode-consult-sessions)))
+  (should (eq (drover-backend-property 'opencode :search) #'drover-opencode--search))
   ;; The keys opencode.el's lists had are gone.
   (dolist (key '("1" "2" "3"))
     (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
@@ -1927,7 +1930,8 @@ A refusal is told on one line, as a warning, the session staying archived."
             (with-current-buffer session-buffer
               (should-not drover-session-at-point-function)
               (should (equal drover-prompt-actions '((schedule . ignore)))))
-            (should-not (ignore-errors (transient-get-suffix 'drover-dispatch "S")))
+            (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "S")) :command)
+                        'drover-search))
             (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "p")) :command)
                         'drover-select-project))
             (with-temp-buffer
@@ -1942,7 +1946,7 @@ A refusal is told on one line, as a warning, the session staying archived."
             (should (memq #'drover-opencode--setup-session-buffer opencode-session-mode-hook))
             (should (eq opencode-command-keys-function #'drover-opencode--command-keys))
             (should (equal (plist-get (cdr (transient-get-suffix 'drover-dispatch "S")) :command)
-                           'opencode-consult-sessions))
+                           'drover-search))
             ;; Installing twice adds nothing twice.
             (drover-opencode--install)
             (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))

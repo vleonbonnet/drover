@@ -38,8 +38,9 @@
 ;; The backend also fits opencode.el's session buffers into drover's
 ;; keys: each tells its session (`drover-session-at-point-function') and
 ;; its prompt actions (`drover-prompt-define').  opencode.el lists no
-;; sessions of its own: drover's list does.  The menu `drover-dispatch'
-;; gains opencode.el's session search.  RET on an earlier prompt of a
+;; sessions of its own: drover's list does, and drover's search
+;; (`drover-search') searches what was said in its sessions through
+;; `opencode-search', once opencode.el offers it.  RET on an earlier prompt of a
 ;; session buffer quotes its line or the region in drover's prompt, as
 ;; `drover-prompt-dwim' does (`drover-opencode-quote-old-input', for
 ;; `opencode-old-input-function').  Withdrawing a pending prompt, from
@@ -1418,6 +1419,39 @@ unknown.  The backend's :options."
       (list :model model
             :variant (or (drover-opencode--ref-variant ref) (drover-model-default-variant model))))))
 
+;;;; Searching what was said
+
+(declare-function opencode-search "ext:opencode" (query callback &rest options))
+
+(defun drover-opencode--search-match (hit)
+  "Return the match of drover's search HIT of `opencode-search' tells, or nil.
+HIT is a plist naming a session by :id, with the :snippet of text
+around the match and the :message it is in, if known."
+  (when-let* (((listp hit))
+              (id (plist-get hit :id))
+              ((stringp id)))
+    (list :key (cons 'opencode id)
+          :snippet (plist-get hit :snippet)
+          :position (plist-get hit :message))))
+
+(defun drover-opencode--search (query scope callback)
+  "Search what was said in OpenCode's sessions for QUERY, for CALLBACK.
+Through `opencode-search', once opencode.el offers it: the service
+searches its own messages.  It is called with QUERY, a function of what
+it finds and :limit, the most matches SCOPE takes, and returns a
+function stopping the search; it calls back with lists of plists
+naming a session by :id, with a :snippet and the :message, then `done',
+or (:failure MESSAGE).  Without it, OpenCode's sessions are matched by
+what they tell alone, and nothing is searched.  The backend's :search."
+  (when (fboundp 'opencode-search)
+    (opencode-search query
+                     (lambda (result)
+                       (funcall callback
+                                (if (and (consp result) (listp (car result)) (car result))
+                                    (delq nil (mapcar #'drover-opencode--search-match result))
+                                  result)))
+                     :limit (plist-get scope :limit))))
+
 (defun drover-opencode--register ()
   "Register the `opencode' backend."
   (drover-register-backend
@@ -1452,6 +1486,7 @@ unknown.  The backend's :options."
    :fork #'drover-opencode--fork
    :compact #'drover-opencode--compact
    :history #'drover-opencode--history
+   :search #'drover-opencode--search
    :prefetch #'drover-opencode--prefetch
    ;; Only a service of the fork lists them.
    :caches #'opencode-state-cache-supported-p
@@ -1608,25 +1643,6 @@ option to `opencode-put-old-input' to edit it in the session's input."
   (drover-with-reporting "withdrawn prompt"
     (drover-opencode-edit-old-input text buffer)))
 
-;;;; The dispatch menu
-
-(defconst drover-opencode--dispatch-suffixes
-  '(("S" "Search sessions" opencode-consult-sessions))
-  "Entries of opencode.el commands in `drover-dispatch', in order.")
-
-(defun drover-opencode--add-to-dispatch ()
-  "Add opencode.el's session commands to `drover-dispatch', after drover's lists.
-They follow \"p\", the last of drover's commands listing sessions."
-  (let ((after "p"))
-    (dolist (suffix drover-opencode--dispatch-suffixes)
-      (transient-append-suffix 'drover-dispatch after suffix)
-      (setq after (car suffix)))))
-
-(defun drover-opencode--remove-from-dispatch ()
-  "Remove what `drover-opencode--add-to-dispatch' added to `drover-dispatch'."
-  (dolist (suffix drover-opencode--dispatch-suffixes)
-    (transient-remove-suffix 'drover-dispatch (nth 2 suffix))))
-
 ;;;; Key hints
 
 (defconst drover-opencode--commands
@@ -1658,7 +1674,6 @@ their own (see `drover-opencode-quote-old-input')."
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
       (drover-opencode--setup-session-buffer)))
-  (drover-opencode--add-to-dispatch)
   ;; A user's own function stays.
   (unless opencode-command-keys-function
     (setq opencode-command-keys-function #'drover-opencode--command-keys))
@@ -1674,7 +1689,6 @@ their own (see `drover-opencode-quote-old-input')."
   (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
     (with-current-buffer buffer
       (drover-opencode--teardown-session-buffer)))
-  (drover-opencode--remove-from-dispatch)
   (when (eq opencode-command-keys-function #'drover-opencode--command-keys)
     (setq opencode-command-keys-function nil))
   (when (eq (bound-and-true-p opencode-old-input-function) #'drover-opencode-quote-old-input)
@@ -1686,8 +1700,7 @@ their own (see `drover-opencode-quote-old-input')."
 
 (defun drover-opencode-unload-function ()
   "Forget the `opencode' backend and stop following opencode.el.
-OpenCode buffers lose drover's keys, and `drover-dispatch' the
-commands of opencode.el."
+OpenCode buffers lose drover's keys."
   (remove-hook 'opencode-state-updated-functions #'drover-opencode--updated)
   (remove-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (remove-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)

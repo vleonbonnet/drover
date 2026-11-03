@@ -499,6 +499,50 @@ one read and kept between Emacs sessions is read again.")
                                   #'drover-transcript-id
                                   drover-codex-rollouts--reader-version))
 
+;;;; Searching
+
+(defconst drover-codex-rollouts--text-starts
+  '("\"type\":\"(?:user_message|agent_message)\",\"message\":\""
+    "\"type\":\"message\",(?:\"id\":\"[^\"]*\",)?\"role\":\"(?:user|assistant)\",\"content\":\\[\\{\"type\":\"(?:input_text|output_text)\",\"text\":\"")
+  "What begins the text of a prompt or reply in a rollout, for ripgrep.
+The events of a prompt or reply, and the messages of the user or the
+assistant of a turn's items, as Codex records them: tool calls, their
+outputs and reasoning begin otherwise.")
+
+(defun drover-codex-rollouts--search-text (session)
+  "Return the first prompt of the conversation of SESSION, or nil.
+As its rollout tells it, for any backend's session of Codex's
+conversation.  The backend's :search-text."
+  (when-let* ((id (drover-session-engine-id session))
+              ((eq (drover-session-engine session) 'codex))
+              (data (drover-codex-rollouts--data id)))
+    (delq nil (list (plist-get data :prompt)))))
+
+(defun drover-codex-rollouts--search (query scope callback)
+  "Search the rollouts for QUERY said in prompts and replies, for CALLBACK.
+Those of the conversations the search offers, as the :wanted of SCOPE
+tells, archived ones while shown, are searched with ripgrep (see
+`drover-transcript-search'); CALLBACK gets matches naming each
+conversation by its engine and identifier.  The backend's :search."
+  (when-let* ((index (drover-codex-rollouts--current-index)))
+    (let ((wanted (plist-get scope :wanted))
+          (files nil))
+      (drover-transcript-map
+       (lambda (file data)
+         (let ((id (plist-get data :id)))
+           (when (and id (plist-get data :messages)
+                      (or (not (functionp wanted))
+                          (funcall wanted (list :engine 'codex :id id))))
+             (push (list file id (plist-get data :updated)) files))))
+       index)
+      (drover-transcript-search
+       files drover-codex-rollouts--text-starts query
+       (lambda (result)
+         (funcall callback (if (and (consp result) (consp (car result)))
+                               (mapcar (lambda (match) (append (list :engine 'codex) match)) result)
+                             result)))
+       (plist-get scope :limit)))))
+
 ;;;; Actions
 
 (defun drover-codex-rollouts--open (session other-window)
@@ -605,6 +649,8 @@ Archiving, restoring and deleting are the Codex CLI's, when found."
    :session #'drover-codex-rollouts--session
    :history #'drover-codex-rollouts--history
    :archived #'drover-codex-rollouts--archived
+   :search #'drover-codex-rollouts--search
+   :search-text #'drover-codex-rollouts--search-text
    :open #'drover-codex-rollouts--open
    :preview #'drover-codex-rollouts--preview
    :recap #'drover-codex-rollouts--recap

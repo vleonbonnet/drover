@@ -55,8 +55,7 @@
 ;; relative to drover's keys: more ways to pick a session or prompt
 ;; after "'", the Prompt group's last key (", n and '), before the
 ;; scheduled prompts of "#", or after "b"; more lists of sessions after
-;; "p", where `drover-opencode' appends its session search; more prompt
-;; commands after "O".
+;; "p"; more prompt commands after "O".
 
 ;;; Code:
 
@@ -87,6 +86,7 @@
 (autoload 'drover-prompt-org-task "drover-prompt" nil t)
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 (autoload 'drover-schedule-list "drover-schedule" nil t)
+(autoload 'drover-search "drover-search" nil t)
 
 (defvar drover-prompt-mode)
 
@@ -1908,6 +1908,7 @@ session chosen for it, else to one asked for, unshown."
     ("l" "List" drover-list)
     ("L" "Side list" drover-list-side)
     ("p" "Project" drover-select-project)
+    ("S" "Search" drover-search)
     ;; Only while an action on several sessions runs.
     ("X" drover--dispatch-stop-description drover-stop-actions :if drover-actions-progress)]
    ["Prompt"

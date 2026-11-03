@@ -718,18 +718,25 @@ buffer, alone in the selected window."
   (require 'drover-bulk-bench)
   (funcall 'drover-bulk-bench-run))
 
+(defun drover-bench-search ()
+  "Time the search of sessions, as test/drover-search-bench.el does."
+  (require 'drover-search-bench)
+  (funcall 'drover-search-bench-run))
+
 (defun drover-bench-main ()
   "Run the bench, and print the results; a graphical Emacs then exits."
   (if (not drover-bench-output)
       (progn (drover-bench-run)
              (drover-bench-history)
-             (drover-bench-bulk))
+             (drover-bench-bulk)
+             (drover-bench-search))
     ;; A graphical Emacs ends with the bench, whatever happens.
     (unwind-protect
         (condition-case err
             (progn (drover-bench-run)
                    (drover-bench-history)
-                   (drover-bench-bulk))
+                   (drover-bench-bulk)
+                   (drover-bench-search))
           (error (drover-bench-log "drover bench failed: %s" (drover-error-string err))))
       (kill-emacs 0))))
 

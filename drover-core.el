@@ -1641,6 +1641,34 @@ PROPERTIES is a plist of:
              the conversation reported for such a backend is reported
              for the front ends following it too.
 
+The search of sessions (`drover-search') matches what records tell,
+and asks backends for more through the following operations, both
+optional.
+
+ :search-text
+             Function of a session returning more texts the search
+             matches it by, strings, such as its first and last
+             prompts; it is called for every session as a search
+             starts, the backend's own and those of the engines it
+             records (see :recorded), so it must answer at once.
+ :search     Function of a QUERY, a SCOPE and a CALLBACK searching what
+             was said in the backend's sessions for QUERY, in the
+             background: it must never wait.  SCOPE is a plist of
+             :filter, `drover-filter', :history and :archived, whether
+             older and archived sessions show, :limit, the most matches
+             taken, and :wanted, a function of a match returning
+             non-nil when its session is among those the search
+             offers.  CALLBACK takes a list of matches, any number of
+             times, then the symbol `done', or (:failure MESSAGE);
+             each match a plist naming its session by :key, its
+             `drover-session-key', or by :engine and :id, the engine's
+             identifier, with :host for a session of another host, and
+             telling the :snippet of text around the match, bounded by
+             drover, and its :position, if known.  It returns a
+             function of no argument stopping the search, after which
+             CALLBACK need not be called, or nil when it searches
+             nothing and never calls CALLBACK.
+
 The prompt (`drover-prompt') sends to sessions and starts them through
 the following operations, all optional.  Callbacks are called at most
 once, possibly before the operation returns; THEN receives the value,

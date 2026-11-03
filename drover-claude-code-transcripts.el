@@ -798,6 +798,49 @@ elsewhere; answering, one waiting there.  The backend's :supports."
         (:respond (eq (drover-session-status session) 'waiting))
         (_ t)))))
 
+;;;; Searching
+
+(defconst drover-claude-code-transcripts--text-starts
+  '("\"role\":\"(?:user|assistant)\",\"content\":(?:\"|\\[\\{\"type\":\"text\",\"text\":\")")
+  "What begins the text of a prompt or reply in a transcript, for ripgrep.
+A message's role, then its content: a string, or a block of text first.
+Tool calls, tool results and thinking begin otherwise.")
+
+(defun drover-claude-code-transcripts--search-text (session)
+  "Return the first and last prompts of the conversation of SESSION, or nil.
+As its transcript tells them, for any backend's session of Claude
+Code's conversation.  The backend's :search-text."
+  (when-let* ((id (drover-session-engine-id session))
+              ((eq (drover-session-engine session) 'claude-code))
+              (data (drover-claude-code-transcripts--data id)))
+    (delq nil (list (plist-get data :prompt) (plist-get data :last-prompt)))))
+
+(defun drover-claude-code-transcripts--search (query scope callback)
+  "Search the transcripts for QUERY said in prompts and replies, for CALLBACK.
+Those of the conversations the search offers, as the :wanted of SCOPE
+tells, are searched with ripgrep (see `drover-transcript-search'), not
+those of subagents; CALLBACK gets matches naming each conversation by
+its engine and identifier.  The backend's :search."
+  (when-let* ((index (drover-claude-code-transcripts--current-index)))
+    (let ((wanted (plist-get scope :wanted))
+          (files nil))
+      (drover-transcript-map
+       (lambda (file data)
+         (let ((id (plist-get data :id)))
+           (when (and id (plist-get data :messages)
+                      (or (not (functionp wanted))
+                          (funcall wanted (list :engine 'claude-code :id id))))
+             (push (list file id (plist-get data :updated)) files))))
+       index)
+      (drover-transcript-search
+       files drover-claude-code-transcripts--text-starts query
+       (lambda (result)
+         (funcall callback (if (and (consp result) (consp (car result)))
+                               (mapcar (lambda (match) (append (list :engine 'claude-code) match))
+                                       result)
+                             result)))
+       (plist-get scope :limit)))))
+
 ;;;; Installing
 
 (defun drover-claude-code-transcripts--start ()
@@ -816,6 +859,8 @@ The backend's :start."
    :sessions #'drover-claude-code-transcripts--sessions
    :session #'drover-claude-code-transcripts--session
    :history #'drover-claude-code-transcripts--history
+   :search #'drover-claude-code-transcripts--search
+   :search-text #'drover-claude-code-transcripts--search-text
    :open #'drover-claude-code-transcripts--open
    :respond #'drover-claude-code-transcripts--respond
    :preview #'drover-claude-code-transcripts--preview
