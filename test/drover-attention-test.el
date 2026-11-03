@@ -571,7 +571,7 @@ pixels; spaces displayed as stretches advance by their width."
     (should (equal (drover-attention-test-messages
                      (drover-next)
                      (drover-attention-test-press))
-                   '("1/2 ⚑ Session w  asks: Which?" "2/2 ✓ Session d")))
+                   '("1/2" "2/2")))
     (let ((drover-attention-echo nil))
       (should-not (drover-attention-test-messages (drover-attention-test-press))))))
 

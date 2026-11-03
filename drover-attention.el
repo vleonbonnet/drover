@@ -48,7 +48,8 @@
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
-  "Whether `drover-next' tells which session it visits, and its place in the cycle."
+  "Whether `drover-next' tells the place in the cycle of the session it visits.
+Such as \"2/5\" in the echo area: the buffer visited shows the session."
   :type 'boolean
   :group 'drover)
 
@@ -365,8 +366,7 @@ starts the backends."
   (setq drover-attention--position position)
   (drover-open session)
   (when drover-attention-echo
-    (message "%d/%d %s" (1+ position) (length drover-attention--cycle)
-             (drover-attention--describe session))))
+    (message "%d/%d" (1+ position) (length drover-attention--cycle))))
 
 (defun drover-attention--following ()
   "Return the session after the last one visited, and its position, as a cons.

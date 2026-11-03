@@ -1587,8 +1587,7 @@ closes then, and the close tells only of the input kept."
           ;; Not before the service answered.
           (should (seq-every-p #'buffer-live-p buffers))
           (should (equal messages
-                         '("Archived Title ses_2; its buffer closes once the archive is confirmed"
-                           "Archived Title ses_1; its buffer closes once the archive is confirmed")))
+                         '("Archived Title ses_2" "Archived Title ses_1")))
           (setq messages nil)
           (drover-opencode-test-answer-archive "ses_2")
           (should-not (buffer-live-p (nth 1 buffers)))

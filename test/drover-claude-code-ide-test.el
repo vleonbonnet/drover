@@ -487,15 +487,16 @@ session of `buffer', a temporary buffer, active."
             (should (equal messages '("Archived idle")))
             (drover-archive (drover-claude-code-ide-test-session working))
             (should (buffer-live-p working))
-            (should (equal (car messages) "Archived working; its buffer closes once its turn ends"))
+            (should (equal (car messages) "Archived working"))
             ;; Waiting for an answer, the turn goes on.
             (drover-claude-code-ide-test-status working '(("" :state blocked :kind permission :title "Bash")))
             (run-hooks 'drover-changed-hook)
             (should (buffer-live-p working))
             (drover-claude-code-ide-test-status working '(("" :state done)))
+            (setq messages nil)
             (run-hooks 'drover-changed-hook)
             (should-not (buffer-live-p working))
-            (should (equal (car messages) "Closed working, archived, now that its turn ended")))
+            (should-not messages))
           ;; Their terminals gone, drover keeps them among the archived sessions.
           (let ((drover-show-archived t))
             (should (= (length (drover-archived-sessions)) 2))))))))

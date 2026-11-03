@@ -303,13 +303,14 @@ Its sections, and the faces font lock gives and takes."
               (when (buffer-live-p buffer) (kill-buffer buffer)))))))))
 
 (ert-deftest drover-bulk-test-notes-counted ()
-  "Of many buffers keeping input or closing later, the report counts them."
-  (should (equal (drover--archive-notes '((kept . "A") (closed . "B") (kept . "C")))
+  "Of many buffers keeping input or waiting, the report counts them, closing later unsaid."
+  (should (equal (drover--archive-notes '((kept . "A") (closed . "B") (later . "G") (kept . "C")))
                  '("the unsent input of A is in the kill ring" "the unsent input of C is in the kill ring")))
+  (should (equal (drover--archive-notes '((later . "A") (closed . "B") (waiting . "C")))
+                 '("C waits for you")))
   (should (equal (drover--archive-notes '((kept . "A") (kept . "B") (later . "C") (waiting . "D")
                                           ((failed . "Busy") . "E") ((failed . "Gone") . "F")))
-                 '("the unsent input of 2 buffers is in the kill ring" "1 buffer closes once its turn ends"
-                   "1 session waits for you: its buffer closes once its turn ends"
+                 '("the unsent input of 2 buffers is in the kill ring" "1 session waits for you"
                    "2 buffers stay open: Busy"))))
 
 (ert-deftest drover-bulk-test-confirmation-bounded ()
