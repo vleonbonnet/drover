@@ -113,6 +113,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 (require 'eieio)
 (require 'face-remap)
 (require 'seq)
@@ -266,23 +267,37 @@ than the one the user works in moves at the full pace."
   :group 'drover-list)
 
 (defconst drover-list--former-fields
-  '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
-    (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
-    (location :priority 8 :min 10 :max 30 :label "Project")
-    (branch :priority 9 :min 6 :max 24 :label "Branch")
-    (agent :priority 10 :min 5 :max 14 :label "Agent")
-    (model :priority 5 :min 8 :max 22 :label "Model")
-    (provider :priority 7 :min 2 :max 12 :label "Provider")
-    (context :priority 6 :min 9 :label "Context")
-    (created :priority 11 :min 3 :align right :label "Created")
-    (age :priority 1 :min 3 :align right :narrow line :label "Age")
-    (cache :priority 3 :min 9 :narrow background :label "Cache")
-    (summary :priority 4 :min 12 :narrow below :label "Summary"))
-  "The standard value of `drover-list-fields' before the harness's field.")
+  '(((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (location :priority 8 :min 10 :max 30 :label "Project")
+     (branch :priority 9 :min 6 :max 24 :label "Branch")
+     (agent :priority 10 :min 5 :max 14 :label "Agent")
+     (model :priority 5 :min 8 :max 22 :label "Model")
+     (provider :priority 7 :min 2 :max 12 :label "Provider")
+     (context :priority 6 :min 9 :label "Context")
+     (created :priority 11 :min 3 :align right :label "Created")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+    ((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+     (location :priority 9 :min 10 :max 30 :label "Project")
+     (branch :priority 10 :min 6 :max 24 :label "Branch")
+     (agent :priority 11 :min 5 :max 14 :label "Agent")
+     (model :priority 6 :min 8 :max 22 :label "Model")
+     (provider :priority 8 :min 2 :max 12 :label "Provider")
+     (context :priority 7 :min 9 :label "Context")
+     (created :priority 12 :min 3 :align right :label "Created")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary")))
+  "The former standard values of `drover-list-fields'.
+Before the harness's field, then before the context's pie in two lines.")
 
-;; Loaded over a drover of the former standard value, which `defcustom'
+;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the list takes the new one.
-(when (and (boundp 'drover-list-fields) (equal drover-list-fields drover-list--former-fields))
+(when (and (boundp 'drover-list-fields) (member drover-list-fields drover-list--former-fields))
   (makunbound 'drover-list-fields))
 
 (defcustom drover-list-fields
@@ -294,7 +309,7 @@ than the one the user works in moves at the full pace."
     (agent :priority 11 :min 5 :max 14 :label "Agent")
     (model :priority 6 :min 8 :max 22 :label "Model")
     (provider :priority 8 :min 2 :max 12 :label "Provider")
-    (context :priority 7 :min 9 :label "Context")
+    (context :priority 7 :min 9 :narrow icon :label "Context")
     (created :priority 12 :min 3 :align right :label "Created")
     (age :priority 1 :min 3 :align right :narrow line :label "Age")
     (cache :priority 3 :min 9 :narrow background :label "Cache")
@@ -304,8 +319,9 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
 
  title     The status icon and the title; it is always shown.
  host      The host of a session of another host, and how long ago it
-           was last heard from while it is not connected; nothing for
-           this host's, so that a list of them has no such column.
+           was last heard from while it is not connected; in two lines,
+           an icon too (see `drover-host-icon'); nothing for this host's,
+           so that a list of them has no such column.
  harness   What runs the session (see `drover-harnesses'): its icon and
            name, its icon alone where room is short, as in two lines.
  location  The project.
@@ -317,7 +333,8 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  provider  The provider serving the model, often as an icon.
  context   The size of the context, and a short bar of how much of the
            model's context it fills, in a warning face near a
-           long-context price tier.
+           long-context price tier; in two lines, a pie filling by
+           eighths (see `drover-context-pie-icons').
  created   How long ago the session was created.
  age       How long ago it last did something, or since when it needs
            you.
@@ -338,10 +355,13 @@ PROPERTIES is a plist of:
  :align     `right' to align the field on the right of its column.
  :narrow    Where the field goes when the list is too narrow for
             columns: `line', on the line of the title, flush right,
-            the harness's icon last, in a cell lining icons up;
-            `below', on a second line, under the title, for the
-            sessions that need you; `background', as the background
-            of the line; nil, not shown.
+            the harness by its icon alone and the host with its icon,
+            icons in cells lining them up, the harness's last; `icon',
+            as an icon alone, in such a cell before those, such as the
+            context's pie, a field the columns need not show for the
+            list to use them; `below', on a second line, under the
+            title, for the sessions that need you; `background', as
+            the background of the line; nil, not shown.
  :label     The name of the field's column in the header line.
 
 Characters count as wide as the letter x in the face `drover-list'.
@@ -351,15 +371,18 @@ as their :min fit in the window, but those of
 come and go with turns, count as shown whenever a session listed may
 show them, and the title's room counts from the glyph of a session
 alone, so that a turn changes no field shown.  It uses columns when
-those include every field the narrow layout places, else the narrow
-layout, which shows all of those.  Columns are named in the header
-line, and are at least as wide as their name, room allowing.  On a
-line too narrow for every column, the summary gives up room first,
+those include every field the narrow layout places but as an icon,
+else the narrow layout, which shows all of those.  Columns are named in
+the header line, and are at least as wide as their name, room allowing.
+On a line too narrow for every column, the summary gives up room first,
 then the names of the columns of short texts, then the title, then the
 other fields in proportion; the model keeps its effort, cutting its
-name, and the harness its icon, leaving its name out.  In two lines,
-the harness shows its icon alone, at the end of the title's line,
-where icons line up."
+name, and the harness its icon, leaving its name out.
+In two lines, the title's line ends with the texts placed on it, such
+as the host's name and the age, then the context's pie, the host's icon
+and the harness's, in this order, each in a cell as wide as the widest
+the rows show, so that icons line up; a cell is kept while a row listed
+shows something in it, the line of a row without leaving it empty."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
@@ -687,12 +710,16 @@ showing it, else the selected window."
 
 (defun drover-list--measure-context ()
   "Return what the widths of texts depend on besides the texts themselves.
-That is a copy of the face remapping of the buffer, which
+That is a copy of the face remapping of the buffer but for the highlight
+of the row at point, which
 `face-remap-add-relative' changes in place, the frame measuring them,
 the fonts of the faces lines are drawn in, so that a face given another
 font measures anew, and the functions measuring."
   (let ((frame (window-frame (drover-list--window))))
-    (list (copy-tree face-remapping-alist) frame
+    ;; The sidebar's highlight, a background, measures nothing: the
+    ;; lists measure alike with it.
+    (list (copy-tree (assq-delete-all 'magit-section-highlight (copy-sequence face-remapping-alist)))
+          frame
           (mapcar (lambda (face) (face-font face frame))
                   '(default drover-list variable-pitch fixed-pitch header-line bold))
           (drover-list--measurer))))
@@ -793,7 +820,8 @@ Extents are kept as widths are, in `drover-list--widths'."
 (defun drover-list--line-width ()
   "Return the width in pixels that lines of the list may take.
 Like `window-max-chars-per-line', leave out line numbers, and the
-column of the continuation glyph when the window has no fringe for it."
+column Emacs keeps for the glyph telling a line is cut when the window
+has no fringe for it (see `drover-list--truncation-width')."
   (let* ((window (drover-list--window))
          (fringes (window-fringes window))
          (width (window-body-width window t)))
@@ -804,7 +832,26 @@ column of the continuation glyph when the window has no fringe for it."
              (not (eq (car fringes) 0))
              (not (eq (cadr fringes) 0)))
         width
-      (- width (window-font-width window)))))
+      (- width (max (window-font-width window) (drover-list--truncation-width window))))))
+
+(defun drover-list--truncation-width (window)
+  "Return the width in pixels of the glyph WINDOW shows at the end of a cut line.
+Without a right fringe, Emacs keeps that much room at the right edge of
+every line of a window that truncates lines, and a line reaching into
+it shows the glyph, $ unless the display table says otherwise, in the
+default face as the buffer remaps it: the face `drover-list', whose $ may
+be wider than its average character, which `window-font-width' gives.
+0 on a frame showing no such glyph."
+  (if (frame-parameter (window-frame window) 'no-special-glyphs)
+      0
+    (let* ((table (or (window-display-table window)
+                      (buffer-local-value 'buffer-display-table (window-buffer window))
+                      standard-display-table))
+           (glyph (and table (display-table-slot table 'truncation)))
+           (glyph (and (or (natnump glyph) (consp glyph)) glyph))
+           (char (if glyph (glyph-char glyph) ?$))
+           (face (and glyph (glyph-face glyph))))
+      (drover-list--pixel-width (if face (propertize (string char) 'face face) (string char))))))
 
 (defun drover-list--kept (string)
   "Return where the tail of STRING to keep whole begins, or nil without one.
@@ -1171,7 +1218,8 @@ size, after a \"~\" when the service estimated it after a compaction.
 Near a long-context price tier, the size is in `opencode-context-near'
 and the bar's full part in its inverse video, past it in
 `opencode-context-over'.  Without the model's context size, an empty
-space takes the bar's place, so that sizes line up."
+space takes the bar's place, so that sizes line up.  In two lines, the
+context shows as a pie alone (see `drover-list--context-pie')."
   (when-let* ((tokens (drover-session-context-tokens session)))
     (let* ((fraction (drover-session-context-fraction session))
            (pixels (* drover-list-context-bar-width char))
@@ -1217,7 +1265,8 @@ It names the host and tells how it stands, as when shown.  For
 (defun drover-list--host-text (session now)
   "Return the host of SESSION as its column shows it at NOW, or nil if this host's.
 The host's label, dimmed, then, while it is not connected, how long ago
-it was last heard from; the tooltip tells how it stands."
+it was last heard from; the tooltip tells how it stands.  In two lines,
+its icon shows besides (see `drover-list--host-icon')."
   (when-let* ((host (drover-session-host session)))
     (propertize (drover-face (concat (drover-list--one-line (drover-host-label host))
                                      (when-let* ((age (drover-list--host-age session now)))
@@ -1225,6 +1274,69 @@ it was last heard from; the tooltip tells how it stands."
                              'drover-dim)
                 'drover-list-host host
                 'help-echo #'drover-list--host-help-echo)))
+
+(defun drover-list--host-icon (host)
+  "Return the icon telling that a session runs on HOST, another host, in its cell.
+That of `drover-host-icon', dimmed, its tooltip naming HOST and telling
+how it stands, as the host's column does.  The sessions of a host share
+one, made once as widths are measured (see `drover-list--memo')."
+  (drover-list--memo (list 'host-icon drover-host-icon host)
+                     (lambda (host)
+                       (propertize (drover-list--icon (drover-face drover-host-icon 'drover-dim))
+                                   'drover-list-host host
+                                   'help-echo #'drover-list--host-help-echo))
+                     host))
+
+(defvar drover-list--drawn)
+
+(defun drover-list--context-help-echo (window object position)
+  "Return the tooltip of the context's pie drawn at POSITION in OBJECT.
+It tells what the context of the session there fills, as the context's
+column does; OBJECT is the list's buffer, else WINDOW shows it.  For
+`help-echo'."
+  (drover-with-reporting "list tooltip"
+    (with-current-buffer (cond ((bufferp object) object)
+                               ((window-live-p window) (window-buffer window))
+                               (t (current-buffer)))
+      (when-let* ((section (drover-list--session-section (magit-section-at position)))
+                  (session (and drover-list--drawn (gethash (oref section value) drover-list--drawn)))
+                  (description (drover-session-context-description session)))
+        (concat "Context: " description)))))
+
+(defun drover-list--context-pie (session)
+  "Return the pie of how much of its context SESSION fills, in its cell, or nil.
+See `drover-context-pie-glyph': in the face of the long-context price
+tier it nears or passes, else dimmed, its tooltip telling the context's
+size and the model's.  Every pie is drawn in the cell of all of them,
+so that its width does not change as the context grows.  Nil without
+the model's context size.  Pies of the same eighth and face are one,
+made once as widths are measured (see `drover-list--memo')."
+  (when-let* ((fraction (drover-session-context-fraction session))
+              (glyph (drover-context-pie-glyph fraction)))
+    (let ((face (or (opencode-context-face (drover-session-context-tier session)) 'drover-dim)))
+      (drover-list--memo (list 'pie drover-context-pie-icons glyph face)
+                         (lambda (glyph)
+                           (propertize
+                            (drover-list--in-cell
+                             (drover-face glyph face)
+                             (drover-list--cell (mapcar (lambda (icon) (drover-face icon 'drover-dim))
+                                                        drover-context-pie-icons)))
+                            'help-echo #'drover-list--context-help-echo))
+                         glyph))))
+
+(defun drover-list--field-icon (field row)
+  "Return what FIELD of ROW shows in two lines as an icon alone, or \"\".
+The host, for a session of another host whose host the row shows, its
+icon (see `drover-list--host-icon'); the context, its pie (see
+`drover-list--context-pie'); a field of an icon and a name, such as the
+harness, its icon (see `drover-list--compact'); any other its text."
+  (let ((text (or (alist-get field (drover-list--row-texts row)) "")))
+    (or (pcase field
+          ('host (and (not (string-empty-p text))
+                      (drover-list--host-icon (drover-session-host (drover-list--row-session row)))))
+          ('context (drover-list--context-pie (drover-list--row-session row)))
+          (_ (drover-list--compact text)))
+        "")))
 
 (defun drover-list--text (field session group metrics)
   "Return the text of FIELD for SESSION, or \"\" when it has none.
@@ -1315,7 +1427,8 @@ place, is the same row; see `drover-list--inputs'."
         opencode-session-status-icons opencode-subagent-icons opencode-session-status-animations
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
         ;; Printed with each row, so a digest of the harnesses, not them.
-        (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon)))
+        (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon
+                                    drover-host-icon drover-context-pie-icons)))
         drover-list--text-fields (plist-get metrics :caching)
         ;; Last: `drover-list--peers-of' compares the others.
         drover-list--measuring))
@@ -1496,7 +1609,9 @@ shows a prompt cache or may show one (see `drover-list--caching-p'),
 then for each of `drover-list--text-fields' the width of its text, nil
 when empty, then for each the width an ellipsis and the tail to keep
 whole take (see `drover-list--kept'), or the head to keep (see
-`drover-list--kept-head'), nil without either.  Widths are in pixels."
+`drover-list--kept-head'), nil without either, but for the fields
+showing another icon in two lines (see `drover-list--iconic-fields'),
+the width of that icon.  Widths are in pixels."
   (or (drover-list--row-measures row)
       (setf (drover-list--row-measures row)
             (let ((measures (make-vector drover-list--measure-count nil))
@@ -1517,6 +1632,10 @@ whole take (see `drover-list--kept'), or the head to keep (see
                               (when (drover-list--kept-head text)
                                 (aset measures (+ index count)
                                       (drover-list--pixel-width (drover-list--compact text)))))))
+              (dolist (field (drover-list--iconic-fields))
+                (let ((icon (drover-list--field-icon field row)))
+                  (unless (string-empty-p icon)
+                    (aset measures (drover-list--kept-index field) (drover-list--pixel-width icon)))))
               measures))))
 
 (defun drover-list--tally-create ()
@@ -1611,6 +1730,18 @@ That is the harness, its icon without its name (see
 `drover-list--kept-head'): its column, cut, is as wide as the icon."
   (eq field 'harness))
 
+(defun drover-list--iconic-fields ()
+  "Return the fields that show in two lines as an icon other than their head.
+The host, as `drover-host-icon', and the context, as its pie: see
+`drover-list--field-icon'."
+  '(host context))
+
+(defun drover-list--icon-p (field)
+  "Return non-nil when FIELD shows in two lines as an icon alone, in a cell.
+That is a field showing its head alone (see `drover-list--compact-p')
+or another icon (see `drover-list--iconic-fields')."
+  (or (drover-list--compact-p field) (memq field (drover-list--iconic-fields))))
+
 (defun drover-list--content-width (field summary metrics)
   "Return the width in pixels FIELD takes to show the rows of SUMMARY in full.
 METRICS are the measures of lines.  That of the title counts from the
@@ -1666,9 +1797,10 @@ are taken by priority, as long as the fewest pixels each needs fit (see
 `drover-list--narrowest'), the title's counted from the glyph of a
 session alone (see `drover-list--least-prefix'), and the title always;
 the fields of `drover-list-hidden-fields' never.  Columns are used when
-they include every field the narrow layout places; else the narrow
-layout shows those fields, which need no room of their own but on the
-title's line, where they give way to the title.  So the fields shown
+they include every field the narrow layout places, but those it shows
+as an icon alone; else the narrow layout shows those fields, which need
+no room of their own but on the title's line, where they give way to
+the title.  So the fields shown
 change with the width, the settings and the sessions listed, not with
 what a session's turn changes: whether it needs the user, its prompt
 cache, its subagents at work."
@@ -1692,7 +1824,9 @@ cache, its subagents at work."
     (let ((narrow (seq-filter (lambda (entry)
                                 (or (eq (car entry) 'title) (plist-get (cdr entry) :narrow)))
                               present)))
-      (if (seq-every-p (lambda (entry) (memq entry chosen)) narrow)
+      (if (seq-every-p (lambda (entry)
+                         (or (memq entry chosen) (eq (plist-get (cdr entry) :narrow) 'icon)))
+                       narrow)
           (cons 'columns (seq-filter (lambda (entry) (memq entry chosen)) present))
         (cons 'narrow narrow)))))
 
@@ -1822,19 +1956,24 @@ width would move."
 (defun drover-list--edges (fields summary)
   "Return the cells ending the title's line in two lines, for the rows of SUMMARY.
 FIELDS are the fields shown.  The value is a list of (FIELD . WIDTH),
-from the right edge leftwards: each field of FIELDS placed on the
-title's line that shows its head alone (see `drover-list--compact-p'),
-such as the harness's icon, in a cell as wide as the widest head it
-shows, in pixels.  So its icons line up from line to line, whatever
-stands before them, the ages of other widths; a line without one
-keeps its cell empty."
-  (let ((edges nil))
-    (dolist (field fields)
-      (when (and (drover-list--compact-p field)
-                 (eq (plist-get (drover-list--field-spec field) :narrow) 'line))
-        (let ((width (drover-list--tally-max (aref summary (drover-list--kept-index field)))))
-          (when (> width 0)
-            (push (cons field width) edges)))))
+from the right edge leftwards: first each field of FIELDS placed on
+the title's line that shows an icon alone there (see
+`drover-list--icon-p'), the harness's last, the host's before it, then
+each placed as an icon alone, the context's pie, each in a cell as wide
+as the widest icon the rows show, in pixels.  So icons line up from
+line to line, whatever stands before them, the ages of other widths; a
+line without one keeps its cell empty, and the cell is left out while
+no row shows one."
+  (let ((edges nil)
+        (place (lambda (field) (plist-get (drover-list--field-spec field) :narrow))))
+    (dolist (field (append (seq-filter (lambda (field) (eq (funcall place field) 'icon)) fields)
+                           (seq-filter (lambda (field)
+                                         (and (drover-list--icon-p field)
+                                              (eq (funcall place field) 'line)))
+                                       fields)))
+      (let ((width (drover-list--tally-max (aref summary (drover-list--kept-index field)))))
+        (when (> width 0)
+          (push (cons field width) edges))))
     edges))
 
 (defun drover-list--layout (rows metrics)
@@ -1997,9 +2136,9 @@ the sidebar, which hides no line."
   "Return the heading of ROW in the narrow layout of LAYOUT, and its bar.
 The value is (HEADING . SPEC).  HEADING is one or two lines: the glyph,
 the title and the fields placed on its line, flush right, as they show
-where room is short (see `drover-list--compact'), those showing their
-head alone last, in the cells of :edges of LAYOUT, so that they line
-up (see `drover-list--edges'), then, for a session
+where room is short (see `drover-list--compact'), those showing an icon
+alone last, in the cells of :edges of LAYOUT, so that they line up (see
+`drover-list--edges' and `drover-list--field-icon'), then, for a session
 that needs the user, the fields placed below, under the title; it
 begins with PREFIX, if any, its second line with the line prefix of
 LAYOUT.  SPEC tells where the first line's segments lie, from
@@ -2021,7 +2160,7 @@ background, else nil."
     ;; The cells at the edge, then the other fields on the title's line,
     ;; flush right, from the right edge leftwards.
     (pcase-dolist (`(,field . ,cell) edges)
-      (let ((text (drover-list--compact (or (alist-get field texts) "")))
+      (let ((text (drover-list--field-icon field row))
             (start (- end cell)))
         (when (> start (+ title-start space))
           (unless (string-empty-p text)
@@ -2029,7 +2168,11 @@ background, else nil."
                                 right)))
           (setq end (- start space)))))
     (dolist (field (reverse (funcall narrow 'line)))
-      (let ((text (if (assq field edges) "" (drover-list--compact (or (alist-get field texts) "")))))
+      ;; A field showing its head in a cell shows nothing else; the host
+      ;; shows its name besides its icon.
+      (let ((text (if (and (assq field edges) (drover-list--compact-p field))
+                      ""
+                    (drover-list--compact (or (alist-get field texts) "")))))
         (unless (string-empty-p text)
           (let ((start (- end (drover-list--pixel-width text))))
             (when (> start (+ title-start space))
@@ -3163,11 +3306,14 @@ See `drover-prefetch'."
 
 (defun drover-list--prefetch-wanted-p ()
   "Return non-nil when the list may show what backends fetch on demand.
-That is the context, which costs a request per session: in columns,
-unless the user hides it.  In two lines, it does not show."
-  (and (eq drover-list--layout 'columns)
-       (assq 'context drover-list-fields)
-       (not (memq 'context drover-list-hidden-fields))))
+That is the context, which costs a request per session, unless the user
+hides it: in columns, and in two lines when `drover-list-fields' places
+it there, as its pie.  Whether a row has a context to show yet does not
+count: the rows have none until it is fetched."
+  (when-let* ((entry (assq 'context drover-list-fields)))
+    (and (not (memq 'context drover-list-hidden-fields))
+         (or (eq drover-list--layout 'columns)
+             (plist-get (cdr entry) :narrow)))))
 
 (defun drover-list--settings ()
   "Return the settings a drawing depends on, besides sessions and width."
@@ -4857,14 +5003,17 @@ For `kill-buffer-hook', which runs while the buffer still lives."
 
 (defun drover-list--theme-changed (&rest _)
   "Measure text anew and redraw lists, a theme having been enabled or disabled.
-A theme may change fonts, which widths depend on, and the colour of
-`opencode-cache-bar', which the lines of prompt caches are drawn in.  For
-`enable-theme-functions' and `disable-theme-functions'."
+A theme may change fonts, which widths depend on, the colour of
+`opencode-cache-bar', which the lines of prompt caches are drawn in,
+and the backgrounds the sidebar's highlight is made of (see
+`drover-list--remap-highlight').  For `enable-theme-functions' and
+`disable-theme-functions'."
   (drover-with-reporting "list theme"
     (dolist (buffer (drover-list--buffers))
       (with-current-buffer buffer
         (setq drover-list--widths nil))
-      (drover-list--update buffer))))
+      (drover-list--update buffer))
+    (drover-list--rehighlight)))
 
 (defun drover-list--watch ()
   "Follow sessions, windows and the focus while a list buffer lives.
@@ -5529,7 +5678,143 @@ The commands folding sections do nothing: the sidebar folds nothing."
   "<remap> <magit-section-show-level-1-all>" #'ignore
   "<remap> <magit-section-show-level-2-all>" #'ignore
   "<remap> <magit-section-show-level-3-all>" #'ignore
-  "<remap> <magit-section-show-level-4-all>" #'ignore)
+  "<remap> <magit-section-show-level-4-all>" #'ignore
+  "<remap> <next-line>" #'drover-list-next-row
+  "<remap> <previous-line>" #'drover-list-previous-row)
+
+;; The sidebar shows no cursor: the highlight of the row at point tells
+;; where it is, and point stays at the start of a row.  A column means
+;; nothing there, and moving by lines took the column of the end of the
+;; line: `posn-at-point' places a character displayed as a space at the
+;; end of its line while `bidi-display-reordering' is nil, which
+;; `drover-list--reorder' sets, and the sidebar's lines begin with one.
+
+(defun drover-list--row-start-p (position)
+  "Return non-nil when POSITION begins a row: a session's heading or a group's."
+  (when-let* ((section (get-text-property position 'magit-section)))
+    (and (not (eq section magit-root-section))
+         (= position (oref section start)))))
+
+(defun drover-list--next-row-start (position count)
+  "Return the start of the COUNTth row after the one at POSITION, or nil.
+Backwards for a negative COUNT; nil when there are not that many rows."
+  (save-excursion
+    (goto-char position)
+    (let ((step (if (< count 0) -1 1))
+          (left (abs count)))
+      (while (and (> left 0)
+                  (zerop (forward-line step))
+                  (not (and (> step 0) (eobp))))
+        (when (drover-list--row-start-p (point))
+          (setq left (1- left))))
+      (and (zerop left) (point)))))
+
+(defun drover-list--row-start (position)
+  "Return the start of the row of the sidebar at POSITION, or nil without rows.
+That of the row a line of POSITION belongs to, else of the row above,
+else of the first row."
+  (save-excursion
+    (goto-char position)
+    (beginning-of-line)
+    (if (drover-list--row-start-p (point))
+        (point)
+      (or (drover-list--next-row-start (point) -1)
+          (drover-list--next-row-start (point) 1)))))
+
+(defun drover-list-next-row (&optional count)
+  "Move to the start of the next row of the sidebar, a session or a heading.
+With COUNT, move that many rows, backwards when negative.  The sidebar
+moves by rows rather than lines: point stays at the start of a row,
+where the highlight shows it."
+  (interactive "^p" drover-list-sidebar-mode)
+  (let* ((count (or count 1))
+         (start (or (drover-list--row-start (point)) (point))))
+    (if-let* ((target (drover-list--next-row-start start count)))
+        (goto-char target)
+      (goto-char start)
+      (signal (if (< count 0) 'beginning-of-buffer 'end-of-buffer) nil))))
+
+(defun drover-list-previous-row (&optional count)
+  "Move to the start of the previous row of the sidebar.
+With COUNT, move that many rows, forwards when negative."
+  (interactive "^p" drover-list-sidebar-mode)
+  (drover-list-next-row (- (or count 1))))
+
+(defun drover-list--sidebar-settle ()
+  "Bring point back to the start of its row of the sidebar, and the mark too.
+After any command but those of a search going on: a click, a scroll or
+a search ended leaves point anywhere in a row.  A region then goes from
+the start of a row to the start of another, selecting both and those
+between, as it shows.  For the sidebar's `post-command-hook'."
+  (drover-with-reporting "sidebar point"
+    (unless (bound-and-true-p isearch-mode)
+      (when-let* ((start (drover-list--row-start (point))))
+        (unless (= start (point))
+          (goto-char start)))
+      (when-let* ((mark (and mark-active (mark t)))
+                  (start (drover-list--row-start mark)))
+        (unless (= start mark)
+          (set-marker (mark-marker) start))))))
+
+;; The row at point stands out a little more than in Magit's buffers:
+;; without a cursor, its highlight alone tells where point is.
+
+(defface drover-list-sidebar-highlight '((t))
+  "Face of the row at point in the sidebar, over `magit-section-highlight'.
+What it leaves unspecified comes from `magit-section-highlight', its
+background taken further from the default one, see
+`drover-list-sidebar-highlight-contrast'."
+  :group 'drover-list)
+
+(defcustom drover-list-sidebar-highlight-contrast 1.4
+  "How far the row at point stands out in the sidebar, from the default background.
+Its background is that of `magit-section-highlight' this many times as
+far from the default background, colour by colour, as the theme draws
+them: 1 is Magit's own.  The face `drover-list-sidebar-highlight' sets it
+otherwise."
+  :type 'number
+  :set (lambda (symbol value)
+         (set-default symbol value)
+         (when (fboundp 'drover-list--rehighlight)
+           (drover-list--rehighlight)))
+  :group 'drover-list)
+
+(defun drover-list--rehighlight ()
+  "Draw the highlight of the row at point anew in every sidebar."
+  (dolist (buffer (drover-list--buffers))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'drover-list-sidebar-mode)
+        (drover-list--remap-highlight)))))
+
+(defvar-local drover-list--highlight-cookie nil
+  "Cookie of the remapping of the highlight, see `drover-list--remap-highlight'.")
+
+(defun drover-list--highlight-background ()
+  "Return the background of the row at point in the sidebar, or nil.
+That of `magit-section-highlight', taken
+`drover-list-sidebar-highlight-contrast' times as far from the default
+background; nil when either is not a colour."
+  (let ((default (color-name-to-rgb (or (face-background 'default nil t) "")))
+        (highlight (color-name-to-rgb (or (face-background 'magit-section-highlight nil t) ""))))
+    (when (and default highlight)
+      (apply #'color-rgb-to-hex
+             (append (cl-mapcar (lambda (base color)
+                                  (max 0.0 (min 1.0 (+ base (* drover-list-sidebar-highlight-contrast
+                                                               (- color base))))))
+                                default highlight)
+                     '(2))))))
+
+(defun drover-list--remap-highlight ()
+  "Draw the highlight of the row at point in the current sidebar as the theme says.
+Over `magit-section-highlight', the face `drover-list-sidebar-highlight',
+then the background of `drover-list--highlight-background': a theme
+enabled or disabled draws it anew (see `drover-list--theme-changed')."
+  (when drover-list--highlight-cookie
+    (face-remap-remove-relative drover-list--highlight-cookie))
+  (setq drover-list--highlight-cookie
+        (apply #'face-remap-add-relative 'magit-section-highlight 'drover-list-sidebar-highlight
+               (when-let* ((background (drover-list--highlight-background)))
+                 (list (list :background background))))))
 
 (defun drover-list--sidebar-window-p (window)
   "Return non-nil when WINDOW is a side window showing the sidebar."
@@ -5581,13 +5866,21 @@ two, without details, a group every session it holds, whatever
 nothing.  Its lines begin with their glyphs, and its side window has no
 fringes.
 
+It shows no cursor: the row at point stands out (see
+`drover-list-sidebar-highlight-contrast'), and point stays at the start
+of a row, \\[drover-list-next-row] and \\[drover-list-previous-row] moving by rows.
+
 \\{drover-list-sidebar-mode-map}"
   :group 'drover-list
   :interactive nil
   (setq-local drover-list--folds nil)
   ;; Nothing folds: no section is hidden, nor tells it could be.
   (setq-local magit-section-visibility-indicators nil)
+  (setq-local cursor-type nil)
+  (setq-local cursor-in-non-selected-windows nil)
+  (drover-list--remap-highlight)
   (remove-hook 'magit-section-set-visibility-hook #'drover-list--cached-visibility t)
+  (add-hook 'post-command-hook #'drover-list--sidebar-settle nil t)
   (add-hook 'window-buffer-change-functions #'drover-list--sidebar-shown nil t))
 
 (defun drover-list-unload-function ()

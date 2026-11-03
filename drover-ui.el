@@ -75,6 +75,33 @@ off the count."
   :type 'string
   :group 'drover)
 
+(defcustom drover-host-icon "\U000F048D" ; nf-md-server_network
+  "Icon telling that a session runs on another host, before its name.
+Lists show it in the host's field, alone in two lines, where room is
+short; the sessions of this host show none.  Its tooltip names the host.
+A Nerd Font icon by default; any short string will do, such as \"⇄\"."
+  :type 'string
+  :group 'drover)
+
+(defcustom drover-context-pie-icons
+  (mapcar (lambda (slice) (string (+ #xF0A9E slice))) (number-sequence 0 7))
+  "Icons of a pie filling by eighths, as a session fills its context.
+The first fills an eighth, the last the whole: a context fills the
+eighth it reaches into, as opencode.el's mode line shows it.  In two
+lines, lists show it at the end of the title's line (see
+`drover-list-fields').  Nerd Font icons by default, nf-md-circle_slice_1
+to 8."
+  :type '(repeat string)
+  :group 'drover)
+
+(defun drover-context-pie-glyph (fraction)
+  "Return the icon of `drover-context-pie-icons' for a context FRACTION full.
+FRACTION may exceed 1, past the model's context; nil without icons."
+  (when drover-context-pie-icons
+    (let ((count (length drover-context-pie-icons)))
+      (nth (max 0 (min (1- count) (1- (ceiling (* fraction count)))))
+           drover-context-pie-icons))))
+
 ;;;; The look of opencode.el
 
 ;; Drover's former options and faces name opencode.el's now.  A value

@@ -96,6 +96,8 @@ settings of the list are their defaults, and the clock stands still at
            ;; line (`drover-list-test-showing').
            (drover-list-hidden-fields '(harness))
            (drover-harness-default-icon "▣")
+           (drover-host-icon "@")
+           (drover-context-pie-icons '("▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"))
            (buffer nil))
        (cl-letf (((symbol-function 'drover-list--now) (lambda () drover-list-test-clock)))
          (unwind-protect
@@ -1064,9 +1066,10 @@ title; Magit's ellipsis takes 7 more."
       (should (equal (drover-list-test-layout-at (* 100 7))
                      '(columns title location agent model provider context created age cache summary)))
       ;; Too narrow for the summary in a column: two lines, where
-      ;; neither the model, its provider nor the context shows.
-      (should (equal (drover-list-test-layout-at 320) '(narrow title age cache summary)))
-      (should (equal (drover-list-test-layout-at 120) '(narrow title age cache summary))))))
+      ;; neither the model nor its provider shows, the context as a
+      ;; pie alone; columns need not show it.
+      (should (equal (drover-list-test-layout-at 320) '(narrow title context age cache summary)))
+      (should (equal (drover-list-test-layout-at 120) '(narrow title context age cache summary))))))
 
 (ert-deftest drover-list-test-fields-by-width-with-the-harness ()
   "The harness's column, after the summary's, needs the room of its icon.
@@ -1082,7 +1085,7 @@ an x and of 100 show what the README says."
         (should (equal (drover-list-test-layout-at (* 100 7))
                        '(columns title harness location agent model provider context created age cache summary)))
         ;; Two lines: its icon on the title's line.
-        (should (equal (drover-list-test-layout-at 320) '(narrow title harness age cache summary)))))))
+        (should (equal (drover-list-test-layout-at 320) '(narrow title harness context age cache summary)))))))
 
 (ert-deftest drover-list-test-fields-grow-with-width ()
   "Every field shown at a width shows at any greater width, in columns."
@@ -1124,7 +1127,7 @@ But the summary, which any session may come to need, keeps its column."
         ;; the room of an ellipsis and its effort, "… high", 35 pixels,
         ;; more than its :min: 109 + 49 + 35 + 79 + 98 = 370.
         (should (equal (drover-list-test-layout-at 380) '(columns model title age cache summary)))
-        (should (equal (drover-list-test-layout-at 370) '(narrow title age cache summary)))
+        (should (equal (drover-list-test-layout-at 370) '(narrow title context age cache summary)))
         (drover-list-test-layout-at 380)
         (let ((cells (drover-list-test-cells "a")))
           (should (equal (car cells) (cons 14 "opus high")))
@@ -1429,14 +1432,43 @@ and :help its tooltip."
                       (+ (drover-list-test-fake-width (cdr context))
                          (* drover-list--gap (drover-list--char-width))))))))))
 
-(ert-deftest drover-list-test-context-not-in-two-lines ()
-  "Two lines leave the context out: the cache already colours the line."
+(ert-deftest drover-list-test-context-pie-in-two-lines ()
+  "Two lines show the context as a pie alone, at the end of the title's line.
+Neither its bar nor its size: the cache already colours the line.  The
+pie fills the eighth the context reaches into, in a cell after the age
+that every line keeps, a line without a context size leaving it empty;
+its tooltip tells the context's size and the model's.  As the context
+grows, the pie is drawn in place as a drawing anew draws it.  With no
+context to show, the cell goes."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-with-font
       (drover-list-test-layout-at 250)
       (should (eq drover-list--layout 'narrow))
-      (should-not (memq 'context drover-list--fields))
-      (should-not (string-search "50k" (drover-list-test-entry "a"))))))
+      (should (memq 'context drover-list--fields))
+      (should-not (string-search "50k" (drover-list-test-entry "a")))
+      ;; 50k of 200k: the second eighth.  A's line, whose prompt cache
+      ;; colours its background, ends in a space reaching the edge.
+      (should (string-match-p "\\`.* Alpha +5m +▂ *\\'" (drover-list-test-heading "a")))
+      (should (string-match-p "\\` +! Bravo +1m\\'" (drover-list-test-heading "b")))
+      (should (equal (drover-list-test-tooltip-at '(fake . "a") "▂") "Context: 50k of 200k tokens (25%)"))
+      ;; The ages end where the cell begins, whatever is in it.
+      (let ((age-a (car (last (drover-list-test-key-cells '(fake . "a")) 2)))
+            (age-b (car (last (drover-list-test-key-cells '(fake . "b"))))))
+        (should (= (+ (car age-a) (drover-list-test-fake-width (cdr age-a)))
+                   (+ (car age-b) (drover-list-test-fake-width (cdr age-b))))))
+      (let ((session (copy-sequence (drover-list-test-find "a")))
+            (drover-list-test-width 250))
+        (drover-list-test-shown
+          (setf (drover-session-context-tokens session) 190000)
+          (setq drover-test-sessions (cons session (cdr drover-test-sessions)))
+          (drover-backend-changed 'fake "a")
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (string-match-p " █ *\\'" (drover-list-test-heading "a")))
+          (drover-list-test-is-fresh)))
+      (let ((drover-list-hidden-fields '(harness context)))
+        (drover-list-test-layout-at 250)
+        (should-not (plist-get (drover-list--model-layout drover-list--model) :edges))
+        (should (string-match-p "Alpha +5m *\\'" (drover-list-test-heading "a")))))))
 
 ;;;; The header line
 
@@ -1544,12 +1576,21 @@ and :help its tooltip."
     (should-not drover-test-prefetched)
     (run-hooks 'post-command-hook)
     (should-not drover-test-prefetched)
-    ;; Nor do two lines, which leave it out.
+    ;; Two lines show it too, as a pie: asked for, whether a session
+    ;; has a context yet or not, Idle expanded above.
     (setq drover-list-hidden-fields nil)
     (drover-list-test-with-font
       (drover-list-test-layout-at 100))
     (should (eq drover-list--layout 'narrow))
-    (should-not drover-test-prefetched)))
+    (should (equal drover-test-prefetched '(("wait1" "wait2" "done" "work" "idle"))))
+    ;; Unless the fields leave it out there.
+    (setq drover-test-prefetched nil)
+    (let ((drover-list-fields (cons '(context :priority 7 :min 9 :label "Context")
+                                    (assq-delete-all 'context (copy-alist drover-list-fields)))))
+      (drover-list-test-with-font
+        (drover-list-test-layout-at 100))
+      (should (eq drover-list--layout 'narrow))
+      (should-not drover-test-prefetched))))
 
 ;;;; The prompt cache
 
@@ -4029,11 +4070,12 @@ Each shows its own buffer."
           (should (= (funcall opened) 1))
           (execute-kbd-macro (kbd "n"))
           (should (equal (funcall shown) "*session fail*"))
-          ;; Within a session, on its second line, nothing is shown again.
+          ;; The sidebar moves by rows: past the session's second line,
+          ;; to the heading of the next group, which shows nothing.
           (execute-kbd-macro (kbd "C-n"))
-          (should (equal (drover-list-test-id-at-point) "fail"))
+          (should-not (drover-list-test-id-at-point))
           (should (= (funcall opened) 2))
-          (execute-kbd-macro (kbd "n n"))
+          (execute-kbd-macro (kbd "C-n"))
           (should (equal (funcall shown) "*session done*"))
           (execute-kbd-macro (kbd "p p"))
           (should (equal (funcall shown) "*session fail*"))
@@ -4047,6 +4089,147 @@ Each shows its own buffer."
           (should-not drover-follow-mode)
           (execute-kbd-macro (kbd "n"))
           (should (equal (funcall shown) "*session fail*")))))))
+
+(defun drover-list-test-row-starts ()
+  "Return the starts of the rows of the current list, sessions and headings, in order."
+  (let ((starts nil))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when-let* ((section (get-text-property (point) 'magit-section)))
+          (when (and (not (eq section magit-root-section)) (= (point) (oref section start)))
+            (push (point) starts)))
+        (forward-line 1)))
+    (nreverse starts)))
+
+(ert-deftest drover-list-test-sidebar-moves-by-rows ()
+  "The sidebar shows no cursor, and keeps point at the start of a row.
+Lines move by rows, headings and sessions, over the second line of a
+session needing the user, the mark too; any other command leaves point
+at the start of its row, but while searching.  The list of an ordinary
+window keeps its cursor and moves by lines."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test-showing
+      (drover-list-test--main)
+      (should (eq (key-binding (kbd "C-n")) #'next-line))
+      (should cursor-type)
+      (let ((side (drover-list-side '(4))))
+        (should (eq (selected-window) side))
+        (should-not cursor-type)
+        (should-not cursor-in-non-selected-windows)
+        (let ((starts (drover-list-test-row-starts)))
+          ;; The heading of each of five groups and its session.
+          (should (= (length starts) 10))
+          (goto-char (car starts))
+          (dolist (start (cdr starts))
+            (execute-kbd-macro (kbd "C-n"))
+            (should (= (point) start)))
+          (should-error (drover-list-next-row) :type 'end-of-buffer)
+          (should (= (point) (car (last starts))))
+          (dolist (start (cdr (reverse starts)))
+            (execute-kbd-macro (kbd "<up>"))
+            (should (= (point) start)))
+          (should-error (drover-list-previous-row) :type 'beginning-of-buffer)
+          (execute-kbd-macro (kbd "C-u 3 C-n"))
+          (should (= (point) (nth 3 starts)))
+          ;; Anywhere in a row, any command takes point to its start:
+          ;; within its first line, or on its second.
+          (drover-list-test-goto "ask")
+          (forward-line 1)
+          (execute-kbd-macro (kbd "C-f"))
+          (should (equal (drover-list-test-id-at-point) "ask"))
+          (should (= (point) (oref (drover-list-test-section "ask") start)))
+          (goto-char (+ (point) 4))
+          (execute-kbd-macro (kbd "C-e"))
+          (should (= (point) (oref (drover-list-test-section "ask") start)))
+          ;; But not in the middle of a search.
+          (goto-char (+ (point) 4))
+          (let ((isearch-mode t))
+            (drover-list--sidebar-settle))
+          (should (= (point) (+ (oref (drover-list-test-section "ask") start) 4)))
+          (drover-list--sidebar-settle)
+          ;; A region goes from row to row, selecting the sessions of
+          ;; both and those between, headings among them.
+          (let ((transient-mark-mode t))
+            (drover-list-test-goto "ask")
+            (goto-char (+ (point) 3))
+            (execute-kbd-macro (kbd "C-SPC C-n C-n C-n C-n"))
+            (should (region-active-p))
+            (should (= (mark) (oref (drover-list-test-section "ask") start)))
+            (should (= (point) (oref (drover-list-test-section "done") start)))
+            (should (equal (mapcar (lambda (section) (cdr (oref section value)))
+                                   (drover-list--selected-sections))
+                           '("ask" "fail" "done")))
+            (deactivate-mark)))))))
+
+(ert-deftest drover-list-test-sidebar-highlight ()
+  "The row at point stands out more in the sidebar, as the theme says, and follows it.
+Its background is that of `magit-section-highlight' taken further from
+the default one, the face `drover-list-sidebar-highlight' over it; the
+list in an ordinary window keeps Magit's, and both measure alike."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (let ((default (face-background 'default nil t))
+          (highlight (face-background 'magit-section-highlight nil t))
+          (specs (lambda () (flatten-tree (cdr (assq 'magit-section-highlight face-remapping-alist)))))
+          (background (lambda ()
+                        (plist-get (cdr (memq 'drover-list-sidebar-highlight
+                                              (flatten-tree (cdr (assq 'magit-section-highlight
+                                                                       face-remapping-alist)))))
+                                   :background))))
+      (unwind-protect
+          ;; The colours as given, not the nearest a terminal shows.
+          (cl-letf (((symbol-function 'color-values) (lambda (color &optional _) (color-values-from-color-spec color))))
+            (set-face-background 'default "#101010")
+            (set-face-background 'magit-section-highlight "#203040")
+            (with-current-buffer (window-buffer (drover-list--show-side))
+              (should (memq 'drover-list-sidebar-highlight (funcall specs)))
+              ;; Each colour 1.4 times as far from the default's.
+              (should (equal (funcall background) "#263c53"))
+              (let ((drover-list-sidebar-highlight-contrast 1))
+                (drover-list--rehighlight)
+                (should (equal (funcall background) "#203040")))
+              (drover-list--rehighlight)
+              ;; A theme enabled draws it anew.
+              (set-face-background 'magit-section-highlight "#302010")
+              (run-hook-with-args 'enable-theme-functions 'user)
+              (should (equal (funcall background) "#3c2610"))
+              (should (= 1 (seq-count (lambda (entry) (eq (car entry) 'magit-section-highlight))
+                                      face-remapping-alist)))
+              (should (equal (car (drover-list--measure-context))
+                             (with-current-buffer buffer (car (drover-list--measure-context))))))
+            (should-not (assq 'magit-section-highlight face-remapping-alist)))
+        (set-face-background 'default default)
+        (set-face-background 'magit-section-highlight highlight)))))
+
+(ert-deftest drover-list-test-line-width-leaves-the-truncation-glyph ()
+  "Lines leave the room of the glyph telling a line is cut, as Emacs keeps it.
+Without fringes, Emacs keeps at the right edge the width of $, or of
+the display table's glyph, in the default face as the buffer remaps it,
+which may be wider than its average character; on a frame showing none,
+an average character."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (let* ((window (drover-list--show-side))
+           (body (window-body-width window t)))
+      (with-current-buffer (window-buffer window)
+        (cl-letf (((symbol-function 'window-font-width) (lambda (&rest _) 7))
+                  ((symbol-function 'drover-list--pixel-width)
+                   (lambda (string)
+                     (pcase (substring-no-properties string)
+                       ("$" 9)
+                       (">" (if (eq (get-text-property 0 'face string) 'bold) 11 5))
+                       (_ 7)))))
+          (should (= (drover-list--line-width) (- body 9)))
+          (let ((buffer-display-table (make-display-table)))
+            (set-display-table-slot buffer-display-table 'truncation (make-glyph-code ?> 'bold))
+            (should (= (drover-list--line-width) (- body 11)))
+            (set-display-table-slot buffer-display-table 'truncation ?>)
+            (should (= (drover-list--line-width) (- body 7))))
+          (let ((frame (window-frame window)))
+            (unwind-protect
+                (progn
+                  (set-frame-parameter frame 'no-special-glyphs t)
+                  (should (= (drover-list--line-width) (- body 7))))
+              (set-frame-parameter frame 'no-special-glyphs nil))))))))
 
 ;;;; Where sessions are
 
@@ -4391,8 +4574,15 @@ them; no line is hidden, and none begins with an invisible character."
                     (goto-char (point-max))
                     (drover-list-copy t)))
                 (should (= (length (drover-list-test-drawn-ids)) 60))
+                ;; The text of every session's lines, as drawn: in the
+                ;; sidebar's 35 columns, the title of a subagent deep in
+                ;; its tree may be cut before its identifier.
                 (dolist (session drover-test-sessions)
-                  (should (string-search (drover-session-id session) (car kill-ring))))
+                  (let ((section (drover-list-test-section (drover-session-id session))))
+                    (should (string-search (buffer-substring-no-properties
+                                            (oref section start)
+                                            (or (oref section content) (oref section end)))
+                                           (car kill-ring)))))
                 (deactivate-mark)
                 ;; And moving to the last session.
                 (revert-buffer)
@@ -6221,7 +6411,7 @@ The old menu took 24 lines at any width, its View menu apart."
       (setq drover-list-hidden-fields '(summary harness))
       (should (equal (drover-list-test-layout-at 320) '(columns title model age cache)))
       (setq drover-list-hidden-fields '(cache title harness))
-      (should (equal (drover-list-test-layout-at 120) '(narrow title age summary)))
+      (should (equal (drover-list-test-layout-at 120) '(narrow title context age summary)))
       (should-not drover-list--caches)
       (should (string-match-p "\\` +! Bravo +1m\n +asks: Which f" (drover-list-test-entry "b")))
       (setq drover-list-hidden-fields '(summary age harness))
@@ -7092,9 +7282,20 @@ tree within a bound whatever the sessions."
         (let ((title (text-property-search-forward 'drover-list-title key t)))
           (should (memq 'drover-dim (ensure-list (get-text-property (prop-match-beginning title)
                                                                      'font-lock-face)))))
-        ;; The narrow layout places it on the title's line.
+        ;; The narrow layout places it on the title's line, and its
+        ;; icon at the end, its tooltip naming the host.
         (drover-list-test-layout-at 300)
-        (should (string-match-p "Remote.*core 5m" (drover-list-test-remote-line key)))))))
+        (should (string-match-p "\\`.*Remote.*core 5m.* @\\'" (drover-list-test-remote-line key)))
+        (should (equal (drover-list-test-tooltip-at key "@") "Host: core"))))))
+
+(defun drover-list-test-tooltip-at (key text)
+  "Return the tooltip of TEXT on the first line of the session KEY, of any backend.
+A function of `help-echo' is called as Emacs calls it."
+  (save-excursion
+    (goto-char (oref (drover-list--find-session key) start))
+    (search-forward text (line-end-position))
+    (let ((help (get-text-property (match-beginning 0) 'help-echo)))
+      (if (functionp help) (funcall help nil (current-buffer) (match-beginning 0)) help))))
 
 (ert-deftest drover-list-test-group-by-host ()
   "Grouped by host, this host comes first, then the others in order, each saying how it stands."
@@ -7317,9 +7518,13 @@ cell."
 (ert-deftest drover-list-test-sidebar-harness-ends-the-line ()
   "In the sidebar, the harness's icon ends each line, where the icons line up.
 In two lines, at the end of the title's line, after the age, whatever
-its width, in a cell as wide as the widest icon; in columns, in the last
-column, after the age's and the prompt cache's, which a session without
-a live cache leaves empty.  The positions are the pixels lines align
+its width, in a cell as wide as the widest icon, the host's icon and the
+context's pie before it, each in a cell of its own, which a line without
+one leaves empty: the host's only on the line of a session of another
+host, the pie only on that of a session whose context fills a known
+part.  In columns, the harness in the last column, after the age's and
+the prompt cache's, which a session without a live cache leaves empty;
+the host's after the title's, empty but for a session of another host.  The positions are the pixels lines align
 their parts to."
   (drover-list-test-with nil
     (drover-list-test-showing
@@ -7330,6 +7535,7 @@ their parts to."
          'opencode (list (drover-session-create :backend 'opencode :id "o" :title "Open" :status 'idle
                                                 :engine 'opencode :engine-id "o"
                                                 :updated (drover-list-test-ago 240)
+                                                :context-tokens 100000 :context-limit 200000
                                                 :cache-expires (+ drover-test-now 200) :cache-ttl 300))
          :caches t)
         (let ((side (drover-list--show-side))
@@ -7337,25 +7543,32 @@ their parts to."
           (with-current-buffer (window-buffer side)
             (should (eq drover-list--layout 'narrow))
             (let* ((layout (drover-list--model-layout drover-list--model))
-                   (edge (alist-get 'harness (plist-get layout :edges)))
-                   (x (- (plist-get layout :width) edge)))
+                   (edges (plist-get layout :edges))
+                   (space (plist-get layout :space))
+                   (harness-x (- (plist-get layout :width) (alist-get 'harness edges)))
+                   (host-x (- harness-x space (alist-get 'host edges)))
+                   (context-x (- host-x space (alist-get 'context edges))))
+              (should (equal (mapcar #'car edges) '(harness host context)))
               ;; Ages of two and three characters: 4m, 10m.
-              (should (string-match-p "\\`· Open +4m O\\'" (drover-list-test-remote-line '(opencode . "o"))))
-              (should (string-match-p "\\`· Transcript +10m T\\'"
+              (should (string-match-p "\\`· Open +4m ▄ +O\\'" (drover-list-test-remote-line '(opencode . "o"))))
+              (should (string-match-p "\\`· Transcript +10m +T\\'"
                                       (drover-list-test-remote-line '(claude-code . "t"))))
-              (should (string-match-p "\\`· Remote +core 6m C\\'"
+              (should (string-match-p "\\`· Remote +core 6m +@ C\\'"
                                       (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
               (dolist (key keys)
                 (let* ((cells (drover-list-test-key-cells key))
-                       (icon (car (last cells)))
-                       (age (car (last cells 2))))
-                  ;; Every icon begins at the same pixel, past the age.
-                  (should (= (car icon) x))
-                  (should (equal (substring-no-properties (cdr icon))
-                                 (plist-get (alist-get (if (eq (car key) 'remote:core) 'claude-code-ide (car key))
-                                                       drover-harnesses)
-                                            :icon)))
-                  (should (<= (+ (car age) (string-pixel-width (cdr age))) (- x (plist-get layout :space)))))))
+                       (text (lambda (x) (and (assoc x cells) (substring-no-properties (cdr (assoc x cells))))))
+                       (age (car (last (seq-take-while (lambda (cell) (< (car cell) context-x)) cells)))))
+                  (ert-info ((format "%S" key))
+                    ;; Every icon begins at the pixel of its cell, past the age.
+                    (should (equal (funcall text harness-x)
+                                   (plist-get (alist-get (if (eq (car key) 'remote:core) 'claude-code-ide (car key))
+                                                         drover-harnesses)
+                                              :icon)))
+                    (should (equal (funcall text host-x) (and (eq (car key) 'remote:core) "@")))
+                    (should (equal (funcall text context-x) (and (equal key '(opencode . "o")) "▄")))
+                    (should (equal (car (last cells)) (assoc harness-x cells)))
+                    (should (<= (+ (car age) (string-pixel-width (cdr age))) (- context-x space)))))))
             (drover-list-test-is-fresh)
             ;; Wider, in columns: the harness's column follows the age's
             ;; and the cache's, the summary's after it.
@@ -7365,11 +7578,14 @@ their parts to."
             (should (equal drover-list--fields '(title host age cache harness summary)))
             (let* ((columns (plist-get (drover-list--model-layout drover-list--model) :columns))
                    (cache (assq 'cache columns))
+                   (host (assq 'host columns))
                    (harness (assq 'harness columns)))
               (dolist (key keys)
                 (let ((cells (drover-list-test-key-cells key)))
                   ;; Each icon in the harness's column, its own last cell.
                   (should (= (car (car (last cells))) (nth 1 harness)))
+                  ;; The host only on the line of a session of another host.
+                  (should (eq (and (assoc (nth 1 host) cells) t) (eq (car key) 'remote:core)))
                   ;; The cache only on the line of the session that has one.
                   (should (eq (and (assoc (nth 1 cache) cells) t) (equal key '(opencode . "o")))))))
             (drover-list-test-is-fresh)))))))
