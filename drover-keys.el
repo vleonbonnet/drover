@@ -44,7 +44,10 @@
 ;; While the menu acts on drover's list, here or beside, a List group
 ;; moves in that list, the menu staying open: C-n, C-p, M-n, M-p, M-<
 ;; and M->, keys of no other set; RET opens the session at point, but
-;; in a buffer sending prompts, where it stays the prompt key Send.
+;; in a buffer sending prompts, where it stays the prompt key Send, and
+;; from another buffer while drover's prompt holds a prompt to send,
+;; where RET sends it.  In the list itself, RET opens, and M-RET sends
+;; the prompt: the menu never shows both RET.
 ;;
 ;; Bind `drover-dispatch' globally, for instance to C-'; drover binds no
 ;; global key.  Other packages add their own global commands to the menu
@@ -816,9 +819,15 @@ list shown in another window does not count."
   "Return non-nil when RET in the dispatch menu opens the session at point.
 It does so in the menu's List group, while the menu acts on one of
 drover's lists, unless the current buffer sends prompts: there RET
-stays Send, as losing a prompt to a slip is worse than reaching for o."
+stays Send, as losing a prompt to a slip is worse than reaching for o.
+Nor does it from another buffer, acting on a list in sight, while a
+prompt is ready to send (see `drover-prepared-prompt-function'): RET
+then sends it, as the user typing there means to.  In the list itself,
+RET opens, as it does there, and M-RET sends the prompt."
   (and (drover-dispatch-view-p)
-       (not (drover-prompt-defines-p (current-buffer) 'send))))
+       (not (drover-prompt-defines-p (current-buffer) 'send))
+       (not (and (plist-get (drover--scope) :window)
+                 (drover--prompt-target 'send nil nil t)))))
 
 (defun drover--dispatch-window ()
   "Return the window of the list the dispatch menu acts on, when not current.
@@ -1842,7 +1851,12 @@ act on that list, on the session at its window's point (see
 `drover--context').  While the menu acts on one of drover's lists, its
 List group moves that point, the menu staying open and following the
 new session at point, and RET opens the session, but in a buffer that
-sends prompts, where RET stays Send."
+sends prompts, where RET stays Send, and from another buffer while
+drover's prompt holds a prompt to send, which RET sends.  In the list
+itself, RET opens the session and M-RET sends that prompt.
+
+Send sends drover's prompt from any buffer, as from the prompt, to the
+session chosen for it, else to one asked for, unshown."
   :class 'drover--menu-prefix
   :refresh-suffixes t
   [:class drover--menu-flow
@@ -1871,6 +1885,10 @@ sends prompts, where RET stays Send."
     ("RET" drover--dispatch-send-description drover-prompt-send
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
      :if-not drover-dispatch-list-return-p)
+    ;; Where RET opens, Send has a key of its own.
+    ("M-RET" drover--dispatch-send-description drover-prompt-send
+     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
+     :if drover-dispatch-list-return-p)
     ("S-<return>" "Schedule" drover-prompt-schedule
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'schedule)))
     ("i" "Attach" drover-prompt-attach :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))

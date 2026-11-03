@@ -1588,6 +1588,11 @@ PROPERTIES is a plist of:
              draw, so it must cost nothing for sessions whose details
              are known, being fetched, or cannot be fetched.  See
              `drover-prefetch'.
+ :caches     Non-nil when the backend may report the prompt caches of
+             its sessions (the `cache-expires' of their records), or a
+             function of no argument telling whether it may now: lists
+             then keep the room of the prompt cache while no cache of
+             theirs is live, as a cache comes and goes with turns.
  :recap      Function of a session and a CALLBACK fetching a recap of
              its last turn, and calling CALLBACK once with it, possibly
              before returning; it must never wait.  See `drover-recap'
@@ -1730,6 +1735,15 @@ Backends without a :buffer function never report one."
   "Return PROPERTY of BACKEND, a name or a session."
   (let ((name (if (drover-session-p backend) (drover-session-backend backend) backend)))
     (plist-get (alist-get name drover--backends) property)))
+
+(defun drover-backend-caches-p (backend)
+  "Return non-nil when BACKEND, a name, may report prompt caches now.
+See the property :caches of `drover-register-backend'."
+  (let ((caches (drover-backend-property backend :caches)))
+    (if (functionp caches)
+        (drover-with-reporting "backend caches"
+          (funcall caches))
+      caches)))
 
 (defun drover-backend-label (backend)
   "Return the display name of BACKEND, a name or a session."
@@ -4188,6 +4202,14 @@ See `drover-prompt-actions' for the actions."
   (and (buffer-live-p buffer)
        (assq action (buffer-local-value 'drover-prompt-actions buffer))))
 
+(defvar drover-prepared-prompt-function nil
+  "Function of no argument returning a prompt buffer ready to send, or nil.
+The prompt action `send' applies from a buffer that does not define it
+to the buffer it returns, when that buffer defines it (see
+`drover-prompt-target'): drover's own prompt, which `drover-prompt'
+sets it to, holding something to send.  It is called whenever a menu
+tells whether Send applies, so it must cost little.")
+
 (defun drover--prompt-target (action session list &optional probe)
   "Return the buffer prompt ACTION applies to, or nil.
 SESSION is the session at point, or nil; LIST is non-nil in a list of
@@ -4197,6 +4219,11 @@ create its buffer, is then not called, and its presence stands for the
 symbol `default'."
   (cond
    ((drover-prompt-defines-p (current-buffer) action) (current-buffer))
+   ((eq action 'send)
+    (when-let* ((function drover-prepared-prompt-function)
+                (buffer (drover-with-reporting "prepared prompt"
+                          (funcall function))))
+      (and (drover-prompt-defines-p buffer action) buffer)))
    ((and list (assq action drover--backend-prompt-actions)) nil)
    ((and list session (memq action drover--list-prompt-actions)
          (let ((buffer (drover-session-buffer session)))
@@ -4220,10 +4247,13 @@ It is, in order:
     and `last-answer', the live buffer of the session at point, when it
     defines ACTION; for `compact' and `fork' there is none, as the
     backend operates on the session instead;
- 3. for `agent', `model', `effort' and `directory', the buffer
+ 3. for `send', the buffer of a prompt ready to send that
+    `drover-prepared-prompt-function' returns, when it defines ACTION,
+    in a list too;
+ 4. for `agent', `model', `effort' and `directory', the buffer
     `drover-default-prompt-buffer-function' returns, when it defines
     ACTION;
- 4. for `last-answer', the most recently selected buffer defining it."
+ 5. for `last-answer', the most recently selected buffer defining it."
   (let ((list (drover-session-list-p)))
     (drover--prompt-target action (and list (drover-session-at-point t)) list)))
 

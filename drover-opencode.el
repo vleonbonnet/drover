@@ -1404,6 +1404,8 @@ unknown.  The backend's :options."
    :compact #'drover-opencode--compact
    :history #'drover-opencode--history
    :prefetch #'drover-opencode--prefetch
+   ;; Only a service of the fork lists them.
+   :caches #'opencode-state-cache-supported-p
    :engines '(opencode)
    :create #'drover-opencode--create
    :check #'drover-opencode--check

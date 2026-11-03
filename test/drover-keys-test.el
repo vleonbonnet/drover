@@ -38,6 +38,8 @@
              (opencode-session-status-icons '((waiting . "⚑") (failed . "✗") (done . "✓")
                                      (retrying . "↻") (working . "◐") (idle . "·")))
              (drover-default-prompt-buffer-function nil)
+             ;; No prompt to send but those a test prepares.
+             (drover-prepared-prompt-function nil)
              (drover-keys-test-actions nil))
          ,@body))))
 
