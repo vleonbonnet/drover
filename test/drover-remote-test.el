@@ -29,6 +29,7 @@
 (require 'drover-remote)
 (require 'drover-links)
 (require 'drover-list)
+(require 'drover-prompt)
 (require 'spyglass nil t)
 
 (defun drover-remote-test--available-p ()
@@ -577,7 +578,7 @@ Their sessions stay, as received."
       (drover-preview session (lambda (value) (setq preview value)))
       (drover-remote-test-wait (lambda () (and recap preview)))
       (should (equal recap '(:prompt "Prompt of s1" :reply "Reply of s1" :changes (("a.el" 3 1)))))
-      (should (equal preview "Preview of s1"))
+                             (should (string-prefix-p "# Preview of s1\n" preview))
       ;; Opening it shows what its host tells.
       (save-window-excursion
         (drover-open session)
@@ -835,7 +836,7 @@ Their sessions stay, as received."
       (should (= (length (drover-remote--peer-asks peer)) 2))
       (drover-remote-test-wait (lambda () (and recap preview)))
       (should (equal recap '(:prompt "Prompt of s1" :reply "Reply of s1" :changes (("a.el" 3 1)))))
-      (should (equal preview "Preview of s1"))
+                             (should (string-prefix-p "# Preview of s1\n" preview))
       (should-not (drover-remote--peer-asks peer))
       ;; Asked while not connected, it fails at once; a peer gone for good
       ;; fails what it was to be asked again.
@@ -1096,6 +1097,351 @@ leading back to what holds it would print it again from each."
           (drover-set-show-history nil)
           (kill-buffer)
           (kill-buffer "*drover remote*"))))))
+
+;;;; Actions on a peer's sessions
+
+(defun drover-remote-test-start-full (dir &rest environment)
+  "Start the agent in DIR granting full access, with more ENVIRONMENT, and connect."
+  (let ((process-environment (append (cons "DROVER_AGENT_ACCESS=full" environment) process-environment)))
+    (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+  (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted (drover-remote--peer "agent")) 'full)))
+  (should (eq (drover-remote--peer-granted (drover-remote--peer "agent")) 'full)))
+
+(defun drover-remote-test-calls (&optional action)
+  "Return the agent's actions performed, of ACTION if given, as (ACTION ID ARGUMENT)."
+  (seq-filter (lambda (call) (or (null action) (equal (car call) action)))
+              (mapcar (lambda (call) (append call nil))
+                      (plist-get (drover-remote-test-command "calls") :calls))))
+
+(defun drover-remote-test-session (id)
+  "Return this host's record of the agent's session ID, or nil."
+  (drover-changed-now)
+  (drover-index-session (cons 'remote:agent (cons 'fake id))))
+
+(defun drover-remote-test-events (&optional name)
+  "Return the kinds of the events of this host's link with the peer NAME, oldest first."
+  (mapcar #'cadr (reverse (drover-remote--peer-history (drover-remote--peer (or name "agent"))))))
+
+(ert-deftest drover-remote-test-actions ()
+  "Each action on another host's session is performed there once, its outcome shown as its records change."
+  (drover-remote-test-with nil
+                           (drover-remote-test-start-full dir)
+                           (drover-remote-test-command "sessions" :n 6)
+                           (drover-remote-test-synced 6)
+                           (let ((done (drover-remote-test-session "s2"))
+                                 (working (drover-remote-test-session "s1")))
+                             (should (eq (drover-session-status done) 'done))
+                             ;; What the owner allows travels with each record.
+                             (should (drover-supports-p done :mark-seen))
+                             (should (drover-supports-p done :delete))
+                             (should (drover-archivable-p done))
+                             ;; Marked seen there: its status changes there, then here.
+                             (drover-mark-seen done)
+                             (drover-remote-test-wait (lambda () (eq (drover-session-status (drover-remote-test-session "s2")) 'idle)))
+                             (should (eq (drover-session-status (drover-remote-test-session "s2")) 'idle))
+                             (drover-interrupt working)
+                             (drover-remote-test-wait (lambda () (eq (drover-session-status (drover-remote-test-session "s1")) 'idle)))
+                             (drover-rename (drover-remote-test-session "s3") "Renamed there")
+                             (drover-remote-test-wait (lambda () (equal (drover-session-title (drover-remote-test-session "s3"))
+                                                                        "Renamed there")))
+                             ;; Archived there: gone from the sessions in use, listed among the archived.
+                             (drover-archive (drover-remote-test-session "s4"))
+                             (drover-remote-test-wait (lambda () (null (drover-remote-test-session "s4"))))
+                             (should-not (drover-remote-test-session "s4"))
+                             (drover-set-show-archived t)
+                             (let ((archived nil))
+                               (drover-remote-test-wait
+                                (lambda () (setq archived (seq-find (lambda (session) (equal (drover-session-id session) '(fake . "s4")))
+                                                                    (drover-known-sessions)))))
+                               (should archived)
+                               (should (drover-unarchivable-p archived))
+                               (drover-unarchive archived))
+                             (drover-remote-test-wait (lambda () (drover-remote-test-session "s4")))
+                             (should (drover-remote-test-session "s4"))
+                             (drover-set-show-archived nil)
+                             (drover-delete (drover-remote-test-session "s5"))
+                             (drover-remote-test-wait (lambda () (null (drover-remote-test-session "s5"))))
+                             ;; A prompt goes to its owner, which submits it.
+                             (funcall (drover-backend-property 'remote:agent :send) (drover-remote-test-session "s0") "Hello there" nil)
+                             (drover-remote-test-wait (lambda () (drover-remote-test-calls "send")))
+                             ;; Each was performed once.
+                             (should (equal (mapcar (lambda (call) (list (car call) (cadr call))) (drover-remote-test-calls))
+                                            '(("mark-seen" "s2") ("interrupt" "s1") ("rename" "s3") ("archive" "s4")
+                                              ("unarchive" "s4") ("delete" "s5") ("send" "s0"))))
+                             (should (equal (nth 2 (car (drover-remote-test-calls "send"))) "Hello there"))
+                             ;; Sessions of the agent are offered to the prompt, without buffers.
+                             (should (assoc (drover-remote-test-session "s0") (drover-prompt--target-sessions))))))
+
+(ert-deftest drover-remote-test-answer-request ()
+  "A request of another host's session is answered here, what it asks coming from its owner."
+  (drover-remote-test-with nil
+                           (drover-remote-test-start-full dir)
+                           (drover-remote-test-command "sessions" :n 2)
+                           (drover-remote-test-command "ask" :ids ["s1"])
+                           (drover-remote-test-synced 2 (lambda (_) (drover-session-requests (drover-remote-test-session "s1"))))
+                           (let ((asked nil))
+                             (cl-letf (((symbol-function 'completing-read)
+                                        (lambda (prompt collection &rest _)
+                                          (setq asked (list prompt collection))
+                                          "always")))
+                               (drover-respond (drover-remote-test-session "s1")))
+                             (should (string-match-p "Shell command: ls (Agent)" (car asked)))
+                             (should (equal (cadr asked) '("once" "always" "reject"))))
+                           (drover-remote-test-wait (lambda () (drover-remote-test-calls "answer")))
+                           (should (equal (car (drover-remote-test-calls "answer")) '("answer" "s1" "always")))
+                           (drover-remote-test-wait (lambda () (null (drover-session-requests (drover-remote-test-session "s1")))))
+                           (should (eq (drover-session-status (drover-remote-test-session "s1")) 'working))))
+
+(ert-deftest drover-remote-test-refused-by-access ()
+  "A peer of read access acts on nothing: greyed out here, refused there whatever is asked, told once."
+  (drover-remote-test-with nil
+                           (drover-remote-test-connect (drover-remote-test-start-agent dir))
+                           (drover-remote-test-command "sessions" :n 3)
+                           (drover-remote-test-synced 3)
+                           (drover-remote-test-wait (lambda () (drover-remote--peer-granted (drover-remote--peer "agent"))))
+                           (let ((session (drover-remote-test-session "s2"))
+                                 (peer (drover-remote--peer "agent")))
+                             (should (eq (drover-remote--peer-granted peer) 'read))
+                             (should-not (drover-supports-p session :mark-seen))
+                             (should-not (drover-archivable-p session))
+                             ;; Recaps still come.
+                             (should (drover-supports-p session :recap))
+                             (should (string-match-p "grants this host read access"
+                                                     (cadr (should-error (drover-mark-seen session) :type 'user-error))))
+                             ;; Asked anyway, past this host's checks: refused there.
+                             (let ((outcome nil))
+                               (drover-remote--send-chunk peer "mark-seen" nil
+                                                          (list (list "mark-seen" '(fake . "s2") nil
+                                                                      (lambda () (setq outcome 'done))
+                                                                      (lambda (message) (setq outcome message)))))
+                               (drover-remote-test-wait (lambda () outcome))
+                               (should (stringp outcome))
+                               (should (string-match-p "read access" outcome)))
+                             (should-not (drover-remote-test-calls))
+                             (should (member "refused" (mapcar (lambda (event) (aref event 0))
+                                                               (plist-get (drover-remote-test-command "history" :peer "viewer")
+                                                                          :events)))))))
+
+(ert-deftest drover-remote-test-older-peer-read-only ()
+  "A peer running an older drover keeps listing its sessions here, actions disabled with a note."
+  (drover-remote-test-with nil
+                           (let ((process-environment (append '("DROVER_AGENT_ACCESS=full" "DROVER_AGENT_OLD=1") process-environment)))
+                             (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+                           (drover-remote-test-command "sessions" :n 3)
+                           (drover-remote-test-synced 3)
+                           (let ((session (drover-remote-test-session "s2")))
+                             (should-not (drover-supports-p session :mark-seen))
+                             (should (string-match-p "older drover" (cadr (should-error (drover-mark-seen session) :type 'user-error))))
+                             (should (string-match-p "older drover" (drover-remote--refusal (drover-remote--peer "agent")))))))
+
+(ert-deftest drover-remote-test-action-survives-a-drop ()
+  "An action whose stream breaks before its answer is asked again, and performed once."
+  (drover-remote-test-with nil
+                           (drover-remote-test-start-full dir)
+                           (drover-remote-test-command "sessions" :n 3)
+                           (drover-remote-test-synced 3)
+                           (drover-remote-test-command "hold")
+                           (let ((outcome nil)
+                                 (peer (drover-remote--peer "agent")))
+                             (drover--call-confirming (drover-remote-test-session "s2") :mark-seen
+                                                      (lambda () (setq outcome 'done)) (lambda (message) (setq outcome message)))
+                             (drover-remote-test-wait (lambda () (drover-remote-test-calls "mark-seen")))
+                             (spyglass-connection-drop-stream (drover-remote--peer-dialed peer))
+                             (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 5)
+                             (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state peer) 'open)))
+                             (drover-remote-test-settle 0.3)
+                             (drover-remote-test-command "release")
+                             (drover-remote-test-wait (lambda () outcome))
+                             (should (eq outcome 'done))
+                             (should (= (length (drover-remote-test-calls "mark-seen")) 1)))))
+
+(ert-deftest drover-remote-test-action-times-out ()
+  "An action whose peer never answers fails at its deadline, on one line."
+  (drover-remote-test-with nil
+                           (drover-remote-test-start-full dir)
+                           (drover-remote-test-command "sessions" :n 3)
+                           (drover-remote-test-synced 3)
+                           (drover-remote-test-command "hold")
+                           (let ((outcome nil)
+                                 (drover-remote-action-timeout 1.5))
+                             (drover--call-confirming (drover-remote-test-session "s2") :mark-seen
+                                                      (lambda () (setq outcome 'done)) (lambda (message) (setq outcome message)))
+                             ;; Its peer gone meanwhile, for longer than the action waits.
+                             (drover-remote-test-command "drop" :away 5)
+                             (drover-remote-test-wait (lambda () outcome) 10)
+                             (should (stringp outcome))
+                             (should (string-match-p "\\`Agent: \\|did not come back" outcome))
+                             (should-not (string-search "\n" outcome)))))
+
+(ert-deftest drover-remote-test-bulk-batched ()
+  "Archiving hundreds of another host's sessions goes in a few requests, reported once."
+  (drover-remote-test-with nil
+                           (drover-remote-test-start-full dir)
+                           (drover-remote-test-command "sessions" :n 300)
+                           (drover-remote-test-synced 300)
+                           (let ((messages nil))
+                             (cl-letf (((symbol-function 'message)
+                                        (lambda (format-string &rest args)
+                                          (when format-string (push (apply #'format format-string args) messages)))))
+                               (drover-archive (drover-remote-test-remote))
+                               (drover-remote-test-wait (lambda () (null drover--bulk-jobs)) 30))
+                             (should (= (length (drover-remote-test-calls "archive")) 300))
+                             (should (seq-some (lambda (text) (string-match-p "\\`Archived 300 sessions" text)) messages))
+                             (drover-remote-test-synced 0)
+                             (should (= (plist-get (drover-remote-test-stats) :actions-sent) 300))
+                             ;; Requests of 100 sessions at most, and few.
+                             (let ((asked (seq-filter (lambda (event) (equal (aref event 0) "act"))
+                                                      (plist-get (drover-remote-test-command "history" :peer "viewer") :events))))
+                               (should (<= 3 (length asked) 8))))))
+
+;;;; The link
+
+(ert-deftest drover-remote-test-history-bounded ()
+  "Each peer keeps the last events of its link, errors with their messages, bounded."
+  (skip-unless (drover-remote-test--available-p))
+  (let ((peer (drover-remote--peer-make :name "core")))
+    (dotimes (i 100)
+      (drover-remote--event peer 'drop "stream ended %d" i))
+    (should (= (length (drover-remote--peer-history peer)) drover-remote-history-size))
+    (should (equal (nth 2 (car (drover-remote--peer-history peer))) "stream ended 99"))
+    (drover-remote--fail peer (concat "Error in filter: (excessive-lisp-nesting 1601) " (make-string 5000 ?x)))
+    (let ((event (car (drover-remote--peer-history peer))))
+      (should (eq (nth 1 event) 'error))
+      (should (string-match-p "excessive-lisp-nesting" (nth 2 event)))
+      (should (<= (length (nth 2 event)) 201)))
+    ;; The last error stays, with its time.
+    (should (string-match-p "excessive-lisp-nesting" (drover-remote--peer-error peer)))
+    (should (drover-remote--peer-error-time peer))))
+
+(ert-deftest drover-remote-test-restart-keeps-rows ()
+  "A peer restarting its remote layer says so: its rows stay, it greets again, and a snapshot of its new epoch comes."
+  (drover-remote-test-with nil
+                           (drover-remote-test-connect (drover-remote-test-start-agent dir))
+                           (drover-remote-test-command "sessions" :n 5)
+                           (drover-remote-test-synced 5)
+                           (let* ((peer (drover-remote--peer "agent"))
+                                  (epoch (drover-remote--peer-epoch peer))
+                                  (snapshots (plist-get (drover-remote-test-stats) :snapshots))
+                                  (dimmed nil))
+                             (drover-remote-test-command "restart")
+                             (drover-remote-test-wait (lambda ()
+                                                        (drover-changed-now)
+                                                        (when (seq-some #'drover-session-stale (drover-remote-test-remote))
+                                                          (setq dimmed t))
+                                                        (and (not (equal (drover-remote--peer-epoch peer) epoch))
+                                                             (eq (drover-remote--peer-state peer) 'open))))
+                             (should-not (equal (drover-remote--peer-epoch peer) epoch))
+                             (should (> (plist-get (drover-remote-test-stats) :snapshots) snapshots))
+                             (should (memq 'bye (drover-remote-test-events)))
+                             (should (string-match-p "restart" (seq-some (lambda (event) (and (eq (nth 1 event) 'bye) (nth 2 event)))
+                                                                         (drover-remote--peer-history peer))))
+                             (should-not dimmed)
+                             (drover-remote-test-synced 5))))
+
+(ert-deftest drover-remote-test-relayout-resubscribes ()
+  "A peer whose remote layer starts anew on the same connection greets again: this host subscribes again, and gets its new epoch."
+  (drover-remote-test-with (list (drover-test-session "v1"))
+                           (drover-remote-test-connect (drover-remote-test-start-agent dir "agent" "viewer"))
+                           (drover-remote-test-command "sessions" :n 4)
+                           (drover-remote-test-synced 4)
+                           (let* ((peer (drover-remote--peer "agent"))
+                                  (connection (drover-remote--peer-connection peer))
+                                  (epoch (drover-remote--peer-epoch peer)))
+                             (drover-remote-test-command "relayout")
+                             (drover-remote-test-wait (lambda () (and (drover-remote--peer-epoch peer)
+                                                                      (not (equal (drover-remote--peer-epoch peer) epoch)))))
+                             ;; The same connection, a new epoch, a snapshot of it.
+                             (should (eq (drover-remote--peer-connection peer) connection))
+                             (should-not (equal (drover-remote--peer-epoch peer) epoch))
+                             (should (seq-some (lambda (event) (and (eq (nth 1 event) 'snapshot) (string-match-p "its epoch was" (nth 2 event))))
+                                               (drover-remote--peer-history peer)))
+                             ;; Changes keep coming, through it.
+                             (drover-remote-test-command "change" :ids ["s1"] :title "After the restart" :now t)
+                             (drover-remote-test-synced 4 (lambda (_) (equal (drover-session-title (drover-remote-test-session "s1"))
+                                                                             "After the restart")))
+                             ;; It subscribed to this host again too: it lists this host's session.
+                             (drover-remote-test-wait (lambda () (= (length (plist-get (drover-remote-test-command "hosts") :remote)) 1)))
+                             (should (= (length (plist-get (drover-remote-test-command "hosts") :remote)) 1)))))
+
+(ert-deftest drover-remote-test-grace-then-dimmed ()
+  "A peer whose own connection ends has a grace to dial again before its rows dim; quitting, they dim at once."
+  (drover-remote-test-with nil
+                           (let ((drover-remote-grace 1.5)
+                                 (drover-remote-peers '(("agent"))))
+                             (drover-remote-mode 1)
+                             (let ((process-environment (cons (concat "DROVER_AGENT_DIAL=" spyglass-registration-file)
+                                                              process-environment)))
+                               (drover-remote-test-start-agent dir "agent" "viewer"))
+                             (let ((peer (drover-remote--peer "agent")))
+                               (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state peer) 'open)))
+                               (drover-remote-test-command "sessions" :n 3)
+                               (drover-remote-test-synced 3)
+                               ;; Back within the grace: never dimmed.
+                               (let ((dimmed nil))
+                                 (drover-remote-test-command "drop")
+                                 (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 5)
+                                 (drover-remote-test-wait (lambda ()
+                                                            (when (drover-remote--peer-stale peer) (setq dimmed t))
+                                                            (eq (drover-remote--peer-state peer) 'open)))
+                                 (should (eq (drover-remote--peer-state peer) 'open))
+                                 (should-not dimmed)
+                                 (should (memq 'grace (drover-remote-test-events))))
+                               ;; Away past it: dimmed, then fresh once back.
+                               (drover-remote-test-command "drop" :away 4)
+                               (drover-remote-test-wait (lambda () (drover-remote--peer-stale peer)) 5)
+                               (should (drover-remote--peer-stale peer))
+                               (drover-remote-test-wait (lambda () (and (eq (drover-remote--peer-state peer) 'open)
+                                                                        (not (drover-remote--peer-stale peer))))
+                                                        10)
+                               (should-not (drover-remote--peer-stale peer))
+                               ;; Quitting, it says so: dimmed at once, with no grace.
+                               (drover-remote-test-command "quit")
+                               (drover-remote-test-wait (lambda () (drover-remote--peer-stale peer)) 1)
+                               (should (drover-remote--peer-stale peer))
+                               (should (equal (car (drover-remote--peer-bye peer)) "quit"))))))
+
+;;;; Showing a session of a peer
+
+(ert-deftest drover-remote-test-show-renders-markdown ()
+  "A session of another host shows its last reply as OpenCode's buffers render Markdown, read only."
+  (drover-remote-test-with nil
+                           (let ((treesit-extra-load-path (cons (expand-file-name "~/.emacs.d/tree-sitter")
+                                                                (bound-and-true-p treesit-extra-load-path))))
+                             (skip-unless (drover-remote--markdown-ready-p))
+                             (drover-remote-test-connect (drover-remote-test-start-agent dir))
+                             (drover-remote-test-command "sessions" :n 3)
+                             (drover-remote-test-synced 3)
+                             (save-window-excursion
+                               (with-current-buffer (drover-remote-show (drover-remote-test-session "s1"))
+                                 (drover-remote-test-wait (lambda () (save-excursion (goto-char (point-min))
+                                                                                     (search-forward "Prompt of s1" nil t))))
+                                 (goto-char (point-min))
+                                 (should (search-forward "Preview of s1" nil t))
+                                 ;; A heading, its markup gone; bold; code fontified by its language.
+                                 (should (memq 'markdown-ts-heading-1 (ensure-list (get-text-property (match-beginning 0) 'face))))
+                                 (should-not (save-excursion (goto-char (point-min)) (search-forward "**" nil t)))
+                                 (should (search-forward "bold" nil t))
+                                 (should (memq 'markdown-ts-bold (ensure-list (get-text-property (match-beginning 0) 'face))))
+                                 (should (search-forward "defun" nil t))
+                                 (should (memq 'font-lock-keyword-face (ensure-list (get-text-property (match-beginning 0) 'face))))
+                                 ;; Its status in its face, the labels dim, read only.
+                                 (goto-char (point-min))
+                                 (should (search-forward "Working" nil t))
+                                 (should (eq (get-text-property (match-beginning 0) 'face) (opencode-session-status-face 'working)))
+                                 (should buffer-read-only)
+                                 (kill-buffer))))))
+
+(ert-deftest drover-remote-test-tooltips-travel ()
+  "Strings with faces keep their tooltips across hosts, bounded; tooltips made by functions stay home."
+  (skip-unless (drover-remote-test--available-p))
+  (let* ((agent (concat (propertize "plan" 'face 'bold 'help-echo (concat "Agent plan\n" (make-string 50000 ?x)))
+                        (propertize "!" 'help-echo #'ignore)))
+         (record (drover-session-create :backend 'opencode :id "s" :agent-display agent))
+         (decoded (drover-remote-test--roundtrip record)))
+    (should (equal (get-text-property 0 'face (drover-session-agent-display decoded)) 'bold))
+    (should (string-prefix-p "Agent plan" (get-text-property 0 'help-echo (drover-session-agent-display decoded))))
+    (should (< (length (get-text-property 0 'help-echo (drover-session-agent-display decoded))) 5000))
+    (should-not (get-text-property 4 'help-echo (drover-session-agent-display decoded)))))
 
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

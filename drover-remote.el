@@ -39,9 +39,13 @@
 ;; mode-line count.  Records are installed in slices from timers, and
 ;; sent in slices too: no step blocks Emacs long.
 ;;
-;; This first step is read-only: recaps and previews come through the
-;; owner, and opening a session shows what the owner tells of it.  See
-;; doc/remote.org for the whole design.
+;; A peer acts on the sessions of another host through it: marking them
+;; seen, archiving, restoring, interrupting, deleting, renaming,
+;; answering their requests and sending them prompts are requests its
+;; owner performs through its own backends, as its access allows, the
+;; outcome showing here once its records changed; many sessions go in a
+;; few requests.  Each peer keeps a history of its link, shown by
+;; `drover-remote-status'.  See doc/remote.org for the whole design.
 
 ;;; Code:
 
@@ -49,9 +53,10 @@
 (require 'seq)
 (require 'subr-x)
 (require 'drover-core)
+(require 'drover-ui)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 14))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -83,6 +88,13 @@
 (declare-function spyglass-wire-decode "ext:spyglass-wire" (data &optional depth))
 (declare-function spyglass-wire-sanitize-string "ext:spyglass-wire" (string &optional depth))
 (declare-function spyglass-wire-random-token "ext:spyglass-wire" ())
+(declare-function spyglass-connection-ending "ext:spyglass-conn" (connection))
+(declare-function treesit-language-available-p "treesit.c" (language &optional detail))
+(declare-function markdown-ts-mode--initialize "markdown-ts-mode" ())
+(declare-function opencode-fontify-markdown "opencode-render" (start end &optional loudly))
+(defvar markdown-ts-hide-markup)
+(defvar markdown-ts-enable-code-block-context-mode)
+(defvar markdown-ts-enable-table-mode)
 (defvar drover-links-remote-function)
 
 ;;;; Options
@@ -109,8 +121,9 @@ NAME is the host's name, its `drover-host' there.  PROPERTIES is a plist:
  :local         The registration file of a spyglass server of this
                 host to connect to instead, without SSH: for another
                 Emacs of this host.
- :access        What it may do with this host's sessions: `read', `act'
-                or `full'.  This step serves reading alone.
+ :access        What it may do with this host's sessions: `read', to
+                list and read them; `act', to act on them too, but
+                delete them; `full', to delete them too.
  :aliases       Other names of it, in links.
 
 A host connecting under a name not here is refused, unless
@@ -153,8 +166,58 @@ A silent peer is dropped after TIMEOUT, and its sessions dimmed."
   :type 'number
   :group 'drover-remote)
 
+(defcustom drover-remote-grace 5
+  "Seconds a peer whose connection ended may take to connect again unnoticed.
+When the connection a peer dialed ends, this host waits this long for
+it to dial again before dimming its sessions: SSH connects again in
+about a second, and a peer restarting its remote layer greets again
+at once.  A peer saying its Emacs quits is dimmed at once."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-fallback-delay 10
+  "Seconds before this Emacs dials a peer whose own connection to it ended.
+Only for a peer this Emacs dials too (:dial), the peer's connection being
+the one kept: the peer dials again within seconds, as SSH and spyglass
+retry after 0.2, 1, 2 and 5 seconds, so this Emacs dials only when it
+did not.  A peer that said its Emacs quits is dialed after
+`drover-remote-standby-delay' instead."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-action-timeout 60
+  "Seconds an action on a session of a peer waits for the owner's answer.
+An action whose connection ends is asked again once connected anew, and
+done once whatever: past this, its outcome is reported unknown."
+  :type 'number
+  :group 'drover-remote)
+
 (defconst drover-remote-protocol 1
-  "The version of drover's protocol between hosts.")
+  "The version of drover's protocol between hosts.
+Peers of the same version understand each other; what a version adds is
+told in the greeting's capabilities (`drover-remote-capabilities'), so
+that a peer running an older drover keeps working without it.")
+
+(defconst drover-remote-capabilities '("actions" "bye" "grant")
+  "What this drover adds to its protocol's version, told in its greeting.
+\"actions\": it performs actions on its sessions for its peers, and
+tells which each session allows; \"bye\": its farewells say why it goes
+\(`restart', `quit', `off' or `dropped'), only those for good closing a
+peer; \"grant\": it tells each peer the access it grants it.")
+
+(defconst drover-remote-action-batch 100
+  "Sessions at most in one request of an action on a peer's sessions.")
+
+(defconst drover-remote-history-size 64
+  "Events of its link each peer keeps, the oldest going first.")
+
+(defconst drover-remote-outcomes 256
+  "Outcomes of the actions peers asked that this host keeps, by identifier.
+An action asked again, its answer lost with its stream, gets its outcome
+rather than run twice.")
+
+(defconst drover-remote-prompt-limit 262144
+  "Characters at most of a prompt sent to a session of a peer.")
 
 (defconst drover-remote-channel "drover"
   "The spyglass channel drover talks on.")
@@ -209,7 +272,17 @@ A silent peer is dropped after TIMEOUT, and its sessions dimmed."
 TABLE holds, by source, the records each of the owner's backends answered.")
   (asks nil :documentation "Requests whose stream ended before their answer, to ask again.
 Each is (MESSAGE CALLBACK DEADLINE), oldest first.")
-  (stats nil :documentation "Counters and measures, a plist."))
+  (stats nil :documentation "Counters and measures, a plist.")
+  (caps nil :documentation "The capabilities its drover told, strings, or nil for an older one.")
+  (granted nil :documentation "The access it grants this host, a symbol, or nil when untold.")
+  (history nil :documentation "Events of its link, newest first, as (TIME KIND TEXT).")
+  (error-time nil :documentation "When the last error happened, a float time.")
+  (bye nil :documentation "Its last farewell, as (KIND WHY TIME), or nil.")
+  (grace nil :documentation "Timer dimming its sessions once its connection did not come back.")
+  (outbox nil :documentation "Actions to send, newest first, as (ACTION KEY ARGS THEN ELSE).")
+  (flusher nil :documentation "Timer sending the actions of OUTBOX.")
+  (ops nil :documentation "What the owner allows of each session, a list of strings, by its key.")
+  (serial 0 :documentation "The number of the last action sent."))
 
 (cl-defstruct (drover-remote--sub (:constructor drover-remote--sub-make)
                                   (:copier nil))
@@ -253,7 +326,15 @@ Each is (MESSAGE CALLBACK DEADLINE), oldest first.")
   (tomb-count 0 :documentation "How many tombstones are kept.")
   (floor 0 :documentation "The revision before which tombstones were dropped.")
   (unsynced t :documentation "Non-nil when changes went unnoted, no peer subscribed.")
-  (started-server nil :documentation "Non-nil when the mode started spyglass's server."))
+  (started-server nil :documentation "Non-nil when the mode started spyglass's server.")
+  (outcomes (make-hash-table :test #'equal)
+            :documentation "Actions peers asked, by identifier, as (DONE . VALUE).
+DONE nil: VALUE lists the replies awaiting it; t: VALUE is its outcome.")
+  (outcome-order nil :documentation "The identifiers of OUTCOMES, newest first.")
+  (tasks nil :documentation "Actions peers asked being performed, oldest first.")
+  (runner nil :documentation "Timer performing TASKS.")
+  (flight 0 :documentation "Operations of TASKS whose backends have not answered.")
+  (watch nil :documentation "Timer failing the operations of TASKS not answered in time."))
 
 (drover-note-layout 'drover-remote--peer 'drover-remote--sub 'drover-remote--state)
 
@@ -326,6 +407,29 @@ anew, and peers greet each other again."
   (let ((access (plist-get (drover-remote--peer-properties peer) :access)))
     (if (memq access '(read act full)) access 'read)))
 
+(defun drover-remote--allows-p (access action)
+  "Return non-nil when ACCESS, `read', `act' or `full', allows ACTION, a string."
+  (pcase access
+    ('full t)
+    ('act (not (equal action "delete")))
+    (_ nil)))
+
+(defun drover-remote--event (peer kind format-string &rest args)
+  "Note in PEER's history an event of KIND, a symbol.
+FORMAT-STRING and ARGS tell it.  The history keeps
+`drover-remote-history-size' events, each on a line."
+  (when peer
+    (let ((history (cons (list (float-time) kind
+                               (drover-bound-line (apply #'format format-string args) 200))
+                         (drover-remote--peer-history peer))))
+      (when (> (length history) drover-remote-history-size)
+        (setcdr (nthcdr (1- drover-remote-history-size) history) nil))
+      (setf (drover-remote--peer-history peer) history))))
+
+(defun drover-remote--capable-p (peer capability)
+  "Return non-nil when PEER's drover told CAPABILITY, a string."
+  (member capability (drover-remote--peer-caps peer)))
+
 ;;;; Records on the wire
 
 (defun drover-remote--number (value)
@@ -341,11 +445,27 @@ anew, and peers greet each other again."
   (and (stringp value) (substring-no-properties value)))
 
 (defun drover-remote--faced (value)
-  "Return VALUE, a string, as it travels with its faces, or nil."
+  "Return VALUE, a string, as it travels with its faces and tooltips, or nil.
+Of its properties, only its faces and the strings of its `help-echo'
+travel, those bounded to `drover-text-lines' lines: a tooltip made by a
+function is this host's to compute."
   (when (stringp value)
-    (if (seq-some #'caddr (object-intervals value))
-        (spyglass-wire-encode value 6)
-      (substring-no-properties value))))
+    (let* ((value (if (> (length value) (* 2 drover-line-limit))
+                      (substring value 0 (* 2 drover-line-limit))
+                    value))
+           (copy (substring-no-properties value))
+           (kept nil))
+      (dolist (interval (object-intervals value))
+        (let* ((plist (caddr interval))
+               (face (plist-get plist 'face))
+               (help (plist-get plist 'help-echo))
+               (props (append (and face (list 'face face))
+                              (and (stringp help)
+                                   (list 'help-echo (drover-bound-lines (substring-no-properties help)))))))
+          (when props
+            (setq kept t)
+            (set-text-properties (car interval) (cadr interval) props copy))))
+      (if kept (spyglass-wire-encode copy 6) copy))))
 
 (defun drover-remote--wire-id (id)
   "Return ID, an identifier of a session, as it travels, or nil when it cannot."
@@ -412,8 +532,25 @@ identifier cannot travel."
         (put :agent-display (drover-remote--faced (drover-session-agent-display record)))
         (put :context-estimated (and (drover-session-context-estimated record) t))
         (put :archived (let ((archived (drover-session-archived record)))
-                         (if (eq archived t) t (drover-remote--number archived)))))
+                         (if (eq archived t) t (drover-remote--number archived))))
+        (put :ops (drover-remote--record-ops record)))
       (nreverse out))))
+
+(defun drover-remote--record-ops (record)
+  "Return the actions this host performs on RECORD for a peer, a vector of strings.
+What its backend supports of it, whatever a peer's access: each peer's
+greys out what its access forbids, and this host checks it again."
+  (drover-with-reporting "remote operations"
+    (vconcat
+     (delq nil
+           (list (and (drover-supports-p record :interrupt) "interrupt")
+                 (and (drover-supports-p record :mark-seen) "mark-seen")
+                 (and (drover-archivable-p record) "archive")
+                 (and (drover-session-archived-p record) (drover-unarchivable-p record) "unarchive")
+                 (and (drover-supports-p record :delete) "delete")
+                 (and (drover-supports-p record :rename) "rename")
+                 (and (drover-supports-p record :requests) (drover-supports-p record :answer) "answer")
+                 (and (drover-supports-p record :submit) "send"))))))
 
 (defun drover-remote--symbol (value)
   "Return the symbol VALUE, a string received, names, or nil when it may not.
@@ -443,16 +580,23 @@ Only short names of lowercase letters, digits and dashes are interned."
   (and (stringp value) (drover-bound-text value)))
 
 (defun drover-remote--faced-value (value)
-  "Return VALUE, a string with faces received, sanitized, on one line, or nil."
+  "Return VALUE, a string with faces received, sanitized, on one line, or nil.
+Its tooltips, strings, are kept too, bounded to `drover-text-lines' lines."
   (let ((string (if (stringp value)
                     value
                   (and (consp value) (ignore-errors (spyglass-wire-decode value 6))))))
-    (and (stringp string)
-         (drover-bound-line (spyglass-wire-sanitize-string
-                             (if (> (length string) (* 2 drover-line-limit))
-                                 (substring string 0 (* 2 drover-line-limit))
-                               string)
-                             0)))))
+    (when (stringp string)
+      (let* ((string (if (> (length string) (* 2 drover-line-limit))
+                         (substring string 0 (* 2 drover-line-limit))
+                       string))
+             (clean (spyglass-wire-sanitize-string string 0)))
+        (dolist (interval (object-intervals string))
+          (let ((help (plist-get (caddr interval) 'help-echo)))
+            (when (and (stringp help) (< (car interval) (length clean)))
+              (put-text-property (car interval) (min (cadr interval) (length clean)) 'help-echo
+                                 (drover-bound-lines (drover-bound-text (substring-no-properties help)))
+                                 clean))))
+        (drover-bound-line clean)))))
 
 (defun drover-remote--time (value offset)
   "Return VALUE, a time of the owner's clock, on this host's, OFFSET behind."
@@ -676,6 +820,8 @@ gets the changes since; else a snapshot."
              (<= held (drover-remote--state-rev state)))
         (progn
           (drover-remote--stat sub :resumes)
+          (drover-remote--event peer 'serve "serving it from revision %s of this host's epoch %s, to %s"
+                                held (drover-remote--state-epoch state) (drover-remote--state-rev state))
           (setf (drover-remote--sub-held sub) held)
           (maphash (lambda (key rev) (when (> rev held) (puthash key t (drover-remote--sub-dirty sub))))
                    (drover-remote--state-revs state))
@@ -685,6 +831,13 @@ gets the changes since; else a snapshot."
           (when (zerop (hash-table-count (drover-remote--sub-dirty sub)))
             (drover-remote--start-batch state sub 'up nil)))
       (drover-remote--stat sub :snapshots)
+      (drover-remote--event peer 'serve "serving it a snapshot of %d sessions: it held %s"
+                            (hash-table-count (drover-remote--state-sent state))
+                            (cond ((not (stringp epoch)) "nothing")
+                                  ((not (equal epoch (drover-remote--state-epoch state)))
+                                   (format "epoch %s, this host's being %s" (drover-bound-line epoch 16)
+                                           (drover-remote--state-epoch state)))
+                                  (t (format "revision %s, out of reach" held))))
       (drover-remote--start-batch state sub 'snap
                                   (hash-table-keys (drover-remote--state-sent state))))
     (drover-remote--schedule-flush sub)))
@@ -805,7 +958,24 @@ Records are read from STATE as they are now."
                        (list :t "hello" :v drover-remote-protocol :host drover-host
                              :inst spyglass-instance-id
                              :dialed (if (spyglass-connection-transport connection) t :false)
-                             :ask (if ask t :false))))
+                             :ask (if ask t :false)
+                             :caps (vconcat drover-remote-capabilities)
+                             :epoch (or (and drover-remote--state
+                                             (drover-remote--state-epoch drover-remote--state))
+                                        :false))))
+
+(defun drover-remote--bye (connection kind why)
+  "Tell CONNECTION's peer that this host goes, of KIND, because of WHY.
+KIND is \"restart\" (the remote layer starts anew, greeting again),
+\"quit\" (Emacs exits), \"off\" (the mode is turned off) or \"dropped\"
+\(this host's configuration dropped the peer).  A peer running an older
+drover closes this host for good on any farewell: it is told only of
+the last two, and of a restart, after which it greets again."
+  (let* ((state (drover-remote--current))
+         (peer (and state (drover-remote--peer-of state connection))))
+    (when (or (member kind '("off" "dropped" "restart"))
+              (and peer (drover-remote--capable-p peer "bye")))
+      (drover-remote--send connection (list :t "bye" :kind kind :why why)))))
 
 (defun drover-remote--refuse (connection why &optional close)
   "Tell CONNECTION's peer that this host refuses it, because of WHY.
@@ -835,6 +1005,17 @@ the peer writing meanwhile would lose what it had not read, the reason."
          (dialer (drover-remote--dialer-of state connection))
          (peer (and (stringp host) (drover-remote--find-peer host))))
     (cond
+     ((and peer (or (null dialer) (eq dialer peer)) (eq connection (drover-remote--peer-connection peer))
+           (stringp host) (string-equal-ignore-case host (drover-remote--peer-name peer))
+           (integerp version) (= version drover-remote-protocol))
+      ;; Greeted again on the connection kept: its remote layer started
+      ;; anew, and serves no subscription of this host's any more.
+      (drover-remote--greeted peer connection message)
+      (drover-remote--event peer 'hello "greeted again: its remote layer restarted, epoch %s"
+                            (drover-remote--hello-epoch message))
+      (when (eq (plist-get message :ask) t)
+        (drover-remote--hello connection))
+      (drover-remote--resubscribe peer nil))
      ((not (and (integerp version) (= version drover-remote-protocol)))
       (drover-remote--fail dialer (format "%s speaks drover's protocol %s, this host %s"
                                           (drover-bound-line (format "%s" host)) version
@@ -855,6 +1036,12 @@ the peer writing meanwhile would lose what it had not read, the reason."
         (setq peer (drover-remote--add-peer state (downcase host)
                                             (list :access drover-remote-accept-unknown) t)))
       (drover-remote--stat peer :hellos)
+      (drover-remote--greeted peer connection message)
+      (drover-remote--event peer 'hello "greeted on a connection %s, instance %s, epoch %s%s"
+                            (if dialer "this host dialed" "it dialed")
+                            (drover-bound-line (format "%s" (plist-get message :inst)) 16)
+                            (drover-remote--hello-epoch message)
+                            (if (drover-remote--peer-caps peer) "" ", an older drover: read only"))
       ;; JSON's false is `:false', not nil: asked only when told so.
       (when (eq (plist-get message :ask) t)
         (drover-remote--hello connection))
@@ -872,6 +1059,25 @@ the peer writing meanwhile would lose what it had not read, the reason."
       (spyglass-connection-set-heartbeat connection (float (car drover-remote-heartbeat))
                                          (float (cdr drover-remote-heartbeat)))
       (drover-remote--elect state peer)))))
+
+(defun drover-remote--hello-epoch (message)
+  "Return the epoch the greeting MESSAGE tells, on a short line."
+  (let ((epoch (plist-get message :epoch)))
+    (if (stringp epoch) (drover-bound-line epoch 16) "untold")))
+
+(defun drover-remote--greeted (peer connection message)
+  "Take what PEER's greeting MESSAGE on CONNECTION tells of its drover.
+Its capabilities, short strings, and this host's access, granted it."
+  (let ((caps (plist-get message :caps)))
+    (setf (drover-remote--peer-caps peer)
+          (and (vectorp caps)
+               (seq-filter (lambda (cap) (and (stringp cap) (< (length cap) 32)))
+                           (seq-take caps 16)))))
+  (when (drover-remote--peer-grace peer)
+    (cancel-timer (drover-remote--peer-grace peer))
+    (setf (drover-remote--peer-grace peer) nil))
+  (setf (drover-remote--peer-bye peer) nil)
+  (drover-remote--send connection (list :t "grant" :access (symbol-name (drover-remote--access peer)))))
 
 (defun drover-remote--preferred-ours-p (peer)
   "Return non-nil when the connection kept with PEER is the one this host dials.
@@ -912,6 +1118,7 @@ it dialed it, standing by."
     (let ((dialed (drover-remote--peer-dialed peer)))
       (when (and best dialed (not (eq dialed (car best)))
                  (assq dialed same))
+        (drover-remote--event peer 'elect "closed the connection this host dialed: the one it dialed is kept")
         (setf (drover-remote--peer-dialed peer) nil)
         (spyglass-disconnect dialed)))))
 
@@ -921,13 +1128,18 @@ STATE is the remote layer's."
   (ignore state)
   (drover-remote--reset-queue peer)
   (setf (drover-remote--peer-connection peer) connection
-        (drover-remote--peer-heard peer) (float-time)
-        (drover-remote--peer-error peer) nil)
+        (drover-remote--peer-heard peer) (float-time))
   (drover-remote--set-state peer 'open)
   (when (drover-remote--peer-standby peer)
     (cancel-timer (drover-remote--peer-standby peer))
     (setf (drover-remote--peer-standby peer) nil))
+  (when (drover-remote--peer-grace peer)
+    (cancel-timer (drover-remote--peer-grace peer))
+    (setf (drover-remote--peer-grace peer) nil))
   (drover-remote--stat peer :subscriptions)
+  (drover-remote--event peer 'sub "kept the connection %s; subscribed holding epoch %s revision %s"
+                        (if (spyglass-connection-transport connection) "this host dialed" "it dialed")
+                        (or (drover-remote--peer-epoch peer) "none") (or (drover-remote--peer-rev peer) "none"))
   (drover-remote--send connection (list :t "sub"
                                         :epoch (drover-remote--peer-epoch peer)
                                         :rev (drover-remote--peer-rev peer)))
@@ -956,9 +1168,13 @@ show them, whose answers come in several messages, as when shown."
     (force-mode-line-update t)))
 
 (defun drover-remote--fail (peer message)
-  "Note MESSAGE, an error, as the last of PEER, if any."
+  "Note MESSAGE, an error, as the last of PEER, if any, and in its history.
+The last error stays once connected again, with its time, for
+`drover-remote-status' to tell what happened."
   (when peer
-    (setf (drover-remote--peer-error peer) (drover-bound-line message))))
+    (setf (drover-remote--peer-error peer) (drover-bound-line (format "%s" message))
+          (drover-remote--peer-error-time peer) (float-time))
+    (drover-remote--event peer 'error "%s" (drover-remote--peer-error peer))))
 
 (defvar drover-remote--error-grace 0.5
   "Seconds a stream an error was told on has to end, ending as streams do.")
@@ -986,7 +1202,8 @@ one line, once in `drover-error-interval' seconds."
       (let ((line (drover-bound-line (format "%s" message)))
             (stream (gethash connection (drover-remote--state-streams state) 0)))
         (if (string-prefix-p "Sending failed" line)
-            (drover-remote--stat peer :write-failures)
+            (progn (drover-remote--stat peer :write-failures)
+                   (drover-remote--event peer 'write "%s" line))
           (drover-remote--fail peer line)
           (when (spyglass-connection-live-p connection)
             (run-at-time drover-remote--error-grace nil
@@ -1009,9 +1226,21 @@ one line, once in `drover-error-interval' seconds."
     (when-let* ((state (drover-remote--current)))
       (drover-remote--next-stream state connection)
       (remhash connection (drover-remote--state-hellos state))
-      (when-let* ((peer (drover-remote--dialer-of state connection)))
-        (setf (drover-remote--peer-error peer) nil))
+      (when-let* ((peer (or (drover-remote--dialer-of state connection)
+                            (drover-remote--peer-of state connection))))
+        (drover-remote--event peer 'open "stream open, a connection %s"
+                              (if (spyglass-connection-transport connection) "this host dialed" "it dialed")))
       (drover-remote--hello connection))))
+
+(defun drover-remote--ending (connection)
+  "Return how CONNECTION's last stream ended, as spyglass tells it, or nil."
+  (and (fboundp 'spyglass-connection-ending)
+       (ignore-errors (spyglass-connection-ending connection))))
+
+(defun drover-remote--quitting-p (peer)
+  "Return non-nil when PEER said lately that its Emacs quits or its mode stops."
+  (pcase (drover-remote--peer-bye peer)
+    (`(,kind ,_why ,time) (and (member kind '("quit" "off")) (< (- (float-time) time) 60)))))
 
 (defun drover-remote--detach (connection final)
   "Follow the end of CONNECTION's stream; FINAL when it does not come back."
@@ -1023,44 +1252,86 @@ one line, once in `drover-error-interval' seconds."
       (dolist (peer (hash-table-values (drover-remote--state-peers state)))
         (setf (drover-remote--peer-candidates peer)
               (assq-delete-all connection (drover-remote--peer-candidates peer)))
-        (when (and final (eq connection (drover-remote--peer-dialed peer)))
-          (setf (drover-remote--peer-dialed peer) nil))
-        (when (eq connection (drover-remote--peer-connection peer))
-          (setf (drover-remote--peer-heard peer)
-                (max (or (drover-remote--peer-heard peer) 0)
-                     (or (ignore-errors (spyglass-connection-last-recv connection)) 0))
-                (drover-remote--peer-connection peer) nil)
-          (drover-remote--reset-queue peer)
-          (drover-remote--elect state peer)
-          (unless (drover-remote--peer-connection peer)
-            (drover-remote--lost peer)))
-        (when (and (not (drover-remote--peer-connection peer))
-                   (not (drover-remote--peer-dialed peer)))
-          (drover-remote--stand-by peer))))))
+        (let ((theirs (and (eq connection (drover-remote--peer-connection peer))
+                           (not (spyglass-connection-transport connection)))))
+          (when (or (eq connection (drover-remote--peer-connection peer))
+                    (eq connection (drover-remote--peer-dialed peer)))
+            (let ((ending (drover-remote--ending connection)))
+              (drover-remote--event peer 'drop "stream ended (%s)%s%s"
+                                    (if (spyglass-connection-transport connection)
+                                        "this host dialed" "it dialed")
+                                    (if ending (concat ": " ending) "")
+                                    (if final ", for good" ""))))
+          (when (and final (eq connection (drover-remote--peer-dialed peer)))
+            (setf (drover-remote--peer-dialed peer) nil))
+          (when (eq connection (drover-remote--peer-connection peer))
+            (setf (drover-remote--peer-heard peer)
+                  (max (or (drover-remote--peer-heard peer) 0)
+                       (or (ignore-errors (spyglass-connection-last-recv connection)) 0))
+                  (drover-remote--peer-connection peer) nil)
+            (drover-remote--reset-queue peer)
+            (drover-remote--elect state peer)
+            (unless (drover-remote--peer-connection peer)
+              (if (and theirs (not (drover-remote--quitting-p peer)) (> drover-remote-grace 0))
+                  (drover-remote--wait-grace peer)
+                (drover-remote--lost peer))))
+          (when (and (not (drover-remote--peer-connection peer))
+                     (not (drover-remote--peer-dialed peer)))
+            (drover-remote--stand-by peer (and theirs (not (drover-remote--quitting-p peer))
+                                               drover-remote-fallback-delay))))))))
+
+(defun drover-remote--wait-grace (peer)
+  "Give PEER, whose connection to this host ended, `drover-remote-grace' seconds.
+Meanwhile its sessions stay as they are, the peer reconnecting; past
+them, its sessions are dimmed, as `drover-remote--lost' does."
+  (drover-remote--set-state peer 'reconnecting)
+  (drover-remote--event peer 'grace "waiting %ss for it to connect again" drover-remote-grace)
+  (unless (drover-remote--peer-grace peer)
+    (setf (drover-remote--peer-grace peer)
+          (run-at-time drover-remote-grace nil
+                       (let ((link (drover-link peer)))
+                         (lambda ()
+                           (drover-with-reporting "remote grace"
+                             (let ((peer (drover-linked link)))
+                               (setf (drover-remote--peer-grace peer) nil)
+                               (when (and (drover-remote--current)
+                                          (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
+                                          (or (not (drover-remote--peer-connection peer))
+                                              (equal (car (drover-remote--peer-bye peer)) "restart"))
+                                          (not (eq (drover-remote--peer-state peer) 'closed)))
+                                 (drover-remote--event peer 'grace "not back after %ss: its sessions dimmed"
+                                                       drover-remote-grace)
+                                 (drover-remote--lost peer))))))))))
 
 (defun drover-remote--lost (peer)
   "Note that PEER is not connected: its sessions stay, stale."
+  (when (drover-remote--peer-grace peer)
+    (cancel-timer (drover-remote--peer-grace peer))
+    (setf (drover-remote--peer-grace peer) nil))
   (drover-remote--set-state peer (if (drover-remote--peer-dialed peer) 'reconnecting 'waiting))
   (drover-remote--set-stale peer (or (drover-remote--peer-heard peer) (float-time))))
 
-(defun drover-remote--stand-by (peer)
-  "Dial PEER again once unreachable for `drover-remote-standby-delay' seconds.
-Only a peer this host dials, and not when its configuration dropped it."
+(defun drover-remote--stand-by (peer &optional delay)
+  "Dial PEER again once unreachable for DELAY seconds.
+DELAY is `drover-remote-standby-delay' by default.  Only a peer this
+host dials, and not when its configuration dropped it."
   (when (and (plist-get (drover-remote--peer-properties peer) :dial)
              (not (eq (drover-remote--peer-state peer) 'closed))
              (not (drover-remote--peer-standby peer)))
-    (setf (drover-remote--peer-standby peer)
-          (run-at-time drover-remote-standby-delay nil
-                       (let ((link (drover-link peer)))
-                         (lambda ()
-                           (drover-with-reporting "remote standby"
-                             (let ((peer (drover-linked link)))
-                               (setf (drover-remote--peer-standby peer) nil)
-                               (when (and (drover-remote--current)
-                                          (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
-                                          (not (drover-remote--peer-connection peer))
-                                          (not (drover-remote--peer-dialed peer)))
-                                 (drover-remote--dial peer))))))))))
+    (let ((delay (or delay drover-remote-standby-delay)))
+      (drover-remote--event peer 'standby "dialing it in %ss unless it connects first" delay)
+      (setf (drover-remote--peer-standby peer)
+            (run-at-time delay nil
+                         (let ((link (drover-link peer)))
+                           (lambda ()
+                             (drover-with-reporting "remote standby"
+                               (let ((peer (drover-linked link)))
+                                 (setf (drover-remote--peer-standby peer) nil)
+                                 (when (and (drover-remote--current)
+                                            (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
+                                            (not (drover-remote--peer-connection peer))
+                                            (not (drover-remote--peer-dialed peer)))
+                                   (drover-remote--dial peer)))))))))))
 
 (defun drover-remote--transport (peer)
   "Return the spyglass transport reaching PEER."
@@ -1078,6 +1349,13 @@ Only a peer this host dials, and not when its configuration dropped it."
   (unless (drover-remote--peer-dialed peer)
     (unless (drover-remote--peer-connection peer)
       (drover-remote--set-state peer 'connecting))
+    (drover-remote--event peer 'dial "dialing it%s"
+                          (let ((properties (drover-remote--peer-properties peer)))
+                            (if (plist-get properties :local)
+                                " on this host"
+                              (format " through %s %s"
+                                      (or (plist-get properties :program) drover-remote-ssh-program)
+                                      (or (plist-get properties :ssh) (drover-remote--peer-name peer))))))
     ;; Its errors come through `drover-remote--spyglass-error'.
     (setf (drover-remote--peer-dialed peer)
           (spyglass-connect (drover-remote--transport peer) :name (drover-remote--peer-name peer)))))
@@ -1149,11 +1427,17 @@ finds those."
                                      (drover-remote--work peer)))))))))
 
 (defun drover-remote--resubscribe (peer why)
-  "Subscribe to PEER again from what it holds, after WHY, a gap in its updates."
+  "Subscribe to PEER again from what it holds, after WHY, a gap in its updates.
+WHY nil: PEER greeted again, its remote layer having started anew."
+  (when why
   (drover-remote--stat peer :gaps)
-  (drover-remote--fail peer why)
+    (drover-remote--fail peer why))
   (drover-remote--reset-queue peer)
+  (drover-remote--set-state peer 'open)
   (when-let* ((connection (drover-remote--peer-connection peer)))
+    (drover-remote--stat peer :subscriptions)
+    (drover-remote--event peer 'sub "subscribed again, holding epoch %s revision %s"
+                          (or (drover-remote--peer-epoch peer) "none") (or (drover-remote--peer-rev peer) "none"))
     (drover-remote--send connection (list :t "sub" :epoch (drover-remote--peer-epoch peer)
                                           :rev (drover-remote--peer-rev peer)))))
 
@@ -1193,12 +1477,13 @@ last drops the sessions it did not list."
             (while (< (drover-remote--peer-position peer) (length recs))
               (when (and changed (> (float-time) deadline))
                 (throw 'done nil))
-              (let ((record (drover-remote-decode-record
-                             (aref recs (drover-remote--peer-position peer))
-                             (drover-remote--peer-name peer) (drover-remote--peer-backend peer)
-                             offset)))
+              (let* ((data (aref recs (drover-remote--peer-position peer)))
+                     (record (drover-remote-decode-record
+                              data (drover-remote--peer-name peer) (drover-remote--peer-backend peer)
+                              offset)))
                 (cl-incf (drover-remote--peer-position peer))
                 (when record
+                  (drover-remote--note-ops peer (drover-session-id record) data)
                   (when (drover-remote--peer-stale peer)
                     (setf (drover-session-stale record) (drover-remote--peer-stale peer)))
                   (let ((key (drover-session-id record)))
@@ -1216,6 +1501,7 @@ last drops the sessions it did not list."
                 (when-let* ((key (drover-remote--key gone))
                             ((gethash key records)))
                   (remhash key records)
+                  (remhash key (drover-remote--peer-ops peer))
                   (push key changed))))
             (drover-remote--stat peer :messages)
             (drover-remote--send connection (list :t "ack" :n (plist-get message :n)))
@@ -1226,9 +1512,18 @@ last drops the sessions it did not list."
                   (maphash (lambda (key _) (unless (gethash key listed) (push key gone))) records)
                   (dolist (key gone)
                     (remhash key records)
+                    (remhash key (drover-remote--peer-ops peer))
                     (push key changed))
                   (setf (drover-remote--peer-snapshot peer) nil)
-                  (drover-remote--stat peer :snapshots)))
+                  (drover-remote--stat peer :snapshots)
+                  (drover-remote--event peer 'snapshot "took a snapshot of %d sessions, epoch %s%s"
+                                        (hash-table-count records)
+                                        (drover-bound-line (format "%s" (plist-get message :epoch)) 16)
+                                        (if (and (drover-remote--peer-epoch peer)
+                                                 (not (equal (drover-remote--peer-epoch peer)
+                                                             (plist-get message :epoch))))
+                                            (format ", its epoch was %s" (drover-remote--peer-epoch peer))
+                                          ""))))
               (setf (drover-remote--peer-epoch peer) (plist-get message :epoch)
                     (drover-remote--peer-rev peer) (plist-get message :to))
               (drover-remote--report peer changed)
@@ -1241,6 +1536,20 @@ last drops the sessions it did not list."
       (drover-remote--stat peer :slices)
       (when (drover-remote--peer-queue peer)
         (drover-remote--schedule-work peer)))))
+
+(defconst drover-remote--actions
+  '("interrupt" "mark-seen" "archive" "unarchive" "delete" "rename" "answer" "send")
+  "The actions on its sessions a host performs for its peers.")
+
+(defun drover-remote--note-ops (peer key data)
+  "Note what the owner allows of its session KEY, as DATA, its record, tells.
+PEER keeps it beside the record; nil when DATA tells nothing, as an
+older drover's records."
+  (let ((ops (plist-get data :ops)))
+    (if (vectorp ops)
+        (puthash key (seq-filter (lambda (op) (member op drover-remote--actions)) (seq-take ops 16))
+                 (drover-remote--peer-ops peer))
+      (remhash key (drover-remote--peer-ops peer)))))
 
 (defun drover-remote--peer-session (peer key)
   "Return PEER's session of the owner's KEY, or nil."
@@ -1390,6 +1699,536 @@ it, here, where they are: the peer names them as received."
                                                                                  500))))))))))))))
     (setcar (drover-remote--peer-prefetch peer) pending)))
 
+;;;; Acting on a peer's sessions
+
+(defconst drover-remote--operations
+  '((:interrupt . "interrupt") (:mark-seen . "mark-seen") (:archive . "archive")
+    (:unarchive . "unarchive") (:delete . "delete") (:rename . "rename")
+    (:respond . "answer") (:send . "send"))
+  "The operations of a peer's proxy forwarded to the owner, by action.")
+
+(defun drover-remote--refusal (peer &optional session action)
+  "Return why PEER takes no ACTION on SESSION now, a line, or nil when it does.
+Without SESSION and ACTION, why it takes no action at all."
+  (cond
+   ((not (drover-remote--capable-p peer "actions"))
+    (format "%s runs an older drover, which takes no action from other hosts: update it"
+            (drover-remote--label peer)))
+   ((not (eq (drover-remote--peer-state peer) 'open))
+    (format "%s is not connected" (drover-remote--label peer)))
+   ((and action (not (drover-remote--allows-p (or (drover-remote--peer-granted peer) 'read) action)))
+    (format "%s grants this host %s access" (drover-remote--label peer)
+            (or (drover-remote--peer-granted peer) "read")))
+   ((and session action
+         (let ((ops (gethash (drover-session-id session) (drover-remote--peer-ops peer) 'unknown)))
+           (and (listp ops) (not (member action ops)))))
+    (format "%s does not %s it" (drover-remote--label peer) action))))
+
+(defun drover-remote--supports (name session operation)
+  "Return non-nil when the peer NAME takes OPERATION on SESSION now.
+For the proxy's :supports: the operations forwarded need a connected
+peer whose drover acts for others, an access allowing them, and the
+owner's leave for SESSION; the others, recaps and previews, apply."
+  (let ((action (alist-get operation drover-remote--operations)))
+    (or (null action)
+        (when-let* ((peer (drover-remote--peer name)))
+          (not (drover-remote--refusal peer session action))))))
+
+(defun drover-remote--unsupported (name session operation)
+  "Return why the peer NAME takes no OPERATION on SESSION, for :unsupported."
+  (when-let* ((action (alist-get operation drover-remote--operations)))
+    (if-let* ((peer (drover-remote--peer name)))
+        (drover-remote--refusal peer session action)
+      (format "%s is not a peer" name))))
+
+(defun drover-remote--act (name action session args then else)
+  "Have the peer NAME perform ACTION on SESSION, with ARGS, a plist.
+THEN is called with no argument once the owner did, ELSE with a line
+once it refused or failed, at most one of them once.  Actions asked
+together go in few requests, the next time Emacs is idle: acting on
+thousands of sessions costs a few requests."
+  (let ((peer (drover-remote--peer name)))
+    (if-let* ((refusal (if peer (drover-remote--refusal peer session action) (format "%s is not a peer" name))))
+        (funcall else refusal)
+      (push (list action (drover-session-id session) args then else) (drover-remote--peer-outbox peer))
+      (unless (drover-remote--peer-flusher peer)
+        (setf (drover-remote--peer-flusher peer)
+              (run-at-time 0 nil (let ((link (drover-link peer)))
+                                   (lambda ()
+                                     (drover-with-reporting "remote actions"
+                                       (let ((peer (drover-linked link)))
+                                         (setf (drover-remote--peer-flusher peer) nil)
+                                         (drover-remote--send-actions peer)))))))))))
+
+(defun drover-remote--fail-outbox (peer why)
+  "Fail the actions of PEER not sent yet, telling WHY."
+  (let ((outbox (drover-remote--peer-outbox peer)))
+    (setf (drover-remote--peer-outbox peer) nil)
+    (when (drover-remote--peer-flusher peer)
+      (cancel-timer (drover-remote--peer-flusher peer))
+      (setf (drover-remote--peer-flusher peer) nil))
+    (pcase-dolist (`(,_action ,_key ,_args ,_then ,else) outbox)
+      (drover-with-reporting "remote actions"
+        (funcall else why)))))
+
+(defun drover-remote--action-id (peer)
+  "Return a new identifier of an action asked of PEER, unique across restarts."
+  (format "%s-%s-%d" drover-host (substring (or (drover-remote--state-epoch (drover-remote--current)) "x") 0 8)
+          (cl-incf (drover-remote--peer-serial peer))))
+
+(defun drover-remote--send-actions (peer)
+  "Send PEER the actions of its outbox: one request per action and arguments.
+Each carries `drover-remote-action-batch' sessions at most, and an
+identifier the owner answers again, rather than act twice, when the
+request is asked again after its stream ended."
+  (let ((outbox (reverse (drover-remote--peer-outbox peer)))
+        (groups nil))
+    (setf (drover-remote--peer-outbox peer) nil)
+    (dolist (entry outbox)
+      (let ((group (assoc (cons (nth 0 entry) (nth 2 entry)) groups)))
+        (if group
+            (push entry (cdr group))
+          (push (list (cons (nth 0 entry) (nth 2 entry)) entry) groups))))
+    (pcase-dolist (`((,action . ,args) . ,entries) (nreverse groups))
+      (dolist (chunk (seq-partition (nreverse entries) drover-remote-action-batch))
+        (drover-remote--send-chunk peer action args chunk)))))
+
+(defun drover-remote--send-chunk (peer action args entries)
+  "Ask PEER to perform ACTION with ARGS on the sessions of ENTRIES, of its outbox."
+  (let ((id (drover-remote--action-id peer))
+        (label (drover-remote--label peer)))
+    (drover-remote--stat peer :actions-sent (length entries))
+    (drover-remote--request
+     peer (append (list :op "act" :id id :action action
+                        :keys (vconcat (mapcar (lambda (entry)
+                                                 (let ((key (nth 1 entry)))
+                                                   (vector (symbol-name (car key)) (cdr key))))
+                                               entries)))
+                  (and args (list :args args)))
+     (lambda (reply error)
+       (let ((out (and (null error) (plist-get reply :out))))
+         (seq-do-indexed
+          (lambda (entry index)
+            (let ((outcome (and (vectorp out) (< index (length out)) (aref out index))))
+              (drover-with-reporting "remote actions"
+                (cond ((eq outcome t) (funcall (nth 3 entry)))
+                      (error (funcall (nth 4 entry) (format "%s: %s" label error)))
+                      ((stringp outcome) (funcall (nth 4 entry) (drover-bound-line outcome)))
+                      (t (funcall (nth 4 entry) (format "%s told no outcome" label)))))))
+          entries)))
+     (+ (float-time) drover-remote-action-timeout))))
+
+(defun drover-remote--confirming (name action)
+  "Return the operation of the peer NAME's proxy performing ACTION, a string.
+It takes a session, THEN and ELSE, as the operations that confirm do."
+  (lambda (session &optional then else)
+    (drover-remote--act name action session nil (or then #'ignore)
+                        (or else (lambda (message)
+                                   (drover-warn "Could not %s %s: %s" action
+                                                (drover-session-display-title session) message))))))
+
+(defun drover-remote--rename (name session title)
+  "Have the peer NAME rename SESSION to TITLE."
+  (drover-remote--act name "rename" session (list :title (drover-bound-line title)) #'ignore
+                      (lambda (message)
+                        (drover-warn "Could not rename %s: %s" (drover-session-display-title session) message))))
+
+(defun drover-remote--send-prompt (name session text _token &optional _attachments)
+  "Have the peer NAME submit TEXT as a prompt of SESSION, for the proxy's :send.
+The owner submits it through its backend, as it delivers a scheduled
+prompt; attachments, files of this host, do not travel."
+  (let ((title (drover-session-display-title session)))
+    (if (> (length text) drover-remote-prompt-limit)
+        (drover-warn "The prompt for %s is longer than %d characters, which go to another host at most; it is in the kill ring"
+                     title drover-remote-prompt-limit)
+      (drover-remote--act name "send" session (list :text (substring-no-properties text))
+                          (lambda () (drover-message "%s took the prompt" title))
+                          (lambda (message)
+                            (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
+                                         title message))))))
+
+(defun drover-remote--wait (peer message timeout)
+  "Ask PEER MESSAGE and wait for its answer, TIMEOUT seconds at most.
+Return (REPLY ERROR).  Only for a command that must answer from it:
+Emacs reads processes and runs timers meanwhile, and \\[keyboard-quit] stops it."
+  (let ((answer nil)
+        (deadline (+ (float-time) timeout)))
+    (drover-remote--request peer message (lambda (reply error) (setq answer (list reply error)))
+                            deadline t)
+    (while (and (not answer) (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (or answer (list nil (format "%s did not answer in %ss" (drover-remote--label peer) timeout)))))
+
+(defun drover-remote--decode-requests (data)
+  "Return the requests DATA, received, tells, checked and bounded, oldest first."
+  (cl-flet ((strings (value limit)
+              (and (vectorp value)
+                   (delq nil (mapcar (lambda (item) (drover-remote--line item 200)) (seq-take value limit))))))
+    (and (vectorp data)
+         (delq nil
+               (mapcar (lambda (request)
+                         (when-let* (((and (consp request) (keywordp (car request))))
+                                     (id (drover-remote--line (plist-get request :id) 200)))
+                           (list :id id
+                                 :kind (if (equal (plist-get request :kind) "permission") 'permission 'question)
+                                 :title (or (drover-remote--line (plist-get request :title)) "Request")
+                                 :detail (drover-remote--text (plist-get request :detail))
+                                 :choices (seq-filter (lambda (choice) (member choice '("once" "always" "reject")))
+                                                      (strings (plist-get request :choices) 3))
+                                 :fields (delq nil
+                                               (mapcar (lambda (field)
+                                                         (when-let* (((and (consp field) (keywordp (car field))))
+                                                                     (key (drover-remote--line (plist-get field :key) 64)))
+                                                           (list :key key
+                                                                 :type (let ((type (plist-get field :type)))
+                                                                         (if (member type '("string" "multiselect" "boolean"
+                                                                                            "number" "integer"))
+                                                                             type "string"))
+                                                                 :title (or (drover-remote--line (plist-get field :title)) key)
+                                                                 :options (strings (plist-get field :options) 50)
+                                                                 :custom (eq (plist-get field :custom) t))))
+                                                       (seq-take (or (and (vectorp (plist-get request :fields))
+                                                                          (plist-get request :fields))
+                                                                     [])
+                                                                 20))))))
+                       (seq-take data 20))))))
+
+(defun drover-remote--encode-requests (requests)
+  "Return REQUESTS, as a backend's :requests tells them, as they travel."
+  (vconcat
+   (mapcar (lambda (request)
+             (list :id (format "%s" (plist-get request :id))
+                   :kind (symbol-name (or (plist-get request :kind) 'question))
+                   :title (or (drover-remote--plain (plist-get request :title)) "")
+                   :detail (or (drover-remote--plain (plist-get request :detail)) :false)
+                   :choices (vconcat (plist-get request :choices))
+                   :fields (vconcat (mapcar (lambda (field)
+                                              (list :key (or (plist-get field :key) "")
+                                                    :type (or (plist-get field :type) "string")
+                                                    :title (or (drover-remote--plain (plist-get field :title)) "")
+                                                    :options (vconcat (plist-get field :options))
+                                                    :custom (if (plist-get field :custom) t :false)))
+                                            (plist-get request :fields)))))
+           (seq-take (seq-filter #'consp requests) 20))))
+
+(defun drover-remote--read-answer (request host)
+  "Read the answer to REQUEST, of a session of HOST.
+As the action \"answer\" sends it: return a plist of :request and
+:decision, for a permission, or :answer, for a question, a vector of
+[KEY VALUE]."
+  (let ((title (format "%s (%s)" (plist-get request :title) host)))
+    (if (eq (plist-get request :kind) 'permission)
+        (list :request (plist-get request :id)
+              :decision (completing-read (format-prompt (concat title (and (plist-get request :detail)
+                                                                           (concat "\n" (drover-bound-lines (plist-get request :detail) 6) "\n")))
+                                                        "once")
+                                         (or (plist-get request :choices) '("once" "always" "reject"))
+                                         nil t nil nil "once"))
+      (list :request (plist-get request :id)
+            :answer
+            (vconcat
+             (delq nil
+                   (mapcar (lambda (field)
+                             (let* ((prompt (format "%s · %s: " title (plist-get field :title)))
+                                    (options (plist-get field :options))
+                                    (value (pcase (plist-get field :type)
+                                             ("multiselect" (vconcat (completing-read-multiple prompt options)))
+                                             ("boolean" (if (y-or-n-p (concat (string-remove-suffix ": " prompt) "? "))
+                                                            t :false))
+                                             ((or "number" "integer") (read-number prompt))
+                                             (_ (if options
+                                                    (completing-read prompt options nil (not (plist-get field :custom)))
+                                                  (read-string prompt))))))
+                               (and value (not (equal value "")) (vector (plist-get field :key) value))))
+                           (plist-get request :fields))))))))
+
+(defun drover-remote--respond (name session)
+  "Answer the oldest request of SESSION, a session of the peer NAME, here.
+For the proxy's :respond.  What the request asks comes from its owner,
+waited for a few seconds; the answer is read here, then the owner gives
+it through its backend, its records then telling the request answered."
+  (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
+         (label (drover-remote--label peer)))
+    (when-let* ((refusal (drover-remote--refusal peer session "answer")))
+      (user-error "%s" refusal))
+    (pcase-let ((`(,reply ,error) (drover-remote--wait
+                                   peer (list :op "requests" :key (drover-remote--wire-key session)) 10)))
+      (when error
+        (user-error "%s: %s" label error))
+      (let ((requests (drover-remote--decode-requests (plist-get reply :requests))))
+        (unless requests
+          (user-error "%s has no request pending on %s" (drover-session-display-title session) label))
+        (let ((answer (drover-remote--read-answer (car requests) label))
+              (title (drover-session-display-title session)))
+          (drover-remote--act name "answer" session answer
+                              (lambda () (drover-message "Answered %s on %s" title label))
+                              (lambda (message) (drover-warn "Could not answer %s: %s" title message))))))))
+
+;;;; Performing a peer's actions
+
+(defconst drover-remote--id-regexp "\\`[A-Za-z0-9._-]\\{1,96\\}\\'"
+  "What the identifier of an action a peer asks may be.")
+
+(defun drover-remote--refuse-action (peer action why)
+  "Note that this host refused PEER's ACTION because of WHY; return WHY.
+A refusal is told once per `drover-error-interval' by peer and action."
+  (drover-remote--event peer 'refused "refused to %s: %s" action why)
+  (when (drover--report-due-p (list "remote refusal" (drover-remote--peer-name peer) action))
+    (drover-warn "Refused %s's request to %s: %s" (drover-remote--label peer) action why))
+  why)
+
+(defun drover-remote--check-args (action args)
+  "Return ARGS of ACTION, received, checked and bounded, as a plist.
+A string tells why they do not fit."
+  (let ((args (and (consp args) (keywordp (car args)) args)))
+    (pcase action
+      ("rename" (let ((title (drover-remote--line (plist-get args :title))))
+                  (if title (list :title title) "no title")))
+      ("send" (let ((text (plist-get args :text)))
+                (if (and (stringp text) (not (string-blank-p text))
+                         (<= (length text) drover-remote-prompt-limit))
+                    (list :text text)
+                  "no prompt, or one too long")))
+      ("answer"
+       (let ((request (drover-remote--line (plist-get args :request) 200))
+             (decision (plist-get args :decision))
+             (answer (plist-get args :answer)))
+         (cond
+          ((not request) "no request")
+          ((plist-get args :dismiss) (list :request request :dismiss t))
+          ((member decision '("once" "always" "reject")) (list :request request :decision decision))
+          ((vectorp answer)
+           (list :request request
+                 :answer (delq nil
+                               (mapcar (lambda (pair)
+                                         (and (vectorp pair) (= (length pair) 2)
+                                              (stringp (aref pair 0)) (<= (length (aref pair 0)) 64)
+                                              (let ((value (aref pair 1)))
+                                                (cond
+                                                 ((stringp value) (cons (aref pair 0) (drover-bound-text value 20 4096)))
+                                                 ((and (vectorp value) (seq-every-p #'stringp value))
+                                                  (cons (aref pair 0)
+                                                        (vconcat (mapcar (lambda (text) (drover-bound-text text 20 4096))
+                                                                         (seq-take value 50)))))
+                                                 ((or (memq value '(t :false)) (drover-remote--number value))
+                                                  (cons (aref pair 0) value))))))
+                                       (seq-take answer 20)))))
+          (t "no answer"))))
+      (_ nil))))
+
+(defun drover-remote--on-act (state peer message reply)
+  "Perform the action MESSAGE asks for PEER, answering through REPLY, in STATE.
+The answer is (:out OUTCOMES), one per session asked, t or a line.  An
+action whose identifier this host performs or performed already is
+answered with its outcome rather than performed twice."
+  (let* ((id (plist-get message :id))
+         (action (plist-get message :action))
+         (keys (plist-get message :keys))
+         (args (drover-remote--check-args action (plist-get message :args)))
+         (outcomes (drover-remote--state-outcomes state))
+         (known (and (stringp id) (gethash id outcomes))))
+    (cond
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "no identifier"))
+     ((not (member action drover-remote--actions))
+      (funcall reply nil (drover-remote--refuse-action peer (drover-bound-line (format "%s" action) 20)
+                                                       "unknown action")))
+     ((not (and (vectorp keys) (<= 1 (length keys) drover-remote-action-batch)))
+      (funcall reply nil "no sessions, or too many"))
+     ((not (drover-remote--allows-p (drover-remote--access peer) action))
+      (funcall reply nil (drover-remote--refuse-action
+                          peer action (format "%s has %s access" (drover-remote--label peer)
+                                              (drover-remote--access peer)))))
+     ((stringp args) (funcall reply nil (drover-remote--refuse-action peer action args)))
+     ((and known (car known)) (funcall reply (list :out (cdr known))))
+     (known (setcdr known (cons reply (cdr known))))
+     (t
+      (puthash id (list nil reply) outcomes)
+      (push id (drover-remote--state-outcome-order state))
+      (let ((order (drover-remote--state-outcome-order state)))
+        (when (> (length order) drover-remote-outcomes)
+          (let ((old (nthcdr drover-remote-outcomes order)))
+            (setcdr (nthcdr (1- drover-remote-outcomes) order) nil)
+            ;; Those still being performed are kept until done.
+            (dolist (gone old)
+              (when (car (gethash gone outcomes))
+                (remhash gone outcomes))))))
+      (drover-remote--stat peer :actions-done (length keys))
+      (drover-remote--event peer 'act "asked to %s %d session%s" action (length keys)
+                            (if (= (length keys) 1) "" "s"))
+      (setf (drover-remote--state-tasks state)
+            (append (drover-remote--state-tasks state)
+                    (list (list :id id :action action :args args
+                                :keys (vconcat (mapcar #'drover-remote--key keys))
+                                :out (make-vector (length keys) nil)
+                                :pending (make-vector (length keys) nil)
+                                :next 0 :left (length keys)
+                                :deadline (+ (float-time) drover-remote-action-timeout)))))
+      (drover-remote--run-soon state)))))
+
+(defun drover-remote--run-soon (state)
+  "Perform the actions of STATE's tasks from a timer."
+  (unless (drover-remote--state-runner state)
+    (setf (drover-remote--state-runner state)
+          (run-at-time 0 nil (let ((link (drover-link state)))
+                               (lambda ()
+                                 (drover-with-reporting "remote actions"
+                                   (let ((state (drover-linked link)))
+                                     (setf (drover-remote--state-runner state) nil)
+                                     (when (eq state (drover-remote--current))
+                                       (drover-remote--run state))))))))))
+
+(defun drover-remote--owner-record (key action)
+  "Return this host's record of its session KEY for ACTION, or nil.
+A session listed, else one of the older or archived sessions fetched,
+else drover's own archive; for restoring or deleting, a record of the
+backend's own archive is made from KEY, the backends acting by
+identifier."
+  (when-let* ((key)
+              (backend (car key))
+              ((memq backend (drover-backends)))
+              ((not (drover-backend-property backend :remote))))
+    (or (drover-index-session key)
+        (seq-find (lambda (record) (equal (drover-session-key record) key))
+                  (append (drover--fetched-sessions 'history) (drover--fetched-sessions 'archived)))
+        (and (member action '("unarchive" "delete"))
+             (or (seq-find (lambda (record) (equal (drover-session-key record) key))
+                           (let ((drover--archived nil)) (drover-archived-sessions)))
+                 (drover-session-create :backend backend :id (cdr key)
+                                        :archived (and (equal action "unarchive") t)))))))
+
+(defun drover-remote--perform (action args record settle)
+  "Perform ACTION with ARGS on RECORD, this host's, then call SETTLE.
+SETTLE takes t, or nil and a line.  Nothing shows a window nor asks."
+  (cl-flet ((then () (funcall settle t))
+            (else (message) (funcall settle nil (or (drover-bound-line (format "%s" message)) "refused"))))
+    (pcase action
+      ((or "interrupt" "mark-seen")
+       (let ((operation (intern (concat ":" action))))
+         (if (drover-supports-p record operation)
+             (drover--call-confirming record operation #'then #'else)
+           (else (format "cannot %s it" action)))))
+      ("archive"
+       (if (drover-session-archived-p record)
+           (then)
+         (drover--archive-step record (lambda (ok &optional value)
+                                        (if (not ok)
+                                            (else value)
+                                          (drover--archive-finish record value)
+                                          (then))))))
+      ("unarchive"
+       (if (not (drover-session-archived-p record))
+           (then)
+         (drover--unarchive-step record (lambda (ok &optional value) (if ok (then) (else value))))))
+      ("delete" (drover--delete-step record (lambda (ok &optional value) (if ok (then) (else value)))))
+      ("rename" (drover-backend-call record :rename (plist-get args :title)) (then))
+      ("send"
+       (if (not (drover-supports-p record :submit))
+           (else "it takes no prompt from another host")
+         (drover-unarchive-to-send record)
+         (drover-backend-call record :submit (plist-get args :text) #'then
+                              (lambda (message &rest _) (else message)))))
+      ("answer"
+       (if (not (and (drover-supports-p record :answer)))
+           (else "its requests are answered on its host")
+         (drover-backend-call record :answer (plist-get args :request)
+                              (cond ((plist-get args :dismiss) (list :dismiss t))
+                                    ((plist-get args :decision) (list :decision (plist-get args :decision)))
+                                    (t (list :answer (plist-get args :answer))))
+                              #'then #'else)))
+      (_ (else "unknown action")))))
+
+(defun drover-remote--run (state)
+  "Perform for a slice the actions of STATE's tasks, and come back for the rest.
+Operations whose backends answer later are `drover-bulk-requests' in
+flight at most; a task is answered once all its sessions settled, or
+failed past its deadline."
+  (let ((deadline (+ (float-time) drover-remote-send-slice))
+        (display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t)))
+        (link (drover-link state)))
+    (catch 'done
+      (dolist (task (copy-sequence (drover-remote--state-tasks state)))
+        (when (> (float-time) (plist-get task :deadline))
+          (dotimes (index (length (plist-get task :out)))
+            (when (aref (plist-get task :pending) index)
+              (aset (plist-get task :pending) index nil)
+              (cl-decf (drover-remote--state-flight state)))
+            (unless (aref (plist-get task :out) index)
+              (aset (plist-get task :out) index "its backend did not answer in time")))
+          (plist-put task :left 0)
+          (plist-put task :next (length (plist-get task :keys))))
+        (while (and (< (plist-get task :next) (length (plist-get task :keys)))
+                    (< (drover-remote--state-flight state) (max 1 drover-bulk-requests)))
+          (when (> (float-time) deadline)
+            (throw 'done nil))
+          (let* ((index (plist-get task :next))
+                 (key (aref (plist-get task :keys) index))
+                 (record (drover-remote--owner-record key (plist-get task :action))))
+            (plist-put task :next (1+ index))
+            (cl-incf (drover-remote--state-flight state))
+            (aset (plist-get task :pending) index t)
+            (let ((settle (lambda (ok &optional message)
+                            (when (aref (plist-get task :pending) index)
+                              (aset (plist-get task :pending) index nil)
+                              (let ((state (drover-linked link)))
+                                (cl-decf (drover-remote--state-flight state))
+                                (unless (aref (plist-get task :out) index)
+                                  (aset (plist-get task :out) index (if ok t (or message "failed")))
+                                  (plist-put task :left (1- (plist-get task :left))))
+                                (when (eq state (drover-remote--current))
+                                  (drover-remote--run-soon state)))))))
+              (if (not record)
+                  (funcall settle nil "no such session here")
+                (condition-case err
+                    (drover-remote--perform (plist-get task :action) (plist-get task :args) record settle)
+                  (error (funcall settle nil (drover-error-message err))))))))
+        (when (<= (plist-get task :left) 0)
+          (drover-remote--finish-task state task))))
+    (when (seq-some (lambda (task) (< (plist-get task :next) (length (plist-get task :keys))))
+                    (drover-remote--state-tasks state))
+      (drover-remote--run-soon state))
+    ;; Answers late fail at their deadline.
+    (when (and (drover-remote--state-tasks state) (not (drover-remote--state-watch state)))
+      (setf (drover-remote--state-watch state)
+            (run-at-time (max 0.1 (- (apply #'min (mapcar (lambda (task) (plist-get task :deadline))
+                                                          (drover-remote--state-tasks state)))
+                                     (float-time)))
+                         nil (lambda ()
+                               (drover-with-reporting "remote actions"
+                                 (let ((state (drover-linked link)))
+                                   (setf (drover-remote--state-watch state) nil)
+                                   (when (and (eq state (drover-remote--current))
+                                              (drover-remote--state-tasks state))
+                                     (drover-remote--run state))))))))))
+
+(defun drover-remote--finish-task (state task)
+  "Answer TASK, done, to whoever asked it, and keep its outcome in STATE."
+  (setf (drover-remote--state-tasks state) (delq task (drover-remote--state-tasks state)))
+  (let* ((out (vconcat (mapcar (lambda (outcome) (or outcome "failed")) (plist-get task :out))))
+         (entry (gethash (plist-get task :id) (drover-remote--state-outcomes state)))
+         (replies (cdr entry)))
+    (puthash (plist-get task :id) (cons t out) (drover-remote--state-outcomes state))
+    (dolist (reply replies)
+      (drover-with-reporting "remote actions"
+        (funcall reply (list :out out))))))
+
+(defun drover-remote--on-requests (peer key reply)
+  "Answer through REPLY what the pending requests of session KEY ask, for PEER."
+  (let ((record (drover-remote--owner-record key "answer")))
+    (cond
+     ((not (drover-remote--allows-p (drover-remote--access peer) "answer"))
+      (funcall reply nil (drover-remote--refuse-action peer "answer"
+                                                       (format "%s has %s access" (drover-remote--label peer)
+                                                               (drover-remote--access peer)))))
+     ((not record) (funcall reply nil "no such session here"))
+     ((not (drover-supports-p record :requests)) (funcall reply nil "its requests are answered on its host"))
+     (t (drover-backend-call record :requests
+                             (lambda (requests)
+                               (drover-with-reporting "remote requests"
+                                 (if (eq (car-safe requests) :failure)
+                                     (funcall reply nil (drover-bound-line (format "%s" (cadr requests))))
+                                   (funcall reply (list :requests (drover-remote--encode-requests requests)))))))))))
+
 ;;;; Older and archived sessions
 
 (defun drover-remote--serve-fetch (connection kind generation)
@@ -1465,9 +2304,12 @@ received so far each time an answer of the owner's comes."
       (let* ((offset (or (spyglass-connection-clock-offset (drover-remote--peer-connection peer)) 0))
              (source (plist-get message :source))
              (records (delq nil (mapcar (lambda (data)
-                                          (drover-remote-decode-record data (drover-remote--peer-name peer)
-                                                                       (drover-remote--peer-backend peer)
-                                                                       offset))
+                                          (when-let* ((record (drover-remote-decode-record
+                                                               data (drover-remote--peer-name peer)
+                                                               (drover-remote--peer-backend peer)
+                                                               offset)))
+                                            (drover-remote--note-ops peer (drover-session-id record) data)
+                                            record))
                                         (seq-take (or (plist-get message :recs) []) drover-remote-batch)))))
         (when (equal kind "archived")
           (dolist (record records)
@@ -1499,35 +2341,65 @@ received so far each time an answer of the owner's comes."
             (peer (drover-remote--peer-of state connection)))
         (when (and peer (eq connection (drover-remote--peer-connection peer)))
           (setf (drover-remote--peer-heard peer) (float-time)))
-        (cond
-         ((equal type "hello") (drover-remote--on-hello state connection message))
-         ((equal type "refuse")
-          (let ((dialer (drover-remote--dialer-of state connection))
-                (why (drover-bound-line (format "%s" (plist-get message :why)))))
-            (drover-remote--fail (or dialer peer) (format "refused: %s" why))
-            (when dialer
-              ;; Another Emacs of this host may be connected there for a
-              ;; while yet: stand by, and try again.
-              (setf (drover-remote--peer-dialed dialer) nil)
-              (spyglass-disconnect connection)
-              (drover-remote--stand-by dialer))))
-         ((null peer)
-          ;; A connection greeted before the state was made anew.
-          (unless (plist-get (gethash connection (drover-remote--state-hellos state)) :asked)
-            (puthash connection (list :asked t) (drover-remote--state-hellos state))
-            (drover-remote--hello connection t)))
-         ((equal type "sub") (drover-remote--subscribe state connection peer message))
-         ((equal type "ack") (drover-remote--acked state connection message))
-         ((equal type "pre") (drover-remote--on-prefetch message))
-         ((equal type "fetched")
+        (condition-case err
+            (drover-remote--dispatch state connection peer type message)
+          (error
+           ;; Kept in the history too, such as a recursion too deep.
+           (drover-remote--fail (or peer (drover-remote--dialer-of state connection))
+                                (format "handling %s: %s" (drover-bound-line (format "%s" type) 20)
+                                        (drover-error-message err)))
+           (signal (car err) (cdr err))))))))
+
+(defun drover-remote--dispatch (state connection peer type message)
+  "Handle MESSAGE of TYPE from PEER, received on CONNECTION, in STATE."
+  (cond
+   ((equal type "hello") (drover-remote--on-hello state connection message))
+   ((equal type "refuse")
+    (let ((dialer (drover-remote--dialer-of state connection))
+          (why (drover-bound-line (format "%s" (plist-get message :why)))))
+      (drover-remote--fail (or dialer peer) (format "refused: %s" why))
+      (when dialer
+        ;; Another Emacs of this host may be connected there for a
+        ;; while yet: stand by, and try again.
+        (setf (drover-remote--peer-dialed dialer) nil)
+        (spyglass-disconnect connection)
+        (drover-remote--stand-by dialer))))
+   ((null peer)
+    ;; A connection greeted before the state was made anew.
+    (unless (plist-get (gethash connection (drover-remote--state-hellos state)) :asked)
+      (puthash connection (list :asked t) (drover-remote--state-hellos state))
+      (drover-remote--hello connection t)))
+   ((equal type "sub") (drover-remote--subscribe state connection peer message))
+   ((equal type "ack") (drover-remote--acked state connection message))
+   ((equal type "pre") (drover-remote--on-prefetch message))
+   ((equal type "fetched")
+    (when (eq connection (drover-remote--peer-connection peer))
+      (drover-remote--fetched peer message)))
+   ((member type '("snap" "up"))
+    (when (eq connection (drover-remote--peer-connection peer))
+      (drover-remote--receive peer message)))
+   ((equal type "grant")
+    (let ((access (plist-get message :access)))
+      (setf (drover-remote--peer-granted peer)
+            (and (member access '("read" "act" "full")) (intern access)))))
+   ((equal type "bye") (drover-remote--on-bye peer connection message))))
+
+(defun drover-remote--on-bye (peer connection message)
+  "Take PEER's farewell MESSAGE on CONNECTION.
+A restart or a quit leaves its sessions, the peer coming back; turned
+off or dropping this host, it closes PEER for good, its sessions gone,
+as an older drover's farewells do."
+  (let ((kind (plist-get message :kind))
+        (why (drover-bound-line (format "%s" (or (plist-get message :why) "bye")))))
           (when (eq connection (drover-remote--peer-connection peer))
-            (drover-remote--fetched peer message)))
-         ((member type '("snap" "up"))
-          (when (eq connection (drover-remote--peer-connection peer))
-            (drover-remote--receive peer message)))
-         ((equal type "bye")
-          (when (eq connection (drover-remote--peer-connection peer))
-            (drover-remote--close peer (format "%s" (or (plist-get message :why) "bye"))))))))))
+      (drover-remote--event peer 'bye "said bye%s: %s" (if (stringp kind) (concat ", " kind) "") why)
+      (pcase kind
+        ("restart"
+         (setf (drover-remote--peer-bye peer) (list kind why (float-time)))
+         (drover-remote--wait-grace peer))
+        ("quit"
+         (setf (drover-remote--peer-bye peer) (list kind why (float-time))))
+        (_ (drover-remote--close peer why))))))
 
 (defun drover-remote--on-prefetch (message)
   "Fetch what the records of the sessions MESSAGE names lack, for a peer."
@@ -1550,6 +2422,8 @@ received so far each time an answer of the owner's comes."
      ((not (memq (drover-remote--access peer) '(read act full))) (funcall reply nil "not allowed"))
      (t
       (pcase (plist-get message :op)
+        ("act" (drover-remote--on-act state peer message reply))
+        ("requests" (drover-remote--on-requests peer key reply))
         ("recap"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -1628,14 +2502,33 @@ received so far each time an answer of the owner's comes."
                    (drover-remote--fetch peer "archived" callback)))
      :prefetch (lambda (sessions)
                  (when-let* ((peer (drover-remote--peer name)))
-                   (drover-remote--prefetch peer sessions))))))
+                   (drover-remote--prefetch peer sessions)))
+     ;; Actions, which the owner performs and confirms.
+     :supports (lambda (session operation) (drover-remote--supports name session operation))
+     :unsupported (lambda (session operation) (drover-remote--unsupported name session operation))
+     :batches t
+     :interrupt (drover-remote--confirming name "interrupt")
+     :interrupt-confirms t
+     :mark-seen (drover-remote--confirming name "mark-seen")
+     :mark-seen-confirms t
+     :archive (drover-remote--confirming name "archive")
+     :archive-confirms t
+     :unarchive (drover-remote--confirming name "unarchive")
+     :unarchive-confirms t
+     :delete (drover-remote--confirming name "delete")
+     :delete-confirms t
+     :rename (lambda (session title) (drover-remote--rename name session title))
+     :respond (lambda (session) (drover-remote--respond name session))
+     :send (lambda (session text token &optional attachments)
+             (drover-remote--send-prompt name session text token attachments)))))
 
 (defun drover-remote--add-peer (state name properties &optional ephemeral)
   "Add the peer NAME with PROPERTIES to STATE, registering its backend.
 EPHEMERAL non-nil for one accepted without configuration."
   (let ((peer (drover-remote--peer-make :name name :properties properties :ephemeral ephemeral
                                         :backend (drover-remote--backend-name name)
-                                        :records (make-hash-table :test #'equal))))
+                                        :records (make-hash-table :test #'equal)
+                                        :ops (make-hash-table :test #'equal))))
     (puthash name peer (drover-remote--state-peers state))
     (setf (drover-remote--state-order state)
           (append (delete name (drover-remote--state-order state)) (list name)))
@@ -1654,14 +2547,19 @@ EPHEMERAL non-nil for one accepted without configuration."
   (setf (drover-remote--peer-connection peer) nil
         (drover-remote--peer-epoch peer) nil
         (drover-remote--peer-rev peer) nil)
+  (clrhash (drover-remote--peer-ops peer))
+  (drover-remote--fail-outbox peer (format "%s closed: %s" (drover-remote--label peer) why))
   (let ((keys (hash-table-keys (drover-remote--peer-records peer))))
     (clrhash (drover-remote--peer-records peer))
     (drover-remote--report peer keys)))
 
-(defun drover-remote--remove-peer (state peer why)
-  "Remove PEER from STATE, telling it WHY: its sessions and backend go."
+(defun drover-remote--remove-peer (state peer why &optional kind)
+  "Remove PEER from STATE, telling it WHY: its sessions and backend go.
+KIND is the farewell (see `drover-remote--bye'), \"dropped\" by default."
   (dolist (candidate (drover-remote--peer-candidates peer))
-    (drover-remote--send (car candidate) (list :t "bye" :why why)))
+    (drover-remote--bye (car candidate) (or kind "dropped") why))
+  (dolist (timer (list (drover-remote--peer-grace peer) (drover-remote--peer-flusher peer)))
+    (when timer (cancel-timer timer)))
   (when-let* ((dialed (drover-remote--peer-dialed peer)))
     (setf (drover-remote--peer-dialed peer) nil)
     (spyglass-disconnect dialed))
@@ -1747,7 +2645,7 @@ added is dialed if it says so."
              (and attempts (> attempts 0) (format ", attempt %d" attempts))
              (and (> heard 0) (not (eq state 'open))
                   (format ", last heard from %s ago" (opencode-format-age heard now)))
-             (and (drover-remote--peer-error peer)
+             (and (drover-remote--peer-error peer) (not (eq state 'open))
                   (concat ": " (drover-remote--peer-error peer)))))))
 
 (defun drover-remote--host-label (host)
@@ -1837,6 +2735,17 @@ sessions, and :dirty, how many sessions changed since are still to send."
             (when-let* ((serving (plist-get stats :serving)))
               (insert (format "  served up to revision %s, %d sessions to send\n"
                               (plist-get serving :held) (plist-get serving :dirty))))
+            (insert (format "  %s\n" (or (drover-remote--refusal peer)
+                                         (format "takes actions, granting this host %s access"
+                                                 (drover-remote--peer-granted peer)))))
+            (when-let* ((error (drover-remote--peer-error peer)))
+              (insert (format "  last error, %s ago: %s\n"
+                              (opencode-format-age (or (drover-remote--peer-error-time peer) now) now)
+                              error)))
+            (when-let* ((history (drover-remote--peer-history peer)))
+              (insert "  history, newest first:\n")
+              (pcase-dolist (`(,time ,kind ,text) (seq-take history 30))
+                (insert (format "    %s %-9s %s\n" (format-time-string "%H:%M:%S" time) kind text))))
             (insert "\n")))
         (goto-char (point-min))
         (special-mode))
@@ -1879,8 +2788,16 @@ reads spyglass's registration file there."
   "The session of a peer the current buffer shows, as (PEER-NAME . KEY).")
 
 (define-derived-mode drover-remote-session-mode special-mode "Drover remote"
-  "A session of another host, as its host tells it: read only."
-  (setq-local drover-session-at-point-function #'drover-remote--shown-session))
+  "A session of another host, as its host tells it: read only.
+\\[revert-buffer] shows it anew, as its host tells it now; the keys of
+drover's sessions act on it through its host."
+  (setq-local drover-session-at-point-function #'drover-remote--shown-session)
+  (setq-local revert-buffer-function #'drover-remote--revert)
+  (when (bound-and-true-p opencode-remap-headings)
+    (dolist (face '(markdown-ts-heading-1 markdown-ts-heading-2 markdown-ts-heading-3
+                                          markdown-ts-heading-4 markdown-ts-heading-5 markdown-ts-heading-6
+                                          markdown-ts-setext-heading))
+      (face-remap-add-relative face 'opencode-heading))))
 
 (defun drover-remote--shown-session ()
   "Return the session the current buffer shows, as its host last told it."
@@ -1888,56 +2805,172 @@ reads spyglass's registration file there."
               (peer (drover-remote--peer (car shown))))
     (drover-remote--peer-session peer (cdr shown))))
 
-(defun drover-remote-show (session)
+(defun drover-remote--revert (&rest _)
+  "Show the session of the current buffer anew, for `revert-buffer-function'."
+  (if-let* ((session (drover-remote--shown-session)))
+      (drover-remote-show session t)
+    (user-error "Its host no longer lists this session")))
+
+(defun drover-remote--markdown-ready-p ()
+  "Return non-nil when Markdown can be fontified as OpenCode's buffers fontify it."
+  (and (require 'markdown-ts-mode nil t)
+       (require 'opencode-render nil t)
+       (fboundp 'markdown-ts-mode--initialize)
+       (fboundp 'treesit-language-available-p)
+       (treesit-language-available-p 'markdown)
+       (treesit-language-available-p 'markdown-inline)))
+
+(defun drover-remote--markdown (text)
+  "Return TEXT, Markdown, fontified as OpenCode's session buffers show it.
+Its markup hidden goes, its code blocks are fontified by their
+languages; of its properties, only faces, tooltips and displays that
+are strings stay.  TEXT plain when Markdown cannot be fontified here."
+  (or (and (stringp text)
+           (drover-remote--markdown-ready-p)
+           (condition-case nil
+               (with-temp-buffer
+                 (insert text)
+                 (setq-local markdown-ts-hide-markup t
+                             markdown-ts-enable-code-block-context-mode nil
+                             markdown-ts-enable-table-mode nil)
+                 (let ((delay-mode-hooks t))
+                   (markdown-ts-mode--initialize))
+                 (setq-local font-lock-defaults
+                             '(nil nil nil nil
+                                   (font-lock-fontify-syntactically-function . opencode-fontify-markdown)))
+                 (setq-local font-lock-fontify-syntactically-function #'opencode-fontify-markdown)
+                 (font-lock-mode 1)
+                 (font-lock-ensure)
+                 (let ((pieces nil)
+                       (position (point-min)))
+                   (while (< position (point-max))
+                     (let ((next (next-property-change position nil (point-max))))
+                       (unless (get-text-property position 'invisible)
+                         (let* ((piece (buffer-substring-no-properties position next))
+                                (face (get-text-property position 'face))
+                                (help (get-text-property position 'help-echo))
+                                (display (get-text-property position 'display)))
+                           (set-text-properties
+                            0 (length piece)
+                            (append (and face (list 'face face 'font-lock-face face))
+                                    (and (stringp help) (list 'help-echo (drover-bound-line help)))
+                                    (and (stringp display) (list 'display (substring-no-properties display))))
+                            piece)
+                           (push piece pieces)))
+                       (setq position next)))
+                   (apply #'concat (nreverse pieces))))
+             (error nil)))
+      text))
+
+(defun drover-remote--section (title)
+  "Return the heading of a section of a shown session, TITLE, on its line."
+  (concat "\n" (drover-face title 'drover-heading) "\n"))
+
+(defun drover-remote--field (label value)
+  "Return the line of a shown session telling VALUE, under LABEL, or nil."
+  (when (and value (not (equal value "")))
+    (concat (drover-face (format "%-11s" label) 'drover-dim) value "\n")))
+
+(defun drover-remote--details (peer session)
+  "Return what SESSION, of PEER, is, as its view's first lines show it."
+  (let ((status (drover-session-status session)))
+    (concat
+     (opencode-session-status-glyph status) " "
+     (drover-face (drover-bound-line (format "%s" (drover-session-display-title session))) 'drover-heading)
+     "\n\n"
+     (drover-remote--field "Host" (concat (drover-remote--label peer)
+                                          (and (drover-session-stale session)
+                                               (drover-face (concat "  " (drover-remote--state-line peer))
+                                                            'drover-host-disconnected))))
+     (drover-remote--field "Status" (drover-face (opencode-session-status-label status)
+                                                 (opencode-session-status-face status)))
+     (drover-remote--field "Harness" (concat (drover-harness-glyph (drover-session-harness session)) " "
+                                             (drover-harness-name (drover-session-harness session))))
+     (drover-remote--field "Agent" (or (drover-session-agent-display session) (drover-session-agent session)))
+     (drover-remote--field "Model" (string-join
+                                    (delq nil (list (drover-session-model session)
+                                                    (and (drover-session-effort session)
+                                                         (drover-face (drover-session-effort session)
+                                                                      (if (drover-session-effort-default session)
+                                                                          'opencode-setting-inherited
+                                                                        'opencode-setting-chosen)))))
+                                    " "))
+     (drover-remote--field "Directory" (drover-session-directory session))
+     (drover-remote--field "Branch" (drover-session-branch session))
+     (mapconcat (lambda (request)
+                  (drover-remote--field (if (eq (plist-get request :kind) 'question) "Asks" "Permit")
+                                        (drover-face (drover-bound-line (plist-get request :summary))
+                                                     'opencode-session-status-waiting)))
+                (drover-session-requests session) "")
+     (when-let* ((refusal (drover-remote--refusal peer)))
+       (drover-remote--field "Read only" (drover-face refusal 'drover-dim))))))
+
+(defun drover-remote--recap-text (recap)
+  "Return RECAP, as received, as the view of a session shows it."
+  (if-let* ((failure (plist-get recap :failure)))
+      (concat (drover-remote--section "Last turn") (drover-face failure 'drover-dim) "\n")
+    (concat
+     (and (plist-get recap :prompt)
+          (concat (drover-remote--section "Last prompt")
+                  (drover-remote--markdown (plist-get recap :prompt)) "\n"))
+     (and (plist-get recap :changes)
+          (concat (drover-remote--section "Files changed")
+                  (mapconcat (lambda (change)
+                               (concat (car change)
+                                       (and (nth 1 change) (drover-face (format "  +%d" (nth 1 change)) 'success))
+                                       (and (nth 2 change) (drover-face (format " -%d" (nth 2 change)) 'error))
+                                       "\n"))
+                             (plist-get recap :changes) "")))
+     (and (plist-get recap :error)
+          (concat (drover-remote--section "Error")
+                  (drover-face (plist-get recap :error) 'error) "\n")))))
+
+(defun drover-remote-show (session &optional again)
   "Show SESSION, a session of another host, as that host tells it, read only.
-Its record, then where it stands and its last turn, fetched through its
-host.  Opening it there comes in a later step."
+What it is, its last reply, Markdown fontified as OpenCode's buffers
+show it, its last prompt and the files its last turn changed, fetched
+through its host.  Its turn ended unseen is marked seen there, as
+viewing it there would.  AGAIN non-nil shows it anew in the current
+window, without taking another."
   (let* ((host (drover-session-host session))
          (peer (or (drover-remote--peer host) (user-error "No peer %s" host)))
          (buffer (get-buffer-create (format "*drover %s: %s*" (drover-remote--label peer)
                                             (drover-bound-line (drover-session-display-title session) 60)))))
     (with-current-buffer buffer
-      (drover-remote-session-mode)
+      (unless (derived-mode-p 'drover-remote-session-mode)
+        (drover-remote-session-mode))
       (setq drover-remote--shown (cons (drover-remote--peer-name peer) (drover-session-id session)))
       (let ((inhibit-read-only t))
         (erase-buffer)
-        (insert (propertize (format "%s" (drover-session-display-title session)) 'face 'bold) "\n\n")
-        (pcase-dolist (`(,label . ,value)
-                       `(("Host" . ,(drover-remote--label peer))
-                         ("Status" . ,(opencode-session-status-label (drover-session-status session)))
-                         ("Harness" . ,(drover-harness-name (drover-session-harness session)))
-                         ("Engine" . ,(and (drover-session-engine session)
-                                           (symbol-name (drover-session-engine session))))
-                         ("Directory" . ,(drover-session-directory session))
-                         ("Model" . ,(drover-session-model session))
-                         ("Not connected" . ,(and (drover-session-stale session)
-                                                  (drover-remote--state-line peer)))))
-          (when value (insert (format "%-14s%s\n" (concat label ":") value))))
-        (insert "\n")
+        (insert (drover-remote--details peer session))
         (let ((preview-at (point-marker))
-              (recap-at (progn (insert "\n") (point-marker))))
+              (recap-at (point-marker)))
           (set-marker-insertion-type recap-at t)
           (cl-flet ((put (marker text)
-                      (when (buffer-live-p buffer)
+                      (when (and (buffer-live-p buffer) text)
                         (with-current-buffer buffer
                           (let ((inhibit-read-only t))
                             (save-excursion (goto-char marker) (insert text)))))))
             (unless (drover-session-stale session)
               (drover-remote--preview peer session
-                                      (lambda (text) (put preview-at (concat (or text "Nothing to show.") "\n"))))
-              (drover-remote--recap
-               peer session
-               (lambda (recap)
-                 (put recap-at
-                      (if-let* ((failure (plist-get recap :failure)))
-                          (format "\nNo recap: %s\n" failure)
-                        (concat "\n"
-                                (and (plist-get recap :prompt)
-                                     (format "Prompt:\n%s\n\n" (plist-get recap :prompt)))
-                                (and (plist-get recap :reply)
-                                     (format "Reply:\n%s\n" (plist-get recap :reply)))))))))))
+                                      (lambda (text)
+                                        (put preview-at
+                                             (concat (drover-remote--section "Last reply")
+                                                     (if text (drover-remote--markdown text)
+                                                       (drover-face "Nothing to show." 'drover-dim))
+                                                     "\n"))))
+              (drover-remote--recap peer session
+                                    (lambda (recap) (put recap-at (drover-remote--recap-text recap)))))))
         (goto-char (point-min))))
-    (pop-to-buffer-same-window buffer)))
+    (when (and (memq (drover-session-status session) '(done failed))
+               (not (drover-remote--refusal peer session "mark-seen")))
+      (drover-remote--act (drover-remote--peer-name peer) "mark-seen" session nil #'ignore
+                          (let ((link (drover-link peer)))
+                            (lambda (message)
+                              (drover-remote--event (drover-linked link) 'error "marking seen: %s" message)))))
+    (unless again
+      (pop-to-buffer-same-window buffer))
+    buffer))
 
 (defun drover-remote--open-conversation (conversation)
   "Show CONVERSATION, of another host, as `drover-links-parse' returns it.
@@ -1971,24 +3004,46 @@ For `drover-links-remote-function'."
       (setf (drover-remote--state-started-server state) t))
     (add-hook 'drover-changed-hook #'drover-remote--owner-changed)
     (add-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
+    (add-hook 'kill-emacs-hook #'drover-remote--kill-emacs)
     (setq drover-hosts-function #'drover-remote--host-names
           drover-host-label-function #'drover-remote--host-label
           drover-host-state-function #'drover-remote--host-state
           drover-links-remote-function #'drover-remote--open-conversation)
     (drover-remote-reconfigure)
-    ;; Connections made before: greeted now.
+    ;; Connections made before, by a remote layer of this Emacs gone
+    ;; since: their peers are told it restarted, as they still serve it
+    ;; and follow its subscription to them, and are greeted again.
     (dolist (connection (spyglass-connections))
       (when (and (spyglass-connection-live-p connection)
                  (not (memq connection (mapcar #'drover-remote--peer-dialed (drover-remote--peers)))))
+        (drover-remote--bye connection "restart" (format "%s restarted its remote layer" drover-host))
         (drover-remote--hello connection t)))
     state))
 
-(defun drover-remote--stop ()
-  "Tell the peers this host stops, close what this host dialed, forget them."
+(defun drover-remote--kill-emacs ()
+  "Tell the peers this Emacs quits, so that they keep its sessions, dimmed.
+For `kill-emacs-hook'."
+  (drover-with-reporting "remote quit"
+    (when-let* ((state (drover-remote--current)))
+      (dolist (peer (drover-remote--peers))
+        (dolist (candidate (drover-remote--peer-candidates peer))
+          (when (spyglass-connection-live-p (car candidate))
+            (drover-remote--bye (car candidate) "quit" (format "%s's Emacs quits" drover-host))))))))
+
+(defun drover-remote--stop (&optional kind)
+  "Tell the peers this host stops, close what this host dialed, forget them.
+KIND is the farewell, \"off\" by default, or \"restart\" when the mode
+starts again at once: its peers keep this host's sessions meanwhile."
   (when-let* ((state drover-remote--state))
     (when (drover-layout-current-p state 'drover-remote--state)
       (dolist (peer (drover-remote--peers))
-        (drover-remote--remove-peer state peer (format "%s stopped" drover-host)))
+        (drover-remote--remove-peer state peer (format "%s %s" drover-host
+                                                       (if (equal kind "restart") "restarted" "stopped"))
+                                    (or kind "off")))
+      (when (drover-remote--state-runner state)
+        (cancel-timer (drover-remote--state-runner state)))
+      (when (drover-remote--state-watch state)
+        (cancel-timer (drover-remote--state-watch state)))
       (maphash (lambda (connection _sub) (drover-remote--unsubscribe state connection))
                (copy-hash-table (drover-remote--state-subs state)))
       (when (drover-remote--state-started-server state)
@@ -1997,6 +3052,7 @@ For `drover-links-remote-function'."
     (spyglass-unregister-channel drover-remote-channel))
   (remove-hook 'drover-changed-hook #'drover-remote--owner-changed)
   (remove-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
+  (remove-hook 'kill-emacs-hook #'drover-remote--kill-emacs)
   (setq drover-hosts-function nil
         drover-host-label-function nil
         drover-host-state-function nil
@@ -2025,7 +3081,7 @@ whose write failed, as those offering `spyglass-reconnect' do."
             ;; Drover counts on spyglass to drop a stream a write failed on.
             (unless (fboundp 'spyglass-reconnect)
               (user-error "`drover-remote-mode' needs a newer spyglass, one dropping a stream whose write failed"))
-            (when drover-remote--state (drover-remote--stop))
+            (when drover-remote--state (drover-remote--stop "restart"))
             (drover-start)
             (drover-remote--start))
         (error (setq drover-remote-mode nil)

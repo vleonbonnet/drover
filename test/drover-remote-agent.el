@@ -24,8 +24,13 @@
 ;; spyglass server registered in DROVER_AGENT_DIR/server.json, its state
 ;; there too, and takes commands as requests on the channel
 ;; "drover-test" of any connection: make, change and remove sessions,
-;; break streams, dial back, tell what it holds.  With DROVER_AGENT_STRICT
-;; set, it refuses hosts it does not know.  It says READY on
+;; break streams, dial back, tell what it holds, restart its remote layer.
+;; Its backend performs actions, noting each, its confirmations held on
+;; command.  With DROVER_AGENT_STRICT set, it refuses hosts it does not
+;; know; DROVER_AGENT_ACCESS is the access it grants the others, `read' by
+;; default; DROVER_AGENT_DIAL, a registration file, has it dial the host
+;; registered there as it starts; DROVER_AGENT_OLD has it greet as a drover
+;; telling no capabilities, as an older one.  It says READY on
 ;; standard error once it listens, kills itself past 2 GB of resident
 ;; memory, and after ten minutes without a command.  It loads neither
 ;; drover's lists nor its test helpers, so that its files are few to copy.
@@ -49,6 +54,57 @@
 (defvar drover-remote-agent--quit nil
   "Non-nil once told to quit.")
 
+(defvar drover-remote-agent--archived (make-hash-table :test #'equal)
+  "The fake backend's archived sessions, by identifier.")
+
+(defvar drover-remote-agent--calls nil
+  "The actions the fake backend performed, newest first, as [ACTION ID ARGUMENT].")
+
+(defvar drover-remote-agent--hold nil
+  "Non-nil while confirmations are held; then the functions confirming, newest first.")
+
+(defun drover-remote-agent--confirm (function)
+  "Call FUNCTION, a confirmation, now or once released."
+  (if drover-remote-agent--hold
+      (push function (cdr drover-remote-agent--hold))
+    (funcall function)))
+
+(defun drover-remote-agent--action (action)
+  "Return the fake backend's operation ACTION, a string, confirming.
+It notes the call, changes the session as ACTION would, and confirms."
+  (lambda (session &optional then else)
+    (let ((id (drover-session-id session)))
+      (push (vector action id :false) drover-remote-agent--calls)
+      (drover-remote-agent--confirm
+       (lambda ()
+         (let ((live (gethash id drover-remote-agent--sessions))
+               (archived (gethash id drover-remote-agent--archived)))
+           (if (not (or live archived))
+               (when else (funcall else "no such session"))
+             (pcase action
+               ("interrupt" (drover-remote-agent--set id (drover-remote-agent--with live :status 'idle)))
+               ("mark-seen" (drover-remote-agent--set id (drover-remote-agent--with live :status 'idle)))
+               ("archive" (when live
+                            (puthash id (drover-remote-agent--with live :archived (float-time))
+                                     drover-remote-agent--archived)
+                            (drover-remote-agent--set id nil)))
+               ("unarchive" (when archived
+                              (remhash id drover-remote-agent--archived)
+                              (drover-remote-agent--set id (drover-remote-agent--with archived :archived nil))))
+               ("delete" (remhash id drover-remote-agent--archived)
+                (drover-remote-agent--set id nil)))
+             (drover-changed-now)
+             (when then (funcall then)))))))))
+
+(defun drover-remote-agent--with (session &rest slots)
+  "Return a copy of SESSION with SLOTS, a plist of slot names as keywords, set."
+  (let ((copy (copy-sequence session)))
+    (cl-loop for (slot value) on slots by #'cddr
+             do (setf (cl-struct-slot-value 'drover-session (intern (substring (symbol-name slot) 1)) copy)
+                      value))
+    (setf (drover-session-updated copy) (float-time))
+    copy))
+
 (defun drover-remote-agent--say (format-string &rest args)
   "Tell the driver FORMAT-STRING with ARGS, on standard error."
   (message "DROVER-AGENT %s" (apply #'format format-string args)))
@@ -65,7 +121,37 @@
                                     :reply (concat "Reply of " (drover-session-id session))
                                     :changes (list (list "a.el" 3 1)))))
    :preview (lambda (session callback)
-              (funcall callback (concat "Preview of " (drover-session-id session))))
+              (funcall callback (concat "# Preview of " (drover-session-id session)
+                                        "\n\nSome **bold** text and `code`.\n\n"
+                                        "```elisp\n(defun drover-agent-f () 1)\n```\n")))
+   :interrupt (drover-remote-agent--action "interrupt") :interrupt-confirms t
+   :mark-seen (drover-remote-agent--action "mark-seen") :mark-seen-confirms t
+   :archive (drover-remote-agent--action "archive") :archive-confirms t
+   :unarchive (drover-remote-agent--action "unarchive") :unarchive-confirms t
+   :delete (drover-remote-agent--action "delete") :delete-confirms t
+   :rename (lambda (session title)
+             (push (vector "rename" (drover-session-id session) title) drover-remote-agent--calls)
+             (drover-remote-agent--set (drover-session-id session)
+                                       (drover-remote-agent--with session :title title))
+             (drover-changed-now))
+   :submit (lambda (session text then _else)
+             (push (vector "send" (drover-session-id session) text) drover-remote-agent--calls)
+             (drover-remote-agent--confirm then))
+   :requests (lambda (session callback)
+               (funcall callback
+                        (and (drover-session-requests session)
+                             (list (list :id (concat "perm-" (drover-session-id session)) :kind 'permission
+                                         :title "Shell command: ls" :detail "ls -la"
+                                         :choices '("once" "always" "reject"))))))
+   :answer (lambda (session id answer then else)
+             (if (not (equal id (concat "perm-" (drover-session-id session))))
+                 (funcall else "no such request pending")
+               (push (vector "answer" (drover-session-id session) (plist-get answer :decision))
+                     drover-remote-agent--calls)
+               (drover-remote-agent--set (drover-session-id session)
+                                         (drover-remote-agent--with session :requests nil :status 'working))
+               (drover-changed-now)
+               (funcall then)))
    :history (lambda (callback)
               ;; Later, as a service answers.
               (run-at-time 0.05 nil
@@ -73,8 +159,9 @@
                              (funcall callback (list (drover-remote-agent--session "old1" 0 :status 'idle)
                                                      (drover-remote-agent--session "old2" 0 :status 'idle))))))
    :archived (lambda (callback)
-               (funcall callback (list (drover-remote-agent--session "gone1" 0 :status 'idle
-                                                                     :archived 1700000000.0))))))
+               (funcall callback (cons (drover-remote-agent--session "gone1" 0 :status 'idle
+                                                                     :archived 1700000000.0)
+                                       (hash-table-values drover-remote-agent--archived))))))
 
 (defun drover-remote-agent--session (id index &rest properties)
   "Return a fake session ID, the INDEXth, with PROPERTIES over the defaults."
@@ -160,6 +247,41 @@
                (drover-remote-agent--set id copy)
                (drover-changed-now))))
          (funcall reply (list :rev (plist-get (drover-remote-owner-stats) :rev)))))
+      ("ask"
+       ;; Sessions waiting for the user: a permission each.
+       (seq-doseq (id (plist-get args :ids))
+         (when-let* ((session (gethash id drover-remote-agent--sessions)))
+           (drover-remote-agent--set id (drover-remote-agent--with
+                                         session :status 'waiting
+                                         :requests (list (list :kind 'permission :summary "ls"))))))
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
+      ("calls"
+       (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("hold"
+       (setq drover-remote-agent--hold (list 'held))
+       (funcall reply (list :ok t)))
+      ("release"
+       (let ((held (reverse (cdr drover-remote-agent--hold))))
+         (setq drover-remote-agent--hold nil)
+         (mapc #'funcall held)
+         (funcall reply (list :released (length held)))))
+      ("history"
+       ;; The events of its link with PEER, oldest first, as [KIND TEXT].
+       (let ((peer (drover-remote--peer (plist-get args :peer))))
+         (funcall reply (list :events (vconcat (mapcar (lambda (event)
+                                                         (vector (symbol-name (nth 1 event)) (nth 2 event)))
+                                                       (reverse (and peer (drover-remote--peer-history peer)))))))))
+      ("restart"
+       ;; The mode enabled again, as a restart of the remote layer.
+       (funcall reply (list :ok t))
+       (run-at-time 0.05 nil (lambda () (drover-remote-mode 1))))
+      ("relayout"
+       ;; The state made by another version of drover: made anew, its
+       ;; connections kept, as reloading a newer drover does.
+       (setf (drover-remote--state-stamp drover-remote--state) 'older)
+       (funcall reply (list :ok t))
+       (run-at-time 0.05 nil (lambda () (drover-remote--current))))
       ("titles"
        (funcall reply (list :titles (vconcat (mapcar (lambda (id)
                                                        (let ((s (gethash id drover-remote-agent--sessions)))
@@ -203,8 +325,11 @@
        (drover-remote-reconfigure)
        (funcall reply (list :ok t)))
       ("drop"
-       ;; Streams broken, then CHANGE sessions changed while they are.
+       ;; Streams broken, then CHANGE sessions changed while they are;
+       ;; with AWAY, those it dialed connect again AWAY seconds later.
        (funcall reply (list :ok t))
+       (when (plist-get args :away)
+         (setq spyglass-reconnect-delays (list (plist-get args :away) 0.2)))
        (let ((change (or (plist-get args :change) 0)))
          (run-at-time 0.05 nil
                       (lambda ()
@@ -241,9 +366,17 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
           drover-refresh-delay 0.02
           spyglass-registration-file (expand-file-name "server.json" dir)
           drover-remote-standby-delay 1
-          drover-remote-accept-unknown (unless (getenv "DROVER_AGENT_STRICT") 'read)
+          drover-remote-accept-unknown (unless (getenv "DROVER_AGENT_STRICT")
+                                         (intern (or (getenv "DROVER_AGENT_ACCESS") "read")))
           drover-remote-peers (and peers (not (string-empty-p peers))
-                                   (mapcar (lambda (name) (list name)) (split-string peers ","))))
+                                   (mapcar (lambda (name)
+                                             (list name :access (intern (or (getenv "DROVER_AGENT_ACCESS") "read"))))
+                                           (split-string peers ","))))
+    (when (getenv "DROVER_AGENT_OLD")
+      (setq drover-remote-capabilities nil))
+    (when-let* ((dial (getenv "DROVER_AGENT_DIAL")))
+      (setq drover-remote-peers (mapcar (lambda (entry) (append entry (list :dial t :local dial)))
+                                        drover-remote-peers)))
     (add-hook 'spyglass-error-functions
               (lambda (_connection message) (drover-remote-agent--say "spyglass: %s" message)))
     (drover-remote-agent--register)

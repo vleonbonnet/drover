@@ -102,6 +102,16 @@
 (declare-function opencode-session-compact "opencode-session" (id))
 (declare-function opencode-session-last-turn "opencode-session" (id callback))
 (declare-function opencode-agent-display "opencode-display" (id &optional directory))
+(declare-function opencode--sync-requests "opencode-requests" (callback))
+(declare-function opencode--form-find "opencode-form" (key value))
+(declare-function opencode--form-resolved "opencode-form" (id))
+(declare-function opencode--field-options "opencode-form" (field))
+(declare-function opencode-form-send "opencode-form" (entry &optional cancel))
+(declare-function opencode-open-forms "opencode-form" ())
+(declare-function opencode-form-fields "opencode-form" (form))
+(declare-function opencode-form-question-p "opencode-form" (form))
+(declare-function opencode-permission-reply "opencode-permission" (permission decision &optional message))
+(defvar opencode-pending-permissions)
 
 ;; Scheduling is drover's, loaded as the user schedules.
 (declare-function drover-schedule-load "drover-schedule" ())
@@ -1032,6 +1042,119 @@ with the refusal's description, which opencode.el otherwise reports.
 The backend's :delete, which confirms (:delete-confirms)."
   (opencode-session-delete (drover-session-id session) then (drover-opencode--else else)))
 
+(defun drover-opencode--describe-field (field)
+  "Return FIELD, of a form, as the backend's :requests tells it."
+  (let-alist field
+    (list :key (and (stringp .key) .key)
+          :type (if (member .type '("string" "multiselect" "boolean" "number" "integer")) .type "string")
+          :title (drover-bound-line (format "%s" (or .title .description .key "")))
+          :options (seq-take (seq-filter #'stringp (opencode--field-options field)) 50)
+          :custom (and (or .custom (null .options)) t))))
+
+(defun drover-opencode--describe-requests ()
+  "Return the requests the session of the current buffer waits on, as data.
+As the backend's :requests tells them."
+  (append
+   (mapcar (lambda (permission)
+             (list :id (plist-get permission :id) :kind 'permission
+                   :title (drover-bound-line (format "%s" (or (plist-get permission :title)
+                                                              (plist-get permission :action) "")))
+                   :detail (drover-bound-text (and (stringp (plist-get permission :detail))
+                                                   (plist-get permission :detail)))
+                   :choices '("once" "always" "reject")))
+           opencode-pending-permissions)
+   (mapcar (lambda (entry)
+             (let ((form (plist-get entry :form)))
+               (list :id (plist-get entry :id) :kind 'question
+                     :title (drover-bound-line (format "%s" (or (alist-get 'title form)
+                                                                (and (opencode-form-question-p form) "Question")
+                                                                "Form")))
+                     :fields (mapcar #'drover-opencode--describe-field
+                                     (seq-take (opencode-form-fields form) 20)))))
+           (opencode-open-forms))))
+
+(defun drover-opencode--requests (session callback)
+  "Call CALLBACK with what the pending requests of SESSION ask, as data.
+Its buffer, opened in the background if need be, loads them first.
+Nothing is shown and nothing asks.  The backend's :requests."
+  (drover-opencode--in-buffer
+   session
+   (lambda ()
+     (opencode--sync-requests
+      (lambda ()
+        (drover-with-reporting "OpenCode requests"
+                               (funcall callback (drover-opencode--describe-requests))))))
+   (lambda (message) (funcall callback (list :failure message)))))
+
+(defun drover-opencode--field-value (field value)
+  "Return VALUE, an answer received for FIELD of a form, as the service takes it.
+An option's label stands for its value; text no option offers is kept
+only where FIELD takes typed answers.  Nil when VALUE does not fit."
+  (let-alist field
+    (cl-flet ((choice (text)
+                (and (stringp text)
+                     (if-let* ((option (seq-find (lambda (option) (equal (alist-get 'label option) text))
+                                                 .options)))
+                         (or (alist-get 'value option) text)
+                       (and (or .custom (null .options)) (drover-bound-text text 20 4096))))))
+      (pcase .type
+        ("multiselect" (and (vectorp value)
+                            (let ((chosen (mapcar #'choice (seq-take value 50))))
+                              (and (not (memq nil chosen)) (vconcat chosen)))))
+        ("boolean" (cond ((eq value t) t) ((eq value :false) :false)))
+        ((or "number" "integer") (and (numberp value) value))
+        (_ (choice value))))))
+
+(defun drover-opencode--answer (session id answer then else)
+  "Answer the request ID of SESSION with ANSWER, then call THEN, or ELSE.
+ANSWER is (:decision CHOICE) for a permission, (:answer PAIRS) for a
+form, PAIRS a list of (KEY . VALUE) by the keys of its fields, as
+strings, or (:dismiss t).  Nothing asks the user.  The backend's
+:answer."
+  (drover-opencode--in-buffer
+   session
+   (lambda ()
+     (opencode--sync-requests
+      (lambda ()
+        (drover-with-reporting "OpenCode answer"
+                               (let ((permission (seq-find (lambda (p) (equal (plist-get p :id) id)) opencode-pending-permissions))
+                                     (entry (opencode--form-find :id id)))
+                                 (cond
+                                  (permission
+                                   (let ((decision (plist-get answer :decision)))
+                                     (if (not (member decision '("once" "always" "reject")))
+                                         (funcall else "no such choice")
+                                       (opencode-permission-reply permission (intern decision))
+                                       (funcall then))))
+                                  ((not (and entry (not (plist-get entry :submitted))))
+                                   (funcall else "no such request pending"))
+                                  ((plist-get answer :dismiss)
+                                   (opencode-form-send entry t)
+                                   (funcall then))
+                                  (t
+                                   (let* ((pairs (plist-get answer :answer))
+                                          (form (plist-get entry :form))
+                                          (body nil))
+                                     (dolist (field (opencode-form-fields form))
+                                       (let* ((key (alist-get 'key field))
+                                              (given (and (stringp key) (assoc key pairs)))
+                                              (value (and given (drover-opencode--field-value field (cdr given)))))
+                                         (when value
+                                           (push (cons (intern key) value) body))))
+                                     (plist-put entry :submitted t)
+                                     (opencode-request
+                                      'post (format "/api/session/%s/form/%s/reply" opencode-session-id id)
+                                      :body `((answer . ,(or (nreverse body) (opencode-empty-object))))
+                                      :then (lambda (_)
+                                              (drover-with-reporting "OpenCode answer"
+                                                                     (opencode--form-resolved id)
+                                                                     (funcall then)))
+                                      :else (lambda (error)
+                                              (drover-with-reporting "OpenCode answer"
+                                                                     (plist-put entry :submitted nil)
+                                                                     (funcall else (opencode-error-describe error)))))))))))))
+   else))
+
 (defun drover-opencode--pending-prompts (session)
   "Return how many pending prompts of SESSION can be withdrawn, maybe 0.
 Its buffer keeps them: a session without one has none to withdraw.
@@ -1499,6 +1622,8 @@ nothing; one refusing or failing is a failure.  Without
    :reports-changes t
    :open #'drover-opencode--open
    :respond #'drover-opencode--respond
+   :requests #'drover-opencode--requests
+   :answer #'drover-opencode--answer
    :interrupt #'drover-opencode--interrupt
    :interrupt-confirms t
    :pending-prompts #'drover-opencode--pending-prompts

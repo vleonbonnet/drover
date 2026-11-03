@@ -916,6 +916,11 @@ instead.  A prompt with attachments is refused: the queue keeps text."
               (user-error "A prompt with attachments cannot be scheduled: send it, or delete their labels")))
          (session (drover-prompt-read-target "Schedule for session: " :existing-only t :options-menu t))
          (buffer (or (drover-session-buffer session)
+                     ;; The queue is this host's, and delivers through this host's front ends.
+                     (when (drover-session-host session)
+                       (user-error "%s runs on %s: prompts are scheduled on the host running the session"
+                                   (drover-session-display-title session)
+                                   (drover-host-label (drover-session-host session))))
                      (user-error "%s has no live buffer" (drover-session-display-title session))))
          (target (drover-schedule-target buffer))
          (chosen (drover-schedule-read-when

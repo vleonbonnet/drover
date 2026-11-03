@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 13
+(defconst drover-core-generation 14
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1630,6 +1630,36 @@ PROPERTIES is a plist of:
              backend implements applies to all its sessions.  See
              `drover-supports-p'.  A backend not supporting :archive
              for a session has it archived by drover.
+ :unsupported
+             Function of a session and an OPERATION :supports refused,
+             returning why, a line, or nil: a command acting on that
+             session alone says it.
+ :batches    Non-nil when the backend gathers the operations it is
+             given at once into few requests, as the proxy of another
+             host does: acting on several sessions, drover then keeps
+             many more of its operations awaiting answers than
+             `drover-bulk-requests' (see `drover--bulk-start').  Its
+             operations confirm (:archive-confirms and the others).
+ :requests   Function of a session and a CALLBACK fetching, without
+             asking the user, what the session's pending requests ask,
+             and calling CALLBACK once with a list of plists, or with
+             (:failure MESSAGE): each has :id and :kind, `permission'
+             or `question', :title, a line, and :detail, a text; a
+             permission its :choices, among \"once\", \"always\" and
+             \"reject\"; a question its :fields, plists of :key,
+             :type (\"string\", \"multiselect\", \"boolean\",
+             \"number\" or \"integer\"), :title, :options, the
+             labels offered, and :custom, non-nil when another answer
+             may be typed.  For the hosts acting on this one's sessions.
+ :answer     Function of a session, the :id of one of its requests, an
+             ANSWER, THEN and ELSE, answering it without asking the
+             user: ANSWER is a plist (:decision CHOICE) for a
+             permission, (:answer PAIRS) for a question, PAIRS a list
+             of (KEY . VALUE), KEY a field's key, a string, VALUE a
+             string, a vector of strings for a multiselect, a number,
+             or t or :false, or (:dismiss t) to dismiss it.  THEN is
+             called with no argument once the answer went, ELSE with a
+             message, at most one of them once.
  :recorded   The engines whose conversations the backend lists from
              what they record themselves, such as transcripts on disk,
              rather than sessions a front end shows: a list of symbols.
@@ -1841,8 +1871,13 @@ its :supports function says it does not apply to SESSION."
       (user-error "%s sessions do not support %s"
                   (drover-backend-label session) (drover--operation-name operation)))
     (unless (drover-supports-p session operation)
-      (user-error "%s cannot %s" (drover-session-display-title session)
-                  (drover--operation-name operation)))
+      (let ((why (when-let* ((unsupported (drover-backend-property session :unsupported))
+                             ((functionp unsupported)))
+                   (drover-with-reporting "backend supports"
+                     (funcall unsupported session operation)))))
+        (user-error "%s cannot %s%s" (drover-session-display-title session)
+                    (drover--operation-name operation)
+                    (if (stringp why) (concat ": " (drover-bound-line why)) ""))))
     (apply function session arguments)))
 
 (defun drover--start-backend (name)
@@ -4332,6 +4367,14 @@ answer is typed in full."
 Such as :archive-confirms for :archive (see `drover-register-backend')."
   (intern (concat (symbol-name operation) "-confirms")))
 
+(defun drover--request-kind (session operation)
+  "Return what OPERATION on SESSION is, for `drover--bulk-start'.
+`batched' for a backend batching its requests (:batches), `confirmed'
+for one confirming OPERATION later, else `request'."
+  (cond ((drover-backend-property session :batches) 'batched)
+        ((drover-backend-property session (drover--confirms-property operation)) 'confirmed)
+        (t 'request)))
+
 (defun drover--call-confirming (session operation then else)
   "Perform OPERATION on SESSION; call THEN once it took, ELSE if refused.
 OPERATION is a keyword.
@@ -4394,10 +4437,7 @@ keyword, which a backend may confirm later (see
              (funcall settle t (funcall operation session)))))
      (or (plist-get properties :kind)
          (if (keywordp operation)
-             (lambda (session)
-               (if (drover-backend-property session (drover--confirms-property operation))
-                   'confirmed
-                 'request))
+             (lambda (session) (drover--request-kind session operation))
            (lambda (_session) 'local)))
      (plist-get properties :finish)
      (plist-get properties :notes))))
@@ -4452,6 +4492,11 @@ A selection of this many is acted on in the command, as one alone.")
 (defconst drover--bulk-progress-interval 0.25
   "Seconds at least between two messages of an action's progress.")
 
+(defconst drover--bulk-batch-flight 512
+  "Answers awaited at most of backends batching their requests (:batches).
+Such a backend sends one request for many sessions, as a peer's proxy
+does, so that more may be in flight than `drover-bulk-requests'.")
+
 (defconst drover--bulk-named 3
   "Failures a report names, and notes it gives one by one, at most.")
 
@@ -4473,6 +4518,7 @@ It runs in slices.")
   (keys nil :documentation "The keys of the sessions it acts on, a hash table.")
   (total 0 :documentation "How many sessions it acts on.")
   (flight 0 :documentation "How many answers it awaits.")
+  (batched 0 :documentation "How many of those its backends batch.")
   (waiting nil :documentation "The sessions whose answers it awaits, by key.
 Each is (DEADLINE . SETTLE).")
   (settled 0 :documentation "How many sessions settled, whichever way.")
@@ -4517,12 +4563,14 @@ was acted on, or nil and a message, a line, when it failed; a step
 signalling fails.  KIND, a function of a session, tells what STEP is:
 `confirmed', a request whose answer is awaited, of which
 `drover-bulk-requests' are in flight at most; `request', one whose
-answer is not, as many sent per hundredth of a second at most; or
-`local', work in Emacs.  FINISH, if any, is a function of a session and
-its value, run in slices once the session settled, as closing its
-buffer: what it returns is noted instead.  NOTES, if any, is a function
-of the notes, the non-nil values (VALUE . TITLE) in order, returning
-the texts the report gives after what was done.
+answer is not, as many sent per hundredth of a second at most;
+`batched', a request whose answer is awaited, gathered with others into
+one by its backend, of which `drover--bulk-batch-flight' are in flight at
+most; or `local', work in Emacs.  FINISH, if any, is a function of a
+session and its value, run in slices once the session settled, as
+closing its buffer: what it returns is noted instead.  NOTES, if any, is
+a function of the notes, the non-nil values (VALUE . TITLE) in order,
+returning the texts the report gives after what was done.
 
 A session listed twice, or acted on already by an action of DONE still
 running, is acted on once: when all are, that is all said.  The first
@@ -4566,7 +4614,7 @@ Only for a job taking notes (see `drover--bulk-start')."
 (defun drover--bulk-settler (job session confirmed)
   "Return the function settling SESSION in JOB, for its step.
 It acts once, however often called.  CONFIRMED non-nil tells that JOB
-awaits its answer."
+awaits its answer, `batched' when its backend batches it."
   (let ((link (drover-link job))
         (key (drover-session-key session))
         (settled nil))
@@ -4578,6 +4626,8 @@ awaits its answer."
                       ((drover-layout-current-p job 'drover--bulk)))
             (when confirmed
               (cl-decf (drover--bulk-flight job))
+              (when (eq confirmed 'batched)
+                (cl-decf (drover--bulk-batched job)))
               (remhash key (drover--bulk-waiting job)))
             (cl-incf (drover--bulk-settled job))
             (if ok
@@ -4601,8 +4651,11 @@ awaits its answer."
   "Return non-nil when a session of KIND may be acted on now.
 SENT is how many requests whose answers are not awaited this slice sent."
   (pcase kind
-    ('confirmed (< (apply #'+ (mapcar #'drover--bulk-flight drover--bulk-jobs))
+    ('confirmed (< (apply #'+ (mapcar (lambda (job) (- (drover--bulk-flight job) (drover--bulk-batched job)))
+                                      drover--bulk-jobs))
                    (max 1 drover-bulk-requests)))
+    ('batched (< (apply #'+ (mapcar #'drover--bulk-batched drover--bulk-jobs))
+                 drover--bulk-batch-flight))
     ('request (< sent (max 1 drover-bulk-requests)))
     (_ t)))
 
@@ -4656,11 +4709,13 @@ on the next ones, as long as requests may go and for
                                    nil))))
             (let* ((session (pop (drover--bulk-queue job)))
                    (kind (funcall (drover--bulk-kind job) session))
-                   (settle (drover--bulk-settler job session (eq kind 'confirmed))))
+                   (settle (drover--bulk-settler job session (and (memq kind '(confirmed batched)) kind))))
               (cl-incf count)
               (pcase kind
-                ('confirmed
+                ((or 'confirmed 'batched)
                  (cl-incf (drover--bulk-flight job))
+                 (when (eq kind 'batched)
+                   (cl-incf (drover--bulk-batched job)))
                  (puthash (drover-session-key session) (cons (+ (float-time) drover-bulk-timeout) settle)
                           (drover--bulk-waiting job)))
                 ('request (cl-incf sent)))
@@ -4791,7 +4846,7 @@ Each action then reports what it did."
   "Return what archiving SESSION is, for `drover--bulk-start'."
   (cond ((drover-session-archived-p session) 'local)
         ((drover--native-archive-p session)
-         (if (drover-backend-property session :archive-confirms) 'confirmed 'request))
+         (drover--request-kind session :archive))
         (t 'local)))
 
 (defun drover--archive-step (session settle)
@@ -4874,7 +4929,7 @@ returns it: told one by one when few, else counted.  Only the outcomes
   "Return what restoring SESSION is, for `drover--bulk-start'."
   (cond ((drover--archive-entry session) 'local)
         ((drover-session-archived session)
-         (if (drover-backend-property session :unarchive-confirms) 'confirmed 'request))
+         (drover--request-kind session :unarchive))
         (t 'local)))
 
 (defun drover--unarchive-step (session settle)
@@ -4904,7 +4959,7 @@ once it answered; a session not archived settles at once."
 
 (defun drover--delete-kind (session)
   "Return what deleting SESSION is, for `drover--bulk-start'."
-  (if (drover-backend-property session :delete-confirms) 'confirmed 'request))
+  (drover--request-kind session :delete))
 
 (defun drover--delete-step (session settle)
   "Delete SESSION as `drover-delete-session' does, then SETTLE.

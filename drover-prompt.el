@@ -1544,27 +1544,49 @@ The key of `drover-dispatch' opens `drover-prompt-options-menu' there."
 
 ;;;; Choosing where the prompt goes
 
+(defcustom drover-prompt-remote-limit 50
+  "Sessions of other hosts the prompt offers to send to, the latest active first.
+Their hosts submit the prompt through their backends; it goes as text,
+attachments being this host's files."
+  :type 'natnum
+  :group 'drover)
+
 (defun drover-prompt--target-sessions ()
   "Return the running sessions the prompt may go to, with their buffers.
 The value is a list of (SESSION . BUFFER): the sessions whose backend
 takes prompts (:send) and that have a live buffer, the current
 buffer's first, then in the order of `buffer-list'.  Those drover
 archived itself are among them, a buffer still showing them: sent a
-prompt, they are restored first (see `drover-unarchive-to-send')."
+prompt, they are restored first (see `drover-unarchive-to-send').
+Then come the sessions of other hosts connected that take prompts
+there, their owners submitting them, as (SESSION), the latest active
+first, `drover-prompt-remote-limit' at most."
   (let ((ranks (make-hash-table :test #'eq))
         (rank 0)
-        (current (current-buffer)))
+        (current (current-buffer))
+        (remote nil))
     (dolist (buffer (buffer-list))
       (puthash buffer (cl-incf rank) ranks))
     (puthash current 0 ranks)
-    (sort (delq nil (mapcar (lambda (session)
-                              (when-let* (((drover-supports-p session :send))
-                                          (buffer (drover-session-buffer session)))
-                                (cons session buffer)))
-                            (append (drover-sessions) (drover-archived-live-sessions))))
-          (lambda (a b)
-            (< (gethash (cdr a) ranks most-positive-fixnum)
-               (gethash (cdr b) ranks most-positive-fixnum))))))
+    (append
+     (sort (delq nil (mapcar (lambda (session)
+                               (if (drover-session-host session)
+                                   (progn (when (and (not (drover-session-stale session))
+                                                     (not (drover-session-archived session))
+                                                     (drover-supports-p session :send))
+                                            (push session remote))
+                                          nil)
+                                 (when-let* (((drover-supports-p session :send))
+                                             (buffer (drover-session-buffer session)))
+                                   (cons session buffer))))
+                             (append (drover-sessions) (drover-archived-live-sessions))))
+           (lambda (a b)
+             (< (gethash (cdr a) ranks most-positive-fixnum)
+                (gethash (cdr b) ranks most-positive-fixnum))))
+     (mapcar #'list
+             (seq-take (sort remote :key (lambda (session) (- (drover--time (drover-session-since session)))))
+                       drover-prompt-remote-limit)))))
+
 
 (defun drover-prompt--new-targets ()
   "Return the entries of `drover-prompt-new-targets' whose feature is installed."
@@ -1639,7 +1661,8 @@ known only; nil for a new session without a prompt buffer."
 (defun drover-prompt--candidates (sessions targets)
   "Return the candidates of the target picker, as an alist (NAME . ENTRY).
 SESSIONS are the running sessions, as (SESSION . BUFFER), named after
-their buffer; TARGETS the entries of `drover-prompt-new-targets' to
+their buffer, those of other hosts, without one, after their titles
+and hosts; TARGETS the entries of `drover-prompt-new-targets' to
 offer.  ENTRY is a plist: :target, the session or new-target entry;
 :current, what a session runs now (see :options); :directory, where it
 runs or would start.  Each NAME carries its target as its
@@ -1657,13 +1680,16 @@ runs or would start.  Each NAME carries its target as its
                   (push (cons (propertize name 'drover-prompt-target (plist-get entry :target)) entry)
                         candidates))))
       (pcase-dolist (`(,session . ,buffer) sessions)
-        (add (buffer-name buffer)
+        (add (if buffer
+                 (buffer-name buffer)
+               (format "%s @%s" (drover-bound-line (format "%s" (drover-session-display-title session)) 60)
+                       (drover-host-label (drover-session-host session))))
              (list :target session
                    :current (and (drover-supports-p session :options)
                                  (drover-with-reporting "session options"
                                    (drover-backend-call session :options)))
                    :directory (or (drover-session-local-directory session)
-                                  (buffer-local-value 'default-directory buffer)))))
+                                  (and buffer (buffer-local-value 'default-directory buffer))))))
       (dolist (target targets)
         (add (format "[New %s…]" (or (plist-get target :label) (plist-get target :engine)))
              (list :target target
