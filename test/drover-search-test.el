@@ -482,7 +482,12 @@ In STATE, by default a search made now."
       (funcall (nth 1 (car drover-search-test-runs)) 'done)
       (should (equal (mapcar (lambda (entry) (drover-session-id (car entry))) (plist-get result :sessions))
                      '("b" "a")))
-      (should (equal (nth 1 (car (plist-get result :sessions))) "zebra two")))))
+      (should (equal (nth 1 (car (plist-get result :sessions))) "zebra two"))
+      ;; What it returns prints as little, whatever the sessions.
+      (let ((cancel (drover-search-text "zebra" #'ignore)))
+        (should (drover-test-printed-length cancel 2000))
+        (funcall cancel)
+        (should-not drover-search--programmatic)))))
 
 (ert-deftest drover-search-test-prints-in-proportion ()
   "What a search keeps prints in proportion to its sessions."

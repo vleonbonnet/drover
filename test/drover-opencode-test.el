@@ -31,6 +31,7 @@
 ;; opencode first: drover loads the backend once opencode is loaded.
 (require 'opencode)
 (require 'drover-opencode)
+(require 'drover-search)
 (require 'drover-prompt)
 (require 'drover-opencode-fixtures)
 
@@ -1888,6 +1889,72 @@ A refusal is told on one line, as a warning, the session staying archived."
   ;; The keys opencode.el's lists had are gone.
   (dolist (key '("1" "2" "3"))
     (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
+
+;;;; Searching what was said
+
+(defmacro drover-opencode-test-with-search (answer &rest body)
+  "Run BODY with `opencode-search' stubbed, answering as ANSWER says.
+ANSWER is a function of the arguments' plist, THEN and ELSE, called at
+once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS)."
+  (declare (indent 1) (debug t))
+  `(let ((calls nil)
+         (cancelled 0))
+     (cl-letf (((symbol-function 'opencode-search)
+                (lambda (query &rest arguments)
+                  (push (cons query arguments) calls)
+                  (funcall ,answer arguments (plist-get arguments :then) (plist-get arguments :else))
+                  (lambda () (cl-incf cancelled)))))
+       ,@body)))
+
+(ert-deftest drover-opencode-test-search ()
+  "The OpenCode backend searches what was said through `opencode-search', scoped."
+  (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0)
+                                   (list :id "ses_2" :created 10.0 :updated 30.0))
+    (let ((drover-opencode--projects '(((id . "prj_drover") (name . "drover") (worktree . "/w/drover"))
+                                       ((id . "prj_other") (name . "other") (worktree . "/w/other"))))
+          (results nil))
+      (drover-opencode-test-with-search
+          (lambda (_arguments then _else)
+            (funcall then (list (list :session-id "ses_2" :message-id "msg_9" :role 'user
+                                      :snippet (propertize "the capybara swims" 'face 'opencode-search-match))
+                                (list :session-id "ses_gone" :message-id "msg_1" :snippet "capybara"))
+                     '(:next nil :complete t)))
+        (drover-search-text "capy\"bara swi" (lambda (found) (setq results found)))
+        ;; Words, quotes dropped, the last a prefix; unarchived sessions only.
+        (should (equal (car calls) (list "capy bara swi*" :then (nth 2 (car calls))
+                                         :else (nth 4 (car calls)) :limit 100 :archived nil)))
+        (should (equal (mapcar (lambda (entry) (list (drover-session-id (car entry)) (nth 1 entry)))
+                               (plist-get results :sessions))
+                       '(("ses_2" "the capybara swims"))))
+        (should (= (plist-get results :outside) 1))
+        ;; A project the filter names, archived sessions shown: both searched.
+        (let ((drover-filter '(:project "drover"))
+              (drover-show-archived t))
+          (drover-opencode--search "capybara" (list :filter drover-filter :archived t :limit 50) #'ignore)
+          (should (equal (cddr (cddr (cdar calls))) '(:limit 50 :project "prj_drover"))))
+        (should-not (drover-opencode--search "\"*" nil #'ignore))))
+    ;; A service without the search tells nothing; one failing, once.
+    (let ((results nil)
+          (messages nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args) (push (apply #'format-message format args) messages))))
+        (drover-opencode-test-with-search
+            (lambda (_arguments _then else) (funcall else 'unsupported "No route"))
+          (drover-search-text "capybara" (lambda (found) (setq results found)))
+          (should results)
+          (should-not (plist-get results :failed))
+          (should-not messages))
+        (drover-opencode-test-with-search
+            (lambda (_arguments _then else) (funcall else 'failed (concat "Broken " (make-string 100000 ?x))))
+          (setq results nil)
+          (drover-search-text "capybara" (lambda (found) (setq results found)))
+          (should (equal (mapcar #'car (plist-get results :failed)) '(opencode)))
+          (should (= (length messages) 1))
+          (should (< (length (car messages)) 400)))))
+    ;; Without `opencode-search', nothing is searched.
+    (cl-letf (((symbol-function 'opencode-search) nil))
+      (fmakunbound 'opencode-search)
+      (should-not (drover-opencode--search "capybara" nil #'ignore)))))
 
 (ert-deftest drover-opencode-test-command-keys ()
   "opencode.el's hints name the keys of drover's menu."

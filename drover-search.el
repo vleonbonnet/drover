@@ -977,11 +977,15 @@ a new one stops the one before."
                                       :failed (drover-search--state-failed state))))))
     (setq drover-search--programmatic state)
     (drover-search--start state (string-trim query))
-    (lambda ()
-      (when (eq drover-search--programmatic state)
-        (setq drover-search--programmatic nil))
-      (setf (drover-search--state-done state) nil)
-      (drover-search--finish state))))
+    ;; Held through a link: the caller keeps it, and Emacs prints it, as
+    ;; the server prints a value evaluated, whole otherwise.
+    (let ((link (drover-link state)))
+      (lambda ()
+        (when-let* ((state (drover-linked link)))
+          (when (eq drover-search--programmatic state)
+            (setq drover-search--programmatic nil))
+          (setf (drover-search--state-done state) nil)
+          (drover-search--finish state))))))
 
 (defun drover-search-unload-function ()
   "Stop the searches in progress and forget the completion style, unloading."

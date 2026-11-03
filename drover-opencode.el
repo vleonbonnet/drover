@@ -1423,36 +1423,69 @@ unknown.  The backend's :options."
 
 ;;;; Searching what was said
 
-(declare-function opencode-search "ext:opencode" (query callback &rest options))
+(declare-function opencode-search "opencode-sessions" (query &rest arguments))
 
-(defun drover-opencode--search-match (hit)
-  "Return the match of drover's search HIT of `opencode-search' tells, or nil.
-HIT is a plist naming a session by :id, with the :snippet of text
-around the match and the :message it is in, if known."
-  (when-let* (((listp hit))
-              (id (plist-get hit :id))
+(defconst drover-opencode-search-limit 100
+  "Matches at most one search of OpenCode's messages asks the service.
+The most a page holds: the search asks one page, the best matches first.")
+
+(defun drover-opencode--search-query (query)
+  "Return QUERY, typed in drover's search, as `opencode-search' takes it.
+Its words, all of which a message must hold, quotes and stars dropped
+so that a word typed cannot make the query invalid; the last one
+matches as a prefix, as typing is in progress."
+  (let ((words (split-string (replace-regexp-in-string "[\"*]" " " query) "[ \t\n]+" t)))
+    (when words
+      (let ((last (car (last words))))
+        (when (string-match-p "[[:alnum:]]\\'" last)
+          (setcar (last words) (concat last "*"))))
+      (string-join words " "))))
+
+(defun drover-opencode--search-project (name)
+  "Return the identifier of the one project of the service named NAME, or nil.
+Nil too when several projects bear that name."
+  (when name
+    (let ((ids (delq nil (mapcar (lambda (project)
+                                   (and (equal (ignore-errors (opencode-project-name project)) name)
+                                        (alist-get 'id project)))
+                                 drover-opencode--projects))))
+      (and ids (null (cdr ids)) (car ids)))))
+
+(defun drover-opencode--search-match (match)
+  "Return the match of drover's search MATCH of `opencode-search' tells, or nil.
+MATCH names a session by :session-id, with a :snippet around the match
+in the message :message-id."
+  (when-let* (((listp match))
+              (id (plist-get match :session-id))
               ((stringp id)))
     (list :key (cons 'opencode id)
-          :snippet (plist-get hit :snippet)
-          :position (plist-get hit :message))))
+          :snippet (plist-get match :snippet)
+          :position (plist-get match :message-id))))
 
 (defun drover-opencode--search (query scope callback)
   "Search what was said in OpenCode's sessions for QUERY, for CALLBACK.
-Through `opencode-search', once opencode.el offers it: the service
-searches its own messages.  It is called with QUERY, a function of what
-it finds and :limit, the most matches SCOPE takes, and returns a
-function stopping the search; it calls back with lists of plists
-naming a session by :id, with a :snippet and the :message, then `done',
-or (:failure MESSAGE).  Without it, OpenCode's sessions are matched by
-what they tell alone, and nothing is searched.  The backend's :search."
-  (when (fboundp 'opencode-search)
-    (opencode-search query
-                     (lambda (result)
-                       (funcall callback
-                                (if (and (consp result) (listp (car result)) (car result))
-                                    (delq nil (mapcar #'drover-opencode--search-match result))
-                                  result)))
-                     :limit (plist-get scope :limit))))
+Through `opencode-search': the service searches the prompts and
+replies of its sessions, the archived ones only while archived
+sessions show, those of the project the filter of SCOPE names when one
+project bears that name, and gives a page of the best matches.  A
+service without the search, `unsupported', searches nothing and tells
+nothing; one refusing or failing is a failure.  Without
+`opencode-search', nothing is searched.  The backend's :search."
+  (when-let* (((fboundp 'opencode-search))
+              (text (drover-opencode--search-query query)))
+    (let ((project (drover-opencode--search-project (plist-get (plist-get scope :filter) :project))))
+      (apply #'opencode-search text
+             :then (lambda (matches _info)
+                     (funcall callback (delq nil (mapcar #'drover-opencode--search-match matches)))
+                     (funcall callback 'done))
+             :else (lambda (reason message)
+                     (funcall callback (if (eq reason 'unsupported)
+                                           'done
+                                         (list :failure (format "%s" message)))))
+             :limit (min drover-opencode-search-limit
+                         (or (plist-get scope :limit) drover-opencode-search-limit))
+             (append (and (not (plist-get scope :archived)) (list :archived nil))
+                     (and project (list :project project)))))))
 
 (defun drover-opencode--register ()
   "Register the `opencode' backend."
