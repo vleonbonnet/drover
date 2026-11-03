@@ -7284,10 +7284,12 @@ tree within a bound whatever the sessions."
           (should (memq 'drover-dim (ensure-list (get-text-property (prop-match-beginning title)
                                                                      'font-lock-face)))))
         ;; The narrow layout places it on the title's line, and its
-        ;; icon at the end, its tooltip naming the host.
+        ;; icon at the end, its tooltip naming the host and telling
+        ;; since when it is not connected, as its face does.
         (drover-list-test-layout-at 300)
         (should (string-match-p "\\`.*Remote.*core 5m.* @\\'" (drover-list-test-remote-line key)))
-        (should (equal (drover-list-test-tooltip-at key "@") "Host: core"))))))
+        (should (equal (drover-list-test-tooltip-at key "@") "core — disconnected for 5m"))
+        (should (equal (drover-list-test-tooltip-at key "core") "Host: core"))))))
 
 (defun drover-list-test-tooltip-at (key text)
   "Return the tooltip of TEXT on the first line of the session KEY, of any backend.
@@ -7525,8 +7527,9 @@ one leaves empty: the host's only on the line of a session of another
 host, the pie only on that of a session whose context fills a known
 part.  In columns, the harness in the last column, after the age's and
 the prompt cache's, which a session without a live cache leaves empty;
-the host's after the title's, empty but for a session of another host.  The positions are the pixels lines align
-their parts to."
+the host's icon before the harness's, empty but for a session of
+another host, whose host's name neither layout shows.  The positions
+are the pixels lines align their parts to."
   (drover-list-test-with nil
     (drover-list-test-showing
       (let ((drover-harnesses drover-list-test-harnesses))
@@ -7554,7 +7557,7 @@ their parts to."
               (should (string-match-p "\\`· Open +4m ▄ +O\\'" (drover-list-test-remote-line '(opencode . "o"))))
               (should (string-match-p "\\`· Transcript +10m +T\\'"
                                       (drover-list-test-remote-line '(claude-code . "t"))))
-              (should (string-match-p "\\`· Remote +core 6m +@ C\\'"
+              (should (string-match-p "\\`· Remote +6m +@ C\\'"
                                       (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
               (dolist (key keys)
                 (let* ((cells (drover-list-test-key-cells key))
@@ -7571,12 +7574,14 @@ their parts to."
                     (should (equal (car (last cells)) (assoc harness-x cells)))
                     (should (<= (+ (car age) (string-pixel-width (cdr age))) (- context-x space)))))))
             (drover-list-test-is-fresh)
-            ;; Wider, in columns: the harness's column follows the age's
-            ;; and the cache's, the summary's after it.
+            ;; Wider, in columns: the host's and the harness's columns
+            ;; follow the age's and the cache's, the summary's after them.
             (window-resize side 24 t nil t)
             (drover-list--on-window-change side)
             (should (eq drover-list--layout 'columns))
-            (should (equal drover-list--fields '(title host age cache harness summary)))
+            (should (equal drover-list--fields '(title age cache host harness summary)))
+            (should (string-match-p "\\`· Remote +6m +@ +C Claude IDE\\'"
+                                    (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
             (let* ((columns (plist-get (drover-list--model-layout drover-list--model) :columns))
                    (cache (assq 'cache columns))
                    (host (assq 'host columns))
@@ -7590,6 +7595,109 @@ their parts to."
                   ;; The cache only on the line of the session that has one.
                   (should (eq (and (assoc (nth 1 cache) cells) t) (equal key '(opencode . "o")))))))
             (drover-list-test-is-fresh)))))))
+
+(defun drover-list-test-icon-face-p (key face)
+  "Return non-nil when the host's icon on the line of session KEY is in FACE."
+  (save-excursion
+    (goto-char (oref (drover-list--find-session key) start))
+    (search-forward "@" (line-end-position))
+    (memq face (ensure-list (get-text-property (match-beginning 0) 'font-lock-face)))))
+
+(ert-deftest drover-list-test-sidebar-host-icon-alone ()
+  "The sidebar shows a session's host by its icon alone, which tells how the host stands.
+In two lines and in columns, neither the host's name nor since when it
+is not connected: the icon's tooltip tells both, and its face whether
+the host is connected.  A host connecting and another leaving change
+no field, cell nor column, drawn in place as anew; the list in an
+ordinary window keeps the host's name and age."
+  (drover-list-test-with nil
+    (drover-list-test-showing
+      (let* ((drover-harnesses drover-list-test-harnesses)
+             (zed (list (drover-session-create :backend 'remote:zed :id '(claude-code-ide . "z") :title "Far"
+                                               :status 'idle :engine 'claude-code :engine-id "z"
+                                               :updated (drover-list-test-ago 180) :host "zed"
+                                               :origin 'claude-code-ide :stale (drover-list-test-ago 300))))
+             (core (list (drover-session-create :backend 'remote:core :id '(claude-code-ide . "r")
+                                                :title "Remote" :status 'idle :engine 'claude-code
+                                                :engine-id '(claude-code-ide . "r")
+                                                :updated (drover-list-test-ago 360) :host "core"
+                                                :origin 'claude-code-ide)))
+             (far '(remote:zed claude-code-ide . "z"))
+             (near '(remote:core claude-code-ide . "r"))
+             (drover-host-state-function (lambda (host)
+                                           (and (drover-session-stale (car (if (equal host "zed") zed core)))
+                                                "reconnecting"))))
+        (drover-list-test-register-harnesses)
+        (drover-test-register-simple 'remote:core (lambda () core) :remote "core")
+        (drover-test-register-simple 'remote:zed (lambda () zed) :remote "zed")
+        (drover-changed-now)
+        (let* ((side (drover-list--show-side))
+               (sidebar (window-buffer side))
+               (shape (lambda ()
+                        (let ((layout (drover-list--model-layout drover-list--model)))
+                          (list drover-list--layout drover-list--fields
+                                (plist-get layout :edges) (plist-get layout :columns)))))
+               (check
+                (lambda (layout)
+                  (should (eq drover-list--layout layout))
+                  (let* ((model (drover-list--model-layout drover-list--model))
+                         (x (if (eq layout 'narrow)
+                                (let ((edges (plist-get model :edges)))
+                                  (- (plist-get model :width) (alist-get 'harness edges)
+                                     (plist-get model :space) (alist-get 'host edges)))
+                              (nth 1 (assq 'host (plist-get model :columns))))))
+                    (dolist (key (list near far))
+                      (let ((line (drover-list-test-remote-line key))
+                            (cells (drover-list-test-key-cells key)))
+                        (ert-info ((format "%S %s" layout line))
+                          (should-not (string-match-p "core\\|zed\\|5m" line))
+                          ;; The icon in its cell, where every line places it.
+                          (should (equal (substring-no-properties (cdr (assoc x cells))) "@")))))
+                    (should-not (and header-line-format
+                                     (string-search "Host" (drover-list-test-displayed header-line-format)))))))
+               (swap (lambda ()
+                       ;; The host not connected connects again, the other leaves.
+                       (setq zed (list (let ((record (copy-sequence (car zed))))
+                                         (setf (drover-session-stale record)
+                                               (and (null (drover-session-stale record))
+                                                    (drover-list-test-ago 300)))
+                                         record))
+                             core (list (let ((record (copy-sequence (car core))))
+                                          (setf (drover-session-stale record)
+                                                (and (null (drover-session-stale record))
+                                                     (drover-list-test-ago 120)))
+                                          record)))
+                       (drover-backend-changed 'remote:zed)
+                       (drover-backend-changed 'remote:core)
+                       (drover-changed-now))))
+          (with-current-buffer sidebar
+            (dolist (width '(nil 24))
+              (when width
+                (window-resize side width t nil t)
+                (drover-list--on-window-change side))
+              (let ((layout (if width 'columns 'narrow)))
+                (funcall check layout)
+                (should (drover-list-test-icon-face-p near 'drover-dim))
+                (should (drover-list-test-icon-face-p far 'drover-host-disconnected))
+                (should (equal (drover-list-test-tooltip-at near "@") "core — connected"))
+                (should (equal (drover-list-test-tooltip-at far "@") "zed — disconnected for 5m\nreconnecting"))
+                (let ((before (funcall shape)))
+                  (funcall swap)
+                  (should (equal (funcall shape) before))
+                  (funcall check layout)
+                  (should (drover-list-test-icon-face-p near 'drover-host-disconnected))
+                  (should (drover-list-test-icon-face-p far 'drover-dim))
+                  (should (equal (drover-list-test-tooltip-at near "@") "core — disconnected for 2m\nreconnecting"))
+                  (should (equal (drover-list-test-tooltip-at far "@") "zed — connected"))
+                  (drover-list-test-is-fresh)
+                  (funcall swap)
+                  (should (equal (funcall shape) before))
+                  (drover-list-test-is-fresh))))))
+        ;; The list keeps the host's name, and its age while not connected.
+        (drover-list-test-with-font
+          (should (equal (seq-take (cdr (drover-list-test-layout-at 1000)) 2) '(title host)))
+          (should (string-match-p "Far +zed 5m " (drover-list-test-remote-line far)))
+          (should (string-match-p "Remote +core " (drover-list-test-remote-line near))))))))
 
 (ert-deftest drover-list-test-send-keeps-the-fields ()
   "Sending a prompt changes no field either list shows, nor where lines place them.

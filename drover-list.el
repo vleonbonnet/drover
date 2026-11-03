@@ -320,8 +320,10 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  title     The status icon and the title; it is always shown.
  host      The host of a session of another host, and how long ago it
            was last heard from while it is not connected; in two lines,
-           an icon too (see `drover-host-icon'); nothing for this host's,
-           so that a list of them has no such column.
+           an icon too (see `drover-host-icon'), and in the sidebar,
+           its icon alone, its tooltip naming the host and telling how
+           it stands; nothing for this host's, so that a list of them
+           has no such column.
  harness   What runs the session (see `drover-harnesses'): its icon and
            name, its icon alone where room is short, as in two lines.
  location  The project.
@@ -356,6 +358,7 @@ PROPERTIES is a plist of:
  :narrow    Where the field goes when the list is too narrow for
             columns: `line', on the line of the title, flush right,
             the harness by its icon alone and the host with its icon,
+            alone in the sidebar,
             icons in cells lining them up, the harness's last; `icon',
             as an icon alone, in such a cell before those, such as the
             context's pie, a field the columns need not show for the
@@ -379,10 +382,12 @@ then the names of the columns of short texts, then the title, then the
 other fields in proportion; the model keeps its effort, cutting its
 name, and the harness its icon, leaving its name out.
 In two lines, the title's line ends with the texts placed on it, such
-as the host's name and the age, then the context's pie, the host's icon
-and the harness's, in this order, each in a cell as wide as the widest
-the rows show, so that icons line up; a cell is kept while a row listed
-shows something in it, the line of a row without leaving it empty."
+as the host's name, but in the sidebar, and the age, then the context's
+pie, the host's icon and the harness's, in this order, each in a cell
+as wide as the widest the rows show, so that icons line up; a cell is
+kept while a row listed shows something in it, the line of a row
+without leaving it empty.  The sidebar's columns place the host's icon
+and the harness's so too, after the age and the prompt cache."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
@@ -1275,19 +1280,49 @@ its icon shows besides (see `drover-list--host-icon')."
                 'drover-list-host host
                 'help-echo #'drover-list--host-help-echo)))
 
-(defun drover-list--host-icon (host)
-  "Return the icon telling that a session runs on HOST, another host, in its cell.
-That of `drover-host-icon', dimmed, its tooltip naming HOST and telling
-how it stands, as the host's column does.  The sessions of a host share
-one, made once as widths are measured (see `drover-list--memo')."
-  (drover-list--memo (list 'host-icon drover-host-icon host)
-                     (lambda (host)
-                       (propertize (drover-list--icon (drover-face drover-host-icon 'drover-dim))
-                                   'drover-list-host host
-                                   'help-echo #'drover-list--host-help-echo))
-                     host))
-
 (defvar drover-list--drawn)
+
+(defun drover-list--host-icon-help-echo (_window object position)
+  "Return the tooltip of the host's icon drawn at POSITION in OBJECT.
+It names the host and tells whether it is connected, and since when it
+is not, as \"core — disconnected for 5m\", then how it stands, if not
+connected.  In the list's buffer, the session drawn there tells whether
+it is connected, as the icon shows it.  For `help-echo'."
+  (drover-with-reporting "list tooltip"
+    (when-let* ((host (and (or (bufferp object) (stringp object))
+                           (get-text-property position 'drover-list-host object))))
+      (let* ((session (and (bufferp object)
+                           (with-current-buffer object
+                             (when-let* ((section (drover-list--session-section
+                                                   (magit-section-at position))))
+                               (and drover-list--drawn
+                                    (gethash (oref section value) drover-list--drawn))))))
+             (state (drover-host-state host))
+             (disconnected (if session (drover-session-stale session) state))
+             (age (and session (drover-list--host-age session (drover-list--now)))))
+        (drover-bound-lines
+         (concat (drover-list--one-line (drover-host-label host)) " — "
+                 (cond (age (concat "disconnected for " age))
+                       (disconnected "disconnected")
+                       (t "connected"))
+                 (and disconnected state (concat "\n" state))))))))
+
+(defun drover-list--host-icon (host disconnected)
+  "Return the icon telling that a session runs on HOST, another host, in its cell.
+That of `drover-host-icon', dimmed, or, when DISCONNECTED, in the face
+`drover-host-disconnected', of the same width, its tooltip naming HOST
+and telling how it stands (see `drover-list--host-icon-help-echo').
+The sessions of a host share one, made once as widths are measured (see
+`drover-list--memo')."
+  (let ((disconnected (and disconnected t)))
+    (drover-list--memo (list 'host-icon drover-host-icon host disconnected)
+                       (lambda (host)
+                         (propertize (drover-list--icon
+                                      (drover-face drover-host-icon
+                                                   (if disconnected 'drover-host-disconnected 'drover-dim)))
+                                     'drover-list-host host
+                                     'help-echo #'drover-list--host-icon-help-echo))
+                       host)))
 
 (defun drover-list--context-help-echo (window object position)
   "Return the tooltip of the context's pie drawn at POSITION in OBJECT.
@@ -1333,7 +1368,9 @@ harness, its icon (see `drover-list--compact'); any other its text."
   (let ((text (or (alist-get field (drover-list--row-texts row)) "")))
     (or (pcase field
           ('host (and (not (string-empty-p text))
-                      (drover-list--host-icon (drover-session-host (drover-list--row-session row)))))
+                      (let ((session (drover-list--row-session row)))
+                        (drover-list--host-icon (drover-session-host session)
+                                                (drover-session-stale session)))))
           ('context (drover-list--context-pie (drover-list--row-session row)))
           (_ (drover-list--compact text)))
         "")))
@@ -1736,6 +1773,15 @@ The host, as `drover-host-icon', and the context, as its pie: see
 `drover-list--field-icon'."
   '(host context))
 
+(defun drover-list--icon-alone-p (field metrics)
+  "Return non-nil when FIELD shows as its icon alone in the list of METRICS.
+That is the host in the sidebar, which folds nothing (see
+`drover-list--folds') and keeps its lines compact: in columns as in two
+lines, the host's icon, without its name, nor since when it is not
+connected, which its tooltip tells, and its face shows (see
+`drover-list--host-icon'); its column is as wide as the icon."
+  (and (eq field 'host) (not (plist-get metrics :folds))))
+
 (defun drover-list--icon-p (field)
   "Return non-nil when FIELD shows in two lines as an icon alone, in a cell.
 That is a field showing its head alone (see `drover-list--compact-p')
@@ -1749,7 +1795,9 @@ margin, indentation and glyph included."
   (pcase field
     ('title (- (drover-list--tally-max (aref summary 1)) (plist-get metrics :margin)))
     ('cache (drover-list--cache-cell-width metrics))
-    (_ (drover-list--tally-max (aref summary (drover-list--text-index field))))))
+    (_ (drover-list--tally-max (aref summary (if (drover-list--icon-alone-p field metrics)
+                                                 (drover-list--kept-index field)
+                                               (drover-list--text-index field)))))))
 
 (defun drover-list--narrowest (entry summary metrics)
   "Return the fewest pixels the field of ENTRY needs for the rows of SUMMARY.
@@ -1761,7 +1809,9 @@ room of an ellipsis and that tail.  That of the title does not count
 the glyphs before it."
   (let* ((field (car entry))
          (least (* (plist-get metrics :char) (or (plist-get (cdr entry) :min) 0))))
-    (cond ((drover-list--whole-p field)
+    (cond ((drover-list--icon-alone-p field metrics)
+           (drover-list--content-width field summary metrics))
+          ((drover-list--whole-p field)
            (max least (drover-list--content-width field summary metrics)))
           ((eq field 'title) least)
           (t (max least (drover-list--tally-max (aref summary (drover-list--kept-index field))))))))
@@ -1769,9 +1819,11 @@ the glyphs before it."
 (defun drover-list--natural (field summary metrics)
   "Return the width in pixels the column of FIELD wants for the rows of SUMMARY.
 It is as wide as what it shows, see `drover-list--content-width', and
-at least as wide as its name in the header line; METRICS are the
-measures of lines."
-  (max (drover-list--label-width field) (drover-list--content-width field summary metrics)))
+at least as wide as its name in the header line, but a field showing
+its icon alone (see `drover-list--icon-alone-p'), as wide as the icon;
+METRICS are the measures of lines."
+  (max (if (drover-list--icon-alone-p field metrics) 0 (drover-list--label-width field))
+       (drover-list--content-width field summary metrics)))
 
 (defun drover-list--title-prefix (summary metrics)
   "Return the room, in pixels, before the titles of SUMMARY, from the margin.
@@ -1918,12 +1970,12 @@ columns, :columns, a list of (FIELD X WIDTH ALIGN) giving where each
 field begins and how wide it is, in pixels, the first at the lead of
 METRICS; in the narrow layout, :edges, see `drover-list--edges'.  In
 the sidebar, which folds nothing, the columns of the fields showing
-their head alone come after those of short texts (see
-`drover-list--compact-after-whole'), as in two lines."
+an icon alone, the host's and the harness's, come after those of short
+texts (see `drover-list--compact-after-whole'), as in two lines."
   (pcase-let* ((`(,layout . ,fields) (drover-list--choose summary metrics))
                (columns nil))
     (when (and (eq layout 'columns) (not (plist-get metrics :folds)))
-      (setq fields (drover-list--compact-after-whole fields)))
+      (setq fields (drover-list--compact-after-whole fields metrics)))
     (when (eq layout 'columns)
       (let ((x (plist-get metrics :lead)))
         (cl-mapc (lambda (entry width)
@@ -1934,16 +1986,21 @@ their head alone come after those of short texts (see
                   :edges (and (eq layout 'narrow) (drover-list--edges (mapcar #'car fields) summary)))
             metrics)))
 
-(defun drover-list--compact-after-whole (fields)
-  "Return FIELDS, those showing their head alone after those of short texts.
-FIELDS are entries of `drover-list-fields'.  Those showing their head
-alone, such as the harness's icon (see `drover-list--compact-p'), come
-right after the last of FIELDS of a short text (see
+(defun drover-list--compact-after-whole (fields metrics)
+  "Return FIELDS, those showing an icon alone after those of short texts.
+FIELDS are entries of `drover-list-fields', METRICS the measures of the
+sidebar's lines.  Those showing their head alone, such as the harness's
+icon (see `drover-list--compact-p'), and those showing their icon alone
+there, the host's (see `drover-list--icon-alone-p'), in their order,
+come right after the last of FIELDS of a short text (see
 `drover-list--whole-p'), the age and the prompt cache: in the sidebar,
-the harness's icon follows them, as in two lines, where it ends the
-title's line, the summary's column after it, which its texts of every
-width would move."
-  (let* ((compact (seq-filter (lambda (entry) (drover-list--compact-p (car entry))) fields))
+the host's icon and the harness's follow them, as in two lines, where
+they end the title's line, the summary's column after them, which its
+texts of every width would move."
+  (let* ((compact (seq-filter (lambda (entry)
+                                (or (drover-list--compact-p (car entry))
+                                    (drover-list--icon-alone-p (car entry) metrics)))
+                              fields))
          (others (seq-difference fields compact #'eq))
          (last-whole (seq-reduce (lambda (last entry) (if (drover-list--whole-p (car entry)) entry last))
                                  others nil)))
@@ -2110,7 +2167,9 @@ once: a list drawn whole makes thousands of lines."
                   layout)
                  parts)))
         (_
-         (let ((text (drover-list--truncate (alist-get field (drover-list--row-texts row)) width)))
+         (let ((text (if (drover-list--icon-alone-p field layout)
+                         (drover-list--field-icon field row)
+                       (drover-list--truncate (alist-get field (drover-list--row-texts row)) width))))
            (unless (string-empty-p text)
              (push (drover-list--align (if (eq align 'right)
                                            (- (+ x width) (drover-list--pixel-width text))
@@ -2168,9 +2227,12 @@ background, else nil."
                                 right)))
           (setq end (- start space)))))
     (dolist (field (reverse (funcall narrow 'line)))
-      ;; A field showing its head in a cell shows nothing else; the host
-      ;; shows its name besides its icon.
-      (let ((text (if (and (assq field edges) (drover-list--compact-p field))
+      ;; A field showing its head in a cell shows nothing else, nor
+      ;; does the host in the sidebar; elsewhere, it shows its name
+      ;; besides its icon.
+      (let ((text (if (and (assq field edges)
+                           (or (drover-list--compact-p field)
+                               (drover-list--icon-alone-p field layout)))
                       ""
                     (drover-list--compact (or (alist-get field texts) "")))))
         (unless (string-empty-p text)
@@ -3250,14 +3312,16 @@ those of the header line from the text area's edge."
 Each name, the :label of its field in `drover-list-fields', begins with
 a space aligned to its column as the cells of lines do, past the line
 numbers, which the header line lacks; the name of a column aligned
-right is aligned right.  A name wider than its column is cut.  The
+right is aligned right.  A name wider than its column is cut; a column
+of an icon alone (see `drover-list--icon-alone-p') has none.  The
 tooltip of a name tells what its column shows, from
 `drover-list-field-descriptions'."
   (when (eq (plist-get layout :layout) 'columns)
     (let ((shift (drover-list--line-numbers-width))
           (segments nil))
       (pcase-dolist (`(,field ,x ,width ,align) (plist-get layout :columns))
-        (when-let* ((label (plist-get (drover-list--field-spec field) :label))
+        (when-let* (((not (drover-list--icon-alone-p field layout)))
+                    (label (plist-get (drover-list--field-spec field) :label))
                     ;; Measured over the face of the header line, which draws it.
                     (cut (drover-list--truncate (propertize label 'face '(drover-list-header header-line))
                                                 width))

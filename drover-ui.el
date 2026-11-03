@@ -63,6 +63,12 @@
   "Face of the harness of a session, its icon and name (see `drover-harnesses')."
   :group 'drover-faces)
 
+(defface drover-host-disconnected '((t :inherit warning :weight normal))
+  "Face of the icon of a host not connected (see `drover-host-icon').
+Of the weight of the icon of a host connected, dimmed, so that the
+icon keeps its width as the host comes and goes."
+  :group 'drover-faces)
+
 (defcustom drover-attention-glyph "\U0001F916" ; robot face
   "Glyph before the count of sessions needing you, in the mode line.
 `drover-attention-mode' shows it, a space and the count, in the face of
@@ -77,8 +83,11 @@ off the count."
 
 (defcustom drover-host-icon "\U000F048D" ; nf-md-server_network
   "Icon telling that a session runs on another host, before its name.
-Lists show it in the host's field, alone in two lines, where room is
-short; the sessions of this host show none.  Its tooltip names the host.
+Lists show it in the host's field, beside the host's name in two lines,
+alone in the sidebar, where room is short; the sessions of this host
+show none.  Its tooltip names the host and tells whether it is
+connected; it is dimmed while the host is, else in the face
+`drover-host-disconnected'.
 A Nerd Font icon by default; any short string will do, such as \"⇄\"."
   :type 'string
   :group 'drover)
