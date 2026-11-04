@@ -168,6 +168,12 @@ The interface takes a return arriving with the paste as part of it.")
 (defconst drover-claude-code-ide--preview-lines 40
   "Lines of a terminal a preview shows.")
 
+(defconst drover-claude-code-ide--draft-lines 200
+  "Lines of a terminal drover looks at, at most, for the input box of its cursor.")
+
+(defconst drover-claude-code-ide--draft-limit 20000
+  "Characters at most of the draft drover keeps of a terminal it closes.")
+
 (defconst drover-claude-code-ide--session-flags-regexp
   "\\(?:\\`\\|[ \t]\\)\\(?:--resume\\|--continue\\|--session-id\\|-[rc]\\)\\(?:[= \t]\\|\\'\\)"
   "Regexp matching start flags that resume, continue or name a session.")
@@ -766,7 +772,7 @@ kill ring."
 
 (defun drover-claude-code-ide--cursor ()
   "Return the position of the current terminal's cursor, or nil."
-  (cond ((derived-mode-p 'ghostel-mode) (ghostel-cursor-point))
+  (cond ((and (derived-mode-p 'ghostel-mode) (fboundp 'ghostel-cursor-point)) (ghostel-cursor-point))
         ((and (derived-mode-p 'vterm-mode) (fboundp 'vterm--get-cursor-point))
          (vterm--get-cursor-point))))
 
@@ -788,6 +794,101 @@ a draft, though what follows it is."
                                       "\\(?:\\[⧉ [^]\n]+\\]\\)?[ \t]*$"))
                   (progn (forward-line -1) (looking-at "[─━-]\\{3,\\}"))
                   (progn (forward-line 2) (looking-at "[─━-]\\{3,\\}"))))))))
+
+(defconst drover-claude-code-ide--pill-regexp "\\[⧉ [^]\n]+\\][ \t]*"
+  "Regexp matching the pill of the context Claude Code attaches to the next prompt.")
+
+(defun drover-claude-code-ide--rule-p ()
+  "Return non-nil when the current line is a rule of Claude Code's input box."
+  (looking-at "[─━-]\\{3,\\}"))
+
+(defun drover-claude-code-ide--draft-line (start limit)
+  "Return the text of the current line of an input box from START, trimmed.
+At most LIMIT characters; the box's indentation and the terminal's
+padding go."
+  (let* ((end (min (line-end-position) (+ start limit)))
+         (text (buffer-substring-no-properties start end)))
+    (string-trim-right (replace-regexp-in-string "\\`[ \u00a0]\\{1,2\\}" "" text))))
+
+(defun drover-claude-code-ide--placeholder-p (from to)
+  "Return non-nil when the text of the input box from FROM to TO is a placeholder.
+FROM is where the cursor sits, at the start of the box's text: Claude
+Code draws its placeholder there, dimmed, the cursor on its first
+character, whereas text typed shows in the terminal's default colours.
+A placeholder is text whose every character after the cursor's carries
+a face."
+  (let ((position (min (1+ from) to))
+        (faced t))
+    (while (and faced (< position to))
+      (unless (or (memq (char-after position) '(?\s ?\u00a0))
+                  (get-text-property position 'face)
+                  (get-text-property position 'font-lock-face))
+        (setq faced nil))
+      (setq position (1+ position)))
+    (and faced (< from to)
+         (or (> to (1+ from))
+             (get-text-property from 'face)
+             (get-text-property from 'font-lock-face))
+         t)))
+
+(defun drover-claude-code-ide-unsent-input (buffer)
+  "Return what the input box of terminal BUFFER holds, unsent, or nil.
+The box is the one the live cursor sits in, between two rules, its
+first line starting with the input caret (see
+`drover-claude-code-ide-input-regexp'); an older screen's still in the
+scrollback is not.  Its text is read as the screen shows it, a line of
+the terminal per line, without the caret, the box's indentation and the
+pill of the context Claude Code attaches to the next prompt (see
+`drover-claude-code-ide-input-empty-p'); nil when it is empty, or holds
+the placeholder Claude Code shows in an empty box (see
+`drover-claude-code-ide--placeholder-p').  A box of more than
+`drover-claude-code-ide--draft-lines' lines is not read, and the text
+is cut to `drover-claude-code-ide--draft-limit' characters."
+  (with-current-buffer buffer
+    (when-let* ((cursor (drover-claude-code-ide--cursor))
+                ((<= (point-min) cursor (point-max))))
+      (save-excursion
+        (goto-char cursor)
+        (beginning-of-line)
+        (let ((lines 0)
+              (caret nil))
+          ;; Up to the caret's line, through no rule.
+          (while (and (not caret) (< lines drover-claude-code-ide--draft-lines)
+                      (not (drover-claude-code-ide--rule-p)))
+            (if (looking-at drover-claude-code-ide-input-regexp)
+                (setq caret (point))
+              (setq lines (if (zerop (forward-line -1)) (1+ lines) drover-claude-code-ide--draft-lines))))
+          (when (and caret
+                     (save-excursion (and (zerop (forward-line -1)) (drover-claude-code-ide--rule-p))))
+            (goto-char caret)
+            (looking-at (concat drover-claude-code-ide-input-regexp
+                                "\\(?:" drover-claude-code-ide--pill-regexp "\\)?"))
+            (let* ((start (match-end 0))
+                   (limit drover-claude-code-ide--draft-limit)
+                   (first (string-trim-right
+                           (buffer-substring-no-properties start (min (line-end-position) (+ start limit)))))
+                   (texts (list first))
+                   (closed nil))
+              (setq limit (- limit (length first)))
+              (forward-line 1)
+              (while (and (not closed) (not (eobp))
+                          (< (cl-incf lines) drover-claude-code-ide--draft-lines))
+                (if (drover-claude-code-ide--rule-p)
+                    (setq closed (point))
+                  (when (> limit 0)
+                    (let ((line (drover-claude-code-ide--draft-line (point) limit)))
+                      (push line texts)
+                      (setq limit (- limit (length line) 1))))
+                  (forward-line 1)))
+              (when (and closed (< cursor closed))
+                (setq texts (nreverse texts))
+                (let ((text (string-trim (string-join texts "\n"))))
+                  (unless (or (string-empty-p text)
+                              (and (= cursor start)
+                                   (seq-every-p #'string-empty-p (cdr texts))
+                                   (drover-claude-code-ide--placeholder-p
+                                    start (save-excursion (goto-char start) (line-end-position)))))
+                    (drover-bound-text text most-positive-fixnum drover-claude-code-ide--draft-limit)))))))))))
 
 (defun drover-claude-code-ide--blocker (session)
   "Say why the terminal of SESSION cannot take a prompt now, or nil once it can.
@@ -1074,12 +1175,14 @@ went."
 (defun drover-claude-code-ide--close-session (session)
   "Close the terminal of SESSION without asking, as archiving does.
 Drover calls it once no turn runs, as closing ends the turn.  What its
-input box holds goes with it: it is the CLI's screen, which drover
-cannot tell from the box's placeholder.  The value is nil: nothing goes
-to the kill ring.  The backend's :close."
+input box holds unsent goes to the kill ring first (see
+`drover-claude-code-ide-unsent-input'); the value is non-nil when
+there was some.  The backend's :close."
   (when-let* ((buffer (drover-claude-code-ide--buffer session)))
-    (drover-claude-code-ide--close buffer)
-    nil))
+    (prog1 (drover-keep-unsent
+            (list (drover-with-reporting "reading the input of a Claude terminal"
+                    (drover-claude-code-ide-unsent-input buffer))))
+      (drover-claude-code-ide--close buffer))))
 
 (defun drover-claude-code-ide--delete (session)
   "Delete SESSION for good: close its terminal, then delete its conversation.

@@ -1628,6 +1628,111 @@ The pill of the context Claude Code attaches is no draft; what follows it is."
         (setq major-mode 'eat-mode))
       (should-not (drover-claude-code-ide-input-empty-p terminal)))))
 
+;;;; Unsent input
+
+(defun drover-claude-code-ide-test-screen (terminal box &optional cursor)
+  "Make TERMINAL show an older box, then BOX, between rules, and a footer.
+BOX is the text after the input caret, its lines after the first
+indented as Claude Code indents them; CURSOR, a string of BOX, is where
+the cursor sits, at its start, else at the end of BOX.  Return the
+cursor's position."
+  (with-current-buffer terminal
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert "────\n>" (string #xa0) "an old prompt\n────\nan old answer\n────\n>" (string #xa0))
+      (let ((start (point)))
+        (insert box)
+        (let ((end (point)))
+          (insert "\n────\n  ? for shortcuts\n")
+          (if cursor
+              (progn (goto-char start) (search-forward cursor end) (match-beginning 0))
+            end))))))
+
+(ert-deftest drover-claude-code-ide-test-unsent-input ()
+  "The input box around the live cursor is read without its caret, indentation or pill.
+An empty box, the placeholder, an old box and a cursor out of any box
+read as nothing; a draft whose cursor is at its start, typed, reads."
+  (drover-claude-code-ide-test-isolated
+    (let* ((terminal (drover-claude-code-ide-test-terminal "*claude* draft"))
+           (cursor nil))
+      (cl-letf (((symbol-function 'ghostel-cursor-point) (lambda () cursor)))
+        (setq cursor (drover-claude-code-ide-test-screen terminal "an unfinished question   "))
+        (should (equal (drover-claude-code-ide-unsent-input terminal) "an unfinished question"))
+        ;; Lines after the first are indented.
+        (setq cursor (drover-claude-code-ide-test-screen terminal "first line\n  second line\n    indented"))
+        (should (equal (drover-claude-code-ide-unsent-input terminal) "first line\nsecond line\n  indented"))
+        ;; The cursor on the first line of several still reads them all.
+        (setq cursor (drover-claude-code-ide-test-screen terminal "first line\n  second line" "line"))
+        (should (equal (drover-claude-code-ide-unsent-input terminal) "first line\nsecond line"))
+        ;; The pill of the context attached is no draft.
+        (setq cursor (drover-claude-code-ide-test-screen terminal "[⧉ In Emacs buffer 'notes.org'] the draft"))
+        (should (equal (drover-claude-code-ide-unsent-input terminal) "the draft"))
+        (setq cursor (drover-claude-code-ide-test-screen terminal "[⧉ In Emacs buffer 'notes.org'] "))
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        (setq cursor (drover-claude-code-ide-test-screen terminal ""))
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        ;; The placeholder, dimmed, the cursor on its first character.
+        (setq cursor (drover-claude-code-ide-test-screen
+                      terminal (concat (propertize "T" 'face '(:inverse-video t))
+                                       (propertize "ry \"fix the tests\"" 'face '(:foreground "gray50")))
+                      "T"))
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        ;; Text typed, the cursor moved back to its start, reads.
+        (setq cursor (drover-claude-code-ide-test-screen terminal "typed, then went home" "typed"))
+        (should (equal (drover-claude-code-ide-unsent-input terminal) "typed, then went home"))
+        ;; The cursor out of the live box: in the old answer, or on a rule.
+        (setq cursor (drover-claude-code-ide-test-screen terminal "a draft"))
+        (setq cursor (with-current-buffer terminal
+                       (goto-char (point-min)) (search-forward "old answer") (point)))
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        (setq cursor (with-current-buffer terminal (goto-char (point-max)) (forward-line -2) (point)))
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        ;; No cursor known, nothing is read.
+        (setq cursor nil)
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        ;; A box without its closing rule yet is not read.
+        (setq cursor (drover-claude-code-ide-test-screen terminal "a draft"))
+        (with-current-buffer terminal
+          (delete-region cursor (point-max)))
+        (should-not (drover-claude-code-ide-unsent-input terminal))
+        ;; A line of 500 kB is read bounded.
+        (setq cursor (drover-claude-code-ide-test-screen terminal (make-string 500000 ?x)))
+        (let ((draft (drover-claude-code-ide-unsent-input terminal)))
+          (should (<= (length draft) (1+ drover-claude-code-ide--draft-limit)))
+          (should (string-prefix-p "xxxx" draft)))))))
+
+(ert-deftest drover-claude-code-ide-test-archive-keeps-draft ()
+  "Archiving a terminal puts what its input box holds unsent in the kill ring, and says so."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (drover-test-with-state
+        (let ((terminal (drover-claude-code-ide-test-terminal "*claude* draft"))
+              (empty (drover-claude-code-ide-test-terminal "*claude* empty"))
+              (cursors nil)
+              (kill-ring nil)
+              (interprogram-cut-function nil)
+              (messages nil))
+          (pcase-dolist (`(,buffer ,id ,box) `((,terminal "88888888-8888-4888-8888-888888888888" "Half a question")
+                                               (,empty "99999999-9999-4999-8999-999999999999" "")))
+            (with-current-buffer buffer
+              (setq-local drover-claude-code-ide-session-id id)
+              (drover-claude-code-ide--setup-terminal))
+            (push (cons buffer (drover-claude-code-ide-test-screen buffer box)) cursors))
+          (cl-letf (((symbol-function 'ghostel-cursor-point)
+                     (lambda () (alist-get (current-buffer) cursors)))
+                    ((symbol-function 'message)
+                     (lambda (format &rest arguments)
+                       (push (apply #'format-message format arguments) messages))))
+            (drover-archive (drover-claude-code-ide-test-session terminal))
+            (should-not (buffer-live-p terminal))
+            (should (equal kill-ring '("Half a question")))
+            (should (equal messages '("Archived draft; its unsent input is in the kill ring")))
+            (setq messages nil)
+            (drover-archive (drover-claude-code-ide-test-session empty))
+            (should-not (buffer-live-p empty))
+            (should (equal kill-ring '("Half a question")))
+            (should (equal messages '("Archived empty")))))))))
+
 (ert-deftest drover-claude-code-ide-test-scheduled-prompt ()
   "A scheduled prompt waits for an empty input box, then is pasted and submitted."
   (drover-claude-code-ide-test-with
