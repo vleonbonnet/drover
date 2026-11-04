@@ -103,7 +103,11 @@ was kept of the files, looks at them from now on if the backend
 started."
   (let ((index drover-codex-rollouts--index))
     (if (or (null index) (drover-transcript-index-current-p index))
-        index
+        (progn
+          ;; Read by the reader loaded before this one: read again.
+          (when index
+            (drover-transcript-reread index drover-codex-rollouts--reader-version))
+          index)
       (drover-stale-layout "index of Codex's rollouts")
       (setq drover-codex-rollouts--index (drover-codex-rollouts--make-index))
       (when (memq 'codex drover--started)
@@ -879,7 +883,9 @@ The backend goes once no front end needs it."
 ;; Loaded anew, as reloading drover does, the backend a front end
 ;; installed takes this file's properties.
 (when (eq (drover-backend-property 'codex :sessions) #'drover-codex-rollouts--sessions)
-  (drover-codex-rollouts--register))
+  (drover-codex-rollouts--register)
+  ;; What the reader before read is read again.
+  (drover-codex-rollouts--current-index))
 
 (provide 'drover-codex-rollouts)
 ;;; drover-codex-rollouts.el ends here
