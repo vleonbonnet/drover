@@ -2864,10 +2864,9 @@ SECTIONS HEADER-LINE MARKS), TEXT without sections, MARKS as
 `drover-list-test-marks' returns them.  The buffer has the
 visibility of LIST, is drawn for its width, and is killed."
   (let* ((list (or list (current-buffer)))
-         ;; The sidebar's rows left for later, drawn.
+         ;; The rows left for later past the first screens, drawn.
          (_ (with-current-buffer list
-              (unless drover-list--folds
-                (drover-list--draw-deferred))))
+              (drover-list--draw-undrawn)))
          (visibility (with-current-buffer list (drover-list--remember-visibility)))
          (visibility (copy-hash-table (buffer-local-value 'drover-list--visibility list)))
          (recaps (buffer-local-value 'drover-list--recaps list))
@@ -2887,8 +2886,7 @@ visibility of LIST, is drawn for its width, and is killed."
           (cl-letf (((symbol-function 'drover-list--line-width) (lambda () width))
                     ((symbol-function 'drover-list--buffers) (lambda () (list fresh))))
             (drover-list--render)
-            (unless drover-list--folds
-              (drover-list--draw-deferred))
+            (drover-list--draw-undrawn)
             ;; The collapsed groups the list drew, drawn too.
             (dolist (group (drover-list--model-groups drover-list--model))
               (when (member (drover-list--group-value group) drawn)
@@ -2901,10 +2899,9 @@ visibility of LIST, is drawn for its width, and is killed."
 
 (defun drover-list-test-drawn (&optional list)
   "Return LIST, the current list by default, as `drover-list-test-fresh' returns a fresh one.
-The rows the sidebar left for later are drawn first."
+The rows left for later past the first screens are drawn first."
   (with-current-buffer (or list (current-buffer))
-    (unless drover-list--folds
-      (drover-list--draw-deferred))
+    (drover-list--draw-undrawn)
     (list (drover-list-test-without-sections (buffer-string))
           (drover-list-test-sections)
           header-line-format
@@ -4730,6 +4727,43 @@ them; no line is hidden, and none begins with an invisible character."
                 (drover-list-last-session)
                 (should (= (length (drover-list-test-drawn-ids)) 60))
                 (should (equal (drover-list-test-id-at-point) (car (last (drover-list-test-order)))))))))))))
+
+(ert-deftest drover-list-test-list-draws-first-screens ()
+  "The list draws the rows of its first screens at once, the others later, as the sidebar does.
+They are drawn while Emacs is idle, as a window nears them, or as
+moving to the last session needs them, and the list is then the list
+drawn whole."
+  (dolist (grouping '(nil status))
+    (drover-list-test-with (drover-list-test-random-sessions 60)
+      (drover-list-test-showing
+        (drover-list-test-shown
+          (let ((drover-group-by grouping)
+                (drover-show-subagents 'all)
+                (drover-list--deferred-chunk 7))
+            (cl-letf (((symbol-function 'drover-list--first-rows) (lambda () 10)))
+              (revert-buffer)
+              (let ((drawn (drover-list-test-drawn-ids)))
+                (should (<= 10 (length drawn) 20))
+                (should drover-list--undrawn))
+              ;; Drawn while idle, the list is the list drawn whole.
+              (drover-list-test-idle-draw)
+              (should-not (seq-some (lambda (group) (and drover-list--undrawn (gethash group drover-list--undrawn)))
+                                    (drover-list--model-groups drover-list--model)))
+              (drover-list-test-is-fresh)
+              ;; A window scrolled near the rows left draws them.
+              (revert-buffer)
+              (let ((before (length (drover-list-test-drawn-ids))))
+                (set-window-start (selected-window) (point-min))
+                (drover-list--draw-near-end)
+                (should (> (length (drover-list-test-drawn-ids)) before)))
+              (drover-list-test-is-fresh)
+              ;; Moving to the last session draws them too.
+              (revert-buffer)
+              (drover-list-last-session)
+              (should-not (seq-some (lambda (group) (and drover-list--undrawn (gethash group drover-list--undrawn)))
+                                    (drover-list--model-groups drover-list--model)))
+              (should (equal (drover-list-test-id-at-point)
+                             (car (last (drover-list-test-drawn-ids))))))))))))
 
 (ert-deftest drover-list-test-sidebar-in-place-while-drawing-later ()
   "Sessions changing while the sidebar left rows for later draw in place, as drawn anew.
@@ -7645,6 +7679,8 @@ tree within a bound whatever the sessions."
             (drover-set-show-archived t)
             (drover-changed-now)
             (revert-buffer)
+            ;; Every row, those left for later past the first screens too.
+            (drover-list--draw-undrawn)
             (let ((expanded 0))
               (magit-map-sections (lambda (section)
                                     (when (drover-list-session-section-p section)

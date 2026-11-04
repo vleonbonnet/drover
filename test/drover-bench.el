@@ -171,15 +171,13 @@ Nor the `face' properties font lock removes from what it displayed, as
 
 (defun drover-bench-same-p ()
   "Return non-nil when the current list is what drawing it anew draws.
-When it is not, log where the two first differ.  The rows the sidebar
-left for later are drawn first, in both: what a drawing anew draws at
-once is its first screens, whatever moved since."
-  (unless drover-list--folds
-    (drover-list--draw-deferred))
+When it is not, log where the two first differ.  The rows a list left
+for later past its first screens are drawn first, in both: what a
+drawing anew draws at once is its first screens, whatever moved since."
+  (drover-list--draw-undrawn)
   (let ((text (drover-bench-text)))
     (drover-list--render)
-    (unless drover-list--folds
-      (drover-list--draw-deferred))
+    (drover-list--draw-undrawn)
     (let ((anew (drover-bench-text)))
       (or (equal-including-properties text anew)
           (let* ((at (compare-strings text nil nil anew nil nil))

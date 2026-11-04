@@ -553,12 +553,17 @@ holds, each noted by `drover-note-layout'."
 (defun drover-layout-matches-p (layout)
   "Return non-nil when LAYOUT, made by `drover-layout', is of the types now.
 That is of the types as defined last."
+  ;; A loop rather than `seq-every-p': views check thousands of
+  ;; structures a drawing.
   (and layout
        (proper-list-p layout)
-       (seq-every-p (lambda (entry)
-                      (and (consp entry)
-                           (eq (cdr entry) (cdr (gethash (car entry) drover--layouts)))))
-                    layout)))
+       (let ((matches t))
+         (while (and matches layout)
+           (let ((entry (car layout)))
+             (setq matches (and (consp entry)
+                                (eq (cdr entry) (cdr (gethash (car entry) drover--layouts))))
+                   layout (cdr layout))))
+         matches)))
 
 (defun drover-layout-current-p (object type)
   "Return non-nil when OBJECT is a structure of TYPE of the layouts defined now.
@@ -1211,19 +1216,32 @@ returns them."
   (if (and (eq drover-show-subagents 'all) (not shown))
       ;; Every subagent shows: the trees as they are, ranked alike.
       nodes
+    ;; A tree keeping every subagent is the tree itself: trees are
+    ;; never changed once made, and thousands are drawn at once.
     (cl-labels ((kept-p (node)
                   (or (drover--subagent-shown-p node)
                       (and shown (funcall shown node))))
                 (visible (nodes)
                   (sort (mapcar (lambda (node)
-                                  (drover--node (drover-node-session node)
-                                                (visible (seq-filter #'kept-p (drover-node-children node)))))
+                                  (let* ((children (drover-node-children node))
+                                         (kept (and children
+                                                    (visible (cl-remove-if-not #'kept-p children)))))
+                                    (if (drover--same-nodes-p kept children)
+                                        node
+                                      (drover--node (drover-node-session node) kept))))
                                 nodes)
                         #'drover--node-before-p)))
-      (visible (seq-filter (lambda (node)
-                             (or (null (drover-session-parent (drover-node-session node)))
-                                 (kept-p node)))
-                           nodes)))))
+      (visible (cl-remove-if-not (lambda (node)
+                                   (or (null (drover-session-parent (drover-node-session node)))
+                                       (kept-p node)))
+                                 nodes)))))
+
+(defun drover--same-nodes-p (a b)
+  "Return non-nil when the lists of trees A and B hold the same trees, in order."
+  (while (and a b (eq (car a) (car b)))
+    (setq a (cdr a)
+          b (cdr b)))
+  (and (null a) (null b)))
 
 (defun drover-tree-hidden-count (nodes)
   "Return how many subagent sessions of trees NODES are hidden.
@@ -1465,23 +1483,33 @@ for FIELD come last, and ties keep the order of urgency."
         (field (or field drover-sort-by)))
     (if (and (eq field 'urgency) (not descending))
         nodes
+      ;; A tree whose subagents keep their order is the tree itself:
+      ;; trees are never changed once made, and thousands are sorted at
+      ;; once.  NODES, in the same order, are returned themselves.
       (cl-labels ((arrange (nodes)
-                    (let ((keyed (seq-map-indexed
-                                  (lambda (node index)
-                                    (cons (drover--sort-key field node index)
-                                          (drover-node--create
-                                           :session (drover-node-session node)
-                                           :children (arrange (drover-node-children node))
-                                           :status (drover-node-status node)
-                                           :since (drover-node-since node)
-                                           :updated (drover-node-updated node)
-                                           :activity (drover-node-activity node))))
-                                  nodes)))
+                    (let ((keyed nil)
+                          (index 0))
+                      (dolist (node nodes)
+                        (let* ((children (drover-node-children node))
+                               (sorted (and children (arrange children)))
+                               (node (if (eq sorted children)
+                                         node
+                                       (drover-node--create
+                                        :session (drover-node-session node)
+                                        :children sorted
+                                        :status (drover-node-status node)
+                                        :since (drover-node-since node)
+                                        :updated (drover-node-updated node)
+                                        :activity (drover-node-activity node)))))
+                          (push (cons (drover--sort-key field node index) node) keyed)
+                          (setq index (1+ index))))
                       ;; `sort' is stable: ties keep the order of urgency.
-                      (mapcar #'cdr (sort keyed (lambda (a b)
-                                                  (drover--sort-key-less-p (car a) (car b)
-                                                                           descending)))))))
-        (arrange nodes)))))
+                      (let ((sorted (mapcar #'cdr (sort (nreverse keyed)
+                                                        (lambda (a b)
+                                                          (drover--sort-key-less-p (car a) (car b)
+                                                                                   descending))))))
+                        (if (drover--same-nodes-p sorted nodes) nodes sorted)))))
+        (copy-sequence (arrange nodes))))))
 
 ;;;; Backends
 
