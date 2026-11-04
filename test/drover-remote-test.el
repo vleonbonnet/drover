@@ -1400,6 +1400,28 @@ leading back to what holds it would print it again from each."
                                (should (drover-remote--peer-stale peer))
                                (should (equal (car (drover-remote--peer-bye peer)) "quit"))))))
 
+(ert-deftest drover-remote-test-restart-subscribes-once ()
+  "This host restarting its remote layer, both hosts dialing, subscribes once: the greeting it asked for is no restart of the peer's."
+  (drover-remote-test-with nil
+    (let ((registration (let ((process-environment (cons (concat "DROVER_AGENT_DIAL=" spyglass-registration-file)
+                                                         process-environment)))
+                          (drover-remote-test-start-agent dir "agent" "viewer"))))
+      (drover-remote-test-connect registration)
+      (drover-remote-test-command "sessions" :n 3)
+      (drover-remote-test-synced 3)
+      ;; The agent's connection is kept, its name sorting first.
+      (drover-remote-test-wait (lambda () (eq (plist-get (drover-remote-test-stats) :through) 'accepted)) 10)
+      (should (eq (plist-get (drover-remote-test-stats) :through) 'accepted))
+      (drover-remote-mode 1)
+      (drover-remote-test-wait (lambda () (and (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)
+                                               (drover-remote--peer-epoch (drover-remote--peer "agent"))))
+                               10)
+      (drover-remote-test-settle 1.0)
+      (drover-remote-test-synced 3)
+      (should-not (seq-some (lambda (event) (string-prefix-p "greeted again" (nth 2 event)))
+                            (drover-remote--peer-history (drover-remote--peer "agent"))))
+      (should (= (plist-get (drover-remote-test-stats) :subscriptions) 1)))))
+
 ;;;; Showing a session of a peer
 
 (ert-deftest drover-remote-test-show-renders-markdown ()
