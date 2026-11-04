@@ -44,8 +44,15 @@
 ;; answering their requests and sending them prompts are requests its
 ;; owner performs through its own backends, as its access allows, the
 ;; outcome showing here once its records changed; many sessions go in a
-;; few requests.  Each peer keeps a history of its link, shown by
-;; `drover-remote-status'.  See doc/remote.org for the whole design.
+;; few requests.  Opening a session of another host whose host runs it
+;; in a terminal or a shell mirrors that terminal here, through
+;; spyglass: its owner shares it with this host alone, taking its input
+;; as its access allows, resuming a recorded conversation in its front
+;; end first; other sessions show as their host tells them.  A peer
+;; this host cannot reach is tried less and less often, and at once as
+;; the network changes or the machine wakes.  Each peer keeps a history
+;; of its link, shown by `drover-remote-status'.  See doc/remote.org for
+;; the whole design.
 
 ;;; Code:
 
@@ -77,6 +84,22 @@
 (declare-function spyglass-connection-last-recv "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-set-heartbeat "ext:spyglass-conn" (connection interval timeout))
 (defvar spyglass-error-functions)
+(defvar spyglass-share-state-functions)
+(defvar spyglass-mirror-state-functions)
+(declare-function spyglass-share "ext:spyglass-owner" (&optional buffer &rest arguments))
+(declare-function spyglass-share-of "ext:spyglass-owner" (buffer))
+(declare-function spyglass-share-id "ext:spyglass-owner" (share))
+(declare-function spyglass-shares "ext:spyglass-owner" ())
+(declare-function spyglass-share-viewers "ext:spyglass-owner" (share))
+(declare-function spyglass-unshare "ext:spyglass-owner" (buffer-or-share))
+(declare-function spyglass-open "ext:spyglass-mirror" (connection share-id &rest arguments))
+(declare-function spyglass-close "ext:spyglass-mirror" (mirror-or-buffer))
+(declare-function spyglass-mirror-state "ext:spyglass-mirror" (mirror-or-buffer))
+(declare-function spyglass-mirror-closed-reason "ext:spyglass-mirror" (mirror-or-buffer))
+(declare-function spyglass-mirror-connection "ext:spyglass-mirror" (mirror-or-buffer))
+(declare-function spyglass-reconnect "ext:spyglass-conn" (connection &optional fresh))
+(declare-function spyglass-connection-set-reconnect-delays "ext:spyglass-conn" (connection delays))
+(declare-function spyglass-connection-next-attempt "ext:spyglass-conn" (connection))
 (declare-function spyglass-file-transport "ext:spyglass-conn" (&optional file))
 (declare-function spyglass-ssh-transport "ext:spyglass-conn" (host &rest arguments))
 (declare-function spyglass-register-channel "ext:spyglass-channel" (name handler &rest arguments))
@@ -192,18 +215,57 @@ done once whatever: past this, its outcome is reported unknown."
   :type 'number
   :group 'drover-remote)
 
+(defcustom drover-remote-backoff '(0.2 1 2 5 10 30 60 120 240 300)
+  "Seconds before each attempt to reach again a peer this Emacs dials.
+The Nth attempt after its connection broke waits the Nth delay, those
+after the last its delay: a peer switched off for the night is tried
+every five minutes, not every thirty seconds, each attempt through SSH
+starting a process.  The delays start over as the network changes or
+the machine wakes from sleep (see `drover-remote-lookout-interval'), and
+when `drover-remote-check' is called."
+  :type '(repeat number)
+  :group 'drover-remote)
+
+(defcustom drover-remote-lookout-interval 15
+  "Seconds between two looks at the network, for peers backing off.
+A change of this host's network addresses, or a gap between two looks
+far longer than this, as after sleep, has peers still unreachable tried
+again at once, their delays starting over."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-open-timeout 10
+  "Seconds opening a peer's terminal waits for its owner's answer."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-resume-timeout 60
+  "Seconds opening a peer's conversation waits for its owner to resume it.
+Its owner starts its front end, as opening it there would, then shares
+its terminal."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-unshare-delay 60
+  "Seconds a terminal this host shared stays shared once no peer mirrors it.
+A peer opening it again meanwhile mirrors it at once."
+  :type 'number
+  :group 'drover-remote)
+
 (defconst drover-remote-protocol 1
   "The version of drover's protocol between hosts.
 Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant")
+(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
 \(`restart', `quit', `off' or `dropped'), only those for good closing a
-peer; \"grant\": it tells each peer the access it grants it.")
+peer; \"grant\": it tells each peer the access it grants it;
+\"mirror\": it shares the terminals and shells of its sessions with the
+peer opening them, resuming a conversation first when asked.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -221,6 +283,9 @@ rather than run twice.")
 
 (defconst drover-remote-channel "drover"
   "The spyglass channel drover talks on.")
+
+(defconst drover-remote--share-prefix "drover/"
+  "What the identifiers of the terminals this host shares begin with.")
 
 (defconst drover-remote-batch 100
   "Records at most in one message of a snapshot or an update.")
@@ -282,7 +347,8 @@ Each is (MESSAGE CALLBACK DEADLINE), oldest first.")
   (outbox nil :documentation "Actions to send, newest first, as (ACTION KEY ARGS THEN ELSE).")
   (flusher nil :documentation "Timer sending the actions of OUTBOX.")
   (ops nil :documentation "What the owner allows of each session, a list of strings, by its key.")
-  (serial 0 :documentation "The number of the last action sent."))
+  (serial 0 :documentation "The number of the last action sent.")
+  (mirrors nil :documentation "The buffers mirroring its sessions' terminals here, by the owner's key."))
 
 (cl-defstruct (drover-remote--sub (:constructor drover-remote--sub-make)
                                   (:copier nil))
@@ -336,7 +402,13 @@ DONE nil: VALUE lists the replies awaiting it; t: VALUE is its outcome.")
   (flight 0 :documentation "Operations of TASKS whose backends have not answered.")
   (watch nil :documentation "Timer failing the operations of TASKS not answered in time.")
   (asked (make-hash-table :test #'eq :weakness 'key)
-         :documentation "Greetings asked of each connection's peer and not received, by connection."))
+         :documentation "Greetings asked of each connection's peer and not received, by connection.")
+  (shares (make-hash-table :test #'equal)
+          :documentation "Terminals this host shares with peers, by share identifier.
+Each a plist: :buffer, :key, the session's, :viewers, the peers that
+asked, as (LINK . NAME), LINK their connection's `drover-link', and
+:timer, unsharing it once no peer mirrors it.")
+  (network nil :documentation "This host's network addresses at the last look, and when, as (TIME . ADDRESSES)."))
 
 (drover-note-layout 'drover-remote--peer 'drover-remote--sub 'drover-remote--state)
 
@@ -419,14 +491,21 @@ anew, and peers greet each other again."
 (defun drover-remote--event (peer kind format-string &rest args)
   "Note in PEER's history an event of KIND, a symbol.
 FORMAT-STRING and ARGS tell it.  The history keeps
-`drover-remote-history-size' events, each on a line."
+`drover-remote-history-size' events, each on a line, as (TIME KIND
+TEXT COUNT FIRST): an event as the last one, of its kind and text, as
+each failed attempt to reach a peer away for the night, is counted
+there, COUNT times since FIRST, rather than push the others out."
   (when peer
-    (let ((history (cons (list (float-time) kind
-                               (drover-bound-line (apply #'format format-string args) 200))
-                         (drover-remote--peer-history peer))))
-      (when (> (length history) drover-remote-history-size)
-        (setcdr (nthcdr (1- drover-remote-history-size) history) nil))
-      (setf (drover-remote--peer-history peer) history))))
+    (let* ((text (drover-bound-line (apply #'format format-string args) 200))
+           (now (float-time))
+           (last (car (drover-remote--peer-history peer))))
+      (if (and last (eq (nth 1 last) kind) (equal (nth 2 last) text))
+          (setcar (drover-remote--peer-history peer)
+                  (list now kind text (1+ (or (nth 3 last) 1)) (or (nth 4 last) (nth 0 last))))
+        (let ((history (cons (list now kind text 1 now) (drover-remote--peer-history peer))))
+          (when (> (length history) drover-remote-history-size)
+            (setcdr (nthcdr (1- drover-remote-history-size) history) nil))
+          (setf (drover-remote--peer-history peer) history))))))
 
 (defun drover-remote--capable-p (peer capability)
   "Return non-nil when PEER's drover told CAPABILITY, a string."
@@ -967,7 +1046,9 @@ Records are read from STATE as they are now."
                              :inst spyglass-instance-id
                              :dialed (if (spyglass-connection-transport connection) t :false)
                              :ask (if ask t :false)
-                             :caps (vconcat drover-remote-capabilities)
+                             :caps (vconcat (if (drover-remote--mirrors-p)
+                                                drover-remote-capabilities
+                                              (remove "mirror" drover-remote-capabilities)))
                              :epoch (or (and drover-remote--state
                                              (drover-remote--state-epoch drover-remote--state))
                                         :false))))
@@ -1033,7 +1114,8 @@ the peer writing meanwhile would lose what it had not read, the reason."
       (drover-remote--greeted peer connection message)
       (drover-remote--event peer 'hello "greeted again: its remote layer restarted, epoch %s"
                             (drover-remote--hello-epoch message))
-      (drover-remote--resubscribe peer nil))
+      (drover-remote--resubscribe peer nil)
+      (drover-remote--reopen-mirrors peer))
      ((not (and (integerp version) (= version drover-remote-protocol)))
       (drover-remote--fail dialer (format "%s speaks drover's protocol %s, this host %s"
                                           (drover-bound-line (format "%s" host)) version
@@ -1162,7 +1244,8 @@ STATE is the remote layer's."
   (drover-remote--send connection (list :t "sub"
                                         :epoch (drover-remote--peer-epoch peer)
                                         :rev (drover-remote--peer-rev peer)))
-  (drover-remote--resume peer))
+  (drover-remote--resume peer)
+  (drover-remote--reopen-mirrors peer))
 
 (defun drover-remote--resume (peer)
   "Ask PEER again, connected anew, what a stream ending lost.
@@ -1220,9 +1303,16 @@ one line, once in `drover-error-interval' seconds."
                           (drover-remote--peer-of state connection))))
       (let ((line (drover-bound-line (format "%s" message)))
             (stream (gethash connection (drover-remote--state-streams state) 0)))
-        (if (string-prefix-p "Sending failed" line)
-            (progn (drover-remote--stat peer :write-failures)
-                   (drover-remote--event peer 'write "%s" line))
+        (cond
+         ((string-prefix-p "Sending failed" line)
+          (drover-remote--stat peer :write-failures)
+          (drover-remote--event peer 'write "%s" line))
+         ;; A mirror's: input its owner refused, a key it does not take.
+         ((string-prefix-p drover-remote--share-prefix line)
+          (drover-remote--event peer 'mirror "%s" line)
+          (when (drover--report-due-p (list "remote mirror" (drover-remote--peer-name peer) line))
+            (drover-message "%s: %s" (drover-remote--label peer) line)))
+         (t
           (drover-remote--fail peer line)
           (when (spyglass-connection-live-p connection)
             (run-at-time drover-remote--error-grace nil
@@ -1237,7 +1327,7 @@ one line, once in `drover-error-interval' seconds."
                                             (spyglass-connection-live-p connection))
                                    (drover-remote--stat peer :unexpected)
                                    (when (drover--report-due-p (list "remote" (drover-remote--peer-name peer) line))
-                                     (drover-warn "%s: %s" (drover-remote--label peer) line))))))))))))))
+                                     (drover-warn "%s: %s" (drover-remote--label peer) line)))))))))))))))
 
 (defun drover-remote--attach (connection)
   "Greet the peer of CONNECTION, whose stream just opened."
@@ -1376,8 +1466,55 @@ host dials, and not when its configuration dropped it."
                                       (or (plist-get properties :program) drover-remote-ssh-program)
                                       (or (plist-get properties :ssh) (drover-remote--peer-name peer))))))
     ;; Its errors come through `drover-remote--spyglass-error'.
-    (setf (drover-remote--peer-dialed peer)
-          (spyglass-connect (drover-remote--transport peer) :name (drover-remote--peer-name peer)))))
+    (let ((connection (spyglass-connect (drover-remote--transport peer)
+                                        :name (drover-remote--peer-name peer))))
+      (drover-remote--back-off connection)
+      (setf (drover-remote--peer-dialed peer) connection))))
+
+(defun drover-remote--back-off (connection)
+  "Have CONNECTION, dialed, wait `drover-remote-backoff' between its attempts.
+A spyglass predating delays of a connection's own keeps its own."
+  (when (fboundp 'spyglass-connection-set-reconnect-delays)
+    (condition-case err
+        (spyglass-connection-set-reconnect-delays connection drover-remote-backoff)
+      (error (drover-warn "drover-remote-backoff: %s" (drover-error-message err))))))
+
+(defun drover-remote--retry-now (peer why)
+  "Have PEER, which this host dials and waits to try again, tried now.
+Its delays start over; WHY, a line, goes to its history.  Return
+non-nil when it was waiting."
+  (when-let* ((dialed (drover-remote--peer-dialed peer))
+              ((not (spyglass-connection-live-p dialed)))
+              ((fboundp 'spyglass-connection-next-attempt))
+              (next (spyglass-connection-next-attempt dialed))
+              ((> next 0.5)))
+    (drover-remote--event peer 'retry "%s: trying it now rather than in %s" why (drover-remote--duration next))
+    (spyglass-reconnect dialed t)
+    t))
+
+(defun drover-remote--network ()
+  "Return this host's network interfaces and addresses, to compare."
+  (ignore-errors (sort (mapcar (lambda (interface) (format "%s" interface)) (network-interface-list t))
+                       #'string<)))
+
+(defun drover-remote--look-out ()
+  "Try the peers backing off again at once, if the network changed or Emacs slept.
+From a timer every `drover-remote-lookout-interval' seconds: timers do
+not run while the machine sleeps, so a gap far longer than the interval
+tells it woke."
+  (drover-with-reporting "remote lookout"
+    (when-let* ((state (drover-remote--current)))
+      (let* ((now (float-time))
+             (last (drover-remote--state-network state))
+             (addresses (drover-remote--network))
+             (why (cond ((null last) nil)
+                        ((> (- now (car last)) (* 3 drover-remote-lookout-interval))
+                         (format "this host woke after %s" (drover-remote--duration (- now (car last)))))
+                        ((not (equal addresses (cdr last))) "this host's network changed"))))
+        (setf (drover-remote--state-network state) (cons now addresses))
+        (when why
+          (dolist (peer (drover-remote--peers))
+            (drover-remote--retry-now peer why)))))))
 
 ;;;; Sessions of a peer
 
@@ -1404,7 +1541,8 @@ finds those."
                                              drover--changed-keys))
       (drover-backend-changed backend))
      (t (dolist (key keys)
-          (drover-backend-changed backend key))))))
+          (drover-backend-changed backend key))))
+    (drover-remote--seen-mirrors peer keys)))
 
 (defun drover-remote--set-stale (peer heard)
   "Make PEER's sessions stale, last heard from at HEARD, or fresh for nil."
@@ -2062,16 +2200,7 @@ answered with its outcome rather than performed twice."
      ((and known (car known)) (funcall reply (list :out (cdr known))))
      (known (setcdr known (cons reply (cdr known))))
      (t
-      (puthash id (list nil reply) outcomes)
-      (push id (drover-remote--state-outcome-order state))
-      (let ((order (drover-remote--state-outcome-order state)))
-        (when (> (length order) drover-remote-outcomes)
-          (let ((old (nthcdr drover-remote-outcomes order)))
-            (setcdr (nthcdr (1- drover-remote-outcomes) order) nil)
-            ;; Those still being performed are kept until done.
-            (dolist (gone old)
-              (when (car (gethash gone outcomes))
-                (remhash gone outcomes))))))
+      (drover-remote--begin-outcome state id reply)
       (drover-remote--stat peer :actions-done (length keys))
       (drover-remote--event peer 'act "asked to %s %d session%s" action (length keys)
                             (if (= (length keys) 1) "" "s"))
@@ -2084,6 +2213,21 @@ answered with its outcome rather than performed twice."
                                 :next 0 :left (length keys)
                                 :deadline (+ (float-time) drover-remote-action-timeout)))))
       (drover-remote--run-soon state)))))
+
+(defun drover-remote--begin-outcome (state id reply)
+  "Note in STATE that the request ID, a peer's, is being performed for REPLY.
+Its outcome is kept once done, for the last `drover-remote-outcomes'
+requests, those still being performed kept until done."
+  (let ((outcomes (drover-remote--state-outcomes state)))
+    (puthash id (list nil reply) outcomes)
+    (push id (drover-remote--state-outcome-order state))
+    (let ((order (drover-remote--state-outcome-order state)))
+      (when (> (length order) drover-remote-outcomes)
+        (let ((old (nthcdr drover-remote-outcomes order)))
+          (setcdr (nthcdr (1- drover-remote-outcomes) order) nil)
+          (dolist (gone old)
+            (when (car (gethash gone outcomes))
+              (remhash gone outcomes))))))))
 
 (defun drover-remote--run-soon (state)
   "Perform the actions of STATE's tasks from a timer."
@@ -2247,6 +2391,258 @@ failed past its deadline."
                                  (if (eq (car-safe requests) :failure)
                                      (funcall reply nil (drover-bound-line (format "%s" (cadr requests))))
                                    (funcall reply (list :requests (drover-remote--encode-requests requests)))))))))))
+
+;;;; Sharing terminals with peers
+
+(defun drover-remote--mirrors-p ()
+  "Return non-nil when spyglass shares terminals with some peers only.
+Its shares for some peers and delays of a connection's own came
+together: drover mirrors terminals only with them."
+  (and (fboundp 'spyglass-connection-next-attempt) (fboundp 'spyglass-share)))
+
+(defun drover-remote--terminal (record)
+  "Return the terminal or shell of RECORD's conversation, as (BUFFER . KIND).
+KIND is \"shell\" for a comint buffer, as agent-shell's, \"terminal\"
+otherwise.  The buffer is RECORD's, or that of another record of its
+conversation, as the terminal of a front end resuming a conversation an
+engine records; only of a backend whose buffers run their agents
+\(:runs-in-buffer): an OpenCode session's buffer shows a service's
+session, which a mirror would not serve.  Nil when none."
+  (let* ((engine-key (drover-session-engine-key record))
+         (others (and engine-key
+                      (delq nil (mapcar #'drover-index-session
+                                        (gethash engine-key (drover--index-engines (drover-index))))))))
+    (seq-some (lambda (candidate)
+                (when-let* (((drover-backend-property candidate :runs-in-buffer))
+                            (buffer (drover-session-buffer candidate)))
+                  (cons buffer (if (with-current-buffer buffer (derived-mode-p 'comint-mode))
+                                   "shell" "terminal"))))
+              (cons record others))))
+
+(defun drover-remote--resumable-p (record)
+  "Return non-nil when RECORD's conversation may be resumed here in a front end.
+A conversation an engine records, Claude Code's or Codex's, which a
+front end resumes as opening it here does; not one archived."
+  (when-let* ((engine (drover-session-engine record)))
+    (and (drover-session-engine-id record)
+         (not (drover-session-archived-p record))
+         (drover-supports-p record :open)
+         (or (drover-resumer-front-ends engine)
+             (seq-some (lambda (entry) (memq engine (cddr entry))) drover--front-end-backends))
+         t)))
+
+(defun drover-remote--share-id (key)
+  "Return the identifier this host shares the terminal of session KEY under."
+  (format "%s%s/%s" drover-remote--share-prefix (car key) (cdr key)))
+
+(defun drover-remote--share-viewer (id connection)
+  "Return the name of CONNECTION's peer, when it asked to mirror the share ID.
+The peer is known by the connection it asked on, which keeps its
+streams, or by its greeting there: spyglass's mirrors, resuming as a
+stream comes back, ask before the peers greet each other again."
+  (when-let* ((state (drover-remote--current))
+              (entry (gethash id (drover-remote--state-shares state))))
+    (or (cdr (seq-find (lambda (viewer) (eq (drover-linked (car viewer)) connection))
+                       (plist-get entry :viewers)))
+        (when-let* ((peer (drover-remote--peer-of state connection))
+                    ((rassoc (drover-remote--peer-name peer) (plist-get entry :viewers))))
+          (drover-remote--peer-name peer)))))
+
+(defun drover-remote--share-refuses-p (id connection)
+  "Return non-nil when the share ID takes no input from CONNECTION's peer.
+A peer of `read' access watches; `act' and `full' type, as configured
+now."
+  (let* ((name (drover-remote--share-viewer id connection))
+         (peer (and name (drover-remote--peer name))))
+    (not (and peer (drover-remote--allows-p (drover-remote--access peer) "type")))))
+
+(defun drover-remote--share (state peer connection key buffer)
+  "Share BUFFER, the terminal of this host's session KEY, with PEER on CONNECTION.
+STATE is the remote layer's.  Return the share's identifier.  The share
+is visible to the peers that asked alone, takes their input as their
+access allows, and is sized by the viewer's window while no window of
+this host shows it, else by this host's (spyglass's `owner' policy).
+A buffer someone else shared is left as it is."
+  (let* ((existing (spyglass-share-of buffer))
+         (id (if existing (spyglass-share-id existing) (drover-remote--share-id key)))
+         (shares (drover-remote--state-shares state))
+         (entry (gethash id shares))
+         (name (drover-remote--peer-name peer)))
+    (if (and existing (not entry))
+        id
+      ;; A share of that name left on another buffer is a stale one of drover's.
+      (when-let* ((other (seq-find (lambda (share) (equal (spyglass-share-id share) id)) (spyglass-shares)))
+                  ((not (eq other existing))))
+        (spyglass-unshare other))
+      (let ((viewers (seq-remove (lambda (viewer)
+                                   (let ((other (drover-linked (car viewer))))
+                                     (or (eq other connection)
+                                         (eq (spyglass-connection-state other) 'closed))))
+                                 (plist-get entry :viewers))))
+        (puthash id (list :buffer buffer :key key
+                          :viewers (cons (cons (drover-link connection) name) viewers)
+                          :timer (plist-get entry :timer))
+                 shares)
+        (spyglass-share buffer :id id
+                        :peers (lambda (connection) (and (drover-remote--share-viewer id connection) t))
+                        :read-only (lambda (connection) (drover-remote--share-refuses-p id connection))
+                        :size-policy 'owner)
+        (unless (spyglass-share-viewers (spyglass-share-of buffer))
+          (drover-remote--unshare-later state id))
+        id))))
+
+(defun drover-remote--unshare-later (state id)
+  "Unshare ID, a terminal STATE shares, once no peer mirrored it for a while.
+See `drover-remote-unshare-delay'."
+  (when-let* ((entry (gethash id (drover-remote--state-shares state))))
+    (when (plist-get entry :timer)
+      (cancel-timer (plist-get entry :timer)))
+    (puthash id (plist-put (copy-sequence entry) :timer
+                           (run-at-time drover-remote-unshare-delay nil
+                                        (lambda ()
+                                          (drover-with-reporting "remote sharing"
+                                            (drover-remote--unshare-idle id)))))
+             (drover-remote--state-shares state))))
+
+(defun drover-remote--unshare-idle (id)
+  "Unshare ID, a terminal this host shares, unless a peer mirrors it."
+  (when-let* ((state (drover-remote--current))
+              (entry (gethash id (drover-remote--state-shares state))))
+    (puthash id (plist-put (copy-sequence entry) :timer nil) (drover-remote--state-shares state))
+    (let* ((buffer (plist-get entry :buffer))
+           (share (and (buffer-live-p buffer) (spyglass-share-of buffer))))
+      (cond ((not (and share (equal (spyglass-share-id share) id)))
+             (remhash id (drover-remote--state-shares state)))
+            ((not (spyglass-share-viewers share))
+             (spyglass-unshare share))))))
+
+(defun drover-remote--share-event (share event _data)
+  "Follow EVENT of SHARE, if this host shares it with peers.
+For `spyglass-share-state-functions': a terminal no peer mirrors any
+more is unshared a while later, one a peer mirrors again stays."
+  (drover-with-reporting "remote sharing"
+    (when-let* ((state (drover-remote--current))
+                (id (spyglass-share-id share))
+                (entry (gethash id (drover-remote--state-shares state))))
+      (pcase event
+        ('subscribed
+         (when (plist-get entry :timer)
+           (cancel-timer (plist-get entry :timer))
+           (puthash id (plist-put (copy-sequence entry) :timer nil) (drover-remote--state-shares state))))
+        ('unsubscribed
+         (unless (spyglass-share-viewers share)
+           (drover-remote--unshare-later state id)))
+        ('unshared
+         (when (plist-get entry :timer)
+           (cancel-timer (plist-get entry :timer)))
+         (remhash id (drover-remote--state-shares state)))))))
+
+(defun drover-remote--unshare-all (&optional state)
+  "Unshare the terminals this host shares with peers, STATE's and any left.
+Those left are shares of a remote layer made anew without stopping, as
+reloading a drover whose structures changed does."
+  (when state
+    (maphash (lambda (_id entry)
+               (when (plist-get entry :timer) (cancel-timer (plist-get entry :timer))))
+             (drover-remote--state-shares state)))
+  (when (fboundp 'spyglass-shares)
+    (dolist (share (spyglass-shares))
+      (when (string-prefix-p drover-remote--share-prefix (spyglass-share-id share))
+        (spyglass-unshare share)))))
+
+(defun drover-remote--mirror-answer (state peer connection key terminal)
+  "Share TERMINAL, (BUFFER . KIND) of session KEY, with PEER on CONNECTION.
+STATE is the remote layer's.  Return the answer to the peer's request:
+the share's identifier, its kind, and whether the peer may type."
+  (let ((id (drover-remote--share state peer connection key (car terminal))))
+    (drover-remote--event peer 'share "sharing the %s %s" (cdr terminal) (buffer-name (car terminal)))
+    (list :share id :kind (cdr terminal)
+          :input (if (drover-remote--allows-p (drover-remote--access peer) "type") t :false))))
+
+(defun drover-remote--finish-outcome (state id answer)
+  "Answer ANSWER to whoever asked the request ID, done, and keep it in STATE."
+  (let ((entry (gethash id (drover-remote--state-outcomes state))))
+    (unless (car entry)
+      (puthash id (cons t answer) (drover-remote--state-outcomes state))
+      (dolist (reply (cdr entry))
+        (drover-with-reporting "remote mirror"
+          (funcall reply answer))))))
+
+(defun drover-remote--on-mirror (state peer connection message reply)
+  "Answer PEER's request MESSAGE on CONNECTION to mirror a session's terminal.
+STATE is the remote layer's; REPLY gets the answer: the share to open,
+else why there is none (:none) and whether it may be resumed.  With
+:resume, a conversation without a terminal is resumed in its front end
+first, as opening it here would, without a window, for a peer that may
+act on it; the request's identifier has it resumed once, asked again
+after a stream ended."
+  (let* ((key (drover-remote--key (plist-get message :key)))
+         (id (plist-get message :id))
+         (record (and key (car (drover-remote--served key))))
+         (terminal (and record (drover-remote--terminal record)))
+         (known (and (stringp id) (gethash id (drover-remote--state-outcomes state)))))
+    (cond
+     ((not record) (funcall reply nil "no such session here"))
+     (terminal (funcall reply (drover-remote--mirror-answer state peer connection key terminal)))
+     ((and known (car known)) (funcall reply (cdr known)))
+     (known (setcdr known (cons reply (cdr known))))
+     ((not (eq (plist-get message :resume) t))
+      (funcall reply (list :none "it has no terminal here"
+                           :resumable (if (drover-remote--resumable-p record) t :false))))
+     ((not (drover-remote--allows-p (drover-remote--access peer) "resume"))
+      (funcall reply nil (drover-remote--refuse-action
+                          peer "resume" (format "%s has %s access" (drover-remote--label peer)
+                                                (drover-remote--access peer)))))
+     ((not (drover-remote--resumable-p record))
+      (funcall reply (list :none "it has no terminal here, and no front end resumes it" :resumable :false)))
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "no identifier"))
+     (t
+      (drover-remote--begin-outcome state id reply)
+      (drover-remote--resume-terminal state peer connection key record id)))))
+
+(defun drover-remote--resume-terminal (state peer connection key record id)
+  "Resume RECORD, session KEY, in its front end, then share its terminal.
+For PEER on CONNECTION, which asked it under the identifier ID, STATE's
+outcome answered once its terminal shows, or past
+`drover-remote-resume-timeout' seconds.  It is opened as here, from a
+timer rather than the stream's filter, without a window: a terminal
+needing one for its peer goes to spyglass's parking frame."
+  (drover-remote--event peer 'resume "resuming %s, to share its terminal"
+                        (drover-session-display-title record))
+  (let ((state-link (drover-link state))
+        (peer-link (drover-link peer))
+        (connection-link (drover-link connection))
+        (deadline (+ (float-time) drover-remote-resume-timeout))
+        (done nil))
+    (cl-labels ((finish (answer)
+                  (unless done
+                    (setq done t)
+                    (drover-remote--finish-outcome (drover-linked state-link) id answer)))
+                (poll ()
+                  (drover-with-reporting "remote resume"
+                    (let ((state (drover-linked state-link)))
+                      (cond
+                       ((or done (not (eq state (drover-remote--current))))
+                        (setq done t))
+                       ((drover-remote--terminal (or (drover-index-session key) record))
+                        (finish (drover-remote--mirror-answer
+                                 state (drover-linked peer-link) (drover-linked connection-link) key
+                                 (drover-remote--terminal (or (drover-index-session key) record)))))
+                       ((> (float-time) deadline)
+                        (finish (list :none "its front end showed no terminal in time" :resumable t)))
+                       (t (run-at-time 0.2 nil #'poll)))))))
+      (run-at-time 0 nil
+                   (lambda ()
+                     (drover-with-reporting "remote resume"
+                       (condition-case err
+                           (save-window-excursion
+                             (save-current-buffer
+                               (let ((display-buffer-overriding-action
+                                      '(display-buffer-no-window (allow-no-window . t))))
+                                 (drover-backend-call record :open nil))))
+                         (error (finish (list :none (drover-error-message err) :resumable :false))))
+                       (poll)))))))
 
 ;;;; Older and archived sessions
 
@@ -2443,6 +2839,10 @@ as an older drover's farewells do."
      (t
       (pcase (plist-get message :op)
         ("act" (drover-remote--on-act state peer message reply))
+        ("mirror"
+         (if (drover-remote--mirrors-p)
+             (drover-remote--on-mirror state peer connection message reply)
+           (funcall reply nil "this host's spyglass shares no terminal: update it")))
         ("requests" (drover-remote--on-requests peer key reply))
         ("recap"
          (if (not served)
@@ -2505,7 +2905,11 @@ as an older drover's farewells do."
      ;; them: a refresh lists none again but with FULL.
      :reports-changes t
      :open (lambda (session &optional _other-window)
-             (drover-remote-show session))
+             (drover-remote-open session))
+     ;; A mirror of its terminal, while one is open here.
+     :buffer (lambda (session)
+               (when-let* ((peer (drover-remote--peer name)))
+                 (drover-remote--mirror-buffer peer (drover-session-id session))))
      :recap (lambda (session callback)
               (if-let* ((peer (drover-remote--peer name)))
                   (drover-remote--recap peer session callback)
@@ -2548,7 +2952,8 @@ EPHEMERAL non-nil for one accepted without configuration."
   (let ((peer (drover-remote--peer-make :name name :properties properties :ephemeral ephemeral
                                         :backend (drover-remote--backend-name name)
                                         :records (make-hash-table :test #'equal)
-                                        :ops (make-hash-table :test #'equal))))
+                                        :ops (make-hash-table :test #'equal)
+                                        :mirrors (make-hash-table :test #'equal))))
     (puthash name peer (drover-remote--state-peers state))
     (setf (drover-remote--state-order state)
           (append (delete name (drover-remote--state-order state)) (list name)))
@@ -2652,7 +3057,9 @@ added is dialed if it says so."
          (state (drover-remote--peer-state peer))
          (dialed (drover-remote--peer-dialed peer))
          (heard (drover-remote--last-heard peer))
-         (attempts (and dialed (ignore-errors (spyglass-connection-attempts dialed)))))
+         (attempts (and dialed (ignore-errors (spyglass-connection-attempts dialed))))
+         (next (and dialed (fboundp 'spyglass-connection-next-attempt)
+                    (ignore-errors (spyglass-connection-next-attempt dialed)))))
     (drover-bound-line
      (concat (pcase state
                ('open "connected")
@@ -2663,10 +3070,19 @@ added is dialed if it says so."
                       "standing by"
                     "waiting for it to connect")))
              (and attempts (> attempts 0) (format ", attempt %d" attempts))
+             (and next (not (eq state 'open))
+                  (format ", next in %s" (drover-remote--duration next)))
              (and (> heard 0) (not (eq state 'open))
                   (format ", last heard from %s ago" (opencode-format-age heard now)))
              (and (drover-remote--peer-error peer) (not (eq state 'open))
                   (concat ": " (drover-remote--peer-error peer)))))))
+
+(defun drover-remote--duration (seconds)
+  "Return SECONDS, a duration, on a few characters: 4s, 2m 30s, 1h 5m."
+  (let ((seconds (max 0 (round seconds))))
+    (cond ((< seconds 60) (format "%ds" seconds))
+          ((< seconds 3600) (format "%dm %02ds" (/ seconds 60) (% seconds 60)))
+          (t (format "%dh %02dm" (/ seconds 3600) (/ (% seconds 3600) 60))))))
 
 (defun drover-remote--host-label (host)
   "Return how views name HOST, for `drover-host-label-function'."
@@ -2755,6 +3171,21 @@ sessions, and :dirty, how many sessions changed since are still to send."
             (when-let* ((serving (plist-get stats :serving)))
               (insert (format "  served up to revision %s, %d sessions to send\n"
                               (plist-get serving :held) (plist-get serving :dirty))))
+            (let ((mirrors nil))
+              (maphash (lambda (key _buffer)
+                         (when-let* ((buffer (drover-remote--mirror-buffer peer key)))
+                           (push (format "%s (%s)" (buffer-name buffer) (spyglass-mirror-state buffer)) mirrors)))
+                       (copy-hash-table (drover-remote--peer-mirrors peer)))
+              (when mirrors
+                (insert (format "  mirrored here: %s\n" (string-join (nreverse mirrors) ", ")))))
+            (let ((shared nil))
+              (maphash (lambda (id entry)
+                         (when (rassoc (drover-remote--peer-name peer) (plist-get entry :viewers))
+                           (push id shared)))
+                       (drover-remote--state-shares state))
+              (when shared
+                (insert (format "  terminals of this host it may mirror: %s\n"
+                                (string-join (sort shared #'string<) ", ")))))
             (insert (format "  %s\n" (or (drover-remote--refusal peer)
                                          (format "takes actions, granting this host %s access"
                                                  (drover-remote--peer-granted peer)))))
@@ -2764,8 +3195,13 @@ sessions, and :dirty, how many sessions changed since are still to send."
                               error)))
             (when-let* ((history (drover-remote--peer-history peer)))
               (insert "  history, newest first:\n")
-              (pcase-dolist (`(,time ,kind ,text) (seq-take history 30))
-                (insert (format "    %s %-9s %s\n" (format-time-string "%H:%M:%S" time) kind text))))
+              (dolist (event (seq-take history 30))
+                (pcase-let ((`(,time ,kind ,text ,count ,first) event))
+                  (insert (format "    %s %-9s %s%s\n" (format-time-string "%H:%M:%S" time) kind text
+                                  (if (and count (> count 1))
+                                      (format " (%d times since %s)" count
+                                              (format-time-string "%H:%M:%S" first))
+                                    ""))))))
             (insert "\n")))
         (goto-char (point-min))
         (special-mode))
@@ -2774,9 +3210,12 @@ sessions, and :dirty, how many sessions changed since are still to send."
 (defun drover-remote-check ()
   "Check that each peer this host dials is reachable, and tell what fails.
 SSH runs as the connection runs it, without a prompt (BatchMode), and
-reads spyglass's registration file there."
+reads spyglass's registration file there.  A peer backing off, still
+unreachable, is tried again at once, its delays starting over (see
+`drover-remote-backoff')."
   (interactive)
   (dolist (peer (drover-remote--peers))
+    (drover-remote--retry-now peer "checked by the user")
     (let* ((properties (drover-remote--peer-properties peer))
            (name (drover-remote--peer-name peer)))
       (when (and (plist-get properties :dial) (not (plist-get properties :local)))
@@ -2806,6 +3245,20 @@ reads spyglass's registration file there."
 
 (defvar-local drover-remote--shown nil
   "The session of a peer the current buffer shows, as (PEER-NAME . KEY).")
+
+(defvar-local drover-remote--note nil
+  "Why the current buffer shows a session of a peer as its host tells it, or nil.
+Rather than mirror its terminal: a line.")
+
+(defvar-local drover-remote--mirror-kind nil
+  "What the current buffer mirrors of a session of a peer, \"terminal\" or \"shell\".
+Nil in a buffer that mirrors none.")
+
+(defvar-local drover-remote--seen-sent 0
+  "When the session the current mirror shows was last marked seen from here.")
+
+(defvar-local drover-remote--reopens 0
+  "Times the current mirror was opened anew since it was last live.")
 
 (define-derived-mode drover-remote-session-mode special-mode "Drover remote"
   "A session of another host, as its host tells it: read only.
@@ -2945,13 +3398,14 @@ are strings stay.  TEXT plain when Markdown cannot be fontified here."
           (concat (drover-remote--section "Error")
                   (drover-face (plist-get recap :error) 'error) "\n")))))
 
-(defun drover-remote-show (session &optional again)
+(defun drover-remote-show (session &optional again note)
   "Show SESSION, a session of another host, as that host tells it, read only.
 What it is, its last reply, Markdown fontified as OpenCode's buffers
 show it, its last prompt and the files its last turn changed, fetched
 through its host.  Its turn ended unseen is marked seen there, as
 viewing it there would.  AGAIN non-nil shows it anew in the current
-window, without taking another."
+window, without taking another.  NOTE, a line, tells why its terminal
+is not mirrored instead; shown anew, the note stays."
   (let* ((host (drover-session-host session))
          (peer (or (drover-remote--peer host) (user-error "No peer %s" host)))
          (buffer (get-buffer-create (format "*drover %s: %s*" (drover-remote--label peer)
@@ -2960,9 +3414,13 @@ window, without taking another."
       (unless (derived-mode-p 'drover-remote-session-mode)
         (drover-remote-session-mode))
       (setq drover-remote--shown (cons (drover-remote--peer-name peer) (drover-session-id session)))
+      (unless again
+        (setq drover-remote--note note))
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (drover-remote--details peer session))
+        (when drover-remote--note
+          (insert (drover-remote--field "Terminal" (drover-face drover-remote--note 'drover-dim))))
         (let ((preview-at (point-marker))
               (recap-at (point-marker)))
           (set-marker-insertion-type recap-at t)
@@ -2984,15 +3442,226 @@ window, without taking another."
                                     (lambda (recap) (put recap-at (drover-remote--recap-text recap)))))))
         (set-buffer-modified-p nil)
         (goto-char (point-min))))
-    (when (and (memq (drover-session-status session) '(done failed))
-               (not (drover-remote--refusal peer session "mark-seen")))
-      (drover-remote--act (drover-remote--peer-name peer) "mark-seen" session nil #'ignore
-                          (let ((link (drover-link peer)))
-                            (lambda (message)
-                              (drover-remote--event (drover-linked link) 'error "marking seen: %s" message)))))
+    (drover-remote--seen-here peer session)
     (unless again
       (pop-to-buffer-same-window buffer))
     buffer))
+
+(defun drover-remote--seen-here (peer session)
+  "Mark SESSION of PEER seen there if its turn ended unseen."
+  (when (and (memq (drover-session-status session) '(done failed))
+             (not (drover-remote--refusal peer session "mark-seen")))
+    (drover-remote--act (drover-remote--peer-name peer) "mark-seen" session nil #'ignore
+                        (let ((link (drover-link peer)))
+                          (lambda (message)
+                            (drover-remote--event (drover-linked link) 'error "marking seen: %s" message))))))
+
+;;;; Mirrors of a peer's terminals
+
+(defun drover-remote--mirror-buffer (peer key)
+  "Return the live buffer mirroring the terminal of PEER's session KEY, or nil."
+  (let ((buffer (gethash key (drover-remote--peer-mirrors peer))))
+    (if (buffer-live-p buffer)
+        buffer
+      (remhash key (drover-remote--peer-mirrors peer))
+      nil)))
+
+(defun drover-remote--why-no-mirror (peer session)
+  "Return why SESSION of PEER opens as its host tells it, not mirrored, or nil.
+A line: an OpenCode session, whose buffer shows its service's session
+and opens here as a full buffer once opencode.el talks to several
+services; a peer not connected, or running a drover or spyglass that
+shares no terminal; a session archived."
+  (let ((label (drover-remote--label peer)))
+    (cond
+     ((eq (drover-session-origin session) 'opencode)
+      (format "An OpenCode session of %s: shown as %s tells it, until OpenCode's buffers open here"
+              label label))
+     ((drover-session-archived-p session) "Archived: it runs no terminal")
+     ((not (eq (drover-remote--peer-state peer) 'open))
+      (format "%s is not connected: its terminal opens once it is" label))
+     ((not (drover-remote--mirrors-p))
+      "This host's spyglass mirrors no terminal of drover's: update it")
+     ((not (drover-remote--capable-p peer "mirror"))
+      (format "%s runs an older drover, which shares no terminal: update it there" label)))))
+
+(defun drover-remote-open (session)
+  "Open SESSION, of another host: its terminal mirrored, else its view.
+The proxy's :open.  The owner shares its session's terminal or shell
+with this host, which mirrors it in a buffer taking input as the
+owner's access allows, sized by the window showing it while the owner
+shows it in none; a conversation without one, Claude Code's or
+Codex's, is resumed there first, as opening it there would, when this
+host may act on it.  Otherwise it shows as its host tells it (see
+`drover-remote-show'), saying why.  Killing the mirror leaves the
+session running there."
+  (let* ((peer (or (drover-remote--peer (drover-session-host session))
+                   (user-error "No peer %s" (drover-session-host session))))
+         (buffer (drover-remote--mirror-buffer peer (drover-session-id session))))
+    (if (and buffer (not (eq (spyglass-mirror-state buffer) 'closed)))
+        (progn (pop-to-buffer-same-window buffer)
+               (drover-remote--seen-here peer session)
+               buffer)
+      (if-let* ((why (drover-remote--why-no-mirror peer session)))
+          (drover-remote-show session nil why)
+        (drover-remote--open-mirror peer session buffer)))))
+
+(defun drover-remote--open-mirror (peer session buffer)
+  "Ask PEER for SESSION's terminal and mirror it, in BUFFER if one closed.
+Waited for in the command, `drover-remote-open-timeout' seconds, or
+`drover-remote-resume-timeout' when PEER may resume it first;
+\[keyboard-quit] stops waiting.  Shown as its host tells it when there
+is none."
+  (let* ((label (drover-remote--label peer))
+         (title (drover-bound-line (drover-session-display-title session) 60))
+         (resume (drover-remote--allows-p (or (drover-remote--peer-granted peer) 'read) "resume")))
+    (drover-message "Opening %s's terminal of %s..." label title)
+    (pcase-let ((`(,reply ,error)
+                 (drover-remote--wait peer (list :op "mirror" :key (drover-remote--wire-key session)
+                                                 :resume (if resume t :false)
+                                                 :id (drover-remote--action-id peer))
+                                      (if resume drover-remote-resume-timeout drover-remote-open-timeout))))
+      (cond
+       (error
+        (drover-remote-show session nil (format "Its terminal did not open: %s" error)))
+       ((stringp (plist-get reply :share))
+        (let ((mirror (drover-remote--attach-mirror peer session reply buffer)))
+          (drover-message "")
+          (pop-to-buffer-same-window mirror)
+          (drover-remote--seen-here peer session)
+          mirror))
+       (t
+        (drover-remote-show
+         session nil
+         (format "%s: %s%s" label
+                 (or (drover-remote--line (plist-get reply :none) 200) "it has no terminal")
+                 (if (and (not resume) (eq (plist-get reply :resumable) t))
+                     (format "; %s grants this host %s access, which resumes nothing" label
+                             (or (drover-remote--peer-granted peer) "read"))
+                   ""))))))))
+
+(defun drover-remote--attach-mirror (peer session reply &optional buffer)
+  "Mirror the terminal of SESSION, of PEER, as REPLY, its owner's answer, tells.
+In BUFFER when it is a mirror that closed, so that its windows show
+the new one; else in a buffer named after SESSION and PEER.  Return the
+mirror's buffer, a session buffer: the keys of drover's sessions act
+there on SESSION, through PEER."
+  (let* ((label (drover-remote--label peer))
+         (title (drover-bound-line (drover-session-display-title session) 60))
+         (reuse (and buffer (buffer-live-p buffer)
+                     (eq (spyglass-mirror-state buffer) 'closed)
+                     buffer))
+         (kind (if (equal (plist-get reply :kind) "shell") "shell" "terminal"))
+         (mirror (spyglass-open (drover-remote--peer-connection peer) (plist-get reply :share)
+                                :buffer-name (format "*%s@%s*" title label)
+                                :buffer reuse :title title)))
+    (with-current-buffer mirror
+      (setq-local drover-remote--shown (cons (drover-remote--peer-name peer) (drover-session-id session)))
+      (setq-local drover-session-at-point-function #'drover-remote--shown-session)
+      (setq-local drover-remote--mirror-kind kind)
+      (add-hook 'kill-buffer-hook #'drover-remote--mirror-killed nil t))
+    (puthash (drover-session-id session) mirror (drover-remote--peer-mirrors peer))
+    (drover-remote--event peer 'mirror "mirroring the %s of %s%s" kind title
+                          (if (eq (plist-get reply :input) t) "" ", read only"))
+    mirror))
+
+(defun drover-remote--mirror-killed ()
+  "Forget the mirror of the buffer being killed: its session runs on there.
+For `kill-buffer-hook'; spyglass closes the mirror."
+  (drover-with-reporting "remote mirror"
+    (when-let* ((shown drover-remote--shown)
+                (peer (drover-remote--peer (car shown))))
+      (when (eq (gethash (cdr shown) (drover-remote--peer-mirrors peer)) (current-buffer))
+        (remhash (cdr shown) (drover-remote--peer-mirrors peer))))))
+
+(defun drover-remote--reopen (peer key buffer)
+  "Open anew in BUFFER the mirror of PEER's session KEY, on its connection now.
+For a mirror its connection lost for good, one on a connection no
+longer kept, or one its owner unshared as its remote layer restarted;
+not one closed here, nor one whose terminal is gone there."
+  (let ((connection (drover-remote--peer-connection peer))
+        (session (drover-remote--peer-session peer key)))
+    (when (and connection session (buffer-live-p buffer)
+               (eq (drover-remote--peer-state peer) 'open)
+               (drover-remote--capable-p peer "mirror")
+               (< (buffer-local-value 'drover-remote--reopens buffer) 3))
+      (let ((state (spyglass-mirror-state buffer))
+            (reason (spyglass-mirror-closed-reason buffer)))
+        (when (if (eq state 'closed)
+                  (not (member reason '("killed" "closed here")))
+                (not (eq (spyglass-mirror-connection buffer) connection)))
+          (unless (eq state 'closed)
+            (spyglass-close buffer))
+          (with-current-buffer buffer (cl-incf drover-remote--reopens))
+          (drover-remote--event peer 'mirror "opening anew the mirror of %s" (buffer-name buffer))
+          (let ((link (drover-link peer)))
+            (drover-remote--request
+             peer (list :op "mirror" :key (drover-remote--wire-key session) :resume :false)
+             (lambda (reply error)
+               (let ((peer (drover-linked link)))
+                 (cond
+                  ((not (buffer-live-p buffer)))
+                  ((and (null error) (stringp (plist-get reply :share))
+                        (eq (spyglass-mirror-state buffer) 'closed))
+                   (drover-remote--attach-mirror peer (or (drover-remote--peer-session peer key) session)
+                                                 reply buffer))
+                  (t (drover-remote--event peer 'mirror "could not open anew the mirror of %s: %s"
+                                           (buffer-name buffer)
+                                           (or error (plist-get reply :none) "no terminal")))))))))))))
+
+(defun drover-remote--reopen-mirrors (peer)
+  "Open anew the mirrors of PEER that need it, from a timer.
+See `drover-remote--reopen'."
+  (when (> (hash-table-count (drover-remote--peer-mirrors peer)) 0)
+    (run-at-time 0.2 nil
+                 (let ((link (drover-link peer)))
+                   (lambda ()
+                     (drover-with-reporting "remote mirror"
+                       (let ((peer (drover-linked link)))
+                         (when (eq peer (drover-remote--peer (drover-remote--peer-name peer)))
+                           (maphash (lambda (key buffer) (drover-remote--reopen peer key buffer))
+                                    (copy-hash-table (drover-remote--peer-mirrors peer)))))))))))
+
+(defun drover-remote--mirror-state (buffer state)
+  "Follow STATE, the new state of BUFFER, if it mirrors a peer's terminal.
+For `spyglass-mirror-state-functions': its history tells it, and a mirror
+its owner unshared, as its remote layer restarted, is opened anew."
+  (drover-with-reporting "remote mirror"
+    (when-let* (((buffer-live-p buffer))
+                ((buffer-local-value 'drover-remote--mirror-kind buffer))
+                (shown (buffer-local-value 'drover-remote--shown buffer))
+                (peer (drover-remote--peer (car shown)))
+                ((eq (gethash (cdr shown) (drover-remote--peer-mirrors peer)) buffer)))
+      (pcase state
+        ('live (with-current-buffer buffer (setq drover-remote--reopens 0)))
+        ('closed
+         (let ((reason (spyglass-mirror-closed-reason buffer)))
+           (drover-remote--event peer 'mirror "the mirror of %s closed: %s" (buffer-name buffer) reason)
+           (when (member reason '("unshared" "no such share"))
+             (run-at-time 1 nil
+                          (let ((link (drover-link peer))
+                                (key (cdr shown)))
+                            (lambda ()
+                              (drover-with-reporting "remote mirror"
+                                (drover-remote--reopen (drover-linked link) key buffer))))))))))))
+
+(defun drover-remote--seen-mirrors (peer keys)
+  "Mark seen those of PEER's sessions KEYS the selected window mirrors.
+Their turns ended there while the user looked here: at most once a
+second each."
+  (when (> (hash-table-count (drover-remote--peer-mirrors peer)) 0)
+    (let* ((buffer (window-buffer (selected-window)))
+           (shown (buffer-local-value 'drover-remote--shown buffer)))
+      (when (and shown
+                 (buffer-local-value 'drover-remote--mirror-kind buffer)
+                 (equal (car shown) (drover-remote--peer-name peer))
+                 (member (cdr shown) keys)
+                 (frame-focus-state)
+                 (> (- (float-time) (buffer-local-value 'drover-remote--seen-sent buffer)) 1))
+        (when-let* ((session (drover-remote--peer-session peer (cdr shown)))
+                    ((memq (drover-session-status session) '(done failed))))
+          (with-current-buffer buffer (setq drover-remote--seen-sent (float-time)))
+          (drover-remote--seen-here peer session))))))
 
 (defun drover-remote--open-conversation (conversation)
   "Show CONVERSATION, of another host, as `drover-links-parse' returns it.
@@ -3024,8 +3693,16 @@ For `drover-links-remote-function'."
     (unless (spyglass-server)
       (spyglass-server-start)
       (setf (drover-remote--state-started-server state) t))
+    ;; Terminals a remote layer made anew without stopping still shares.
+    (drover-remote--unshare-all)
     (add-hook 'drover-changed-hook #'drover-remote--owner-changed)
     (add-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
+    (add-hook 'spyglass-share-state-functions #'drover-remote--share-event)
+    (add-hook 'spyglass-mirror-state-functions #'drover-remote--mirror-state)
+    (setf (drover-remote--state-network state) (cons (float-time) (drover-remote--network)))
+    ;; One, whatever remote layer made it before.
+    (cancel-function-timers #'drover-remote--look-out)
+    (run-at-time drover-remote-lookout-interval drover-remote-lookout-interval #'drover-remote--look-out)
     (add-hook 'kill-emacs-hook #'drover-remote--kill-emacs)
     (setq drover-hosts-function #'drover-remote--host-names
           drover-host-label-function #'drover-remote--host-label
@@ -3066,6 +3743,7 @@ starts again at once: its peers keep this host's sessions meanwhile."
         (cancel-timer (drover-remote--state-runner state)))
       (when (drover-remote--state-watch state)
         (cancel-timer (drover-remote--state-watch state)))
+      (drover-remote--unshare-all state)
       (maphash (lambda (connection _sub) (drover-remote--unsubscribe state connection))
                (copy-hash-table (drover-remote--state-subs state)))
       (when (drover-remote--state-started-server state)
@@ -3074,6 +3752,9 @@ starts again at once: its peers keep this host's sessions meanwhile."
     (spyglass-unregister-channel drover-remote-channel))
   (remove-hook 'drover-changed-hook #'drover-remote--owner-changed)
   (remove-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
+  (cancel-function-timers #'drover-remote--look-out)
+  (remove-hook 'spyglass-share-state-functions #'drover-remote--share-event)
+  (remove-hook 'spyglass-mirror-state-functions #'drover-remote--mirror-state)
   (remove-hook 'kill-emacs-hook #'drover-remote--kill-emacs)
   (setq drover-hosts-function nil
         drover-host-label-function nil
@@ -3087,10 +3768,12 @@ starts again at once: its peers keep this host's sessions meanwhile."
 Each host tells the others the sessions its own backends follow, over
 spyglass connections; lists here show those of the peers too, under a
 backend per peer, their host in a column of its own, dimmed while that
-host is not connected.  This step is read-only: recaps and previews
-come through the peers, and opening a session shows what its host
-tells of it.  Needs spyglass, with its channels, one dropping a stream
-whose write failed, as those offering `spyglass-reconnect' do."
+host is not connected.  Recaps and previews come through the peers,
+drover's actions on their sessions are performed by them as their
+access allows, and opening a session mirrors its terminal, or shows
+what its host tells of it.  Needs spyglass, with its channels, one
+dropping a stream whose write failed, as those offering
+`spyglass-reconnect' do; mirrors need one sharing with some peers only."
   :global t
   :group 'drover-remote
   (if drover-remote-mode

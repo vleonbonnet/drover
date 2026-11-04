@@ -33,7 +33,10 @@
 ;;
 ;; It reports the time to take in 2511 sessions as they appear, as a
 ;; snapshot, an update of one session and of 50, a resynchronization
-;; after 10 and after 500 changes made while the stream was broken; the
+;; after 10 and after 500 changes made while the stream was broken; a
+;; terminal of the agent mirrored here: opened, a line typed here until
+;; its echo shows here, 8 MB written there as fast as a program writes,
+;; its mirror resuming after a drop; the
 ;; longest slice of the viewer installing records and of the owner
 ;; serializing them; the longest block of this Emacs's main thread, as
 ;; a timer every 5 ms finds it late; resident memory of both.  Every
@@ -186,7 +189,7 @@ With BACK, the agent will be told to dial this host back."
           (make-process
            :name "drover-agent" :connection-type 'pipe :noquery t
            :command (list (drover-remote-bench--ssh) "-o" "BatchMode=yes" drover-remote-bench--remote
-                          (format "cd %s && DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
+                          (format "cd %s && DROVER_AGENT_ACCESS=full DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
                                   dir drover-remote-test-agent-name (if back drover-host "") emacs))
            :filter #'drover-remote-test--agent-filter))
     (drover-remote-test-wait (lambda () (or (seq-some (lambda (line) (string-prefix-p "DROVER-AGENT READY" line))
@@ -197,6 +200,74 @@ With BACK, the agent will be told to dial this host back."
                       drover-remote-test--agent-output)
       (error "The agent did not start: %S" drover-remote-test--agent-output))
     (concat dir "/server.json")))
+
+;;;; Mirrors
+
+(defun drover-remote-bench--mirror-shows-p (mirror text)
+  "Return non-nil when MIRROR, a buffer, holds TEXT near its end."
+  (with-current-buffer mirror
+    (save-excursion
+      (goto-char (point-max))
+      (search-backward text (max (point-min) (- (point-max) 4096)) t))))
+
+(defun drover-remote-bench--mirror ()
+  "Measure a terminal of the agent mirrored here, adding rows.
+Opening it, a line typed until its echo shows, 8 MB written there with
+a scrollback of 512 kB, and resuming after a drop."
+  (let* ((peer (drover-remote--peer drover-remote-test-agent-name))
+         (pty (eq (plist-get (drover-remote-test-command "terminal" :id "s1") :pty) t)))
+    (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted peer) 'full)) 10)
+    (drover-changed-now)
+    (save-window-excursion
+      (delete-other-windows)
+      (drover-remote-bench--reset)
+      (let* ((start (float-time))
+             (mirror (drover-remote-open (gethash '(fake . "s1") (drover-remote--peer-records peer)))))
+        (unless (drover-remote-test-wait (lambda () (eq (spyglass-mirror-state mirror) 'live)) 30)
+          (error "The mirror did not open"))
+        (drover-remote-bench--row (format "terminal mirrored (%s)" (if pty "pty" "pipes")) (- (float-time) start))
+        ;; A line typed until its echo shows.
+        (drover-remote-bench--reset)
+        (let ((times nil))
+          (dotimes (i 20)
+            (let ((token (format "typed%02d" i))
+                  (start (float-time)))
+              (spyglass-mirror-send-string token mirror)
+              (spyglass-mirror-send-key "C-j" mirror)
+              (unless (drover-remote-test-wait (lambda () (drover-remote-bench--mirror-shows-p mirror token)) 10)
+                (error "No echo of %s" token))
+              (push (- (float-time) start) times)))
+          (setq times (sort times #'<))
+          (drover-remote-bench--row "a line typed to its echo (median of 20)" (nth 10 times))
+          (drover-remote-bench--row "a line typed to its echo (slowest of 20)" (car (last times))))
+        ;; A program writing fast there.
+        (drover-remote-bench--reset)
+        (let ((start (float-time)))
+          (drover-remote-test-command "emit" :id "s1" :bytes (* 8 1024 1024) :keep (* 512 1024))
+          (unless (drover-remote-test-wait (lambda () (drover-remote-bench--mirror-shows-p mirror "EMITTED")) 120)
+            (error "The output did not arrive"))
+          (let ((elapsed (- (float-time) start)))
+            (drover-remote-bench--row (format "8 MB written there, %.1f MB/s" (/ 8.0 elapsed)) elapsed))
+          (let ((same (drover-remote-test-wait
+                       (lambda () (equal (drover-remote-test-digest mirror)
+                                         (plist-get (drover-remote-test-command "terminal-state" :id "s1")
+                                                    :digest)))
+                       20)))
+            (push (list "the mirror shows the terminal exactly" (if same "yes" "NO")
+                        (format "%d" (buffer-size mirror)) "-" "-" "-")
+                  drover-remote-bench--rows)))
+        ;; A drop: the mirror resumes, what was written meanwhile shown.
+        (drover-remote-bench--reset)
+        (let ((start (float-time)))
+          (drover-remote-test-command "emit" :id "s1" :text "during the drop\n" :delay 0.3)
+          (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+          (unless (drover-remote-test-wait (lambda () (and (eq (spyglass-mirror-state mirror) 'live)
+                                                           (drover-remote-bench--mirror-shows-p
+                                                            mirror "during the drop")))
+                                           60)
+            (error "The mirror did not resume"))
+          (drover-remote-bench--row "mirror resumed after a drop" (- (float-time) start)))
+        (kill-buffer mirror)))))
 
 ;;;; Main
 
@@ -242,8 +313,10 @@ With BACK, the agent will be told to dial this host back."
               (let* ((drover-group-by nil)
                      (registration (if drover-remote-bench--remote
                                        (drover-remote-bench--start-remote back)
-                                     (drover-remote-test-start-agent dir drover-remote-test-agent-name
-                                                                     (and back drover-host)))))
+                                     (let ((process-environment (cons "DROVER_AGENT_ACCESS=full"
+                                                                      process-environment)))
+                                       (drover-remote-test-start-agent dir drover-remote-test-agent-name
+                                                                       (and back drover-host))))))
                 (setq drover-remote-peers
                       (list (if drover-remote-bench--remote
                                 (list drover-remote-test-agent-name :dial t :ssh drover-remote-bench--remote
@@ -341,6 +414,8 @@ With BACK, the agent will be told to dial this host back."
                     (drover-remote-bench--time-until
                      (lambda () (zerop (seq-count (lambda (s) (string-prefix-p "Outage" (or (drover-session-title s) "")))
                                                   (drover-remote-bench--records-here)))))))
+                ;; A terminal there mirrored here.
+                (drover-remote-bench--mirror)
                 ;; Both directions, when asked.
                 (when back
                   (unless drover-remote-bench--remote
