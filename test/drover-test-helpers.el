@@ -232,6 +232,10 @@ PROPERTIES are more properties of `drover-register-backend', such as
          (drover-sort-activity-tolerance 60)
          (drover-changed-hook nil)
          (drover--closing nil)
+         (drover--closing-saved nil)
+         (drover--closing-deferred nil)
+         (drover--closing-restored t)
+         (drover--closing-written 'unread)
          (drover-show-subagents 'active)
          (drover-filter nil)
          ;; Not the defaults: most tests read the groups of statuses and

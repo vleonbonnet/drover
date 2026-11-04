@@ -2642,6 +2642,120 @@ elsewhere, which its backend archives.  Their buffers, made by
       (should (equal messages '("Archived Term t")))
       (should (get-buffer "*session t*")))))
 
+(defun drover-test-closing-file ()
+  "Return the entries of the file of the buffers to close, as their keys and buffers."
+  (mapcar (lambda (entry) (list (plist-get entry :key) (plist-get entry :engine) (plist-get entry :buffer)))
+          (drover-read-data (drover-closing-file) drover--closing-version :buffers)))
+
+(defun drover-test-restart ()
+  "Start drover anew, as after Emacs restarted, its buffers kept: nothing in memory."
+  (remove-hook 'drover-changed-hook #'drover--close-pending)
+  (setq drover--closing nil
+        drover--closing-saved nil
+        drover--closing-deferred nil
+        drover--closing-restored nil
+        drover--closing-written 'unread
+        drover--started nil
+        drover--running nil)
+  (drover-start))
+
+(ert-deftest drover-test-archive-close-remembered ()
+  "A buffer to close once its turn ends is remembered in a file, and forgotten once closed."
+  (let ((sessions (list (drover-test-term "t" :status 'working))))
+    (drover-test-with-terms sessions
+      (drover-archive (drover-find 'term "t"))
+      (should (equal (drover-test-closing-file)
+                     '(((term . "t") (claude-code . "conv-t") "*session t*"))))
+      (setq sessions (list (drover-test-term "t" :status 'done)))
+      (drover-backend-changed 'term)
+      (drover-changed-now)
+      (should-not (get-buffer "*session t*"))
+      (should-not (drover-test-closing-file))
+      ;; Restored before its turn ended, it is forgotten too.
+      (setq sessions (list (drover-test-term "u" :status 'working)))
+      (drover-archive (drover-find 'term "u"))
+      (should (= (length (drover-test-closing-file)) 1))
+      (drover-unarchive (drover-find 'term "u"))
+      (should-not (drover-test-closing-file)))))
+
+(ert-deftest drover-test-archive-close-after-restart ()
+  "Started anew, drover closes the buffers whose turns ended, and waits for the others.
+A buffer gone, restored meanwhile, or now showing another conversation
+or under another name is forgotten, and kept open."
+  (let ((sessions (list (drover-test-term "a" :status 'working)
+                        (drover-test-term "b" :status 'working)
+                        (drover-test-term "c" :status 'working)
+                        (drover-test-term "d" :status 'working)
+                        (drover-test-term "e" :status 'working))))
+    (drover-test-with-terms sessions
+      (drover-start)
+      (with-current-buffer (drover-test-term-buffer "b")
+        (insert "Typed meanwhile"))
+      (drover-archive (mapcar (lambda (id) (drover-find 'term id)) '("a" "b" "c" "d" "e")))
+      (should (drover-test-wait-actions))
+      (should (= (length (drover-test-closing-file)) 5))
+      ;; While drover was away: b's turn ended, c's buffer went, d's
+      ;; buffer shows another conversation, e was restored.
+      (let ((kill-buffer-query-functions nil))
+        (kill-buffer "*session c*"))
+      (drover--archive-forget (drover-find 'term "e"))
+      (setq sessions (list (drover-test-term "a" :status 'working)
+                           (drover-test-term "b" :status 'done)
+                           (drover-test-term "d" :status 'working :engine-id "another")
+                           (drover-test-term "e" :status 'working)))
+      (setq messages nil)
+      (drover-test-restart)
+      (should-not (get-buffer "*session b*"))
+      (should (equal kill-ring '("Typed meanwhile")))
+      (should (equal messages '("The unsent input of Term b, archived, is in the kill ring")))
+      (should (get-buffer "*session d*"))
+      (should (get-buffer "*session e*"))
+      (should (equal (mapcar #'car drover--closing) '((term . "a"))))
+      (should (equal (mapcar #'car (drover-test-closing-file)) '((term . "a"))))
+      ;; a's turn ends: it closes, and is forgotten.
+      (setq sessions (list (drover-test-term "a" :status 'idle)))
+      (drover-backend-changed 'term)
+      (drover-changed-now)
+      (should-not (get-buffer "*session a*"))
+      (should-not drover--closing)
+      (should-not (drover-test-closing-file)))))
+
+(ert-deftest drover-test-archive-close-waits-for-backend ()
+  "A buffer to close whose backend registers after drover started waits for it."
+  (let ((sessions (list (drover-test-term "t" :status 'idle))))
+    (drover-test-with-terms sessions
+      (drover-write-data (drover-closing-file) "Buffers" drover--closing-version :buffers
+                         (list (list :key '(term . "t") :engine '(claude-code . "conv-t")
+                                     :buffer "*session t*" :time (float-time))
+                               ;; Too old: forgotten.
+                               (list :key '(term . "old") :engine nil :buffer "*session old*"
+                                     :time (- (float-time) (* 86400 (1+ drover--closing-days))))))
+      (drover--archive-own (drover-find 'term "t"))
+      (let ((term (assq 'term drover--backends)))
+        (drover-unregister-backend 'term)
+        (drover-test-restart)
+        (should (get-buffer "*session t*"))
+        (should (equal (mapcar (lambda (entry) (plist-get entry :key)) drover--closing-deferred)
+                       '((term . "t") (term . "old"))))
+        (apply #'drover-register-backend 'term (cdr term)))
+      (should-not (get-buffer "*session t*"))
+      (should-not drover--closing-deferred)
+      (should-not (drover-test-closing-file)))))
+
+(ert-deftest drover-test-archive-close-file-unread ()
+  "A file of buffers to close that does not read is told of, and taken as empty."
+  (let ((sessions (list (drover-test-term "t" :status 'working))))
+    (drover-test-with-terms sessions
+      (let ((warnings nil))
+        (drover-test-write (drover-closing-file) "(:version 1 :buffers ((:key oops)))")
+        (cl-letf (((symbol-function 'drover-warn)
+                   (lambda (format &rest args) (push (apply #'format-message format args) warnings))))
+          (drover-test-restart))
+        (should (string-prefix-p "Ignoring the buffers to close" (car warnings)))
+        (should (get-buffer "*session t*"))
+        (drover-archive (drover-find 'term "t"))
+        (should (= (length (drover-test-closing-file)) 1))))))
+
 (ert-deftest drover-test-archive-from-its-buffer ()
   "Archived from its own buffer, shown, a session closes it; its window shows another."
   (let ((sessions (list (drover-test-view "v"))))

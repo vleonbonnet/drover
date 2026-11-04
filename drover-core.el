@@ -1896,12 +1896,15 @@ its :supports function says it does not apply to SESSION."
     (apply function session arguments)))
 
 (defun drover--start-backend (name)
-  "Run the :start function of backend NAME unless it ran already."
+  "Run the :start function of backend NAME unless it ran already.
+The buffers of its sessions an earlier Emacs session was to close once
+their turns ended are looked at then (see `drover--closing-resume')."
   (unless (memq name drover--started)
     (push name drover--started)
     (when-let* ((start (plist-get (alist-get name drover--backends) :start)))
       (drover-with-reporting "backend start"
-        (funcall start)))))
+        (funcall start)))
+    (drover--closing-resume name)))
 
 (defcustom drover-transcript-engines '(claude-code codex)
   "Engines whose recorded conversations drover lists from the time it starts.
@@ -1961,10 +1964,14 @@ looked at: the backends read what was recorded later, in slices."
 (defun drover-start ()
   "Prepare every registered backend, and those registered from now on.
 The backends listing the conversations engines recorded are installed
-first (see `drover-transcript-engines')."
+first (see `drover-transcript-engines').  The buffers an earlier Emacs
+session was to close once their turns ended are read first, then looked
+at as their backends start (see `drover--closing-restore')."
   (setq drover--running t)
+  (drover--closing-restore)
   (drover--install-transcript-backends)
-  (mapc #'drover--start-backend (drover-backends)))
+  (mapc #'drover--start-backend (drover-backends))
+  (drover--closing-resume))
 
 (defun drover--backend-sessions (properties)
   "Return the sessions of the backend of PROPERTIES, or nil when they fail.
@@ -4071,8 +4078,7 @@ which closing would end, so that it closes once the turn ended, and
                            session))
               ((drover-session-active-p current)))
         (progn
-          (setf (alist-get (drover-session-key session) drover--closing nil nil #'equal) buffer)
-          (add-hook 'drover-changed-hook #'drover--close-pending)
+          (drover--closing-arm session buffer)
           (if (eq (drover-session-status current) 'waiting) 'waiting 'later))
       (drover--close session))))
 
@@ -4082,9 +4088,13 @@ Or before its backend confirmed the archive: the confirmation, when it
 comes, closes nothing."
   (drover--confirming-forget (drover-session-key session))
   (setq drover--closing (seq-remove (lambda (entry) (equal (car entry) (drover-session-key session)))
-                                    drover--closing))
+                                    drover--closing)
+        drover--closing-deferred (seq-remove (lambda (entry)
+                                               (equal (plist-get entry :key) (drover-session-key session)))
+                                             drover--closing-deferred))
   (unless drover--closing
-    (remove-hook 'drover-changed-hook #'drover--close-pending)))
+    (remove-hook 'drover-changed-hook #'drover--close-pending))
+  (drover--closing-save))
 
 (defun drover--close-pending ()
   "Close the buffers of archived sessions whose turns ended.
@@ -4102,15 +4112,191 @@ was restored, is forgotten."
       (unless (and still (drover-session-active-p record))
         (setq drover--closing (delq entry drover--closing))
         (when still
-          (let ((title (drover-session-display-title record))
-                (outcome (drover--close record)))
-            (pcase outcome
-              (`(failed . ,message)
-               (drover-warn "Could not close the buffer of %s, archived: %s" title message))
-              ('kept (drover-message "The unsent input of %s, archived, is in the kill ring"
-                                     title))))))))
+          (drover--close-later-ended record)))))
   (unless drover--closing
-    (remove-hook 'drover-changed-hook #'drover--close-pending)))
+    (remove-hook 'drover-changed-hook #'drover--close-pending))
+  (drover--closing-save))
+
+(defun drover--close-later-ended (record)
+  "Close the buffer of RECORD, archived, whose turn ended.
+Told only when the user would otherwise miss something: unsent input
+kept in the kill ring, or a failure, as a warning."
+  (let ((title (drover-session-display-title record))
+        (outcome (drover--close record)))
+    (pcase outcome
+      (`(failed . ,message)
+       (drover-warn "Could not close the buffer of %s, archived: %s" title message))
+      ('kept (drover-message "The unsent input of %s, archived, is in the kill ring"
+                             title)))))
+
+;;;; Closing once turns end, across Emacs sessions
+
+;; The buffers to close once their turns end are remembered in a file
+;; of `drover-state-directory', so that a buffer an archive was to close
+;; still closes after drover or Emacs started anew, as when drover's
+;; files are loaded anew, or its buffer outlived its Emacs session, as a
+;; restored desktop's does.  Each is named by its session's key, its
+;; conversation and its buffer's name: as its backend starts, a buffer
+;; found with all three, its session still archived, is closed at once
+;; when its turn ended, else once it ends; any other is forgotten, a
+;; buffer named alike yet showing another conversation kept open.
+
+(defconst drover--closing-version 1
+  "Version of the file of the buffers to close once their turns end.")
+
+(defconst drover--closing-limit 100
+  "Buffers to close once their turns end the file remembers, at most.")
+
+(defconst drover--closing-days 30
+  "Days after which a buffer to close once its turn ends is forgotten.")
+
+(defvar drover--closing-saved nil
+  "What the file remembers of each buffer of `drover--closing'.
+A list of plists, newest first, as `drover--closing-entry-p' accepts.")
+
+(defvar drover--closing-deferred nil
+  "Buffers to close, read from the file, whose backends did not start yet.
+A list of plists, as `drover--closing-entry-p' accepts.")
+
+(defvar drover--closing-restored nil
+  "Non-nil once the file of the buffers to close was read in this Emacs.")
+
+(defvar drover--closing-written 'unread
+  "The entries last read from or written to the file of buffers to close.")
+
+(defun drover-closing-file ()
+  "Return the file of the buffers to close once their turns end."
+  (expand-file-name "closing.eld" drover-state-directory))
+
+(defun drover--closing-entry-p (entry)
+  "Return non-nil when ENTRY is an entry of the file of buffers to close.
+A plist of :key, the key of the session archived, (BACKEND . ID), :engine
+its conversation, (ENGINE . ENGINE-ID), or nil, :buffer, its buffer's
+name, and :time, when it was archived."
+  (and (plistp entry)
+       (pcase (plist-get entry :key)
+         (`(,(and backend (pred symbolp)) . ,(and id (pred stringp)))
+          (and backend (not (string-empty-p id)) (<= (length id) drover-line-limit))))
+       (pcase (plist-get entry :engine)
+         ('nil t)
+         (`(,(and engine (pred symbolp)) . ,(and id (pred stringp)))
+          (and engine (<= (length id) drover-line-limit))))
+       (let ((name (plist-get entry :buffer)))
+         (and (stringp name) (not (string-empty-p name)) (<= (length name) drover-line-limit)))
+       (numberp (plist-get entry :time))))
+
+(defun drover--closing-arm (session buffer)
+  "Close BUFFER, that of SESSION, just archived, once its turn ends.
+It is remembered in the file, so that it closes even after Emacs
+started anew (see `drover--closing-restore')."
+  (let ((key (drover-session-key session)))
+    (setf (alist-get key drover--closing nil nil #'equal) buffer)
+    (add-hook 'drover-changed-hook #'drover--close-pending)
+    (setq drover--closing-saved
+          (cons (list :key key :engine (drover-session-engine-key session)
+                      :buffer (buffer-name buffer) :time (float-time))
+                (seq-remove (lambda (entry) (equal (plist-get entry :key) key)) drover--closing-saved)))
+    (drover--closing-save)))
+
+(defun drover--closing-entries ()
+  "Return the entries the file of the buffers to close holds, newest first.
+Those of `drover--closing' and `drover--closing-deferred', each key
+once, `drover--closing-limit' at most, none older than
+`drover--closing-days' days."
+  (let ((oldest (- (float-time) (* drover--closing-days 86400)))
+        (seen nil)
+        (entries nil))
+    (setq drover--closing-saved
+          (seq-filter (lambda (entry) (assoc (plist-get entry :key) drover--closing))
+                      drover--closing-saved))
+    (dolist (entry (sort (append drover--closing-saved drover--closing-deferred)
+                         :key (lambda (entry) (- (plist-get entry :time)))))
+      (let ((key (plist-get entry :key)))
+        (unless (or (member key seen) (< (plist-get entry :time) oldest))
+          (push key seen)
+          (push entry entries))))
+    (seq-take (nreverse entries) drover--closing-limit)))
+
+(defun drover--closing-save ()
+  "Write the buffers to close once their turns end to their file, if changed.
+A failure is reported, once per `drover-error-interval'."
+  ;; Entries of an earlier Emacs session not read yet would be lost.
+  (drover--closing-restore)
+  (let ((entries (drover--closing-entries)))
+    (unless (equal entries drover--closing-written)
+      (let ((file (drover-closing-file)))
+        (condition-case err
+            (progn
+              (if (and (null entries) (not (file-exists-p file)))
+                  nil
+                (drover-write-data file "Buffers to close once their turns end"
+                                   drover--closing-version :buffers entries))
+              (setq drover--closing-written entries))
+          (error (drover-report-failure "remembering the buffers to close" err)))))))
+
+(defun drover--closing-read ()
+  "Return the entries of the file of the buffers to close, nil without one.
+A file of another version, or not read, is reported and taken as empty."
+  (let ((file (drover-closing-file)))
+    (condition-case err
+        (let ((entries (drover-read-data file drover--closing-version :buffers)))
+          (unless (seq-every-p #'drover--closing-entry-p entries)
+            (error "Malformed entries"))
+          (seq-take entries drover--closing-limit))
+      (error
+       (drover-warn "Ignoring the buffers to close of %s: %s"
+                    (abbreviate-file-name file) (drover-error-message err))
+       nil))))
+
+(defun drover--closing-restore ()
+  "Read the buffers an earlier Emacs was to close once their turns ended.
+Once per Emacs session, as drover starts: each waits for its backend to
+start, then is looked at (see `drover--closing-resume')."
+  (unless drover--closing-restored
+    (setq drover--closing-restored t)
+    (drover-with-reporting "reading the buffers to close"
+      (let ((entries (drover--closing-read)))
+        (setq drover--closing-written entries
+              drover--closing-deferred
+              (seq-remove (lambda (entry) (assoc (plist-get entry :key) drover--closing))
+                          entries))))))
+
+(defun drover--closing-resume (&optional backend)
+  "Look at the buffers to close, read from the file, whose backends started.
+Those of BACKEND, or of every backend started.  A buffer still there,
+its session still archived, closes now when its turn ended, else once
+it ends; the others are forgotten."
+  (when drover--closing-deferred
+    (let ((due (seq-filter (lambda (entry)
+                             (let ((name (car (plist-get entry :key))))
+                               (if backend (eq name backend) (memq name drover--started))))
+                           drover--closing-deferred)))
+      (when due
+        (setq drover--closing-deferred (seq-difference drover--closing-deferred due #'eq))
+        (dolist (entry due)
+          (drover-with-reporting "closing a buffer once its turn ends"
+            (drover--closing-resume-entry entry)))
+        (drover--closing-save)))))
+
+(defun drover--closing-resume-entry (entry)
+  "Close the buffer of ENTRY, from the file, now or once its turn ends.
+Only when its session is found, with the conversation and the buffer
+ENTRY names, still archived and its backend closing buffers."
+  (pcase-let* ((`(,backend . ,id) (plist-get entry :key))
+               (record (drover-find backend id))
+               (buffer (and record (drover-session-buffer record))))
+    (when (and buffer
+               (equal (buffer-name buffer) (plist-get entry :buffer))
+               (equal (drover-session-engine-key record) (plist-get entry :engine))
+               (drover-session-archived-p record)
+               (functionp (drover-backend-property record :close)))
+      (if (and (drover-backend-property record :runs-in-buffer)
+               (drover-session-active-p record))
+          (progn
+            (setf (alist-get (plist-get entry :key) drover--closing nil nil #'equal) buffer)
+            (add-hook 'drover-changed-hook #'drover--close-pending)
+            (push entry drover--closing-saved))
+        (drover--close-later-ended record)))))
 
 (defun drover--archive-note (outcome title)
   "Return the note on closing the buffer of a session archived, or nil.
