@@ -79,7 +79,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 10))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
   (load "drover-core" nil t))
 
 ;; Drover does not require agent-shell, so this file compiles without
@@ -900,8 +900,12 @@ again receives it whole, which is no activity of the conversation."
            (engine-id (map-nested-elt state '(:session :id)))
            (times (drover-followed-times engine engine-id drover-agent-shell--created
                                          (drover-agent-shell--last-activity)))
-           (effort (drover-agent-shell--effort state)))
-      (drover-session-create
+           (effort (drover-agent-shell--effort state))
+           ;; Its provider, context and cache, as recorded, when the shell
+           ;; does not tell them.
+           (run (drover-recorded-run engine engine-id)))
+      (apply
+       #'drover-session-create
        :backend 'agent-shell
        :id (drover-agent-shell--ensure-id)
        :title (drover-agent-shell--display-title state)
@@ -917,10 +921,11 @@ again receives it whole, which is no activity of the conversation."
        :model (drover-model-short-name (ignore-errors (agent-shell-get-model-name state)))
        :effort (car effort)
        :effort-default (cdr effort)
-       :provider-name (drover-agent-shell--provider state)
+       :provider-name (or (drover-agent-shell--provider state) (plist-get run :provider-name))
        :detail (plist-get status :detail)
        :engine engine
-       :engine-id engine-id))))
+       :engine-id engine-id
+       run))))
 
 (defun drover-agent-shell--sessions ()
   "Return the sessions of the live shells."
@@ -1305,6 +1310,12 @@ whose creation time is unknown."
 
 ;;;; Registering and installing
 
+(defun drover-agent-shell--caches ()
+  "Return non-nil when shells may tell prompt caches now.
+Those of Claude Code's conversations do, as their transcripts tell them:
+see `drover-recorded-run'.  The backend's :caches."
+  (drover-backend-caches-p 'claude-code))
+
 (defvar drover-agent-shell--gemini-registered nil
   "Non-nil when this file registered the `gemini-cli' engine.")
 
@@ -1313,6 +1324,7 @@ whose creation time is unknown."
   (drover-register-backend
    'agent-shell
    :label "agent-shell"
+   :caches #'drover-agent-shell--caches
    :sessions #'drover-agent-shell--sessions
    :open #'drover-agent-shell--open
    :respond #'drover-agent-shell--respond

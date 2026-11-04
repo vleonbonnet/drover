@@ -934,6 +934,32 @@ end, and the conversation's newest message after."
             (drover-transcript-scan drover-claude-code-transcripts--index)
             (should (eql (drover-session-updated (session)) (+ opened 95)))))))))
 
+(ert-deftest drover-claude-code-ide-test-recorded-run ()
+  "A terminal tells the provider, context and prompt cache its conversation's transcript tells.
+The terminal tells none of them; its row shows them as a closed
+conversation's, or an OpenCode session's."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (drover-test-write-claude-catalog)
+      (let* ((project (file-name-as-directory (expand-file-name "work" home)))
+             (file (drover-fixture-claude "c2" project))
+             (terminal (drover-claude-code-ide-test-terminal "*claude* run" :directory project)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "c2"))
+        (drover-fixture-claude-append
+         file
+         (drover-fixture-claude-user "c2" project 1790000100.0 "Go on")
+         (drover-fixture-claude-assistant "c2" project 1790000101.0 "Done." :parent "c2-u1790000100"
+                                          :usage (drover-fixture-claude-usage :input 10 :hour 500 :read 9500)))
+        (drover-transcript-scan drover-claude-code-transcripts--index)
+        (let ((session (drover-claude-code-ide-test-session terminal)))
+          (should (equal (list (drover-session-provider-name session) (drover-session-context-tokens session)
+                               (drover-session-context-limit session) (drover-session-cache-expires session)
+                               (drover-session-cache-ttl session) (drover-session-cache-tokens session))
+                         (list "Anthropic" 10010 1000000 (+ 1790000100.0 3600) 3600 10000)))
+          (should (equal (drover-session-model session) "Opus 5.5"))
+          (should (drover-backend-caches-p 'claude-code-ide)))))))
+
 (ert-deftest drover-claude-code-ide-test-statuses-of-records-beyond-the-root ()
   "A request or an error of any record wins over the root, as in Ghostel's mode line."
   (drover-claude-code-ide-test-with

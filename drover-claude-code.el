@@ -148,6 +148,10 @@ See `drover-claude-code-agent-modes'."
   "Return the directory of Claude Code's transcripts, one subdirectory per project."
   (file-name-as-directory (expand-file-name "projects" drover-claude-code-home)))
 
+(defun drover-claude-code-recorded-p ()
+  "Return non-nil when Claude Code recorded conversations, in its projects."
+  (file-directory-p (drover-claude-code-projects-directory)))
+
 (defun drover-claude-code-sessions-directory ()
   "Return the directory where Claude Code records its running sessions by PID."
   (file-name-as-directory (expand-file-name "sessions" drover-claude-code-home)))

@@ -328,7 +328,16 @@ In STATE, by default a search made now."
         (should (equal prompt "Search sessions: "))
         (let ((drover-filter '(:project "drover")))
           (drover-search nil)
-          (should (string-search "project drover" prompt)))))
+          (should (string-search "project drover" prompt)))
+        ;; What the Filter group of its menu sets, the subagents shown too.
+        (let ((drover-filter '(:project "drover"))
+              (drover-show-subagents 'all)
+              (drover-show-history t)
+              (drover-show-archived t))
+          (should (equal (drover-search--prompt)
+                         "Search sessions (project drover, +subagents, +older, +archived): ")))
+        (let ((drover-show-subagents 'none))
+          (should (equal (drover-search--prompt) "Search sessions (-subagents): ")))))
     ;; Nothing matching.
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "nowhere")))
       (should-error (drover-search) :type 'user-error))

@@ -179,6 +179,7 @@
                                                                (min 60 (length (drover-session-title record))))))
                                             odd))
               (drover-real-data-log "  memory: %.0f MB before indexing, %.0f MB after" rss-before (drover-real-data-rss))
+              (drover-real-data-states conversations codex-records)
               (drover-real-data-list (length records)))))
       (advice-mapc (lambda (advice _) (advice-remove 'message advice)) 'message)
       (let ((long (seq-filter (lambda (message) (> (length message) 300)) drover-real-data-messages)))
@@ -189,6 +190,64 @@
                                                                       (min 200 (length (car drover-real-data-messages)))))
                                 "")))
       (delete-directory state t))))
+
+(defun drover-real-data-counts (records function)
+  "Return how many of RECORDS each value of FUNCTION has, as a sorted alist."
+  (let ((counts nil))
+    (dolist (record records)
+      (cl-incf (alist-get (funcall function record) counts 0 nil #'equal)))
+    (sort counts :key (lambda (entry) (format "%s" (car entry))))))
+
+(defun drover-real-data-states (claude codex)
+  "Report the statuses, contexts and caches of the CLAUDE and CODEX conversations.
+Their statuses as listed, drover reading them for the first time, every
+reply before counting as seen; then as they would be had drover first
+read them before any, every turn's end unseen."
+  (let ((now (float-time)))
+    (cl-flet ((report (label records)
+                (drover-real-data-log "  %s: %d, statuses %S" label (length records)
+                                      (drover-real-data-counts records #'drover-session-status))))
+      (report "Claude Code, first sight" claude)
+      (report "Codex, first sight" codex)
+      (let ((table (drover-transcript--seen-table)))
+        (puthash (list drover-claude-code-transcripts--name) 0.0 table)
+        (puthash (list drover-codex-rollouts--name) 0.0 table))
+      (let ((claude (seq-remove #'drover-session-parent (drover-claude-code-transcripts--sessions)))
+            (codex (drover-codex-rollouts--sessions)))
+        (report "Claude Code, every turn's end unseen" claude)
+        (report "Codex, every turn's end unseen" codex)
+        (drover-real-data-log "  Claude Code, the failed: %S"
+                              (mapcar (lambda (record)
+                                        (let ((detail (or (drover-session-detail record) "")))
+                                          (substring detail 0 (min 60 (length detail)))))
+                                      (seq-filter (lambda (record) (eq (drover-session-status record) 'failed))
+                                                  claude)))
+        (dolist (entry (list (cons "Claude Code" claude) (cons "Codex" codex)))
+          (let ((records (cdr entry)))
+            (drover-real-data-log
+             "  %s context: %S; limits %S; providers %S"
+             (car entry)
+             (drover-real-data-counts
+              records (lambda (record)
+                        (if-let* ((fraction (drover-session-context-fraction record)))
+                            (cond ((< fraction 0.1) "<10%") ((< fraction 0.25) "10-25%")
+                                  ((< fraction 0.5) "25-50%") ((< fraction 0.75) "50-75%")
+                                  (t ">=75%"))
+                          "unknown")))
+             (drover-real-data-counts records #'drover-session-context-limit)
+             (drover-real-data-counts records #'drover-session-provider-name))
+            (drover-real-data-log
+             "  %s caches: %d told (TTL %S), %d live now%s"
+             (car entry)
+             (seq-count #'drover-session-cache-expires records)
+             (drover-real-data-counts (seq-filter #'drover-session-cache-expires records)
+                                      #'drover-session-cache-ttl)
+             (seq-count (lambda (record) (drover-session-cache-fraction record now)) records)
+             (mapconcat (lambda (record)
+                          (format ", %s %.0f s left" (drover-session-id record)
+                                  (drover-session-cache-remaining record now)))
+                        (seq-filter (lambda (record) (drover-session-cache-fraction record now)) records)
+                        ""))))))))
 
 (defun drover-real-data-list (recorded)
   "Time the list over the RECORDED conversations and the 2510 sessions of the bench."

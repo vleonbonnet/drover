@@ -157,8 +157,8 @@ whose parent is not listed, archived, deleted or not loaded, shows as
 any subagent does, at the top of a tree of its own.  A hidden
 subagent never places its parent in a group; whether a parent has
 active subagents, shown or not, its line tells.  Change it for every
-view with `drover-toggle-subagents', U in lists, or with
-`drover-set-show-subagents'."
+view with `drover-toggle-subagents', =u in the menus' Filter group,
+or with `drover-set-show-subagents'."
   :type '(choice (const :tag "All subagents" all)
                  (const :tag "Active subagents" active)
                  (const :tag "No subagent" none))
@@ -1679,6 +1679,21 @@ PROPERTIES is a plist of:
              turn of its own (see `drover-recorded-times'); a change of
              the conversation reported for such a backend is reported
              for the front ends following it too.
+ :recorded-run
+             Function of an engine identifier returning what the
+             conversation runs, as recorded, as keyword arguments of
+             `drover-session-create': its provider, the size of its
+             context and its model's, and its prompt cache, those known;
+             nil when it knows none.  It must answer at once.  A front
+             end following the conversation takes them from there (see
+             `drover-recorded-run').
+ :recorded-seen
+             Function of an engine identifier noting that the user saw
+             the conversation as of now: a front end following it
+             reported it idle, its turn seen (see
+             `drover--note-followed').  It must answer at once, and
+             report no change: no record of its own is listed while a
+             front end follows the conversation.
 
 The search of sessions (`drover-search') matches what records tell,
 and asks backends for more through the following operations, both
@@ -1888,9 +1903,67 @@ its :supports function says it does not apply to SESSION."
       (drover-with-reporting "backend start"
         (funcall start)))))
 
+(defcustom drover-transcript-engines '(claude-code codex)
+  "Engines whose recorded conversations drover lists from the time it starts.
+Claude Code and Codex record their conversations in their homes
+\(`drover-claude-code-home', `drover-codex-home'), whichever front end
+ran them, in Emacs or not.  As drover starts (`drover-start', which
+`drover-attention-mode' and the lists run), it lists those of these
+engines, closed ones included, whether or not a front end resuming
+them is loaded: opening one loads such a front end (see
+`drover-resume').  An engine that recorded nothing yet is looked for
+again at the next start; one removed from the list is no longer listed
+from the next start, unless a front end loaded lists it."
+  :type '(set (const :tag "Claude Code" claude-code) (const :tag "Codex" codex))
+  :group 'drover)
+
+(defconst drover--transcript-backends
+  '((claude-code :engine drover-claude-code :recorded drover-claude-code-recorded-p
+                 :file drover-claude-code-transcripts
+                 :install drover-claude-code-transcripts-install
+                 :uninstall drover-claude-code-transcripts-uninstall
+                 :users drover-claude-code-transcripts--users)
+    (codex :engine drover-codex :recorded drover-codex-recorded-p
+           :file drover-codex-rollouts
+           :install drover-codex-rollouts-install
+           :uninstall drover-codex-rollouts-uninstall
+           :users drover-codex-rollouts--users))
+  "The backends listing what engines recorded, by engine, as plists.
+:engine is the engine's file, :recorded its function telling whether it
+recorded conversations, :file the backend's, which :install and
+:uninstall for a user and keeps in :users.  Their backend is named
+after the engine.")
+
+(defun drover--transcript-user-p (spec)
+  "Return non-nil when drover itself uses the backend SPEC describes."
+  (let ((users (plist-get spec :users)))
+    (and (boundp users) (memq 'drover (symbol-value users)) t)))
+
+(defun drover--install-transcript-backends ()
+  "List the conversations of `drover-transcript-engines', as drover starts.
+The backend of each engine that recorded some is installed for drover,
+a user beside the front ends, which install it too as they load; that
+of an engine no longer listed is uninstalled for drover, and stays
+while a front end uses it.  Only files are loaded, and directories
+looked at: the backends read what was recorded later, in slices."
+  (pcase-dolist (`(,engine . ,spec) drover--transcript-backends)
+    (drover-with-reporting "listing recorded conversations"
+      (if (memq engine drover-transcript-engines)
+          (unless (and (drover--transcript-user-p spec)
+                       (drover-backend-property engine :sessions))
+            (require (plist-get spec :engine))
+            (when (funcall (plist-get spec :recorded))
+              (require (plist-get spec :file))
+              (funcall (plist-get spec :install) 'drover)))
+        (when (and (featurep (plist-get spec :file)) (drover--transcript-user-p spec))
+          (funcall (plist-get spec :uninstall) 'drover))))))
+
 (defun drover-start ()
-  "Prepare every registered backend, and those registered from now on."
+  "Prepare every registered backend, and those registered from now on.
+The backends listing the conversations engines recorded are installed
+first (see `drover-transcript-engines')."
   (setq drover--running t)
+  (drover--install-transcript-backends)
   (mapc #'drover--start-backend (drover-backends)))
 
 (defun drover--backend-sessions (properties)
@@ -2029,6 +2102,41 @@ when later; one recorded nowhere yet, as of now, at CREATED."
           (cond ((and activity last) (max activity last))
                 ((or activity last))
                 (t created)))))
+
+;; A front end tells what a turn does, not always what it ran on: a
+;; terminal of claude-code-ide tells no context nor cache.  What the
+;; conversation records does, and the backends recording it read it.
+
+(defun drover-recorded-run (engine engine-id)
+  "Return what ENGINE's conversation ENGINE-ID runs, as recorded, or nil.
+A plist of keyword arguments of `drover-session-create', its provider,
+context and prompt cache, from the first backend recording ENGINE that
+tells (see :recorded-run in `drover-register-backend'), for a front
+end's record of the conversation: appended to its own arguments, which
+come first and win."
+  (when (and engine engine-id)
+    (seq-some (lambda (backend)
+                (when-let* ((function (drover-backend-property backend :recorded-run))
+                            (run (drover-with-reporting "recorded run"
+                                   (funcall function engine-id))))
+                  (and (plistp run) run)))
+              (drover--recording-backends engine))))
+
+(defun drover--note-followed (record)
+  "Tell the backends recording the conversation of RECORD that the user saw it.
+RECORD is a front end's record of this host, idle: its turn ended seen,
+or none ran, so that once the front end lets the conversation go, its
+record as recorded is not shown done for a reply the user saw there
+\(see :recorded-seen in `drover-register-backend')."
+  (when-let* (((eq (drover-session-status record) 'idle))
+              ((null (drover-session-host record)))
+              (engine (drover-session-engine record))
+              (engine-id (drover-session-engine-id record))
+              ((not (drover--recorded-p (drover-session-backend record)))))
+    (dolist (backend (drover--recording-backends engine))
+      (when-let* ((function (drover-backend-property backend :recorded-seen)))
+        (drover-with-reporting "recorded seen"
+          (funcall function engine-id))))))
 
 (defun drover--live-sessions ()
   "Return the sessions every registered backend follows, as they report them.
@@ -2649,7 +2757,8 @@ Return the keys whose place among the trees changed."
           (puthash key record records)
           (unless (gethash key (drover--index-serials index))
             (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index)))
-          (drover--index-file index key record))
+          (drover--index-file index key record)
+          (drover--note-followed record))
       (remhash key records)
       (remhash key (drover--index-serials index)))
     ;; Sessions naming KEY their parent, directly or through its
@@ -2737,6 +2846,7 @@ which a session listed again keeps while its activity stays near them."
           (puthash key (copy-sequence record) (drover--index-records index))
           (puthash key (cl-incf (drover--index-serial index)) (drover--index-serials index))
           (drover--index-file index key (gethash key (drover--index-records index)))
+          (drover--note-followed record)
           (drover--note-activity key record times)
           (push key listed))))
     (setq drover--activity-times times)
@@ -5542,16 +5652,65 @@ the buffer it returned."
   "Return the display name of ENGINE, its label once its engine is loaded."
   (or (and (fboundp 'drover-engine-label) (drover-engine-label engine)) engine))
 
+(defvar drover--front-end-backends
+  '((claude-code-ide drover-claude-code-ide claude-code)
+    (agent-shell drover-agent-shell claude-code codex))
+  "Optional front ends resuming conversations, as (FRONT-END FILE . ENGINES).
+FILE is drover's backend of FRONT-END: loading it loads FRONT-END and
+registers how it resumes the conversations of ENGINES.  Drover lists
+the conversations of those engines without them (see
+`drover-transcript-engines'), and loads one to resume a conversation.")
+
+(defun drover--load-front-end (front-end engine)
+  "Load FRONT-END, through drover's backend, to resume ENGINE's conversations.
+Only a front end of `drover--front-end-backends' resuming ENGINE, not
+loaded yet and installed, is loaded; one failing to load is reported.
+Return non-nil when its backend loaded."
+  (when-let* ((entry (assq front-end drover--front-end-backends))
+              ((memq engine (cddr entry)))
+              ((not (featurep (cadr entry))))
+              ((locate-library (symbol-name front-end))))
+    (condition-case err
+        (progn (require (cadr entry)) t)
+      (error (drover-warn "Could not load %s: %s" front-end (drover-error-message err))
+             nil))))
+
+(defun drover-load-resumer (engine &optional front-end)
+  "Return (FRONT-END . FUNCTION) resuming ENGINE's conversations, loading one.
+As `drover-resumer' with FRONT-END, the one the conversation ran in, if
+known; when no front end loaded resumes them, the first installed of
+the front ends `drover-resume-front-ends' names for ENGINE, FRONT-END
+and those of `drover--front-end-backends' is loaded first.  Nil when
+none resumes them."
+  (or (drover-resumer engine front-end)
+      (seq-some (lambda (candidate)
+                  (and (drover--load-front-end candidate engine)
+                       (drover-resumer engine front-end)))
+                (delete-dups (append (alist-get engine drover-resume-front-ends)
+                                     (and front-end (list front-end))
+                                     (mapcar #'car drover--front-end-backends))))))
+
+(defun drover--no-resumer-message (engine)
+  "Return the line telling that no front end installed resumes ENGINE.
+It names those of `drover--front-end-backends' that would."
+  (let ((front-ends (seq-keep (lambda (entry) (and (memq engine (cddr entry)) (car entry)))
+                              drover--front-end-backends)))
+    (format "No front end installed resumes %s conversations%s"
+            (drover--engine-name engine)
+            (if front-ends
+                (format ": install %s" (mapconcat #'symbol-name front-ends " or "))
+              ""))))
+
 (defun drover-resume (engine id directory &optional front-end)
   "Resume conversation ID of ENGINE, run in DIRECTORY, and return its buffer.
 FRONT-END is the front end it ran in, when known; the one resuming it
-is chosen by `drover-resumer'.  Signal a `user-error' when no front end
-loaded can resume it.  A front end showing it later, as one asking a
-service does, returns nil."
+is chosen by `drover-resumer', a front end installed but not loaded
+loaded first when none loaded can (see `drover-load-resumer').  Signal
+a `user-error' when none can resume it.  A front end showing it later,
+as one asking a service does, returns nil."
   (pcase-let ((`(,chosen . ,function)
-               (or (drover-resumer engine front-end)
-                   (user-error "No front end loaded resumes %s conversations"
-                               (drover--engine-name engine)))))
+               (or (drover-load-resumer engine front-end)
+                   (user-error "%s" (drover--no-resumer-message engine)))))
     (drover--call-resumer engine chosen function id directory nil nil)))
 
 (defun drover-resume-with (front-end engine id directory &optional then else)
@@ -5562,7 +5721,10 @@ conversation did not open; at most one of them is called, once,
 possibly before this returns.  DIRECTORY may be nil when FRONT-END
 finds conversations by their identifier (see `drover-register-resumer').
 Signal a `user-error' when FRONT-END does not resume ENGINE's
-conversations."
+conversations.  FRONT-END, one of `drover--front-end-backends',
+installed but not loaded, is loaded first."
+  (unless (alist-get (cons engine front-end) drover--resumers nil nil #'equal)
+    (drover--load-front-end front-end engine))
   (let ((function (or (alist-get (cons engine front-end) drover--resumers nil nil #'equal)
                       (user-error "%s does not resume %s conversations"
                                   (drover-backend-label front-end) (drover--engine-name engine)))))

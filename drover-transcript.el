@@ -52,7 +52,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
   (load "drover-core" nil t))
 
 (defcustom drover-transcript-scan-interval 15
@@ -305,6 +305,31 @@ passed since they were kept last.  A failure is reported once."
                     (drover-transcript-inode entry))
               (drover-transcript--stamp attributes))))
 
+(defun drover-transcript--fresh-p (index entry attributes)
+  "Return non-nil when ENTRY of INDEX was read from the file ATTRIBUTES describe.
+Read, that is, by the version of the reader INDEX reads with now: what
+another one read is read again, whole."
+  (and (drover-transcript--current-p entry attributes)
+       (drover-transcript--reader-current-p index entry)))
+
+(defun drover-transcript--reader-current-p (index entry)
+  "Return non-nil when ENTRY was read by the version of the reader of INDEX."
+  (let ((version (drover-transcript-index-version index))
+        (data (drover-transcript-data entry)))
+    (or (null version) (null data) (eql (plist-get data :reader) version))))
+
+(defun drover-transcript-reread (index version)
+  "Have INDEX read its files with VERSION of its reader, when another read them.
+Its entries stay, and so what its backend lists, until each file is
+read again, by the next look, which checks every file, in slices."
+  (unless (eql (drover-transcript-index-version index) version)
+    (setf (drover-transcript-index-version index) version)
+    ;; The next look begun checks every file.
+    (setf (drover-transcript-index-looks index)
+          (* drover-transcript-full-look-every
+             (ceiling (drover-transcript-index-looks index) drover-transcript-full-look-every)))
+    (drover-transcript-look-soon index)))
+
 (defun drover-transcript--enqueue (index file &optional first)
   "Queue FILE for INDEX to read, FIRST before the others when non-nil."
   (let ((queued (drover-transcript-index-queued index)))
@@ -323,7 +348,7 @@ passed since they were kept last.  A failure is reported once."
   "Note FILE of ATTRIBUTES listed by INDEX, queued to read when it changed."
   (when-let* ((seen (drover-transcript-index-seen index)))
     (puthash file t seen))
-  (unless (drover-transcript--current-p (drover-transcript-entry index file) attributes)
+  (unless (drover-transcript--fresh-p index (drover-transcript-entry index file) attributes)
     (drover-transcript--enqueue index file)))
 
 (defun drover-transcript--hot-p (entry now)
@@ -399,10 +424,12 @@ listed again only once its modification time tells files came or went."
         (remhash file entries)
         (setf (drover-transcript-index-dirty index) t)
         (drover-transcript--change index file (drover-transcript-data entry) nil)))
-     ((drover-transcript--current-p entry attributes))
+     ((drover-transcript--fresh-p index entry attributes))
      (t
       (let ((data (condition-case err
-                      (funcall (drover-transcript-index-read index) file attributes entry)
+                      ;; What another reader read is no start to read on from.
+                      (funcall (drover-transcript-index-read index) file attributes
+                               (and entry (drover-transcript--reader-current-p index entry) entry))
                     ;; A file that cannot be read is noted as read, to be
                     ;; read again once it changes, not on every look.
                     ((debug error)
@@ -449,6 +476,11 @@ It checks every file when its turn came (see
     (when-let* ((function (drover-transcript-index-on-cycle index)))
       (drover-with-reporting "transcript cycle"
         (funcall function)))
+    (when (and (drover-transcript-index-full index) (drover-transcript-index-complete index)
+               (drover-transcript-index-key index))
+      (let ((files (drover-transcript-index-files index)))
+        (drover-transcript-seen-prune (drover-transcript-index-name index)
+                                      (lambda (id) (gethash id files)))))
     (drover-transcript-save index)))
 
 (defun drover-transcript--step (index)
@@ -527,7 +559,7 @@ backend told then."
   (let ((attributes (file-attributes file))
         (entry (drover-transcript-entry index file)))
     (when (and (or attributes entry)
-               (not (and attributes (drover-transcript--current-p entry attributes))))
+               (not (and attributes (drover-transcript--fresh-p index entry attributes))))
       (drover-transcript--enqueue index file t)
       (when (drover-transcript-index-active index)
         (drover-transcript--schedule index drover-transcript-slice-delay #'drover-transcript--work))
@@ -638,6 +670,27 @@ them, and the line the tail begins in, whole."
                        (+ start (drover-transcript--bytes tail (1- (point))))
                      size))))
         (drover-transcript-look-back file end floor function)))))
+
+(defun drover-transcript-look-before-tail-for (file size tail old-size functions)
+  "Return what each of FUNCTIONS finds before the tail, the newest, appended.
+FUNCTIONS are functions as for `drover-transcript-look-back', each
+returning a plist or nil, and FILE, SIZE, TAIL and OLD-SIZE as for
+`drover-transcript-look-before-tail': the lines are read once, newest
+first, until each function found what it looks for, or the look back
+ends, so that looking for two things costs what looking for the later
+one does."
+  (let ((left (copy-sequence functions))
+        (found nil))
+    (when left
+      (drover-transcript-look-before-tail
+       file size tail old-size
+       (lambda (beg end)
+         (dolist (function (copy-sequence left))
+           (when-let* ((value (funcall function beg end)))
+             (setq found (append found value)
+                   left (delq function left))))
+         (null left))))
+    found))
 
 (defun drover-transcript--string-scan (bound)
   "Scan the JSON string whose opening quote is at point, up to BOUND.
@@ -790,6 +843,220 @@ system: readers ask for it as they read, out of commands."
                         (when-let* ((project (project-current nil directory)))
                           (project-name project))))
                  drover-transcript--projects)))))
+
+;;;; Turns the user saw
+
+;; A conversation whose last turn ended in a reply, or an error, is
+;; done, or failed, until the user sees it, as OpenCode's sessions are.
+;; Engines record no such thing, so drover notes when the user last saw
+;; each conversation: as they mark it seen, open it, or a front end
+;; following it reports it idle (see :recorded-seen in
+;; `drover-register-backend').  A reply after that time is unseen.  So
+;; that the first look at hundreds of conversations does not ask the
+;; user to see them all, a reply before drover first read an engine's
+;; conversations, the time noted for its index, counts as seen: a
+;; conversation is done only for a reply that came since.  What the
+;; user saw is kept in `drover-state-directory', bounded: the times of
+;; conversations still recorded, `drover-transcript-seen-limit' at most.
+
+(defconst drover-transcript--seen-version 1
+  "Version of the format of the file of what the user saw.")
+
+(defconst drover-transcript-seen-limit 20000
+  "Conversations at most whose time seen drover keeps.
+Past it, those seen longest ago are forgotten: their replies, older
+still, show done again unless older than when drover first read their
+engine's conversations.")
+
+(defconst drover-transcript-seen-save-delay 30
+  "Seconds after a conversation was seen that what the user saw is kept.
+Emacs exiting keeps it at once.")
+
+(defvar drover-transcript--seen nil
+  "What the user saw of conversations, as (FILE . TABLE), or nil before read.
+FILE is the file it is kept in, as `drover-transcript-seen-file' named
+it; TABLE maps (NAME . ID) to when the user last saw the conversation ID
+of the index NAME, and (NAME) to when drover first read the
+conversations of NAME, float times.")
+
+(defvar drover-transcript--seen-dirty nil
+  "Non-nil when what the user saw changed since it was kept.")
+
+(defvar drover-transcript--seen-timer nil
+  "Timer keeping what the user saw, or nil.")
+
+(defvar drover-transcript--seen-warned nil
+  "Non-nil once a problem with the file of what the user saw was reported.")
+
+(defun drover-transcript-seen-file ()
+  "Return the file what the user saw of conversations is kept in."
+  (expand-file-name "seen.eld" drover-state-directory))
+
+(defun drover-transcript--seen-warn (format-string &rest args)
+  "Report a problem with the file of what the user saw, once.
+FORMAT-STRING and ARGS are as for `format-message'."
+  (unless drover-transcript--seen-warned
+    (setq drover-transcript--seen-warned t)
+    (apply #'drover-warn format-string args)))
+
+(defun drover-transcript--seen-entry-p (entry)
+  "Return non-nil when ENTRY is one as kept, (NAME ID TIME), ID nil or a string."
+  (pcase entry
+    (`(,(pred symbolp) ,(or 'nil (pred stringp)) ,(pred numberp)) t)))
+
+(defun drover-transcript--seen-read (file)
+  "Return the table of what the user saw FILE keeps, empty without one.
+One that does not read is reported, and ignored: every reply then counts
+as seen until a reply comes after it was read."
+  (let ((table (make-hash-table :test #'equal)))
+    (condition-case err
+        (let ((entries (drover-read-data file drover-transcript--seen-version :seen)))
+          (unless (seq-every-p #'drover-transcript--seen-entry-p entries)
+            (error "Malformed entries"))
+          (pcase-dolist (`(,name ,id ,time) entries)
+            (puthash (cons name id) (float time) table)))
+      (error
+       (drover-transcript--seen-warn "Ignoring what drover noted you saw in %s: %s"
+                                     (abbreviate-file-name file) (drover-error-message err))))
+    table))
+
+(defvar drover-transcript--seen-directory nil
+  "The value of `drover-state-directory' the table of what was seen was read for.")
+
+(defun drover-transcript--seen-table ()
+  "Return the table of what the user saw, read from its file once.
+It is read again when `drover-state-directory' names another file."
+  (unless (and drover-transcript--seen
+               (equal drover-transcript--seen-directory drover-state-directory))
+    (let ((file (drover-transcript-seen-file)))
+      (setq drover-transcript--seen-directory drover-state-directory)
+      (unless (equal (car drover-transcript--seen) file)
+        (setq drover-transcript--seen (cons file (drover-transcript--seen-read file))
+              drover-transcript--seen-dirty nil))))
+  (cdr drover-transcript--seen))
+
+(defun drover-transcript--seen-changed ()
+  "Note that what the user saw changed, to keep it soon."
+  (setq drover-transcript--seen-dirty t)
+  (unless (timerp drover-transcript--seen-timer)
+    (setq drover-transcript--seen-timer
+          (run-at-time drover-transcript-seen-save-delay nil #'drover-transcript--seen-flush))))
+
+(defun drover-transcript--seen-flush ()
+  "Keep what the user saw, from a timer."
+  (drover-with-reporting "keeping what you saw"
+    (setq drover-transcript--seen-timer nil)
+    (drover-transcript-seen-save)))
+
+(defun drover-transcript-seen-since (name)
+  "Return when drover first read the conversations of the index NAME.
+A reply before counts as seen.  Noted now, the first time asked."
+  (let ((table (drover-transcript--seen-table)))
+    (or (gethash (list name) table)
+        (prog1 (puthash (list name) (float-time) table)
+          (drover-transcript--seen-changed)))))
+
+(defun drover-transcript-seen-time (name id)
+  "Return when the user last saw conversation ID of the index NAME, or before.
+That is when they saw it, or when drover first read the conversations
+of NAME, whichever is later."
+  (let ((since (drover-transcript-seen-since name))
+        (seen (gethash (cons name id) (drover-transcript--seen-table))))
+    (if seen (max seen since) since)))
+
+(defun drover-transcript-unseen-p (name id time)
+  "Return non-nil when a reply at TIME of conversation ID of index NAME is unseen."
+  (and (numberp time) (> time (drover-transcript-seen-time name id))))
+
+(defun drover-transcript-mark-seen (name id &optional time)
+  "Note that the user saw conversation ID of the index NAME at TIME.
+TIME defaults to now.  Return non-nil when that is later than noted."
+  (let* ((table (drover-transcript--seen-table))
+         (key (cons name id))
+         (time (float (or time (float-time))))
+         (before (gethash key table)))
+    (when (or (null before) (> time before))
+      (puthash key time table)
+      (drover-transcript--seen-changed)
+      t)))
+
+(defun drover-transcript-seen-prune (name keep)
+  "Forget what the user saw of the conversations of index NAME KEEP does not keep.
+KEEP is a function of an identifier: those of conversations no longer
+recorded go, after a look found every file.  So do times before drover
+first read NAME's conversations, which tell nothing more."
+  (let ((table (drover-transcript--seen-table))
+        (gone nil))
+    (let ((since (gethash (list name) table)))
+      (maphash (lambda (key time)
+                 (when (and (eq (car key) name) (cdr key)
+                            (or (not (funcall keep (cdr key)))
+                                (and since (<= time since))))
+                   (push key gone)))
+               table))
+    (when gone
+      (dolist (key gone)
+        (remhash key table))
+      (drover-transcript--seen-changed))))
+
+(defun drover-transcript-seen-save ()
+  "Keep what the user saw in its file, when it changed since kept.
+What another Emacs kept there meanwhile is merged in, the later time
+seen of each conversation and the earlier first look at each index;
+the times seen longest ago are dropped past
+`drover-transcript-seen-limit'.  A failure is reported once."
+  (when (and drover-transcript--seen-dirty
+             (equal (car drover-transcript--seen) (drover-transcript-seen-file)))
+    (let* ((file (car drover-transcript--seen))
+           (table (cdr drover-transcript--seen))
+           (seen nil)
+           (entries nil))
+      (setq drover-transcript--seen-dirty nil)
+      (when (file-exists-p file)
+        (let ((drover-transcript--seen-warned t))
+          (maphash (lambda (key time)
+                     (let ((own (gethash key table)))
+                       (when (or (null own) (if (cdr key) (> time own) (< time own)))
+                         (puthash key time table))))
+                   (drover-transcript--seen-read file))))
+      (maphash (lambda (key time)
+                 (if (cdr key)
+                     (push (cons key time) seen)
+                   (push (list (car key) nil time) entries)))
+               table)
+      (when (> (length seen) drover-transcript-seen-limit)
+        (setq seen (sort seen :key #'cdr :reverse t :in-place t))
+        (dolist (forgotten (nthcdr drover-transcript-seen-limit seen))
+          (remhash (car forgotten) table))
+        (setq seen (seq-take seen drover-transcript-seen-limit)))
+      (dolist (entry seen)
+        (push (list (caar entry) (cdar entry) (cdr entry)) entries))
+      (condition-case err
+          (drover-write-data file "What you saw of the conversations engines record"
+                             drover-transcript--seen-version :seen
+                             (sort entries :key (lambda (entry)
+                                                  (concat (symbol-name (car entry)) " " (or (nth 1 entry) "")))
+                                   :in-place t))
+        (error (drover-transcript--seen-warn "Could not keep what you saw in %s: %s"
+                                             (abbreviate-file-name file) (drover-error-message err)))))))
+
+;;;; Providers
+
+(defvar drover-transcript--providers (cons nil (make-hash-table :test #'equal))
+  "The providers made, by (ID . NAME), and the icons they were made with.")
+
+(defun drover-transcript-provider (id name)
+  "Return the provider ID, named NAME, as keyword arguments of a record.
+That is :provider, its icon as `opencode-provider-icons' gives it, else
+a generic icon and NAME, as OpenCode's sessions show it, and
+:provider-name, NAME, which lists group sessions by."
+  (unless (eq (car drover-transcript--providers) opencode-provider-icons)
+    (setq drover-transcript--providers (cons opencode-provider-icons (make-hash-table :test #'equal))))
+  (with-memoization (gethash (cons id name) (cdr drover-transcript--providers))
+    (list :provider (or (cdr (seq-find (lambda (entry) (string-match-p (car entry) id))
+                                       opencode-provider-icons))
+                        (concat opencode-provider-default-icon " " name))
+          :provider-name name)))
 
 ;;;; Searching what was said
 

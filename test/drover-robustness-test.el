@@ -618,6 +618,7 @@ and a session changes, as its timers follow."
                       (zerop (call-process "git" nil nil nil "-C" root "cat-file" "-e"
                                            (concat drover-robustness-test-old-commit "^{commit}")))))
     (let* ((old (make-temp-file "drover-old" t))
+           (state (make-temp-file "drover-reload-state" t))
            (script (make-temp-file "drover-reload" nil ".el"))
            (output (generate-new-buffer " *drover reload*")))
       (unwind-protect
@@ -636,6 +637,10 @@ and a session changes, as its timers follow."
                         (setq load-path (cons ,old load-path)
                               load-prefer-newer t
                               debug-on-error nil)
+                        ;; Neither the user's state nor their conversations.
+                        (setq drover-state-directory ,(file-name-as-directory state)
+                              drover-claude-code-home ,(expand-file-name "claude" state)
+                              drover-codex-home ,(expand-file-name "codex" state))
                         (require 'drover)
                         (require 'drover-list)
                         (defvar sessions
@@ -701,6 +706,7 @@ and a session changes, as its timers follow."
                              '("Drover: index of sessions made by another version of drover, made anew"
                                "Drover: list of sessions made by another version of drover, made anew")))))
         (delete-directory old t)
+        (delete-directory state t)
         (delete-file script)
         (kill-buffer output)))))
 

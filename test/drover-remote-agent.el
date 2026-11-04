@@ -363,6 +363,8 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (setq drover-host (or (getenv "DROVER_AGENT_HOST") "agent")
           drover-host-aliases nil
           drover-state-directory (expand-file-name "state/" dir)
+          ;; The fake backend's sessions alone, not those this host's engines recorded.
+          drover-transcript-engines nil
           drover-refresh-delay 0.02
           spyglass-registration-file (expand-file-name "server.json" dir)
           drover-remote-standby-delay 1
