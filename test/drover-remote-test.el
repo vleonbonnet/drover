@@ -1583,6 +1583,56 @@ leading back to what holds it would print it again from each."
         (should (with-current-buffer mirror (>= (how-many "echo me" (point-min) (point-max)) 2)))
         (kill-buffer mirror)))))
 
+(ert-deftest drover-remote-test-mirror-shell-own-commands ()
+  "A shell submitting through a command of its own, as agent-shell's, submits from its mirror; the cursor follows the input."
+  (skip-unless (executable-find "cat"))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-command "terminal" :id "s0" :kind "agent-shell")
+    (drover-remote-test-synced 2)
+    (save-window-excursion
+      (delete-other-windows)
+      (let ((mirror (drover-remote-test-open "s0")))
+        (drover-remote-test-live mirror)
+        ;; Read elsewhere here: typing brings point back to the input.
+        (goto-char (point-min))
+        (spyglass-mirror-send-string "confirmed it works" mirror)
+        (drover-remote-test-shows mirror "Agent> confirmed it works")
+        (drover-remote-test-wait (lambda () (eql (spyglass-mirror-owner-point mirror)
+                                                 (with-current-buffer mirror (point-max)))))
+        (should (eql (spyglass-mirror-owner-point mirror) (with-current-buffer mirror (point-max))))
+        (should (= (window-point) (spyglass-mirror-owner-point mirror)))
+        (should (= (plist-get (drover-remote-test-terminal "s0") :point)
+                   (1+ (length "Agent> confirmed it works"))))
+        ;; Edited at the cursor.
+        (spyglass-mirror-send-key "<left>" mirror)
+        (spyglass-mirror-send-key "DEL" mirror)
+        (spyglass-mirror-send-string "K" mirror)
+        (drover-remote-test-shows mirror "confirmed it worKs")
+        ;; RET submits through the shell's own command, not comint's.
+        (spyglass-mirror-send-key "RET" mirror)
+        (drover-remote-test-wait (lambda () (> (length (plist-get (drover-remote-test-terminal "s0") :submitted)) 0)))
+        (should (equal (plist-get (drover-remote-test-terminal "s0") :submitted) ["confirmed it worKs"]))
+        ;; Its interrupt is drover's, without asking there.
+        (spyglass-mirror-send-key "C-c" mirror)
+        (drover-remote-test-wait (lambda () (drover-remote-test-calls "interrupt")))
+        (should (equal (mapcar #'cadr (drover-remote-test-calls "interrupt")) '("s0")))
+        (kill-buffer mirror)))))
+
+(ert-deftest drover-remote-test-agent-shell-keys ()
+  "A real agent-shell's keys, as a peer's mirror runs them: its submit, its override, drover's interrupt."
+  (skip-unless (and (drover-remote-test--available-p) (require 'agent-shell nil t)))
+  (with-temp-buffer
+    (agent-shell-mode)
+    (drover-remote--shell-keys (current-buffer))
+    (should (eq (cdr (assoc "RET" spyglass-key-commands)) 'agent-shell-submit))
+    (should (eq (cdr (assoc "<return>" spyglass-key-commands)) 'agent-shell-submit))
+    (should (eq (cdr (assoc "M-RET" spyglass-key-commands)) 'agent-shell-submit-override))
+    (should (eq (cdr (assoc "C-c" spyglass-key-commands)) 'drover-remote--shell-interrupt))
+    ;; Never a command of its, as TAB moving between items, for a key not listed.
+    (should-not (assoc "TAB" spyglass-key-commands))))
+
 (ert-deftest drover-remote-test-mirror-resumes-conversation ()
   "A conversation without a terminal is resumed there, out of its windows, then mirrored here; once."
   (skip-unless (drover-remote-test--ptys-p))

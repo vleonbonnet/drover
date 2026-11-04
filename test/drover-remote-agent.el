@@ -120,15 +120,55 @@ It notes the call, changes the session as ACTION would, and confirms."
   "Tell the driver FORMAT-STRING with ARGS, on standard error."
   (message "DROVER-AGENT %s" (apply #'format format-string args)))
 
+(defvar-local drover-remote-agent--submitted nil
+  "What the stand-in shell of a fake session submitted, newest first.")
+
+(defun drover-remote-agent--shell-submit ()
+  "Submit the input of the stand-in shell, as agent-shell's submit does."
+  (interactive)
+  (goto-char (point-max))
+  (let ((mark (process-mark (get-buffer-process (current-buffer)))))
+    (push (buffer-substring-no-properties mark (point-max)) drover-remote-agent--submitted)
+    (insert "\n")
+    (set-marker mark (point-max))))
+
+(defun drover-remote-agent--shell-interrupt ()
+  "Interrupt the stand-in shell, asking first as agent-shell does."
+  (interactive)
+  (when (y-or-n-p "Interrupt? ")
+    (push "INTERRUPTED" drover-remote-agent--submitted)))
+
+(defvar-keymap drover-remote-agent--shell-mode-map
+  :parent comint-mode-map
+  "<remap> <comint-send-input>" #'drover-remote-agent--shell-submit
+  "C-c C-c" #'drover-remote-agent--shell-interrupt
+  "M-RET" #'drover-remote-agent--shell-submit)
+
+(define-derived-mode drover-remote-agent--shell-mode comint-mode "Stand-in agent-shell"
+  "A shell submitting as agent-shell does, through a command of its own.
+`comint-send-input' alone only commits the line, as shell-maker's
+`comint-input-sender' only keeps the input: nothing is submitted."
+  (setq-local comint-input-sender (lambda (_process _input))))
+
 (defun drover-remote-agent--terminal (id kind)
-  "Start the terminal of fake session ID, of KIND, \"pty\" or \"comint\", and return it.
-A pty runs `cat', sized by viewers as front ends' terminals are; where
-processes run through pipes, as on Windows, `cat' or, without it, a
-buffer echoing what is typed."
+  "Start the terminal of fake session ID, of KIND, and return it.
+KIND \"pty\" runs `cat' in a pty, sized by viewers as front ends'
+terminals are; where processes run through pipes, as on Windows, `cat'
+or, without it, a buffer echoing what is typed.  \"comint\" is a comint
+buffer running `cat'; \"agent-shell\" one submitting and interrupting
+through commands of its own, as agent-shell does."
   (let ((buffer (generate-new-buffer (format "*fake terminal %s*" id))))
     (with-current-buffer buffer
       (setq default-directory temporary-file-directory)
       (pcase kind
+        ("agent-shell"
+         (make-comint-in-buffer (format "fake-agent-shell-%s" id) buffer "cat")
+         (drover-remote-agent--shell-mode)
+         (insert "Agent> ")
+         (set-marker (process-mark (get-buffer-process buffer)) (point-max))
+         (let ((session-id id))
+           (setq-local drover-session-at-point-function
+                       (lambda () (gethash session-id drover-remote-agent--sessions)))))
         ("comint"
          (if (executable-find "cat")
              (make-comint-in-buffer (format "fake-shell-%s" id) buffer "cat")
@@ -463,6 +503,10 @@ whose newlines are CRLF on Windows."
                                     (buffer-substring-no-properties (max (point-min) (- (point-max) 2000))
                                                                     (point-max)))
                                   "")
+                        :submitted (if (buffer-live-p buffer)
+                                       (vconcat (reverse (buffer-local-value 'drover-remote-agent--submitted buffer)))
+                                     [])
+                        :point (if (buffer-live-p buffer) (with-current-buffer buffer (point)) 0)
                         :digest (if (buffer-live-p buffer)
                                     (drover-remote-agent--digest buffer)
                                   :false)

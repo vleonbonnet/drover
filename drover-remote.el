@@ -86,6 +86,10 @@
 (defvar spyglass-error-functions)
 (defvar spyglass-share-state-functions)
 (defvar spyglass-mirror-state-functions)
+(defvar spyglass-input-function)
+(defvar spyglass-key-commands)
+(declare-function spyglass-default-input "ext:spyglass-owner" (kind value))
+(declare-function comint-interrupt-subjob "comint" ())
 (declare-function spyglass-share "ext:spyglass-owner" (&optional buffer &rest arguments))
 (declare-function spyglass-share-of "ext:spyglass-owner" (buffer))
 (declare-function spyglass-share-id "ext:spyglass-owner" (share))
@@ -2486,10 +2490,60 @@ A buffer someone else shared is left as it is."
         (spyglass-share buffer :id id
                         :peers (lambda (connection) (and (drover-remote--share-viewer id connection) t))
                         :read-only (lambda (connection) (drover-remote--share-refuses-p id connection))
+                        :input #'drover-remote--share-input
                         :size-policy 'owner)
+        (when (with-current-buffer buffer (derived-mode-p 'comint-mode))
+          (drover-remote--shell-keys buffer))
         (unless (spyglass-share-viewers (spyglass-share-of buffer))
           (drover-remote--unshare-later state id))
         id))))
+
+(defconst drover-remote--shell-keys
+  '(("RET" . "RET") ("<return>" . "RET") ("M-RET" . "M-RET") ("M-<return>" . "M-RET")
+    ("M-p" . "M-p") ("<up>" . "M-p") ("M-n" . "M-n") ("<down>" . "M-n"))
+  "Keys a peer's mirror of a shell sends, and the shell's keys they stand for.
+The shell's own command for each runs, as its owner's key would: RET
+submits through a front end's own command, such as agent-shell's
+`agent-shell-submit', which `comint-send-input' alone does not.")
+
+(defun drover-remote--shell-keys (buffer)
+  "Let peers' mirrors of BUFFER, a shell, run its own commands for its keys.
+Its bindings of `drover-remote--shell-keys', as they are now, and the
+interrupt a mirror sends, interrupting its session as drover's interrupt
+does, without asking (`drover-remote--shell-interrupt'); see
+`spyglass-key-commands'."
+  (with-current-buffer buffer
+    (setq-local spyglass-key-commands
+                (cons (cons "C-c" #'drover-remote--shell-interrupt)
+                      (delq nil (mapcar (lambda (entry)
+                                          (let ((command (save-excursion
+                                                           (goto-char (point-max))
+                                                           (key-binding (kbd (cdr entry))))))
+                                            (and (commandp command) (symbolp command)
+                                                 (cons (car entry) command))))
+                                        drover-remote--shell-keys))))))
+
+(defun drover-remote--shell-interrupt ()
+  "Interrupt the session of the current buffer, a shell, for a peer's mirror.
+Through its backend, as drover's interrupt does, without asking; else
+through the shell's own command interrupting, comint's by default."
+  (let ((session (drover-buffer-session (current-buffer))))
+    (if (and session (drover-supports-p session :interrupt))
+        (drover--call-confirming session :interrupt #'ignore
+                                 (lambda (message)
+                                   (drover-message "Could not interrupt %s: %s"
+                                                   (drover-session-display-title session) message)))
+      (let ((command (key-binding (kbd "C-c C-c"))))
+        (if (commandp command)
+            (call-interactively command)
+          (comint-interrupt-subjob))))))
+
+(defun drover-remote--share-input (kind value)
+  "Apply a peer's input of KIND and VALUE in the current buffer, shared with it.
+As the buffer's input function, or spyglass's default, applies it, no
+window of this host's taken meanwhile."
+  (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+    (funcall (or spyglass-input-function #'spyglass-default-input) kind value)))
 
 (defun drover-remote--unshare-later (state id)
   "Unshare ID, a terminal STATE shares, once no peer mirrored it for a while.
@@ -2535,6 +2589,9 @@ more is unshared a while later, one a peer mirrors again stays."
         ('unshared
          (when (plist-get entry :timer)
            (cancel-timer (plist-get entry :timer)))
+         (when (buffer-live-p (plist-get entry :buffer))
+           (with-current-buffer (plist-get entry :buffer)
+             (kill-local-variable 'spyglass-key-commands)))
          (remhash id (drover-remote--state-shares state)))))))
 
 (defun drover-remote--unshare-all (&optional state)

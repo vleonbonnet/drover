@@ -445,6 +445,24 @@ A mirror is a session buffer: =drover-session-at-point-function= gives the peer'
 
 OpenCode sessions keep their view.  Their buffers show a service's session through opencode.el's own interface (pickers, folding, the prompt's completions), which a mirror sending keys would serve badly, and milestones 4 and 5 open them here as full buffers through the service; mirroring them meanwhile, as the plan had it, would have been work thrown away.
 
+** Points and keys, after the first live use
+
+The first live mirror, of an agent-shell of Core's, showed two faults.  Its cursor lagged behind what was typed: spyglass inserted a viewer's text at the end of the shell with the owner's point kept, and the point of the window showing it there, a marker staying before text inserted at it, stayed before the text, which mirrors showed as the cursor.  And =RET= committed the line with a newline, sending nothing: spyglass ran =comint-send-input=, which in agent-shell only records the input (shell-maker sets =comint-input-sender= so), its submit being =agent-shell-submit=, bound by remapping =comint-send-input=; drover was to set =spyglass-submit-function= in the shells it shares, and did not.  Core's buffer showed it: =Claude> confirmed it works= followed by a newline, the process mark past it.
+
+The model, now, in spyglass and so for every front end:
+
+| What                      | Terminals (Ghostel, Eat, vterm)                                               | Shells (agent-shell, comint)                                                                                                       |
+|---------------------------+-------------------------------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------|
+| The cursor a mirror shows | the terminal's cursor                                                         | the input point: the shell's point while it is in the input after the prompt, else its end                                         |
+| Text typed in a mirror    | to the terminal, as its keys                                                  | inserted at the input point, which moves past it, with the owner's windows whose point was there                                   |
+| Editing keys              | to the terminal                                                               | =DEL=, =<delete>=, =C-d=, left and right, =<home>=, =<end>= edit the input there, never the output before the prompt               |
+| =RET=, =M-RET=            | to the terminal                                                               | the shell's own command for its =RET= and =M-RET= (=agent-shell-submit=, =agent-shell-submit-override=), from the end of the input |
+| =M-p=, =M-n=, up, down    | to the terminal                                                               | the shell's own history commands                                                                                                   |
+| =C-c C-c= in the mirror   | control-C to the terminal                                                     | the session interrupted through its backend, as drover's =K= does, without asking there                                            |
+| The viewer's point        | its own, to read; typing brings it back to the cursor, which it follows again | the same                                                                                                                           |
+
+Viewers' keys are never looked up in the owner's keymaps: spyglass gained =spyglass-key-commands=, a buffer's list of the commands viewers' keys run, which drover fills, as it shares a shell, with that shell's bindings of =RET=, =M-RET=, =M-p= and =M-n= and its own interrupt; any other key gets comint's defaults.  Viewers' input runs with =inhibit-interaction=, so that a command asking, as agent-shell's interrupt asks for confirmation, fails and says so to the viewer rather than leave Core's Emacs waiting; drover's input function also keeps windows from showing there.  Nothing changed on the wire.
+
 ** The protocol, compatible
 
 | What                 | New                                                                                                                                                                                                                                                                                            |
