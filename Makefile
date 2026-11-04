@@ -37,8 +37,11 @@ NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
 TESTS = $(wildcard test/*-test.el)
+# One test file for test-one, and the tests of it to run, a regexp.
+FILE ?=
+SELECTOR ?=
 
-.PHONY: all compile compile-standalone test test-alone lint clean bench bench-bulk bench-search bench-idle bench-remote real-data
+.PHONY: all compile compile-standalone test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote real-data
 
 all: compile test
 
@@ -93,6 +96,14 @@ test-alone:
 	done; \
 	rm -f "$$log"; exit $$status
 
+# One test file, FILE, alone, or the tests of it SELECTOR matches: what
+# to run while working, before the whole of test.
+test-one:
+	@if [ -z "$(FILE)" ]; then echo "test-one needs FILE, a test file"; exit 2; fi
+	$(NOPIPE) SELECTOR="$(SELECTOR)" $(BATCH) -l $(FILE) \
+	  --eval '(ert-run-tests-batch-and-exit (if (member (getenv "SELECTOR") (quote (nil ""))) t (getenv "SELECTOR")))' \
+	  < /dev/null
+
 # Times the list over thousands of sessions, as compiled: not part of
 # test.  opencode.el, whose look the list draws with, is compiled too,
 # as installed, in a copy of OPENCODE_EL's sources, which stay as they
@@ -100,7 +111,15 @@ test-alone:
 # measuring text and collecting garbage cost what they cost the user;
 # DROVER_BENCH_FONT, DROVER_BENCH_THEME and DROVER_BENCH_THEME_DIRECTORY
 # choose its font and theme.  See test/drover-bench.el.
+#
+# A graphical Emacs starts through test/gui-emacs.sh: on macOS through
+# `open', neither activated nor shown, its frames off screen and
+# transparent, so that nothing comes in front of the user's windows nor
+# takes the focus; under GUI_TIMEOUT and a memory guard of 2 GB, its
+# status and output returned.  Never start one otherwise.
 EMACS_GUI ?=
+GUI_TIMEOUT ?= 600
+GUI = test/gui-emacs.sh -t $(GUI_TIMEOUT) $(EMACS_GUI)
 BENCH_FILES = -l test/drover-test-helpers.el -l test/drover-bench.el --eval '(drover-bench-main)'
 OPENCODE_DEPS = -L $(DEPS)/transient -L $(DEPS)/cond-let -L $(DEPS)/compat -L $(DEPS)/llama
 bench: compile
@@ -111,8 +130,8 @@ bench: compile
 	if [ $$status -eq 0 ]; then \
 	  if [ -n "$(EMACS_GUI)" ]; then \
 	    out=$$(mktemp); \
-	    DROVER_BENCH_OUTPUT=$$out $(EMACS_GUI) -Q --chdir $(CURDIR) -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) \
-	      $(BENCH_FILES); \
+	    DROVER_BENCH_OUTPUT=$$out $(GUI) -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) \
+	      $(BENCH_FILES) || status=1; \
 	    cat $$out; rm -f $$out; \
 	  else \
 	    $(EMACS) -Q --batch -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) $(BENCH_FILES) || status=1; \
@@ -149,8 +168,8 @@ bench-idle: compile
 	   > /dev/null 2>&1) || { echo "Could not compile opencode.el from $(OPENCODE_EL)"; status=1; }; \
 	if [ $$status -eq 0 ]; then \
 	  out=$$(mktemp -d)/idle.txt; \
-	  DROVER_BENCH_OUTPUT=$$out timeout 600 $(EMACS_GUI) -Q --chdir $(CURDIR) \
-	    -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) $(IDLE_BENCH_FILES) -ApplePersistenceIgnoreState YES || status=1; \
+	  DROVER_BENCH_OUTPUT=$$out $(GUI) \
+	    -L "$$opencode" $(LOAD_PATH) $(PREFER_NEWER) $(IDLE_BENCH_FILES) || status=1; \
 	  cat $$out; echo "Profiles: $$(dirname $$out)"; \
 	fi; \
 	rm -rf "$$opencode"; exit $$status
