@@ -1631,7 +1631,9 @@ leading back to what holds it would print it again from each."
     (should (eq (cdr (assoc "M-RET" spyglass-key-commands)) 'agent-shell-submit-override))
     (should (eq (cdr (assoc "C-c" spyglass-key-commands)) 'drover-remote--shell-interrupt))
     ;; Never a command of its, as TAB moving between items, for a key not listed.
-    (should-not (assoc "TAB" spyglass-key-commands))))
+    (should-not (assoc "TAB" spyglass-key-commands))
+    ;; The arrows recall the history, whatever M-p is bound to there.
+    (should-not (assoc "<up>" spyglass-key-commands))))
 
 (ert-deftest drover-remote-test-mirror-resumes-conversation ()
   "A conversation without a terminal is resumed there, out of its windows, then mirrored here; once."

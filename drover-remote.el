@@ -2499,12 +2499,14 @@ A buffer someone else shared is left as it is."
         id))))
 
 (defconst drover-remote--shell-keys
-  '(("RET" . "RET") ("<return>" . "RET") ("M-RET" . "M-RET") ("M-<return>" . "M-RET")
-    ("M-p" . "M-p") ("<up>" . "M-p") ("M-n" . "M-n") ("<down>" . "M-n"))
+  '(("RET" . "RET") ("<return>" . "RET") ("M-RET" . "M-RET") ("M-<return>" . "M-RET"))
   "Keys a peer's mirror of a shell sends, and the shell's keys they stand for.
 The shell's own command for each runs, as its owner's key would: RET
 submits through a front end's own command, such as agent-shell's
-`agent-shell-submit', which `comint-send-input' alone does not.")
+`agent-shell-submit', which `comint-send-input' alone does not.  The
+arrows up and down recall the input history, as spyglass's comint
+input does: the owner's own history keys may be bound to anything else,
+as a configuration moving between links binds them.")
 
 (defun drover-remote--shell-keys (buffer)
   "Let peers' mirrors of BUFFER, a shell, run its own commands for its keys.
