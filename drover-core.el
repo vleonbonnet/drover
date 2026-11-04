@@ -4029,13 +4029,23 @@ An alist (KEY . BUFFER): KEY is the key of the session archived (see
   "Buffers to close, read from the file, whose backends did not start yet.
 A list of plists, as `drover--closing-entry-p' accepts.")
 
-(defun drover-keep-unsent (texts)
+(defvar drover-unsent-functions nil
+  "Functions called with (BUFFER TEXT) as BUFFER closes holding TEXT unsent.
+`drover-keep-unsent' runs them, after it put TEXT in the kill ring:
+the remote layer tells the hosts mirroring BUFFER, whose user may have
+typed TEXT there.")
+
+(defun drover-keep-unsent (texts &optional buffer)
   "Put TEXTS in the kill ring, as one entry, unless every one is blank.
 TEXTS are strings, or nil: what a buffer about to close holds that its
-agent never got, such as input typed at its prompt.  Return non-nil
-when they went to the kill ring."
+agent never got, such as input typed at its prompt.  BUFFER, when
+given, is that buffer: `drover-unsent-functions' hear of it.  Return
+non-nil when they went to the kill ring."
   (when-let* ((texts (seq-remove (lambda (text) (or (null text) (string-blank-p text))) texts)))
-    (kill-new (mapconcat #'string-trim texts "\n\n"))
+    (let ((text (mapconcat #'string-trim texts "\n\n")))
+      (kill-new text)
+      (when buffer
+        (drover-run-hook-reporting 'drover-unsent-functions buffer text)))
     t))
 
 (defun drover--view-shown-elsewhere-p (buffer window)

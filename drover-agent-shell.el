@@ -1224,7 +1224,7 @@ agent never got goes to the kill ring first (see
 some.  Its queued prompts kept, agent-shell has nothing to ask before
 the shell goes.  The backend's :close."
   (when-let* ((buffer (drover-agent-shell--buffer session)))
-    (prog1 (drover-keep-unsent (drover-agent-shell--unsent buffer))
+    (prog1 (drover-keep-unsent (drover-agent-shell--unsent buffer) buffer)
       (drover-agent-shell--close buffer))))
 
 (defun drover-agent-shell--delete (session)

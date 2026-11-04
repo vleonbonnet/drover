@@ -1524,7 +1524,8 @@ leading back to what holds it would print it again from each."
       (let ((mirror (drover-remote-test-open "s1")))
         (should (equal (buffer-local-value 'drover-remote--mirror-kind mirror) "terminal"))
         (drover-remote-test-live mirror)
-        (should (string-match-p "Session s1@Agent" (with-current-buffer mirror (spyglass--mirror-header-line))))
+        (should (string-match-p "Session s1@Agent" (spyglass--mirror-state-line
+                                                     (buffer-local-value 'spyglass--mirror mirror))))
         ;; A session buffer: drover's keys act on the session there.
         (with-current-buffer mirror
           (should (equal (drover-session-id (drover-session-at-point)) '(fake . "s1"))))
@@ -1547,7 +1548,8 @@ leading back to what holds it would print it again from each."
         (split-window nil 30 t)
         (drover-remote-test-report-size mirror)
         (let ((size (spyglass-window-cells (selected-window))))
-          (should (= (cdr size) 6))
+          ;; Eight lines, its mode line one; no header line, the owner having none.
+          (should (= (cdr size) 7))
           (drover-remote-test-wait (lambda () (equal (append (plist-get (drover-remote-test-terminal "s1") :size) nil)
                                                      (list (car size) (cdr size)))))
           (should (equal (append (plist-get (drover-remote-test-terminal "s1") :size) nil)
@@ -1619,6 +1621,51 @@ leading back to what holds it would print it again from each."
         (drover-remote-test-wait (lambda () (drover-remote-test-calls "interrupt")))
         (should (equal (mapcar #'cadr (drover-remote-test-calls "interrupt")) '("s0")))
         (kill-buffer mirror)))))
+
+(ert-deftest drover-remote-test-mirror-closes-when-archived ()
+  "Archiving a session whose shell this host mirrors closes the mirror, what was typed in it kept in the kill ring here."
+  (skip-unless (executable-find "cat"))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 4)
+    (drover-remote-test-command "terminal" :id "s0" :kind "agent-shell")
+    (drover-remote-test-command "terminal" :id "s3" :kind "agent-shell")
+    (drover-remote-test-synced 4)
+    (save-window-excursion
+      ;; Its terminal killed there, the session still listed: the mirror
+      ;; stays, readable, saying why.
+      (let ((mirror (drover-remote-test-open "s3")))
+        (drover-remote-test-live mirror)
+        (drover-remote-test-command "kill-terminal" :id "s3")
+        (drover-remote-test-wait (lambda () (eq (spyglass-mirror-state mirror) 'closed)))
+        (drover-remote-test-settle 0.5)
+        (should (buffer-live-p mirror))
+        (should (equal (spyglass-mirror-closed-reason mirror) "killed"))
+        (kill-buffer mirror))
+      (let ((mirror (drover-remote-test-open "s0"))
+            (kill-ring nil)
+            (messages nil))
+        (drover-remote-test-live mirror)
+        ;; The mirror's mode line, while no window shows it there: the
+        ;; session's, as its host tells it.
+        (with-current-buffer mirror
+          (let ((line (funcall spyglass-mirror-mode-line-function)))
+            (should (string-match-p "Opus 5.5 high" line))
+            (should (string-match-p "Idle" line))))
+        (spyglass-mirror-send-string "draft not sent" mirror)
+        (drover-remote-test-wait (lambda () (string-search "draft not sent"
+                                                           (plist-get (drover-remote-test-terminal "s0") :text))))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (when format-string (push (apply #'format format-string args) messages)))))
+          (drover-archive (drover-remote-test-session "s0"))
+          (drover-remote-test-wait (lambda () (and (not (buffer-live-p mirror)) kill-ring)) 10))
+        (should-not (buffer-live-p mirror))
+        (should (equal (car kill-ring) "draft not sent"))
+        (should (seq-some (lambda (text) (string-match-p "the unsent input of Session s0 is in the kill ring" text))
+                          messages))
+        ;; Closed there too, its share gone.
+        (should-not (drover-remote-test-shares))))))
 
 (ert-deftest drover-remote-test-agent-shell-keys ()
   "A real agent-shell's keys, as a peer's mirror runs them: its submit, its override, drover's interrupt."
@@ -2021,12 +2068,18 @@ user's service: only the services BODY registers are reached."
           (drover-remote-test-shows buffer "Echo: from elsewhere")
           ;; RET again shows the same buffer.
           (should (eq (drover-remote-test-open-oc "ses_a") buffer))
-          ;; Archived there, with nothing typed nor running here: closed here.
-          (let ((other (drover-remote-test-open-oc "ses_b")))
+          ;; Archived there: closed here, as archiving closes it here,
+          ;; what was typed at its prompt kept in the kill ring.
+          (let ((other (drover-remote-test-open-oc "ses_b"))
+                (kill-ring nil))
             (drover-remote-test-shows other "First reply of Other work")
+            (with-current-buffer other
+              (goto-char (point-max))
+              (insert "typed, not sent"))
             (drover-remote-test-command "oc-archive" :id "ses_b")
             (drover-remote-test-wait (lambda () (not (buffer-live-p other))))
-            (should-not (buffer-live-p other)))
+            (should-not (buffer-live-p other))
+            (should (equal (car kill-ring) "typed, not sent")))
           ;; The local service is untouched: no buffer, no stream.
           (should-not (gethash "ses_a" opencode-session-buffers))
           ;; Killed here, the session runs on there.

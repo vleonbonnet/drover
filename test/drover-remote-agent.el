@@ -217,6 +217,17 @@ whose newlines are CRLF on Windows."
   (let ((buffer (gethash (drover-session-id session) drover-remote-agent--terminals)))
     (and (buffer-live-p buffer) buffer)))
 
+(defun drover-remote-agent--close (session)
+  "Close SESSION's terminal, its input not sent to the kill ring, as front ends do."
+  (when-let* ((buffer (drover-remote-agent--buffer session)))
+    (prog1 (drover-keep-unsent
+            (list (when-let* ((process (get-buffer-process buffer))
+                              ((with-current-buffer buffer (derived-mode-p 'comint-mode))))
+                    (with-current-buffer buffer
+                      (buffer-substring-no-properties (process-mark process) (point-max)))))
+            buffer)
+      (drover-kill-buffer buffer))))
+
 (defun drover-remote-agent--open (session &optional _other-window)
   "Show SESSION's terminal, starting one as a front end resuming it would."
   (push (vector "open" (drover-session-id session) :false) drover-remote-agent--calls)
@@ -231,6 +242,7 @@ whose newlines are CRLF on Windows."
   (drover-register-backend
    'fake :label "Fake"
    :buffer #'drover-remote-agent--buffer
+   :close #'drover-remote-agent--close
    :runs-in-buffer t
    :open #'drover-remote-agent--open
    :sessions (lambda () (delq nil (mapcar (lambda (id) (gethash id drover-remote-agent--sessions))
@@ -594,6 +606,12 @@ whose newlines are CRLF on Windows."
                                                        (vector (spyglass-share-id share)
                                                                (length (spyglass-share-viewers share))))
                                                      (spyglass-shares))))))
+      ("kill-terminal"
+       ;; Its terminal killed there, its session still listed.
+       (let ((buffer (gethash (plist-get args :id) drover-remote-agent--terminals)))
+         (drover-kill-buffer buffer)
+         (drover-backend-changed 'fake (plist-get args :id))
+         (funcall reply (list :ok t))))
       ("windows"
        (funcall reply (list :windows (vconcat (mapcar (lambda (window) (buffer-name (window-buffer window)))
                                                       (window-list nil 'no-minibuffer))))))

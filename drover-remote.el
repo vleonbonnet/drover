@@ -88,6 +88,7 @@
 (defvar spyglass-mirror-state-functions)
 (defvar spyglass-input-function)
 (defvar spyglass-key-commands)
+(defvar spyglass-mirror-mode-line-function)
 (declare-function spyglass-default-input "ext:spyglass-owner" (kind value))
 (declare-function comint-interrupt-subjob "comint" ())
 (declare-function spyglass-share "ext:spyglass-owner" (&optional buffer &rest arguments))
@@ -262,7 +263,7 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode")
+(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -272,7 +273,8 @@ peer; \"grant\": it tells each peer the access it grants it;
 peer opening them, resuming a conversation first when asked;
 \"opencode\": it relays its OpenCode service to its peers, as their
 access allows, for their opencode.el to open its sessions in full
-buffers.")
+buffers; \"unsent\": it takes what a buffer the peer mirrors held unsent
+as it closed, as archiving closes it, for the peer's kill ring.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1551,6 +1553,7 @@ finds those."
      (t (dolist (key keys)
           (drover-backend-changed backend key))))
     (drover-remote--seen-mirrors peer keys)
+    (drover-remote--close-archived-mirrors peer keys)
     (drover-remote--oc-archived peer keys)))
 
 (defun drover-remote--set-stale (peer heard)
@@ -2489,6 +2492,9 @@ A buffer someone else shared is left as it is."
                                          (eq (spyglass-connection-state other) 'closed))))
                                  (plist-get entry :viewers))))
         (puthash id (list :buffer buffer :key key
+                          :title (or (when-let* ((record (drover-index-session key)))
+                                       (drover-remote--plain (drover-session-display-title record)))
+                                     (plist-get entry :title))
                           :viewers (cons (cons (drover-link connection) name) viewers)
                           :timer (plist-get entry :timer))
                  shares)
@@ -2551,6 +2557,47 @@ As the buffer's input function, or spyglass's default, applies it, no
 window of this host's taken meanwhile."
   (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
     (funcall (or spyglass-input-function #'spyglass-default-input) kind value)))
+
+(defun drover-remote--unsent (buffer text)
+  "Tell the peers mirroring BUFFER the TEXT it held unsent as it closes.
+For `drover-unsent-functions': a user typing in a mirror typed there,
+and finds it in the kill ring there, as archiving here puts it in this
+host's.  Only peers telling \"unsent\" hear it."
+  (drover-with-reporting "remote unsent"
+    (when-let* ((state (drover-remote--current)))
+      (maphash (lambda (_id entry)
+                 (when (eq (plist-get entry :buffer) buffer)
+                   (let ((key (plist-get entry :key))
+                         (sent nil))
+                     (pcase-dolist (`(,link . ,name) (plist-get entry :viewers))
+                       (let ((connection (drover-linked link))
+                             (peer (drover-remote--peer name)))
+                         (when (and peer connection (not (member name sent))
+                                    (spyglass-connection-live-p connection)
+                                    (drover-remote--capable-p peer "unsent"))
+                           (push name sent)
+                           (drover-remote--send
+                            connection
+                            (list :t "unsent" :key (vector (symbol-name (car key)) (cdr key))
+                                  :title (or (plist-get entry :title) "")
+                                  :text (substring-no-properties
+                                         text 0 (min (length text) drover-remote-prompt-limit))))))))))
+               (drover-remote--state-shares state)))))
+
+(defun drover-remote--on-unsent (peer message)
+  "Keep in the kill ring what a buffer of PEER's mirrored here held unsent.
+MESSAGE tells it, as that buffer closed there, as archiving closes it."
+  (let* ((text (plist-get message :text))
+         (key (drover-remote--key (plist-get message :key)))
+         (record (and key (drover-remote--peer-session peer key)))
+         (title (or (and record (drover-bound-line (drover-session-display-title record) 80))
+                    (let ((title (drover-remote--line (plist-get message :title) 80)))
+                      (and title (not (string-empty-p title)) title))
+                    "its session")))
+    (when (and (stringp text) (not (string-blank-p text)))
+      (drover-keep-unsent (list (substring text 0 (min (length text) drover-remote-prompt-limit))))
+      (drover-remote--event peer 'mirror "kept in the kill ring the unsent input of %s" title)
+      (drover-message "%s: the unsent input of %s is in the kill ring" (drover-remote--label peer) title))))
 
 (defun drover-remote--unshare-later (state id)
   "Unshare ID, a terminal STATE shares, once no peer mirrored it for a while.
@@ -2863,6 +2910,7 @@ received so far each time an answer of the owner's comes."
       (setf (drover-remote--peer-granted peer)
             (and (member access '("read" "act" "full")) (intern access)))))
    ((equal type "bye") (drover-remote--on-bye peer connection message))
+   ((equal type "unsent") (drover-remote--on-unsent peer message))
    ((equal type "ocd") (drover-remote--on-oc-data message))
    ((equal type "oce") (drover-remote--on-oc-end message))
    ((equal type "occ") (drover-remote--on-oc-cancel connection message))))
@@ -3641,6 +3689,7 @@ there on SESSION, through PEER."
       (setq-local drover-remote--shown (cons (drover-remote--peer-name peer) (drover-session-id session)))
       (setq-local drover-session-at-point-function #'drover-remote--shown-session)
       (setq-local drover-remote--mirror-kind kind)
+      (setq-local spyglass-mirror-mode-line-function #'drover-remote--mirror-mode-line)
       (add-hook 'kill-buffer-hook #'drover-remote--mirror-killed nil t))
     (puthash (drover-session-id session) mirror (drover-remote--peer-mirrors peer))
     (drover-remote--event peer 'mirror "mirroring the %s of %s%s" kind title
@@ -3719,6 +3768,7 @@ its owner unshared, as its remote layer restarted, is opened anew."
         ('closed
          (let ((reason (spyglass-mirror-closed-reason buffer)))
            (drover-remote--event peer 'mirror "the mirror of %s closed: %s" (buffer-name buffer) reason)
+           (drover-remote--close-archived-mirror peer (cdr shown) buffer)
            (when (member reason '("unshared" "no such share"))
              (run-at-time 1 nil
                           (let ((link (drover-link peer))
@@ -3726,6 +3776,61 @@ its owner unshared, as its remote layer restarted, is opened anew."
                             (lambda ()
                               (drover-with-reporting "remote mirror"
                                 (drover-remote--reopen (drover-linked link) key buffer))))))))))))
+
+(defun drover-remote--close-archived-mirror (peer key buffer)
+  "Kill BUFFER, the mirror of PEER's session KEY, once its owner archived it.
+As archiving a session here closes its buffer: the owner closed its
+own, at once or once its turn ended, which closed the mirror (spyglass's
+reason \"killed\"), and its record says archived, or is gone from the
+sessions it lists, as archived sessions go.  What was typed and not
+sent comes from the owner (see `drover-remote--on-unsent').  A mirror
+the owner closed otherwise, its session still listed, stays readable,
+saying why."
+  (when (and (buffer-live-p buffer)
+             (eq (spyglass-mirror-state buffer) 'closed)
+             (equal (spyglass-mirror-closed-reason buffer) "killed")
+             (eq (drover-remote--peer-state peer) 'open)
+             (let ((record (drover-remote--peer-session peer key)))
+               (or (null record) (drover-session-archived-p record))))
+    (drover-remote--event peer 'mirror "closed the mirror of %s: its session is gone there" (buffer-name buffer))
+    (drover-kill-buffer buffer)))
+
+(defun drover-remote--close-archived-mirrors (peer keys)
+  "Kill the mirrors of PEER's sessions KEYS whose owner archived them.
+See `drover-remote--close-archived-mirror'."
+  (when (> (hash-table-count (drover-remote--peer-mirrors peer)) 0)
+    (dolist (key keys)
+      (when-let* ((buffer (drover-remote--mirror-buffer peer key)))
+        (drover-remote--close-archived-mirror peer key buffer)))))
+
+(defun drover-remote--mirror-mode-line ()
+  "Return the mode line of a mirror of a peer's session, from its record.
+For `spyglass-mirror-mode-line-function', while the owner sends no mode
+line of its own (no window shows the session there): the session's
+status, harness, model, effort and context, as the peer last told them."
+  (when-let* ((session (drover-remote--shown-session)))
+    (let ((status (drover-session-status session))
+          (tokens (drover-session-context-tokens session))
+          (limit (drover-session-context-limit session)))
+      (drover-bound-line
+       (string-join
+        (delq nil
+              (list (concat " " (opencode-session-status-glyph status) " "
+                            (drover-face (opencode-session-status-label status)
+                                         (opencode-session-status-face status)))
+                    (concat (drover-harness-glyph (drover-session-harness session)) " "
+                            (drover-harness-name (drover-session-harness session)))
+                    (and (drover-session-model session)
+                         (concat (drover-session-model session)
+                                 (and (drover-session-effort session)
+                                      (concat " " (drover-face (drover-session-effort session)
+                                                               (if (drover-session-effort-default session)
+                                                                   'opencode-setting-inherited
+                                                                 'opencode-setting-chosen))))))
+                    (and (natnump tokens) (natnump limit) (> limit 0)
+                         (format "%d%%" (/ (* 100 tokens) limit)))))
+        "  ")
+       200))))
 
 (defun drover-remote--seen-mirrors (peer keys)
   "Mark seen those of PEER's sessions KEYS the selected window mirrors.
@@ -4110,20 +4215,23 @@ See `drover-remote--oc-close-archived'."
   "Close BUFFER, of PEER's OpenCode session KEY, once its owner archived it.
 The owner's record says archived, or is gone, its owner's drover listing
 archived sessions apart, while the service says archived too.  As
-archiving does here, a buffer holding input or running a turn stays."
+archiving an OpenCode session closes its buffer here: at once, a turn
+running or not, its session living in the service, and input typed at
+its prompt and not sent going to the kill ring, the user told."
   (let ((record (drover-remote--peer-session peer key)))
     (when (and (buffer-live-p buffer)
                (if record
                    (drover-session-archived-p record)
                  (with-current-buffer buffer (opencode-session-archived-p))))
-      (with-current-buffer buffer
-        (let ((process (get-buffer-process buffer)))
-          (when (and (not (eq opencode-session-status 'busy))
-                     process
-                     (= (marker-position (process-mark process)) (point-max)))
-            (drover-remote--event peer 'opencode "closed the OpenCode session %s: archived there"
-                                  (drover-bound-line (format "%s" (cdr key)) 40))
-            (kill-buffer buffer)))))))
+      (let* ((process (get-buffer-process buffer))
+             (unsent (and process (with-current-buffer buffer
+                                    (buffer-substring-no-properties (process-mark process) (point-max)))))
+             (title (buffer-name buffer)))
+        (drover-remote--event peer 'opencode "closed the OpenCode session %s: archived there"
+                              (drover-bound-line (format "%s" (cdr key)) 40))
+        (when (drover-keep-unsent (list unsent))
+          (drover-message "%s" (drover--archive-note 'kept title)))
+        (drover-kill-buffer buffer)))))
 
 (defun drover-remote--oc-updated (id)
   "Close the buffer of the peer's OpenCode session ID once archived there.
@@ -4339,6 +4447,7 @@ then its end."
     (add-hook 'drover-changed-hook #'drover-remote--owner-changed)
     (add-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
     (add-hook 'spyglass-share-state-functions #'drover-remote--share-event)
+    (add-hook 'drover-unsent-functions #'drover-remote--unsent)
     (add-hook 'spyglass-mirror-state-functions #'drover-remote--mirror-state)
     (setf (drover-remote--state-network state) (cons (float-time) (drover-remote--network)))
     ;; One, whatever remote layer made it before.
@@ -4398,6 +4507,7 @@ starts again at once: its peers keep this host's sessions meanwhile."
   (remove-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
   (cancel-function-timers #'drover-remote--look-out)
   (remove-hook 'spyglass-share-state-functions #'drover-remote--share-event)
+  (remove-hook 'drover-unsent-functions #'drover-remote--unsent)
   (remove-hook 'spyglass-mirror-state-functions #'drover-remote--mirror-state)
   (remove-hook 'kill-emacs-hook #'drover-remote--kill-emacs)
   (setq drover-hosts-function nil

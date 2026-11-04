@@ -1181,7 +1181,8 @@ there was some.  The backend's :close."
   (when-let* ((buffer (drover-claude-code-ide--buffer session)))
     (prog1 (drover-keep-unsent
             (list (drover-with-reporting "reading the input of a Claude terminal"
-                    (drover-claude-code-ide-unsent-input buffer))))
+                    (drover-claude-code-ide-unsent-input buffer)))
+            buffer)
       (drover-claude-code-ide--close buffer))))
 
 (defun drover-claude-code-ide--delete (session)

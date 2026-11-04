@@ -1074,7 +1074,8 @@ there was some.  The backend's :close."
     (prog1 (drover-keep-unsent
             (list (when-let* ((process (get-buffer-process buffer)))
                     (with-current-buffer buffer
-                      (buffer-substring-no-properties (process-mark process) (point-max))))))
+                      (buffer-substring-no-properties (process-mark process) (point-max)))))
+            buffer)
       (drover-kill-buffer buffer))))
 
 (defun drover-opencode--mark-seen (session &optional then else)
