@@ -2979,60 +2979,79 @@ later, within the tolerance or past it, or a turn starting."
        ,@body)
      count))
 
-(ert-deftest drover-list-test-in-place-is-a-fresh-drawing ()
-  "Whatever sessions change, the list drawn in place is the list drawn anew.
-Its text and properties, its sections and their places, its header
-line, after each of many random changes, in every subagent mode, in
-columns and in two lines, grouped by status, project or activity or
+(defun drover-list-test-in-place-check (mode width grouping sort descending tolerance)
+  "Check that the list drawn in place is the list drawn anew after random changes.
+After each of many random changes, with `drover-show-subagents' MODE,
+WIDTH, `drover-group-by' GROUPING, `drover-sort-by' SORT,
+`drover-sort-descending' DESCENDING and
+`drover-sort-activity-tolerance' TOLERANCE: its text and properties,
+its sections and their places, its header line, some sessions
+expanded, groups collapsed and expanded, their sessions drawn or not
+yet.  Most changes are drawn in place.  The random changes follow
+from the settings alone."
+  (random (format "drover %s %s %s %s %s %s" mode width grouping sort descending tolerance))
+  (drover-list-test-with (drover-list-test-random-sessions 40)
+    (drover-list-test-with-font
+      (let ((drover-list-test-width width)
+            (drover-show-subagents mode)
+            (drover-group-by grouping)
+            (drover-sort-by sort)
+            (drover-sort-descending descending)
+            (drover-sort-activity-tolerance tolerance)
+            (drover-list-collapsed-groups nil)
+            ;; The harness too, some sessions of another.
+            (drover-list-hidden-fields nil)
+            (in-place 0))
+        (drover-list-test-shown
+          (revert-buffer)
+          ;; Some sessions show their details.
+          (dolist (section (seq-take (seq-filter (lambda (section) (oref section hidden))
+                                                 (mapcan #'drover-list--session-sections
+                                                         (drover-list--containers)))
+                                     3))
+            (magit-section-show section))
+          (dotimes (step 30)
+            ;; Now and then, a group is expanded or collapsed.
+            (when (zerop (random 5))
+              (when-let* ((groups (drover-list--groups)))
+                (let ((group (seq-random-elt groups)))
+                  (if (oref group hidden) (magit-section-show group) (magit-section-hide group)))))
+            (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
+              (setq drover-test-sessions sessions)
+              (dolist (id ids)
+                (drover-backend-changed 'fake id))
+              (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
+                (cl-incf in-place))
+              (let ((drawn (drover-list-test-drawn))
+                    (fresh (drover-list-test-fresh)))
+                (should (equal (list mode width grouping sort descending step (cdr drawn))
+                               (list mode width grouping sort descending step (cdr fresh))))
+                (should (equal-including-properties (car drawn) (car fresh))))))
+          (should (> in-place 15)))))))
+
+(defmacro drover-list-test-in-place-cases (&rest cases)
+  "Define a test of `drover-list-test-in-place-check' for each of CASES, its arguments.
+Each runs alone, so that the cases run in several Emacs at once."
+  (declare (indent 0))
+  `(progn
+     ,@(seq-map-indexed
+        (lambda (case index)
+          `(ert-deftest ,(intern (format "drover-list-test-in-place-is-a-fresh-drawing-%d" (1+ index))) ()
+             ,(format "Whatever sessions change, the list drawn in place is the list drawn anew.
+Its case %S of `drover-list-test-in-place-check': every subagent
+mode, columns and two lines, grouped by status, project or activity or
 not at all, sorted by urgency, activity or title, either way, with the
-tolerance of activity or without, some sessions expanded, groups
-collapsed and expanded, their sessions drawn or not yet.  Most changes
-are drawn in place."
-  (pcase-dolist (`(,mode ,width ,grouping ,sort ,descending ,tolerance)
-                 '((all 1000 status urgency nil 60) (active 300 status urgency nil 60)
-                   (none 1000 project updated nil 60) (all 1000 project urgency nil 60)
-                   (all 1000 updated title nil 60) (active 1000 nil urgency nil 60)
-                   (all 1000 nil updated t 60) (active 300 nil updated nil 60)
-                   (all 1000 updated updated t 60) (all 1000 nil updated t nil)))
-    (random (format "drover %s %s %s %s %s %s" mode width grouping sort descending tolerance))
-    (drover-list-test-with (drover-list-test-random-sessions 40)
-      (drover-list-test-with-font
-        (let ((drover-list-test-width width)
-              (drover-show-subagents mode)
-              (drover-group-by grouping)
-              (drover-sort-by sort)
-              (drover-sort-descending descending)
-              (drover-sort-activity-tolerance tolerance)
-              (drover-list-collapsed-groups nil)
-              ;; The harness too, some sessions of another.
-              (drover-list-hidden-fields nil)
-              (in-place 0))
-          (drover-list-test-shown
-            (revert-buffer)
-            ;; Some sessions show their details.
-            (dolist (section (seq-take (seq-filter (lambda (section) (oref section hidden))
-                                                   (mapcan #'drover-list--session-sections
-                                                           (drover-list--containers)))
-                                       3))
-              (magit-section-show section))
-            (dotimes (step 30)
-              ;; Now and then, a group is expanded or collapsed.
-              (when (zerop (random 5))
-                (when-let* ((groups (drover-list--groups)))
-                  (let ((group (seq-random-elt groups)))
-                    (if (oref group hidden) (magit-section-show group) (magit-section-hide group)))))
-              (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
-                (setq drover-test-sessions sessions)
-                (dolist (id ids)
-                  (drover-backend-changed 'fake id))
-                (when (zerop (drover-list-test-counting-redraws (drover-changed-now)))
-                  (cl-incf in-place))
-                (let ((drawn (drover-list-test-drawn))
-                      (fresh (drover-list-test-fresh)))
-                  (should (equal (list mode width grouping sort descending step (cdr drawn))
-                                 (list mode width grouping sort descending step (cdr fresh))))
-                  (should (equal-including-properties (car drawn) (car fresh))))))
-            (should (> in-place 15))))))))
+tolerance of activity or without, over the cases."
+                      case)
+             (drover-list-test-in-place-check ,@(mapcar (lambda (value) `',value) case))))
+        cases)))
+
+(drover-list-test-in-place-cases
+  (all 1000 status urgency nil 60) (active 300 status urgency nil 60)
+  (none 1000 project updated nil 60) (all 1000 project urgency nil 60)
+  (all 1000 updated title nil 60) (active 1000 nil urgency nil 60)
+  (all 1000 nil updated t 60) (active 300 nil updated nil 60)
+  (all 1000 updated updated t 60) (all 1000 nil updated t nil))
 
 (defun drover-list-test-is-fresh ()
   "Check that the list is the list drawn anew, text, properties and sections."
@@ -6083,27 +6102,29 @@ it: the focus is looked at once those events settled."
     (let ((opencode-session-status-animation-interval 0.5)
           (drover-list-animation-unfocused-interval 2)
           (focused (selected-frame)))
+      ;; Frames listed last: redefining a primitive may compile its
+      ;; trampoline, which lists frames.
       (cl-letf (((symbol-function 'frame-initial-p) #'ignore)
-                ((symbol-function 'frame-list) (lambda () (list (selected-frame) 'other)))
                 ((symbol-function 'frame-focus-state) (lambda (&optional frame) (eq frame focused))))
-        (drover-list-test-shown
-          (revert-buffer)
-          (let ((timer drover-list--frame-timer))
-            (should (timerp timer))
-            ;; The list's frame loses focus, then the other frame has it.
-            (setq focused nil)
-            (drover-list--focus-changed)
-            (setq focused 'other)
-            (drover-list--focus-changed)
-            (drover-list--refocus)
-            (should drover-list--focused)
-            (should (eq drover-list--frame-timer timer))
-            (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
-            ;; Then Emacs loses focus: the slow pace.
-            (setq focused nil)
-            (drover-list--refocus)
-            (should-not drover-list--focused)
-            (should (= (timer--repeat-delay drover-list--frame-timer) 3.5))))))))
+        (cl-letf (((symbol-function 'frame-list) (lambda () (list (selected-frame) 'other))))
+          (drover-list-test-shown
+            (revert-buffer)
+            (let ((timer drover-list--frame-timer))
+              (should (timerp timer))
+              ;; The list's frame loses focus, then the other frame has it.
+              (setq focused nil)
+              (drover-list--focus-changed)
+              (setq focused 'other)
+              (drover-list--focus-changed)
+              (drover-list--refocus)
+              (should drover-list--focused)
+              (should (eq drover-list--frame-timer timer))
+              (should (= (timer--repeat-delay drover-list--frame-timer) 0.5))
+              ;; Then Emacs loses focus: the slow pace.
+              (setq focused nil)
+              (drover-list--refocus)
+              (should-not drover-list--focused)
+              (should (= (timer--repeat-delay drover-list--frame-timer) 3.5)))))))))
 
 (ert-deftest drover-list-test-unfocused-hidden-frames ()
   "A list on an iconified frame animates nothing, Emacs having focus or not."
@@ -7528,6 +7549,8 @@ Confirmations answer yes, their prompts pushed to `asked', newest first."
 
 (ert-deftest drover-list-test-copy-without-link-type ()
   "Without a link type storing sessions, their titles are copied."
+  ;; Copying loads Org's links: bound before, the variable would be lexical.
+  (require 'ol)
   (drover-list-test-selecting (drover-list-test-selection-sample)
     (let ((kill-ring nil)
           (org-link-parameters nil))
