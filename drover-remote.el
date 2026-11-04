@@ -86,6 +86,10 @@
 (defvar spyglass-error-functions)
 (defvar spyglass-share-state-functions)
 (defvar spyglass-mirror-state-functions)
+(defvar spyglass-input-function)
+(defvar spyglass-key-commands)
+(declare-function spyglass-default-input "ext:spyglass-owner" (kind value))
+(declare-function comint-interrupt-subjob "comint" ())
 (declare-function spyglass-share "ext:spyglass-owner" (&optional buffer &rest arguments))
 (declare-function spyglass-share-of "ext:spyglass-owner" (buffer))
 (declare-function spyglass-share-id "ext:spyglass-owner" (share))
@@ -258,14 +262,17 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror")
+(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
 \(`restart', `quit', `off' or `dropped'), only those for good closing a
 peer; \"grant\": it tells each peer the access it grants it;
 \"mirror\": it shares the terminals and shells of its sessions with the
-peer opening them, resuming a conversation first when asked.")
+peer opening them, resuming a conversation first when asked;
+\"opencode\": it relays its OpenCode service to its peers, as their
+access allows, for their opencode.el to open its sessions in full
+buffers.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1046,9 +1053,7 @@ Records are read from STATE as they are now."
                              :inst spyglass-instance-id
                              :dialed (if (spyglass-connection-transport connection) t :false)
                              :ask (if ask t :false)
-                             :caps (vconcat (if (drover-remote--mirrors-p)
-                                                drover-remote-capabilities
-                                              (remove "mirror" drover-remote-capabilities)))
+                             :caps (drover-remote--capabilities)
                              :epoch (or (and drover-remote--state
                                              (drover-remote--state-epoch drover-remote--state))
                                         :false))))
@@ -1245,7 +1250,8 @@ STATE is the remote layer's."
                                         :epoch (drover-remote--peer-epoch peer)
                                         :rev (drover-remote--peer-rev peer)))
   (drover-remote--resume peer)
-  (drover-remote--reopen-mirrors peer))
+  (drover-remote--reopen-mirrors peer)
+  (drover-remote--oc-resume peer))
 
 (defun drover-remote--resume (peer)
   "Ask PEER again, connected anew, what a stream ending lost.
@@ -1354,6 +1360,8 @@ one line, once in `drover-error-interval' seconds."
 (defun drover-remote--detach (connection final)
   "Follow the end of CONNECTION's stream; FINAL when it does not come back."
   (drover-with-reporting "remote connection"
+    (drover-remote--oc-unrelay connection)
+    (drover-remote--oc-drop connection)
     (when-let* ((state (drover-remote--current)))
       (drover-remote--next-stream state connection)
       (drover-remote--unsubscribe state connection)
@@ -1542,7 +1550,8 @@ finds those."
       (drover-backend-changed backend))
      (t (dolist (key keys)
           (drover-backend-changed backend key))))
-    (drover-remote--seen-mirrors peer keys)))
+    (drover-remote--seen-mirrors peer keys)
+    (drover-remote--oc-archived peer keys)))
 
 (defun drover-remote--set-stale (peer heard)
   "Make PEER's sessions stale, last heard from at HEARD, or fresh for nil."
@@ -2486,10 +2495,62 @@ A buffer someone else shared is left as it is."
         (spyglass-share buffer :id id
                         :peers (lambda (connection) (and (drover-remote--share-viewer id connection) t))
                         :read-only (lambda (connection) (drover-remote--share-refuses-p id connection))
+                        :input #'drover-remote--share-input
                         :size-policy 'owner)
+        (when (with-current-buffer buffer (derived-mode-p 'comint-mode))
+          (drover-remote--shell-keys buffer))
         (unless (spyglass-share-viewers (spyglass-share-of buffer))
           (drover-remote--unshare-later state id))
         id))))
+
+(defconst drover-remote--shell-keys
+  '(("RET" . "RET") ("<return>" . "RET") ("M-RET" . "M-RET") ("M-<return>" . "M-RET"))
+  "Keys a peer's mirror of a shell sends, and the shell's keys they stand for.
+The shell's own command for each runs, as its owner's key would: RET
+submits through a front end's own command, such as agent-shell's
+`agent-shell-submit', which `comint-send-input' alone does not.  The
+arrows up and down recall the input history, as spyglass's comint
+input does: the owner's own history keys may be bound to anything else,
+as a configuration moving between links binds them.")
+
+(defun drover-remote--shell-keys (buffer)
+  "Let peers' mirrors of BUFFER, a shell, run its own commands for its keys.
+Its bindings of `drover-remote--shell-keys', as they are now, and the
+interrupt a mirror sends, interrupting its session as drover's interrupt
+does, without asking (`drover-remote--shell-interrupt'); see
+`spyglass-key-commands'."
+  (with-current-buffer buffer
+    (setq-local spyglass-key-commands
+                (cons (cons "C-c" #'drover-remote--shell-interrupt)
+                      (delq nil (mapcar (lambda (entry)
+                                          (let ((command (save-excursion
+                                                           (goto-char (point-max))
+                                                           (key-binding (kbd (cdr entry))))))
+                                            (and (commandp command) (symbolp command)
+                                                 (cons (car entry) command))))
+                                        drover-remote--shell-keys))))))
+
+(defun drover-remote--shell-interrupt ()
+  "Interrupt the session of the current buffer, a shell, for a peer's mirror.
+Through its backend, as drover's interrupt does, without asking; else
+through the shell's own command interrupting, comint's by default."
+  (let ((session (drover-buffer-session (current-buffer))))
+    (if (and session (drover-supports-p session :interrupt))
+        (drover--call-confirming session :interrupt #'ignore
+                                 (lambda (message)
+                                   (drover-message "Could not interrupt %s: %s"
+                                                   (drover-session-display-title session) message)))
+      (let ((command (key-binding (kbd "C-c C-c"))))
+        (if (commandp command)
+            (call-interactively command)
+          (comint-interrupt-subjob))))))
+
+(defun drover-remote--share-input (kind value)
+  "Apply a peer's input of KIND and VALUE in the current buffer, shared with it.
+As the buffer's input function, or spyglass's default, applies it, no
+window of this host's taken meanwhile."
+  (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+    (funcall (or spyglass-input-function #'spyglass-default-input) kind value)))
 
 (defun drover-remote--unshare-later (state id)
   "Unshare ID, a terminal STATE shares, once no peer mirrored it for a while.
@@ -2535,6 +2596,9 @@ more is unshared a while later, one a peer mirrors again stays."
         ('unshared
          (when (plist-get entry :timer)
            (cancel-timer (plist-get entry :timer)))
+         (when (buffer-live-p (plist-get entry :buffer))
+           (with-current-buffer (plist-get entry :buffer)
+             (kill-local-variable 'spyglass-key-commands)))
          (remhash id (drover-remote--state-shares state)))))))
 
 (defun drover-remote--unshare-all (&optional state)
@@ -2798,7 +2862,10 @@ received so far each time an answer of the owner's comes."
     (let ((access (plist-get message :access)))
       (setf (drover-remote--peer-granted peer)
             (and (member access '("read" "act" "full")) (intern access)))))
-   ((equal type "bye") (drover-remote--on-bye peer connection message))))
+   ((equal type "bye") (drover-remote--on-bye peer connection message))
+   ((equal type "ocd") (drover-remote--on-oc-data message))
+   ((equal type "oce") (drover-remote--on-oc-end message))
+   ((equal type "occ") (drover-remote--on-oc-cancel connection message))))
 
 (defun drover-remote--on-bye (peer connection message)
   "Take PEER's farewell MESSAGE on CONNECTION.
@@ -2844,6 +2911,8 @@ as an older drover's farewells do."
              (drover-remote--on-mirror state peer connection message reply)
            (funcall reply nil "this host's spyglass shares no terminal: update it")))
         ("requests" (drover-remote--on-requests peer key reply))
+        ("oc" (drover-remote--on-oc peer message reply))
+        ("ocs" (drover-remote--on-oc-stream peer connection message reply))
         ("recap"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -2906,10 +2975,11 @@ as an older drover's farewells do."
      :reports-changes t
      :open (lambda (session &optional _other-window)
              (drover-remote-open session))
-     ;; A mirror of its terminal, while one is open here.
+     ;; A mirror of its terminal, or its OpenCode buffer, while open here.
      :buffer (lambda (session)
                (when-let* ((peer (drover-remote--peer name)))
-                 (drover-remote--mirror-buffer peer (drover-session-id session))))
+                 (or (drover-remote--mirror-buffer peer (drover-session-id session))
+                     (drover-remote--oc-buffer name (drover-session-id session)))))
      :recap (lambda (session callback)
               (if-let* ((peer (drover-remote--peer name)))
                   (drover-remote--recap peer session callback)
@@ -2974,6 +3044,7 @@ EPHEMERAL non-nil for one accepted without configuration."
         (drover-remote--peer-rev peer) nil)
   (clrhash (drover-remote--peer-ops peer))
   (drover-remote--fail-outbox peer (format "%s closed: %s" (drover-remote--label peer) why))
+  (drover-remote--oc-close peer)
   (let ((keys (hash-table-keys (drover-remote--peer-records peer))))
     (clrhash (drover-remote--peer-records peer))
     (drover-remote--report peer keys)))
@@ -3468,15 +3539,14 @@ is not mirrored instead; shown anew, the note stays."
 
 (defun drover-remote--why-no-mirror (peer session)
   "Return why SESSION of PEER opens as its host tells it, not mirrored, or nil.
-A line: an OpenCode session, whose buffer shows its service's session
-and opens here as a full buffer once opencode.el talks to several
-services; a peer not connected, or running a drover or spyglass that
-shares no terminal; a session archived."
+A line: an OpenCode session that cannot open in a full buffer here (see
+`drover-remote--why-no-opencode'); a peer not connected, or running a
+drover or spyglass that shares no terminal; a session archived."
   (let ((label (drover-remote--label peer)))
     (cond
      ((eq (drover-session-origin session) 'opencode)
-      (format "An OpenCode session of %s: shown as %s tells it, until OpenCode's buffers open here"
-              label label))
+      (or (drover-remote--why-no-opencode peer)
+          (format "An OpenCode session of %s, which opens in an OpenCode buffer" label)))
      ((drover-session-archived-p session) "Archived: it runs no terminal")
      ((not (eq (drover-remote--peer-state peer) 'open))
       (format "%s is not connected: its terminal opens once it is" label))
@@ -3487,7 +3557,10 @@ shares no terminal; a session archived."
 
 (defun drover-remote-open (session)
   "Open SESSION, of another host: its terminal mirrored, else its view.
-The proxy's :open.  The owner shares its session's terminal or shell
+The proxy's :open.  An OpenCode session opens in a full opencode.el
+buffer, talking to its owner's service through the owner (see
+`drover-remote--open-opencode').  The owner shares its session's
+terminal or shell
 with this host, which mirrors it in a buffer taking input as the
 owner's access allows, sized by the window showing it while the owner
 shows it in none; a conversation without one, Claude Code's or
@@ -3498,13 +3571,22 @@ session running there."
   (let* ((peer (or (drover-remote--peer (drover-session-host session))
                    (user-error "No peer %s" (drover-session-host session))))
          (buffer (drover-remote--mirror-buffer peer (drover-session-id session))))
-    (if (and buffer (not (eq (spyglass-mirror-state buffer) 'closed)))
-        (progn (pop-to-buffer-same-window buffer)
-               (drover-remote--seen-here peer session)
-               buffer)
-      (if-let* ((why (drover-remote--why-no-mirror peer session)))
-          (drover-remote-show session nil why)
-        (drover-remote--open-mirror peer session buffer)))))
+    (if (and (eq (drover-session-origin session) 'opencode)
+             (or (drover-remote--oc-buffer (drover-remote--peer-name peer) (drover-session-id session))
+                 (not (drover-remote--why-no-opencode peer))))
+        (drover-remote--open-opencode peer session)
+      (drover-remote--open-other peer session buffer))))
+
+(defun drover-remote--open-other (peer session buffer)
+  "Open SESSION of PEER, not opened in opencode.el: mirrored, else its view.
+BUFFER is its mirror, if any.  See `drover-remote-open'."
+  (if (and buffer (not (eq (spyglass-mirror-state buffer) 'closed)))
+      (progn (pop-to-buffer-same-window buffer)
+             (drover-remote--seen-here peer session)
+             buffer)
+    (if-let* ((why (drover-remote--why-no-mirror peer session)))
+        (drover-remote-show session nil why)
+      (drover-remote--open-mirror peer session buffer))))
 
 (defun drover-remote--open-mirror (peer session buffer)
   "Ask PEER for SESSION's terminal and mirror it, in BUFFER if one closed.
@@ -3680,6 +3762,565 @@ For `drover-links-remote-function'."
       (user-error "%s does not run that conversation now" (drover-remote--label peer)))
      (t (drover-open session)))))
 
+;;;; OpenCode services of peers
+
+;; A peer's OpenCode session opens here as a full opencode.el buffer,
+;; talking to the peer's service through its drover: opencode.el's
+;; requests to the service registered under the peer's name go to the
+;; relay relay://NAME, which carries them on drover's channel to the
+;; owner, which performs them against its own service, with its own
+;; password, as the peer's access allows, and answers.  Its event
+;; stream goes the same way, its bytes relayed as the owner's service
+;; writes them.  So the password never leaves the owner, and the owner,
+;; the truth of its sessions, decides what a peer may do to them.
+
+(declare-function opencode-service-register "opencode-service" (name &rest arguments))
+(declare-function opencode-service-unregister "opencode-events" (service))
+(declare-function opencode-service-get "opencode-common" (name))
+(declare-function opencode-svc-closed "opencode-common" (service))
+(declare-function opencode-svc-name "opencode-common" (service))
+(declare-function opencode-current-service "opencode-common" ())
+(declare-function opencode-call-with-service "opencode-common" (service function &rest arguments))
+(declare-function opencode-session-open-by-id "opencode-session" (id &rest arguments))
+(declare-function opencode-events-reopen "opencode-events" ())
+(declare-function opencode-service-ensure "opencode-service" (callback &optional errback))
+(declare-function opencode-service-authorization "opencode-service" (connection))
+(declare-function opencode-transport-register-relay "opencode-transport" (name function))
+(declare-function opencode-transport-unregister-relay "opencode-transport" (name))
+(declare-function opencode-transport-relay-answer "opencode-transport" (exchange status body &optional headers))
+(declare-function opencode-transport-relay-chunk "opencode-transport" (exchange bytes))
+(declare-function opencode-transport-relay-end "opencode-transport" (exchange))
+(declare-function opencode-transport-relay-fail "opencode-transport" (exchange reason message &optional status body))
+(declare-function opencode-transport-exchange-filter "opencode-transport" (exchange))
+(declare-function opencode-transport-request "opencode-transport" (method url &rest arguments))
+(declare-function opencode-transport-cancel "opencode-transport" (exchange))
+(declare-function opencode-transport-failure-reason "opencode-transport" (failure))
+(declare-function opencode-transport-failure-status "opencode-transport" (failure))
+(declare-function opencode-transport-failure-body "opencode-transport" (failure))
+(declare-function opencode-transport-failure-describe "opencode-transport" (failure))
+(defvar opencode-session-status)
+(defvar opencode-state-updated-functions)
+
+(defcustom drover-remote-opencode-timeout 120
+  "Seconds a request to a peer's OpenCode service waits for its owner's answer."
+  :type 'number
+  :group 'drover-remote)
+
+(defconst drover-remote--opencode-headers '(:accept :content-type :x-opencode-directory)
+  "The headers of an OpenCode request a peer relays, as keywords.
+Never its credentials: the owner adds its own.")
+
+(defvar drover-remote--oc-streams (make-hash-table :test #'equal)
+  "Event streams of peers' OpenCode services relayed here, by identifier.
+Each is (PEER-NAME CONNECTION EXCHANGE), links (`drover-link') to the
+connection the stream was asked on and to opencode.el's exchange.")
+
+(defvar drover-remote--oc-buffers (make-hash-table :test #'equal)
+  "The OpenCode buffers of peers' sessions here, by (PEER-NAME . KEY).
+KEY is the owner's.")
+
+(defvar drover-remote--oc-relayed (make-hash-table :test #'eq :weakness 'key)
+  "The event streams this host relays to peers, by connection.
+Each a hash table of links (`drover-link') to the exchanges with this
+host's service, by the identifier the peer gave.")
+
+(defvar drover-remote--oc-serial 0
+  "The number of the last event stream relayed here.")
+
+(defun drover-remote--opencode-here-p ()
+  "Return non-nil when this host's opencode.el reaches services through relays."
+  (and (fboundp 'opencode-service-register) (fboundp 'opencode-transport-register-relay)
+       (fboundp 'opencode-call-with-service)))
+
+(defun drover-remote--serves-opencode-p ()
+  "Return non-nil when this host relays its OpenCode service to its peers.
+That is when opencode.el, loaded, reaches its service through sockets."
+  (and (featurep 'opencode-service) (fboundp 'opencode-transport-request)
+       (fboundp 'opencode-service-ensure)))
+
+(defun drover-remote--capabilities ()
+  "Return the capabilities this host tells its peers, as a vector of strings."
+  (vconcat (seq-remove (lambda (capability)
+                         (or (and (equal capability "mirror") (not (drover-remote--mirrors-p)))
+                             (and (equal capability "opencode") (not (drover-remote--serves-opencode-p)))))
+                       drover-remote-capabilities)))
+
+;;;;; Here, viewing a peer's sessions
+
+(defun drover-remote--oc-service (peer)
+  "Return PEER's OpenCode service in opencode.el, registering it when needed.
+It goes by PEER's name, its requests going through the relay of that
+name, which carries them to PEER."
+  (let* ((name (drover-remote--peer-name peer))
+         (label (drover-remote--label peer))
+         (service (opencode-service-get name)))
+    (opencode-transport-register-relay name (drover-remote--oc-relay name))
+    (if (and service (not (opencode-svc-closed service)))
+        service
+      (opencode-service-register
+       name :label label
+       :connect (lambda (callback errback)
+                  (let ((peer (drover-remote--peer name)))
+                    (if (and peer (eq (drover-remote--peer-state peer) 'open)
+                             (drover-remote--capable-p peer "opencode"))
+                        (funcall callback (list :url (concat "relay://" name) :id (concat "drover:" name)))
+                      (funcall errback (format "%s is not connected" label)))))))))
+
+(defun drover-remote--oc-relay (name)
+  "Return the relay carrying OpenCode requests to the peer NAME."
+  (lambda (exchange method path headers body)
+    (drover-with-reporting "remote OpenCode"
+      (drover-remote--oc-carry name exchange method path headers body))))
+
+(defun drover-remote--oc-fail-later (exchange reason message)
+  "Fail EXCHANGE for REASON with MESSAGE from a timer, after it is relayed."
+  (run-at-time 0 nil (lambda ()
+                       (drover-with-reporting "remote OpenCode"
+                         (opencode-transport-relay-fail exchange reason message)))))
+
+(defun drover-remote--oc-headers (headers)
+  "Return the HEADERS of an OpenCode request a peer relays, as a plist."
+  (let ((out nil))
+    (pcase-dolist (`(,name . ,value) headers)
+      (let ((key (intern (concat ":" (downcase name)))))
+        (when (and (memq key drover-remote--opencode-headers) (stringp value) (< (length value) 4096))
+          (setq out (plist-put out key value)))))
+    out))
+
+(defun drover-remote--oc-carry (name exchange method path headers body)
+  "Carry EXCHANGE to the peer NAME's service: METHOD on PATH with HEADERS and BODY.
+Return the function abandoning it, as relays do."
+  (let* ((peer (drover-remote--peer name))
+         (connection (and peer (drover-remote--peer-connection peer))))
+    (cond
+     ((not (and connection (eq (drover-remote--peer-state peer) 'open)))
+      (drover-remote--oc-fail-later exchange 'refused (format "%s is not connected" name))
+      nil)
+     ((not (drover-remote--capable-p peer "opencode"))
+      (drover-remote--oc-fail-later exchange 'refused
+                                    (format "%s runs an older drover, which relays no OpenCode service"
+                                            (drover-remote--label peer)))
+      nil)
+     ((opencode-transport-exchange-filter exchange)
+      (drover-remote--oc-open-stream peer connection exchange path))
+     (t
+      (drover-remote--oc-send peer connection exchange method path headers body)))))
+
+(defun drover-remote--oc-send (peer connection exchange method path headers body)
+  "Send PEER, on CONNECTION, EXCHANGE's request.
+It is METHOD on PATH with HEADERS and BODY; its answer settles
+EXCHANGE.  A request whose stream ends before its answer fails, retried
+by opencode.el only when it asked for something: the owner may have
+performed one that changes something."
+  (let ((label (drover-remote--label peer))
+        (asks (memq method '(get head))))
+    (drover-remote--stat peer :oc-requests)
+    (spyglass-channel-request
+     connection drover-remote-channel
+     (list :op "oc" :m (symbol-name method) :p path
+           :h (or (drover-remote--oc-headers headers) (make-hash-table))
+           :b (if body (decode-coding-string body 'utf-8) :false))
+     (lambda (reply error)
+       (drover-with-reporting "remote OpenCode"
+         (cond
+          ((null error)
+           (let ((status (plist-get reply :st))
+                 (text (plist-get reply :b)))
+             (if (integerp status)
+                 (opencode-transport-relay-answer exchange status (if (stringp text) text ""))
+               (opencode-transport-relay-fail exchange 'protocol (format "%s answered nothing" label)))))
+          ((string-match-p "ended" error)
+           (opencode-transport-relay-fail exchange (if asks 'closed 'truncated)
+                                          (format "the link to %s ended%s" label
+                                                  (if asks "" "; it may have performed it"))))
+          ((string-match-p "in time" error)
+           (opencode-transport-relay-fail exchange 'timeout (format "%s did not answer in time" label)))
+          (t (opencode-transport-relay-fail exchange 'refused (format "%s: %s" label error))))))
+     drover-remote-opencode-timeout)
+    nil))
+
+(defun drover-remote--oc-open-stream (peer connection exchange path)
+  "Ask PEER, on CONNECTION, for the event stream EXCHANGE opens at PATH.
+Return the function closing it."
+  (let* ((name (drover-remote--peer-name peer))
+         (label (drover-remote--label peer))
+         (id (format "%s-%d" (or (and drover-remote--state (drover-remote--state-epoch drover-remote--state))
+                                 "here")
+                     (cl-incf drover-remote--oc-serial)))
+         (link (drover-link connection)))
+    (puthash id (list name link (drover-link exchange)) drover-remote--oc-streams)
+    (drover-remote--stat peer :oc-streams)
+    (spyglass-channel-request
+     connection drover-remote-channel (list :op "ocs" :id id :p path)
+     (lambda (reply error)
+       (drover-with-reporting "remote OpenCode"
+         (let ((status (plist-get reply :st)))
+           (when (or error (not (eql status 200)))
+             (when (gethash id drover-remote--oc-streams)
+               (remhash id drover-remote--oc-streams)
+               (if (integerp status)
+                   (opencode-transport-relay-answer exchange status (or (plist-get reply :b) ""))
+                 (opencode-transport-relay-fail exchange 'refused (format "%s: %s" label error))))))))
+     drover-remote-request-timeout)
+    (lambda ()
+      (drover-with-reporting "remote OpenCode"
+        (when (gethash id drover-remote--oc-streams)
+          (remhash id drover-remote--oc-streams)
+          (let ((connection (drover-linked link)))
+            (when (spyglass-connection-live-p connection)
+              (drover-remote--send connection (list :t "occ" :id id)))))))))
+
+(defun drover-remote--on-oc-data (message)
+  "Give the stream MESSAGE names the bytes its owner's service wrote."
+  (when-let* ((id (plist-get message :id))
+              (entry (and (stringp id) (gethash id drover-remote--oc-streams)))
+              (text (plist-get message :d))
+              ((stringp text)))
+    (opencode-transport-relay-chunk (drover-linked (nth 2 entry)) (encode-coding-string text 'utf-8 t))))
+
+(defun drover-remote--on-oc-end (message)
+  "End the stream MESSAGE names, as its owner's service ended it or refused it."
+  (when-let* ((id (plist-get message :id))
+              (entry (and (stringp id) (gethash id drover-remote--oc-streams))))
+    (remhash id drover-remote--oc-streams)
+    (let ((why (plist-get message :err)))
+      (if (stringp why)
+          (opencode-transport-relay-fail (drover-linked (nth 2 entry)) 'closed (drover-bound-line why))
+        (opencode-transport-relay-end (drover-linked (nth 2 entry)))))))
+
+(defun drover-remote--oc-drop (connection)
+  "End the streams of peers' OpenCode services asked on CONNECTION.
+Its stream ended: opencode.el opens them anew, through the connection
+kept."
+  (let ((ended nil))
+    (maphash (lambda (id entry)
+               (when (eq (drover-linked (nth 1 entry)) connection)
+                 (push (cons id entry) ended)))
+             drover-remote--oc-streams)
+    (pcase-dolist (`(,id ,_name ,_link ,exchange) ended)
+      (remhash id drover-remote--oc-streams)
+      (opencode-transport-relay-fail (drover-linked exchange) 'closed "the link to its host ended"))))
+
+(defun drover-remote--oc-resume (peer)
+  "Have PEER's OpenCode service, if registered here, reopen its stream at once.
+PEER is connected anew: opencode.el would wait for its backoff."
+  (when-let* (((drover-remote--opencode-here-p))
+              (service (opencode-service-get (drover-remote--peer-name peer)))
+              ((not (opencode-svc-closed service))))
+    (run-at-time 0 nil (lambda ()
+                         (drover-with-reporting "remote OpenCode"
+                           (opencode-call-with-service service #'opencode-events-reopen))))))
+
+(defun drover-remote--oc-close (peer)
+  "Close PEER's OpenCode service here, PEER gone for good.
+Its buffers stay, saying so."
+  (when-let* (((drover-remote--opencode-here-p))
+              (service (opencode-service-get (drover-remote--peer-name peer))))
+    (opencode-service-unregister service)
+    (opencode-transport-unregister-relay (drover-remote--peer-name peer))))
+
+(defun drover-remote--oc-buffer (name key)
+  "Return the live OpenCode buffer of the session KEY of the peer NAME, or nil."
+  (let ((buffer (gethash (cons name key) drover-remote--oc-buffers)))
+    (if (buffer-live-p buffer)
+        buffer
+      (remhash (cons name key) drover-remote--oc-buffers)
+      nil)))
+
+(defun drover-remote--why-no-opencode (peer)
+  "Return why PEER's OpenCode sessions open as their host tells them, or nil."
+  (let ((label (drover-remote--label peer)))
+    (cond
+     ((not (drover-remote--opencode-here-p))
+      "This host's opencode.el talks to one service only: update it")
+     ((not (eq (drover-remote--peer-state peer) 'open))
+      (format "%s is not connected: its OpenCode session opens once it is" label))
+     ((not (drover-remote--capable-p peer "opencode"))
+      (format "%s runs an older drover, which relays no OpenCode service: update it there" label)))))
+
+(defun drover-remote--open-opencode (peer session)
+  "Open SESSION, an OpenCode session of PEER, in a full opencode.el buffer.
+The buffer talks to PEER's service through PEER, which performs what
+it asks as its access allows.  Return the buffer when one is open
+already; otherwise it shows once the session's info arrives."
+  (let* ((name (drover-remote--peer-name peer))
+         (key (drover-session-id session))
+         (existing (drover-remote--oc-buffer name key)))
+    (if existing
+        (progn (pop-to-buffer-same-window existing) existing)
+      (let ((service (drover-remote--oc-service peer))
+            (window (selected-window))
+            (title (drover-bound-line (drover-session-display-title session) 60)))
+        (drover-message "Opening %s's session %s..." (drover-remote--label peer) title)
+        (opencode-call-with-service
+         service #'opencode-session-open-by-id (cdr key)
+         :no-display t
+         :callback (lambda (_info)
+                     (drover-with-reporting "remote OpenCode"
+                       (let ((buffer (current-buffer)))
+                         (drover-remote--oc-adopt name key buffer)
+                         (drover-message "")
+                         (if (window-live-p window)
+                             (with-selected-window window (pop-to-buffer-same-window buffer))
+                           (pop-to-buffer-same-window buffer)))))
+         :else (lambda (error)
+                 (drover-warn "%s's session %s did not open: %s" (drover-remote--label peer) title
+                              (drover-bound-line (format "%s" (if (fboundp 'opencode-error-describe)
+                                                                  (opencode-error-describe error)
+                                                                error))))))
+        nil))))
+
+(declare-function opencode-error-describe "opencode-http" (error))
+
+(defun drover-remote--oc-adopt (name key buffer)
+  "Make BUFFER, opencode.el's, the buffer of the session KEY of the peer NAME.
+drover's keys act there on that session through NAME, as in its mirrors."
+  (with-current-buffer buffer
+    (setq-local drover-remote--shown (cons name key))
+    (setq-local drover-session-at-point-function #'drover-remote--shown-session)
+    (add-hook 'kill-buffer-hook #'drover-remote--oc-killed nil t))
+  (puthash (cons name key) buffer drover-remote--oc-buffers)
+  (add-hook 'opencode-state-updated-functions #'drover-remote--oc-updated)
+  (when-let* ((peer (drover-remote--peer name)))
+    (drover-remote--event peer 'opencode "opened the OpenCode session %s"
+                          (drover-bound-line (format "%s" (cdr key)) 40))
+    (drover-backend-changed (drover-remote--peer-backend peer) key)))
+
+(defun drover-remote--oc-killed ()
+  "Forget the OpenCode buffer being killed, of a peer's session.
+For `kill-buffer-hook'."
+  (drover-with-reporting "remote OpenCode"
+    (when-let* ((shown drover-remote--shown))
+      (when (eq (gethash shown drover-remote--oc-buffers) (current-buffer))
+        (remhash shown drover-remote--oc-buffers)
+        (when-let* ((peer (drover-remote--peer (car shown))))
+          (drover-backend-changed (drover-remote--peer-backend peer) (cdr shown)))))))
+
+(declare-function opencode-session-archived-p "opencode-session" (&optional id))
+
+(defun drover-remote--oc-archived (peer keys)
+  "Close the OpenCode buffers of PEER's sessions KEYS its owner archived.
+See `drover-remote--oc-close-archived'."
+  (let ((name (drover-remote--peer-name peer)))
+    (dolist (key keys)
+      (when-let* ((buffer (drover-remote--oc-buffer name key)))
+        (drover-remote--oc-close-archived peer key buffer)))))
+
+(defun drover-remote--oc-close-archived (peer key buffer)
+  "Close BUFFER, of PEER's OpenCode session KEY, once its owner archived it.
+The owner's record says archived, or is gone, its owner's drover listing
+archived sessions apart, while the service says archived too.  As
+archiving does here, a buffer holding input or running a turn stays."
+  (let ((record (drover-remote--peer-session peer key)))
+    (when (and (buffer-live-p buffer)
+               (if record
+                   (drover-session-archived-p record)
+                 (with-current-buffer buffer (opencode-session-archived-p))))
+      (with-current-buffer buffer
+        (let ((process (get-buffer-process buffer)))
+          (when (and (not (eq opencode-session-status 'busy))
+                     process
+                     (= (marker-position (process-mark process)) (point-max)))
+            (drover-remote--event peer 'opencode "closed the OpenCode session %s: archived there"
+                                  (drover-bound-line (format "%s" (cdr key)) 40))
+            (kill-buffer buffer)))))))
+
+(defun drover-remote--oc-updated (id)
+  "Close the buffer of the peer's OpenCode session ID once archived there.
+For `opencode-state-updated-functions', which runs for that peer's
+service: the service may tell after the owner's record does."
+  (drover-with-reporting "remote OpenCode"
+    (when-let* (((and id (fboundp 'opencode-service-remote-p) (opencode-service-remote-p)))
+                (name (opencode-svc-name (opencode-current-service)))
+                (peer (drover-remote--peer name)))
+      (let ((found nil))
+        (maphash (lambda (shown buffer)
+                   (when (and (equal (car shown) name) (equal (cdr-safe (cdr shown)) id))
+                     (push (cons (cdr shown) buffer) found)))
+                 drover-remote--oc-buffers)
+        (pcase-dolist (`(,key . ,buffer) found)
+          (drover-remote--oc-close-archived peer key buffer))))))
+
+;;;;; There, relaying this host's service
+
+(defun drover-remote--oc-refusal (access method path)
+  "Return why a peer of ACCESS may not send METHOD on PATH, a line, or nil.
+`read' reads; `act' does everything but deleting a session or a
+project; `full' everything.  Paths are the service's API's."
+  (cond
+   ((not (and (stringp path) (< (length path) 8192)
+              (string-match-p "\\`/api/[^[:space:]]*\\'" path)))
+    "not a path of the OpenCode API")
+   ((not (memq method '(get head post put patch delete)))
+    "not a method of the OpenCode API")
+   ((memq method '(get head)) nil)
+   ((eq access 'read) "this host grants it read access")
+   ((and (eq access 'act) (eq method 'delete)
+         (string-match-p "\\`/api/\\(?:session\\|project\\)/[^/?]+/?\\(?:\\?.*\\)?\\'" path))
+    "this host grants it act access, which deletes nothing")
+   ((memq access '(act full)) nil)
+   (t "not allowed")))
+
+(defun drover-remote--oc-refuse (reply why)
+  "Answer through REPLY that the request is refused, WHY: a 403, as services do."
+  (funcall reply (list :st 403 :b (json-serialize (list :message why :_tag "Forbidden")))))
+
+(defun drover-remote--oc-service-then (reply function)
+  "Call FUNCTION with this host's OpenCode connection, else answer REPLY a 503.
+The local service, whatever the buffers here."
+  (opencode-call-with-service
+   nil #'opencode-service-ensure
+   (lambda (connection)
+     (drover-with-reporting "remote OpenCode"
+       (funcall function connection)))
+   (lambda (why)
+     (drover-with-reporting "remote OpenCode"
+       (funcall reply (list :st 503 :b (json-serialize (list :message (drover-bound-line why)))))))))
+
+(defun drover-remote--oc-request-headers (connection message)
+  "Return the headers of the request MESSAGE asks this host's service.
+CONNECTION is that service's: its credentials, and those of MESSAGE's
+headers a peer may send."
+  (let ((headers (list (cons "Authorization" (opencode-service-authorization connection))))
+        (asked (plist-get message :h)))
+    (dolist (key drover-remote--opencode-headers)
+      (let ((value (and (consp asked) (plist-get asked key))))
+        (when (and (stringp value) (< (length value) 4096) (not (string-match-p "[\r\n]" value)))
+          (push (cons (substring (symbol-name key) 1) value) headers))))
+    headers))
+
+(defun drover-remote--on-oc (peer message reply)
+  "Perform the OpenCode request MESSAGE of PEER against this host's service.
+REPLY answers with its status and body; a refusal of PEER's access is
+a 403."
+  (let* ((method (and (stringp (plist-get message :m))
+                      (car (member (intern-soft (plist-get message :m)) '(get head post put patch delete)))))
+         (path (plist-get message :p))
+         (body (plist-get message :b))
+         (why (drover-remote--oc-refusal (drover-remote--access peer) method path)))
+    (drover-remote--stat peer :oc-served)
+    (cond
+     ((not (drover-remote--serves-opencode-p))
+      (funcall reply nil "this host relays no OpenCode service"))
+     (why
+      (drover-remote--event peer 'refused "OpenCode %s %s: %s" (or method "?")
+                            (drover-bound-line (format "%s" path) 80) why)
+      (drover-remote--oc-refuse reply why))
+     ((and body (not (stringp body)) (not (eq body :false)))
+      (funcall reply nil "malformed body"))
+     (t
+      (drover-remote--oc-service-then
+       reply
+       (lambda (connection)
+         (opencode-transport-request
+          method (concat (plist-get connection :url) path)
+          :headers (drover-remote--oc-request-headers connection message)
+          :body (and (stringp body) (encode-coding-string body 'utf-8))
+          :timeout drover-remote-opencode-timeout
+          :then (lambda (text)
+                  (drover-with-reporting "remote OpenCode"
+                    (funcall reply (list :st 200 :b (if (stringp text) text "")))))
+          :else (lambda (failure)
+                  (drover-with-reporting "remote OpenCode"
+                    (if (eq (opencode-transport-failure-reason failure) 'http)
+                        (funcall reply (list :st (opencode-transport-failure-status failure)
+                                             :b (or (opencode-transport-failure-body failure) "")))
+                      (funcall reply nil (drover-bound-line
+                                          (opencode-transport-failure-describe failure)))))))))))))
+
+(defconst drover-remote--oc-piece 65536
+  "Bytes of an event stream at most in one message to a peer.
+A large event, a long tool output, goes in pieces, so that neither end
+parses one message of megabytes at once.")
+
+(defun drover-remote--oc-cut (bytes)
+  "Return how many of BYTES, UTF-8, to send now, whole characters, or 0.
+All that ends with a line when it is short; otherwise a piece of
+`drover-remote--oc-piece' bytes at most, never cutting a character."
+  (let ((length (length bytes)))
+    (if (<= length drover-remote--oc-piece)
+        (let ((end (cl-position ?\n bytes :from-end t)))
+          (if end (1+ end) 0))
+      (let ((cut drover-remote--oc-piece))
+        ;; Back over the continuation bytes of a character, 10xxxxxx.
+        (while (and (> cut 0) (= (logand (aref bytes cut) #xC0) #x80))
+          (setq cut (1- cut)))
+        cut))))
+
+(defun drover-remote--oc-flush (connection id pending)
+  "Send CONNECTION's peer the bytes of the stream ID that PENDING holds, a cons.
+In pieces of whole characters: a piece ends with a line, or is a piece
+of a long one."
+  (let ((cut nil))
+    (while (and (car pending) (> (setq cut (drover-remote--oc-cut (car pending))) 0))
+      (let ((bytes (car pending)))
+        (setcar pending (substring bytes cut))
+        (drover-remote--send connection (list :t "ocd" :id id
+                                              :d (decode-coding-string (substring bytes 0 cut) 'utf-8)))))))
+
+(defun drover-remote--on-oc-stream (peer connection message reply)
+  "Relay to PEER, on CONNECTION, the event stream of this host's service.
+MESSAGE asks for it; REPLY answers at once, the stream's bytes follow,
+then its end."
+  (let ((id (plist-get message :id))
+        (path (plist-get message :p)))
+    (cond
+     ((not (drover-remote--serves-opencode-p))
+      (funcall reply nil "this host relays no OpenCode service"))
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "malformed stream"))
+     ((not (equal path "/api/event"))
+      (drover-remote--oc-refuse reply "only the event stream streams"))
+     (t
+      (drover-remote--stat peer :oc-streams-served)
+      (drover-remote--oc-service-then
+       reply
+       (lambda (service)
+         (let* ((link (drover-link connection))
+                (pending (list nil))
+                (table (or (gethash connection drover-remote--oc-relayed)
+                           (puthash connection (make-hash-table :test #'equal) drover-remote--oc-relayed))))
+           (cl-flet ((ended (why)
+                       (drover-with-reporting "remote OpenCode"
+                         (let ((connection (drover-linked link)))
+                           (when-let* ((table (gethash connection drover-remote--oc-relayed)))
+                             (remhash id table))
+                           (when (spyglass-connection-live-p connection)
+                             (drover-remote--oc-flush connection id pending)
+                             (drover-remote--send connection (append (list :t "oce" :id id)
+                                                                     (and why (list :err why)))))))))
+             (puthash id
+                      (drover-link
+                       (opencode-transport-request
+                       'get (concat (plist-get service :url) path)
+                       :headers (list (cons "Authorization" (opencode-service-authorization service))
+                                      (cons "Accept" "text/event-stream"))
+                       :filter (lambda (_exchange bytes)
+                                 (drover-with-reporting "remote OpenCode"
+                                   (let ((connection (drover-linked link)))
+                                     (setcar pending (concat (car pending) bytes))
+                                     (when (spyglass-connection-live-p connection)
+                                       (drover-remote--oc-flush connection id pending)))))
+                       :then (lambda (_) (ended nil))
+                       :else (lambda (failure)
+                               (ended (drover-bound-line (opencode-transport-failure-describe failure))))))
+                      table)
+             (funcall reply (list :st 200))))))))))
+
+(defun drover-remote--on-oc-cancel (connection message)
+  "Close the stream of this host's service MESSAGE names, CONNECTION's peer gone."
+  (when-let* ((table (gethash connection drover-remote--oc-relayed))
+              (id (plist-get message :id))
+              (exchange (and (stringp id) (gethash id table))))
+    (remhash id table)
+    (opencode-transport-cancel (drover-linked exchange))))
+
+(defun drover-remote--oc-unrelay (connection)
+  "Close the streams of this host's service relayed on CONNECTION, which ended."
+  (when-let* ((table (gethash connection drover-remote--oc-relayed)))
+    (remhash connection drover-remote--oc-relayed)
+    (maphash (lambda (_id exchange) (opencode-transport-cancel (drover-linked exchange))) table)))
+
 ;;;; The mode
 
 (defun drover-remote--start ()
@@ -3748,6 +4389,9 @@ starts again at once: its peers keep this host's sessions meanwhile."
                (copy-hash-table (drover-remote--state-subs state)))
       (when (drover-remote--state-started-server state)
         (spyglass-server-stop))))
+  (dolist (connection (hash-table-keys drover-remote--oc-relayed))
+    (drover-remote--oc-unrelay connection))
+  (remove-hook 'opencode-state-updated-functions #'drover-remote--oc-updated)
   (when (fboundp 'spyglass-unregister-channel)
     (spyglass-unregister-channel drover-remote-channel))
   (remove-hook 'drover-changed-hook #'drover-remote--owner-changed)

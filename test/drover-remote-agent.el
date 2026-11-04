@@ -37,6 +37,10 @@
 ;; terminals and shells are; opening a session without one starts one,
 ;; as a front end resuming a conversation would, displayed as front ends
 ;; display them.  DROVER_AGENT_UNSHARE is `drover-remote-unshare-delay'.
+;; With DROVER_AGENT_OPENCODE set, it runs a fake OpenCode service
+;; (test/drover-fake-opencode.el), which opencode.el finds as its
+;; service, and a backend `opencode' of its sessions, which drover's
+;; remote layer relays to peers.
 ;; It says READY on
 ;; standard error once it listens, kills itself past 2 GB of resident
 ;; memory, and after ten minutes without a command.  It loads neither
@@ -49,6 +53,19 @@
 (require 'drover-remote)
 (require 'spyglass)
 (require 'comint)
+
+(defvar drover-fake-opencode--sessions)
+(defvar drover-fake-opencode--order)
+(defvar drover-fake-opencode--streams)
+(defvar drover-fake-opencode--password)
+(defvar drover-fake-opencode-directory)
+(defvar opencode-service-registration-file)
+(declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
+(declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
+(declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
+(declare-function drover-fake-opencode-requests "drover-fake-opencode" (&optional method))
+(declare-function drover-fake-opencode-port "drover-fake-opencode" ())
+(declare-function drover-fake-opencode-archive "drover-fake-opencode" (id))
 
 (defvar drover-remote-agent--sessions (make-hash-table :test #'equal)
   "The fake backend's sessions, by identifier.")
@@ -120,15 +137,55 @@ It notes the call, changes the session as ACTION would, and confirms."
   "Tell the driver FORMAT-STRING with ARGS, on standard error."
   (message "DROVER-AGENT %s" (apply #'format format-string args)))
 
+(defvar-local drover-remote-agent--submitted nil
+  "What the stand-in shell of a fake session submitted, newest first.")
+
+(defun drover-remote-agent--shell-submit ()
+  "Submit the input of the stand-in shell, as agent-shell's submit does."
+  (interactive)
+  (goto-char (point-max))
+  (let ((mark (process-mark (get-buffer-process (current-buffer)))))
+    (push (buffer-substring-no-properties mark (point-max)) drover-remote-agent--submitted)
+    (insert "\n")
+    (set-marker mark (point-max))))
+
+(defun drover-remote-agent--shell-interrupt ()
+  "Interrupt the stand-in shell, asking first as agent-shell does."
+  (interactive)
+  (when (y-or-n-p "Interrupt? ")
+    (push "INTERRUPTED" drover-remote-agent--submitted)))
+
+(defvar-keymap drover-remote-agent--shell-mode-map
+  :parent comint-mode-map
+  "<remap> <comint-send-input>" #'drover-remote-agent--shell-submit
+  "C-c C-c" #'drover-remote-agent--shell-interrupt
+  "M-RET" #'drover-remote-agent--shell-submit)
+
+(define-derived-mode drover-remote-agent--shell-mode comint-mode "Stand-in agent-shell"
+  "A shell submitting as agent-shell does, through a command of its own.
+`comint-send-input' alone only commits the line, as shell-maker's
+`comint-input-sender' only keeps the input: nothing is submitted."
+  (setq-local comint-input-sender (lambda (_process _input))))
+
 (defun drover-remote-agent--terminal (id kind)
-  "Start the terminal of fake session ID, of KIND, \"pty\" or \"comint\", and return it.
-A pty runs `cat', sized by viewers as front ends' terminals are; where
-processes run through pipes, as on Windows, `cat' or, without it, a
-buffer echoing what is typed."
+  "Start the terminal of fake session ID, of KIND, and return it.
+KIND \"pty\" runs `cat' in a pty, sized by viewers as front ends'
+terminals are; where processes run through pipes, as on Windows, `cat'
+or, without it, a buffer echoing what is typed.  \"comint\" is a comint
+buffer running `cat'; \"agent-shell\" one submitting and interrupting
+through commands of its own, as agent-shell does."
   (let ((buffer (generate-new-buffer (format "*fake terminal %s*" id))))
     (with-current-buffer buffer
       (setq default-directory temporary-file-directory)
       (pcase kind
+        ("agent-shell"
+         (make-comint-in-buffer (format "fake-agent-shell-%s" id) buffer "cat")
+         (drover-remote-agent--shell-mode)
+         (insert "Agent> ")
+         (set-marker (process-mark (get-buffer-process buffer)) (point-max))
+         (let ((session-id id))
+           (setq-local drover-session-at-point-function
+                       (lambda () (gethash session-id drover-remote-agent--sessions)))))
         ("comint"
          (if (executable-find "cat")
              (make-comint-in-buffer (format "fake-shell-%s" id) buffer "cat")
@@ -250,6 +307,29 @@ whose newlines are CRLF on Windows."
     (setq drover-remote-agent--order (delete id drover-remote-agent--order)))
   (drover-backend-changed 'fake id))
 
+(defvar drover-remote-agent--oc-archived (make-hash-table :test #'equal)
+  "When the fake OpenCode service's sessions archived were, by identifier.")
+
+(defun drover-remote-agent--opencode-session (id)
+  "Return the record of the fake OpenCode service's session ID, or nil."
+  (when-let* ((info (gethash id drover-fake-opencode--sessions)))
+    (drover-session-create :backend 'opencode :id id :title (alist-get 'title info)
+                           :directory drover-fake-opencode-directory :status 'idle
+                           :engine 'opencode :engine-id id :agent "build"
+                           :archived (gethash id drover-remote-agent--oc-archived)
+                           :updated (float-time) :created (float-time))))
+
+(defun drover-remote-agent--opencode ()
+  "Start the fake OpenCode service, and the backend of its sessions."
+  (require 'drover-fake-opencode)
+  (require 'opencode-service)
+  (setq opencode-service-registration-file
+        (drover-fake-opencode-start (or (getenv "DROVER_AGENT_DIR") default-directory)))
+  (drover-register-backend
+   'opencode :label "OpenCode"
+   :sessions (lambda () (delq nil (mapcar #'drover-remote-agent--opencode-session drover-fake-opencode--order)))
+   :session #'drover-remote-agent--opencode-session))
+
 (defun drover-remote-agent--json (value)
   "Return VALUE, a plist parsed from JSON, with false as nil."
   (cl-loop for (k v) on value by #'cddr nconc (list k (if (eq v :false) nil v))))
@@ -321,6 +401,42 @@ whose newlines are CRLF on Windows."
        (funcall reply (list :ok t)))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("oc-add"
+       ;; Sessions of the fake OpenCode service, as (ID TITLE).
+       (seq-doseq (pair (plist-get args :sessions))
+         (drover-fake-opencode-add (aref pair 0) (aref pair 1))
+         (drover-backend-changed 'opencode (aref pair 0)))
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
+      ("oc-turn"
+       ;; A turn run by another client of the service, DELAY seconds
+       ;; later; with SIZE, its prompt is TEXT and SIZE characters more,
+       ;; as a long tool output streams.
+       (let ((id (plist-get args :id))
+             (text (concat (plist-get args :text)
+                           (and (plist-get args :size)
+                                (concat " " (make-string (plist-get args :size) ?x) " "
+                                        (plist-get args :text) "-END")))))
+         (funcall reply (list :ok t))
+         (run-at-time (or (plist-get args :delay) 0) nil
+                      (lambda () (drover-fake-opencode-turn id text)))))
+      ("oc-archive"
+       (puthash (plist-get args :id) (float-time) drover-remote-agent--oc-archived)
+       (drover-fake-opencode-archive (plist-get args :id))
+       (drover-backend-changed 'opencode (plist-get args :id))
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
+      ("oc-requests"
+       ;; What reached the service, oldest first, as [METHOD PATH BODY].
+       (funcall reply (list :requests (vconcat (mapcar (lambda (request)
+                                                         (vector (nth 0 request) (nth 1 request)
+                                                                 (or (nth 2 request) "")))
+                                                       (drover-fake-opencode-requests
+                                                        (plist-get args :method)))))))
+      ("oc-streams"
+       (funcall reply (list :streams (length (seq-filter #'process-live-p drover-fake-opencode--streams))
+                            :port (drover-fake-opencode-port)
+                            :password drover-fake-opencode--password)))
       ("hold"
        (setq drover-remote-agent--hold (list 'held))
        (funcall reply (list :ok t)))
@@ -463,6 +579,10 @@ whose newlines are CRLF on Windows."
                                     (buffer-substring-no-properties (max (point-min) (- (point-max) 2000))
                                                                     (point-max)))
                                   "")
+                        :submitted (if (buffer-live-p buffer)
+                                       (vconcat (reverse (buffer-local-value 'drover-remote-agent--submitted buffer)))
+                                     [])
+                        :point (if (buffer-live-p buffer) (with-current-buffer buffer (point)) 0)
                         :digest (if (buffer-live-p buffer)
                                     (drover-remote-agent--digest buffer)
                                   :false)
@@ -521,6 +641,8 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (add-hook 'spyglass-error-functions
               (lambda (_connection message) (drover-remote-agent--say "spyglass: %s" message)))
     (drover-remote-agent--register)
+    (when (getenv "DROVER_AGENT_OPENCODE")
+      (drover-remote-agent--opencode))
     (spyglass-register-channel "drover-test" #'ignore :request #'drover-remote-agent--command)
     (drover-remote-mode 1)
     (drover-remote-agent--say "READY %s %s" drover-host spyglass-registration-file)

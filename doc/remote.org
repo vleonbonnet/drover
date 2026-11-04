@@ -1,13 +1,13 @@
 #+TITLE: drover across hosts: design
 #+OPTIONS: toc:nil
 
-A design, accepted, its first three milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]] and [[*The third milestone, as built][after that]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
+A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][last]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
 
 * What was decided
 
 - Each session has a host; the owner host is the truth of its sessions: status, seen, archive, scheduled prompts.  Peers mirror; every change goes to the owner.
 - Each host shares only the sessions it owns: nothing learnt from a peer is passed on, so two hosts connected to each other never loop nor duplicate.
-- Remote OpenCode sessions open as full local buffers: opencode.el talks to the remote service through a tunnel, and so supports several services.
+- Remote OpenCode sessions open as full local buffers: opencode.el talks to the remote service through its owner's drover, which relays its requests and event stream (a tunnel at first, see [[*The fourth milestone, as built][the fourth milestone]]), and so supports several services.
 - Remote terminals and shells (Claude Code in claude-code-ide on Ghostel, Eat or vterm; agent-shell) open as spyglass mirrors.
 - A remote session can be cloned or forked here.
 - View settings (grouping, filter, collapsed groups, subagents) stay each machine's own.
@@ -283,8 +283,8 @@ Each is useful alone, and lands with its tests, =make compile=, =make lint= and 
 | 1 | Remote sessions listed (built) | =drover-remote.el=: hosts and peers, dialing and accepting, the checks of each direction, one channel per pair, snapshot, revisions and resynchronization, proxies, the host slot, column, group and filter, stale rows, recaps, previews, older and archived sessions |
 | 2 | Actions (built)                | every action of the table, idempotent; links with hosts opened; scheduled prompts sent to their owner, the owners' queues listed                                                                                                                                       |
 | 3 | Terminals and shells (built)   | mirrors opened from drover, sharing on the owner, input, sizes, parking, mirrors as session buffers; OpenCode through mirrors meanwhile                                                                                                                                |
-| 4 | opencode.el's services         | in opencode.el, each step keeping the local service as today: (a) the service object and requests; (b) a stream per service; (c) a registry per service with its policy; (d) catalogs and directories per service; (e) buffers per service, files off for remote ones  |
-| 5 | Remote OpenCode buffers        | forwards both ways, =svc=, services registered from peers, full buffers mapped to remote records, the owner's Emacs down                                                                                                                                               |
+| 4 | opencode.el's services (built) | in opencode.el, each step keeping the local service as today: (a) the service object and requests; (b) a stream per service; (c) a registry per service with its policy; (d) catalogs and directories per service; (e) buffers per service, files off for remote ones  |
+| 5 | Remote OpenCode buffers (built, with 4) | the owner relaying its service instead of forwards and =svc=, services registered from peers, full buffers mapped to remote records; not the owner's Emacs down (see the fourth milestone)                                                                    |
 | 6 | Clones                         | OpenCode, Claude Code and Codex conversations cloned here, directories mapped                                                                                                                                                                                          |
 | 7 | New sessions elsewhere         | the prompt's targets on peers: their engines, models and defaults over the protocol, =create=                                                                                                                                                                          |
 | 8 | The gateway                    | a first gateway and a phone client reading sessions and needing-you notifications                                                                                                                                                                                      |
@@ -445,6 +445,24 @@ A mirror is a session buffer: =drover-session-at-point-function= gives the peer'
 
 OpenCode sessions keep their view.  Their buffers show a service's session through opencode.el's own interface (pickers, folding, the prompt's completions), which a mirror sending keys would serve badly, and milestones 4 and 5 open them here as full buffers through the service; mirroring them meanwhile, as the plan had it, would have been work thrown away.
 
+** Points and keys, after the first live use
+
+The first live mirror, of an agent-shell of Core's, showed two faults.  Its cursor lagged behind what was typed: spyglass inserted a viewer's text at the end of the shell with the owner's point kept, and the point of the window showing it there, a marker staying before text inserted at it, stayed before the text, which mirrors showed as the cursor.  And =RET= committed the line with a newline, sending nothing: spyglass ran =comint-send-input=, which in agent-shell only records the input (shell-maker sets =comint-input-sender= so), its submit being =agent-shell-submit=, bound by remapping =comint-send-input=; drover was to set =spyglass-submit-function= in the shells it shares, and did not.  Core's buffer showed it: =Claude> confirmed it works= followed by a newline, the process mark past it.
+
+The model, now, in spyglass and so for every front end:
+
+| What                      | Terminals (Ghostel, Eat, vterm)                                               | Shells (agent-shell, comint)                                                                                                       |
+|---------------------------+-------------------------------------------------------------------------------+------------------------------------------------------------------------------------------------------------------------------------|
+| The cursor a mirror shows | the terminal's cursor                                                         | the input point: the shell's point while it is in the input after the prompt, else its end                                         |
+| Text typed in a mirror    | to the terminal, as its keys                                                  | inserted at the input point, which moves past it, with the owner's windows whose point was there                                   |
+| Editing keys              | to the terminal                                                               | =DEL=, =<delete>=, =C-d=, left and right, =<home>=, =<end>= edit the input there, never the output before the prompt               |
+| =RET=, =M-RET=            | to the terminal                                                               | the shell's own command for its =RET= and =M-RET= (=agent-shell-submit=, =agent-shell-submit-override=), from the end of the input |
+| up, down                  | to the terminal                                                               | comint's input history                                                                                                             |
+| =C-c C-c= in the mirror   | control-C to the terminal                                                     | the session interrupted through its backend, as drover's =K= does, without asking there                                            |
+| The viewer's point        | its own, to read; typing brings it back to the cursor, which it follows again | the same                                                                                                                           |
+
+Viewers' keys are never looked up in the owner's keymaps: spyglass gained =spyglass-key-commands=, a buffer's list of the commands viewers' keys run, which drover fills, as it shares a shell, with that shell's bindings of =RET= and =M-RET= and its own interrupt (not its =M-p= and =M-n=: Core binds them to moving between links in agent-shell); any other key gets comint's defaults.  Viewers' input runs with =inhibit-interaction=, so that a command asking, as agent-shell's interrupt asks for confirmation, fails and says so to the viewer rather than leave Core's Emacs waiting; drover's input function also keeps windows from showing there.  Nothing changed on the wire.
+
 ** The protocol, compatible
 
 | What                 | New                                                                                                                                                                                                                                                                                            |
@@ -505,3 +523,64 @@ Two batch Emacs, as before, the agent's fake backend running terminals on comman
 | resident memory, viewer / agent                         | 158 / 104 MB      | 150 / 77 MB |
 
 The 8 MB come at the rate the agent writes them, a batch Emacs inserting 10 kB per timer, which the mirror follows: spyglass carries 50 MB/s between two Emacs (its =make bench=).  A line typed costs a frame each way and the owner's flush, 16 ms, which spyglass's latencies measure too.  The rest of the bench is as before, the sessions' steps within their budgets.
+
+* The fourth milestone, as built
+
+A peer's OpenCode session opens here as a full opencode.el buffer: =RET= on its row, or on a link to it, opens =*OpenCode@core: Title*=, its transcript rendered, its input typed into, its pickers, folding, answers and pending prompts as any session buffer's, following its session as the peer's service streams it.  This is milestones 4 and 5 of the plan in one step: opencode.el talking to several services (see its =doc/design.org=, Several services), and drover opening its peers' sessions through them.
+
+** How the buffer reaches the service
+
+The plan had the host dialing a peer forward a port to the peer's service over SSH (=myssh -N -L=), the peer sending its password in =svc=.  Built, the owner's drover relays its service instead, over the spyglass connection the pair already keeps: opencode.el's requests to the service registered under the peer's name go to the relay =relay://core=, which drover carries on its channel, and the owner performs them against its own service, with its own password, and answers; the event stream goes the same way, its bytes relayed as the owner's service writes them, in pieces of whole characters of 64 kB at most.
+
+| What                       | SSH forward (designed)                                                                                       | Relay by the owner's drover (built)                                                                               |
+|----------------------------+--------------------------------------------------------------------------------------------------------------+-------------------------------------------------------------------------------------------------------------------|
+| A process                  | one more SSH per peer, beside the stream; 230 ms to start and answer, Reaver to Core                         | none: the connection spyglass keeps                                                                               |
+| Directions                 | only where SSH works; Core reaching Reaver needs =IdentityAgent=, else the =-R= variant through the dialer   | either, whoever dialed                                                                                            |
+| The password               | sent to the peer in =svc=, held in its memory                                                                | never leaves the owner: the relayed requests carry none, the owner adds its own                                   |
+| Access                     | none: a peer with the password can do anything                                                               | checked by the owner on every request: =read= GETs and the event stream, =act= all but deleting a session or a project, =full= all |
+| Windows                    | sockets through =sshd=                                                                                        | spyglass's paced stream, as every other message                                                                   |
+| Reconnecting               | the forward's own, beside the stream's                                                                        | the link's: drover reopens the buffer's stream as soon as the peer is connected again                             |
+| The owner's Emacs down     | works while the service runs                                                                                  | does not work: the owner is the truth, and decides                                                                |
+
+Measured with =make bench-remote=, both ways at once against the fake OpenCode service of the agent, Reaver viewing, the agent on Reaver through 127.0.0.1 and on Core through SSH, each buffer shown in a window and of a session of its own, medians of 20 requests and 10 prompts:
+
+| Step                                                         | Reaver, direct | Reaver, relayed | Core, SSH -L    | Core, relayed   |
+|--------------------------------------------------------------+----------------+-----------------+-----------------+-----------------|
+| forward started and answering                                | -              | -               | 227 to 241 ms   | -               |
+| buffer opened, its transcript shown                          | 153 ms         | 94 ms           | 173 to 200 ms   | 183 to 256 ms   |
+| a GET of a session                                           | 1.9 ms         | 2.1 ms          | 1.2 ms          | 3.4 to 3.7 ms   |
+| a prompt sent until the echo it streams shows                | 22.8 ms        | 25.7 ms         | 22.5 to 24.1 ms | 26.5 to 34.9 ms |
+| a turn of 1 MB streamed until shown                          | 739 ms         | 532 ms          | 160 to 904 ms   | 115 to 125 ms   |
+| longest block of this Emacs's main thread, those 1 MB        | 24 ms          | 49 ms           | 15 to 29 ms     | 31 to 34 ms     |
+| the relayed buffer caught up after the link dropped          | -              | 372 ms          | -               | 676 to 719 ms   |
+
+The relay costs 2 to 3 ms a request and 3 to 10 ms a turn's first echo: nothing a user notices, against a process, a password on another host and no access.  The 1 MB rows mostly measure the fake service, which writes 16 kB per timer so that the agent's own opencode.el, reading it in the same Emacs on Windows, never waits on itself; the relay's pieces keep the viewer's longest block near the forward's, where one message of 1 MB had held it 55 ms.  So the relay was chosen, and the owner's Emacs being down is left out: the session lists stale as every session of a peer not connected.
+
+** The protocol, compatible
+
+| What                   | New                                                                                                                                                                                   |
+|------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| capability =opencode=  | told by a host whose opencode.el reaches its service through sockets: it relays its service                                                                                         |
+| request =oc=           | a method, a path of the API, the headers =accept=, =content-type= and =x-opencode-directory= only, a body; answered with the service's status and body, a refusal of access a 403 |
+| request =ocs=          | an identifier the viewer makes, the path =/api/event=: the owner opens its service's event stream and answers at once                                                              |
+| messages =ocd=, =oce=  | the owner: a piece of the stream's bytes, whole characters; its end, with why when it failed                                                                                       |
+| message =occ=          | the viewer: close the stream, its buffers gone                                                                                                                                       |
+| =svc=                  | not sent: the relay needs no password                                                                                                                                                |
+
+A request whose stream ends before its answer fails: one asking for something is retried by opencode.el once connected anew, one changing something is not, as the owner may have performed it.  The owner's streams of a connection close as it ends; the viewer's fail, and opencode.el opens them anew as soon as drover sees the peer connected again (=drover-remote--oc-resume=), rather than after its backoff, each buffer then catching up as after any reconnection.  A peer of an older drover, without =opencode=, keeps the view of the second milestone, its line saying to update drover there; an opencode.el here talking to one service, saying to update it here.
+
+** Decided
+
+| Question                                   | Built                                                                                                                                                                                                                                                                                                                                       |
+|--------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Keys                                       | opencode.el keys the buffers of a service by the session's identifier in that service's own table, =opencode-session-buffers= staying the local service's; drover keys the buffer of a peer's session by =(PEER . OWNER-KEY)= (=drover-remote--oc-buffers=), the proxy's =:buffer=                                                                                 |
+| The registries                             | drover lists a peer's sessions from the peer, as before; the registry opencode.el keeps for the peer's service holds only the sessions of its buffers, the running ones and those around them, never listed (opencode.el's =buffers= policy), and drover's OpenCode backend ignores every service but the local one, binding it for its operations whatever buffer is current |
+| Actions, one path                          | everything goes through the owner: drover's keys in the buffer act on the proxy's record, its owner performing them as in the second milestone (=act=: archiving with drover's archive, closing its own buffers there); opencode.el's own interactions, a prompt typed, a question answered, a view posted, are requests the owner relays to its service as the access allows; either way the owner decides, and its records change |
+| Archived there                             | the buffer closes here once the owner's record says archived, or is gone while the service says so, unless input is typed in it or a turn runs                                                                                                                                                                                              |
+| Directories, files                         | the buffer is in this host's home, its session's directory the peer's as its service spells it; nothing links, visits nor processes the peer's files; files of this host attach inline                                                                                                                                                     |
+| The stream                                 | open while a buffer of the peer's service is: the last one killed closes it there                                                                                                                                                                                                                                                          |
+| A peer gone for good                       | its service unregistered here: its buffers stay, saying in their header line they no longer follow their sessions                                                                                                                                                                                                                          |
+
+** Tests
+
+Two batch Emacs, the agent running a fake OpenCode service (=test/drover-fake-opencode.el=), registered as OpenCode registers its own, and a backend =opencode= of its sessions: =RET= opens the full buffer, named after the host, its transcript shown, its session the peer's for drover's keys; this host holds no password of that service, its connection a relay's; one stream there; a prompt sent here reaches the service there and its reply streams back; a turn another client runs there shows; the same buffer again on =RET=; a session archived there closes its buffer here; killed here, its stream closes there.  =read= access reads but cannot send, a 403 telling why, nothing but GETs reaching the service.  The link dropped, the buffer follows its session again as it comes back, what ran meanwhile shown, and takes prompts.  A peer whose drover tells no =opencode= shows the view, saying why, and nothing reaches its service.  The owner's checks of each method and path by access, and the pieces of the stream, are tested alone.  opencode.el's own tests run two fake services at once, the remote one directly and through a relay (see its design).

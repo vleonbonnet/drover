@@ -113,6 +113,11 @@
 (declare-function opencode-permission-reply "opencode-permission" (permission decision &optional message))
 (defvar opencode-pending-permissions)
 
+;; Several services, from opencode.el's version talking to several.
+(declare-function opencode-call-with-service "opencode-common" (service function &rest arguments))
+(declare-function opencode-service-remote-p "opencode-common" (&optional service))
+(defvar opencode--buffer-service)
+
 ;; Scheduling is drover's, loaded as the user schedules.
 (declare-function drover-schedule-load "drover-schedule" ())
 (declare-function drover-schedule-target "drover-schedule" (&optional buffer))
@@ -126,6 +131,41 @@
 ;; From opencode.el's versions that edit earlier prompts.
 (defvar opencode-old-input-function)
 (defvar opencode-withdrawn-prompt-function)
+
+;;;; The local service
+
+;; The `opencode' backend follows the local OpenCode service alone:
+;; another host's OpenCode sessions come from that host's drover, as
+;; any of its sessions.  opencode.el runs its hooks for the service
+;; whose events they follow, and the code of its other services' buffers
+;; works for those: the backend leaves their hooks alone, and runs its
+;; operations, called from any buffer, for the local service.
+
+(defun drover-opencode--remote-p ()
+  "Return non-nil when the running code works for another OpenCode service.
+As opencode.el's hooks do for the services other than the local one."
+  (and (fboundp 'opencode-service-remote-p) (opencode-service-remote-p)))
+
+(defun drover-opencode--call-local (function &rest arguments)
+  "Call FUNCTION with ARGUMENTS for the local OpenCode service.
+Whatever buffer is current, such as the session buffer of another
+host's service, where opencode.el would work for that one."
+  (if (fboundp 'opencode-call-with-service)
+      (apply #'opencode-call-with-service nil function arguments)
+    (apply function arguments)))
+
+(defun drover-opencode--here (function)
+  "Return FUNCTION made to run for the local OpenCode service."
+  (lambda (&rest arguments)
+    (apply #'drover-opencode--call-local function arguments)))
+
+(defun drover-opencode--localize (properties)
+  "Return PROPERTIES, a plist, its functions made to run for the local service.
+See `drover-opencode--here'."
+  (cl-loop for (key value) on properties by #'cddr
+           nconc (list key (if (and (symbolp value) value (not (eq value t)) (fboundp value))
+                               (drover-opencode--here value)
+                             value))))
 
 ;;;; The OpenCode engine
 
@@ -251,9 +291,12 @@ is reported, and the caller goes on without it.  Only commands may wait."
 (defun drover-opencode--catalog-source (directory)
   "Return the models of the OpenCode catalogs of DIRECTORY, or nil.
 The model and provider catalogs give names, variants and default
-variants.  Nil when the model catalog does not arrive in time."
-  (when-let* ((models (drover-opencode--catalog-wait 'model directory)))
-    (drover-opencode--catalog-models models (drover-opencode--catalog-wait 'provider directory))))
+variants, the local service's.  Nil when the model catalog does not
+arrive in time."
+  (drover-opencode--call-local
+   (lambda ()
+     (when-let* ((models (drover-opencode--catalog-wait 'model directory)))
+       (drover-opencode--catalog-models models (drover-opencode--catalog-wait 'provider directory))))))
 
 (defun drover-opencode--agents (directory)
   "Return the names of the agents a session in DIRECTORY can run, or nil.
@@ -389,14 +432,15 @@ times of the database files stand in.  The engine's :last-used."
 
 (defun drover-opencode--register-engine ()
   "Register the `opencode' engine and its catalog as a model source."
-  (drover-register-engine 'opencode
-                          :label "OpenCode"
-                          :defaults #'drover-opencode--fetch-defaults
-                          :resolve #'drover-opencode--resolve
-                          :agents #'drover-opencode--agents
-                          :last-used #'drover-opencode--last-used
-                          :model-resets-variant t
-                          :directory #'drover-opencode--directory)
+  (apply #'drover-register-engine 'opencode
+         (drover-opencode--localize
+          (list :label "OpenCode"
+                :defaults #'drover-opencode--fetch-defaults
+                :resolve #'drover-opencode--resolve
+                :agents #'drover-opencode--agents
+                :last-used #'drover-opencode--last-used
+                :model-resets-variant t
+                :directory #'drover-opencode--directory)))
   (drover-register-model-source 'opencode #'drover-opencode--catalog-source 0))
 
 (drover-opencode--register-engine)
@@ -502,15 +546,21 @@ process, which may hold Emacs for as long as the system takes to start
 it.  The projects are fetched again when they were never fetched, while
 a fetch is under way, after an event without a whole project, and after
 `server.connected', after which changes missed while disconnected are
-fetched like the registry is."
+fetched like the registry is.  Another host's service's projects are
+that host's drover's."
   (drover-with-reporting "OpenCode events"
-    (let ((project (and (equal (alist-get 'type event) "project.updated")
-                        (alist-get 'data event))))
-      (if (and drover-opencode--projects-known
-               (not drover-opencode--projects-fetching)
-               (drover-opencode--whole-project-p project))
-          (drover-opencode--project-updated project)
-        (drover-opencode--fetch-projects)))))
+    (unless (drover-opencode--remote-p)
+      (drover-opencode--projects-changed-here event))))
+
+(defun drover-opencode--projects-changed-here (event)
+  "Follow EVENT of the local service, as `drover-opencode--projects-changed'."
+  (let ((project (and (equal (alist-get 'type event) "project.updated")
+                      (alist-get 'data event))))
+    (if (and drover-opencode--projects-known
+             (not drover-opencode--projects-fetching)
+             (drover-opencode--whole-project-p project))
+        (drover-opencode--project-updated project)
+      (drover-opencode--fetch-projects))))
 
 (defun drover-opencode--whole-project-p (project)
   "Return non-nil when PROJECT, of an event, holds what names sessions."
@@ -886,9 +936,10 @@ hold tells nothing."
 _EVENT archived, restored or deleted a session, which moves it between
 the lists the service gives, or reconnected the event stream, after
 which events may have been missed.  Archiving a selection sends a burst
-of events: they are fetched again once, half a second after the last."
+of events: they are fetched again once, half a second after the last.
+Another host's service's events are that host's drover's."
   (drover-with-reporting "OpenCode events"
-    (when (or drover-show-history drover-show-archived)
+    (when (and (or drover-show-history drover-show-archived) (not (drover-opencode--remote-p)))
       (when (timerp drover-opencode--refetch-timer)
         (cancel-timer drover-opencode--refetch-timer))
       (setq drover-opencode--refetch-timer (run-at-time 0.5 nil #'drover-opencode--refetch)))))
@@ -904,25 +955,34 @@ of events: they are fetched again once, half a second after the last."
 The subagents below ID are reported too when ID may take them into the
 archive or out of it (see `drover-opencode--archived-above'): when it
 is archived, or on the way from them to an archived session, its
-change then maybe a restore or a deletion."
+change then maybe a restore or a deletion.  A session of another host's
+service is that host's drover's to report."
   (drover-with-reporting "OpenCode changes"
-    (drover-opencode--left-archive id)
-    (drover-backend-changed 'opencode id)
-    (when (and id (or (gethash id drover-opencode--hiding)
-                      (plist-get (opencode-state-get id) :archived)))
-      ;; Noted again as the subagents are looked at, if still on the way.
-      (remhash id drover-opencode--hiding)
-      (dolist (entry (opencode-state-descendants id))
-        (drover-backend-changed 'opencode (plist-get entry :id))))))
+    (unless (drover-opencode--remote-p)
+      (drover-opencode--updated-here id))))
+
+(defun drover-opencode--updated-here (id)
+  "Report a change of session ID of the local service.
+As `drover-opencode--updated' does."
+  (drover-opencode--left-archive id)
+  (drover-backend-changed 'opencode id)
+  (when (and id (or (gethash id drover-opencode--hiding)
+                    (plist-get (opencode-state-get id) :archived)))
+    ;; Noted again as the subagents are looked at, if still on the way.
+    (remhash id drover-opencode--hiding)
+    (dolist (entry (opencode-state-descendants id))
+      (drover-backend-changed 'opencode (plist-get entry :id)))))
 
 (defun drover-opencode--catalog-changed (_kind _directory)
   "Report that sessions may read otherwise, now that a catalog changed.
 Names, icons, efforts and context sizes come from a location's
 catalogs, which opencode.el fetches the first time they are asked for,
 and fetches again once an event or a reconnection made it forget them.
-For `opencode-catalog-changed-functions'."
+For `opencode-catalog-changed-functions'; another host's service's
+catalogs show in no session of this backend."
   (drover-with-reporting "OpenCode changes"
-    (drover-backend-changed 'opencode)))
+    (unless (drover-opencode--remote-p)
+      (drover-backend-changed 'opencode))))
 
 (defun drover-opencode--start ()
   "Follow the registry, session buffers, catalogs and projects; bootstrap it.
@@ -1620,54 +1680,58 @@ nothing; one refusing or failing is a failure.  Without
 
 (defun drover-opencode--register ()
   "Register the `opencode' backend."
-  (drover-register-backend
+  (apply
+   #'drover-register-backend
    'opencode
-   :label "OpenCode"
-   :start #'drover-opencode--start
-   :sessions #'drover-opencode--sessions
-   :session #'drover-opencode--session-by-id
-   ;; Registry, buffers, catalogs and projects: all but the branches.
-   :reports-changes t
-   :open #'drover-opencode--open
-   :respond #'drover-opencode--respond
-   :requests #'drover-opencode--requests
-   :answer #'drover-opencode--answer
-   :interrupt #'drover-opencode--interrupt
-   :interrupt-confirms t
-   :pending-prompts #'drover-opencode--pending-prompts
-   :edit-pending #'drover-opencode--edit-pending
-   :archive #'drover-opencode--archive
-   :archive-confirms t
-   :unarchive #'drover-opencode--unarchive
-   :unarchive-confirms t
-   :archived #'drover-opencode--archived
-   :mark-seen #'drover-opencode--mark-seen
-   :mark-seen-confirms t
-   :preview #'drover-opencode--preview
-   :recap #'drover-opencode--recap
-   :new #'drover-opencode--new
-   :buffer #'drover-opencode--buffer
-   :close #'drover-opencode--close
-   :rename #'drover-opencode--rename
-   :delete #'drover-opencode--delete
-   :delete-confirms t
-   :fork #'drover-opencode--fork
-   :compact #'drover-opencode--compact
-   :history #'drover-opencode--history
-   :search #'drover-opencode--search
-   :prefetch #'drover-opencode--prefetch
-   ;; Only a service of the fork lists them.
-   :caches #'opencode-state-cache-supported-p
-   :engines '(opencode)
-   :create #'drover-opencode--create
-   :check #'drover-opencode--check
-   :apply-options #'drover-opencode--apply-options
-   :send #'drover-opencode--send
-   :options #'drover-opencode--options
-   :blocker #'drover-opencode--blocker
-   :submit #'drover-opencode--submit
-   :ready #'drover-opencode--ready)
-  (drover-register-resumer 'opencode 'opencode #'drover-opencode-resume :by-id t :async t))
+   (drover-opencode--localize
+    (list
+     :label "OpenCode"
+     :start #'drover-opencode--start
+     :sessions #'drover-opencode--sessions
+     :session #'drover-opencode--session-by-id
+     ;; Registry, buffers, catalogs and projects: all but the branches.
+     :reports-changes t
+     :open #'drover-opencode--open
+     :respond #'drover-opencode--respond
+     :requests #'drover-opencode--requests
+     :answer #'drover-opencode--answer
+     :interrupt #'drover-opencode--interrupt
+     :interrupt-confirms t
+     :pending-prompts #'drover-opencode--pending-prompts
+     :edit-pending #'drover-opencode--edit-pending
+     :archive #'drover-opencode--archive
+     :archive-confirms t
+     :unarchive #'drover-opencode--unarchive
+     :unarchive-confirms t
+     :archived #'drover-opencode--archived
+     :mark-seen #'drover-opencode--mark-seen
+     :mark-seen-confirms t
+     :preview #'drover-opencode--preview
+     :recap #'drover-opencode--recap
+     :new #'drover-opencode--new
+     :buffer #'drover-opencode--buffer
+     :close #'drover-opencode--close
+     :rename #'drover-opencode--rename
+     :delete #'drover-opencode--delete
+     :delete-confirms t
+     :fork #'drover-opencode--fork
+     :compact #'drover-opencode--compact
+     :history #'drover-opencode--history
+     :search #'drover-opencode--search
+     :prefetch #'drover-opencode--prefetch
+     ;; Only a service of the fork lists them.
+     :caches #'opencode-state-cache-supported-p
+     :engines '(opencode)
+     :create #'drover-opencode--create
+     :check #'drover-opencode--check
+     :apply-options #'drover-opencode--apply-options
+     :send #'drover-opencode--send
+     :options #'drover-opencode--options
+     :blocker #'drover-opencode--blocker
+     :submit #'drover-opencode--submit
+     :ready #'drover-opencode--ready)))
+  (drover-register-resumer 'opencode 'opencode (drover-opencode--here #'drover-opencode-resume)
+                           :by-id t :async t))
 
 (drover-opencode--register)
 
@@ -1684,8 +1748,10 @@ idle session, archived when the registry knows it is."
                              :archived (plist-get (opencode-state-get id) :archived))))
 
 (defun drover-opencode--buffer-session ()
-  "Return the session of the current OpenCode session buffer, or nil."
-  (when opencode-session-id
+  "Return the session of the current OpenCode session buffer, or nil.
+Nil in a session buffer of another host's service, whose session drover
+knows through that host (see `drover-remote-mode')."
+  (when (and opencode-session-id (not (bound-and-true-p opencode--buffer-service)))
     (drover-opencode--session-of opencode-session-id
                                  (alist-get 'title opencode-session-info)
                                  default-directory
@@ -1737,9 +1803,12 @@ Everything after the process mark goes; \\[undo] brings it back."
   "The prompt actions of OpenCode session buffers, as (ACTION . COMMAND).")
 
 (defun drover-opencode--setup-session-buffer ()
-  "Tell drover the session and the prompt actions of this session buffer."
+  "Tell drover the session and the prompt actions of this session buffer.
+The session of a buffer of another host's service is that host's,
+which drover's remote layer tells."
   (drover-with-reporting "OpenCode buffer"
-    (setq-local drover-session-at-point-function #'drover-opencode--buffer-session)
+    (unless (bound-and-true-p opencode--buffer-service)
+      (setq-local drover-session-at-point-function #'drover-opencode--buffer-session))
     (pcase-dolist (`(,action . ,command) drover-opencode--prompt-actions)
       (drover-prompt-define action command))))
 
@@ -1785,6 +1854,8 @@ their labels go as text.  A withdrawn prompt goes there through it
   (require 'drover-prompt)
   (let ((session (with-current-buffer buffer
                    (or (drover-opencode--buffer-session)
+                       (and (bound-and-true-p opencode--buffer-service)
+                            (drover-session-at-point t))
                        (user-error "Not an OpenCode session buffer")))))
     (drover-prompt-edit-for session (drover-opencode--prompt-text text))))
 
