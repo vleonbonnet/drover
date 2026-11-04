@@ -417,7 +417,7 @@ The resumption seen in the live run is not a bug of resumption: a subscription h
 
 ** Measured
 
-=make bench-remote= through 127.0.0.1, 2511 sessions, before and after: a snapshot 382 and 375 ms, sessions appearing 256 and 246 ms, the owner's slices within 4.3 ms, the viewer's within 3.1, longest blocks as before (17 to 50 ms, garbage collections and the index taking the snapshot in).  What each record allows costs 51 µs of the owner's when drover's archive file is looked at for each record, which doubled the owner's work and made a session changed block 14 ms; the file is looked at once a message since.  =drover-core-generation= is 15: the bulk machinery's new kind.
+=make bench-remote= through 127.0.0.1, 2511 sessions, before and after: a snapshot 382 and 375 ms, sessions appearing 256 and 246 ms, the owner's slices within 4.3 ms, the viewer's within 3.1, longest blocks as before (17 to 50 ms, garbage collections and the index taking the snapshot in).  What each record allows costs 51 µs of the owner's when drover's archive file is looked at for each record, which doubled the owner's work and made a session changed block 14 ms; the file is looked at once a message since.  =drover-core-generation= is 16: the bulk machinery's new kind.
 
 ** Tests
 

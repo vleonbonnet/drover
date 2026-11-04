@@ -56,7 +56,7 @@
 (require 'drover-ui)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 16))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
