@@ -32,7 +32,7 @@
 ;; - idle: nothing changes but the clock, for `drover-idle-bench-seconds';
 ;; - streaming: the working session takes a step every 100 ms;
 ;; - unfocused: Emacs lost focus, as a focus-out event tells, the glyphs
-;;   standing still (`drover-list-animation-unfocused-interval' nil),
+;;   standing still (`opencode-session-status-animation-unfocused-interval' nil),
 ;;   then moving at the unfocused pace, by default;
 ;; - then, synchronously, a frame of the animation drawn and redisplayed,
 ;;   its lines reordered for display or not, against a redisplay
@@ -400,13 +400,13 @@ CLOCK-CELL is a cons whose car is the clock the lists read."
               t)
         (list "unfocused, idle, glyphs still"
               (lambda ()
-                (setq drover-list-animation-unfocused-interval nil)
+                (setq opencode-session-status-animation-unfocused-interval nil)
                 (drover-idle-bench-set-focus nil))
               (lambda ()
                 (drover-idle-bench-set-focus t)
-                (custom-reevaluate-setting 'drover-list-animation-unfocused-interval))
+                (custom-reevaluate-setting 'opencode-session-status-animation-unfocused-interval))
               nil)
-        (list (format "unfocused, idle, glyphs every %s s" drover-list-animation-unfocused-interval)
+        (list (format "unfocused, idle, glyphs every %s s" opencode-session-status-animation-unfocused-interval)
               (lambda () (drover-idle-bench-set-focus nil))
               (lambda () (drover-idle-bench-set-focus t))
               nil)
