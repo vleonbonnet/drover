@@ -274,13 +274,15 @@ same."
           (should (equal (drover-codex-rollouts-test-ids) (list drover-codex-rollouts-test-a))))))))
 
 (ert-deftest drover-codex-rollouts-test-archive-with-cli ()
-  "With the Codex CLI, archiving, restoring and deleting are its commands, run without waiting."
+  "With the Codex CLI, archiving, restoring and deleting are its commands, run without waiting.
+Deleting forces it: drover asked already, and the CLI refuses to delete
+without a terminal to ask in otherwise, as its version 0.166 does."
   (drover-codex-rollouts-test-with
     (let* ((project (expand-file-name "work/" home))
            (log (expand-file-name "codex.log" home))
            (script (expand-file-name "bin/codex" home))
            (drover-codex-program script))
-      (drover-test-write script (format "#!/bin/sh\necho \"$@\" >> %s\n[ \"$1\" != delete ]\n"
+      (drover-test-write script (format "#!/bin/sh\necho \"$@\" >> %s\n[ \"$1\" != unarchive ]\n"
                                         (shell-quote-argument log)))
       (set-file-modes script #o755)
       (drover-fixture-codex drover-codex-rollouts-test-a project)
@@ -289,6 +291,8 @@ same."
             (warnings nil))
         (should (equal (drover-codex-rollouts-command "archive" drover-codex-rollouts-test-a)
                        (list script "archive" drover-codex-rollouts-test-a)))
+        (should (equal (drover-codex-rollouts-command "delete" drover-codex-rollouts-test-a "--force")
+                       (list script "delete" "--force" drover-codex-rollouts-test-a)))
         (should (drover-supports-p session :archive))
         (cl-letf (((symbol-function 'drover-warn)
                    (lambda (format &rest args) (push (apply #'format-message format args) warnings))))
@@ -303,7 +307,48 @@ same."
                                            "\n" t)
                              #'string<)
                        (mapcar (lambda (command) (concat command " " drover-codex-rollouts-test-a))
-                               '("archive" "delete" "unarchive"))))
+                               '("archive" "delete --force" "unarchive"))))
+        (should (equal (length warnings) 1))
+        (should (string-match-p "\\`Codex could not unarchive" (car warnings)))))))
+
+(ert-deftest drover-codex-rollouts-test-delete-older-cli ()
+  "A Codex CLI too old to know --force deletes without it; another refusal is told."
+  (drover-codex-rollouts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (log (expand-file-name "codex.log" home))
+           (script (expand-file-name "bin/codex" home))
+           (drover-codex-program script)
+           (warnings nil)
+           (messages nil))
+      (drover-test-write script
+                         (format (concat "#!/bin/sh\necho \"$@\" >> %s\n"
+                                         "if [ \"$2\" = --force ]; then\n"
+                                         "  echo \"error: unexpected argument '--force' found\" >&2; exit 2\nfi\n"
+                                         "[ \"$2\" != %s ]\n")
+                                 (shell-quote-argument log) drover-codex-rollouts-test-b))
+      (set-file-modes script #o755)
+      (drover-fixture-codex drover-codex-rollouts-test-a project)
+      (drover-fixture-codex drover-codex-rollouts-test-b project :start 1790000100.0)
+      (drover-codex-rollouts-test-scan)
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (format &rest args) (push (apply #'format-message format args) warnings)))
+                ((symbol-function 'drover-message)
+                 (lambda (format &rest args) (push (apply #'format-message format args) messages))))
+        (drover-codex-rollouts--delete (drover-find 'codex drover-codex-rollouts-test-a))
+        (should (drover-test-wait-commands))
+        (should (equal (split-string (with-temp-buffer (insert-file-contents log) (buffer-string)) "\n" t)
+                       (list (concat "delete --force " drover-codex-rollouts-test-a)
+                             (concat "delete " drover-codex-rollouts-test-a))))
+        (should-not warnings)
+        (should (equal (length messages) 1))
+        (should (string-prefix-p "Codex deleted" (car messages)))
+        ;; Refused once run without --force, it is told, and not run again.
+        (delete-file log)
+        (drover-codex-rollouts--delete (drover-find 'codex drover-codex-rollouts-test-b))
+        (should (drover-test-wait-commands))
+        (should (equal (split-string (with-temp-buffer (insert-file-contents log) (buffer-string)) "\n" t)
+                       (list (concat "delete --force " drover-codex-rollouts-test-b)
+                             (concat "delete " drover-codex-rollouts-test-b))))
         (should (equal (length warnings) 1))
         (should (string-match-p "\\`Codex could not delete" (car warnings)))))))
 
