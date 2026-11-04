@@ -1895,7 +1895,9 @@ user told why on one line."
           (should (equal (buffer-string) "first line\nsecond line"))
           (should (= (point) (point-max)))
           (should (equal default-directory "/tmp/a/"))
-          (should (equal drover-prompt--chosen-session '(:key (fake . "a") :title "Session a")))
+          (should (equal (plist-get drover-prompt--chosen-session :key) '(fake . "a")))
+          (should (equal (plist-get drover-prompt--chosen-session :title) "Session a"))
+          (should (eq (plist-get drover-prompt--chosen-session :session) session))
           (let ((header (drover-prompt--header-line)))
             (should (string-match-p "|  to \\[Session a\\]" header))
             (should (eq (get-text-property (string-match "Session a" header) 'face header)
@@ -1910,6 +1912,46 @@ user told why on one line."
                      '((:check "a" "first line\nsecond line" (:agent nil :model nil :variant nil))
                        (:apply-options "a" (:agent nil :model nil :variant nil))
                        (:send "a" "first line\nsecond line" fake-token)))))))
+
+(ert-deftest drover-prompt-test-edit-for-shows-session-options ()
+  "A prompt set to go to a running session shows what that session runs.
+Not what a new session would run: the session keeps its own model, the
+one its backend tells it runs now, unless a model is chosen."
+  (drover-prompt-test-with
+    (let* ((sonnet (drover-test-model "sonnet" :name "Sonnet" :default-variant 'medium))
+           (opus (drover-test-model "opus" :name "Opus" :default-variant 'high))
+           (haiku (drover-test-model "haiku" :name "Haiku"))
+           (session (drover-prompt-test--session "a")))
+      (drover-test-register-engine
+       'fake :resolve (lambda (_defaults agent model variant)
+                        (list :agent (or agent "plan") :model (or model opus)
+                              :variant (or variant (drover-model-default-variant (or model opus))))))
+      (setq drover-test-options `(("a" :model ,sonnet :variant low)))
+      (with-current-buffer (drover-prompt-buffer t)
+        (should (eq (plist-get (drover-prompt-effective-options) :model) opus)))
+      (drover-prompt-edit-for session "again")
+      (with-current-buffer (drover-prompt-buffer)
+        (let ((options (drover-prompt-effective-options)))
+          (should (eq (plist-get options :model) sonnet))
+          (should (eq (plist-get options :variant) 'low))
+          (should-not (plist-get options :model-explicit-p))
+          (should-not (plist-get options :variant-explicit-p))
+          (should-not (plist-get options :agent)))
+        (should (string-match-p "model \\[Sonnet\\]" (drover-prompt--header-line)))
+        (should (eq (plist-get (drover-prompt-inherited-options) :model) sonnet))
+        ;; The backend is asked again: a switch made since shows.
+        (setq drover-test-options `(("a" :model ,haiku :variant nil)))
+        (should (eq (plist-get (drover-prompt-effective-options) :model) haiku))
+        ;; A model chosen applies to the session.
+        (setq drover-prompt-picked-model opus)
+        (let ((options (drover-prompt-effective-options)))
+          (should (eq (plist-get options :model) opus))
+          (should (plist-get options :model-explicit-p)))
+        ;; Forgotten, the prompt shows a new session's options again.
+        (setq drover-prompt-picked-model nil
+              drover-prompt--chosen-session nil)
+        (should (eq (plist-get (drover-prompt-effective-options) :model) opus))
+        (should (eq (plist-get (drover-prompt-inherited-options) :model) opus))))))
 
 (ert-deftest drover-prompt-test-edit-for-keeps-draft ()
   "An earlier prompt follows a draft after a blank line, which the echo area tells."

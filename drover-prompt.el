@@ -42,7 +42,11 @@
 ;; would run, resolved by the engine that took a prompt last from the
 ;; defaults the prompt holds for each engine: those of slow engines are
 ;; fetched when the prompt starts or changes directory, those of
-;; engines reading local files whenever the prompt gains context.
+;; engines reading local files whenever the prompt gains context.  A
+;; prompt set to go to a running session shows what that session runs
+;; instead.  OpenCode's default model is the one chosen last for a
+;; session, not the one a prompt went to last (see
+;; `drover-opencode--resolve').
 ;;
 ;; Scheduling, Org links and the like belong to the user's
 ;; configuration, which uses `drover-prompt-content',
@@ -236,9 +240,10 @@ other comes in order.")
 
 (defvar-local drover-prompt--chosen-session nil
   "Session the prompt goes to without the picker, or nil.
-A plist (:key KEY :title TITLE): KEY is the session's
-`drover-session-key', TITLE how the header names it.  Set by
-`drover-prompt-edit-for'; see `drover-prompt-read-target'.")
+A plist (:key KEY :title TITLE :session SESSION): KEY is the session's
+`drover-session-key', TITLE how the header names it, SESSION its
+`drover-session' when chosen.  Set by `drover-prompt-edit-for'; see
+`drover-prompt-read-target'.")
 
 ;;;; The mode
 
@@ -472,14 +477,44 @@ one."
           last
         (car engines)))))
 
+(defun drover-prompt--chosen-target (&optional buffer)
+  "Return the running session the prompt BUFFER is set to go to, or nil.
+BUFFER defaults to the current one.  The session is the one
+`drover-prompt-edit-for' chose, as its backend tells it now when it
+finds a session by identifier (:session), else as it was chosen; nil
+when no session was chosen, or a session without a record."
+  (with-current-buffer (or buffer (current-buffer))
+    (when-let* ((chosen drover-prompt--chosen-session)
+                (session (plist-get chosen :session)))
+      (or (and (drover-backend-property (drover-session-backend session) :session)
+               (drover-find (drover-session-backend session) (drover-session-id session)))
+          session))))
+
+(defun drover-prompt--chosen-entry-options (session buffer)
+  "Return what the running SESSION runs once sent the prompt BUFFER.
+The value is an entry plist (see `drover-prompt--entry-options'),
+from what SESSION's backend tells it runs now (:options), nil when it
+tells nothing."
+  (drover-prompt--entry-options session
+                                (and (drover-supports-p session :options)
+                                     (drover-backend-call session :options))
+                                buffer))
+
 (defun drover-prompt-inherited-options (&optional buffer)
-  "Return the resolved options a new session would run without any choice.
-The engine is the one that took a prompt last, else
+  "Return the resolved options a session would run without any choice.
+For a prompt `drover-prompt-edit-for' set to go to a running session,
+they are what that session runs now: its model and variant, as its
+backend tells them, the agent unknown.  Otherwise those of a new
+session of the engine that took a prompt last, else of
 `drover-prompt-default-engine'.  BUFFER is the prompt buffer, the
 current one by default.  The pickers' \"Default\" entry names them."
   (with-current-buffer (or buffer (current-buffer))
-    (drover-prompt-engine-options (or drover-prompt--last-engine drover-prompt-default-engine)
-                                  nil nil nil)))
+    (if-let* ((session (drover-prompt--chosen-target)))
+        (let ((current (and (drover-supports-p session :options)
+                            (drover-backend-call session :options))))
+          (list :agent nil :model (plist-get current :model) :variant (plist-get current :variant)))
+      (drover-prompt-engine-options (or drover-prompt--last-engine drover-prompt-default-engine)
+                                    nil nil nil))))
 
 (defun drover-prompt-effective-options (&optional buffer)
   "Return what the prompt BUFFER shows it runs, as a display plist.
@@ -487,20 +522,32 @@ BUFFER defaults to the current one.  The plist holds the resolved
 :agent, :model and :variant, whether each was chosen
 \(:agent-explicit-p, :model-explicit-p, :variant-explicit-p), the
 :directory and whether it was chosen (:directory-explicit-p).  The
-resolved values are for display only: only the choices are applied."
+resolved values are for display only: only the choices are applied.
+A prompt `drover-prompt-edit-for' set to go to a running session shows
+what that session runs once sent it, as its entry in the target picker
+does: its own model and variant, the choices applying to it; its agent
+is the one chosen, else unknown.  Otherwise it shows what a new session
+would run."
   (with-current-buffer (or buffer (current-buffer))
-    (let ((resolved (drover-prompt-engine-options (drover-prompt--display-engine)
-                                                  drover-prompt-picked-agent
-                                                  drover-prompt-picked-model
-                                                  drover-prompt-picked-variant)))
+    (let* ((session (drover-prompt--chosen-target))
+           (entry (and session (drover-prompt--chosen-entry-options session (current-buffer))))
+           (resolved (unless session
+                       (drover-prompt-engine-options (drover-prompt--display-engine)
+                                                     drover-prompt-picked-agent
+                                                     drover-prompt-picked-model
+                                                     drover-prompt-picked-variant))))
       (list :directory (or default-directory drover-prompt--default-directory)
             :directory-explicit-p drover-prompt-directory-picked-p
-            :agent (plist-get resolved :agent)
+            :agent (if session drover-prompt-picked-agent (plist-get resolved :agent))
             :agent-explicit-p (and drover-prompt-picked-agent t)
-            :model (plist-get resolved :model)
-            :model-explicit-p (and drover-prompt-picked-model t)
-            :variant (plist-get resolved :variant)
-            :variant-explicit-p (and drover-prompt-picked-variant t)))))
+            :model (plist-get (if session entry resolved) :model)
+            :model-explicit-p (if session
+                                  (plist-get entry :model-explicit-p)
+                                (and drover-prompt-picked-model t))
+            :variant (plist-get (if session entry resolved) :variant)
+            :variant-explicit-p (if session
+                                    (plist-get entry :variant-explicit-p)
+                                  (and drover-prompt-picked-variant t))))))
 
 (defun drover-prompt-option-display (value explicit-p)
   "Return VALUE as a string in the face of a chosen or an inherited setting.
@@ -795,7 +842,8 @@ backend."
         (drover-prompt--begin (or (drover-session-local-directory session) default-directory)))
       (insert text)
       (setq end (point)
-            drover-prompt--chosen-session (list :key (drover-session-key session) :title title))
+            drover-prompt--chosen-session (list :key (drover-session-key session) :title title
+                                                :session session))
       (force-mode-line-update))
     (drover-prompt--display buffer)
     (if-let* ((window (get-buffer-window buffer t)))

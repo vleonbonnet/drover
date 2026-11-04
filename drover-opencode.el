@@ -265,13 +265,18 @@ The agent catalog is waited for, as `drover-opencode--catalog-wait' does."
 
 (defun drover-opencode--last-pick (&optional catalog)
   "Return (MODEL . VARIANT), the model and variant picked last in opencode.el.
-New opencode.el sessions start from `opencode-last-model', which is
-read live, so that a pick made since the defaults were fetched counts.
-MODEL is resolved against CATALOG as `drover-opencode--ref-model' does.
-VARIANT is a symbol, nil for the model's default; it is dropped only
-when CATALOG proves MODEL lacks it.  Nil when no model was picked."
+New opencode.el sessions start from `opencode-last-model', the model
+chosen last for a session, by a switch or a session created on it; a
+prompt sent chooses none.  It is read live, so that a pick made since
+the defaults were fetched counts.  MODEL is resolved against CATALOG as
+`drover-opencode--ref-model' does.  VARIANT is a symbol, nil for the
+model's default; it is dropped only when CATALOG proves MODEL lacks it.
+Nil when no model was picked, or when CATALOG, not empty, lacks MODEL,
+as while its provider is down: opencode.el then leaves the model to
+the service too (see `opencode-new-session-model')."
   (when-let* ((ref opencode-last-model)
-              (model (drover-opencode--ref-model ref catalog)))
+              (model (drover-opencode--ref-model ref catalog))
+              ((or (null catalog) (memq model catalog))))
     (let ((variant (drover-opencode--ref-variant ref)))
       (cons model
             (and variant
@@ -340,8 +345,11 @@ DEFAULTS is the data of `drover-opencode--fetch-defaults', or nil while
 it is fetched; AGENT, MODEL and VARIANT are the explicit choices, nil
 when not made.  This is what a new opencode.el session does with them:
 the agent chosen, else the default one; the model chosen, else the one
-the agent pins, else the last pick (`drover-opencode--last-pick'), else
-the service's default model.  The variant chosen wins; else a model
+the agent pins, else the last pick (`drover-opencode--last-pick'), the
+model chosen last for a session, in drover's prompt or in opencode.el,
+whatever sessions prompts went to since, else the service's default
+model.  A last pick the catalog lacks, its provider down, is skipped.
+The variant chosen wins; else a model
 chosen runs its own default variant, since the variant an agent pins
 belongs to the agent's model; else a pinned model runs its pinned
 variant, the last pick its own; else the model's default.  The engine's

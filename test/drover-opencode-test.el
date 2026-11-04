@@ -2422,16 +2422,51 @@ quotes the buffer's text."
     (should (equal (drover-engine-resolve 'opencode defaults "plan" nil nil)
                    (list :agent "plan" :model sol :variant 'high)))))
 
-(ert-deftest drover-opencode-test-precedence-without-defaults ()
-  "Before the defaults arrive, the last pick and the choices still resolve."
-  (let ((opencode-last-model '((id . "gpt-5.5") (providerID . "openai") (variant . "max"))))
+(ert-deftest drover-opencode-test-unavailable-last-pick ()
+  "A last pick the catalog lacks, its provider down, gives way to the default model.
+The pick is kept, and applies again once the catalog has it; without a
+catalog nothing proves it unavailable."
+  (let* ((defaults (drover-opencode-fixtures-defaults "build"))
+         (pickle (drover-opencode-fixtures-catalog-model defaults "opencode" "big-pickle"))
+         (gone '((id . "claude-opus-5-5") (providerID . "ai-gateway-anthropic") (variant . "high")))
+         (opencode-last-model gone))
+    (should (equal (drover-opencode--resolve defaults nil nil nil)
+                   (list :agent "build" :model pickle :variant nil)))
+    (should (equal opencode-last-model gone))
     (let ((resolved (drover-opencode--resolve nil nil nil nil)))
-      (should-not (plist-get resolved :agent))
-      (should (equal (drover-model-id (plist-get resolved :model)) "gpt-5.5"))
-      ;; Without a catalog nothing proves the variant missing.
-      (should (eq (plist-get resolved :variant) 'max))))
-  (let ((opencode-last-model nil))
-    (should (equal (drover-opencode--resolve nil "plan" nil 'low) '(:agent "plan" :model nil :variant low)))))
+      (should (equal (drover-model-provider-id (plist-get resolved :model)) "ai-gateway-anthropic"))
+      (should (eq (plist-get resolved :variant) 'high)))))
+
+(ert-deftest drover-opencode-test-default-is-the-last-choice ()
+  "A new session's default is the model chosen last, not the one prompted last.
+Prompts to a session on another model, as a reply in an older session
+or a scheduled prompt, sent through opencode.el, leave it; a switch of
+model in a session, as drover's prompt or opencode.el's input makes,
+changes it."
+  (let ((defaults (drover-opencode-fixtures-defaults "build")))
+    (drover-opencode-test-with-session
+      (let ((copilot (drover-opencode-fixtures-catalog-model defaults "github-copilot" "claude-opus-5.5"))
+            (sonnet (drover-opencode-fixtures-catalog-model defaults "anthropic" "claude-sonnet-5-5"))
+            (picked '((id . "claude-opus-5.5") (providerID . "github-copilot"))))
+        (should (and copilot sonnet))
+        (setq opencode-last-model picked)
+        (with-current-buffer buffer
+          (setq opencode-session-model
+                '((id . "claude-opus-5-5") (providerID . "anthropic") (variant . "high"))))
+        (cl-letf (((symbol-function 'opencode-events-reopen) #'ignore))
+          (drover-backend-call session :send "a reply" nil)
+          (drover-backend-call session :submit "a scheduled prompt" #'ignore #'ignore))
+        (should (equal (mapcar #'car posts)
+                       '("/api/session/ses_1/prompt" "/api/session/ses_1/prompt")))
+        (should (equal opencode-last-model picked))
+        (should (eq (plist-get (drover-opencode--resolve defaults nil nil nil) :model) copilot))
+        ;; A switch is a choice.
+        (setq posts nil pending nil)
+        (drover-opencode-test-apply session (list :model sonnet))
+        (should (equal (mapcar #'car posts) '("/api/session/ses_1/model")))
+        (answer)
+        (should (equal opencode-last-model '((id . "claude-sonnet-5-5") (providerID . "anthropic"))))
+        (should (eq (plist-get (drover-opencode--resolve defaults nil nil nil) :model) sonnet))))))
 
 (defmacro drover-opencode-test-with-service (&rest body)
   "Run BODY with every OpenCode catalog fetch and request recorded, never sent.
