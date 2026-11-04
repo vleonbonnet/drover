@@ -25,7 +25,7 @@
 | =drover-codex-rollouts.el=          | The =codex= backend: Codex's conversations from its rollouts, archived ones included; resuming them, archiving, restoring and deleting them through its CLI                                                                                                                                                                                                                                       |
 | =drover-claude-code-ide.el=         | The claude-code-ide.el backend: Claude Code terminals, their Ghostel statuses, starting, resuming, forking, compacting and deleting; the CLI's catalog as a live model source; installs the =claude-code= backend, and resumes its conversations                                                                                                                                                  |
 | =drover-agent-shell.el=             | The agent-shell backend: shells of any engine over ACP, their statuses from events, forking, compacting and deleting through the agent; live model sources; the =gemini-cli= engine; installs the =claude-code= and =codex= backends, and resumes their conversations                                                                                                                             |
-| =drover-remote.el=                  | Other hosts: peers and their connections over spyglass, the owner serving its own sessions by revisions, each peer a backend of the records it received, stale while not connected; recaps and previews through the owner. See =doc/remote.org=                                                                                                                                                   |
+| =drover-remote.el=                  | Other hosts: peers and their connections over spyglass, the owner serving its own sessions by revisions, each peer a backend of the records it received, stale while not connected; recaps and previews through the owner; actions performed by the owner; terminals shared by the owner and mirrored here; peers backed off. See =doc/remote.org=                                                |
 
 * Backends describe, drover arranges
 
@@ -218,14 +218,14 @@ Changes reach the index as any change does, coalesced: the hook runs once backen
 
 Measured with 2510 sessions, 251 with buffers, three refused, the list shown, ungrouped (=make bench-bulk=, =EMACS_GUI= for the graphical runs):
 
-| Action, 2510 sessions                   | Emacs        | Command, before | Longest block, before | Done after, before | Command | Longest block | Done after | In flight at most |
-|-----------------------------------------+--------------+-----------------+-----------------------+--------------------+---------+---------------+------------+-------------------|
-| archived by the backend, confirmed      | graphical    | 5330 ms         | 5331 ms               | 10.3 s             | 3.4 ms  | 31 ms         | 10.6 s     | 8 (2510 before)   |
-| archived by drover, into its file       | graphical    | 34880 ms        | 34880 ms              | 35.0 s             | 41 ms   | 46 ms         | 0.18 s     |                   |
-| marked seen, answers not awaited        | graphical    | 1212 ms         | 1212 ms               | 1.2 s              | 2.9 ms  | 25 ms         | 0.8 s      |                   |
-| archived by the backend, confirmed      | batch        | 4880 ms         | 4896 ms               | 9.5 s              | 3.2 ms  | 70 ms         | 11.9 s     | 8 (2510 before)   |
-| archived by drover, into its file       | batch        | 32419 ms        | 32419 ms              | 32.6 s             | 18 ms   | 37 ms         | 0.18 s     |                   |
-| marked seen, answers not awaited        | batch        | 1157 ms         | 1157 ms               | 1.2 s              | 18 ms   | 29 ms         | 2.6 s      |                   |
+| Action, 2510 sessions              | Emacs     | Command, before | Longest block, before | Done after, before | Command | Longest block | Done after | In flight at most |
+|------------------------------------+-----------+-----------------+-----------------------+--------------------+---------+---------------+------------+-------------------|
+| archived by the backend, confirmed | graphical | 5330 ms         | 5331 ms               | 10.3 s             | 3.4 ms  | 31 ms         | 10.6 s     | 8 (2510 before)   |
+| archived by drover, into its file  | graphical | 34880 ms        | 34880 ms              | 35.0 s             | 41 ms   | 46 ms         | 0.18 s     |                   |
+| marked seen, answers not awaited   | graphical | 1212 ms         | 1212 ms               | 1.2 s              | 2.9 ms  | 25 ms         | 0.8 s      |                   |
+| archived by the backend, confirmed | batch     | 4880 ms         | 4896 ms               | 9.5 s              | 3.2 ms  | 70 ms         | 11.9 s     | 8 (2510 before)   |
+| archived by drover, into its file  | batch     | 32419 ms        | 32419 ms              | 32.6 s             | 18 ms   | 37 ms         | 0.18 s     |                   |
+| marked seen, answers not awaited   | batch     | 1157 ms         | 1157 ms               | 1.2 s              | 18 ms   | 29 ms         | 2.6 s      |                   |
 
 The longest blocks are slices or the one update of the list, a garbage collection landing in them: slices take 8 ms of work, the update of 2507 sessions leaving 10 ms (the index taking them in, the list, two rows left, drawn whole), drover's archive written once 15 ms.  In batch, the one block over 50 ms was the update with a collection in it.  The whole archive takes as long as the service answers 8 at a time, about 240 sessions a second, rather than all at once; drover's own archive allocates 970 objects a session rather than 695 000.
 
@@ -689,13 +689,13 @@ A match carries its line in the file as =:position=.  Opening a conversation res
 
 The OpenCode backend's =:search= calls opencode.el's =opencode-search=, a route of the service of the fork searching the prompts and visible replies of its sessions with full-text indexes (=drover-opencode--search=).  Its query is words a message must all hold, which the backend gives the text typed as, quotes and stars dropped so that no text typed is invalid, the last word a prefix as typing is in progress: OpenCode's messages match by words, where ripgrep matches transcripts by the phrase.  The scope narrows it: unarchived sessions alone unless archived sessions show (=:archived nil=), the project of the filter when one project of the service bears its name (=:project=, the filter naming projects by name); the rest the search's =:wanted= does after, a match naming a session the search does not offer counted out of scope.  It asks one page, the 100 best matches first, which suffices since a session shows one snippet; the snippet comes with the service's highlights, which the annotation replaces with its own.  A service without the route answers =unsupported=, remembered by opencode.el per service: the backend then searches nothing and tells nothing, as a service older than 2.2.5 does until restarted on it; a refusal or failure is a failure, told once.  Without =opencode-search=, an opencode.el before it, nothing is searched.  The backend of a peer, =remote:NAME=, may take =:search= the same way, asking the peer over the channel to search its own sessions and naming them by their keys here; nothing in the search assumes a backend is local.
 
-| Measure, 2510 sessions, batch Emacs                   | Time               |
-|-------------------------------------------------------+--------------------|
-| Candidates made, as the search starts                 | 22 ms              |
-| A key typed, candidates and a page of annotations     | 0.3 to 1.2 ms      |
-| Ripgrep over 120 transcripts, to the last match       | 30 to 41 ms        |
-| Longest function of the search on the main thread     | 1 to 1.3 ms        |
-| Longest a timer ticking every millisecond waits       | 3 ms, 13 with a GC |
+| Measure, 2510 sessions, batch Emacs               | Time               |
+|---------------------------------------------------+--------------------|
+| Candidates made, as the search starts             | 22 ms              |
+| A key typed, candidates and a page of annotations | 0.3 to 1.2 ms      |
+| Ripgrep over 120 transcripts, to the last match   | 30 to 41 ms        |
+| Longest function of the search on the main thread | 1 to 1.3 ms        |
+| Longest a timer ticking every millisecond waits   | 3 ms, 13 with a GC |
 
 * Engines
 
@@ -711,12 +711,12 @@ Records of different backends with the same non-nil =(engine . engine-id)= (=dro
 
 =drover-register-engine= takes a =:label=, =:defaults= (a function of a directory and a callback delivering the engine's defaults data, at most once), =:volatile= (the defaults are cheap local state, read again whenever the prompt gains context or a picker opens; otherwise they are read when the prompt starts or changes directory), =:resolve= (from the defaults and the explicit agent, model and variant to what a new session runs), =:agents=, =:last-used= and =:model-resets-variant=.  Every property is optional: an engine without =:resolve= runs the choices as they are.  =drover-engines= lists them in =drover-engine-order= (OpenCode, Claude Code, Codex, Gemini), others after; =drover-last-used-engine= is the engine whose =:last-used= is latest, a failure counting as unused.  =drover-agent-names= is the union of the engines' agents in that order, so OpenCode's come first and Claude Code's plan and build are offered without OpenCode.
 
-| Engine        | File                    | Defaults (=:defaults=)                                                                      | =:resolve=                                                                                                                                               |
-|---------------+-------------------------+---------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Engine        | File                    | Defaults (=:defaults=)                                                                      | =:resolve=                                                                                                                                                                           |
+|---------------+-------------------------+---------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | =opencode=    | =drover-opencode.el=    | asynchronous: the directory's agent, model and provider catalogs and default model, bounded | agent or the default agent; model explicit, else the agent's pin, else the last pick unless the catalog lacks it, else the default model; variant likewise, else the model's default |
-| =claude-code= | =drover-claude-code.el= | volatile: =drover-claude-code-defaults= (settings layers, flags, environment, catalog)      | model explicit or the startup model; agent explicit or the one standing for the starting permission mode; variant explicit or the effort of the model    |
-| =codex=       | =drover-codex.el=       | volatile: =drover-codex-defaults= (=config.toml=, models cache)                             | agent as given; model explicit or config's; variant explicit or the effort for the model                                                                 |
-| =gemini-cli=  | =drover-agent-shell.el= | none                                                                                        | none: the choices                                                                                                                                        |
+| =claude-code= | =drover-claude-code.el= | volatile: =drover-claude-code-defaults= (settings layers, flags, environment, catalog)      | model explicit or the startup model; agent explicit or the one standing for the starting permission mode; variant explicit or the effort of the model                                |
+| =codex=       | =drover-codex.el=       | volatile: =drover-codex-defaults= (=config.toml=, models cache)                             | agent as given; model explicit or config's; variant explicit or the effort for the model                                                                                             |
+| =gemini-cli=  | =drover-agent-shell.el= | none                                                                                        | none: the choices                                                                                                                                                                    |
 
 What an OpenCode model runs without a variant is opencode.el's to know (=opencode-model-default-variant=, =opencode-request-effort=); drover calls it.
 
@@ -859,14 +859,14 @@ The list gains the field =host=, whose column shows only when a session of anoth
 
 =make bench-remote= measures it (=test/drover-remote-bench.el=); in batch, the probe a timer every 5 ms late, the times including =drover-refresh-delay= (0.1 s) and, for a resynchronization, spyglass's first reconnection delay (0.2 s) and, through SSH, the registration read again:
 
-| Step                       | Reaver, 127.0.0.1 | Reaver viewing Core, =myssh -W= | Records | Viewer slice, ms | Owner slice, ms | Longest block, ms |
-|----------------------------+-------------------+---------------------------------+---------+------------------+-----------------+-------------------|
-| 2511 sessions appearing    | 311 ms            | 626 ms                          | 2511    | 3.6 / 1.9        | 2.2 / 4.9       | 12 / 12           |
-| A snapshot of 2511         | 357 ms            | 1051 ms                         | 2511    | 1.9 / 1.9        | 2.0 / 4.5       | 20 / 16           |
-| One session changed        | 101 ms            | 102 ms                          | 1       | 0.1 / 0.0        | 0.0 / 0.2       | 11 / 11           |
-| 50 sessions changed        | 107 ms            | 112 ms                          | 50      | 0.6 / 0.6        | 0.3 / 0.9       | 0.2 / 0.1         |
-| Resync after 10 changes    | 375 ms            | 1103 ms                         | 10      | 0.7 / 0.6        | 0.1 / 0.2       | 16 / 14           |
-| Resync after 500 changes   | 382 ms            | 1098 ms                         | 500     | 2.0 / 1.4        | 2.1 / 4.8       | 17 / 23           |
+| Step                     | Reaver, 127.0.0.1 | Reaver viewing Core, =myssh -W= | Records | Viewer slice, ms | Owner slice, ms | Longest block, ms |
+|--------------------------+-------------------+---------------------------------+---------+------------------+-----------------+-------------------|
+| 2511 sessions appearing  | 311 ms            | 626 ms                          |    2511 | 3.6 / 1.9        | 2.2 / 4.9       | 12 / 12           |
+| A snapshot of 2511       | 357 ms            | 1051 ms                         |    2511 | 1.9 / 1.9        | 2.0 / 4.5       | 20 / 16           |
+| One session changed      | 101 ms            | 102 ms                          |       1 | 0.1 / 0.0        | 0.0 / 0.2       | 11 / 11           |
+| 50 sessions changed      | 107 ms            | 112 ms                          |      50 | 0.6 / 0.6        | 0.3 / 0.9       | 0.2 / 0.1         |
+| Resync after 10 changes  | 375 ms            | 1103 ms                         |      10 | 0.7 / 0.6        | 0.1 / 0.2       | 16 / 14           |
+| Resync after 500 changes | 382 ms            | 1098 ms                         |     500 | 2.0 / 1.4        | 2.1 / 4.8       | 17 / 23           |
 
 Slices are without garbage collections, which took up to 11 ms when one fell in a slice; the longest blocks, all under 25 ms, are the index and the mode-line count taking 2511 sessions in at once, once, and garbage collections.  Both directions held on one connection, Core's (=core= sorts before =reaver=), Core dialing Reaver with MSYS's =ssh -o IdentityAgent=~/.ssh/agent.sock=; both hosts held the same 2511 sessions; resident memory 111 MB here, 56 MB on Core.  Adding the host's field to every row made the list drawn whole over 2510 rows about 10% slower in batch (46 against 42 ms, most of it garbage collection), the other measures of =make bench= unchanged.  Those measures were taken while the two Emacs greeted each other about 11,000 times a second (see above), which kept both busy, their timers on time and the processor at its fastest: once they greet once per stream, on 127.0.0.1, an update of one session takes 104 ms, of 50 sessions 127 ms rather than 107, the minute's refresh 1.2 ms rather than 0.2, the viewer's slices up to 2.8 ms and the owner's 3.9, the same code measuring so with the greeting fixed alone; resynchronizations take 403 ms, every step within its budget, spyglass telling no error and drover reporting none, 4 greetings for 4 streams, the viewer at 99 MB rather than 111.
 
