@@ -1784,6 +1784,9 @@ leading back to what holds it would print it again from each."
                                                       (setq worst (max worst (- now last)) last now)))))
         (unwind-protect
             (progn
+              ;; What earlier tests allocated is collected now, not as
+              ;; this measures: a heap of all of them takes 130 ms.
+              (garbage-collect)
               (setq start (float-time) last start)
               ;; 8 MB written as a program would, its scrollback 512 kB.
               (drover-remote-test-command "emit" :id "s1" :bytes (* 8 1024 1024) :keep (* 512 1024))
