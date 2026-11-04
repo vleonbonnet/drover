@@ -26,6 +26,7 @@
   '((drover-status-glyphs . opencode-session-status-icons)
     (drover-animations . opencode-session-status-animations)
     (drover-list-animation-interval . opencode-session-status-animation-interval)
+    (drover-list-animation-unfocused-interval . opencode-session-status-animation-unfocused-interval)
     (drover-subagent-glyphs . opencode-subagent-icons)
     (drover-archived-glyph . opencode-archived-icon)
     (drover-agent-faces . opencode-agent-faces)

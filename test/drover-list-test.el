@@ -5927,7 +5927,7 @@ seven, a second, showed them turning backwards."
                                                              'standard-value))
                                                   t))
         (drover-list-animation-unfocused-interval
-         (eval (car (get 'drover-list-animation-unfocused-interval 'standard-value)) t))
+         (eval (car (get 'opencode-session-status-animation-unfocused-interval 'standard-value)) t))
         (drover-list--focused nil))
     (should (equal (mapcar (lambda (entry) (length (cdr entry))) opencode-session-status-animations) '(8 4)))
     ;; The default, nine frames, ticks fall mid-frame.
@@ -5998,17 +5998,17 @@ the moon its phase before, turning backwards."
     ;; most frames together: from 7 to 20 frames, 10, the nine-frame
     ;; one's; from 20 to 60, 46, the nine and five-frame ones', 14
     ;; frames, rather than 36, seven and five, 12.
-    (should (= (drover-list--forward-frames (/ 1.0 0.15) '(5 7 9)) 10))
-    (should (= (drover-list--forward-frames 20 '(5 7 9)) 46))
+    (should (= (opencode-session-status-forward-frames (/ 1.0 0.15) '(5 7 9)) 10))
+    (should (= (opencode-session-status-forward-frames 20 '(5 7 9)) 46))
     ;; Within reach, the least of all.
-    (should (= (drover-list--forward-frames 200 '(5 7 9)) 316))
+    (should (= (opencode-session-status-forward-frames 200 '(5 7 9)) 316))
     ;; Eight and three: their next frames together every 25 frames, past
     ;; three times 6.67; nine shows the moon its next phase, seven would
     ;; show the three-frame one its next, the moon its phase before.
-    (should (= (drover-list--forward-frames (/ 1.0 0.15) '(8 3)) 9))
-    (should (= (drover-list--forward-frames 9 '(8 4)) 9))
-    (should (= (drover-list--forward-frames 9.000000000000002 '(8 4)) 9))
-    (should (= (drover-list--forward-frames 0.3 '(8 4)) 1))))
+    (should (= (opencode-session-status-forward-frames (/ 1.0 0.15) '(8 3)) 9))
+    (should (= (opencode-session-status-forward-frames 9 '(8 4)) 9))
+    (should (= (opencode-session-status-forward-frames 9.000000000000002 '(8 4)) 9))
+    (should (= (opencode-session-status-forward-frames 0.3 '(8 4)) 1))))
 
 (ert-deftest drover-list-test-unfocused-glyphs-step-forward ()
   "A list without focus shows each animated glyph its next frame at each tick."
