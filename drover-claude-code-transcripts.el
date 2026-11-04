@@ -117,7 +117,11 @@ was kept of the files, looks at them from now on if the backend
 started."
   (let ((index drover-claude-code-transcripts--index))
     (if (or (null index) (drover-transcript-index-current-p index))
-        index
+        (progn
+          ;; Read by the reader loaded before this one: read again.
+          (when index
+            (drover-transcript-reread index drover-claude-code-transcripts--reader-version))
+          index)
       (drover-stale-layout "index of Claude Code's transcripts")
       (setq drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index))
       (when (memq 'claude-code drover--started)
@@ -1213,7 +1217,9 @@ The backend goes once no front end needs it."
 ;; Loaded anew, as reloading drover does, the backend a front end
 ;; installed takes this file's properties.
 (when (eq (drover-backend-property 'claude-code :sessions) #'drover-claude-code-transcripts--sessions)
-  (drover-claude-code-transcripts--register))
+  (drover-claude-code-transcripts--register)
+  ;; What the reader before read is read again.
+  (drover-claude-code-transcripts--current-index))
 
 (provide 'drover-claude-code-transcripts)
 ;;; drover-claude-code-transcripts.el ends here

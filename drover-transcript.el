@@ -305,6 +305,31 @@ passed since they were kept last.  A failure is reported once."
                     (drover-transcript-inode entry))
               (drover-transcript--stamp attributes))))
 
+(defun drover-transcript--fresh-p (index entry attributes)
+  "Return non-nil when ENTRY of INDEX was read from the file ATTRIBUTES describe.
+Read, that is, by the version of the reader INDEX reads with now: what
+another one read is read again, whole."
+  (and (drover-transcript--current-p entry attributes)
+       (drover-transcript--reader-current-p index entry)))
+
+(defun drover-transcript--reader-current-p (index entry)
+  "Return non-nil when ENTRY was read by the version of the reader of INDEX."
+  (let ((version (drover-transcript-index-version index))
+        (data (drover-transcript-data entry)))
+    (or (null version) (null data) (eql (plist-get data :reader) version))))
+
+(defun drover-transcript-reread (index version)
+  "Have INDEX read its files with VERSION of its reader, when another read them.
+Its entries stay, and so what its backend lists, until each file is
+read again, by the next look, which checks every file, in slices."
+  (unless (eql (drover-transcript-index-version index) version)
+    (setf (drover-transcript-index-version index) version)
+    ;; The next look begun checks every file.
+    (setf (drover-transcript-index-looks index)
+          (* drover-transcript-full-look-every
+             (ceiling (drover-transcript-index-looks index) drover-transcript-full-look-every)))
+    (drover-transcript-look-soon index)))
+
 (defun drover-transcript--enqueue (index file &optional first)
   "Queue FILE for INDEX to read, FIRST before the others when non-nil."
   (let ((queued (drover-transcript-index-queued index)))
@@ -323,7 +348,7 @@ passed since they were kept last.  A failure is reported once."
   "Note FILE of ATTRIBUTES listed by INDEX, queued to read when it changed."
   (when-let* ((seen (drover-transcript-index-seen index)))
     (puthash file t seen))
-  (unless (drover-transcript--current-p (drover-transcript-entry index file) attributes)
+  (unless (drover-transcript--fresh-p index (drover-transcript-entry index file) attributes)
     (drover-transcript--enqueue index file)))
 
 (defun drover-transcript--hot-p (entry now)
@@ -399,10 +424,12 @@ listed again only once its modification time tells files came or went."
         (remhash file entries)
         (setf (drover-transcript-index-dirty index) t)
         (drover-transcript--change index file (drover-transcript-data entry) nil)))
-     ((drover-transcript--current-p entry attributes))
+     ((drover-transcript--fresh-p index entry attributes))
      (t
       (let ((data (condition-case err
-                      (funcall (drover-transcript-index-read index) file attributes entry)
+                      ;; What another reader read is no start to read on from.
+                      (funcall (drover-transcript-index-read index) file attributes
+                               (and entry (drover-transcript--reader-current-p index entry) entry))
                     ;; A file that cannot be read is noted as read, to be
                     ;; read again once it changes, not on every look.
                     ((debug error)
@@ -532,7 +559,7 @@ backend told then."
   (let ((attributes (file-attributes file))
         (entry (drover-transcript-entry index file)))
     (when (and (or attributes entry)
-               (not (and attributes (drover-transcript--current-p entry attributes))))
+               (not (and attributes (drover-transcript--fresh-p index entry attributes))))
       (drover-transcript--enqueue index file t)
       (when (drover-transcript-index-active index)
         (drover-transcript--schedule index drover-transcript-slice-delay #'drover-transcript--work))
