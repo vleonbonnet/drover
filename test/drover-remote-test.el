@@ -1872,5 +1872,221 @@ leading back to what holds it would print it again from each."
           (should (= (seq-count (lambda (event) (eq (nth 1 event) 'retry)) (drover-remote--peer-history peer))
                      retries)))))))
 
+;;;; OpenCode sessions in full buffers
+
+(defvar opencode-service-registration-file)
+(defvar opencode-command)
+(defvar opencode-notification-os-filter)
+
+(defun drover-remote-test-oc-session (id)
+  "Return this host's record of the agent's OpenCode session ID, or nil."
+  (drover-changed-now)
+  (drover-index-session (cons 'remote:agent (cons 'opencode id))))
+
+(defun drover-remote-test-oc-requests (&optional method)
+  "Return what reached the agent's OpenCode service, of METHOD if given, as (METHOD PATH BODY)."
+  (mapcar (lambda (request) (append request nil))
+          (plist-get (apply #'drover-remote-test-command "oc-requests" (and method (list :method method)))
+                     :requests)))
+
+(defun drover-remote-test-start-oc (dir access &rest environment)
+  "Start the agent in DIR with its OpenCode service, granting ACCESS, ENVIRONMENT more; connect.
+Its sessions ses_a and ses_b are listed here once it is connected."
+  (let ((process-environment (append (list "DROVER_AGENT_OPENCODE=1" (concat "DROVER_AGENT_ACCESS=" access))
+                                     environment process-environment)))
+    (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+  (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted (drover-remote--peer "agent")) (intern access))))
+  (drover-remote-test-command "oc-add" :sessions [["ses_a" "Agent work"] ["ses_b" "Other work"]])
+  (drover-remote-test-wait (lambda () (and (drover-remote-test-oc-session "ses_a") (drover-remote-test-oc-session "ses_b"))))
+  (should (drover-remote-test-oc-session "ses_a")))
+
+(defun drover-remote-test-open-oc (id)
+  "Open the agent's OpenCode session ID as RET does; return its buffer once shown."
+  (drover-open (drover-remote-test-oc-session id))
+  (let ((buffer (drover-remote-test-wait
+                 (lambda ()
+                   (let ((buffer (window-buffer (selected-window))))
+                     (and (eq (buffer-local-value 'major-mode buffer) 'opencode-session-mode)
+                          (equal (buffer-local-value 'opencode-session-id buffer) id)
+                          (buffer-local-value 'drover-remote--shown buffer)
+                          buffer))))))
+    (should buffer)
+    buffer))
+
+(defmacro drover-remote-test-oc-isolated (&rest body)
+  "Run BODY with opencode.el loaded, its local service out of reach.
+Its registration and CLI name nothing, and drover's OpenCode backend,
+which loading opencode.el registers, is dropped, lest it follow the
+user's service: only the services BODY registers are reached."
+  (declare (indent 0) (debug t))
+  `(progn
+     (require 'opencode nil t)
+     (let ((opencode-service-registration-file
+            (expand-file-name (make-temp-name "drover-no-opencode-") temporary-file-directory))
+           (opencode-command "drover-test-no-opencode")
+           (opencode-notification-os-filter nil))
+       (when (assq 'opencode drover--backends)
+         (drover-unregister-backend 'opencode))
+       ,@body)))
+
+(defmacro drover-remote-test-with-oc (&rest body)
+  "Run BODY with this host's opencode.el following no service but those BODY opens."
+  (declare (indent 0) (debug t))
+  `(progn
+     (require 'opencode nil t)
+     (skip-unless (fboundp 'opencode-service-register))
+     (unwind-protect (drover-remote-test-oc-isolated ,@body)
+       (dolist (buffer (buffer-list))
+         (when (and (buffer-live-p buffer) (buffer-local-value 'opencode--buffer-service buffer))
+           (kill-buffer buffer)))
+       (when-let* ((service (opencode-service-get "agent")))
+         (opencode-service-unregister service)
+         (opencode--service-reset service)
+         (remhash "agent" opencode--services))
+       (opencode-transport-unregister-relay "agent")
+       (clrhash drover-remote--oc-buffers))))
+
+(ert-deftest drover-remote-test-oc-pieces ()
+  "An event stream goes to a peer in pieces of whole characters, lines when short."
+  (let ((drover-remote--oc-piece 8))
+    (should (= (drover-remote--oc-cut (encode-coding-string "ab\ncd" 'utf-8)) 3))
+    (should (= (drover-remote--oc-cut (encode-coding-string "abc" 'utf-8)) 0))
+    ;; é is two bytes, the second a continuation: never cut between them.
+    (let ((bytes (encode-coding-string "abcdefgéxyz" 'utf-8)))
+      (should (= (drover-remote--oc-cut bytes) 7))
+      (should (equal (decode-coding-string (substring bytes 0 7) 'utf-8) "abcdefg")))
+    (let ((sent nil)
+          (pending (list (encode-coding-string "éééééé\nrest" 'utf-8))))
+      (cl-letf (((symbol-function 'drover-remote--send)
+                 (lambda (_connection message) (push (plist-get message :d) sent))))
+        (drover-remote--oc-flush nil "id" pending))
+      ;; Nothing lost nor cut within a character; a short tail without
+      ;; its line's end waits for it.
+      (should (equal (concat (apply #'concat (reverse sent)) (decode-coding-string (car pending) 'utf-8))
+                     "éééééé\nrest"))
+      (should (< (length (car pending)) 8))
+      (should (seq-every-p (lambda (piece) (<= (string-bytes piece) 8)) sent)))))
+
+(ert-deftest drover-remote-test-oc-refusals ()
+  "A peer's OpenCode requests are checked against its access, whatever it greyed out."
+  (should-not (drover-remote--oc-refusal 'read 'get "/api/session/ses_a/message?limit=5"))
+  (should (drover-remote--oc-refusal 'read 'post "/api/session/ses_a/prompt"))
+  (should-not (drover-remote--oc-refusal 'act 'post "/api/session/ses_a/prompt"))
+  (should-not (drover-remote--oc-refusal 'act 'delete "/api/session/ses_a/inbox/msg_1"))
+  (should-not (drover-remote--oc-refusal 'act 'delete "/api/session/ses_a/revert"))
+  (should (drover-remote--oc-refusal 'act 'delete "/api/session/ses_a"))
+  (should (drover-remote--oc-refusal 'act 'delete "/api/project/prj_1"))
+  (should-not (drover-remote--oc-refusal 'full 'delete "/api/session/ses_a"))
+  (should (drover-remote--oc-refusal 'full 'get "/etc/passwd"))
+  (should (drover-remote--oc-refusal 'full 'get "/api/session x"))
+  (should (drover-remote--oc-refusal 'full nil "/api/session"))
+  (should (drover-remote--oc-refusal nil 'post "/api/session")))
+
+(ert-deftest drover-remote-test-oc-buffer ()
+  "RET on another host's OpenCode session opens it in a full buffer, talking to its service through its host."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "act")
+      (save-window-excursion
+        (let* ((buffer (drover-remote-test-open-oc "ses_a"))
+               (service (opencode-service-get "agent")))
+          (should (equal (buffer-name buffer) "*OpenCode@agent: Agent work*"))
+          (drover-remote-test-shows buffer "First reply of Agent work")
+          ;; Its session is the host's: drover's keys act on it through the host.
+          (with-current-buffer buffer
+            (should (equal (drover-session-id (drover-session-at-point)) '(opencode . "ses_a")))
+            (should (equal (drover-session-host (drover-session-at-point)) "agent"))
+            (should (equal (opencode-location) "C:/Users/agent/project/")))
+          (should (eq (drover-session-buffer (drover-remote-test-oc-session "ses_a")) buffer))
+          ;; This host holds no password of that service: its host adds its own.
+          (should-not (plist-get (opencode-call-with-service service (lambda () (opencode-sv opencode-service-connection)))
+                                 :password))
+          (should (string-prefix-p "relay://" (plist-get (opencode-call-with-service
+                                                           service (lambda () (opencode-sv opencode-service-connection)))
+                                                          :url)))
+          ;; Its events stream through the host: one stream there.
+          (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)))
+          (should (= (plist-get (drover-remote-test-command "oc-streams") :streams) 1))
+          ;; A prompt sent here reaches the service there; its reply streams back.
+          (with-current-buffer buffer
+            (opencode-session-send "hello there" :show t))
+          (drover-remote-test-shows buffer "Echo: hello there")
+          (should (seq-find (lambda (request) (equal (nth 1 request) "/api/session/ses_a/prompt"))
+                            (drover-remote-test-oc-requests "POST")))
+          ;; A turn another client runs there shows here too.
+          (drover-remote-test-command "oc-turn" :id "ses_a" :text "from elsewhere")
+          (drover-remote-test-shows buffer "Echo: from elsewhere")
+          ;; RET again shows the same buffer.
+          (should (eq (drover-remote-test-open-oc "ses_a") buffer))
+          ;; Archived there, with nothing typed nor running here: closed here.
+          (let ((other (drover-remote-test-open-oc "ses_b")))
+            (drover-remote-test-shows other "First reply of Other work")
+            (drover-remote-test-command "oc-archive" :id "ses_b")
+            (drover-remote-test-wait (lambda () (not (buffer-live-p other))))
+            (should-not (buffer-live-p other)))
+          ;; The local service is untouched: no buffer, no stream.
+          (should-not (gethash "ses_a" opencode-session-buffers))
+          ;; Killed here, the session runs on there.
+          (kill-buffer buffer)
+          (should-not (drover-remote--oc-buffer "agent" '(opencode . "ses_a")))
+          (drover-remote-test-wait (lambda () (= (plist-get (drover-remote-test-command "oc-streams") :streams) 0)) 10)
+          (should (= (plist-get (drover-remote-test-command "oc-streams") :streams) 0)))))))
+
+(ert-deftest drover-remote-test-oc-read-only ()
+  "A host granting read access lets this one read its OpenCode sessions, not change them."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "read")
+      (save-window-excursion
+        (let ((buffer (drover-remote-test-open-oc "ses_a"))
+              (failure nil))
+          (drover-remote-test-shows buffer "First reply of Agent work")
+          (with-current-buffer buffer
+            (opencode-session-send "not allowed" :else (lambda (error) (setq failure error))))
+          (drover-remote-test-wait (lambda () failure))
+          (should (eql (opencode-error-status failure) 403))
+          (should (string-match-p "read access" (opencode-error-message failure)))
+          ;; Nothing reached the service but what reads.
+          (should-not (drover-remote-test-oc-requests "POST"))
+          (should-not (drover-remote-test-oc-requests "DELETE"))
+          (kill-buffer buffer))))))
+
+(ert-deftest drover-remote-test-oc-survives-a-drop ()
+  "The link dropping, an OpenCode buffer follows its session again as it comes back, what ran meanwhile shown."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (let ((drover-remote-backoff '(1.0 1.0)))
+        (drover-remote-test-start-oc dir "act")
+        (save-window-excursion
+          (let ((buffer (drover-remote-test-open-oc "ses_a"))
+                (service (opencode-service-get "agent"))
+                (peer (drover-remote--peer "agent")))
+            (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)))
+            (drover-remote-test-command "oc-turn" :id "ses_a" :text "during the outage" :delay 0.4)
+            (spyglass-connection-drop-stream (drover-remote--peer-dialed peer))
+            (drover-remote-test-wait (lambda () (not (opencode-call-with-service service #'opencode-events-connected-p))) 5)
+            (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state peer) 'open)) 20)
+            (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)) 20)
+            (drover-remote-test-shows buffer "Echo: during the outage")
+            ;; Still talking to it.
+            (with-current-buffer buffer
+              (opencode-session-send "after" :show t))
+            (drover-remote-test-shows buffer "Echo: after")
+            (kill-buffer buffer)))))))
+
+(ert-deftest drover-remote-test-oc-older-peer ()
+  "A peer whose drover relays no OpenCode service shows its OpenCode sessions as it tells them, saying why."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "full" "DROVER_AGENT_CAPS=actions,bye,grant,mirror")
+      (save-window-excursion
+        (drover-open (drover-remote-test-oc-session "ses_a"))
+        (let ((view (window-buffer (selected-window))))
+          (should (eq (buffer-local-value 'major-mode view) 'drover-remote-session-mode))
+          (should (string-match-p "older drover" (buffer-local-value 'drover-remote--note view)))
+          (should-not (opencode-service-get "agent"))
+          (should-not (drover-remote-test-oc-requests))
+          (kill-buffer view))))))
+
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

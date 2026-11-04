@@ -4025,6 +4025,10 @@ whether drover's archive hides it or not: restored, it shows again."
 An alist (KEY . BUFFER): KEY is the key of the session archived (see
 `drover-session-key'), BUFFER its buffer, which runs its agent.")
 
+(defvar drover--closing-deferred nil
+  "Buffers to close, read from the file, whose backends did not start yet.
+A list of plists, as `drover--closing-entry-p' accepts.")
+
 (defun drover-keep-unsent (texts)
   "Put TEXTS in the kill ring, as one entry, unless every one is blank.
 TEXTS are strings, or nil: what a buffer about to close holds that its
@@ -4181,10 +4185,6 @@ kept in the kill ring, or a failure, as a warning."
 (defvar drover--closing-saved nil
   "What the file remembers of each buffer of `drover--closing'.
 A list of plists, newest first, as `drover--closing-entry-p' accepts.")
-
-(defvar drover--closing-deferred nil
-  "Buffers to close, read from the file, whose backends did not start yet.
-A list of plists, as `drover--closing-entry-p' accepts.")
 
 (defvar drover--closing-restored nil
   "Non-nil once the file of the buffers to close was read in this Emacs.")

@@ -37,6 +37,10 @@
 ;; terminals and shells are; opening a session without one starts one,
 ;; as a front end resuming a conversation would, displayed as front ends
 ;; display them.  DROVER_AGENT_UNSHARE is `drover-remote-unshare-delay'.
+;; With DROVER_AGENT_OPENCODE set, it runs a fake OpenCode service
+;; (test/drover-fake-opencode.el), which opencode.el finds as its
+;; service, and a backend `opencode' of its sessions, which drover's
+;; remote layer relays to peers.
 ;; It says READY on
 ;; standard error once it listens, kills itself past 2 GB of resident
 ;; memory, and after ten minutes without a command.  It loads neither
@@ -49,6 +53,19 @@
 (require 'drover-remote)
 (require 'spyglass)
 (require 'comint)
+
+(defvar drover-fake-opencode--sessions)
+(defvar drover-fake-opencode--order)
+(defvar drover-fake-opencode--streams)
+(defvar drover-fake-opencode--password)
+(defvar drover-fake-opencode-directory)
+(defvar opencode-service-registration-file)
+(declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
+(declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
+(declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
+(declare-function drover-fake-opencode-requests "drover-fake-opencode" (&optional method))
+(declare-function drover-fake-opencode-port "drover-fake-opencode" ())
+(declare-function drover-fake-opencode-archive "drover-fake-opencode" (id))
 
 (defvar drover-remote-agent--sessions (make-hash-table :test #'equal)
   "The fake backend's sessions, by identifier.")
@@ -290,6 +307,29 @@ whose newlines are CRLF on Windows."
     (setq drover-remote-agent--order (delete id drover-remote-agent--order)))
   (drover-backend-changed 'fake id))
 
+(defvar drover-remote-agent--oc-archived (make-hash-table :test #'equal)
+  "When the fake OpenCode service's sessions archived were, by identifier.")
+
+(defun drover-remote-agent--opencode-session (id)
+  "Return the record of the fake OpenCode service's session ID, or nil."
+  (when-let* ((info (gethash id drover-fake-opencode--sessions)))
+    (drover-session-create :backend 'opencode :id id :title (alist-get 'title info)
+                           :directory drover-fake-opencode-directory :status 'idle
+                           :engine 'opencode :engine-id id :agent "build"
+                           :archived (gethash id drover-remote-agent--oc-archived)
+                           :updated (float-time) :created (float-time))))
+
+(defun drover-remote-agent--opencode ()
+  "Start the fake OpenCode service, and the backend of its sessions."
+  (require 'drover-fake-opencode)
+  (require 'opencode-service)
+  (setq opencode-service-registration-file
+        (drover-fake-opencode-start (or (getenv "DROVER_AGENT_DIR") default-directory)))
+  (drover-register-backend
+   'opencode :label "OpenCode"
+   :sessions (lambda () (delq nil (mapcar #'drover-remote-agent--opencode-session drover-fake-opencode--order)))
+   :session #'drover-remote-agent--opencode-session))
+
 (defun drover-remote-agent--json (value)
   "Return VALUE, a plist parsed from JSON, with false as nil."
   (cl-loop for (k v) on value by #'cddr nconc (list k (if (eq v :false) nil v))))
@@ -361,6 +401,42 @@ whose newlines are CRLF on Windows."
        (funcall reply (list :ok t)))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("oc-add"
+       ;; Sessions of the fake OpenCode service, as (ID TITLE).
+       (seq-doseq (pair (plist-get args :sessions))
+         (drover-fake-opencode-add (aref pair 0) (aref pair 1))
+         (drover-backend-changed 'opencode (aref pair 0)))
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
+      ("oc-turn"
+       ;; A turn run by another client of the service, DELAY seconds
+       ;; later; with SIZE, its prompt is TEXT and SIZE characters more,
+       ;; as a long tool output streams.
+       (let ((id (plist-get args :id))
+             (text (concat (plist-get args :text)
+                           (and (plist-get args :size)
+                                (concat " " (make-string (plist-get args :size) ?x) " "
+                                        (plist-get args :text) "-END")))))
+         (funcall reply (list :ok t))
+         (run-at-time (or (plist-get args :delay) 0) nil
+                      (lambda () (drover-fake-opencode-turn id text)))))
+      ("oc-archive"
+       (puthash (plist-get args :id) (float-time) drover-remote-agent--oc-archived)
+       (drover-fake-opencode-archive (plist-get args :id))
+       (drover-backend-changed 'opencode (plist-get args :id))
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
+      ("oc-requests"
+       ;; What reached the service, oldest first, as [METHOD PATH BODY].
+       (funcall reply (list :requests (vconcat (mapcar (lambda (request)
+                                                         (vector (nth 0 request) (nth 1 request)
+                                                                 (or (nth 2 request) "")))
+                                                       (drover-fake-opencode-requests
+                                                        (plist-get args :method)))))))
+      ("oc-streams"
+       (funcall reply (list :streams (length (seq-filter #'process-live-p drover-fake-opencode--streams))
+                            :port (drover-fake-opencode-port)
+                            :password drover-fake-opencode--password)))
       ("hold"
        (setq drover-remote-agent--hold (list 'held))
        (funcall reply (list :ok t)))
@@ -565,6 +641,8 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (add-hook 'spyglass-error-functions
               (lambda (_connection message) (drover-remote-agent--say "spyglass: %s" message)))
     (drover-remote-agent--register)
+    (when (getenv "DROVER_AGENT_OPENCODE")
+      (drover-remote-agent--opencode))
     (spyglass-register-channel "drover-test" #'ignore :request #'drover-remote-agent--command)
     (drover-remote-mode 1)
     (drover-remote-agent--say "READY %s %s" drover-host spyglass-registration-file)

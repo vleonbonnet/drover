@@ -1877,6 +1877,11 @@ A refusal is told on one line, as a warning, the session staying archived."
           (should-not (string-search "\n" (car warnings)))
           (should (< (length (car warnings)) 400)))))))
 
+(defun drover-opencode-test-target (function)
+  "Return what FUNCTION, registered by the backend, runs for the local service."
+  (cl-letf (((symbol-function 'drover-opencode--call-local) (lambda (target &rest _) target)))
+    (funcall function)))
+
 (ert-deftest drover-opencode-test-dispatch ()
   "The menu's S is drover's search, which searches OpenCode's sessions too."
   (let ((keys (mapcar (lambda (key)
@@ -1889,7 +1894,8 @@ A refusal is told on one line, as a warning, the session staying archived."
   ;; opencode.el's search of open buffers stays, unbound.
   (should (fboundp 'opencode-consult-sessions))
   (should-not (ignore-errors (transient-get-suffix 'drover-dispatch 'opencode-consult-sessions)))
-  (should (eq (drover-backend-property 'opencode :search) #'drover-opencode--search))
+  (should (eq (drover-opencode-test-target (drover-backend-property 'opencode :search))
+              #'drover-opencode--search))
   ;; The keys opencode.el's lists had are gone.
   (dolist (key '("1" "2" "3"))
     (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
@@ -2603,10 +2609,10 @@ PATH . KEYS), newest first; `warnings' the warnings of drover."
   "Loading the backend registers the engine and its catalog source."
   (let ((engine (alist-get 'opencode (default-value 'drover--engines))))
     (should (equal (plist-get engine :label) "OpenCode"))
-    (should (eq (plist-get engine :defaults) #'drover-opencode--fetch-defaults))
-    (should (eq (plist-get engine :resolve) #'drover-opencode--resolve))
-    (should (eq (plist-get engine :agents) #'drover-opencode--agents))
-    (should (eq (plist-get engine :last-used) #'drover-opencode--last-used))
+    (should (eq (drover-opencode-test-target (plist-get engine :defaults)) #'drover-opencode--fetch-defaults))
+    (should (eq (drover-opencode-test-target (plist-get engine :resolve)) #'drover-opencode--resolve))
+    (should (eq (drover-opencode-test-target (plist-get engine :agents)) #'drover-opencode--agents))
+    (should (eq (drover-opencode-test-target (plist-get engine :last-used)) #'drover-opencode--last-used))
     (should (plist-get engine :model-resets-variant))
     ;; Its defaults are fetched, not read from local files.
     (should-not (plist-get engine :volatile)))

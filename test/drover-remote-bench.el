@@ -48,6 +48,9 @@
 (require 'drover-remote-test)
 (require 'drover-attention)
 
+(defvar opencode-service-registration-file)
+(defvar opencode-command)
+
 (defvar drover-remote-bench--late 0.0
   "The longest lateness of the probe timer, in seconds, since reset.")
 
@@ -167,7 +170,8 @@ changes in at once: views follow them as they do in use, after
 (defun drover-remote-bench--sources ()
   "Return the files the agent needs."
   (append (mapcar #'locate-library '("drover-core.el" "drover-ui.el" "drover-remote.el" "drover-remote-agent.el"
-                                     "opencode-look.el" "opencode-common.el"))
+                                     "opencode-look.el" "opencode-common.el" "opencode-transport.el"
+                                     "opencode-service.el" "drover-fake-opencode.el"))
           (file-expand-wildcards
            (expand-file-name "spyglass*.el" (file-name-directory (locate-library "spyglass.el"))))))
 
@@ -181,7 +185,7 @@ With BACK, the agent will be told to dial this host back."
     (dolist (file (drover-remote-bench--sources))
       (drover-remote-bench--copy file dir))
     (drover-remote-bench--remote-run
-     (format "cd %s && timeout 300 %s -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile opencode-common.el opencode-look.el spyglass*.el drover-core.el drover-ui.el drover-remote.el 2>&1"
+     (format "cd %s && timeout 300 %s -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile opencode-common.el opencode-look.el opencode-transport.el opencode-service.el spyglass*.el drover-core.el drover-ui.el drover-remote.el 2>&1"
              dir emacs))
     (setq drover-remote-test--agent-output nil
           drover-remote-test--agent-pending ""
@@ -189,7 +193,7 @@ With BACK, the agent will be told to dial this host back."
           (make-process
            :name "drover-agent" :connection-type 'pipe :noquery t
            :command (list (drover-remote-bench--ssh) "-o" "BatchMode=yes" drover-remote-bench--remote
-                          (format "cd %s && DROVER_AGENT_ACCESS=full DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
+                          (format "cd %s && DROVER_AGENT_OPENCODE=1 DROVER_AGENT_ACCESS=full DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
                                   dir drover-remote-test-agent-name (if back drover-host "") emacs))
            :filter #'drover-remote-test--agent-filter))
     (drover-remote-test-wait (lambda () (or (seq-some (lambda (line) (string-prefix-p "DROVER-AGENT READY" line))
@@ -269,6 +273,198 @@ a scrollback of 512 kB, and resuming after a drop."
           (drover-remote-bench--row "mirror resumed after a drop" (- (float-time) start)))
         (kill-buffer mirror)))))
 
+;;;; OpenCode sessions
+
+(defun drover-remote-bench--free-port ()
+  "Return a port of 127.0.0.1 free a moment ago."
+  (let* ((server (make-network-process :name "free-port" :server t :host "127.0.0.1" :service t
+                                       :family 'ipv4 :noquery t))
+         (port (process-contact server :service)))
+    (delete-process server)
+    port))
+
+(defun drover-remote-bench--forward (port)
+  "Forward a port of this host to the agent's PORT; return (PROCESS . LOCAL-PORT).
+Through SSH, as the design's forward would, when the agent runs on
+another host; on this host, nothing: its port is reached directly."
+  (if (not drover-remote-bench--remote)
+      (cons nil port)
+    (let* ((local (drover-remote-bench--free-port))
+           (process (make-process
+                     :name "bench-forward" :noquery t :connection-type 'pipe
+                     :command (list (drover-remote-bench--ssh) "-N" "-o" "BatchMode=yes"
+                                    "-o" "ExitOnForwardFailure=yes"
+                                    "-L" (format "127.0.0.1:%d:127.0.0.1:%d" local port)
+                                    drover-remote-bench--remote))))
+      (cons process local))))
+
+(defun drover-remote-bench--forward-ready (port password)
+  "Wait until the service answers through 127.0.0.1's PORT, with PASSWORD."
+  (let ((ready nil)
+        (deadline (+ (float-time) 30)))
+    (while (and (not ready) (< (float-time) deadline))
+      (let ((outcome nil))
+        (opencode-transport-request 'get (format "http://127.0.0.1:%d/api/info" port)
+                                    :headers (list (cons "Authorization"
+                                                         (opencode-service-authorization (list :password password))))
+                                    :timeout 5 :connect-timeout 2
+                                    :then (lambda (_) (setq outcome 'ok))
+                                    :else (lambda (_) (setq outcome 'failed)))
+        (drover-remote-test-wait (lambda () outcome) 10)
+        (if (eq outcome 'ok)
+            (setq ready t)
+          (drover-remote-test-settle 0.1))))
+    (unless ready (error "The forwarded port did not answer"))))
+
+(defun drover-remote-bench--oc-buffer-shows-p (buffer text)
+  "Return non-nil when BUFFER, a session buffer, shows TEXT."
+  (with-current-buffer buffer
+    (save-excursion (goto-char (point-max)) (search-backward text nil t))))
+
+(defun drover-remote-bench--oc-round-trips (service id)
+  "Return the median and slowest of 20 GETs of the session ID from SERVICE, in seconds."
+  (let ((times nil))
+    (dotimes (_ 20)
+      (let ((start (float-time))
+            (done nil))
+        (opencode-call-with-service service #'opencode-request 'get (concat "/api/session/" id)
+                                    :directory nil :timeout 10 :buffer nil
+                                    :then (lambda (_) (setq done t))
+                                    :else (lambda (error) (setq done error)))
+        (unless (drover-remote-test-wait (lambda () done) 20)
+          (error "No answer"))
+        (unless (eq done t)
+          (error "A GET failed: %s" (opencode-error-describe done)))
+        (push (- (float-time) start) times)))
+    (setq times (sort times #'<))
+    (list (nth 10 times) (car (last times)))))
+
+(defun drover-remote-bench--oc-echoes (buffer label)
+  "Measure prompts sent from BUFFER until their echo shows there; LABEL the rows."
+  (let ((times nil))
+    (dotimes (i 10)
+      (let ((token (format "%s-%02d" label i))
+            (start (float-time)))
+        (with-current-buffer buffer (opencode-session-send token :show t))
+        (unless (drover-remote-test-wait (lambda () (drover-remote-bench--oc-buffer-shows-p
+                                                     buffer (concat "Echo: " token)))
+                                         20)
+          (error "No echo of %s" token))
+        (push (- (float-time) start) times)))
+    (setq times (sort times #'<))
+    (drover-remote-bench--row (format "a prompt to its echo, %s (median of 10)" label) (nth 5 times))
+    (drover-remote-bench--row (format "a prompt to its echo, %s (slowest of 10)" label) (car (last times)))))
+
+(defun drover-remote-bench--oc-large (buffer id label)
+  "Measure a turn of 1 MB of the session ID streamed there until BUFFER shows it.
+LABEL names the row."
+  (drover-remote-bench--reset)
+  (let ((start (float-time))
+        (token (format "large-%s" label)))
+    (drover-remote-test-command "oc-turn" :id id :text token :size (* 1024 1024))
+    (unless (drover-remote-test-wait (lambda () (drover-remote-bench--oc-buffer-shows-p buffer (concat token "-END")))
+                                     120)
+      (error "The large turn did not arrive"))
+    (drover-remote-bench--row (format "1 MB event streamed, %s" label) (- (float-time) start))))
+
+(defun drover-remote-bench--oc-open (opener finder label)
+  "Open one of the agent's sessions with OPENER, a function, and measure it.
+FINDER returns its buffer once there.  LABEL names the row; return the
+buffer once it shows the transcript."
+  (drover-remote-bench--reset)
+  (let ((start (float-time))
+        (buffer nil))
+    (funcall opener)
+    (unless (drover-remote-test-wait (lambda () (and (setq buffer (funcall finder))
+                                                     (buffer-live-p buffer)
+                                                     (drover-remote-bench--oc-buffer-shows-p
+                                                      buffer "First reply of Bench session")))
+                                     60)
+      (error "The %s OpenCode buffer did not open" label))
+    (drover-remote-bench--row (format "OpenCode buffer opened, %s" label) (- (float-time) start))
+    buffer))
+
+(defun drover-remote-bench--oc-measure (service buffer id label)
+  "Measure SERVICE's requests and events in BUFFER, the session ID's; LABEL the rows."
+  (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)) 30)
+  (drover-remote-bench--reset)
+  (pcase-let ((`(,median ,slowest) (drover-remote-bench--oc-round-trips service id)))
+    (drover-remote-bench--row (format "a GET of a session, %s (median of 20)" label) median)
+    (drover-remote-bench--row (format "a GET of a session, %s (slowest of 20)" label) slowest))
+  (drover-remote-bench--reset)
+  (drover-remote-bench--oc-echoes buffer label)
+  (drover-remote-bench--oc-large buffer id label))
+
+(defun drover-remote-bench--opencode ()
+  "Measure an OpenCode session of the agent's service here, two ways, adding rows.
+Through a port forwarded to the service, the design's first idea, then
+relayed by the agent's drover, as opencode.el reaches a peer's service:
+the buffer opened, requests, a prompt until its echo, a large event,
+and the relayed buffer catching up after the link dropped.  One buffer
+at a time, each shown, of a session of its own, so that neither
+renders the other's large turn."
+  (drover-remote-test-command "oc-add" :sessions [["ses_a" "Bench session"] ["ses_b" "Bench session"]])
+  (let* ((opencode-notification-os-filter nil)
+         (name drover-remote-test-agent-name)
+         (key (cons (intern (concat "remote:" name)) (cons 'opencode "ses_b")))
+         (record (drover-remote-test-wait (lambda () (drover-changed-now) (drover-index-session key)) 20))
+         (info (drover-remote-test-command "oc-streams"))
+         (forward nil)
+         (direct nil))
+    (unless record (error "The agent's OpenCode session is not listed"))
+    (save-window-excursion
+      (delete-other-windows)
+      (unwind-protect
+          (let ((label (if drover-remote-bench--remote "forwarded" "direct")))
+            ;; Through a forwarded port.
+            (drover-remote-bench--reset)
+            (let ((start (float-time)))
+              (setq forward (drover-remote-bench--forward (plist-get info :port)))
+              (drover-remote-bench--forward-ready (cdr forward) (plist-get info :password))
+              (when (car forward)
+                (drover-remote-bench--row "SSH -L forward started, answering" (- (float-time) start))))
+            (setq direct (opencode-service-register
+                          "bench-direct" :label "Direct"
+                          :connect (let ((url (format "http://127.0.0.1:%d" (cdr forward)))
+                                         (password (plist-get info :password)))
+                                     (lambda (callback _)
+                                       (funcall callback (list :url url :password password))))))
+            (let* ((opened nil)
+                   (buffer (drover-remote-bench--oc-open
+                            (lambda ()
+                              (opencode-call-with-service direct #'opencode-session-open-by-id "ses_a"
+                                                          :no-display t
+                                                          :callback (lambda (_) (setq opened (current-buffer)))))
+                            (lambda () opened)
+                            label)))
+              ;; Shown, as the relayed one is: Comint scrolls the windows showing it.
+              (switch-to-buffer buffer)
+              (drover-remote-bench--oc-measure direct buffer "ses_a" label)
+              (kill-buffer buffer))
+            ;; Relayed.
+            (let* ((buffer (drover-remote-bench--oc-open
+                            (lambda () (drover-open record))
+                            (lambda () (drover-remote--oc-buffer name (cons 'opencode "ses_b")))
+                            "relayed"))
+                   (service (opencode-service-get name)))
+              (drover-remote-bench--oc-measure service buffer "ses_b" "relayed")
+              ;; The link dropping: the relayed buffer follows its session again.
+              (drover-remote-bench--reset)
+              (let ((start (float-time))
+                    (peer (drover-remote--peer name)))
+                (drover-remote-test-command "oc-turn" :id "ses_b" :text "during the drop" :delay 0.3)
+                (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+                (unless (drover-remote-test-wait (lambda () (drover-remote-bench--oc-buffer-shows-p
+                                                             buffer "Echo: during the drop"))
+                                                 60)
+                  (error "The relayed buffer did not catch up"))
+                (drover-remote-bench--row "relayed buffer caught up after a drop" (- (float-time) start)))
+              (kill-buffer buffer)))
+        (when direct
+          (opencode-service-unregister direct))
+        (when (process-live-p (car forward))
+          (delete-process (car forward)))))))
+
 ;;;; Main
 
 (defun drover-remote-bench--print ()
@@ -289,6 +485,8 @@ a scrollback of 512 kB, and resuming after a drop."
          (back-args (and (drover-remote-bench--getenv "DROVER_BENCH_BACK_ARGS")
                          (split-string (getenv "DROVER_BENCH_BACK_ARGS") "," t)))
          (dir (file-name-as-directory (make-temp-file "drover-remote-bench" t)))
+         (opencode-service-registration-file (expand-file-name "no-opencode-service.json" dir))
+         (opencode-command "drover-bench-no-opencode")
          (drover-remote-test-agent-name (if drover-remote-bench--remote "core" "agent"))
          (drover-host (if drover-remote-bench--remote (drover--system-host) "viewer"))
          (spyglass-registration-file (expand-file-name "server.json" dir))
@@ -313,8 +511,9 @@ a scrollback of 512 kB, and resuming after a drop."
               (let* ((drover-group-by nil)
                      (registration (if drover-remote-bench--remote
                                        (drover-remote-bench--start-remote back)
-                                     (let ((process-environment (cons "DROVER_AGENT_ACCESS=full"
-                                                                      process-environment)))
+                                     (let ((process-environment (append '("DROVER_AGENT_ACCESS=full"
+                                                                          "DROVER_AGENT_OPENCODE=1")
+                                                                        process-environment)))
                                        (drover-remote-test-start-agent dir drover-remote-test-agent-name
                                                                        (and back drover-host))))))
                 (setq drover-remote-peers
@@ -323,6 +522,11 @@ a scrollback of 512 kB, and resuming after a drop."
                                       :program (drover-remote-bench--ssh) :registration registration)
                               (list drover-remote-test-agent-name :dial t :local registration))))
                 (drover-attention-mode 1)
+                ;; opencode.el loaded first, its own service out of reach:
+                ;; only the agent's is measured.
+                (require 'opencode)
+                (when (assq 'opencode drover--backends)
+                  (drover-unregister-backend 'opencode))
                 (drover-remote-mode 1)
                 (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state
                                                          (drover-remote--peer drover-remote-test-agent-name))
@@ -416,6 +620,8 @@ a scrollback of 512 kB, and resuming after a drop."
                                                   (drover-remote-bench--records-here)))))))
                 ;; A terminal there mirrored here.
                 (drover-remote-bench--mirror)
+                ;; An OpenCode session there in a full buffer here.
+                (drover-remote-bench--opencode)
                 ;; Both directions, when asked.
                 (when back
                   (unless drover-remote-bench--remote
@@ -446,6 +652,8 @@ a scrollback of 512 kB, and resuming after a drop."
                           drover-remote-bench--rows)))
                 ;; What the agent holds, this host holds.
                 (let* ((titles (plist-get (drover-remote-test-command "titles") :titles))
+                       (fake (seq-filter (lambda (session) (eq (car (drover-session-id session)) 'fake))
+                                         (drover-remote-bench--records-here)))
                        (wrong (seq-count (lambda (entry)
                                            (let ((session (gethash (cons 'fake (aref entry 0))
                                                                    (drover-remote--peer-records
@@ -455,7 +663,7 @@ a scrollback of 512 kB, and resuming after a drop."
                                                        (equal (symbol-name (drover-session-status session))
                                                               (aref entry 2))))))
                                          titles)))
-                  (unless (and (= (length titles) (length (drover-remote-bench--records-here))) (zerop wrong))
+                  (unless (and (= (length titles) (length fake)) (zerop wrong))
                     (setq failed t))
                   (push (list "the same sessions on both hosts" (if (and (not failed) (zerop wrong)) "yes" "NO")
                               (format "%d" (length titles)) "-" "-" "-")
