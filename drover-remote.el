@@ -334,7 +334,9 @@ DONE nil: VALUE lists the replies awaiting it; t: VALUE is its outcome.")
   (tasks nil :documentation "Actions peers asked being performed, oldest first.")
   (runner nil :documentation "Timer performing TASKS.")
   (flight 0 :documentation "Operations of TASKS whose backends have not answered.")
-  (watch nil :documentation "Timer failing the operations of TASKS not answered in time."))
+  (watch nil :documentation "Timer failing the operations of TASKS not answered in time.")
+  (asked (make-hash-table :test #'eq :weakness 'key)
+         :documentation "Greetings asked of each connection's peer and not received, by connection."))
 
 (drover-note-layout 'drover-remote--peer 'drover-remote--sub 'drover-remote--state)
 
@@ -957,6 +959,9 @@ Records are read from STATE as they are now."
 
 (defun drover-remote--hello (connection &optional ask)
   "Greet CONNECTION's peer; with ASK, asking it to greet back."
+  (when (and ask drover-remote--state)
+    (let ((asked (drover-remote--state-asked drover-remote--state)))
+      (puthash connection (1+ (gethash connection asked 0)) asked)))
   (drover-remote--send connection
                        (list :t "hello" :v drover-remote-protocol :host drover-host
                              :inst spyglass-instance-id
@@ -1005,19 +1010,29 @@ the peer writing meanwhile would lose what it had not read, the reason."
   "Take the greeting MESSAGE of CONNECTION's peer, in STATE."
   (let* ((host (plist-get message :host))
          (version (plist-get message :v))
+         (asked (gethash connection (drover-remote--state-asked state) 0))
+         (answer (and (> asked 0) (not (eq (plist-get message :ask) t))))
          (dialer (drover-remote--dialer-of state connection))
          (peer (and (stringp host) (drover-remote--find-peer host))))
+    (when answer
+      (if (> asked 1)
+          (puthash connection (1- asked) (drover-remote--state-asked state))
+        (remhash connection (drover-remote--state-asked state))))
     (cond
      ((and peer (or (null dialer) (eq dialer peer)) (eq connection (drover-remote--peer-connection peer))
            (stringp host) (string-equal-ignore-case host (drover-remote--peer-name peer))
-           (integerp version) (= version drover-remote-protocol))
+           (integerp version) (= version drover-remote-protocol)
+           ;; Not the greeting this host asked for, which may come once
+           ;; the connection is kept.
+           (not answer))
       ;; Greeted again on the connection kept: its remote layer started
       ;; anew, and serves no subscription of this host's any more.
+      ;; Greeted back first: what follows needs the greeting there.
+      (when (eq (plist-get message :ask) t)
+        (drover-remote--hello connection))
       (drover-remote--greeted peer connection message)
       (drover-remote--event peer 'hello "greeted again: its remote layer restarted, epoch %s"
                             (drover-remote--hello-epoch message))
-      (when (eq (plist-get message :ask) t)
-        (drover-remote--hello connection))
       (drover-remote--resubscribe peer nil))
      ((not (and (integerp version) (= version drover-remote-protocol)))
       (drover-remote--fail dialer (format "%s speaks drover's protocol %s, this host %s"
@@ -1039,15 +1054,16 @@ the peer writing meanwhile would lose what it had not read, the reason."
         (setq peer (drover-remote--add-peer state (downcase host)
                                             (list :access drover-remote-accept-unknown) t)))
       (drover-remote--stat peer :hellos)
+      ;; JSON's false is `:false', not nil: asked only when told so.
+      ;; Greeted back first: what follows needs the greeting there.
+      (when (eq (plist-get message :ask) t)
+        (drover-remote--hello connection))
       (drover-remote--greeted peer connection message)
       (drover-remote--event peer 'hello "greeted on a connection %s, instance %s, epoch %s%s"
                             (if dialer "this host dialed" "it dialed")
                             (drover-bound-line (format "%s" (plist-get message :inst)) 16)
                             (drover-remote--hello-epoch message)
                             (if (drover-remote--peer-caps peer) "" ", an older drover: read only"))
-      ;; JSON's false is `:false', not nil: asked only when told so.
-      (when (eq (plist-get message :ask) t)
-        (drover-remote--hello connection))
       (puthash connection (list :peer (drover-remote--peer-name peer)
                                 :inst (plist-get message :inst)
                                 :ours (and (spyglass-connection-transport connection) t)
