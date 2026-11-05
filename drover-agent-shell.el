@@ -63,11 +63,18 @@
 ;; engines record, installed with this one (see
 ;; `drover-claude-code-transcripts', `drover-codex-rollouts').
 ;;
+;; A shell shows the brief of its session (see `drover-brief'), the
+;; line a model wrote on where it stands, just above its prompt while it
+;; awaits input, as opencode.el's session buffers do: an overlay's
+;; string at the start of the prompt's line, before the labels
+;; agent-shell's chat mode draws there, never text.
+;;
 ;; `drover' loads this file once agent-shell.el is loaded.
 
 ;;; Code:
 
 (require 'cl-lib)
+(require 'drover-brief)
 (require 'drover-core)
 (require 'drover-model)
 (require 'drover-claude-code)
@@ -75,6 +82,7 @@
 (require 'drover-codex)
 (require 'drover-codex-rollouts)
 (require 'map)
+(require 'opencode-look)
 (require 'seq)
 (require 'subr-x)
 
@@ -89,6 +97,7 @@
 ;; are declared without an arglist, which the byte compiler would check
 ;; as positional.
 (defvar agent-shell--state)
+(defvar comint-last-prompt)
 (defvar agent-shell-viewport--compose-snapshot)
 (defvar agent-shell-viewport--suffix)
 (declare-function agent-shell--config-option-by-category "ext:agent-shell-config" (state category))
@@ -102,6 +111,7 @@
 (declare-function agent-shell--get-available-models "ext:agent-shell-config" (state))
 (declare-function agent-shell--get-available-thought-levels "ext:agent-shell-config" (state))
 (declare-function agent-shell--project-name "ext:agent-shell-project" ())
+(declare-function agent-shell--live-input-prompt-p "ext:agent-shell-prompt" (prompt))
 (declare-function agent-shell--prompt-input-start "ext:agent-shell-prompt" ())
 (declare-function agent-shell--start "ext:agent-shell" t)
 (declare-function agent-shell--state "ext:agent-shell" ())
@@ -1294,6 +1304,7 @@ whose creation time is unknown."
                                       :on-event #'drover-agent-shell--on-event))
       (setq-local drover-session-at-point-function #'drover-agent-shell--buffer-session)
       (add-hook 'kill-buffer-hook #'drover-agent-shell--killed nil t)
+      (drover-agent-shell--brief-setup)
       (drover-agent-shell--changed)
       ;; A shell drover follows late may offer models already.
       (when existing
@@ -1306,7 +1317,132 @@ whose creation time is unknown."
     (setq drover-agent-shell--subscription nil))
   (when (eq drover-session-at-point-function #'drover-agent-shell--buffer-session)
     (kill-local-variable 'drover-session-at-point-function))
-  (remove-hook 'kill-buffer-hook #'drover-agent-shell--killed t))
+  (remove-hook 'kill-buffer-hook #'drover-agent-shell--killed t)
+  (drover-agent-shell--brief-teardown))
+
+;;;; The brief above the prompt
+
+(defvar-local drover-agent-shell--brief nil
+  "The brief of this shell's session as last asked, (LINE . RECAP), or nil.")
+
+(defvar-local drover-agent-shell--brief-unfolded nil
+  "Non-nil when the recap of `drover-agent-shell--brief' shows.")
+
+(defvar-local drover-agent-shell--brief-overlay nil
+  "Overlay showing the brief above the prompt as its string, or nil.")
+
+(defvar-keymap drover-agent-shell-brief-map
+  :doc "Keys of the brief above a shell's prompt, which a click unfolds."
+  "<mouse-1>" #'drover-agent-shell-brief-click
+  "<mouse-2>" #'drover-agent-shell-brief-click)
+
+(defun drover-agent-shell--brief-at ()
+  "Return where the brief shows: the start of the live prompt's line, or nil.
+Nil while the shell works, and without a prompt awaiting input."
+  (when-let* ((prompt comint-last-prompt)
+              ((markerp (car-safe prompt)))
+              ((eq (ignore-errors (agent-shell-status)) 'ready))
+              ((ignore-errors (agent-shell--live-input-prompt-p prompt))))
+    (save-excursion
+      (save-restriction
+        (widen)
+        (goto-char (car prompt))
+        (let ((inhibit-field-text-motion t))
+          (line-beginning-position))))))
+
+(defun drover-agent-shell--brief-lead (at)
+  "Return the newlines the brief shown at AT starts with, after a blank line."
+  (cond ((= at (point-min)) "")
+        ((/= (char-before at) ?\n) "\n\n")
+        ((or (= (1- at) (point-min)) (/= (char-before (1- at)) ?\n)) "\n")
+        (t "")))
+
+(defun drover-agent-shell--brief-place (&rest _)
+  "Keep the brief just above the prompt awaiting input, or nowhere.
+Output and prompts coming and going move it, so this runs after every
+change and before redisplay; without a brief it costs nothing."
+  (when drover-agent-shell--brief
+    (let ((at (drover-agent-shell--brief-at))
+          (overlay drover-agent-shell--brief-overlay))
+      (if (not at)
+          (when (overlayp overlay)
+            (delete-overlay overlay)
+            (setq drover-agent-shell--brief-overlay nil))
+        (unless (and (overlayp overlay) (overlay-buffer overlay))
+          (setq overlay (make-overlay at at nil t t)
+                drover-agent-shell--brief-overlay overlay)
+          (overlay-put overlay 'drover-brief t)
+          (overlay-put overlay 'drover-brief-body
+                       (opencode-session-summary-text (car drover-agent-shell--brief)
+                                                      (cdr drover-agent-shell--brief)
+                                                      drover-agent-shell--brief-unfolded
+                                                      drover-agent-shell-brief-map)))
+        (unless (= (overlay-start overlay) at)
+          (move-overlay overlay at at))
+        (let ((lead (save-restriction (widen) (drover-agent-shell--brief-lead at))))
+          (unless (equal lead (overlay-get overlay 'drover-brief-lead))
+            (overlay-put overlay 'drover-brief-lead lead)
+            (overlay-put overlay 'before-string
+                         (concat lead (overlay-get overlay 'drover-brief-body)))))))))
+
+(defun drover-agent-shell--brief-place-window (_window)
+  "Keep the brief in place before redisplay, for `pre-redisplay-functions'."
+  (drover-with-reporting "agent-shell brief"
+    (drover-agent-shell--brief-place)))
+
+(defun drover-agent-shell--brief-placed (&rest _)
+  "Keep the brief in place after a change, for `after-change-functions'."
+  (drover-with-reporting "agent-shell brief"
+    (drover-agent-shell--brief-place)))
+
+(defun drover-agent-shell--brief-show (brief &optional anew)
+  "Show BRIEF, (LINE . RECAP) or nil, above the prompt, its recap folded when new.
+ANEW draws it again even when it is the brief shown, as unfolding does."
+  (unless (and (not anew) (equal brief drover-agent-shell--brief))
+    (unless (equal brief drover-agent-shell--brief)
+      (setq drover-agent-shell--brief-unfolded nil))
+    (setq drover-agent-shell--brief brief)
+    (when (overlayp drover-agent-shell--brief-overlay)
+      (delete-overlay drover-agent-shell--brief-overlay)
+      (setq drover-agent-shell--brief-overlay nil)))
+  (drover-agent-shell--brief-place))
+
+(defun drover-agent-shell--brief-refresh ()
+  "Ask anew the brief of the current shell's session, and show it above its prompt."
+  (drover-agent-shell--brief-show (drover-brief-of-buffer #'drover-agent-shell--brief-refresh)))
+
+(defun drover-agent-shell-toggle-brief-recap ()
+  "Show or hide the recap below the brief above this shell's prompt."
+  (interactive)
+  (unless (cdr drover-agent-shell--brief)
+    (user-error "No recap of the last turn to show"))
+  (setq drover-agent-shell--brief-unfolded (not drover-agent-shell--brief-unfolded))
+  (drover-agent-shell--brief-show drover-agent-shell--brief t))
+
+(defun drover-agent-shell-brief-click (event)
+  "Show or hide the recap of the brief clicked.
+EVENT is the click."
+  (interactive "e")
+  (let ((window (posn-window (event-end event))))
+    (when (windowp window)
+      (with-current-buffer (window-buffer window)
+        (drover-agent-shell-toggle-brief-recap)))))
+
+(defun drover-agent-shell--brief-setup ()
+  "Show the brief of the current shell's session above its prompt."
+  (add-hook 'after-change-functions #'drover-agent-shell--brief-placed nil t)
+  (add-hook 'pre-redisplay-functions #'drover-agent-shell--brief-place-window nil t)
+  (drover-agent-shell--brief-refresh))
+
+(defun drover-agent-shell--brief-teardown ()
+  "Undo `drover-agent-shell--brief-setup' in the current shell."
+  (remove-hook 'after-change-functions #'drover-agent-shell--brief-placed t)
+  (remove-hook 'pre-redisplay-functions #'drover-agent-shell--brief-place-window t)
+  (drover-brief-forget (current-buffer))
+  (setq drover-agent-shell--brief nil)
+  (when (overlayp drover-agent-shell--brief-overlay)
+    (delete-overlay drover-agent-shell--brief-overlay)
+    (setq drover-agent-shell--brief-overlay nil)))
 
 ;;;; Registering and installing
 

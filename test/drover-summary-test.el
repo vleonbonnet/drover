@@ -27,6 +27,8 @@
 (require 'drover-test-helpers)
 (require 'drover-summary)
 (require 'drover-list)
+(require 'drover-brief)
+(require 'drover-opencode)
 (require 'opencode-http)
 
 (defvar drover-summary-test-prompts nil
@@ -519,6 +521,101 @@ SLOTS is a plist of slot names as keywords and values."
       (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results))))
     (should-not requests)
     (should (equal results '((:failure "OpenCode's service does not run"))))))
+
+;;;; Briefs in the buffers of sessions
+
+(defvar drover-summary-test-refreshed nil
+  "Buffers whose brief was shown anew, newest first.")
+
+(defun drover-summary-test-refresh ()
+  "Note that the current buffer showed its brief anew."
+  (push (current-buffer) drover-summary-test-refreshed))
+
+(defmacro drover-summary-test-with-buffers (ids &rest body)
+  "Run BODY with a buffer for each fake session of IDS, bound to BUFFERS.
+Each tells its session as the one at point, as a front end's buffer does."
+  (declare (indent 1) (debug t))
+  `(let ((drover-brief--buffers (make-hash-table :test #'eq :weakness 'key))
+         (drover-summary-test-refreshed nil)
+         (buffers (mapcar (lambda (id)
+                            (with-current-buffer (generate-new-buffer (concat "session " id))
+                              (setq-local drover-session-at-point-function
+                                          (lambda () (drover-summary-test-of id)))
+                              (current-buffer)))
+                          ,ids)))
+     (add-hook 'drover-changed-hook #'drover-brief--changed)
+     (unwind-protect (progn ,@body)
+       (mapc #'kill-buffer buffers))))
+
+(ert-deftest drover-summary-test-brief-of-buffer ()
+  "A buffer gets its session's brief, shown anew as that session changes, and only then."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working)
+                                  (drover-summary-test-session "s2" :status 'working))
+    (drover-summary-test-with-buffers '("s1" "s2")
+      (let ((one (car buffers))
+            (two (cadr buffers)))
+        ;; At work: no brief, but followed.
+        (should-not (drover-brief-of-buffer #'drover-summary-test-refresh one))
+        (should-not (drover-brief-of-buffer #'drover-summary-test-refresh two))
+        (drover-summary-test-turn "s1" :status 'done)
+        (drover-summary-test-settle)
+        ;; The turn ended, then its brief was written: shown anew, the other not.
+        (should (memq one drover-summary-test-refreshed))
+        (should-not (memq two drover-summary-test-refreshed))
+        (should (equal (drover-brief-of-buffer #'drover-summary-test-refresh one)
+                       '("Done: wrote the feature, tests pass" . "Added the parser.\nTests pass.")))
+        ;; Working again, the brief goes, which the buffer is told.
+        (setq drover-summary-test-refreshed nil)
+        (drover-summary-test-turn "s1" :status 'working)
+        (drover-summary-test-settle)
+        (should (equal drover-summary-test-refreshed (list one)))
+        (should-not (drover-brief-of-buffer #'drover-summary-test-refresh one))
+        ;; Turned off, buffers show none.
+        (drover-summary-test-turn "s1" :status 'done)
+        (drover-summary-test-settle)
+        (should (drover-brief-of-buffer #'drover-summary-test-refresh one))
+        (let ((drover-brief-in-buffers nil))
+          (should-not (drover-brief-of-buffer #'drover-summary-test-refresh one)))
+        ;; A buffer killed is forgotten.
+        (kill-buffer two)
+        (drover-brief-refresh t)
+        (should-not (gethash two drover-brief--buffers))
+        (should (gethash one drover-brief--buffers))))))
+
+(ert-deftest drover-summary-test-brief-of-other-host ()
+  "A session of another host shows the brief its owner wrote, from its record."
+  (drover-summary-test-with nil
+    (let* ((record (drover-session-create :backend 'remote:core :id '(opencode . "ses_1") :host "core"
+                                          :status 'idle :brief "Done: on Core" :brief-recap "Its recap"))
+           (drover-brief--buffers (make-hash-table :test #'eq :weakness 'key)))
+      (with-temp-buffer
+        (setq-local drover-session-at-point-function (lambda () record))
+        (should (equal (drover-brief-of-buffer #'ignore) '("Done: on Core" . "Its recap")))
+        (should (equal (car (gethash (current-buffer) drover-brief--buffers))
+                       '(remote:core opencode . "ses_1")))))))
+
+(ert-deftest drover-summary-test-brief-opencode-function ()
+  "Drover tells OpenCode's buffers their briefs, unless the user chose a function of their own."
+  (let ((opencode-session-summary-function nil))
+    (cl-letf (((symbol-function 'drover-opencode--buffers) (lambda (_) nil)))
+      (drover-opencode--install)
+      (should (eq opencode-session-summary-function #'drover-opencode-brief))
+      (drover-opencode--uninstall)
+      (should-not opencode-session-summary-function)
+      (let ((opencode-session-summary-function #'ignore))
+        (drover-opencode--install)
+        (should (eq opencode-session-summary-function #'ignore))
+        (drover-opencode--uninstall)
+        (should (eq opencode-session-summary-function #'ignore)))
+      (drover-opencode--install)))
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (drover-summary-test-with-buffers '("s1")
+      (with-current-buffer (car buffers)
+        (should (equal (car (drover-opencode-brief)) "Done: wrote the feature, tests pass"))
+        (should (eq (cdr (gethash (current-buffer) drover-brief--buffers))
+                    #'opencode-session-summary-update))))))
 
 (ert-deftest drover-summary-test-prints-in-proportion ()
   "What summaries keep prints in proportion to the sessions."

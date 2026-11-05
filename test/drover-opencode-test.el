@@ -332,6 +332,44 @@ PROJECTS defaults to `drover-opencode-test-projects'."
           (list :title (concat "Title " id) :directory "/work/drover/"
                 :project-id "prj_drover" :created 10.0 :updated 20.0)))
 
+;;;; Briefs above the input
+
+(ert-deftest drover-opencode-test-brief-above-input ()
+  "An idle session buffer shows its session's brief just above its input, anew as it changes."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (let* ((brief "Done: first")
+           (drover-brief-function
+            (lambda (record)
+              (if (and brief (equal (drover-session-id record) "ses_1"))
+                  (let ((copy (copy-sequence record)))
+                    (setf (drover-session-brief copy) brief
+                          (drover-session-brief-recap copy) "A recap.")
+                    copy)
+                record)))
+           (drover-brief--buffers (make-hash-table :test #'eq :weakness 'key))
+           (opencode-session-summary-function #'drover-opencode-brief)
+           (opencode-session-summary-icon "※"))
+      (add-hook 'drover-changed-hook #'drover-brief--changed)
+      (drover-opencode-test-with-buffers '("")
+        (with-current-buffer (car buffers)
+          (drover-opencode--setup-session-buffer)
+          (drover-changed-now)
+          (opencode-show-prompt)
+          (opencode-session-summary-update)
+          ;; After a blank line, as the transcript ends with a line.
+          (should (equal (opencode-session-summary-string) "\n※ Done: first …\n\n"))
+          (should (= (overlay-start opencode--recap-overlay) (marker-position opencode--prompt-start)))
+          ;; A new brief shows in place, without the buffer asking.
+          (setq brief "Done: second")
+          (drover-backend-changed 'opencode "ses_1")
+          (drover-changed-now)
+          (should (equal (opencode-session-summary-string) "\n※ Done: second …\n\n"))
+          ;; Gone as the session works again.
+          (setq brief nil)
+          (drover-backend-changed 'opencode "ses_1")
+          (drover-changed-now)
+          (should-not (opencode-session-summary-string)))))))
+
 ;;;; Registration
 
 (ert-deftest drover-opencode-test-registered-on-load ()

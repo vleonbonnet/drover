@@ -83,6 +83,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'drover-brief)
 (require 'drover-core)
 (require 'drover-keys)
 (require 'drover-model)
@@ -132,6 +133,9 @@
 ;; From opencode.el's versions that edit earlier prompts.
 (defvar opencode-old-input-function)
 (defvar opencode-withdrawn-prompt-function)
+;; From opencode.el's versions that show where a session stands.
+(defvar opencode-session-summary-function)
+(declare-function opencode-session-summary-update "opencode-recap" (&optional buffer))
 
 ;;;; The local service
 
@@ -1922,6 +1926,26 @@ option to `opencode-put-old-input' to edit it in the session's input."
   (drover-with-reporting "withdrawn prompt"
     (drover-opencode-edit-old-input text buffer)))
 
+;;;; Briefs
+
+(defun drover-opencode-brief ()
+  "Return the brief of the session of the current OpenCode buffer, or nil.
+As (LINE . RECAP), what a model wrote of its last turn (see
+`drover-session-brief'): of this host's session as `drover-summary-mode'
+writes it, of another host's as its owner did.  For
+`opencode-session-summary-function', which drover sets to it when nil,
+so that session buffers show it just above their input while idle,
+and anew as it changes (see `drover-brief-of-buffer')."
+  (drover-with-reporting "OpenCode brief"
+    (drover-brief-of-buffer #'opencode-session-summary-update)))
+
+(defun drover-opencode--show-briefs ()
+  "Have every OpenCode session buffer show its brief anew."
+  (when (fboundp 'opencode-session-summary-update)
+    (dolist (buffer (drover-opencode--buffers 'opencode-session-mode))
+      (drover-with-reporting "OpenCode brief"
+        (opencode-session-summary-update buffer)))))
+
 ;;;; Key hints
 
 (defconst drover-opencode--commands
@@ -1960,7 +1984,10 @@ prompts are edited there, unless the user chose functions of their own
   (when (memq (bound-and-true-p opencode-old-input-function) '(nil drover-opencode-edit-old-input))
     (setq opencode-old-input-function #'drover-opencode-quote-old-input))
   (unless (bound-and-true-p opencode-withdrawn-prompt-function)
-    (setq opencode-withdrawn-prompt-function #'drover-opencode-edit-withdrawn)))
+    (setq opencode-withdrawn-prompt-function #'drover-opencode-edit-withdrawn))
+  (when (and (boundp 'opencode-session-summary-function) (null opencode-session-summary-function))
+    (setq opencode-session-summary-function #'drover-opencode-brief)
+    (drover-opencode--show-briefs)))
 
 (defun drover-opencode--uninstall ()
   "Undo `drover-opencode--install'."
@@ -1973,7 +2000,10 @@ prompts are edited there, unless the user chose functions of their own
   (when (eq (bound-and-true-p opencode-old-input-function) #'drover-opencode-quote-old-input)
     (setq opencode-old-input-function nil))
   (when (eq (bound-and-true-p opencode-withdrawn-prompt-function) #'drover-opencode-edit-withdrawn)
-    (setq opencode-withdrawn-prompt-function nil)))
+    (setq opencode-withdrawn-prompt-function nil))
+  (when (eq (bound-and-true-p opencode-session-summary-function) #'drover-opencode-brief)
+    (setq opencode-session-summary-function nil)
+    (drover-opencode--show-briefs)))
 
 (drover-opencode--install)
 

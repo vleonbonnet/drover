@@ -1782,5 +1782,93 @@ One of OpenCode keeps the provider it names, and has nothing recorded."
         (should (equal (drover-session-id renamed) (drover-session-id session)))
         (should (equal (drover-session-title renamed) "Fix the build"))))))
 
+;;;; The brief above the prompt
+
+(defun drover-agent-shell-test-prompt (shell)
+  "Give SHELL an answer and a live prompt awaiting input, as shell-maker writes them."
+  (with-current-buffer shell
+    (let ((process (or (get-buffer-process shell)
+                       (make-pipe-process :name "drover-test-shell" :buffer shell :noquery t)))
+          (inhibit-read-only t))
+      (goto-char (point-max))
+      (insert (propertize "An answer.\n\n" 'field 'output))
+      (let ((start (point)))
+        (insert (propertize "> " 'field 'output))
+        (set-marker (process-mark process) (point))
+        (setq-local comint-last-prompt (cons (copy-marker start) (copy-marker (point))))))))
+
+(defun drover-agent-shell-test-brief-string (shell)
+  "Return what SHELL shows of its brief above its prompt, or nil."
+  (with-current-buffer shell
+    (when (and (overlayp drover-agent-shell--brief-overlay)
+               (overlay-buffer drover-agent-shell--brief-overlay))
+      (substring-no-properties (overlay-get drover-agent-shell--brief-overlay 'before-string)))))
+
+(ert-deftest drover-agent-shell-test-brief-above-prompt ()
+  "An idle shell shows its session's brief just above its prompt, never while it works."
+  (drover-agent-shell-test-with
+    (let* ((brief "Done: fixed the build")
+           (drover-brief-function
+            (lambda (record)
+              (if (and brief (eq (drover-session-backend record) 'agent-shell))
+                  (let ((copy (copy-sequence record)))
+                    (setf (drover-session-brief copy) brief
+                          (drover-session-brief-recap copy) "Fixed it.\nTests pass.")
+                    copy)
+                record)))
+           (drover-brief--buffers (make-hash-table :test #'eq :weakness 'key))
+           (opencode-session-summary-icon "※")
+           (shell (drover-agent-shell-test-shell 'claude-code)))
+      (add-hook 'drover-changed-hook #'drover-brief--changed)
+      (drover-agent-shell-test-initialize shell)
+      (drover-agent-shell-test-prompt shell)
+      (with-current-buffer shell
+        (drover-agent-shell--setup))
+      (drover-changed-now)
+      (with-current-buffer shell
+        (should (equal (drover-agent-shell-test-brief-string shell) "※ Done: fixed the build …\n\n"))
+        (let ((overlay drover-agent-shell--brief-overlay))
+          (should (= (overlay-start overlay) (marker-position (car comint-last-prompt))))
+          ;; Not text: the prompt's line and the input are as they were.
+          (should-not (string-search "Done:" (buffer-string)))
+          (goto-char (point-max))
+          (insert "next prompt")
+          (should (eq drover-agent-shell--brief-overlay overlay))
+          (should (equal (buffer-substring-no-properties (process-mark (get-buffer-process shell)) (point-max))
+                         "next prompt"))
+          ;; Line motion passes over it.
+          (save-window-excursion
+            (set-window-buffer (selected-window) shell)
+            (set-window-start (selected-window) (point-min))
+            (goto-char (point-max))
+            (line-move -1 t)
+            (should (< (point) (marker-position (car comint-last-prompt)))))
+          ;; Unfolded on a click.
+          (drover-agent-shell-toggle-brief-recap)
+          (should (equal (drover-agent-shell-test-brief-string shell)
+                         "※ Done: fixed the build\n  Fixed it.\n  Tests pass.\n\n"))))
+      ;; At work, it goes at once, whatever drover knows yet.
+      (with-current-buffer shell
+        (setq-local shell-maker--busy t)
+        (drover-agent-shell--brief-place)
+        (should-not (drover-agent-shell-test-brief-string shell))
+        (setq-local shell-maker--busy nil)
+        (drover-agent-shell--brief-place)
+        (should (drover-agent-shell-test-brief-string shell)))
+      ;; Without a brief any more, nothing shows.
+      (setq brief nil)
+      (with-current-buffer shell (drover-agent-shell--changed))
+      (drover-changed-now)
+      (should-not (drover-agent-shell-test-brief-string shell))
+      ;; Unfollowed, the shell shows none.
+      (setq brief "Done: again")
+      (with-current-buffer shell (drover-agent-shell--changed))
+      (drover-changed-now)
+      (should (drover-agent-shell-test-brief-string shell))
+      (with-current-buffer shell
+        (drover-agent-shell--teardown))
+      (should-not (drover-agent-shell-test-brief-string shell))
+      (should-not (gethash shell drover-brief--buffers)))))
+
 (provide 'drover-agent-shell-test)
 ;;; drover-agent-shell-test.el ends here
