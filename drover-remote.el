@@ -4194,6 +4194,7 @@ For `drover-clone-function'."
 ;; which opens here once its records list it.  A peer of `act' access
 ;; may start sessions, as it may send prompts and resume conversations.
 
+(declare-function drover-new-session "drover-keys" (directory backend &optional elsewhere))
 (defvar drover-prompt-new-targets)
 (defvar drover-prompt-remote-functions)
 (defvar drover-new-session-elsewhere-function)

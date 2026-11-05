@@ -779,17 +779,17 @@ The prompt goes as text, converted to Markdown as for a session here.  Attachmen
 
 | Step                                                       | Reaver, 127.0.0.1 | Core, SSH |
 |------------------------------------------------------------+-------------------+-----------|
-| what it starts told                                        | 14.7 ms           | CORE1     |
-| its catalogs in a directory                                | 30.7 ms           | CORE2     |
-| a directory listed there                                   | 14.9 ms           | CORE3     |
-| a terminal session started, its host answering             | 37.4 ms           | CORE4     |
-| the same, listed here                                      | 37.4 ms           | CORE5     |
-| the same, mirrored live                                    | 69.9 ms           | CORE6     |
-| an OpenCode session started, its host answering            | 54.1 ms           | CORE7     |
-| the same, its prompt's turn shown here through the relay   | 101.4 ms          | CORE8     |
-| longest block of this Emacs's main thread, outside opencode.el | 14 ms          | CORE9     |
+| what it starts told                                        | 14.7 ms           | 15.0 ms     |
+| its catalogs in a directory                                | 30.7 ms           | 35.1 ms     |
+| a directory listed there                                   | 14.9 ms           | 15.0 ms     |
+| a terminal session started, its host answering             | 37.4 ms           | 40.2 ms     |
+| the same, listed here                                      | 37.4 ms           | 40.3 ms     |
+| the same, mirrored live                                    | 69.9 ms           | 77.6 ms     |
+| an OpenCode session started, its host answering            | 54.1 ms           | 55.5 ms     |
+| the same, its prompt's turn shown here through the relay   | 101.4 ms          | 133.9 ms (slowest 676)     |
+| longest block of this Emacs's main thread, outside opencode.el | 14 ms          | 5.4 ms     |
 
-The waits of a command poll every 20 ms, which most of a local round trip is.  The first OpenCode buffer opened blocked this Emacs 171 ms, opencode.el loading and rendering its first buffer, as opening any relayed buffer first does.
+The waits of a command poll every 20 ms, which most of a local round trip is: Core answers as fast as this host, its fake front ends being Emacs's, the link adding 3 ms.  The first OpenCode buffer opened blocked this Emacs 171 ms here and 191 ms with Core, opencode.el loading and rendering its first buffer, as opening any relayed buffer first does; the slowest turn shown, 676 ms, is the first, its event stream opening through the relay.
 
 ** Tests
 
