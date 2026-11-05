@@ -273,9 +273,23 @@ only when needed."
      (created :priority 12 :min 3 :align right :label "Created")
      (age :priority 1 :min 3 :align right :narrow line :label "Age")
      (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+    ((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+     (location :priority 9 :min 10 :max 30 :label "Project")
+     (branch :priority 10 :min 6 :max 24 :label "Branch")
+     (agent :priority 11 :min 5 :max 14 :label "Agent")
+     (model :priority 6 :min 8 :max 22 :label "Model")
+     (provider :priority 8 :min 2 :max 12 :label "Provider")
+     (context :priority 7 :min 9 :narrow icon :label "Context")
+     (created :priority 12 :min 3 :align right :label "Created")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
      (summary :priority 4 :min 12 :narrow below :label "Summary")))
   "The former standard values of `drover-list-fields'.
-Before the harness's field, then before the context's pie in two lines.")
+Before the harness's field, then before the context's pie in two lines,
+then before the cost.")
 
 ;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the list takes the new one.
@@ -293,6 +307,7 @@ Before the harness's field, then before the context's pie in two lines.")
     (provider :priority 8 :min 2 :max 12 :label "Provider")
     (context :priority 7 :min 9 :narrow icon :label "Context")
     (created :priority 12 :min 3 :align right :label "Created")
+    (cost :priority 13 :min 4 :align right :label "Cost")
     (age :priority 1 :min 3 :align right :narrow line :label "Age")
     (cache :priority 3 :min 9 :narrow background :label "Cache")
     (summary :priority 4 :min 12 :narrow below :label "Summary"))
@@ -320,6 +335,9 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
            long-context price tier; in two lines, a pie filling by
            eighths (see `drover-context-pie-icons').
  created   How long ago the session was created.
+ cost      What the session cost, its subagents included, as the
+           engines recorded it (see `drover-usage'); nothing until
+           its usage is read.
  age       How long ago it last did something, or since when it needs
            you.
  cache     How much of the lifetime of its prompt cache is left: a
@@ -373,7 +391,7 @@ and the harness's so too, after the age and the prompt cache."
   :type '(repeat (cons symbol plist))
   :group 'drover-list)
 
-(defcustom drover-list-hidden-fields nil
+(defcustom drover-list-hidden-fields '(cost)
   "Fields of `drover-list-fields' the list never shows.
 The list chooses among the other fields by the room they take; the
 title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
@@ -387,6 +405,7 @@ changes it for the session, with one switch per field."
               (const :tag "Provider" provider)
               (const :tag "Context" context)
               (const :tag "Creation" created)
+              (const :tag "Cost" cost)
               (const :tag "Age" age)
               (const :tag "Prompt cache" cache)
               (const :tag "Summary" summary))
@@ -403,6 +422,7 @@ changes it for the session, with one switch per field."
     (provider . "The provider serving the model")
     (context . "The size of the session's context, and how much of the model's it fills")
     (created . "How long ago the session was created")
+    (cost . "What the session cost, its subagents included: included when a subscription pays for it")
     (age . "How long ago the session last did something, or since when it needs you")
     (cache . "How long the provider keeps the conversation cached: the next turn sent before then costs less")
     (summary . "What the session waits for, or how its turn stands"))
@@ -957,7 +977,7 @@ The list reads the clock through it, so that tests may stop the clock."
 ;;;; Fields
 
 (defconst drover-list--text-fields
-  '(host harness location branch agent model provider context created age summary)
+  '(host harness location branch agent model provider context created cost age summary)
   "The fields of `drover-list-fields' a row holds a text for.")
 
 (defun drover-list--one-line (string)
@@ -986,6 +1006,23 @@ session needing the user ages from when its status began, the others
 from their last activity, what the order of last activity places them
 by, but for running sessions, whose activity is now."
   (drover-session-last-activity session))
+
+(autoload 'drover-usage-session-text "drover-usage")
+
+(defvar drover-list-usage-function #'drover-usage-session-text
+  "Function of a session and a form returning what the list shows of its usage.
+The form is `column', for the field `cost', `details', for its
+details, both a string or nil, or `value', what the others are made of,
+compared with `equal' to tell a row to make anew; nil shows no usage.")
+
+(defun drover-list--usage (session form)
+  "Return the usage of SESSION as FORM shows it, or nil.
+See `drover-list-usage-function'.  Nil without the function, or for
+FORM `column' and `value' while the field `cost' is hidden."
+  (and drover-list-usage-function
+       (or (eq form 'details) (drover-list-field-enabled-p 'cost))
+       (drover-with-reporting "usage"
+         (funcall drover-list-usage-function session form))))
 
 (defun drover-list--field-spec (field)
   "Return the properties of FIELD in `drover-list-fields', or nil."
@@ -1397,6 +1434,7 @@ text: it is drawn apart."
           ('provider (drover-list--provider-text session))
           ('context (drover-list--context-text session (plist-get metrics :char)))
           ('created (drover-face (opencode-format-age (drover-session-created session) now) 'drover-dim))
+          ('cost (drover-list--usage session 'column))
           ('age (drover-face (opencode-format-age (drover-list--age-time session) now) 'drover-dim))
           ('summary (drover-list--one-line (drover-session-summary session))))
         "")))
@@ -1481,8 +1519,9 @@ one drawing to the next.")
 That is SESSION itself, the record, its DEPTH, INDENT and GROUP, its
 active subagents and STATE, what changes with time, its ages, whether
 its prompt cache is live, the frame of its animated glyph, the age of
-its archiving and since when its host is not connected, and the stamp
-of METRICS (see `drover-list--metrics-stamp')."
+its archiving and since when its host is not connected, the stamp of
+METRICS (see `drover-list--metrics-stamp'), and its usage, which its
+cost shows (see `drover-list-usage-function')."
   (let* ((now (plist-get metrics :now))
          (status (drover-session-status session))
          (archived (drover-session-archived session))
@@ -1498,7 +1537,8 @@ of METRICS (see `drover-list--metrics-stamp')."
             (and frames (opencode-session-status-frame-index (length (car frames)) now))
             (and (numberp archived) (opencode-format-age archived now))
             (drover-list--host-age session now)
-            (plist-get metrics :stamp))))
+            (plist-get metrics :stamp)
+            (drover-list--usage session 'value))))
 
 (defun drover-list--same-inputs-p (a b &optional any-stamp)
   "Return non-nil when row inputs A and B are the same.
@@ -1513,10 +1553,11 @@ compared: the caller compared them."
                  subagents-b (cdr subagents-b)))
          (and (null subagents-a) (null subagents-b)))
        (let ((index 1)
-             (end (if any-stamp 12 13))
-             (same t))
+             (end (length a))
+             (same (= (length a) (length b))))
          (while (and same (< index end))
-           (unless (or (= index 4) (equal (aref a index) (aref b index)))
+           (unless (or (= index 4) (and any-stamp (= index 12))
+                       (equal (aref a index) (aref b index)))
              (setq same nil))
            (setq index (1+ index)))
          same)))
@@ -2853,7 +2894,8 @@ to one, cut.  FACE, if any, is that of TEXT."
             (failure (add "Last turn" (concat "not available: " failure) nil 'drover-dim))
             ((and (plist-get entry :known)
                   (not (or (plist-get recap :prompt) (plist-get recap :reply) (plist-get recap :changes))))
-             (add "Last turn" "nothing to recap" nil 'drover-dim))))
+             (add "Last turn" "nothing to recap" nil 'drover-dim)))
+      (add "Usage" (drover-list--usage session 'details) nil))
     (append (nreverse details)
             (mapcar (pcase-lambda (`(,label ,value ,face)) (list label value nil face))
                     (drover-list--hidden-facts session layout)))))

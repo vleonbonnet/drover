@@ -41,7 +41,7 @@ TESTS = $(wildcard test/*-test.el)
 FILE ?=
 SELECTOR ?=
 
-.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review real-data
+.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review bench-usage real-data
 
 all: compile test
 
@@ -252,6 +252,14 @@ bench-remote: compile
 	DROVER_BENCH_BACK_ARGS="$(BACK_ARGS)" DROVER_BENCH_BACK_HOST="$(BACK_HOST)" \
 	DROVER_BENCH_SEARCH="$(SEARCH)" DROVER_BENCH_CLONE="$(CLONE)" DROVER_BENCH_NEW="$(NEW)" \
 	$(BATCH) -l test/drover-test-helpers.el -l test/drover-remote-bench.el -f drover-remote-bench-main
+
+# Times the totals of usage over OpenCode's database of 2500 sessions
+# and 120 Claude Code transcripts, written in a throwaway home: the
+# first read in slices, the facts, each session's totals, the reports,
+# the list with its costs, a turn read, and an Emacs starting from what
+# was kept.  See test/drover-usage-bench.el.
+bench-usage: compile
+	$(BATCH) -l test/drover-test-helpers.el -l test/drover-usage-bench.el -f drover-usage-bench-main
 
 # Indexes the user's own Claude Code transcripts and Codex rollouts,
 # ~/.claude and ~/.codex or DROVER_CLAUDE_HOME and DROVER_CODEX_HOME,

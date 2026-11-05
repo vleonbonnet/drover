@@ -26,6 +26,8 @@
 | =drover-codex-rollouts.el=          | The =codex= backend: Codex's conversations from its rollouts, archived ones included; resuming them, archiving, restoring and deleting them through its CLI                                                                                                                                                                                                                                       |
 | =drover-claude-code-ide.el=         | The claude-code-ide.el backend: Claude Code terminals, their Ghostel statuses, starting, resuming, forking, compacting and deleting; the CLI's catalog as a live model source; installs the =claude-code= backend, and resumes its conversations                                                                                                                                                  |
 | =drover-agent-shell.el=             | The agent-shell backend: shells of any engine over ACP, their statuses from events, forking, compacting and deleting through the agent; live model sources; the =gemini-cli= engine; installs the =claude-code= and =codex= backends, and resumes their conversations                                                                                                                             |
+| =drover-usage.el=                   | What agents cost: the usage OpenCode's database, Claude Code's transcripts and Codex's rollouts record, read incrementally and kept; facts by session, day, provider and model; billing and prices; each session's totals; the totals a host sends its peers and those it received; the text the list shows. Loads with the core alone, as a host answering a peer does |
+| =drover-usage-report.el=            | The report of usage, =*drover usage*=, in Magit's sections, its menu, and the mode line of today's cost |
 | =drover-remote.el=                  | Other hosts: peers and their connections over spyglass, the owner serving its own sessions by revisions, each peer a backend of the records it received, stale while not connected; recaps and previews through the owner; actions performed by the owner; terminals shared by the owner and mirrored here; OpenCode sessions in full opencode.el buffers, the owner relaying its service; what was said searched by the owner; conversations cloned between hosts, the host owning the clone taking the files in pieces; new sessions started by the owner for the prompt, its directories listed by name and its catalogs told; peers backed off. See =doc/remote.org=                                                |
 | =drover-summary.el=                 | Sessions summarized by a cheap model as their turns end: the briefs records take in, the recap read, redacted and bounded, asked of OpenCode's stateless generation, debounced, two at once, a daily limit; the summaries kept by conversation in =drover-state-directory=, and their counts per day |
 
@@ -716,6 +718,57 @@ The OpenCode backend's =:search= calls opencode.el's =opencode-search=, a route 
 | Ripgrep over 120 transcripts, to the last match   | 30 to 41 ms        |
 | Longest function of the search on the main thread | 1 to 1.3 ms        |
 | Longest a timer ticking every millisecond waits   | 3 ms, 13 with a GC |
+
+* What agents cost
+
+=drover-usage= totals the tokens agents used, input (neither read from nor written into a cache), output (reasoning included), read from a cache and written into one, and what they cost, from what each engine records, never from a backend's records: those tell what a session runs now, not what it used.
+
+** Sources
+
+| Engine      | What is read                                                                                                                                                                  | How                                                                                                                                                                                                                                         |
+|-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| OpenCode    | each step, an assistant's message of =session_message=: its provider, model, tokens (output and reasoning added), the cost the service computed; the sessions' parents, directories and titles of =session_v2= | read only, through Emacs's SQLite, by time of creation, which the database indexes: forward from where it stopped, and once, the history before, newest first; =drover-usage-oc-page= messages a query, =drover-usage-oc-slice= a slice |
+| Claude Code | the =usage= of each assistant's record of a transcript, its subagents' transcripts apart                                                                                      | an index of =drover-transcript= of its own, the file read whole once, then from where it ended, =drover-usage-read-chunk= bytes a step                                                                                                       |
+| Codex       | the =token_count= events of a rollout, the =turn_context= naming the model, the =session_meta= its directory, provider and parent                                              | the same                                                                                                                                                                                                                                    |
+
+The service's API was the first candidate for OpenCode: a session's =Session.Info= holds its =cost= and =tokens= ever, and =/api/experimental/session/stats= totals a range by model, and by project when asked for one.  Neither totals a session's day, which the periods need, nor a project's model; the messages would, but the API sends them whole, with their content: the user's last month is 77,000 steps and 800 MB.  The service's own statistics read its database, =json_extract= over =session_message=; drover reads the same, read only, as its engine already reads when a session last changed (=drover-opencode--last-used=), a page of 200 steps in about 2 ms.  A step running has no usage yet: from the first one not ended (=time.completed=, an error, or =drover-usage-oc-settle= seconds old), every step is read again at each look, counted as it stands meanwhile, and taken in once ended, so that none counts twice.  The database is read as OpenCode's sessions change (=drover-changed-hook=), two seconds after, and as the report refreshes.
+
+Claude Code records a reply in as many records as it has blocks, each with the message's usage, the last with its final output: an entry per message, the newest record's.  A conversation forked or resumed into a new transcript copies its history, the messages keeping their identifiers: of the user's 2,906 replies, 322 were in two files.  Each reply is kept as an entry naming its message, [KEY DAY MODEL INPUT OUTPUT READ WRITE HOUR], so that a message counts once, for the file whose first reply came first (of two beginning alike, the one named first), whichever was read first.  Codex counts the same totals again as rate limits change: a count whose totals are the last ones counts nothing, and a request's entry is named by its time and total, which a fork's copy keeps.  Codex's input counts its cached tokens: drover's input leaves them out, as OpenCode's and Anthropic's do.
+
+=drover-transcript= takes a reader's =:read-to=: a reader that read part of a long file returns where it stopped, the entry keeps that size, and the file is queued again, read on in a later step, so that no step reads megabytes.
+
+What was read is kept in =drover-state-directory=: =claude-code-usage.eld= and =codex-usage.eld= as the indexes keep theirs, checked against the files; =opencode-usage.eld=, where reading goes on forward and back and the totals by session, day, provider and model, checked against the database's true name.
+
+** Facts and totals
+
+Every source becomes facts, a session's tokens on a day through a provider and model, with the cost its engine recorded, made once per change of the usage (=drover-usage--generation=): 3,261 for the user's usage, in 1.4 ms.  Totals are sums of facts: the report's by period, grouping and breakdown, each session's ever, through its parents up the tree, so that a session's totals hold its subagents'.  A day is the local day of a request; periods are days from today's, the week's first (=drover-usage-week-start=) or the month's.
+
+** Billing and prices
+
+=drover-usage-billing= tells what a subscription pays for: GitHub Copilot through OpenCode; Claude Code logged in to an account (=oauthAccount= in its =.claude.json=), without an API key, a token, a base URL nor Bedrock or Vertex in its environment or settings; Codex logged in through ChatGPT (=auth_mode= of its =auth.json=, nothing else of which is kept).  Included usage shows its tokens and =included=, never the money it would have cost: OpenCode prices GitHub Copilot's steps at catalog prices, which the user does not pay.  Priced usage costs what OpenCode recorded, its gateways billing per token at its catalog's prices, else what =drover-usage-prices= says, else OpenCode's model catalog, the provider Anthropic's or OpenAI's first, else =drover-usage-default-prices=.  An hour's cache write costs twice the input unless a price says otherwise, as Anthropic bills it.  The report tells, for each harness, provider and model, where its cost came from.
+
+** In the list
+
+A session's totals show in its details and in the field =cost=, hidden by default.  The list asks =drover-list-usage-function= for them; the row's inputs hold its totals, compared with =equal=, so that a row whose totals changed is made anew.  The usage tells views which sessions' totals changed, those of the conversations read and their parents, through =drover-views-changed=, which runs =drover-changed-hook= with their keys as a change backends report: the list draws them in place.  Tests set the function to nil: lists show usage only where the tests of usage read it from their homes.
+
+** Other hosts
+
+Each host totals its own usage, priced as it prices it: a peer asks with the request =usage=, the capability of the same name, for a period and the dimensions it wants, and the owner answers rows of those, summed over the others, =drover-usage-remote-rows= at most, each checked and bounded as it comes (=drover-usage-decode-row=); the report asks each peer connected once a minute, sooner while it still reads its own, and a session of another host asks its host for each session's totals ever.  What a peer sent is kept in memory, as last received, and shows by host, as of then.
+
+** Measures
+
+=make bench-usage= writes OpenCode's database of 2500 sessions, 1000 at the top of their trees, 30 steps each of the size OpenCode keeps them, and 120 Claude Code transcripts, 20 of 2 MB, in batch:
+
+| What                                                   | Time                                                    |
+|--------------------------------------------------------+---------------------------------------------------------|
+| Reading it all the first time, from timers, in slices  | 4.0 s, Emacs without running a timer 25 ms at most      |
+| The facts, 5,120                                       | 3.0 ms                                                  |
+| Each session's totals, the table of 2500               | 7.4 ms, then 2.4 ms for their costs as the column shows |
+| A report of today; of ever                             | under 1 ms; 13 to 17 ms                                 |
+| The list drawn whole, without costs; with              | 58 ms; 68 ms                                            |
+| An Emacs starting from what was kept, 1.6 MB           | 30 ms                                                   |
+
+The longest blocks are an index's step reading 128 kB of long records and keeping what it read, and OpenCode's history ending, kept at once.  Over the user's own usage, read only, into a throwaway state directory: 198,000 steps of an 8 GB database and 124 transcripts read in 2.8 s, kept in 950 kB, read again by the next Emacs in 20 ms.
 
 * Engines
 

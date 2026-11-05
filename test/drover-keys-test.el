@@ -673,7 +673,7 @@ B applies while a quiet session has a buffer."
 ;;;; The dispatch menu
 
 (defconst drover-keys-test-dispatch-layout
-  '(("Sessions" ("j" "B" "b" "l" "L" "p" "S"))
+  '(("Sessions" ("j" "B" "b" "l" "L" "p" "S" "$"))
     ("Prompt" ("\"" "n" "'" "#"))
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
@@ -681,7 +681,7 @@ B applies while a quiet session has a buffer."
     ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
     ("View" ("= o" "= r" "= g" "- f"))
     ("Filter" ("= u" "= O" "= z" "= p" "= s" "= a" "= m") ("= v" "= H" "= d" "= f" "= c"))
-    ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s")))
+    ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s" "- $")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.")
 
 (ert-deftest drover-keys-test-dispatch-layout ()
@@ -797,7 +797,8 @@ the prefix of the other's, which would hide it."
                    ("=H" . drover-view--filter-harness) ("-H" . drover-view--column-harness)
                    ("=h" . drover-view--filter-host) ("=d" . drover-view--filter-since)
                    ("=f" . drover-view--filter-search) ("=c" . drover-filter-clear)
-                   ("-l" . drover-view--column-location) ("-s" . drover-view--column-summary)))
+                   ("-l" . drover-view--column-location) ("-s" . drover-view--column-summary)
+                   ("-$" . drover-view--column-cost) ("$" . drover-usage)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
                 (cdr entry))))
   ;; Every session key runs the command `drover-session-map' binds it to,
@@ -817,11 +818,11 @@ With drover's prompt as the default prompt buffer, as by default, the
 agent, model, effort and directory of the next prompt are among them."
   (drover-keys-test-with (list (drover-test-session "s"))
     (with-temp-buffer
-      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "l" "L" "p" "S" "\"" "'" "#")))
+      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#")))
       (setq drover-default-prompt-buffer-function
             (eval (car (get 'drover-default-prompt-buffer-function 'standard-value)) t))
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "l" "L" "p" "S" "\"" "'" "#" "a" "m" "e" "d"))))))
+                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "a" "m" "e" "d"))))))
 
 (defun drover-keys-test-description (function)
   "Return what description FUNCTION gives in `drover-dispatch' set up here."
@@ -981,7 +982,7 @@ It applies only while the session has some, in lists and in its buffer."
 
 (defconst drover-keys-test-view-keys
   '("= o" "= r" "= g" "= u" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c"
-    "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s")
+    "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $")
   "The keys of the view settings that apply in one of drover's views.
 Older and archived sessions need a backend keeping them, and follow mode
 a list in a window.")
@@ -993,14 +994,14 @@ a list in a window.")
                                (drover-test-session "sub" :parent "s"))
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     (append '("j" "b" "l" "L" "p" "S" "\"" "'" "#" "C" "f"
+                     (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "C" "f"
                                "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z")
                              drover-keys-test-view-keys
                              '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "RET")))))
     ;; Off a session, only what needs none.
     (drover-keys-test-in 'view nil
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     (append '("j" "b" "l" "L" "p" "S" "\"" "'" "#" "+" "g")
+                     (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "+" "g")
                              drover-keys-test-view-keys
                              '("C-n" "C-p" "M-n" "M-p" "M-<" "M->"))))
       ;; Moving between groups needs groups.
@@ -1100,7 +1101,7 @@ Drover's view settings apply only while one of drover's views shows."
   (drover-keys-test-with (list (drover-test-session "s" :status 'working))
     (drover-keys-test-in 'prompt "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "l" "L" "p" "S" "\"" "'" "#" "a" "m" "e" "d"
+                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "a" "m" "e" "d"
                        "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T" "C" "f" "." "O"
                        "o" "K" "+" "g" "r" "x" "z"))))))
 
@@ -1151,7 +1152,7 @@ shows, so they apply only there."
             (setq drover-default-prompt-buffer-function (lambda () default))
             (with-temp-buffer
               (should (equal (drover-keys-test-apt 'drover-dispatch)
-                             '("j" "b" "l" "L" "p" "S" "\"" "'" "#" "a" "m" "e" "d")))
+                             '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "a" "m" "e" "d")))
               (call-interactively #'drover-prompt-model)
               (should (equal drover-keys-test-actions (list (list 'model default)))))
             ;; Deciding what applies never calls the function, which may
@@ -1332,7 +1333,7 @@ The value is (PLAN . LINES)."
                                        " -h host" " -H harness" " -l location" " -b branch" " -a agent"
                                        " -m model" " -r provider"
                                        " -x context" " -c created"
-                                       " -t age" " -p cache" " -s summary")))
+                                       " -t age" " -p cache" " -s summary" " -$ cost")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
                                       :provider "Anthropic" :harness 'fake :since (- (float-time) 7200))
                   drover-sort-by 'updated
@@ -1389,7 +1390,7 @@ MENU is `drover-view' by default."
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("View" "= o" "= r" "= g" "- f")
                        ("Filter" "= u" "= O" "= z" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c")
-                       ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s"))))
+                       ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $"))))
       ;; Hosts are filtered once there are others.
       (let ((drover-hosts-function (lambda () '("core"))))
         (should (member "= h" (cdr (assoc "Filter" (drover-keys-test-keys 'drover-view))))))
@@ -1768,7 +1769,7 @@ host standing for none."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 29))
+      (should (= (length suffixes) 30))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 
