@@ -62,6 +62,8 @@
 (declare-function opencode-request "opencode-http" (method path &rest arguments))
 (declare-function opencode-request-data "opencode-http" (response))
 (declare-function opencode-error-describe "opencode-http" (error))
+(declare-function opencode-error-status "opencode-http" (error))
+(declare-function opencode-error-tag "opencode-http" (error))
 (declare-function opencode-service-read-registration "opencode-service" ())
 
 (defgroup drover-summary nil
@@ -117,6 +119,13 @@ next day; turns summarized before need no model."
 (defcustom drover-summary-concurrency 2
   "How many summaries are asked for at once, at most."
   :type 'natnum
+  :group 'drover-summary)
+
+(defcustom drover-summary-rest 300
+  "Seconds no summary is asked of the model after one failed.
+Turns ending meanwhile show as before summaries, without a request
+bound to fail as the last one did."
+  :type 'number
   :group 'drover-summary)
 
 (defcustom drover-summary-timeout 60
@@ -411,15 +420,17 @@ its requests.  A settled session seen otherwise since is summarized.")
 
 (defvar drover-summary--jobs (make-hash-table :test #'eql)
   "Summaries asked for, by token, each a plist.
-Its :key, :timer and :forced and, once the recap came, :hash,
+Its :key, :timer, :asked and :anew and, once the recap came, :hash,
 :conversation, :updated, :class and :requests, the session as it stood
 then.")
 
 (defvar drover-summary--token 0
   "The token of the last summary asked for.")
 
-(defvar drover-summary--forced nil
-  "Keys of the sessions to summarize anew, whatever was summarized of them.")
+(defvar drover-summary--asked nil
+  "Sessions the user asked to summarize, as (KEY . ANEW).
+They are summarized whatever failed before, and with ANEW non-nil
+whatever was summarized of them.")
 
 (defun drover-summary--unlive (session)
   "Note that SESSION works again: its summary describes it no longer."
@@ -501,11 +512,11 @@ is put off to then."
 (defun drover-summary--start (key)
   "Ask for the summary of the session KEY, beginning with the recap of its turn."
   (let ((session (drover-index-session key))
-        (forced (member key drover-summary--forced)))
-    (setq drover-summary--forced (delete key drover-summary--forced))
+        (asked (assoc key drover-summary--asked)))
+    (setq drover-summary--asked (assoc-delete-all key drover-summary--asked))
     (when (and session (drover-summary--eligible-p session) (drover-summary--class session))
       (let ((token (cl-incf drover-summary--token)))
-        (puthash token (list :key key :forced forced
+        (puthash token (list :key key :asked (and asked t) :anew (cdr asked)
                              :timer (run-at-time drover-summary-timeout nil
                                                  #'drover-summary--expire token))
                  drover-summary--jobs)
@@ -688,6 +699,10 @@ changed, is summarized by that line."
 (defvar drover-summary--failing nil
   "Non-nil while summaries fail, once the failure was reported.")
 
+(defvar drover-summary--failed-at nil
+  "When the model last failed to write a summary, a float time, or nil.
+See `drover-summary-rest'.")
+
 (defvar drover-summary--capped nil
   "The day the daily limit was reported, or nil.")
 
@@ -753,10 +768,18 @@ Past `drover-summary-daily-limit', it is said once that day."
                             count))
           nil))))
 
+(defun drover-summary--resting-p ()
+  "Return non-nil while no summary is asked after a failure.
+See `drover-summary-rest'."
+  (and drover-summary--failed-at
+       (< (- (float-time) drover-summary--failed-at) drover-summary-rest)))
+
 (defun drover-summary--failed (message)
   "Note that a summary could not be written, for MESSAGE; said once.
 Lists show sessions as before summaries; the failure is said again
-only after a summary was written."
+only after a summary was written.  None is asked for a while (see
+`drover-summary-rest')."
+  (setq drover-summary--failed-at (float-time))
   (unless drover-summary--failing
     (setq drover-summary--failing t)
     (drover-message "Drover could not summarize a session, shown as before: %s"
@@ -783,7 +806,7 @@ only after a summary was written."
           (puthash token job drover-summary--jobs)
           (cond
            ((null conversation) (drover-summary--finish token))
-           ((and entry (equal (plist-get entry :hash) hash) (not (plist-get job :forced)))
+           ((and entry (equal (plist-get entry :hash) hash) (not (plist-get job :anew)))
             (drover-summary--finish token)
             (drover-summary--settle job (plist-get entry :line) (plist-get entry :recap)
                                     (plist-get entry :time)))
@@ -791,7 +814,9 @@ only after a summary was written."
            (trivial
             (drover-summary--finish token)
             (drover-summary--settle job (car trivial) (cdr trivial) (float-time)))
-           ((not (drover-summary--allowed-p)) (drover-summary--finish token))
+           ((or (and (drover-summary--resting-p) (not (plist-get job :asked)))
+                (not (drover-summary--allowed-p)))
+            (drover-summary--finish token))
            (t
             (let ((prompt (drover-summary-prompt input)))
               (condition-case err
@@ -810,7 +835,8 @@ It read INPUT characters."
              (parsed (and (stringp text) (drover-summary-parse text))))
         (cond
          (parsed
-          (setq drover-summary--failing nil)
+          (setq drover-summary--failing nil
+                drover-summary--failed-at nil)
           (drover-summary--count input (length text))
           (drover-summary--settle job (car parsed) (cdr parsed) (float-time)))
          (t (drover-summary--failed (or (plist-get result :failure) "the model wrote nothing"))))))))
@@ -854,17 +880,24 @@ Summaries never start it."
               (pid (plist-get registration :pid)))
     (and (natnump pid) (process-attributes pid) t)))
 
+(defvar drover-summary--former-path nil
+  "Non-nil once the service knew stateless generation by its former path alone.
+Services before 2.2 answer POST /api/experimental/generate, which later
+ones keep as an alias of /api/experimental/generate/text.")
+
 (defun drover-summary-opencode-generate (prompt callback)
   "Have OpenCode's service write what PROMPT asks, then call CALLBACK.
-A stateless generation (POST /api/experimental/generate/text), through
-`drover-summary-model': it makes no session, which neither lists nor
-usage totals of sessions show.  CALLBACK gets (:text TEXT) or
-\(:failure MESSAGE), as `drover-summary-generate-function' says."
+A stateless generation (POST /api/experimental/generate/text, or its
+former path for a service without it), through `drover-summary-model':
+it makes no session, which neither lists nor usage totals of sessions
+show.  CALLBACK gets (:text TEXT) or (:failure MESSAGE), as
+`drover-summary-generate-function' says."
   (require 'opencode-http)
   (if (not (drover-summary--service-running-p))
       (funcall callback (list :failure "OpenCode's service does not run"))
     (opencode-call-with-service
-     nil #'opencode-request 'post "/api/experimental/generate/text"
+     nil #'opencode-request 'post
+     (if drover-summary--former-path "/api/experimental/generate" "/api/experimental/generate/text")
      :body `((prompt . ,prompt) (model . ,(drover-summary--model-ref)))
      :directory nil :buffer nil :timeout drover-summary-timeout
      :then (lambda (response)
@@ -875,7 +908,13 @@ usage totals of sessions show.  CALLBACK gets (:text TEXT) or
                                      (list :failure "OpenCode answered no text"))))))
      :else (lambda (error)
              (drover-with-reporting "summary"
-               (funcall callback (list :failure (opencode-error-describe error))))))))
+               ;; No such route, rather than no such model.
+               (if (and (not drover-summary--former-path)
+                        (eql (opencode-error-status error) 404)
+                        (not (opencode-error-tag error)))
+                   (progn (setq drover-summary--former-path t)
+                          (drover-summary-opencode-generate prompt callback))
+                 (funcall callback (list :failure (opencode-error-describe error)))))))))
 
 ;;;; The mode
 
@@ -886,7 +925,7 @@ usage totals of sessions show.  CALLBACK gets (:text TEXT) or
   (maphash (lambda (_ job) (when (timerp (plist-get job :timer)) (cancel-timer (plist-get job :timer))))
            drover-summary--jobs)
   (setq drover-summary--timer nil
-        drover-summary--forced nil)
+        drover-summary--asked nil)
   (clrhash drover-summary--jobs)
   (clrhash drover-summary--queue)
   (clrhash drover-summary--seen)
@@ -933,8 +972,10 @@ show the summaries their host wrote."
 (defun drover-summarize (sessions &optional anew)
   "Summarize SESSIONS now, whatever drover summarized of them before when ANEW.
 Interactively, the session at point, anew with a prefix argument.
-A session of another host is summarized by its host, and one at work
-once its turn ends."
+They are asked for even while summaries rest after a failure (see
+`drover-summary-rest').  A session of another host is summarized by
+its host, and one at work once its turn ends.  Return how many are
+asked for."
   (interactive (list (list (drover-session-at-point)) current-prefix-arg))
   (unless drover-summary-mode
     (user-error "Summaries are off: see `drover-summary-mode'"))
@@ -949,7 +990,8 @@ once its turn ends."
           (user-error "Not summarized: see `drover-summary-harnesses'")))
        (t
         (let ((key (drover-session-key session)))
-          (when anew (cl-pushnew key drover-summary--forced :test #'equal))
+          (setq drover-summary--asked (cons (cons key (or anew (cdr (assoc key drover-summary--asked))))
+                                            (assoc-delete-all key drover-summary--asked)))
           (drover-summary--schedule key 0)
           (cl-incf count)))))
     count))
