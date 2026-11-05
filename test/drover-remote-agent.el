@@ -103,6 +103,15 @@
 (defvar drover-remote-agent--archived (make-hash-table :test #'equal)
   "The fake backend's archived sessions, by identifier.")
 
+(defvar drover-remote-agent--pushes nil
+  "Pushes posted, newest first, as [URL TOKEN BODY], with DROVER_AGENT_PUSH.")
+
+(defvar drover-remote-agent--idle 1000.0
+  "How long the agent tells it has been idle, in seconds, for pushes.")
+
+(defvar drover-remote-agent--push-status 200
+  "The HTTP status the stand-in push server answers.")
+
 (defvar drover-remote-agent--calls nil
   "The actions the fake backend performed, newest first, as [ACTION ID ARGUMENT].")
 
@@ -707,6 +716,14 @@ noted, and their cancellations."
                                                                (drover-session-title session)))
                                                      (seq-filter #'drover-session-host
                                                                  (drover-index-sessions)))))))
+      ("pushes"
+       (funcall reply (list :pushes (vconcat (reverse drover-remote-agent--pushes)))))
+      ("idle"
+       (setq drover-remote-agent--idle (float (plist-get args :seconds)))
+       (funcall reply (list :ok t)))
+      ("fire-idle"
+       (drover-remote-push-fire-idle)
+       (funcall reply (list :ok t)))
       ("host-names"
        (funcall reply (list :names (vconcat (drover-remote--host-names)))))
       ("peer-link"
@@ -890,6 +907,18 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
                               (list name :viewer t :heartbeat '(2 . 8) :resume 30
                                     :access (intern (or (getenv "DROVER_AGENT_ACCESS") "read"))))
                             (split-string viewers "," t)))))
+    ;; Pushes posted to a stand-in, recorded: what the phone would get.
+    (when (getenv "DROVER_AGENT_PUSH")
+      (require 'drover-remote-push)
+      (setq drover-remote-push-endpoints '("https://ntfy.example/")
+            drover-remote-push-delay 0
+            drover-remote-push-spacing 0
+            drover-remote-push-gather 0.3
+            drover-remote-push-idle-function (lambda () (seconds-to-time drover-remote-agent--idle))
+            drover-remote-push-send-function
+            (lambda (url token body callback)
+              (push (vector url (or token :false) body) drover-remote-agent--pushes)
+              (funcall callback drover-remote-agent--push-status))))
     (when (getenv "DROVER_AGENT_OLD")
       (setq drover-remote-capabilities nil))
     (when-let* ((caps (getenv "DROVER_AGENT_CAPS")))

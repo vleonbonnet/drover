@@ -90,6 +90,15 @@
 (declare-function spyglass-connection-last-recv "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-set-heartbeat "ext:spyglass-conn" (connection interval timeout))
 (declare-function spyglass-connection-set-resume "ext:spyglass-conn" (connection seconds))
+(declare-function drover-remote-push-start "drover-remote-push" ())
+(declare-function drover-remote-push-stop "drover-remote-push" ())
+(declare-function drover-remote-push-available-p "drover-remote-push" ())
+(declare-function drover-remote-push-on-request "drover-remote-push" (peer message reply))
+(declare-function drover-remote-push-on-watch "drover-remote-push" (peer message reply))
+(declare-function drover-remote-push-foreground "drover-remote-push" (peer on))
+(declare-function drover-remote-push-detached "drover-remote-push" (peer))
+(declare-function drover-remote-push-status "drover-remote-push" (peer))
+(defvar drover-remote-push-endpoints)
 (defvar spyglass-error-functions)
 (defvar spyglass-share-state-functions)
 (defvar spyglass-mirror-state-functions)
@@ -286,7 +295,8 @@ told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
-  '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage")
+  '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage"
+    "push")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -305,7 +315,10 @@ theirs from peers of full access; \"review\": it tells the changes its
 sessions made, as `drover-review' shows them, for its peers to review;
 \"new\": it starts sessions for its peers of act or full access, in
 directories of its own they choose among those it lists, on its own
-engines' agents and models, which it tells them.")
+engines' agents and models, which it tells them; \"push\": it pushes
+a phone, a peer owning no sessions, what needs the user while it is not
+connected, encrypted, through the endpoint and with the key the phone
+gave it (see drover-remote-push.el).")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1455,6 +1468,9 @@ one line, once in `drover-error-interval' seconds."
                                     (if final ", for good" ""))))
           (when (and final (eq connection (drover-remote--peer-dialed peer)))
             (setf (drover-remote--peer-dialed peer) nil))
+          (when (and (eq connection (drover-remote--peer-connection peer))
+                     (featurep 'drover-remote-push))
+            (drover-remote-push-detached peer))
           (when (eq connection (drover-remote--peer-connection peer))
             (setf (drover-remote--peer-heard peer)
                   (max (or (drover-remote--peer-heard peer) 0)
@@ -5232,6 +5248,9 @@ when of that peer, opened here once started.  For
                  (not (drover-remote--new-refusal peer)))
         (drover-remote--catalog-ask peer nil nil #'ignore))))
    ((equal type "bye") (drover-remote--on-bye peer connection message))
+   ((equal type "fg")
+    (when (featurep 'drover-remote-push)
+      (drover-remote-push-foreground peer (eq (plist-get message :on) t))))
    ((equal type "unsent") (drover-remote--on-unsent peer message))
    ((equal type "ocd") (drover-remote--on-oc-data message))
    ((equal type "oce") (drover-remote--on-oc-end message))
@@ -5301,6 +5320,12 @@ as an older drover's farewells do."
         ("ls" (drover-remote--on-ls peer message reply))
         ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
+        ("push" (if (featurep 'drover-remote-push)
+                    (drover-remote-push-on-request peer message reply)
+                  (funcall reply nil "this host pushes nothing")))
+        ("watch" (if (featurep 'drover-remote-push)
+                     (drover-remote-push-on-watch peer message reply)
+                   (funcall reply nil "this host pushes nothing")))
         ("recap"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -5684,6 +5709,9 @@ sessions, and :dirty, how many sessions changed since are still to send."
             (when-let* ((serving (plist-get stats :serving)))
               (insert (format "  served up to revision %s, %d sessions to send\n"
                               (plist-get serving :held) (plist-get serving :dirty))))
+            (when-let* (((featurep 'drover-remote-push))
+                        (line (drover-remote-push-status peer)))
+              (insert (format "  %s\n" line)))
             (let ((mirrors nil))
               (maphash (lambda (key _buffer)
                          (when-let* ((buffer (drover-remote--mirror-buffer peer key)))
@@ -6337,11 +6365,18 @@ That is when opencode.el, loaded, reaches its service through sockets."
   (and (featurep 'opencode-service) (fboundp 'opencode-transport-request)
        (fboundp 'opencode-service-ensure)))
 
+(defun drover-remote--pushes-p ()
+  "Return non-nil when this host pushes to phones: endpoints set, crypto and curl."
+  (and (featurep 'drover-remote-push)
+       drover-remote-push-endpoints
+       (drover-remote-push-available-p)))
+
 (defun drover-remote--capabilities ()
   "Return the capabilities this host tells its peers, as a vector of strings."
   (vconcat (seq-remove (lambda (capability)
                          (or (and (equal capability "mirror") (not (drover-remote--mirrors-p)))
-                             (and (equal capability "opencode") (not (drover-remote--serves-opencode-p)))))
+                             (and (equal capability "opencode") (not (drover-remote--serves-opencode-p)))
+                             (and (equal capability "push") (not (drover-remote--pushes-p)))))
                        drover-remote-capabilities)))
 
 ;;;;; Here, viewing a peer's sessions
@@ -6982,6 +7017,8 @@ ID, ELSE why it could not.  For the engine's :import (see
     ;; Terminals a remote layer made anew without stopping still shares.
     (drover-remote--unshare-all)
     (add-hook 'drover-changed-hook #'drover-remote--owner-changed)
+    (require 'drover-remote-push)
+    (drover-remote-push-start)
     (add-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
     (add-hook 'spyglass-share-state-functions #'drover-remote--share-event)
     (add-hook 'drover-unsent-functions #'drover-remote--unsent)
@@ -7051,6 +7088,8 @@ starts again at once: its peers keep this host's sessions meanwhile."
   (when (fboundp 'spyglass-unregister-channel)
     (spyglass-unregister-channel drover-remote-channel))
   (remove-hook 'drover-changed-hook #'drover-remote--owner-changed)
+  (when (featurep 'drover-remote-push)
+    (drover-remote-push-stop))
   (remove-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
   (cancel-function-timers #'drover-remote--look-out)
   (remove-hook 'spyglass-share-state-functions #'drover-remote--share-event)

@@ -680,6 +680,18 @@ A front end also fits its buffers into the keys. A list of sessions sets =drover
 
 A peer with =:viewer= owns no sessions, as the Android client: this host serves it its sessions, never subscribes to it, and lists it in no group, column nor filter; =:heartbeat= gives its connections heartbeats of their own, (INTERVAL . TIMEOUT), and =:resume= how long a connection it made waits for it to come back, its mirrors resuming, a phone closing its streams when its application leaves the screen.
 
+** Pushes to a phone
+
+While a phone is not connected, this host pushes it what needs the user, through UnifiedPush: the phone hands it an endpoint, a topic of a push server such as ntfy, and a key; this host posts its own sessions coming to need the user and leaving it, sealed with that key, so that nothing of the conversations reaches the push server in clear.  It holds what is new while the user types in this Emacs (=drover-remote-push-hold=, 120 s, a peer's =:push-hold= first), and pushes nothing while the phone is in front.
+
+#+begin_src emacs-lisp
+  (setq drover-remote-push-endpoints '("https://ntfy.example/")
+        ;; A token of the push server, never written here.
+        drover-remote-push-token '(pass "ntfy/drover-token"))
+#+end_src
+
+=M-x drover-remote-push-test= pushes a test to each phone registered; =drover-remote-status= tells how pushes to each stand.
+
 ** How they connect
 
 Each host names itself =drover-host=, by default its system's name up to the first dot, downcased. Either host may dial (=:dial=), or both: the connection dialed by the host whose name sorts first is kept, the other closed, its dialer standing by. =M-x drover-remote-status= tells how each peer stands: connected or not, the round trip and clock offset, its sessions, the revision held, whether it takes actions, the last error and when, and the history of its link (dials, streams opened and ended, how SSH exited, greetings, farewells, snapshots and resumptions, errors); a peer whose own connection ended has =drover-remote-grace= seconds to come back before its sessions dim, and is dialed after =drover-remote-fallback-delay= when this host dials it too; =M-x drover-remote-check= runs each SSH command as the connection will, without a prompt, and tells what fails.  A peer this host cannot reach is tried less and less often, up to every five minutes (=drover-remote-backoff=), and at once as the network changes, the machine wakes or =drover-remote-check= is called; the status tells when the next attempt comes, and the history counts failures alike on one line. Nothing of a peer is kept on disk: its sessions come back as it connects.

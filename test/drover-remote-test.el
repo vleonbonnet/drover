@@ -547,6 +547,87 @@ resume window."
                      "open"))
       (should (= (plist-get (drover-remote-owner-stats) :subscribers) 0)))))
 
+(defun drover-remote-test--pushes (count)
+  "Wait until the agent posted COUNT pushes; return them, oldest first."
+  (let (pushes)
+    (drover-remote-test-wait
+     (lambda ()
+       (setq pushes (plist-get (drover-remote-test-command "pushes") :pushes))
+       (>= (length pushes) count))
+     10)
+    (append pushes nil)))
+
+(defun drover-remote-test--opened (push key)
+  "Return PUSH, [URL TOKEN BODY] posted by the agent, opened with KEY, a plist."
+  (json-parse-string (drover-remote-push-open key "kid1" (aref push 2) "agent")
+                     :object-type 'plist :array-type 'list :false-object nil :null-object nil))
+
+(ert-deftest drover-remote-test-push ()
+  "A phone registers with its host, which pushes it what needs the user.
+Sealed with the phone's key, held while the user types there, nothing
+pushed while the phone is in front, and the registration surviving a
+restart of the host's remote layer, its counters rising."
+  (drover-remote-test-with nil
+    (require 'drover-remote-push)
+    (skip-unless (drover-remote-push-available-p))
+    (let* ((registration (let ((process-environment (append '("DROVER_AGENT_VIEWERS=viewer"
+                                                              "DROVER_AGENT_PUSH=record")
+                                                            process-environment)))
+                           (drover-remote-test-start-agent dir)))
+           (key (apply #'unibyte-string (number-sequence 1 32)))
+           (set (list :url "https://ntfy.example/upTopic?up=1" :key (base64url-encode-string key t)
+                      :kid "kid1" :detail "full")))
+      (drover-remote-test-connect registration)
+      (should (member "push" (drover-remote--peer-caps (drover-remote--peer "agent"))))
+      (drover-remote-test-command "sessions" :n 3)
+      (drover-remote-test-synced 3)
+      (pcase-let ((`(,reply ,error) (drover-remote--wait (drover-remote--peer "agent") (list :op "push" :set set) 10)))
+        (should-not error)
+        (should (eq (plist-get reply :ok) t)))
+      ;; s2 is done: pushed.
+      (let* ((pushes (drover-remote-test--pushes 1))
+             (push (drover-remote-test--opened (car (last pushes)) key)))
+        (should (equal (aref (car pushes) 0) "https://ntfy.example/upTopic?up=1"))
+        (should (equal (plist-get push :h) "agent"))
+        (should (equal (mapcar (lambda (e) (plist-get e :k)) (plist-get push :e)) '(("fake" "s2")))))
+      ;; Waiting on a permission: its request, choices and all.
+      (drover-remote-test-command "ask" :ids ["s0"])
+      (let* ((pushes (drover-remote-test--pushes 2))
+             (push (drover-remote-test--opened (car (last pushes)) key))
+             (first (car (plist-get push :e))))
+        (should (equal (plist-get push :r) "need"))
+        (should (equal (plist-get first :k) '("fake" "s0")))
+        (should (equal (plist-get (plist-get first :q) :id) "perm-s0"))
+        (should (equal (plist-get (plist-get first :q) :ch) '("once" "always" "reject"))))
+      ;; In front: nothing pushed; leaving, nothing either.
+      (drover-remote--send (drover-remote-test--agent-connection) (list :t "fg" :on t))
+      (drover-remote-test-command "change" :ids ["s1"] :status "failed" :now t)
+      (drover-remote-test-settle 0.5)
+      (drover-remote--send (drover-remote-test--agent-connection) (list :t "fg" :on :false))
+      (drover-remote-test-settle 0.5)
+      (should (= (length (plist-get (drover-remote-test-command "pushes") :pushes)) 2))
+      ;; Typing there: what is new waits for the user to stop.
+      (drover-remote-test-command "idle" :seconds 3)
+      (drover-remote-test-command "change" :ids ["s1"] :status "done" :now t)
+      (drover-remote-test-settle 0.5)
+      (should (= (length (plist-get (drover-remote-test-command "pushes") :pushes)) 2))
+      (drover-remote-test-command "idle" :seconds 500)
+      (drover-remote-test-command "fire-idle")
+      (let ((push (drover-remote-test--opened (car (last (drover-remote-test--pushes 3))) key)))
+        (should (equal (plist-get (seq-find (lambda (e) (equal (plist-get e :k) '("fake" "s1")))
+                                            (plist-get push :e))
+                                  :st)
+                       "done")))
+      ;; A restart of its remote layer keeps the phone, its counters rising.
+      (drover-remote-test-command "restart")
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)))
+      (drover-remote-test-settle 0.5)
+      (drover-remote-test-command "change" :ids ["s1"] :status "idle" :now t)
+      (let* ((pushes (drover-remote-test--pushes 4))
+             (seqs (mapcar (lambda (push) (plist-get (drover-remote-test--opened push key) :s)) pushes)))
+        (should (equal seqs (sort (copy-sequence seqs) #'<)))
+        (should (= (length (seq-uniq seqs)) (length seqs)))))))
+
 (ert-deftest drover-remote-test-viewer-units ()
   "A viewer is told by its configuration or its capabilities, and kept out of views."
   (drover-remote-test-owning nil
