@@ -121,6 +121,39 @@
       (should (= (plist-get page :to) (plist-get page :sz)))
       (should (equal (plist-get page :g) (drover-conversation-generation file))))))
 
+(ert-deftest drover-conversation-test-not-ascii ()
+  "A tool's input not ASCII reads as characters, bounded by them, and serializes again."
+  (drover-test-with-homes
+    (let* ((directory (file-name-as-directory (expand-file-name "work" home)))
+           (id drover-conversation-test--id)
+           (file (drover-fixture-claude-file id directory))
+           (long (concat "« " (make-string 5000 ?é) " »"))
+           (session (drover-conversation-test--session 'claude-code id directory)))
+      (drover-fixture-write
+       file
+       (list
+        (drover-fixture-claude-user id directory 1790000000.0 "Rename it")
+        (drover-fixture-line
+         :type "assistant" :isSidechain :false :uuid "a1" :timestamp (drover-fixture-time 1790000001.0)
+         :message (list :role "assistant" :model "claude-opus-5-5" :id "msg_1"
+                        :content (vector (list :type "tool_use" :id "toolu_1" :name "Edit"
+                                               :input (list :replace_all :null :file_path "C:\\Users\\é.txt"
+                                                            :old_string "a → b" :new_string "a … b"))
+                                         (list :type "tool_use" :id "toolu_2" :name "Write"
+                                               :input (list :file_path "b.txt" :content long)))))))
+      (let* ((page (drover-conversation-test--page session))
+             (tools (seq-filter (lambda (entry) (equal (plist-get entry :y) "tool")) (plist-get page :e)))
+             (input (plist-get (car tools) :in)))
+        (should (= (length tools) 2))
+        (should (string-search "\"old_string\":\"a → b\"" input))
+        (should (string-search "é.txt" input))
+        ;; Cut at characters, never within one's bytes.
+        (should (= (length (plist-get (cadr tools) :in))
+                   (1+ (alist-get 'tool drover-conversation-bounds))))
+        (should (string-suffix-p "é…" (plist-get (cadr tools) :in)))
+        ;; As the remote layer sends it.
+        (should (json-serialize page :null-object nil :false-object :false))))))
+
 (ert-deftest drover-conversation-test-codex ()
   "A Codex rollout reads as entries, its messages told once."
   (drover-test-with-homes

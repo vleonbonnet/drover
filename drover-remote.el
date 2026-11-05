@@ -7556,7 +7556,7 @@ project; `full' everything.  Paths are the service's API's."
 
 (defun drover-remote--oc-refuse (reply why)
   "Answer through REPLY that the request is refused, WHY: a 403, as services do."
-  (funcall reply (list :st 403 :b (json-serialize (list :message why :_tag "Forbidden")))))
+  (funcall reply (list :st 403 :b (drover-json-text (list :message why :_tag "Forbidden")))))
 
 (defun drover-remote--oc-service-then (reply function)
   "Call FUNCTION with this host's OpenCode connection, else answer REPLY a 503.
@@ -7568,7 +7568,7 @@ The local service, whatever the buffers here."
        (funcall function connection)))
    (lambda (why)
      (drover-with-reporting "remote OpenCode"
-       (funcall reply (list :st 503 :b (json-serialize (list :message (drover-bound-line why)))))))))
+       (funcall reply (list :st 503 :b (drover-json-text (list :message (drover-bound-line why)))))))))
 
 (defun drover-remote--oc-request-headers (connection message)
   "Return the headers of the request MESSAGE asks this host's service.

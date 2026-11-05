@@ -153,7 +153,7 @@ and its tail."
   "Return VALUE, parsed JSON, as compact JSON text, bounded."
   (car (drover-conversation--bound
         'tool (condition-case nil
-                  (json-serialize value :null-object nil :false-object :false)
+                  (drover-json-text value :null-object nil :false-object :false)
                 (error (format "%S" value))))))
 
 (defun drover-conversation--patch (file status patch directory)

@@ -2586,6 +2586,27 @@ user's service: only the services BODY registers are reached."
   (should (drover-remote--oc-refusal 'full nil "/api/session"))
   (should (drover-remote--oc-refusal nil 'post "/api/session")))
 
+(ert-deftest drover-remote-test-oc-answers-are-text ()
+  "The relay's own answers carry their bodies as text: a reason not ASCII, cut, is sent all the same."
+  (let ((peer (drover-remote--peer-make :name "core" :properties '(:access read)))
+        (why (concat "no service at C:/Users/élodie/: " (make-string 400 ?x)))
+        (answers nil))
+    (cl-letf (((symbol-function 'drover-remote--serves-opencode-p) #'always)
+              ((symbol-function 'opencode-call-with-service)
+               (lambda (_service _ensure _then else) (funcall else why))))
+      (drover-remote--on-oc peer (list :m "post" :p "/api/session/ses_a/prompt")
+                            (lambda (answer &rest _) (push answer answers)))
+      (setf (drover-remote--peer-properties peer) '(:access full))
+      (drover-remote--on-oc peer (list :m "get" :p "/api/session")
+                            (lambda (answer &rest _) (push answer answers))))
+    (pcase-let ((`(,unavailable ,refused) answers))
+      (should (= (plist-get refused :st) 403))
+      (should (= (plist-get unavailable :st) 503))
+      (should (string-search "élodie" (plist-get unavailable :b)))
+      (should (string-search "…" (plist-get unavailable :b)))
+      (dolist (answer answers)
+        (should (json-serialize answer))))))
+
 (ert-deftest drover-remote-test-oc-buffer ()
   "RET on another host's OpenCode session opens it in a full buffer, talking to its service through its host."
   (drover-remote-test-with nil

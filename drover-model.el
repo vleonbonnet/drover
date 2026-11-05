@@ -959,6 +959,13 @@ The value is shared between callers, which must not modify it."
   "Return non-nil when VALUE is a JSON object, as an alist keyed by symbols."
   (and (consp value) (consp (car value)) (symbolp (caar value))))
 
+(defun drover-json-text (value &rest arguments)
+  "Return VALUE as JSON text, characters, as `json-serialize' with ARGUMENTS.
+`json-serialize' returns UTF-8 bytes, which, serialized again within a
+message (a body, a tool's input), it refuses unless ASCII: it takes
+text as characters."
+  (decode-coding-string (apply #'json-serialize value arguments) 'utf-8-unix t))
+
 (defun drover-merge-settings (base over)
   "Return settings OVER merged onto BASE, both JSON objects as alists.
 Objects merge key by key, recursively; any other value of OVER
