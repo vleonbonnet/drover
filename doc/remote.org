@@ -1,7 +1,7 @@
 #+TITLE: drover across hosts: design
 #+OPTIONS: toc:nil
 
-A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][the fourth]]), the search of what was said in a peer's sessions (see [[*Searching what was said there, as built][after]]), clones (see [[*Clones, as built][Clones, as built]]) and new sessions on another host (see [[*New sessions on other hosts, as built][last]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
+A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][the fourth]]), the search of what was said in a peer's sessions (see [[*Searching what was said there, as built][after]]), clones (see [[*Clones, as built][Clones, as built]]) and new sessions on another host (see [[*New sessions on other hosts, as built][New sessions on other hosts, as built]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
 
 * What was decided
 
