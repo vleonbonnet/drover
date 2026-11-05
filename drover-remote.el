@@ -98,6 +98,8 @@
 (declare-function drover-schedule-load "drover-schedule" ())
 (declare-function drover-schedule-add "drover-schedule" (target time prompt &optional instruction reference-time))
 (declare-function drover-schedule-add-after-turn "drover-schedule" (target prompt &optional instruction))
+(declare-function drover-schedule-deliver "drover-schedule" (target prompt &rest properties))
+(declare-function drover-schedule-target "drover-schedule" (&optional buffer))
 (declare-function drover-schedule-add-after-trigger "drover-schedule" (target trigger prompt &optional instruction))
 (declare-function drover-schedule-cancel "drover-schedule" (&optional job))
 (declare-function drover-schedule-retry-job "drover-schedule" (job &optional now))
@@ -131,12 +133,15 @@
 (declare-function spyglass-share-id "ext:spyglass-owner" (share))
 (declare-function spyglass-shares "ext:spyglass-owner" ())
 (declare-function spyglass-share-viewers "ext:spyglass-owner" (share))
+(declare-function spyglass-share-buffer "ext:spyglass-owner" (share))
+(declare-function spyglass-connection-peer-id "ext:spyglass-conn" (connection))
 (declare-function spyglass-unshare "ext:spyglass-owner" (buffer-or-share))
 (declare-function spyglass-open "ext:spyglass-mirror" (connection share-id &rest arguments))
 (declare-function spyglass-close "ext:spyglass-mirror" (mirror-or-buffer))
 (declare-function spyglass-mirror-state "ext:spyglass-mirror" (mirror-or-buffer))
 (declare-function spyglass-mirror-closed-reason "ext:spyglass-mirror" (mirror-or-buffer))
 (declare-function spyglass-mirror-connection "ext:spyglass-mirror" (mirror-or-buffer))
+(declare-function spyglass-mirror-set-closed-reason "ext:spyglass-mirror" (mirror-or-buffer reason))
 (declare-function spyglass-reconnect "ext:spyglass-conn" (connection &optional fresh))
 (declare-function spyglass-connection-set-reconnect-delays "ext:spyglass-conn" (connection delays))
 (declare-function spyglass-connection-next-attempt "ext:spyglass-conn" (connection))
@@ -316,6 +321,9 @@ A peer opening it again meanwhile mirrors it at once."
 Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
+
+(defvar drover-remote--acting-peer nil
+  "The name of the peer whose action this host performs, while it does.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
@@ -2537,6 +2545,7 @@ answered with its outcome rather than performed twice."
       (setf (drover-remote--state-tasks state)
             (append (drover-remote--state-tasks state)
                     (list (list :id id :action action :args args
+                                :peer (drover-remote--peer-name peer)
                                 :keys (vconcat (mapcar #'drover-remote--key keys))
                                 :out (make-vector (length keys) nil)
                                 :pending (make-vector (length keys) nil)
@@ -2558,6 +2567,51 @@ requests, those still being performed kept until done."
           (dolist (gone old)
             (when (car (gethash gone outcomes))
               (remhash gone outcomes))))))))
+
+(defun drover-remote--queue-prompt (record args peer-name)
+  "Queue the prompt ARGS carry for RECORD, when it cannot take it now.
+For a peer PEER-NAME sending it, ARGS holding :text and its options.  A
+session running its agent in its buffer (:runs-in-buffer) while its turn
+runs, or whose buffer cannot take a prompt now without touching what its
+input holds (its backend's :blocker), gets it from this host's queue of
+prompts (`drover-schedule'), saved there: after its turn, as a prompt
+scheduled \"when turn ends\" here is, else once it can take it.  Never
+typed over a turn, nor lost; the peer is told so (message \"note\").
+Return t when queued; a string saying why when it must wait but cannot
+be queued, its conversation not known yet; nil when the session takes it
+now, or drover-schedule is not there."
+  (let* ((buffer (drover-session-buffer record))
+         (running (and (drover-backend-property record :runs-in-buffer)
+                       (drover--running-p record)))
+         (blocker (and buffer (not running)
+                       (functionp (drover-backend-property record :blocker))
+                       (drover-with-reporting "remote send"
+                         (drover-backend-call record :blocker)))))
+    (when (and (or running (stringp blocker)) (require 'drover-schedule nil t))
+      (require 'drover-links)
+      (let* ((peer (and peer-name (drover-remote--peer peer-name)))
+             (title (drover-session-display-title record))
+             (why (if running "its turn runs" blocker))
+             (conversation (drover-links-conversation record)))
+        (if (not (and peer conversation))
+            (format "%s, and its conversation is not known yet to queue the prompt" why)
+          (let ((target (drover-remote--schedule-target record conversation args peer))
+                (instruction (format "sent from %s" (drover-remote--label peer)))
+                (text (plist-get args :text)))
+            (let ((inhibit-interaction t))
+              (if running
+                  (drover-schedule-add-after-turn target text instruction)
+                (drover-schedule-deliver target text :origin instruction)))
+            (drover-remote--event peer 'act "queued its prompt for %s: %s" title why)
+            (when-let* ((connection (drover-remote--peer-connection peer)))
+              (drover-remote--send connection
+                                   (list :t "note"
+                                         :text (if running
+                                                   (format "%s runs a turn on %s: the prompt goes once it ends, queued there"
+                                                           title drover-host)
+                                                 (format "%s on %s cannot take a prompt now (%s): it goes once it can, queued there"
+                                                         title drover-host blocker)))))
+            t))))))
 
 (defun drover-remote--run-soon (state)
   "Perform the actions of STATE's tasks from a timer."
@@ -2616,21 +2670,28 @@ SETTLE takes t, or nil and a line.  Nothing shows a window nor asks."
       ("delete" (drover--delete-step record (lambda (ok &optional value) (if ok (then) (else value)))))
       ("rename" (drover-backend-call record :rename (plist-get args :title)) (then))
       ("send"
-       (cond
-        ((not (drover-supports-p record :submit))
-         (else "it takes no prompt from another host"))
-        ((not (or (plist-get args :agent) (plist-get args :model) (plist-get args :variant)))
-         (drover-unarchive-to-send record)
-         (drover-backend-call record :submit (plist-get args :text) #'then
-                              (lambda (message &rest _) (else message))))
-        (t
-         ;; Its options first, as the prompt applies them before sending.
-         (drover-remote--apply-options
-          record args
-          (lambda (_ok &optional _message)
-            (drover-unarchive-to-send record)
-            (drover-backend-call record :submit (plist-get args :text) #'then
-                                 (lambda (message &rest _) (else message))))))))
+       (let* ((options (or (plist-get args :agent) (plist-get args :model) (plist-get args :variant)))
+              ;; Its turn running, the prompt waits for it to end, in this
+              ;; host's queue of prompts, saved: never typed over a turn nor lost.
+              (queued (and (drover-supports-p record :submit)
+                           (drover-remote--queue-prompt record args drover-remote--acting-peer))))
+         (cond
+          ((not (drover-supports-p record :submit))
+           (else "it takes no prompt from another host"))
+          ((stringp queued) (else queued))
+          (queued (then))
+          ((not options)
+           (drover-unarchive-to-send record)
+           (drover-backend-call record :submit (plist-get args :text) #'then
+                                (lambda (message &rest _) (else message))))
+          (t
+           ;; Its options first, as the prompt applies them before sending.
+           (drover-remote--apply-options
+            record args
+            (lambda (_ok &optional _message)
+              (drover-unarchive-to-send record)
+              (drover-backend-call record :submit (plist-get args :text) #'then
+                                   (lambda (message &rest _) (else message)))))))))
       ("options"
        (if (not (drover-supports-p record :apply-options))
            (else "its options are set on its host")
@@ -2689,7 +2750,8 @@ failed past its deadline."
               (if (not record)
                   (funcall settle nil "no such session here")
                 (condition-case err
-                    (drover-remote--perform (plist-get task :action) (plist-get task :args) record settle)
+                    (let ((drover-remote--acting-peer (plist-get task :peer)))
+                      (drover-remote--perform (plist-get task :action) (plist-get task :args) record settle))
                   (error (funcall settle nil (drover-error-message err))))))))
         (when (<= (plist-get task :left) 0)
           (drover-remote--finish-task state task))))
@@ -3052,18 +3114,7 @@ gets the prompt scheduled, or why it was not."
         (if why
             (funcall reply nil (drover-remote--refuse-action peer "schedule a prompt" why))
           (drover-remote--begin-outcome state id reply)
-          (let* ((engine (drover-session-engine record))
-                 (asked (plist-get options :model))
-                 (model (and asked engine (drover-remote--told-model engine (car asked) (cdr asked))))
-                 (target (list :link (drover-links-link conversation)
-                               :backend (drover-session-backend record)
-                               :directory (or (drover-session-directory record) (expand-file-name "~/"))
-                               :title (or (drover-session-title record) (format "%s" (cdr key)))
-                               :options (and (or (plist-get options :agent) model (plist-get options :variant))
-                                             (list :agent (plist-get options :agent) :model model
-                                                   :variant (and model (plist-get options :variant))))
-                               :by (drover-remote--peer-name peer)
-                               :hidden t))
+          (let* ((target (drover-remote--schedule-target record conversation options peer))
                  (instruction (format "scheduled from %s" (drover-remote--label peer)))
                  (answer (condition-case err
                              (let* ((inhibit-interaction t)
@@ -3078,6 +3129,24 @@ gets the prompt scheduled, or why it was not."
               (dolist (pending (cdr entry))
                 (drover-with-reporting "remote schedule"
                   (drover-remote--new-reply pending answer)))))))))))
+
+(defun drover-remote--schedule-target (record conversation options peer)
+  "Return where a prompt PEER schedules for RECORD goes, for `drover-schedule'.
+CONVERSATION is RECORD's (see `drover-links-conversation'); OPTIONS hold
+:agent, :model, (PROVIDER . ID), and :variant, as a peer tells them.
+The prompt resumes the session in no window when it has none."
+  (let* ((engine (drover-session-engine record))
+         (asked (plist-get options :model))
+         (model (and asked engine (drover-remote--told-model engine (car asked) (cdr asked)))))
+    (list :link (drover-links-link conversation)
+          :backend (drover-session-backend record)
+          :directory (or (drover-session-directory record) (expand-file-name "~/"))
+          :title (or (drover-session-title record) (format "%s" (cdr (drover-session-id record))))
+          :options (and (or (plist-get options :agent) model (plist-get options :variant))
+                        (list :agent (plist-get options :agent) :model model
+                              :variant (and model (plist-get options :variant))))
+          :by (drover-remote--peer-name peer)
+          :hidden t)))
 
 (defun drover-remote--peer-job (peer message reply action)
   "Return the scheduled prompt MESSAGE's :job names, for PEER's ACTION, or nil.
@@ -3250,11 +3319,72 @@ stream comes back, ask before the peers greet each other again."
                     ((rassoc (drover-remote--peer-name peer) (plist-get entry :viewers))))
           (drover-remote--peer-name peer)))))
 
+(defun drover-remote--share-visible-p (id connection)
+  "Return non-nil when CONNECTION's peer may see and open the share ID.
+A peer that asked for it, by its connection or its greeting there (see
+`drover-remote--share-viewer'), or, for a share a remote layer before
+this one made, the Emacs instances that mirrored it then, which open it
+again as their streams come back, before greeting this layer."
+  (or (drover-remote--share-viewer id connection)
+      (when-let* ((state (drover-remote--current))
+                  (entry (gethash id (drover-remote--state-shares state)))
+                  (instance (ignore-errors (spyglass-connection-peer-id connection))))
+        (member instance (plist-get entry :instances)))))
+
+(defun drover-remote--share-instances (share)
+  "Return the instances of the Emacs subscribed to SHARE, connected or not.
+From the keys of its subscriptions, INSTANCE/ID."
+  (delete-dups (mapcar (lambda (key) (if (string-match "/[^/]*\\'" key) (substring key 0 (match-beginning 0)) key))
+                       (spyglass-share-viewers share))))
+
+(defun drover-remote--adopt-shares (state)
+  "Have STATE, a remote layer made anew, keep the terminals shared before it.
+Their buffers live and their viewers subscribed, as a remote layer
+restarting or reloading leaves them: each is shared on as this layer
+shares, visible to the instances mirroring it, whose access applies
+once they greet it, and unshared as this layer unshares; a share of a
+buffer gone is dropped."
+  (when (fboundp 'spyglass-shares)
+    (dolist (share (spyglass-shares))
+      (let ((id (spyglass-share-id share)))
+        (when (string-prefix-p drover-remote--share-prefix id)
+          (let* ((rest (substring id (length drover-remote--share-prefix)))
+                 (slash (string-search "/" rest))
+                 (backend (and slash (drover-remote--symbol (substring rest 0 slash))))
+                 (key (and backend (cons backend (substring rest (1+ slash)))))
+                 (buffer (spyglass-share-buffer share)))
+            (if (not (and key (buffer-live-p buffer)))
+                (spyglass-unshare share)
+              (puthash id (list :buffer buffer :key key
+                                :title (when-let* ((record (drover-index-session key)))
+                                         (drover-remote--plain (drover-session-display-title record)))
+                                :viewers nil
+                                :instances (drover-remote--share-instances share))
+                       (drover-remote--state-shares state))
+              (drover-remote--reshare buffer id)
+              (unless (spyglass-share-viewers share)
+                (drover-remote--unshare-later state id)))))))))
+
+(defun drover-remote--reshare (buffer id)
+  "Share BUFFER under ID as this remote layer shares terminals with peers."
+  (spyglass-share buffer :id id
+                  :peers (lambda (connection) (and (drover-remote--share-visible-p id connection) t))
+                  :read-only (lambda (connection) (drover-remote--share-refuses-p id connection))
+                  :input #'drover-remote--share-input
+                  :size-policy 'owner)
+  (when (with-current-buffer buffer (derived-mode-p 'comint-mode))
+    (drover-remote--shell-keys buffer)))
+
 (defun drover-remote--share-refuses-p (id connection)
   "Return non-nil when the share ID takes no input from CONNECTION's peer.
 A peer of `read' access watches; `act' and `full' type, as configured
-now."
-  (let* ((name (drover-remote--share-viewer id connection))
+now.  A peer an earlier remote layer shared it with is known once it
+greeted this one."
+  (let* ((name (or (drover-remote--share-viewer id connection)
+                   (when-let* (((drover-remote--share-visible-p id connection))
+                               (state (drover-remote--current))
+                               (peer (drover-remote--peer-of state connection)))
+                     (drover-remote--peer-name peer))))
          (peer (and name (drover-remote--peer name))))
     (not (and peer (drover-remote--allows-p (drover-remote--access peer) "type")))))
 
@@ -3286,15 +3416,10 @@ A buffer someone else shared is left as it is."
                                        (drover-remote--plain (drover-session-display-title record)))
                                      (plist-get entry :title))
                           :viewers (cons (cons (drover-link connection) name) viewers)
+                          :instances (plist-get entry :instances)
                           :timer (plist-get entry :timer))
                  shares)
-        (spyglass-share buffer :id id
-                        :peers (lambda (connection) (and (drover-remote--share-viewer id connection) t))
-                        :read-only (lambda (connection) (drover-remote--share-refuses-p id connection))
-                        :input #'drover-remote--share-input
-                        :size-policy 'owner)
-        (when (with-current-buffer buffer (derived-mode-p 'comint-mode))
-          (drover-remote--shell-keys buffer))
+        (drover-remote--reshare buffer id)
         (unless (spyglass-share-viewers (spyglass-share-of buffer))
           (drover-remote--unshare-later state id))
         id))))
@@ -5805,6 +5930,10 @@ when of that peer, opened here once started.  For
     (when (featurep 'drover-remote-push)
       (drover-remote-push-foreground peer (eq (plist-get message :on) t))))
    ((equal type "unsent") (drover-remote--on-unsent peer message))
+   ((equal type "note")
+    (when-let* ((text (drover-remote--line (plist-get message :text) 300)))
+      (drover-remote--event peer 'note "%s" text)
+      (drover-message "%s" text)))
    ((equal type "ocd") (drover-remote--on-oc-data message))
    ((equal type "oce") (drover-remote--on-oc-end message))
    ((equal type "occ") (drover-remote--on-oc-cancel connection message))
@@ -6084,6 +6213,7 @@ EPHEMERAL non-nil for one accepted without configuration."
     ;; A viewer has no sessions to list.
     (unless (plist-get properties :viewer)
       (drover-remote--register peer))
+    (drover-remote--adopt-mirrors peer)
     peer))
 
 (defun drover-remote--close (peer why)
@@ -6401,6 +6531,10 @@ Nil in a buffer that mirrors none.")
 (defvar-local drover-remote--reopens 0
   "Times the current mirror was opened anew since it was last live.")
 
+(defvar-local drover-remote--killed-there nil
+  "Non-nil once the owner killed the terminal the current mirror showed.
+Its reason (\"killed\") then makes way for a line saying so.")
+
 (define-derived-mode drover-remote-session-mode special-mode "Drover remote"
   "A session of another host, as its host tells it: read only.
 \\[revert-buffer] shows it anew, as its host tells it now; the keys of
@@ -6599,13 +6733,61 @@ is not mirrored instead; shown anew, the note stays."
 
 ;;;; Mirrors of a peer's terminals
 
+(defun drover-remote--mirror-buffers (name key)
+  "Return the live buffers mirroring the peer NAME's session KEY, newest first.
+Found by what they show (`drover-remote--shown'), which they keep
+whatever remote layer made them: a layer made anew, as reloading a
+drover whose structures changed makes it, knows none of them."
+  (seq-filter (lambda (buffer)
+                (and (buffer-local-value 'drover-remote--mirror-kind buffer)
+                     (equal (buffer-local-value 'drover-remote--shown buffer) (cons name key))
+                     (local-variable-p 'spyglass--mirror buffer)))
+              (buffer-list)))
+
 (defun drover-remote--mirror-buffer (peer key)
-  "Return the live buffer mirroring the terminal of PEER's session KEY, or nil."
+  "Return the live buffer mirroring the terminal of PEER's session KEY, or nil.
+The one PEER holds, else one of the buffers mirroring it (see
+`drover-remote--mirror-buffers'), which PEER adopts: a live mirror
+first.  One session has one mirror: other buffers of it are
+duplicates, which `drover-remote--adopt-mirrors' closes."
   (let ((buffer (gethash key (drover-remote--peer-mirrors peer))))
     (if (buffer-live-p buffer)
         buffer
       (remhash key (drover-remote--peer-mirrors peer))
-      nil)))
+      (let* ((buffers (drover-remote--mirror-buffers (drover-remote--peer-name peer) key))
+             (buffer (or (seq-find (lambda (buffer) (not (eq (spyglass-mirror-state buffer) 'closed)))
+                                   buffers)
+                         (car buffers))))
+        (when buffer
+          (puthash key buffer (drover-remote--peer-mirrors peer)))
+        buffer))))
+
+(defun drover-remote--adopt-mirrors (peer)
+  "Have PEER hold the buffers mirroring its sessions, made before it was.
+As a remote layer is made anew, its peers knowing no mirror: each
+session's mirror is adopted, a live one first, and opened anew if it
+closed meanwhile; another buffer of the same session, closed and shown
+in no window, is killed, a duplicate, which a remote layer that knew
+none of its mirrors made as the session was opened again."
+  (let ((name (drover-remote--peer-name peer))
+        (keys nil))
+    (dolist (buffer (buffer-list))
+      (let ((shown (buffer-local-value 'drover-remote--shown buffer)))
+        (when (and (equal (car-safe shown) name)
+                   (buffer-local-value 'drover-remote--mirror-kind buffer)
+                   (local-variable-p 'spyglass--mirror buffer))
+          (cl-pushnew (cdr shown) keys :test #'equal))))
+    (dolist (key keys)
+      (let ((kept (drover-remote--mirror-buffer peer key)))
+        (dolist (other (drover-remote--mirror-buffers name key))
+          (unless (or (eq other kept)
+                      (not (eq (spyglass-mirror-state other) 'closed))
+                      (get-buffer-window other t))
+            (drover-remote--event peer 'mirror "closed %s, a duplicate of %s"
+                                  (buffer-name other) (buffer-name kept))
+            (drover-kill-buffer other)))))
+    (when keys
+      (drover-remote--reopen-mirrors peer))))
 
 (defun drover-remote--why-no-mirror (peer session)
   "Return why SESSION of PEER opens as its host tells it, not mirrored, or nil.
@@ -6727,40 +6909,73 @@ For `kill-buffer-hook'; spyglass closes the mirror."
       (when (eq (gethash (cdr shown) (drover-remote--peer-mirrors peer)) (current-buffer))
         (remhash (cdr shown) (drover-remote--peer-mirrors peer))))))
 
+(defconst drover-remote--reopen-delays '(1 2 5 10 30)
+  "Seconds before each attempt to open anew a mirror its owner stopped sharing.
+As many attempts as delays: a peer whose remote layer restarts, or
+reloads, shares its terminals again at the first.")
+
+(defun drover-remote--mirror-closed-why (buffer why)
+  "Have BUFFER, a mirror that closed, tell WHY, a line, not spyglass's reason."
+  (when (and (buffer-live-p buffer) (fboundp 'spyglass-mirror-set-closed-reason))
+    (spyglass-mirror-set-closed-reason buffer why)))
+
 (defun drover-remote--reopen (peer key buffer)
   "Open anew in BUFFER the mirror of PEER's session KEY, on its connection now.
 For a mirror its connection lost for good, one on a connection no
-longer kept, or one its owner unshared as its remote layer restarted;
-not one closed here, nor one whose terminal is gone there."
+longer kept, or one its owner stopped sharing, as its remote layer
+restarted or reloaded (\"unshared\", \"no such share\"): PEER is asked
+for the terminal again, which it shares while it runs, at most once per
+`drover-remote--reopen-delays', each failure tried again after the
+next.  The owner telling the session runs no terminal any more, the
+mirror says so: the terminal there was closed.  Not one closed here, nor
+one whose terminal was killed there (see
+`drover-remote--mirror-state')."
   (let ((connection (drover-remote--peer-connection peer))
-        (session (drover-remote--peer-session peer key)))
+        (session (drover-remote--peer-session peer key))
+        (label (drover-remote--label peer)))
     (when (and connection session (buffer-live-p buffer)
                (eq (drover-remote--peer-state peer) 'open)
                (drover-remote--capable-p peer "mirror")
-               (< (buffer-local-value 'drover-remote--reopens buffer) 3))
+               (< (buffer-local-value 'drover-remote--reopens buffer) (length drover-remote--reopen-delays)))
       (let ((state (spyglass-mirror-state buffer))
             (reason (spyglass-mirror-closed-reason buffer)))
         (when (if (eq state 'closed)
-                  (not (member reason '("killed" "closed here")))
+                  (not (or (member reason '("killed" "closed here"))
+                           (buffer-local-value 'drover-remote--killed-there buffer)))
                 (not (eq (spyglass-mirror-connection buffer) connection)))
           (unless (eq state 'closed)
             (spyglass-close buffer))
-          (with-current-buffer buffer (cl-incf drover-remote--reopens))
-          (drover-remote--event peer 'mirror "opening anew the mirror of %s" (buffer-name buffer))
-          (let ((link (drover-link peer)))
-            (drover-remote--request
-             peer (list :op "mirror" :key (drover-remote--wire-key session) :resume :false)
-             (lambda (reply error)
-               (let ((peer (drover-linked link)))
-                 (cond
-                  ((not (buffer-live-p buffer)))
-                  ((and (null error) (stringp (plist-get reply :share))
-                        (eq (spyglass-mirror-state buffer) 'closed))
-                   (drover-remote--attach-mirror peer (or (drover-remote--peer-session peer key) session)
-                                                 reply buffer))
-                  (t (drover-remote--event peer 'mirror "could not open anew the mirror of %s: %s"
-                                           (buffer-name buffer)
-                                           (or error (plist-get reply :none) "no terminal")))))))))))))
+          (let ((attempt (with-current-buffer buffer (cl-incf drover-remote--reopens))))
+            (drover-remote--event peer 'mirror "opening anew the mirror of %s (attempt %d)" (buffer-name buffer) attempt)
+            (drover-remote--mirror-closed-why buffer (format "opening it anew, %s sharing it again" label))
+            (let ((link (drover-link peer)))
+              (drover-remote--request
+               peer (list :op "mirror" :key (drover-remote--wire-key session) :resume :false)
+               (lambda (reply error)
+                 (let ((peer (drover-linked link)))
+                   (cond
+                    ((not (buffer-live-p buffer)))
+                    ((and (null error) (stringp (plist-get reply :share)))
+                     (when (eq (spyglass-mirror-state buffer) 'closed)
+                       (drover-remote--attach-mirror peer (or (drover-remote--peer-session peer key) session)
+                                                     reply buffer)))
+                    ((null error)
+                     ;; The owner answered: no terminal runs it any more.
+                     (drover-remote--event peer 'mirror "the terminal of %s is gone there: %s"
+                                           (buffer-name buffer) (or (plist-get reply :none) "no terminal"))
+                     (drover-remote--mirror-closed-why buffer (format "the terminal on %s was closed" label)))
+                    ((< attempt (length drover-remote--reopen-delays))
+                     (drover-remote--event peer 'mirror "could not open anew the mirror of %s: %s"
+                                           (buffer-name buffer) error)
+                     (run-at-time (nth attempt drover-remote--reopen-delays) nil
+                                  (lambda ()
+                                    (drover-with-reporting "remote mirror"
+                                      (drover-remote--reopen (drover-linked link) key buffer)))))
+                    (t
+                     (drover-remote--event peer 'mirror "gave up opening anew the mirror of %s: %s"
+                                           (buffer-name buffer) error)
+                     (drover-remote--mirror-closed-why
+                      buffer (format "%s did not share its terminal again: %s" label error))))))))))))))
 
 (defun drover-remote--reopen-mirrors (peer)
   "Open anew the mirrors of PEER that need it, from a timer.
@@ -6777,27 +6992,41 @@ See `drover-remote--reopen'."
 
 (defun drover-remote--mirror-state (buffer state)
   "Follow STATE, the new state of BUFFER, if it mirrors a peer's terminal.
-For `spyglass-mirror-state-functions': its history tells it, and a mirror
-its owner unshared, as its remote layer restarted, is opened anew."
+For `spyglass-mirror-state-functions': its history tells it.  A mirror
+its owner stopped sharing, as its remote layer restarted or reloaded,
+or whose connection closed for good, is opened anew (see
+`drover-remote--reopen'); one whose terminal was killed there is killed
+once its session is archived, else says the terminal was closed.  A
+buffer its peer does not hold, made by a remote layer before this one,
+is adopted, unless the peer holds another mirror of the session."
   (drover-with-reporting "remote mirror"
     (when-let* (((buffer-live-p buffer))
                 ((buffer-local-value 'drover-remote--mirror-kind buffer))
+                ;; Closed here, as killing it closes it: nothing to follow.
+                ((not (and (eq state 'closed)
+                           (equal (spyglass-mirror-closed-reason buffer) "closed here"))))
                 (shown (buffer-local-value 'drover-remote--shown buffer))
                 (peer (drover-remote--peer (car shown)))
-                ((eq (gethash (cdr shown) (drover-remote--peer-mirrors peer)) buffer)))
+                ((eq (drover-remote--mirror-buffer peer (cdr shown)) buffer)))
       (pcase state
-        ('live (with-current-buffer buffer (setq drover-remote--reopens 0)))
+        ('live (with-current-buffer buffer
+                 (setq drover-remote--reopens 0 drover-remote--killed-there nil)))
         ('closed
          (let ((reason (spyglass-mirror-closed-reason buffer)))
            (drover-remote--event peer 'mirror "the mirror of %s closed: %s" (buffer-name buffer) reason)
-           (drover-remote--close-archived-mirror peer (cdr shown) buffer)
-           (when (member reason '("unshared" "no such share"))
-             (run-at-time 1 nil
+           (cond
+            ((equal reason "killed")
+             (with-current-buffer buffer (setq drover-remote--killed-there t))
+             (drover-remote--close-archived-mirror peer (cdr shown) buffer)
+             (drover-remote--mirror-closed-why
+              buffer (format "the terminal on %s was closed" (drover-remote--label peer))))
+            (t
+             (run-at-time (car drover-remote--reopen-delays) nil
                           (let ((link (drover-link peer))
                                 (key (cdr shown)))
                             (lambda ()
                               (drover-with-reporting "remote mirror"
-                                (drover-remote--reopen (drover-linked link) key buffer))))))))))))
+                                (drover-remote--reopen (drover-linked link) key buffer)))))))))))))
 
 (defun drover-remote--close-archived-mirror (peer key buffer)
   "Kill BUFFER, the mirror of PEER's session KEY, once its owner archived it.
@@ -6810,7 +7039,8 @@ the owner closed otherwise, its session still listed, stays readable,
 saying why."
   (when (and (buffer-live-p buffer)
              (eq (spyglass-mirror-state buffer) 'closed)
-             (equal (spyglass-mirror-closed-reason buffer) "killed")
+             (or (equal (spyglass-mirror-closed-reason buffer) "killed")
+                 (buffer-local-value 'drover-remote--killed-there buffer))
              (eq (drover-remote--peer-state peer) 'open)
              (let ((record (drover-remote--peer-session peer key)))
                (or (null record) (drover-session-archived-p record))))
@@ -7614,8 +7844,9 @@ ID, ELSE why it could not.  For the engine's :import (see
     (unless (spyglass-server)
       (spyglass-server-start)
       (setf (drover-remote--state-started-server state) t))
-    ;; Terminals a remote layer made anew without stopping still shares.
-    (drover-remote--unshare-all)
+    ;; Terminals a remote layer before this one shared, restarting or
+    ;; made anew as drover reloads, stay shared: their mirrors resume.
+    (drover-remote--adopt-shares state)
     (add-hook 'drover-changed-hook #'drover-remote--owner-changed)
     (require 'drover-remote-push)
     (drover-remote-push-start)
@@ -7670,7 +7901,12 @@ starts again at once: its peers keep this host's sessions meanwhile."
         (cancel-timer (drover-remote--state-runner state)))
       (when (drover-remote--state-watch state)
         (cancel-timer (drover-remote--state-watch state)))
-      (drover-remote--unshare-all state)
+      ;; Restarting, the terminals stay shared for the layer to come.
+      (if (equal kind "restart")
+          (maphash (lambda (_id entry)
+                     (when (plist-get entry :timer) (cancel-timer (plist-get entry :timer))))
+                   (drover-remote--state-shares state))
+        (drover-remote--unshare-all state))
       (maphash (lambda (connection _sub) (drover-remote--unsubscribe state connection))
                (copy-hash-table (drover-remote--state-subs state)))
       (when (drover-remote--state-started-server state)

@@ -1915,6 +1915,20 @@ leading back to what holds it would print it again from each."
         (drover-remote-test-live mirror)
         (should (string-match-p "Session s1@Agent" (spyglass--mirror-state-line
                                                      (buffer-local-value 'spyglass--mirror mirror))))
+        ;; The menu's keys reach drover in a mirror: it forwards only the
+        ;; keys it lists.
+        (let ((map (make-sparse-keymap)))
+          (keymap-set map "<f19>" #'drover-dispatch)
+          (keymap-set map "C-'" #'drover-dispatch)
+          (keymap-set map "s-'" #'drover-dispatch)
+          (let ((global (current-global-map)))
+            (unwind-protect
+                (progn (set-keymap-parent map global)
+                       (use-global-map map)
+                       (with-current-buffer mirror
+                         (dolist (key '("<f19>" "C-'" "s-'"))
+                           (should (eq (key-binding (kbd key)) 'drover-dispatch)))))
+              (use-global-map global))))
         ;; A session buffer: drover's keys act on the session there.
         (with-current-buffer mirror
           (should (equal (drover-session-id (drover-session-at-point)) '(fake . "s1"))))
@@ -2029,7 +2043,8 @@ leading back to what holds it would print it again from each."
         (drover-remote-test-wait (lambda () (eq (spyglass-mirror-state mirror) 'closed)))
         (drover-remote-test-settle 0.5)
         (should (buffer-live-p mirror))
-        (should (equal (spyglass-mirror-closed-reason mirror) "killed"))
+        (drover-remote-test-wait (lambda () (equal (spyglass-mirror-closed-reason mirror) "the terminal on agent was closed")))
+        (should (equal (spyglass-mirror-closed-reason mirror) "the terminal on agent was closed"))
         (kill-buffer mirror))
       (let ((mirror (drover-remote-test-open "s0"))
             (kill-ring nil)
@@ -2055,6 +2070,155 @@ leading back to what holds it would print it again from each."
                           messages))
         ;; Closed there too, its share gone.
         (should-not (drover-remote-test-shares))))))
+
+(defun drover-remote-test-mirrors-of (id)
+  "Return the buffers here mirroring the agent's session ID."
+  (drover-remote--mirror-buffers "agent" (cons 'fake id)))
+
+(defun drover-remote-test-types (mirror text)
+  "Type TEXT and RET in MIRROR, and wait until it shows TEXT echoed."
+  (spyglass-mirror-send-string text mirror)
+  (spyglass-mirror-send-key "RET" mirror)
+  (drover-remote-test-shows mirror text))
+
+(ert-deftest drover-remote-test-mirror-survives-owner-reload ()
+  "Its owner reloading spyglass and the remote layer, restarting it or making it anew, a mirror goes on in its buffer."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-synced 2)
+    (save-window-excursion
+      (let ((mirror (drover-remote-test-open "s1")))
+        (drover-remote-test-live mirror)
+        ;; Files loaded anew, the state made anew without stopping.
+        (drover-remote-test-command "reload" :relayout t)
+        (drover-remote-test-settle 1.5)
+        (drover-remote-test-live mirror)
+        (drover-remote-test-types mirror "after a reload")
+        (should (equal (mapcar #'car (drover-remote-test-shares)) '("drover/fake/s1")))
+        ;; The remote layer restarted: its terminals stay shared.
+        (drover-remote-test-command "restart")
+        (drover-remote-test-wait (lambda () (memq 'bye (drover-remote-test-events))))
+        (drover-remote-test-wait (lambda () (and (eq (spyglass-mirror-state mirror) 'live)
+                                                 (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)))
+                                 20)
+        (drover-remote-test-live mirror)
+        (drover-remote-test-types mirror "after a restart")
+        (should (equal (drover-remote-test-mirrors-of "s1") (list mirror)))
+        (kill-buffer mirror)))))
+
+(ert-deftest drover-remote-test-mirror-reshared-when-share-lost ()
+  "A share gone there, its session running on, is asked for again: the mirror goes on in its buffer, never a second one."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-synced 2)
+    (save-window-excursion
+      (let ((mirror (drover-remote-test-open "s1")))
+        (drover-remote-test-live mirror)
+        (drover-remote-test-command "unshare" :id "drover/fake/s1")
+        (drover-remote-test-wait (lambda () (eq (spyglass-mirror-state mirror) 'closed)) 5)
+        (drover-remote-test-wait (lambda () (eq (spyglass-mirror-state mirror) 'live)) 10)
+        (drover-remote-test-live mirror)
+        (drover-remote-test-types mirror "shared again")
+        ;; This host's remote layer made anew: it knows the mirror still,
+        ;; and RET shows it rather than a second buffer.
+        (setf (drover-remote--state-stamp drover-remote--state) 'older)
+        (drover-remote--current)
+        (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)) 20)
+        (drover-remote-test-synced 2)
+        (should (eq (drover-remote-test-open "s1") mirror))
+        (should (equal (drover-remote-test-mirrors-of "s1") (list mirror)))
+        (kill-buffer mirror)))))
+
+(ert-deftest drover-remote-test-mirror-duplicates-closed ()
+  "A second mirror buffer of a session, closed, left by a remote layer before this one, goes; the live one stays."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-synced 2)
+    (let* ((mirror (save-window-excursion (drover-remote-test-open "s1")))
+           (stale (generate-new-buffer "*Session s1@Agent*")))
+      (drover-remote-test-live mirror)
+      ;; A mirror of the same session, closed, as one of yesterday's.
+      (with-current-buffer stale
+        (spyglass-mirror-mode)
+        (setq spyglass--mirror (spyglass--make-mirror :state 'closed :reason "no such share"
+                                                      :connection-ref (spyglass--ref (spyglass-mirror-connection mirror))))
+        (setq-local drover-remote--shown (cons "agent" '(fake . "s1")))
+        (setq-local drover-remote--mirror-kind "terminal"))
+      (should (= (length (drover-remote-test-mirrors-of "s1")) 2))
+      (setf (drover-remote--state-stamp drover-remote--state) 'older)
+      (drover-remote--current)
+      (should-not (buffer-live-p stale))
+      (should (equal (drover-remote-test-mirrors-of "s1") (list mirror)))
+      (kill-buffer mirror))))
+
+(ert-deftest drover-remote-test-send-to-a-turn-running ()
+  "A prompt sent to another host's session whose turn runs waits there, queued, and goes once it ends: never lost, said so."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    ;; Its conversations linked, as a terminal's of Claude Code are: the
+    ;; queue there names them.
+    (drover-remote-test-start-full dir "DROVER_AGENT_LINKABLE=1")
+    (drover-remote-test-command "sessions" :n 3)
+    (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-synced 3)
+    (let ((session (drover-remote-test-session "s1"))
+          (messages nil))
+      (should (eq (drover-session-status session) 'working))
+      ;; Offered to the prompt, though sessions telling no activity
+      ;; outnumber the limit: they come after it.
+      (drover-remote-test-command "change" :ids ["s0" "s2"] :untimed t :now t)
+      (drover-remote-test-wait (lambda () (null (drover-session-since (drover-remote-test-session "s2")))))
+      (let ((drover-prompt-remote-limit 1))
+        (should (equal (mapcar (lambda (entry) (drover-session-id (car entry)))
+                               (seq-filter (lambda (entry) (drover-session-host (car entry)))
+                                           (drover-prompt--target-sessions)))
+                       '((fake . "s1")))))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string (push (apply #'format format-string args) messages)))))
+        (funcall (drover-backend-property 'remote:agent :send) session "after the turn, please" nil)
+        (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "runs a turn on agent" text)) messages)))
+        (should (seq-some (lambda (text) (string-match-p "the prompt goes once it ends, queued there" text)) messages))
+        ;; Not sent over the turn.
+        (drover-remote-test-settle 0.5)
+        (should-not (drover-remote-test-calls "send"))
+        ;; Its turn over there: delivered from that host's queue.
+        (drover-remote-test-command "change" :ids ["s1"] :status "idle" :now t)
+        (drover-remote-test-wait (lambda () (drover-remote-test-calls "send")) 20)
+        (should (equal (nth 2 (car (drover-remote-test-calls "send"))) "after the turn, please"))))))
+
+(ert-deftest drover-remote-test-send-to-a-turn-unlinked ()
+  "A prompt for another host's session whose turn runs, its conversation not known yet, is refused there, saying why, and kept here."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-synced 2)
+    (let ((session (drover-remote-test-session "s1"))
+          (kill-ring nil)
+          (messages nil))
+      (should (eq (drover-session-status session) 'working))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string (push (apply #'format format-string args) messages)))))
+        (drover-prompt-send-to session "not over the turn")
+        (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "did not take the prompt" text)) messages)))
+        (should (seq-some (lambda (text)
+                            (string-match-p "its turn runs, and its conversation is not known yet to queue the prompt; it is in the kill ring"
+                                            text))
+                          messages))
+        (should (equal (car kill-ring) "not over the turn"))
+        (should-not (drover-remote-test-calls "send"))))))
 
 (ert-deftest drover-remote-test-agent-shell-keys ()
   "A real agent-shell's keys, as a peer's mirror runs them: its submit, its override, drover's interrupt."
@@ -2121,8 +2285,8 @@ leading back to what holds it would print it again from each."
           (drover-remote-test-shows mirror "after")
           (kill-buffer mirror))))))
 
-(ert-deftest drover-remote-test-mirror-reopened-after-restart ()
-  "A peer restarting its remote layer unshares its terminals: the mirror opens anew in its buffer."
+(ert-deftest drover-remote-test-mirror-kept-through-restart ()
+  "A peer restarting its remote layer keeps its terminals shared: the mirror goes on in its buffer."
   (skip-unless (drover-remote-test--ptys-p))
   (drover-remote-test-with nil
     (drover-remote-test-start-full dir)
@@ -2134,13 +2298,14 @@ leading back to what holds it would print it again from each."
         (drover-remote-test-live mirror)
         (drover-remote-test-command "restart")
         (drover-remote-test-wait (lambda () (memq 'bye (drover-remote-test-events))))
-        (drover-remote-test-wait (lambda () (and (eq (spyglass-mirror-state mirror) 'live)
-                                                 (seq-some (lambda (event)
-                                                             (and (eq (nth 1 event) 'mirror)
-                                                                  (string-prefix-p "opening anew" (nth 2 event))))
-                                                           (drover-remote--peer-history (drover-remote--peer "agent")))))
-                                 20)
+        (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)) 20)
+        (should (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open))
         (drover-remote-test-live mirror)
+        ;; Its share kept there: never closed, so never opened anew.
+        (should-not (seq-some (lambda (event)
+                                (and (eq (nth 1 event) 'mirror)
+                                     (string-prefix-p "the mirror of" (nth 2 event))))
+                              (drover-remote--peer-history (drover-remote--peer "agent"))))
         (should (eq (window-buffer (selected-window)) mirror))
         (should (eq (gethash '(fake . "s1") (drover-remote--peer-mirrors (drover-remote--peer "agent"))) mirror))
         (spyglass-mirror-send-string "again" mirror)

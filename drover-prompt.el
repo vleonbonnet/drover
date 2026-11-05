@@ -1913,7 +1913,12 @@ first, `drover-prompt-remote-limit' at most."
              (< (gethash (cdr a) ranks most-positive-fixnum)
                 (gethash (cdr b) ranks most-positive-fixnum))))
      (mapcar #'list
-             (seq-take (sort remote :key (lambda (session) (- (drover--time (drover-session-since session)))))
+             (seq-take (sort remote :key (lambda (session)
+                                           ;; A session telling no activity comes last,
+                                           ;; never before the latest active ones.
+                                           (- (or (drover-session-since session)
+                                                  (drover-session-updated session)
+                                                  0))))
                        drover-prompt-remote-limit)))))
 
 

@@ -233,6 +233,13 @@ through commands of its own, as agent-shell does."
                        (lambda (kind value)
                          (goto-char (point-max))
                          (insert (if (eq kind 'string) value (if (member value '("RET" "C-j")) "\n" "")))))))))
+    ;; A session buffer, as front ends' terminals are: drover's prompts
+    ;; scheduled for it find it.
+    (with-current-buffer buffer
+      (unless drover-session-at-point-function
+        (let ((session-id id))
+          (setq-local drover-session-at-point-function
+                      (lambda () (gethash session-id drover-remote-agent--sessions))))))
     (puthash id buffer drover-remote-agent--terminals)
     (drover-backend-changed 'fake id)
     buffer))
@@ -550,6 +557,9 @@ noted, and their cancellations."
                (when (plist-get args :status)
                  (setf (drover-session-status copy) (intern (plist-get args :status))))
                (setf (drover-session-updated copy) (float-time))
+               ;; A session telling no activity, as some backends' do.
+               (when (plist-get args :untimed)
+                 (setf (drover-session-since copy) nil (drover-session-updated copy) nil))
                (drover-remote-agent--set id copy)
                (cl-incf count))))
          (when (plist-get args :now) (drover-changed-now))
@@ -881,6 +891,26 @@ noted, and their cancellations."
                                                        (vector (spyglass-share-id share)
                                                                (length (spyglass-share-viewers share))))
                                                      (spyglass-shares))))))
+      ("reload"
+       ;; Spyglass and the remote layer loaded anew, as updating them in a
+       ;; running Emacs does; with RELAYOUT, the layer's state made by
+       ;; another version too, made anew without stopping.
+       (funcall reply (list :ok t))
+       (let ((relayout (plist-get args :relayout)))
+         (run-at-time 0.05 nil
+                      (lambda ()
+                        (dolist (file '("spyglass-wire" "spyglass-conn" "spyglass-channel" "spyglass-owner"
+                                        "spyglass-mirror" "spyglass-window" "spyglass" "drover-remote"))
+                          (load file nil t))
+                        (when relayout
+                          (setf (drover-remote--state-stamp drover-remote--state) 'older)
+                          (drover-remote--current))))))
+      ("unshare"
+       ;; The share of a terminal gone, its session running on.
+       (let ((share (seq-find (lambda (share) (equal (spyglass-share-id share) (plist-get args :id)))
+                              (spyglass-shares))))
+         (when share (spyglass-unshare share))
+         (funcall reply (list :ok (if share t :false)))))
       ("kill-terminal"
        ;; Its terminal killed there, its session still listed.
        (let ((buffer (gethash (plist-get args :id) drover-remote-agent--terminals)))
