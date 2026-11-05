@@ -296,7 +296,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage"
-    "push")
+    "push" "opts" "dirs")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -318,7 +318,11 @@ directories of its own they choose among those it lists, on its own
 engines' agents and models, which it tells them; \"push\": it pushes
 a phone, a peer owning no sessions, what needs the user while it is not
 connected, encrypted, through the endpoint and with the key the phone
-gave it (see drover-remote-push.el).")
+gave it (see drover-remote-push.el); \"opts\": it tells a session's
+agent, model and effort and those its engine offers (request `opts'),
+applies others to it (action `options') or before a prompt (`send'
+with options), and lists the directories its sessions ran in (request
+`dirs'), for a phone to start sessions in.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -713,7 +717,8 @@ greys out what its access forbids, and this host checks it again."
                  (and (drover-supports-p record :delete) "delete")
                  (and (drover-supports-p record :rename) "rename")
                  (and (drover-supports-p record :requests) (drover-supports-p record :answer) "answer")
-                 (and (drover-supports-p record :submit) "send"))))))
+                 (and (drover-supports-p record :submit) "send")
+                 (and (drover-supports-p record :apply-options) "options"))))))
 
 (defun drover-remote--symbol (value)
   "Return the symbol VALUE, a string received, names, or nil when it may not.
@@ -1798,7 +1803,7 @@ last drops the sessions it did not list."
         (drover-remote--schedule-work peer)))))
 
 (defconst drover-remote--actions
-  '("interrupt" "mark-seen" "archive" "unarchive" "delete" "rename" "answer" "send")
+  '("interrupt" "mark-seen" "archive" "unarchive" "delete" "rename" "answer" "send" "options")
   "The actions on its sessions a host performs for its peers.")
 
 (defun drover-remote--note-ops (peer key data)
@@ -2388,6 +2393,32 @@ A refusal is told once per `drover-error-interval' by peer and action."
     (drover-warn "Refused %s's request to %s: %s" (drover-remote--label peer) action why))
   why)
 
+(defun drover-remote--check-options (args required)
+  "Return the options ARGS of an action carry, checked: (:agent :model :variant).
+:model is (PROVIDER . ID), PROVIDER nil for a model known by its bare
+identifier.  A string tells why they do not fit; with REQUIRED, when
+none is given."
+  (let ((agent (plist-get args :agent))
+        (model (plist-get args :model))
+        (variant (plist-get args :variant)))
+    (cond
+     ((not (or (memq agent '(nil :false)) (drover-remote--line agent 200)))
+      "an agent of no known shape")
+     ((not (or (memq model '(nil :false))
+               (and (vectorp model) (= (length model) 2)
+                    (or (eq (aref model 0) :false) (drover-remote--line (aref model 0) 200))
+                    (drover-remote--line (aref model 1) 200))))
+      "a model of no known shape")
+     ((not (or (memq variant '(nil :false)) (drover-remote--symbol variant)))
+      "a variant of no known shape")
+     ((and required (memq agent '(nil :false)) (memq model '(nil :false)) (memq variant '(nil :false)))
+      "no options")
+     (t (list :agent (and (stringp agent) (drover-remote--line agent 200))
+              :model (and (vectorp model)
+                          (cons (and (stringp (aref model 0)) (drover-remote--line (aref model 0) 200))
+                                (drover-remote--line (aref model 1) 200)))
+              :variant (and (stringp variant) (drover-remote--symbol variant)))))))
+
 (defun drover-remote--check-args (action args)
   "Return ARGS of ACTION, received, checked and bounded, as a plist.
 A string tells why they do not fit."
@@ -2395,11 +2426,15 @@ A string tells why they do not fit."
     (pcase action
       ("rename" (let ((title (drover-remote--line (plist-get args :title))))
                   (if title (list :title title) "no title")))
-      ("send" (let ((text (plist-get args :text)))
-                (if (and (stringp text) (not (string-blank-p text))
-                         (<= (length text) drover-remote-prompt-limit))
-                    (list :text text)
-                  "no prompt, or one too long")))
+      ("send" (let ((text (plist-get args :text))
+                    (options (drover-remote--check-options args nil)))
+                (cond
+                 ((not (and (stringp text) (not (string-blank-p text))
+                            (<= (length text) drover-remote-prompt-limit)))
+                  "no prompt, or one too long")
+                 ((stringp options) options)
+                 (t (append (list :text text) options)))))
+      ("options" (drover-remote--check-options args t))
       ("answer"
        (let ((request (drover-remote--line (plist-get args :request) 200))
              (decision (plist-get args :decision))
@@ -2540,11 +2575,27 @@ SETTLE takes t, or nil and a line.  Nothing shows a window nor asks."
       ("delete" (drover--delete-step record (lambda (ok &optional value) (if ok (then) (else value)))))
       ("rename" (drover-backend-call record :rename (plist-get args :title)) (then))
       ("send"
-       (if (not (drover-supports-p record :submit))
-           (else "it takes no prompt from another host")
+       (cond
+        ((not (drover-supports-p record :submit))
+         (else "it takes no prompt from another host"))
+        ((not (or (plist-get args :agent) (plist-get args :model) (plist-get args :variant)))
          (drover-unarchive-to-send record)
          (drover-backend-call record :submit (plist-get args :text) #'then
-                              (lambda (message &rest _) (else message)))))
+                              (lambda (message &rest _) (else message))))
+        (t
+         ;; Its options first, as the prompt applies them before sending.
+         (drover-remote--apply-options
+          record args
+          (lambda (_ok &optional _message)
+            (drover-unarchive-to-send record)
+            (drover-backend-call record :submit (plist-get args :text) #'then
+                                 (lambda (message &rest _) (else message))))))))
+      ("options"
+       (if (not (drover-supports-p record :apply-options))
+           (else "its options are set on its host")
+         (drover-remote--apply-options record args
+                                       (lambda (ok &optional message)
+                                         (if ok (then) (else message))))))
       ("answer"
        (if (not (and (drover-supports-p record :answer)))
            (else "its requests are answered on its host")
@@ -2617,6 +2668,133 @@ failed past its deadline."
                                    (when (and (eq state (drover-remote--current))
                                               (drover-remote--state-tasks state))
                                      (drover-remote--run state))))))))))
+
+(defun drover-remote--apply-options (record args settle)
+  "Apply the options ARGS carry to RECORD, this host's, then call SETTLE.
+ARGS hold :agent, :model, (PROVIDER . ID), and :variant.  A model its
+engine cannot run is dropped, and its variant with it, as the prompt
+does.  SETTLE takes t, or nil and a line telling what it runs instead,
+once its backend applied them; nothing shows a window nor asks."
+  (let* ((engine (drover-session-engine record))
+         (asked (plist-get args :model))
+         (model (and asked engine (drover-remote--told-model engine (car asked) (cdr asked))))
+         (runs (or (null model) (drover-model-id-for model engine)))
+         (options (list :agent (plist-get args :agent)
+                        :model (and runs model)
+                        :variant (and runs (plist-get args :variant))))
+         (settled nil))
+    (cl-flet ((settle (ok &optional message)
+                (unless settled
+                  (setq settled t)
+                  (funcall settle ok message))))
+      (if (not (drover-supports-p record :apply-options))
+          (settle nil "its options are set on its host")
+        (condition-case err
+            (save-window-excursion
+              (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+                (drover-backend-call
+                 record :apply-options options
+                 (lambda ()
+                   (drover-with-reporting "remote options"
+                     (let* ((now (and (drover-supports-p record :options)
+                                      (drover-backend-call record :options)))
+                            (current (plist-get now :model)))
+                       (cond
+                        ((and asked (not runs))
+                         (settle nil (format "%s cannot run %s" engine (cdr asked))))
+                        ((and model (drover-model-p current)
+                              (not (equal (drover-model-key current) (drover-model-key model))))
+                         (settle nil (format "applied, but it runs %s" (drover-model-label current))))
+                        (t (settle t)))))))))
+          (error (settle nil (drover-error-message err))))))))
+
+(defun drover-remote--on-opts (peer key reply)
+  "Tell PEER, through REPLY, what session KEY runs and what it may run instead.
+Its agent, model and variant now, which of them it may change, and its
+engine's agents, models and defaults in its directory, as `catalogs'
+tells them."
+  (let ((record (drover-remote--owner-record key "options")))
+    (cond
+     ((not (drover-remote--allows-p (drover-remote--access peer) "options"))
+      (funcall reply nil (drover-remote--refuse-action peer "read options"
+                                                       (format "%s has %s access" (drover-remote--label peer)
+                                                               (drover-remote--access peer)))))
+     ((not record) (funcall reply nil "no such session here"))
+     ((not (drover-session-engine record)) (funcall reply nil "its engine is not known"))
+     (t
+      (let* ((engine (drover-session-engine record))
+             (directory (or (drover-session-directory record) (expand-file-name "~/")))
+             (now (and (drover-supports-p record :options)
+                       (drover-with-reporting "remote options" (drover-backend-call record :options))))
+             (settable (cond ((not (drover-supports-p record :apply-options)) nil)
+                             ((drover-supports-p record :settable)
+                              (drover-with-reporting "remote options" (drover-backend-call record :settable)))
+                             (t '(:agent :model :variant))))
+             (model (plist-get now :model))
+             (variant (plist-get now :variant)))
+        (drover-remote--engine-defaults
+         (list engine) directory
+         (lambda (answers)
+           (funcall reply
+                    (list :e (symbol-name engine)
+                          :d directory
+                          :cur (list :a (or (drover-remote--plain (drover-session-agent record)) :false)
+                                     :m (if (drover-model-p model) (drover-remote--tell-model engine model) :false)
+                                     :v (if (and variant (symbolp variant)) (symbol-name variant) :false))
+                          :set (vconcat (delq nil (mapcar (lambda (option)
+                                                            (and (memq option '(:agent :model :variant))
+                                                                 (substring (symbol-name option) 1)))
+                                                          settable)))
+                          :cat (drover-with-reporting "remote options"
+                                 (drover-remote--engine-catalog engine directory
+                                                                (cdr (assq engine answers)))))))))))))
+
+(defconst drover-remote-dirs-limit 300
+  "Directories at most a host tells a peer its sessions ran in.")
+
+(defun drover-remote--on-dirs (peer message reply)
+  "Tell PEER, through REPLY, the directories this host's sessions ran in.
+Newest first, MESSAGE's :n at most, with their projects, when a session
+ran there last and how many: the directories of its sessions listed,
+of the older and archived ones fetched, and the projects project.el
+knows.  No file names, nothing of what they hold."
+  (if-let* ((why (drover-remote--new-allowed peer "list directories")))
+      (funcall reply nil why)
+    (let ((limit (min drover-remote-dirs-limit (or (drover-remote--count (plist-get message :n))
+                                                   drover-remote-dirs-limit)))
+          (table (make-hash-table :test #'equal)))
+      (dolist (record (append (drover-index-sessions)
+                              (drover--fetched-sessions 'history) (drover--fetched-sessions 'archived)))
+        (when-let* (((drover-remote--local-p record))
+                    (directory (drover-session-directory record))
+                    ((stringp directory))
+                    ((file-name-absolute-p directory)))
+          (let* ((key (file-name-as-directory directory))
+                 (entry (gethash key table))
+                 (time (or (drover-session-updated record) (drover-session-created record) 0)))
+            (puthash key (list (or (car entry) (drover-session-project record))
+                               (max (or (cadr entry) 0) time)
+                               (1+ (or (caddr entry) 0)))
+                     table))))
+      (when (and (featurep 'project) (fboundp 'project-known-project-roots))
+        (dolist (root (seq-take (ignore-errors (project-known-project-roots)) 1000))
+          (when (and (stringp root) (file-name-absolute-p (expand-file-name root)))
+            (let ((key (file-name-as-directory (expand-file-name root))))
+              (unless (gethash key table)
+                (puthash key (list nil 0 0) table))))))
+      (funcall reply
+               (list :dirs
+                     (vconcat
+                      (mapcar (pcase-lambda (`(,directory ,project ,time ,count))
+                                (list :d (drover-remote--plain directory)
+                                      :n (or (drover-remote--plain (and (stringp project) project))
+                                             (file-name-nondirectory (directory-file-name directory)))
+                                      :t (or (drover-remote--number time) 0)
+                                      :c count))
+                              (seq-take (sort (mapcar (lambda (key) (cons key (gethash key table)))
+                                                      (hash-table-keys table))
+                                              (lambda (a b) (> (nth 2 a) (nth 2 b))))
+                                        limit))))))))
 
 (defun drover-remote--finish-task (state task)
   "Answer TASK, done, to whoever asked it, and keep its outcome in STATE."
@@ -5320,6 +5498,8 @@ as an older drover's farewells do."
         ("ls" (drover-remote--on-ls peer message reply))
         ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
+        ("opts" (drover-remote--on-opts peer key reply))
+        ("dirs" (drover-remote--on-dirs peer message reply))
         ("push" (if (featurep 'drover-remote-push)
                     (drover-remote-push-on-request peer message reply)
                   (funcall reply nil "this host pushes nothing")))

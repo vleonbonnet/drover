@@ -628,6 +628,88 @@ restart of the host's remote layer, its counters rising."
         (should (equal seqs (sort (copy-sequence seqs) #'<)))
         (should (= (length (seq-uniq seqs)) (length seqs)))))))
 
+(ert-deftest drover-remote-test-options-args ()
+  "Options an action carries are checked and bounded, hostile ones refused."
+  (should (equal (drover-remote--check-args "options" '(:agent "plan" :model ["anthropic" "opus"] :variant "high"))
+                 '(:agent "plan" :model ("anthropic" . "opus") :variant high)))
+  (should (equal (drover-remote--check-args "options" '(:model [:false "m1"]))
+                 '(:agent nil :model (nil . "m1") :variant nil)))
+  (should (equal (drover-remote--check-args "send" '(:text "go" :agent "build"))
+                 '(:text "go" :agent "build" :model nil :variant nil)))
+  (dolist (bad (list nil '(:agent :false) '(:model "opus") '(:model ["a"]) '(:model [1 2])
+                     '(:variant "Not A Symbol") (list :agent (make-string 500000 ?a) :variant 3)))
+    (ert-info ((format "%S" (seq-take bad 2)))
+      (should (stringp (drover-remote--check-args "options" bad)))))
+  (should (stringp (drover-remote--check-args "send" '(:text "go" :model "x")))))
+
+(ert-deftest drover-remote-test-options-performed ()
+  "Options are applied through the backend, a model its engine cannot run dropped."
+  (drover-test-with-engines
+    (drover-test-register-engine 'fake)
+    (drover-remote-test-owning (list (drover-test-session "a" :engine 'fake :status 'idle))
+      (let ((record (drover-index-session '(fake . "a")))
+            (outcomes nil))
+        (should (member "options" (append (drover-remote--record-ops record) nil)))
+        (drover-remote--tell-model 'fake (drover-test-model "m1" :provider-id "p" :name "M1"))
+        (drover-remote--perform "options" '(:agent "plan" :model ("p" . "m1") :variant high) record
+                                (lambda (ok &optional message) (push (list ok message) outcomes)))
+        (should (equal (car outcomes) '(t nil)))
+        (let ((applied (seq-find (lambda (call) (eq (car call) :apply-options)) drover-test-calls)))
+          (should (equal (plist-get (nth 2 applied) :agent) "plan"))
+          (should (equal (drover-model-id (plist-get (nth 2 applied) :model)) "m1"))
+          (should (eq (plist-get (nth 2 applied) :variant) 'high)))
+        (setq drover-test-calls nil)
+        (drover-remote--perform "options" '(:model ("q" . "elsewhere") :variant low) record
+                                (lambda (ok &optional message) (push (list ok message) outcomes)))
+        (should-not (car (car outcomes)))
+        (should (string-match-p "cannot run" (cadr (car outcomes))))
+        (let ((applied (seq-find (lambda (call) (eq (car call) :apply-options)) drover-test-calls)))
+          (should-not (plist-get (nth 2 applied) :model))
+          (should-not (plist-get (nth 2 applied) :variant)))))))
+
+(ert-deftest drover-remote-test-opts-and-dirs ()
+  "A peer reads a session's options and this host's directories, and applies options."
+  (drover-remote-test-with nil
+    (let ((registration (let ((process-environment (cons "DROVER_AGENT_ACCESS=full" process-environment)))
+                          (drover-remote-test-start-agent dir)))
+          (peer nil))
+      (drover-remote-test-connect registration)
+      (setq peer (drover-remote--peer "agent"))
+      (should (member "opts" (drover-remote--peer-caps peer)))
+      (drover-remote-test-command "sessions" :n 3)
+      (drover-remote-test-synced 3)
+      (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "opts" :key ["fake" "s1"]) 10)))
+        (should-not error)
+        (should (equal (plist-get reply :e) "fake"))
+        (should (equal (plist-get reply :d) "/work/project/"))
+        (should (equal (plist-get (plist-get reply :cur) :a) "build"))
+        (should (equal (plist-get reply :set) ["agent" "variant"])))
+      (should (member "options" (gethash '(fake . "s1") (drover-remote--peer-ops peer))))
+      (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "act" :id "viewer-o-1" :action "options"
+                                                                     :keys [["fake" "s1"]] :args (list :agent "plan"))
+                                                         10)))
+        (should-not error)
+        (should (equal (plist-get reply :out) [t])))
+      (drover-remote-test-synced 3 (lambda (_) (equal (drover-session-agent
+                                                       (drover-index-session '(remote:agent fake . "s1")))
+                                                      "plan")))
+      (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "act" :id "viewer-o-2" :action "send"
+                                                                     :keys [["fake" "s2"]]
+                                                                     :args (list :text "go on" :agent "build"))
+                                                         10)))
+        (should-not error)
+        (should (equal (plist-get reply :out) [t])))
+      (let ((calls (append (plist-get (drover-remote-test-command "calls") :calls) nil)))
+        (should (equal (mapcar (lambda (call) (aref call 0))
+                               (seq-filter (lambda (call) (equal (aref call 1) "s2")) calls))
+                       '("options" "send"))))
+      (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "dirs" :n 10) 10)))
+        (should-not error)
+        (let ((entry (seq-find (lambda (e) (equal (plist-get e :d) "/work/project/")) (plist-get reply :dirs))))
+          (should entry)
+          (should (equal (plist-get entry :n) "project"))
+          (should (= (plist-get entry :c) 3)))))))
+
 (ert-deftest drover-remote-test-viewer-units ()
   "A viewer is told by its configuration or its capabilities, and kept out of views."
   (drover-remote-test-owning nil

@@ -692,6 +692,10 @@ While a phone is not connected, this host pushes it what needs the user, through
 
 =M-x drover-remote-push-test= pushes a test to each phone registered; =drover-remote-status= tells how pushes to each stand.
 
+** What a phone changes and starts
+
+A peer may read a session's agent, model and effort, and what its engine offers, have others applied to it, alone or before a prompt, and list the directories this host's sessions ran in to start one there, as its access allows: the phone's composer and new sessions.
+
 ** How they connect
 
 Each host names itself =drover-host=, by default its system's name up to the first dot, downcased. Either host may dial (=:dial=), or both: the connection dialed by the host whose name sorts first is kept, the other closed, its dialer standing by. =M-x drover-remote-status= tells how each peer stands: connected or not, the round trip and clock offset, its sessions, the revision held, whether it takes actions, the last error and when, and the history of its link (dials, streams opened and ended, how SSH exited, greetings, farewells, snapshots and resumptions, errors); a peer whose own connection ended has =drover-remote-grace= seconds to come back before its sessions dim, and is dialed after =drover-remote-fallback-delay= when this host dials it too; =M-x drover-remote-check= runs each SSH command as the connection will, without a prompt, and tells what fails.  A peer this host cannot reach is tried less and less often, up to every five minutes (=drover-remote-backoff=), and at once as the network changes, the machine wakes or =drover-remote-check= is called; the status tells when the next attempt comes, and the history counts failures alike on one line. Nothing of a peer is kept on disk: its sessions come back as it connects.
