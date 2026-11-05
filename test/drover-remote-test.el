@@ -262,6 +262,17 @@ registration; the agent, if BODY starts one, is stopped after."
     (should (= (drover-session-created decoded) 40))
     (should (= (drover-session-cache-expires decoded) 390.0))
     (should (= (drover-session-archived decoded) 290.0))
+    ;; OpenCode's caches live 3600.0 seconds: the bar of a peer's session needs it.
+    (let ((opencode (drover-remote-test--roundtrip (drover-session-create :backend 'opencode :id "ses_2" :status 'idle
+                                                                          :cache-expires 4000.0 :cache-ttl 3600.0)
+                                                   nil nil 0)))
+      (should (equal (drover-session-cache-ttl opencode) 3600.0))
+      (should (= (drover-session-cache-fraction opencode 2200.0) 0.5)))
+    (dolist (ttl '(0 -5 -1.5 0.0))
+      (should-not (drover-session-cache-ttl
+                   (drover-remote-test--roundtrip (drover-session-create :backend 'opencode :id "ses_3" :status 'idle
+                                                                         :cache-ttl ttl)
+                                                  nil nil 0))))
     (should (equal-including-properties (drover-session-provider decoded) (propertize "P" 'face 'bold)))
     ;; The face stays, the display that would show an image does not.
     (should (equal (get-text-property 0 'face (drover-session-agent-display decoded)) '(:foreground "red")))

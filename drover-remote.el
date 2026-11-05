@@ -834,6 +834,11 @@ Its tooltips, strings, are kept too, bounded to `drover-text-lines' lines."
   "Return VALUE when it is a natural number received, else nil."
   (and (natnump value) value))
 
+(defun drover-remote--seconds (value)
+  "Return VALUE when it is a positive number of seconds received, else nil.
+A duration may be a float: OpenCode's prompt caches live 3600.0."
+  (and (drover-remote--number value) (> value 0) value))
+
 (defun drover-remote-decode-record (data peer-name backend offset)
   "Return the record DATA, received from the host PEER-NAME, or nil.
 DATA is a plist as `drover-remote-encode-record' makes it, parsed as
@@ -887,7 +892,7 @@ minus this host's.  Nil when DATA names no session."
         :engine-id (let ((id (plist-get data :engine-id)))
                      (and (stringp id) (<= (length id) 1024) id))
         :cache-expires (drover-remote--time (plist-get data :cache-expires) offset)
-        :cache-ttl (drover-remote--count (plist-get data :cache-ttl))
+        :cache-ttl (drover-remote--seconds (plist-get data :cache-ttl))
         :cache-tokens (drover-remote--count (plist-get data :cache-tokens))
         :cache-prompt-tokens (drover-remote--count (plist-get data :cache-prompt-tokens))
         :agent-display (drover-remote--faced-value (plist-get data :agent-display))
