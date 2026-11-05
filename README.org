@@ -671,9 +671,14 @@ A front end also fits its buffers into the keys. A list of sessions sets =drover
 #+begin_src emacs-lisp
   ;; On Reaver: dial Core through myssh.
   (setq drover-remote-peers
-        '(("core" :label "Core" :dial t :program "myssh" :access full)))
+        '(("core" :label "Core" :dial t :program "myssh" :access full)
+          ;; A phone: it owns no sessions, and comes and goes.
+          ("adept" :label "Pixel" :viewer t :access full
+           :heartbeat (15 . 60) :resume 300)))
   (drover-remote-mode 1)
 #+end_src
+
+A peer with =:viewer= owns no sessions, as the Android client: this host serves it its sessions, never subscribes to it, and lists it in no group, column nor filter; =:heartbeat= gives its connections heartbeats of their own, (INTERVAL . TIMEOUT), and =:resume= how long a connection it made waits for it to come back, its mirrors resuming, a phone closing its streams when its application leaves the screen.
 
 ** How they connect
 

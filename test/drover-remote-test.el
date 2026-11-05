@@ -519,6 +519,60 @@ Their sessions stay, as received."
         (should (drover-backend-property 'remote:agent :reports-changes))
         (drover-remote-test-synced 3)))))
 
+(ert-deftest drover-remote-test-viewer-peer ()
+  "A viewer, as a phone, is never subscribed to, nor listed, its link its own.
+The agent takes this host for a viewer: it serves its sessions as to
+any peer, never subscribes to this host's, lists it in no group,
+column nor filter, and keeps the connection with its heartbeats and
+resume window."
+  (drover-remote-test-with (list (drover-test-session "mine"))
+    (let ((registration (let ((process-environment (cons "DROVER_AGENT_VIEWERS=viewer" process-environment)))
+                          (drover-remote-test-start-agent dir))))
+      (drover-remote-test-connect registration)
+      (drover-remote-test-command "sessions" :n 3)
+      (drover-remote-test-synced 3)
+      (drover-remote-test-settle 0.3)
+      (should (= (plist-get (drover-remote-owner-stats) :subscribers) 0))
+      (should (equal (append (plist-get (drover-remote-test-command "host-names") :names) nil) nil))
+      (let ((link (drover-remote-test-command "peer-link" :peer "viewer")))
+        (should (eq (plist-get link :viewer) t))
+        (should (= (plist-get link :interval) 2.0))
+        (should (= (plist-get link :timeout) 8.0))
+        (should (= (plist-get link :resume) 30.0))
+        (should (string-prefix-p "viewer, connected" (plist-get link :line))))
+      ;; Its stream ending, nothing of it is dimmed there: it is waited for.
+      (spyglass-connection-drop-stream (drover-remote-test--agent-connection))
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)))
+      (should (equal (plist-get (plist-get (drover-remote-test-command "stats" :peer "viewer") :peer) :state)
+                     "open"))
+      (should (= (plist-get (drover-remote-owner-stats) :subscribers) 0)))))
+
+(ert-deftest drover-remote-test-viewer-units ()
+  "A viewer is told by its configuration or its capabilities, and kept out of views."
+  (drover-remote-test-owning nil
+    (let ((phone (drover-remote-test--peer state "adept"))
+          (other (drover-remote-test--peer state "core")))
+      (setf (drover-remote--state-order state) '("adept" "core"))
+      (should-not (drover-remote--viewer-p phone))
+      (setf (drover-remote--peer-caps phone) '("bye" "viewer"))
+      (should (drover-remote--viewer-p phone))
+      (setf (drover-remote--peer-caps phone) nil
+            (drover-remote--peer-properties phone) '(:viewer t :heartbeat (15 . 60)))
+      (should (drover-remote--viewer-p phone))
+      (should (equal (drover-remote--host-names) '("core")))
+      (should (equal (drover-remote--heartbeat phone) '(15 . 60)))
+      (should (equal (drover-remote--heartbeat other) drover-remote-heartbeat))
+      (dolist (bad '((0 . 5) (5 . 5) (6 . 5) ("1" . 4) 7 nil))
+        (setf (drover-remote--peer-properties other) (list :heartbeat bad))
+        (should (equal (drover-remote--heartbeat other) drover-remote-heartbeat)))
+      (should (string-match-p "owns no sessions" (drover-remote--new-refusal phone)))
+      (setf (drover-remote--peer-properties phone) '(:viewer t :access full))
+      (let (answer)
+        (drover-remote--on-clone-where phone (list :directory "/x/" :home "/x/")
+                                       (lambda (reply &optional error) (setq answer (list reply error))))
+        (should-not (car answer))
+        (should (cadr answer))))))
+
 (ert-deftest drover-remote-test-snapshot-and-updates ()
   "Another Emacs's sessions arrive, subagents under their parents, and follow it."
   (drover-remote-test-with nil

@@ -707,6 +707,19 @@ noted, and their cancellations."
                                                                (drover-session-title session)))
                                                      (seq-filter #'drover-session-host
                                                                  (drover-index-sessions)))))))
+      ("host-names"
+       (funcall reply (list :names (vconcat (drover-remote--host-names)))))
+      ("peer-link"
+       ;; How the link to a peer is kept: its heartbeats and resume window.
+       (let* ((peer (drover-remote--peer (plist-get args :peer)))
+              (connection (and peer (drover-remote--peer-connection peer))))
+         (funcall reply (if (not connection)
+                            (list :none t)
+                          (list :interval (spyglass--heartbeat-interval connection)
+                                :timeout (spyglass--heartbeat-timeout connection)
+                                :resume (spyglass--resume-window connection)
+                                :viewer (if (drover-remote--viewer-p peer) t :false)
+                                :line (drover-remote--state-line peer))))))
       ("stats"
        (funcall reply (list :owner (drover-remote-owner-stats)
                             :peer (and (plist-get args :peer)
@@ -869,6 +882,14 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
                                    (mapcar (lambda (name)
                                              (list name :access (intern (or (getenv "DROVER_AGENT_ACCESS") "read"))))
                                            (split-string peers ","))))
+    ;; Hosts owning no sessions, as phones, with links of their own.
+    (when-let* ((viewers (getenv "DROVER_AGENT_VIEWERS")))
+      (setq drover-remote-peers
+            (append drover-remote-peers
+                    (mapcar (lambda (name)
+                              (list name :viewer t :heartbeat '(2 . 8) :resume 30
+                                    :access (intern (or (getenv "DROVER_AGENT_ACCESS") "read"))))
+                            (split-string viewers "," t)))))
     (when (getenv "DROVER_AGENT_OLD")
       (setq drover-remote-capabilities nil))
     (when-let* ((caps (getenv "DROVER_AGENT_CAPS")))

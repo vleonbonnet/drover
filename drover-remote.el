@@ -89,6 +89,7 @@
 (declare-function spyglass-connection-attempts "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-last-recv "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-set-heartbeat "ext:spyglass-conn" (connection interval timeout))
+(declare-function spyglass-connection-set-resume "ext:spyglass-conn" (connection seconds))
 (defvar spyglass-error-functions)
 (defvar spyglass-share-state-functions)
 (defvar spyglass-mirror-state-functions)
@@ -164,6 +165,16 @@ NAME is the host's name, its `drover-host' there.  PROPERTIES is a plist:
                 under THEIRS cloned under OURS, the first matching;
                 otherwise one under its home goes under this host's
                 home.  See `drover-clone'.
+ :viewer        Non-nil for a host owning no sessions, as a phone: this
+                Emacs never subscribes to it, lists it in no view, and
+                clones nothing to it.  A host whose drover tells the
+                capability \"viewer\" is one too.
+ :heartbeat     Heartbeats of its connections, (INTERVAL . TIMEOUT) in
+                seconds, instead of `drover-remote-heartbeat': a phone
+                on a mobile network may be given longer.
+ :resume        Seconds a connection it made waits for it to come back
+                once its stream ended, its mirrors resuming, instead of
+                spyglass's `spyglass-heartbeat-timeout'.
 
 A host connecting under a name not here is refused, unless
 `drover-remote-accept-unknown' says otherwise.  Change it, then call
@@ -509,6 +520,31 @@ anew, and peers greet each other again."
   "Return what PEER may do with this host's sessions: `read', `act' or `full'."
   (let ((access (plist-get (drover-remote--peer-properties peer) :access)))
     (if (memq access '(read act full)) access 'read)))
+
+(defun drover-remote--viewer-p (peer)
+  "Return non-nil when PEER owns no sessions, as a phone.
+So its configuration says (:viewer), or its drover told it (the
+capability \"viewer\"): this host never subscribes to it, nor lists it."
+  (or (and (plist-get (drover-remote--peer-properties peer) :viewer) t)
+      (and (drover-remote--capable-p peer "viewer") t)))
+
+(defun drover-remote--heartbeat (peer)
+  "Return PEER's heartbeats, (INTERVAL . TIMEOUT) in seconds.
+Its :heartbeat when that makes one, else `drover-remote-heartbeat'."
+  (let ((own (plist-get (drover-remote--peer-properties peer) :heartbeat)))
+    (if (and (consp own) (numberp (car own)) (numberp (cdr own)) (< 0 (car own) (cdr own)))
+        own
+      drover-remote-heartbeat)))
+
+(defun drover-remote--set-resume (peer connection)
+  "Give CONNECTION, which PEER made, the resume window of PEER's :resume.
+Only a connection the peer dialed waits for it to come back; a spyglass
+without resume windows of connections keeps its own."
+  (let ((resume (plist-get (drover-remote--peer-properties peer) :resume)))
+    (when (and (numberp resume) (> resume 0)
+               (not (spyglass-connection-transport connection))
+               (fboundp 'spyglass-connection-set-resume))
+      (spyglass-connection-set-resume connection resume))))
 
 (defun drover-remote--allows-p (access action)
   "Return non-nil when ACCESS, `read', `act' or `full', allows ACTION, a string."
@@ -1149,8 +1185,9 @@ the peer writing meanwhile would lose what it had not read, the reason."
       (drover-remote--greeted peer connection message)
       (drover-remote--event peer 'hello "greeted again: its remote layer restarted, epoch %s"
                             (drover-remote--hello-epoch message))
-      (drover-remote--resubscribe peer nil)
-      (drover-remote--reopen-mirrors peer))
+      (unless (drover-remote--viewer-p peer)
+        (drover-remote--resubscribe peer nil)
+        (drover-remote--reopen-mirrors peer)))
      ((not (and (integerp version) (= version drover-remote-protocol)))
       (drover-remote--fail dialer (format "%s speaks drover's protocol %s, this host %s"
                                           (drover-bound-line (format "%s" host)) version
@@ -1192,8 +1229,9 @@ the peer writing meanwhile would lose what it had not read, the reason."
       ;; Floats: spyglass looks at a connection every half interval,
       ;; which an integer halves to a whole number, 1 to 0, a timer that
       ;; never repeats: a frozen peer then stayed connected for good.
-      (spyglass-connection-set-heartbeat connection (float (car drover-remote-heartbeat))
-                                         (float (cdr drover-remote-heartbeat)))
+      (let ((heartbeat (drover-remote--heartbeat peer)))
+        (spyglass-connection-set-heartbeat connection (float (car heartbeat)) (float (cdr heartbeat))))
+      (drover-remote--set-resume peer connection)
       (drover-remote--elect state peer)))))
 
 (defun drover-remote--hello-epoch (message)
@@ -1272,16 +1310,19 @@ STATE is the remote layer's."
   (when (drover-remote--peer-grace peer)
     (cancel-timer (drover-remote--peer-grace peer))
     (setf (drover-remote--peer-grace peer) nil))
-  (drover-remote--stat peer :subscriptions)
-  (drover-remote--event peer 'sub "kept the connection %s; subscribed holding epoch %s revision %s"
-                        (if (spyglass-connection-transport connection) "this host dialed" "it dialed")
-                        (or (drover-remote--peer-epoch peer) "none") (or (drover-remote--peer-rev peer) "none"))
-  (drover-remote--send connection (list :t "sub"
-                                        :epoch (drover-remote--peer-epoch peer)
-                                        :rev (drover-remote--peer-rev peer)))
-  (drover-remote--resume peer)
-  (drover-remote--reopen-mirrors peer)
-  (drover-remote--oc-resume peer))
+  (if (drover-remote--viewer-p peer)
+      (drover-remote--event peer 'sub "kept the connection %s: a viewer, owning no sessions, not subscribed to"
+                            (if (spyglass-connection-transport connection) "this host dialed" "it dialed"))
+    (drover-remote--stat peer :subscriptions)
+    (drover-remote--event peer 'sub "kept the connection %s; subscribed holding epoch %s revision %s"
+                          (if (spyglass-connection-transport connection) "this host dialed" "it dialed")
+                          (or (drover-remote--peer-epoch peer) "none") (or (drover-remote--peer-rev peer) "none"))
+    (drover-remote--send connection (list :t "sub"
+                                          :epoch (drover-remote--peer-epoch peer)
+                                          :rev (drover-remote--peer-rev peer)))
+    (drover-remote--resume peer)
+    (drover-remote--reopen-mirrors peer)
+    (drover-remote--oc-resume peer)))
 
 (defun drover-remote--resume (peer)
   "Ask PEER again, connected anew, what a stream ending lost.
@@ -1422,9 +1463,12 @@ one line, once in `drover-error-interval' seconds."
             (drover-remote--reset-queue peer)
             (drover-remote--elect state peer)
             (unless (drover-remote--peer-connection peer)
-              (if (and theirs (not (drover-remote--quitting-p peer)) (> drover-remote-grace 0))
-                  (drover-remote--wait-grace peer)
-                (drover-remote--lost peer))))
+              (cond
+               ;; Nothing of it is listed here to dim.
+               ((drover-remote--viewer-p peer) (drover-remote--set-state peer 'waiting))
+               ((and theirs (not (drover-remote--quitting-p peer)) (> drover-remote-grace 0))
+                (drover-remote--wait-grace peer))
+               (t (drover-remote--lost peer)))))
           (when (and (not (drover-remote--peer-connection peer))
                      (not (drover-remote--peer-dialed peer)))
             (drover-remote--stand-by peer (and theirs (not (drover-remote--quitting-p peer))
@@ -3983,8 +4027,8 @@ Interactively, SESSION is the session at point."
 
 (defun drover-remote--on-clone-where (peer message reply)
   "Tell PEER, through REPLY, where a clone run in MESSAGE's directory goes here.
-Only for a peer of full access, which may clone here."
-  (if (not (eq (drover-remote--access peer) 'full))
+Only for a peer of full access, which may clone here, never a viewer."
+  (if (or (drover-remote--viewer-p peer) (not (eq (drover-remote--access peer) 'full)))
       (funcall reply nil (drover-remote--refuse-action peer "clone" (format "%s has %s access, not full"
                                                                             (drover-remote--label peer)
                                                                             (drover-remote--access peer))))
@@ -4001,6 +4045,9 @@ writes this host's files and makes a conversation of its."
   (let ((description (drover-remote--clone-description message))
         (directory (drover-remote--line (plist-get message :target) 1024)))
     (cond
+     ((drover-remote--viewer-p peer)
+      (funcall reply nil (drover-remote--refuse-action peer "clone" (format "%s owns no conversations"
+                                                                            (drover-remote--label peer)))))
      ((not (eq (drover-remote--access peer) 'full))
       (funcall reply nil (drover-remote--refuse-action peer "clone" (format "%s has %s access, not full"
                                                                             (drover-remote--label peer)
@@ -4036,6 +4083,7 @@ connected, cloning, that grant this host full access."
         (when (drover-remote--clone-engine engine :export t)
           (delq nil (mapcar (lambda (peer)
                               (and (eq (drover-remote--peer-state peer) 'open)
+                                   (not (drover-remote--viewer-p peer))
                                    (drover-remote--capable-p peer "clone")
                                    (eq (drover-remote--peer-granted peer) 'full)
                                    (cons (drover-remote--peer-name peer) peer)))
@@ -4698,6 +4746,7 @@ engine's identifier, or why it did not start, within
     (let ((label (drover-remote--label peer))
           (granted (or (drover-remote--peer-granted peer) 'read)))
       (cond
+       ((drover-remote--viewer-p peer) (format "%s owns no sessions" label))
        ((not (eq (drover-remote--peer-state peer) 'open)) (format "%s is not connected" label))
        ((not (drover-remote--capable-p peer "new"))
         (format "%s runs an older drover, which starts no session for other hosts: update it there" label))
@@ -5407,7 +5456,9 @@ EPHEMERAL non-nil for one accepted without configuration."
     (puthash name peer (drover-remote--state-peers state))
     (setf (drover-remote--state-order state)
           (append (delete name (drover-remote--state-order state)) (list name)))
-    (drover-remote--register peer)
+    ;; A viewer has no sessions to list.
+    (unless (plist-get properties :viewer)
+      (drover-remote--register peer))
     peer))
 
 (defun drover-remote--close (peer why)
@@ -5484,7 +5535,12 @@ added is dialed if it says so."
         (if peer
             (progn (setf (drover-remote--peer-properties peer) properties
                          (drover-remote--peer-ephemeral peer) nil)
-                   (drover-remote--register peer))
+                   (cond
+                    ((not (plist-get properties :viewer)) (drover-remote--register peer))
+                    ((memq (drover-remote--peer-backend peer) (drover-backends))
+                     ;; Configured a viewer now: what it listed goes.
+                     (drover-remote--close peer "a viewer now")
+                     (drover-unregister-backend (drover-remote--peer-backend peer)))))
           (setq peer (drover-remote--add-peer state name properties)))
         (when (eq (drover-remote--peer-state peer) 'closed)
           (drover-remote--set-state peer 'waiting))
@@ -5513,7 +5569,8 @@ added is dialed if it says so."
          (next (and dialed (fboundp 'spyglass-connection-next-attempt)
                     (ignore-errors (spyglass-connection-next-attempt dialed)))))
     (drover-bound-line
-     (concat (pcase state
+     (concat (and (drover-remote--viewer-p peer) "viewer, ")
+             (pcase state
                ('open "connected")
                ('connecting "connecting")
                ('reconnecting "reconnecting")
@@ -5550,9 +5607,13 @@ For `drover-host-state-function'."
     (drover-remote--state-line peer)))
 
 (defun drover-remote--host-names ()
-  "Return the names of the peers, in order, for `drover-hosts-function'."
+  "Return the names of the peers, in order, for `drover-hosts-function'.
+Viewers, owning no sessions, are left out: no group, column nor filter."
   (when-let* ((state (drover-remote--current)))
-    (copy-sequence (drover-remote--state-order state))))
+    (seq-remove (lambda (name)
+                  (when-let* ((peer (gethash name (drover-remote--state-peers state))))
+                    (drover-remote--viewer-p peer)))
+                (drover-remote--state-order state))))
 
 (defun drover-remote-peer-stats (name)
   "Return what the peer NAME counted and measured, a plist, or nil.
