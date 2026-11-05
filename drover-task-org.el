@@ -38,6 +38,7 @@
 (require 'subr-x)
 (require 'org)
 (require 'drover-core)
+(require 'drover-task-git)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
@@ -75,9 +76,9 @@ another checkout tracks.  Files of linked worktrees are refused anyway."
   "Return non-nil when tasks are never read from FILE nor written to it.
 See `drover-task-refused-files'."
   (or (null file)
-      (let ((file (expand-file-name file)))
+      (let ((file (drover-task-canonical file)))
         (or (seq-some (lambda (refused)
-                        (let ((refused (expand-file-name refused)))
+                        (let ((refused (drover-task-canonical refused)))
                           (or (equal refused file)
                               (string-prefix-p (file-name-as-directory refused) file))))
                       drover-task-refused-files)
