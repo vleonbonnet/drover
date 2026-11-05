@@ -228,7 +228,7 @@ the runner of pyproject.toml's tools, \"uv run \", \"poetry run \" or
 
 (defconst drover-repo--check-target-regexp
   "\\`\\(?:[a-z0-9]+-\\)?\\(?:check\\|lint\\|typecheck\\|test\\)\\'"
-  "How the targets of a Makefile, or a justfile's recipes, checking changes are named.
+  "How the targets of a Makefile, or recipes of a justfile, checking are named.
 Such as test, lint, or backend-test and frontend-lint of a repository of
 several parts.")
 
