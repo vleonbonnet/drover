@@ -147,7 +147,8 @@ identifiers; fan-outs, goals and the state are fresh, no mode on."
   (declare (indent 0) (debug t))
   `(drover-test-with-backend nil
      (drover-test-with-state
-       (let* ((root (file-name-as-directory (file-truename (make-temp-file "drover-fanout-test" t))))
+       (let* ((default-directory (expand-file-name default-directory))
+              (root (file-name-as-directory (file-truename (make-temp-file "drover-fanout-test" t))))
               (origin (expand-file-name "origin.git/" root))
               (checkout (expand-file-name "repo/" root))
               (file (expand-file-name "work.org" root))

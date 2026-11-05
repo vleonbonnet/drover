@@ -83,9 +83,11 @@
 `root' is the temporary directory holding them, deleted after;
 `drover-task-repositories' names the checkout \"test/repo\", whose
 worktrees go under root's worktrees/.  Git's identity and defaults are
-the test's own, not the user's."
+the test's own, not the user's: its home is root, the current directory
+expanded first, as it may be under the user's home."
   (declare (indent 0) (debug t))
-  `(let* ((root (file-name-as-directory (file-truename (make-temp-file "drover-task-test" t))))
+  `(let* ((default-directory (expand-file-name default-directory))
+          (root (file-name-as-directory (file-truename (make-temp-file "drover-task-test" t))))
           (origin (expand-file-name "origin.git/" root))
           (checkout (expand-file-name "repo/" root))
           (process-environment (append (list (concat "HOME=" root) "GIT_CONFIG_NOSYSTEM=1"
