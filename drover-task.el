@@ -56,6 +56,7 @@
 (require 'subr-x)
 (require 'org)
 (require 'ansi-color)
+(require 'ucs-normalize)
 (require 'drover-core)
 (require 'drover-ui)
 (require 'drover-command)
@@ -184,9 +185,10 @@ link tells which task a session serves."
 (defconst drover-task--links-version 1
   "Version of the format of the file of the links of sessions to tasks.")
 
-(defconst drover-task-id-regexp "\\(?:\\[\\[\\|(\\)id:\\([A-Za-z0-9][A-Za-z0-9_.:-]\\{0,99\\}\\)\\]"
-  "What an Org link to a heading looks like in a prompt, in Org or Markdown.
-Its first group is the ID.")
+(defconst drover-task-id-regexp
+  "\\[\\[id:\\([A-Za-z0-9][A-Za-z0-9_.:-]\\{0,99\\}\\)\\]\\|\\](id:\\([A-Za-z0-9][A-Za-z0-9_.:-]\\{0,99\\}\\))"
+  "What a link to a heading looks like in a prompt, in Org or in Markdown.
+The first group is the ID in Org, the second in Markdown.")
 
 ;;;; Repositories
 
@@ -224,18 +226,23 @@ settings but its checkout."
 
 (defun drover-task-slug (title &optional key)
   "Return the name of a task's branch and worktree, of TITLE and its Jira KEY.
-Lower case words joined by dashes, `drover-task-slug-length' characters
-at most cut between words, after KEY when given."
-  (let* ((words (split-string (downcase (replace-regexp-in-string "[^[:alnum:]]+" " " (or title "")))
-                              " " t))
-         (words (if key (seq-remove (lambda (word) (equal word (downcase key))) words) words))
+Lower case words of ASCII letters and digits, accents dropped, joined by
+dashes, `drover-task-slug-length' characters at most cut between words,
+after KEY when given."
+  (let* ((title (if key
+                    (let ((case-fold-search t))
+                      (replace-regexp-in-string (regexp-quote key) " " (or title "")))
+                  (or title "")))
+         ;; Decomposed, a letter's accent is a character of its own, dropped.
+         (title (replace-regexp-in-string "[^[:ascii:]]+" "" (downcase (ucs-normalize-NFKD-string title))))
+         (words (split-string (replace-regexp-in-string "[^a-z0-9]+" " " title) " " t))
          (slug ""))
     (while (and words (<= (+ (length slug) 1 (length (car words))) drover-task-slug-length))
       (setq slug (if (string-empty-p slug) (car words) (concat slug "-" (car words)))
             words (cdr words)))
     (when (and (string-empty-p slug) words)
       (setq slug (substring (car words) 0 (min (length (car words)) drover-task-slug-length))))
-    (let ((slug (replace-regexp-in-string "[^a-z0-9-]" "" slug)))
+    (progn
       (cond ((and key (string-empty-p slug)) key)
             (key (concat key "-" slug))
             ((string-empty-p slug) "task")
@@ -320,6 +327,7 @@ found; never kept.")
         (puthash key (cons id (float-time)) (drover-task--links))
       (remhash key (drover-task--links)))
     (remhash (drover-session-key session) drover-task--noted)
+    (drover-task--changed)
     (drover-task--save-links)
     (drover-task--views-changed)))
 
@@ -344,7 +352,7 @@ found; never kept.")
   "Return the ID of the first heading TEXT links, or nil."
   (and (stringp text)
        (string-match drover-task-id-regexp text)
-       (match-string 1 text)))
+       (or (match-string 1 text) (match-string 2 text))))
 
 (defun drover-task--prompt-id (session)
   "Return the task the first prompt of SESSION links, or nil.
@@ -368,16 +376,38 @@ and OpenCode's database of its sessions (see `drover-task--oc-read')."
         (puthash session (or id 'none) drover-task--prompts)
         id))))
 
+(defvar drover-task--generation 0
+  "A count raised whenever what tells sessions' tasks may have changed.")
+
+(defvar drover-task--ids (make-hash-table :test #'eq :weakness 'key)
+  "The task of each record, as (GENERATION . ID), by record.
+Views ask for it several times per row as they draw.")
+
+(defun drover-task--changed ()
+  "Note that the tasks of sessions may have changed."
+  (cl-incf drover-task--generation))
+
 (defun drover-task-id-of (session)
   "Return the ID of the heading of the task SESSION serves, or nil.
 The task the user linked it to, else the one it was found serving this
 Emacs session, else the one its worktree serves, else the one its first
-prompt links."
-  (or (car (gethash (drover-task--link-key session) (drover-task--links)))
-      (gethash (drover-session-key session) drover-task--noted)
-      (when-let* ((directory (drover-session-local-directory session)))
-        (drover-task--directory-id directory))
-      (drover-task--prompt-id session)))
+prompt links.  Known of each record until something telling tasks
+changes (see `drover-task--changed'), or a minute passed."
+  (let ((known (gethash session drover-task--ids)))
+    (if (eql (car known) drover-task--generation)
+        (cdr known)
+      (let ((id (or (car (gethash (drover-task--link-key session) (drover-task--links)))
+                    (gethash (drover-session-key session) drover-task--noted)
+                    (when-let* ((directory (drover-session-local-directory session)))
+                      (drover-task--directory-id directory))
+                    (drover-task--prompt-id session))))
+        (puthash session (cons drover-task--generation id) drover-task--ids)
+        id))))
+
+(defun drover-task-note-session (key id)
+  "Note that the session of KEY serves the task ID, this Emacs session."
+  (puthash key id drover-task--noted)
+  (drover-task--changed))
 
 ;;;; What views show of tasks
 
@@ -470,8 +500,10 @@ for with ripgrep, one at a time."
         (let* ((id (pop drover-task--pending))
                (marker (drover-task-org-marker id)))
           (if marker
-              (when (drover-task--take id (drover-task-org-read marker))
-                (setq changed t))
+              (progn
+                (when (drover-task--take id (drover-task-org-read marker))
+                  (setq changed t))
+                (set-marker marker nil))
             (puthash id (list :missing (float-time)) drover-task--infos)
             (drover-task--search id))))
       (when changed
@@ -557,6 +589,7 @@ that links a heading.  Views are told of the sessions found."
           (sqlite-close db))
         (when found
           (clrhash drover-task--prompts)
+          (drover-task--changed)
           (drover-task--views-changed))))))
 
 ;;;; Waiting in a command
@@ -802,8 +835,9 @@ worktree's branch ignores too, so that none may be committed."
                             (copy-next (cdr paths))
                           (make-directory (file-name-directory target) t)
                           (drover-task-run
-                           checkout "cp"
-                           (append (and (eq system-type 'darwin) (list "-c"))
+                           checkout (if (file-executable-p "/bin/cp") "/bin/cp" "cp")
+                           ;; macOS's own cp clones files on APFS, costing no room.
+                           (append (and (eq system-type 'darwin) (file-executable-p "/bin/cp") (list "-c"))
                                    (list "-R" path target))
                            (lambda (copied)
                              (unless (plist-get copied :ok)
@@ -853,7 +887,9 @@ outcome."
 (defun drover-task--context (plan)
   "Return a context of steps holding PLAN, a plist."
   (let ((context (make-hash-table :test #'eq)))
-    (cl-loop for (key value) on plan by #'cddr do (puthash key value context))
+    ;; The first of a key wins, as for `plist-get'.
+    (cl-loop for (key value) on plan by #'cddr
+             when (eq (gethash key context 'none) 'none) do (puthash key value context))
     context))
 
 (defun drover-task-prepare (plan callback &optional on-made)
@@ -896,8 +932,8 @@ worktree exists."
 
 (defun drover-task--harness ()
   "Return the new session tasks start, an entry of `drover-prompt-new-targets'."
-  (require 'drover-prompt)
   (or drover-task-harness
+      (progn (require 'drover-prompt) nil)
       (seq-find (lambda (entry)
                   (let ((feature (plist-get entry :feature)))
                     (or (null feature) (featurep feature) (locate-library (symbol-name feature)))))
@@ -947,7 +983,7 @@ session is noted as serving the task."
         (let ((started
                (lambda (session)
                  (drover-with-reporting "task session"
-                   (puthash (drover-session-key session) (plist-get plan :id) drover-task--noted)
+                   (drover-task-note-session (drover-session-key session) (plist-get plan :id))
                    (let ((send (drover-backend-property session :send))
                          (markdown (condition-case nil
                                        (progn (require 'drover-prompt) (drover-prompt-to-markdown text))
@@ -1188,8 +1224,8 @@ from which base are asked too."
                          ((and (vectorp key) (= (length key) 2)
                                (stringp (aref key 0)) (string-match-p "\\`[a-z][a-z0-9-]\\{0,40\\}\\'" (aref key 0))
                                (or (stringp (aref key 1)) (integerp (aref key 1))))))
-               (puthash (cons (intern (concat "remote:" host)) (cons (intern (aref key 0)) (aref key 1)))
-                        (plist-get plan :id) drover-task--noted))
+               (drover-task-note-session (cons (intern (concat "remote:" host)) (cons (intern (aref key 0)) (aref key 1)))
+                                         (plist-get plan :id)))
              (drover-message "Task %s started on %s" title host))))))
      (+ drover-task-setup-timeout 120))))
 
@@ -1240,12 +1276,17 @@ only writes a prompt for the task."
 
 (defun drover-task--plan-of-attempt (info attempt)
   "Return the plan of the task INFO tells of, working as ATTEMPT does."
-  (let ((entry (drover-task-repository (plist-get attempt :repo))))
+  (let* ((entry (drover-task-repository (plist-get attempt :repo)))
+         (checkout (and entry (drover-task-checkout entry))))
     (list :id (plist-get info :id) :title (plist-get info :title) :jira (plist-get info :jira)
+          :slug (drover-task-slug (plist-get info :title) (plist-get info :jira))
+          :target (or (plist-get (cdr entry) :target)
+                      (and checkout (file-directory-p checkout) (drover-git-default-branch checkout))
+                      "main")
           :kind (if (plist-get attempt :worktree) 'worktree
                   (if entry 'in-place 'folder))
           :repo (plist-get attempt :repo) :entry entry
-          :checkout (and entry (drover-task-checkout entry))
+          :checkout checkout
           :directory (and (plist-get attempt :directory)
                           (file-name-as-directory (drover-task-canonical (plist-get attempt :directory))))
           :worktree (and (plist-get attempt :worktree)
@@ -1340,7 +1381,7 @@ only writes a prompt for the task."
                           (list :title (plist-get plan :title) :agent drover-task-agent)
                           #'ignore)))
     (when-let* ((key (plist-get result :key)))
-      (puthash (cons (intern (concat "remote:" host)) key) (plist-get plan :id) drover-task--noted)
+      (drover-task-note-session (cons (intern (concat "remote:" host)) key) (plist-get plan :id))
       (drover-remote-open-started host result))))
 
 ;;;; Finishing
@@ -2089,6 +2130,8 @@ nil and why it is refused."
 (defun drover-task--oc-tick ()
   "Read the first prompts of OpenCode's sessions now and then, while lists show."
   (drover-with-reporting "task prompts of OpenCode"
+    ;; Worktrees made or gone meanwhile, by hand or by Git: looked at anew.
+    (drover-task--changed)
     (when (or (null drover-task--oc-read)
               (seq-some (lambda (buffer) (and (buffer-local-value 'drover-view-p buffer)
                                               (get-buffer-window buffer t)))

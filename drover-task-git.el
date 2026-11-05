@@ -38,6 +38,8 @@
 (require 'drover-core)
 (require 'drover-command)
 
+(declare-function drover-task--changed "drover-task" ())
+
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
   (load "drover-core" nil t))
@@ -66,20 +68,27 @@ A path under ALIAS is the path under DIRECTORY, such as
 
 ;;;; Paths
 
+(defun drover-task--native-name (file)
+  "Return FILE as Emacs names it on this system.
+On Windows, the MSYS form /c/... is c:/..., and a drive's letter is
+lower case."
+  (if (memq system-type '(windows-nt cygwin))
+      (let ((file (if (string-match "\\`/\\([a-zA-Z]\\)\\(/\\|\\'\\)" file)
+                      (concat (match-string 1 file) ":/" (substring file (match-end 0)))
+                    file)))
+        (if (string-match "\\`\\([A-Za-z]\\):" file)
+            (concat (downcase (match-string 1 file)) (substring file 1))
+          file))
+    file))
+
 (defun drover-task-canonical (file)
   "Return FILE, a directory or a file, as its canonical name on this host.
 Expanded; on Windows the MSYS form /c/... is c:/..., and the drive's
-letter is lower case; a path under an alias of
-`drover-task-path-aliases' is under the directory it names.  A
+letter is lower case (see `drover-task--native-name'); a path under an
+alias of `drover-task-path-aliases' is under the directory it names.  A
 directory keeps its trailing slash, or lack of it."
   (when (and (stringp file) (not (string-empty-p file)))
-    (let ((file (if (and (memq system-type '(windows-nt cygwin))
-                         (string-match "\\`/\\([a-zA-Z]\\)\\(/\\|\\'\\)" file))
-                    (concat (downcase (match-string 1 file)) ":/" (substring file (match-end 0)))
-                  file)))
-      (setq file (expand-file-name file))
-      (when (string-match "\\`\\([A-Z]\\):" file)
-        (setq file (concat (downcase (match-string 1 file)) (substring file 1))))
+    (let ((file (drover-task--native-name (expand-file-name (drover-task--native-name file)))))
       (pcase-dolist (`(,alias . ,directory) drover-task-path-aliases)
         (let ((alias (file-name-as-directory (expand-file-name alias))))
           (when (or (string-prefix-p alias file) (equal (directory-file-name alias) file))
@@ -245,6 +254,8 @@ SETUP is `running', `ok' or `failed'.  The file goes with the worktree's
 Git directory as Git removes it, a sweep telling drover's worktrees
 from others by it."
   (when-let* ((file (drover-task-git-marker-file worktree)))
+    (when (fboundp 'drover-task--changed)
+      (drover-task--changed))
     (with-temp-file file
       (insert id "\n")
       (when setup (insert (format "setup: %s\n" setup))))))

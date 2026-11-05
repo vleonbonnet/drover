@@ -837,9 +837,10 @@ That is on an Org heading, in a buffer other than drover's prompt, or
 on a session serving a task (see `drover-session-task'), in this
 buffer."
   (or (drover-dispatch-org-task-p)
-      (and (not (plist-get (drover--scope) :window))
-           (when-let* ((session (drover-session-at-point t)))
-             (drover-session-task session)))))
+      (let ((scope (drover--scope)))
+        (and (not (plist-get scope :window))
+             (when-let* ((session (plist-get scope :session)))
+               (drover-session-task session))))))
 
 (defun drover-dispatch-task-link-p ()
   "Return non-nil when the dispatch menu may link a session to a task.
@@ -847,8 +848,9 @@ On an Org heading, or on a session in this buffer, while
 `drover-task-mode' tells the tasks of sessions."
   (and drover-session-task-function
        (or (drover-dispatch-org-task-p)
-           (and (not (plist-get (drover--scope) :window))
-                (drover-session-at-point t)))))
+           (let ((scope (drover--scope)))
+             (and (not (plist-get scope :window))
+                  (plist-get scope :session))))))
 
 (defun drover-dispatch-prompt-p (action)
   "Return non-nil when prompt ACTION applies from where the dispatch menu acts.

@@ -63,6 +63,9 @@
 (require 'spyglass)
 (require 'comint)
 
+(defvar drover-task-repositories)
+(defvar drover-task-worktree-root)
+(defvar drover-task-harness)
 (defvar drover-fake-opencode--sessions)
 (defvar drover-fake-opencode--order)
 (defvar drover-fake-opencode--streams)
@@ -883,6 +886,13 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (drover-remote-agent--register)
     (when (getenv "DROVER_AGENT_OPENCODE")
       (drover-remote-agent--opencode))
+    (when-let* ((checkout (getenv "DROVER_AGENT_TASKS")))
+      ;; A repository whose tasks it starts and finishes for its peers,
+      ;; in sessions of its fake backend.
+      (require 'drover-task)
+      (setq drover-task-repositories `(("test/repo" :checkout ,checkout :finish merge))
+            drover-task-worktree-root (expand-file-name "worktrees/" dir)
+            drover-task-harness '(:backend fake :engine fake)))
     (when-let* ((claude (getenv "DROVER_AGENT_CLAUDE")))
       ;; Its conversations listed, as drover starts: every one live,
       ;; none asked of the CLI.

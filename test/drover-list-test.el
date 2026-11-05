@@ -6640,8 +6640,9 @@ set is that of the list in sight."
 The old menu took 24 lines at any width, its View menu apart."
   (drover-list-test-elsewhere
     ;; At 240 columns, the Filter group, too wide for two columns of its
-    ;; own beside the others, shows in one.
-    (pcase-dolist (`(,width . ,bound) '((240 . 13) (160 . 18) (100 . 27) (60 . 60)))
+    ;; own beside the others, shows in one; the Task group stacks under
+    ;; the Prompt group, Input under Prompt runs.
+    (pcase-dolist (`(,width . ,bound) '((240 . 14) (160 . 18) (100 . 27) (60 . 60)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))

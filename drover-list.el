@@ -1966,7 +1966,13 @@ cache, its subagents at work."
                     chosen (cons entry chosen))
             (throw 'full nil)))))
     (let ((narrow (seq-filter (lambda (entry)
-                                (or (eq (car entry) 'title) (plist-get (cdr entry) :narrow)))
+                                (pcase (plist-get (cdr entry) :narrow)
+                                  ((guard (eq (car entry) 'title)) t)
+                                  ;; An icon alone shows only for the rows showing one.
+                                  ('icon (> (drover-list--tally-max
+                                             (aref summary (drover-list--kept-index (car entry))))
+                                            0))
+                                  (place place)))
                               present)))
       (if (seq-every-p (lambda (entry)
                          (or (memq entry chosen) (eq (plist-get (cdr entry) :narrow) 'icon)))
