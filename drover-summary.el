@@ -42,8 +42,9 @@
 ;; their records: their text never leaves their host but through it.
 ;;
 ;; The model answers through OpenCode's service, which bills it to its
-;; provider: this host's cheap model (`drover-model-cheap'), unless
-;; `drover-summary-model' names one.  A stateless generation, which
+;; provider: this host's cheap model (`drover-model-cheap'), or the
+;; next of its chain when one is unavailable (`drover-cheap-generate'),
+;; unless `drover-summary-model' names one.  A stateless generation, which
 ;; makes no session, so that none shows among the user's sessions nor
 ;; counts in their usage; drover keeps its own count, per day
 ;; (`drover-summary-usage'), up to `drover-summary-daily-limit'.  A host
@@ -62,12 +63,6 @@
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
   (load "drover-core" nil t))
 
-(declare-function opencode-call-with-service "opencode-common" (service function &rest arguments))
-(declare-function opencode-request "opencode-http" (method path &rest arguments))
-(declare-function opencode-request-data "opencode-http" (response))
-(declare-function opencode-error-describe "opencode-http" (error))
-(declare-function opencode-error-status "opencode-http" (error))
-(declare-function opencode-error-tag "opencode-http" (error))
 
 (defgroup drover-summary nil
   "Sessions summarized by a cheap model."
@@ -138,7 +133,9 @@ bound to fail as the last one did."
   :group 'drover-summary)
 
 (defcustom drover-summary-timeout 60
-  "Seconds after which a summary not written is given up."
+  "Seconds a model is given to write a summary.
+A summary not written in as many times as `drover-cheap-attempts', the
+models a summary may ask in turn, is given up."
   :type 'number
   :group 'drover-summary)
 
@@ -158,9 +155,11 @@ credentials in URLs: what a regexp matches is replaced by [redacted]."
 (defcustom drover-summary-generate-function #'drover-summary-opencode-generate
   "Function asking the model for a summary.
 It is called with PROMPT, a string, and CALLBACK, which it calls once,
-later or at once, with (:text TEXT), what the model wrote, or with
-\(:failure MESSAGE), adding :none t when there is no model to ask, as
-when no cheap model resolves on this host.  It must never wait."
+later or at once, with (:text TEXT), what the model wrote, adding
+:model, the model, when known, or with (:failure MESSAGE), adding
+:none t when there is no model to ask, as when no cheap model resolves
+on this host.  It must never wait.  It may return a function, which
+cancels the request when the summary is given up."
   :type 'function
   :group 'drover-summary)
 
@@ -527,10 +526,14 @@ is put off to then."
     (when (and session (drover-summary--eligible-p session) (drover-summary--class session))
       (let ((token (cl-incf drover-summary--token)))
         (puthash token (list :key key :asked (and asked t) :anew (cdr asked)
-                             :timer (run-at-time drover-summary-timeout nil
+                             :timer (run-at-time (drover-summary--patience) nil
                                                  #'drover-summary--expire token))
                  drover-summary--jobs)
         (drover-recap session (lambda (recap) (drover-summary--recapped token recap)))))))
+
+(defun drover-summary--patience ()
+  "Return the seconds after which a summary not written is given up."
+  (* drover-summary-timeout (max 1 drover-cheap-attempts)))
 
 (defun drover-summary--finish (token)
   "End the summary TOKEN, letting the next one be asked for."
@@ -543,9 +546,11 @@ is put off to then."
 (defun drover-summary--expire (token)
   "Give up the summary TOKEN, not written in time, from a timer."
   (drover-with-reporting "summary timeout"
-    (when (gethash token drover-summary--jobs)
+    (when-let* ((job (gethash token drover-summary--jobs)))
       (drover-summary--finish token)
-      (drover-summary--failed (format "no summary after %s s" drover-summary-timeout)))))
+      (when (functionp (plist-get job :cancel))
+        (funcall (plist-get job :cancel)))
+      (drover-summary--failed (format "no summary after %s s" (drover-summary--patience))))))
 
 ;;;; What the model reads
 
@@ -853,8 +858,12 @@ only after a summary was written.  None is asked for a while (see
            (t
             (let ((prompt (drover-summary-prompt input)))
               (condition-case err
-                  (funcall drover-summary-generate-function prompt
-                           (lambda (result) (drover-summary--generated token (length prompt) result)))
+                  (let ((cancel (funcall drover-summary-generate-function prompt
+                                         (lambda (result)
+                                           (drover-summary--generated token (length prompt) result)))))
+                    (when-let* (((functionp cancel))
+                                (job (gethash token drover-summary--jobs)))
+                      (puthash token (plist-put job :cancel cancel) drover-summary--jobs)))
                 (error (drover-summary--finish token)
                        (drover-summary--failed (drover-error-message err))))))))))))
 
@@ -900,79 +909,22 @@ until it works again.  Lists draw it at once."
 
 ;;;; OpenCode's service
 
-(defun drover-summary--model-ref ()
-  "Return `drover-summary-model' and its variant as OpenCode's model reference."
-  (let ((slash (and (stringp drover-summary-model) (string-search "/" drover-summary-model))))
-    (unless (and slash (> slash 0) (< (1+ slash) (length drover-summary-model)))
-      (user-error "`drover-summary-model' is not PROVIDER/MODEL: %s" drover-summary-model))
-    `((providerID . ,(substring drover-summary-model 0 slash))
-      (id . ,(substring drover-summary-model (1+ slash)))
-      ,@(and drover-summary-variant `((variant . ,drover-summary-variant))))))
-
-(defun drover-summary--cheap-ref (cheap)
-  "Return CHEAP, a model of `drover-model-cheap', as OpenCode's model reference.
-It names `drover-summary-variant' when CHEAP offers it."
-  `((providerID . ,(plist-get cheap :provider-id))
-    (id . ,(plist-get cheap :id))
-    ,@(and drover-summary-variant (member drover-summary-variant (plist-get cheap :variants))
-           `((variant . ,drover-summary-variant)))))
-
-(defun drover-summary--with-model (then else)
-  "Call THEN with the reference of the model writing summaries, or ELSE.
-The model is `drover-summary-model', else this host's cheap model (see
-`drover-model-cheap-fetch'), read as needed: ELSE gets (:failure
-MESSAGE) when it cannot be read, with :none t when none resolves.
-Either may be called before this returns."
-  (if drover-summary-model
-      (funcall then (drover-summary--model-ref))
-    (drover-model-cheap-fetch
-     (lambda (answer)
-       (cond
-        ((plist-get answer :failure) (funcall else (list :failure (plist-get answer :failure))))
-        ((plist-get answer :none)
-         (funcall else (list :failure (concat "no cheap model, " (plist-get answer :none)) :none t)))
-        (t (funcall then (drover-summary--cheap-ref answer))))))))
-
-(defvar drover-summary--former-path nil
-  "Non-nil once the service knew stateless generation by its former path alone.
-Services before 2.2 answer POST /api/experimental/generate, which later
-ones keep as an alias of /api/experimental/generate/text.")
-
 (defun drover-summary-opencode-generate (prompt callback)
   "Have OpenCode's service write what PROMPT asks, then call CALLBACK.
-A stateless generation (POST /api/experimental/generate/text, or its
-former path for a service without it), through `drover-summary-model'
-or this host's cheap model: it makes no session, which neither lists
-nor usage totals of sessions show.  CALLBACK gets (:text TEXT) or
-\(:failure MESSAGE), as `drover-summary-generate-function' says."
-  (require 'opencode-http)
-  (if (not (drover-cheap-service-running-p))
-      (funcall callback (list :failure "OpenCode's service does not run"))
-    (drover-summary--with-model
-     (lambda (model)
-       (condition-case err
-           (opencode-call-with-service
-            nil #'opencode-request 'post
-            (if drover-summary--former-path "/api/experimental/generate" "/api/experimental/generate/text")
-            :body `((prompt . ,prompt) (model . ,model))
-            :directory nil :buffer nil :timeout drover-summary-timeout
-            :then (lambda (response)
-                    (drover-with-reporting "summary"
-                      (let ((text (alist-get 'text (opencode-request-data response))))
-                        (funcall callback (if (stringp text)
-                                              (list :text (drover-bound-text text 20 2000))
-                                            (list :failure "OpenCode answered no text"))))))
-            :else (lambda (error)
-                    (drover-with-reporting "summary"
-                      ;; No such route, rather than no such model.
-                      (if (and (not drover-summary--former-path)
-                               (eql (opencode-error-status error) 404)
-                               (not (opencode-error-tag error)))
-                          (progn (setq drover-summary--former-path t)
-                                 (drover-summary-opencode-generate prompt callback))
-                        (funcall callback (list :failure (opencode-error-describe error)))))))
-         (error (funcall callback (list :failure (drover-error-message err))))))
-     callback)))
+Through `drover-cheap-generate': this host's cheap model, the next of
+its chain when one is unavailable, or the model `drover-summary-model'
+names, at `drover-summary-variant', each given `drover-summary-timeout'
+seconds.  CALLBACK gets (:text TEXT :model MODEL) or (:failure
+MESSAGE), as `drover-summary-generate-function' says.  Return a
+function cancelling the request."
+  (drover-cheap-generate
+   prompt nil
+   (lambda (result)
+     (funcall callback (if (plist-get result :text)
+                           (list :text (drover-bound-text (plist-get result :text) 20 2000)
+                                 :model (plist-get result :model))
+                         result)))
+   :model drover-summary-model :variant drover-summary-variant :timeout drover-summary-timeout))
 
 ;;;; The mode
 
