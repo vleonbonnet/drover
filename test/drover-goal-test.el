@@ -528,6 +528,8 @@ Worktrees go beside the checkout, as ../repo-<topic>.
                                         ((command . "npm run build")
                                          (evidence . "A change is finished when typecheck, test and format:check all pass."))
                                         ((command . "make lint") (evidence . "Run `make lint` before you push."))
+                                        ((command . "cd web && make lint")
+                                         (evidence . "Run `make lint` before you push."))
                                         ((command . "rm -rf /") (evidence . "Invented, quoted nowhere."))])
                              (setup . [((command . "npm ci") (evidence . "Install with npm ci first."))])
                              (finish . ((method . "merge-push")
@@ -542,7 +544,11 @@ Worktrees go beside the checkout, as ../repo-<topic>.
     (should (equal (plist-get (car (plist-get facts :setup)) :command) "npm ci"))
     (should (eq (plist-get (plist-get facts :finish) :method) 'merge-push))
     (should (eq (plist-get (plist-get facts :placement) :place) 'sibling))
-    (should (= (plist-get facts :dropped) 2))
+    ;; A subdirectory the quote does not name is not grounded.
+    (should (= (plist-get facts :dropped) 3))
+    (should (drover-repo--grounded-p "cd frontend && npx tsc --noEmit" "Frontend: cd frontend && npm run lint and npx tsc --noEmit"
+                                     (drover-repo--normalize "Frontend: `cd frontend && npm run lint` and `npx tsc --noEmit`")
+                                     nil))
     ;; A method or a quote not in the text is dropped.
     (let ((facts (drover-repo-validate '((finish . ((method . "pr") (evidence . "Open a pull request."))))
                                        documents hints)))
@@ -592,6 +598,18 @@ Worktrees go beside the checkout, as ../repo-<topic>.
       (should (string-match-p "the model could not be asked: no model in tests" (plist-get facts :note)))
       (should (equal (plist-get (car (plist-get facts :checks)) :command) "make test"))
       (should-not (drover-repo--entries)))))
+
+(ert-deftest drover-repo-test-conventional ()
+  "The checks of the first conventional file naming any; the setup of lockfiles and install targets."
+  (should (equal (drover-repo-conventional '(:make ("help" "up" "backend-test" "frontend-install" "frontend-lint")
+                                                   :python "uv run " :pytest t))
+                 '(((:command "make backend-test" :source "Makefile target backend-test")
+                    (:command "make frontend-lint" :source "Makefile target frontend-lint"))
+                   (:command "uv sync" :source "uv.lock" :unless ".venv")
+                   (:command "make frontend-install" :source "Makefile target frontend-install"))))
+  (should (equal (car (drover-repo-conventional '(:make ("check" "lint" "test")))) '((:command "make check" :source "Makefile target check"))))
+  (should (equal (drover-repo-conventional '(:go t))
+                 '(((:command "go vet ./..." :source "go.mod") (:command "go test ./..." :source "go.mod"))))))
 
 (ert-deftest drover-repo-test-split-commands ()
   "A heading's commands are joined by &&, quotes respected."
