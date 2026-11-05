@@ -59,8 +59,9 @@ compile:
 # beside them.  Its byte code must be the byte code compiled with the
 # front ends present, if any, so that the backends work either way: the
 # same but for the numbers of uninterned symbols, which count those
-# made before in the compiling Emacs.
-UNNUMBER = LC_ALL=C sed -E 's/(\#:[A-Za-z_-]*[A-Za-z_-])[0-9]+/\1/g'
+# made before in the compiling Emacs, and the offsets of docstrings
+# in the file, which those numbers' lengths shift.
+UNNUMBER = LC_ALL=C sed -E -e 's/(\#:[A-Za-z_-]*[A-Za-z_-])[0-9]+/\1/g' -e 's/\(\#\$$ \. [0-9]+\)/(\#$$ . N)/g'
 compile-standalone:
 	@build=$$(mktemp -d); status=0; \
 	cp $(SOURCES) "$$build" && \

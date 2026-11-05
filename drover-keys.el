@@ -925,6 +925,14 @@ of that window, as typed there."
       (drover--call-in-window window (lambda () (apply function arguments)))
     (apply function arguments)))
 
+(defun drover--dispatch-goal (function &rest arguments)
+  "Apply FUNCTION to ARGUMENTS on an Org heading, else as a session command.
+In Org, on the heading at point; elsewhere, on the session at point, of
+the list the menu acts on (see `drover--dispatch-in-list')."
+  (if (derived-mode-p 'org-mode)
+      (apply function arguments)
+    (apply #'drover--dispatch-in-list function arguments)))
+
 (defun drover--run-local-hook (hook)
   "Run the functions of HOOK local to the current buffer, not the global ones."
   (when (local-variable-p hook)
@@ -2081,9 +2089,7 @@ session chosen for it, else to one asked for, unshown."
     ("n" "Start or continue" drover-task-start :inapt-if-not drover-dispatch-task-p)
     ("F" "Finish" drover-task-finish :inapt-if-not drover-dispatch-task-p)
     ("I" "Link session" drover-task-link-session :inapt-if-not drover-dispatch-task-link-p)
-    ("W" "Worktrees" drover-task-sweep)
-    ("G" "Goal" drover-goal :advice* drover--dispatch-in-list :inapt-if-not drover-dispatch-goal-p)
-    ("^" "Goals" drover-goal-list)]
+    ("W" "Worktrees" drover-task-sweep)]
    [:description drover--dispatch-options-description
     ("a" "Agent" drover-prompt-agent :class drover--prompt-option :action agent
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))
@@ -2153,7 +2159,8 @@ session chosen for it, else to one asked for, unshown."
     ("z" "Archive" drover-archive
      :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-archivable-p)))
     ("Z" "Unarchive" drover-unarchive
-     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-unarchivable-p)))]
+     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-unarchivable-p)))
+    ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)]
    drover--view-columns
    ;; Only while the menu acts on one of drover's lists, here or in
    ;; another window.  Moving stays in the menu, which follows the new

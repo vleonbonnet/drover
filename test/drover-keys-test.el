@@ -147,7 +147,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (equal (sort bindings (lambda (a b) (string< (car a) (car b))))
                    (sort (copy-sequence
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
-                            ("E" . drover-edit-pending-prompt) ("K" . drover-interrupt) ("s" . drover-mark-seen)
+                            ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
                             ("Z" . drover-unarchive) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
@@ -679,10 +679,10 @@ B applies while a quiet session has a buffer."
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
     ("Conversation" ("t" "T" "C" "f" "H" "." "O"))
-    ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
+    ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z" "G"))
     ("View" ("= o" "= r" "= g" "- f"))
     ("Filter" ("= u" "= O" "= z" "= p" "= s" "= a" "= m") ("= v" "= H" "= d" "= f" "= c"))
-    ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s" "- $")))
+    ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s" "- $" "- g")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.")
 
 (ert-deftest drover-keys-test-dispatch-layout ()
@@ -776,7 +776,7 @@ the prefix of the other's, which would hide it."
   (dolist (entry '(("j" . drover-next) ("B" . drover-bury-quiet-sessions) ("b" . drover-select)
                    ("\"" . drover-prompt-dwim)
                    ("N" . drover-prompt-org-task) ("n" . drover-task-start) ("F" . drover-task-finish)
-                   ("I" . drover-task-link-session) ("W" . drover-task-sweep) ("'" . drover-prompt-toggle) ("l" . drover-list)
+                   ("I" . drover-task-link-session) ("W" . drover-task-sweep) ("G" . drover-goal) ("'" . drover-prompt-toggle) ("l" . drover-list)
                    ("L" . drover-list-side) ("p" . drover-select-project) ("S" . drover-search)
                    ("a" . drover-prompt-agent)
                    ("m" . drover-prompt-model) ("e" . drover-prompt-effort)
@@ -800,7 +800,7 @@ the prefix of the other's, which would hide it."
                    ("=h" . drover-view--filter-host) ("=d" . drover-view--filter-since)
                    ("=f" . drover-view--filter-search) ("=c" . drover-filter-clear)
                    ("-l" . drover-view--column-location) ("-s" . drover-view--column-summary)
-                   ("-$" . drover-view--column-cost) ("$" . drover-usage)))
+                   ("-$" . drover-view--column-cost) ("-g" . drover-view--column-goal) ("$" . drover-usage)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
                 (cdr entry))))
   ;; Every session key runs the command `drover-session-map' binds it to,
@@ -987,7 +987,7 @@ It applies only while the session has some, in lists and in its buffer."
 
 (defconst drover-keys-test-view-keys
   '("= o" "= r" "= g" "= u" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c"
-    "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $")
+    "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $" "- g")
   "The keys of the view settings that apply in one of drover's views.
 Older and archived sessions need a backend keeping them, and follow mode
 a list in a window.")
@@ -1000,7 +1000,7 @@ a list in a window.")
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "C" "f"
-                               "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z")
+                               "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "G")
                              drover-keys-test-view-keys
                              '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "RET")))))
     ;; Off a session, only what needs none.
@@ -1108,7 +1108,7 @@ Drover's view settings apply only while one of drover's views shows."
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "e" "d"
                        "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T" "C" "f" "." "O"
-                       "o" "K" "+" "g" "r" "x" "z"))))))
+                       "o" "K" "+" "g" "r" "x" "z" "G"))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-from-list ()
   "In a list, the session's settings apply to its buffer, its prompt does not.
@@ -1338,7 +1338,7 @@ The value is (PLAN . LINES)."
                                        " -h host" " -H harness" " -l location" " -b branch" " -a agent"
                                        " -m model" " -r provider"
                                        " -x context" " -c created"
-                                       " -t age" " -p cache" " -s summary" " -$ cost")))
+                                       " -t age" " -p cache" " -s summary" " -$ cost" " -g goal")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
                                       :provider "Anthropic" :harness 'fake :since (- (float-time) 7200))
                   drover-sort-by 'updated
@@ -1395,7 +1395,7 @@ MENU is `drover-view' by default."
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("View" "= o" "= r" "= g" "- f")
                        ("Filter" "= u" "= O" "= z" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c")
-                       ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $"))))
+                       ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $" "- g"))))
       ;; Hosts are filtered once there are others.
       (let ((drover-hosts-function (lambda () '("core"))))
         (should (member "= h" (cdr (assoc "Filter" (drover-keys-test-keys 'drover-view))))))
@@ -1774,7 +1774,7 @@ host standing for none."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 30))
+      (should (= (length suffixes) 31))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 
