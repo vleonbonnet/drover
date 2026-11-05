@@ -95,7 +95,7 @@ the test's own, not the user's."
           (drover-host "test")
           (drover-task-path-aliases nil)
           (drover-task-worktree-root (expand-file-name "worktrees/" root))
-          (drover-task-repositories `(("test/repo" :checkout ,checkout :finish merge)))
+          (drover-task-repositories `(("test/repo" :checkout ,checkout)))
           (drover-task--noted (make-hash-table :test #'equal))
           (drover-task--infos (make-hash-table :test #'equal))
           (org-id-locations (make-hash-table :test #'equal)))
@@ -206,10 +206,10 @@ the test's own, not the user's."
 (ert-deftest drover-task-test-worktree-sibling-and-prefix ()
   "A repository's worktrees beside its checkout, its branches prefixed."
   (drover-task-test-with-repo
-    (let* ((drover-task-repositories `(("test/repo" :checkout ,checkout :worktrees sibling
-                                        :branch-prefix "val.leon/")))
+    (let* ((drover-task-repositories `(("test/repo" :checkout ,checkout :branch-prefix "val.leon/")))
            (plan (car (drover-task-test-prepare
-                       (drover-task-test-plan checkout :branch-prefix "val.leon/" :slug "topic")))))
+                       (drover-task-test-plan checkout :branch-prefix "val.leon/" :slug "topic"
+                                              :placement 'sibling)))))
       (should (equal (plist-get plan :worktree) (expand-file-name "repo-topic/" root)))
       (should (equal (plist-get plan :branch) "val.leon/topic")))))
 
@@ -246,17 +246,16 @@ the test's own, not the user's."
 (ert-deftest drover-task-test-setup ()
   "The setup runs in the worktree before any session; a failure says so and starts none."
   (drover-task-test-with-repo
-    (let* ((drover-task-repositories `(("test/repo" :checkout ,checkout
-                                        :setup ("echo \"$DROVER_TASK\" > setup-ran" "echo done"))))
-           (plan (car (drover-task-test-prepare (drover-task-test-plan checkout))))
+    (let* ((plan (car (drover-task-test-prepare
+                       (drover-task-test-plan checkout :setup '("echo \"$DROVER_TASK\" > setup-ran" "echo done")))))
            (worktree (plist-get plan :worktree)))
       (should (equal (with-temp-buffer (insert-file-contents (expand-file-name "setup-ran" worktree))
                                        (buffer-string))
                      "TASK-1\n"))
       (should (eq (plist-get (drover-task-git-read-marker worktree) :setup) 'ok))
       (should (string-match-p "Setup done" (with-current-buffer (plist-get plan :buffer) (buffer-string)))))
-    (let* ((drover-task-repositories `(("test/repo" :checkout ,checkout :setup ("echo before" "exit 3" "echo never"))))
-           (outcome (drover-task-test-prepare (drover-task-test-plan checkout :slug "failing")))
+    (let* ((outcome (drover-task-test-prepare (drover-task-test-plan checkout :slug "failing"
+                                                                     :setup '("echo before" "exit 3" "echo never"))))
            (worktree (plist-get (car outcome) :worktree)))
       (should (string-match-p "\\`setup: exit 3 failed (exit 3)" (cdr outcome)))
       (should (plist-get (car outcome) :made))
@@ -314,19 +313,16 @@ the test's own, not the user's."
 (ert-deftest drover-task-test-finish-merge-push ()
   "Merged, checked and pushed to origin; checks failing push nothing."
   (drover-task-test-with-repo
-    (let* ((drover-task-repositories `(("test/repo" :checkout ,checkout :finish merge-push
-                                        :checks ("test -f fix.txt"))))
-           (plan (car (drover-task-test-prepare (drover-task-test-plan checkout)))))
+    (let* ((plan (car (drover-task-test-prepare (drover-task-test-plan checkout :checks '("test -f fix.txt"))))))
       (drover-task-test-commit (plist-get plan :worktree) "fix.txt" "fixed\n" "Fix it")
       (let ((outcome (drover-task-test-finish plan :method 'merge-push)))
         (should-not (plist-get outcome :failure))
         (should (string-match-p "pushed" (plist-get outcome :note)))
         (should (equal (drover-task-test-git origin "rev-parse" "main")
                        (drover-task-test-git checkout "rev-parse" "main")))))
-    (let* ((drover-task-repositories `(("test/repo" :checkout ,checkout :finish merge-push
-                                        :checks ("test -f nothing-here"))))
-           (before (drover-task-test-git origin "rev-parse" "main"))
-           (plan (car (drover-task-test-prepare (drover-task-test-plan checkout :slug "second")))))
+    (let* ((before (drover-task-test-git origin "rev-parse" "main"))
+           (plan (car (drover-task-test-prepare (drover-task-test-plan checkout :slug "second"
+                                                                       :checks '("test -f nothing-here"))))))
       (drover-task-test-commit (plist-get plan :worktree) "more.txt" "more\n" "More")
       (let ((outcome (drover-task-test-finish plan :method 'merge-push)))
         (should (string-match-p "checks failed, not pushed" (plist-get outcome :failure)))
@@ -390,7 +386,6 @@ the test's own, not the user's."
            (drover-task-gh-program
             (drover-task-test-gh root (format "echo \"$@\" >> %s\necho https://github.com/test/repo/pull/7\n"
                                               (shell-quote-argument log))))
-           (drover-task-repositories `(("test/repo" :checkout ,checkout :finish pr)))
            (plan (car (drover-task-test-prepare (drover-task-test-plan checkout :body "The details."))))
            (worktree (plist-get plan :worktree))
            (branch (plist-get plan :branch)))
@@ -771,17 +766,78 @@ Said once.
 
 ;;;; From a heading to the end
 
+(defconst drover-task-test-agents
+  "# Agents\n\nWhen a task is done, merge its branch into main locally. Never push.\n\nRun `sh check.sh` before finishing.\n"
+  "The AGENTS.md of the fixture's repository.")
+
+(defun drover-task-test-model (_prompt _system callback)
+  "Answer as a model reading `drover-task-test-agents', for CALLBACK."
+  (funcall callback
+           (list :text (concat "{\"checks\": [{\"command\": \"sh check.sh\", \"evidence\": \"Run `sh check.sh` before finishing.\"}],"
+                               " \"setup\": [], \"finish\": {\"method\": \"merge\", \"evidence\": \"When a task is done, merge its branch into main locally. Never push.\"},"
+                               " \"worktree\": {\"placement\": \"\", \"evidence\": \"\"}}"))))
+
+(ert-deftest drover-task-test-how-from-the-repository ()
+  "How a task works is the repository's, its heading overriding it; changes go on the heading."
+  (drover-task-test-with-repo
+    (drover-task-test-commit checkout "AGENTS.md" drover-task-test-agents "Agents")
+    (let ((drover-repo--cache 'unread)
+          (drover-repo-generate-function #'drover-task-test-model))
+      (drover-task-test-with-org "* Work\n:PROPERTIES:\n:DROVER_REPO: test/repo\n:DROVER_SETUP: make deps\n:END:\n** TODO Fix\n:PROPERTIES:\n:ID: fix\n:END:\n"
+        (let* ((marker (drover-task-org-marker "fix"))
+               (answers (list "Finish otherwise for this task" "pr" "Accept")))
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (pop answers))))
+            (let ((how (drover-task-how marker (drover-task-read marker "fix") checkout)))
+              (should (eq (plist-get how :finish) 'pr))
+              (should (equal (plist-get how :setup) '("make deps")))
+              (should (equal (plist-get how :checks) '("sh check.sh")))
+              (should-not (plist-get how :placement))))
+          ;; Written on the heading, for this task alone; the parent's setup inherited.
+          (org-with-point-at marker
+            (should (equal (org-entry-get nil "DROVER_FINISH") "pr")))
+          (should-not (org-entry-get (point-min) "DROVER_FINISH"))
+          ;; Confirmed once: not asked again until the instructions change.
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (error "Asked again"))))
+            (should (eq (plist-get (drover-task-how marker (drover-task-read marker "fix") checkout) :finish) 'pr)))
+          (drover-task-test-commit checkout "AGENTS.md" (concat drover-task-test-agents "\nMore.\n") "More")
+          (let ((asked nil))
+            (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (setq asked t) "Accept")))
+              (drover-task-how marker (drover-task-read marker "fix") checkout))
+            (should asked)))))))
+
+(ert-deftest drover-task-test-overrides-parsed ()
+  "A heading's overrides read as drover takes them; what does not parse is left out."
+  (should (equal (drover-task--overrides '(:finish "Merge-Push" :placement "sibling" :checks "a && b"
+                                          :target "release/1.0" :teardown "x"))
+                 '(:finish merge-push :placement sibling :checks ("a" "b") :teardown ("x") :target "release/1.0")))
+  (should-not (drover-task--overrides '(:finish "squash" :placement "elsewhere" :target "a b")))
+  (should (equal (drover-task--how (list :finish '(:method pr :source "x") :checks '((:command "c")))
+                                   '(:finish none))
+                 '(:finish nil :placement nil :setup nil :checks ("c") :teardown nil :target nil)))
+  (should (equal (drover-task--message-overrides '(:finish-method "merge" :check-commands "make test" :setup-commands :false))
+                 '(:finish merge :checks ("make test")))))
+
 (ert-deftest drover-task-test-start-and-finish-from-heading ()
   "A heading's task started, continued and finished: its worktree, sessions, notes and state."
   (drover-test-with-backend nil
     (drover-task-test-with-repo
+      (drover-task-test-commit checkout "AGENTS.md" drover-task-test-agents "Agents")
+      (drover-task-test-git checkout "push" "-q" "origin" "main")
       (let ((drover-task-harness '(:backend fake :engine fake))
             (drover-task-mode t)
-            (drover-session-task-function #'drover-task--session-task))
+            (drover-session-task-function #'drover-task--session-task)
+            (drover-repo--cache 'unread)
+            (drover-repo-generate-function #'drover-task-test-model)
+            (asked nil))
         (drover-task-test-with-org "* Work\n:PROPERTIES:\n:DROVER_REPO: test/repo\n:END:\n** TODO Fix the login\n:PROPERTIES:\n:ID: 5A0E0000-0000-4000-8000-000000000001\n:END:\nIt fails after the redirect.\n"
           (goto-char (point-min))
           (re-search-forward "Fix the login")
-          (drover-task-start)
+          ;; How the repository works is shown once, and accepted.
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt &rest _) (setq asked prompt) "Accept")))
+            (drover-task-start))
+          (should (string-match-p "Finish: merged into the main branch here, not pushed — AGENTS.md: “When a task is done" asked))
+          (should (string-match-p "Checks:\n  sh check.sh  — AGENTS.md" asked))
           (should (drover-task-test-wait (lambda () (seq-find (lambda (call) (eq (car call) :send)) drover-test-calls))))
           (let* ((marker (drover-task-org-marker "5A0E0000-0000-4000-8000-000000000001"))
                  (worktree (expand-file-name "worktrees/test-repo/fix-the-login/" root))

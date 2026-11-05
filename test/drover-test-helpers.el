@@ -67,6 +67,11 @@
 (setq drover-transcript-engines nil
       drover--front-end-backends nil)
 
+;; Nor ask a model how a repository works, but in the tests stubbing one.
+(defvar drover-repo-generate-function)
+(setq drover-repo-generate-function (lambda (_prompt _system callback)
+                                      (funcall callback (list :failure "no model in tests"))))
+
 ;; Nor the conversations the engines recorded: their homes are empty
 ;; directories, but in the tests binding others.
 (let ((home (make-temp-file "drover-test-home" t)))

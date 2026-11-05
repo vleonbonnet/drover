@@ -150,6 +150,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =+= | =drover-new-session=       | start a session in its directory                               |
 | =v= | =drover-peek=              | preview where it stands, without opening (lists)               |
 | =R= | =drover-review=            | review the changes it made, and comment on them                |
+| =G= | =drover-goal=              | set a goal on it, or pause, resume or stop the one it has      |
 | =V= | =drover-view=              | the View menu: the view keys alone (drover's list)             |
 
 =RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds (but in the sidebar, which folds nothing), =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or either list. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
@@ -239,6 +240,8 @@ Everywhere, through the menu.
 | =F= | =drover-task-finish=         | finish the task: merge or open a pull request, then clean up   |
 | =I= | =drover-task-link-session=   | link a session to a task by hand, or unlink it                 |
 | =W= | =drover-task-sweep=          | list the worktrees that may go (see [[*Tasks][Tasks]])                  |
+| =G= | =drover-goal=                | keep the session or task going until its checks pass (see [[*Goals][Goals]]) |
+| =^= | =drover-goal-list=           | the goals of sessions                                          |
 | =a= | =drover-prompt-agent=        | choose the agent                                               |
 | =m= | =drover-prompt-model=        | choose the model                                               |
 | =e= | =drover-prompt-effort=       | choose the reasoning effort                                    |
@@ -612,9 +615,15 @@ Starting a task:
 - resolves its repository: =DROVER_REPO=, inherited, a repository's name such as =10gen/secateur=, the same on every host (never a path), one asked for among several; else the repository of the Org file; else a folder a file link of its entry names, or =DROVER_FOLDER=; else it asks, and offers to save =DROVER_REPO= on the heading;
 - names it after the heading, its Jira key first when it has one (its ID, as ejira makes it, or a =JIRA= property): =RNDSEC-4975-onboard-the-scanner=, accents dropped, cut between words (=drover-task-slug-length=);
 - fetches the repository's default branch from origin, within =drover-task-fetch-timeout= seconds and never prompting, and makes the worktree from it, on a branch of that name (prefixed as the repository says), falling back to =HEAD= when origin is out of reach; =C-u= offers =HEAD=, another branch, and carrying the main checkout's uncommitted changes into it;
-- locks the worktree (=git worktree lock=, its reason naming the task), copies the ignored files =.worktreeinclude= names, as Claude Code and Codex do (only those Git ignores, on the task's branch too), initializes submodules, and runs the repository's =:setup= visibly in =*drover task: TITLE*=; a failing setup starts no session, and says so;
+- locks the worktree (=git worktree lock=, its reason naming the task), copies the ignored files =.worktreeinclude= names, as Claude Code and Codex do (only those Git ignores, on the task's branch too), initializes submodules, and runs the repository's setup visibly in =*drover task: TITLE*=; a failing setup starts no session, and says so;
 - writes =DROVER_WORKTREE=, =DROVER_BRANCH=, =DROVER_BASE=, =DROVER_HOST= on the heading, and a note in its LOGBOOK;
 - starts a session there, of the prompt's first new session (=drover-task-harness=), its first prompt linking the heading and quoting its body (=drover-task-prompt-function=).
+
+** How a repository works
+
+How a task's repository works is the repository's to say, never your configuration's: how finished work lands, where its worktrees go when it says, the setup of a new worktree and the checks before a push.  Drover reads it from the repository as a task starts (=drover-repo.el=): its AGENTS.md and CLAUDE.md, read by the host's cheap model, which reports what they prescribe with the line each item comes from quoted, an item whose quote is not in the text, or a command neither the text nor the repository's files name, dropped, so that nothing is invented; and its conventional files, the scripts of =package.json=, the targets of a Makefile, the recipes of a justfile, =pyproject.toml=, =go.mod=, =Cargo.toml= and the lockfiles, whose checks and setup are taken when the instructions name none.  The first time, or once the instructions changed, it shows what it read, each with its source, to accept, or to change for the task, which writes the heading's =DROVER_= properties.  What was read is kept in =repo-facts.eld= of =drover-state-directory=, a cache by repository and by the content of what was read: it can be deleted at any time.
+
+A heading's properties, inherited, override it for its tasks: =DROVER_FINISH= (=merge-push=, =merge=, =pr= or =none=), =DROVER_WORKTREES= (=sibling=, beside the checkout as =CHECKOUT-TOPIC=, or =default=), =DROVER_SETUP=, =DROVER_CHECKS= and =DROVER_TEARDOWN= (shell commands joined by =&&=), =DROVER_TARGET= (the branch work lands on, the default branch otherwise).  A task of another host is read there, the heading's overrides sent with the request.
 
 ** What drover writes on headings
 
@@ -622,7 +631,7 @@ What drover writes on a heading is properties beginning with =DROVER_= and notes
 
 ** Finishing a task
 
-=C-' F= (=drover-task-finish=), on the heading or on one of its sessions, finishes it as its repository says (=:finish=): =merge=, its branch merged into the target in the main checkout; =merge-push=, merged there, checked with the repository's =:checks=, and pushed, a failing check pushing nothing; =pr=, its branch pushed and a pull request opened with =gh=, people merging it, the task cleaned up when finished again once it is merged.  Conflicts are looked for first (=git merge-tree=), and stop it.  Then it cleans up: a snapshot of the worktree kept as =refs/drover/snapshots/BRANCH= (its uncommitted files too, through a temporary index), the =:teardown= run, the worktree unlocked and removed, never forced but once you agreed to lose what it names, its branch deleted only once merged, its sessions archived, the =DROVER_= properties of its worktree removed and a note telling what was done, and the heading marked done if you said so, the normal Org way: for a heading ejira syncs, its review then offers the issue's transition.  =C-' W= (=drover-task-sweep=) lists the worktrees of your repositories that may go, those whose directory is gone, such as agents' worktrees in the temporary directory, those of tasks done, and the others with their task, deleting nothing.
+=C-' F= (=drover-task-finish=), on the heading or on one of its sessions, finishes it as its repository says (see [[*How a repository works][How a repository works]]): =merge=, its branch merged into the target in the main checkout; =merge-push=, merged there, checked with the repository's checks, and pushed, a failing check pushing nothing; =pr=, its branch pushed and a pull request opened with =gh=, people merging it, the task cleaned up when finished again once it is merged.  Conflicts are looked for first (=git merge-tree=), and stop it.  Then it cleans up: a snapshot of the worktree kept as =refs/drover/snapshots/BRANCH= (its uncommitted files too, through a temporary index), its =DROVER_TEARDOWN= run, the worktree unlocked and removed, never forced but once you agreed to lose what it names, its branch deleted only once merged, its sessions archived, the =DROVER_= properties of its worktree removed and a note telling what was done, and the heading marked done if you said so, the normal Org way: for a heading ejira syncs, its review then offers the issue's transition.  =C-' W= (=drover-task-sweep=) lists the worktrees of your repositories that may go, those whose directory is gone, such as agents' worktrees in the temporary directory, those of tasks done, and the others with their task, deleting nothing.
 
 ** Sessions of tasks, and projects
 
@@ -632,19 +641,28 @@ A task belongs to the host running its sessions, =DROVER_HOST=: =C-u C-' n= star
 
 ** Setting tasks up
 
-=drover-task-repositories= names the repositories tasks work in, by the name =DROVER_REPO= gives them, with their checkout on each host and how their tasks work, finish and are set up; =drover-task-mode= has the lists show tasks.  For instance, secateur's worktrees beside its checkout, merged into =main=, checked and pushed, as its AGENTS.md has it, and aegis-security's finished as pull requests:
+=drover-task-repositories= names the repositories tasks work in, by the name =DROVER_REPO= gives them, with your own preferences alone: their checkout on each host, the prefix of your branches, whether tasks work in place, where you want their worktrees; how they work is theirs to say (see [[*How a repository works][How a repository works]]).  =drover-task-mode= has the lists show tasks.
 
 #+begin_src elisp
 (use-package drover-task
   :hook (elpaca-after-init . drover-task-mode)
   :custom
   (drover-task-repositories
-   '(("10gen/secateur" :checkout "~/local/projects/pr-bot/secateur/" :worktrees sibling
-      :finish merge-push :checks ("npm run typecheck" "npm test" "npm run format:check")
-      :setup ("npm ci"))
+   '(("10gen/secateur" :checkout "~/local/projects/pr-bot/secateur/")
      ("10gen/aegis-security" :checkout "~/local/source/mdb/10gen/aegis-security/"
-      :branch-prefix "val.leon/" :finish pr))))
+      :branch-prefix "val.leon/"))))
 #+end_src
+
+* Goals
+
+A goal keeps a session going until a condition holds, so that you need not run the checks after each turn and paste the failures back.  =G= on a session, in a list or its buffer, or on a task's heading (=drover-goal=, also in the menu's Task group) sets one, or acts on the one it has: pause, resume, stop, or show its log.
+
+- A *check goal*: drover runs the repository's checks itself, in the session's worktree, on this host, after each turn (=drover-command-run=, never waiting; =drover-goal-check-timeout=, 600 s, each), and when they fail sends the agent the failing lines and the end of the output, within =drover-goal-feedback-limit= (8 KB), until they pass.  The checks are those the repository tells agents to run, else those of its conventional files (see [[*How a repository works][How a repository works]]), or the heading's =DROVER_GOAL_CHECKS= (commands joined by =&&=), shown with their sources to confirm or edit before anything runs, and kept on the heading if you say so; a setup the repository needs runs once first.  On a fresh worktree, the checks run once before the next turn, the baseline: checks that cannot run here (a command not found, out of time) arm nothing, and failures already there go with the goal's statement.  An idle session gets the prompt you give with the goal's statement, or the checks run at once; one at work, its turn's end.
+- A *criterion goal*: the harness's own goal judges a condition in words (OpenCode's =/goal=, run as the session's own command), which drover follows: bounded in rounds (=drover-goal-rounds=, 15) and money, and checked with the repository's checks when the harness says it is done, their failures setting the goal again.  Harnesses without a goal of their own take none.
+
+A goal stops when it is met; at its limits, =drover-goal-iterations= follow-ups (5), =drover-goal-minutes= (60), =drover-goal-budget= dollars billed since it began (10; what subscriptions include costs nothing, see [[*Usage][Usage]]); when it makes no progress, the same failure twice or a turn changing nothing in the worktree.  It pauses on a turn failing, a reply ending in a question (its last line, or, a little before, as the cheap model tells: =drover-goal-ask-questions=), and protected files edited, tests, snapshots, CI configuration, scripts and lockfiles (=drover-goal-protected=), which it shows, even when the checks pass: resuming accepts them.  A question or a permission the agent waits on is yours; the goal waits for the turn after.  Follow-ups go through the queue of scheduled prompts, out of every window, so that a draft is never touched.
+
+Goals are kept in =goals.eld= of =drover-state-directory=, saved before they run, and come back paused after Emacs restarts; each logs its iterations in =goals/=, bounded (=drover-goal-log-limit=).  =drover-goal-mode= shows them: the list's Goal column (=-g= in the View menu) shows a goal's glyph (=drover-goal-glyph=), the follow-ups sent of their limit and how it stands, the mode line counts goals running and those met, paused or given up that you have not seen, and the heading of a goal's task gets a LOGBOOK note as it ends.  =C-' ^= (=drover-goal-list=) lists them: =RET= shows a log, =o= opens a session, =p= pauses or resumes, =k= stops.  A session of another host is that host's: its goals run there.
 
 * Org links
 

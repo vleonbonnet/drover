@@ -63,6 +63,7 @@
 (require 'drover-task-git)
 (require 'drover-task-org)
 (require 'drover-task-palette)
+(require 'drover-repo)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
@@ -83,48 +84,36 @@
 ;;;; Options
 
 (defcustom drover-task-repositories nil
-  "The repositories tasks work in, as an alist (NAME . PROPERTIES).
-NAME is how DROVER_REPO names the repository, such as
-\"10gen/secateur\", the same on every host.  PROPERTIES is a plist:
+  "Where the repositories tasks work in are, and how the user works in them.
+An alist (NAME . PROPERTIES).  NAME is how DROVER_REPO names the
+repository, such as \"10gen/secateur\", the same on every host.
+PROPERTIES is a plist of the user's own preferences:
 
  :checkout   Its main checkout: a directory, or an alist (HOST
              . DIRECTORY) of its checkouts by host, `drover-host'.
  :kind       How tasks work in it: `worktree', on a branch of their
              own, the default, or `in-place', in the main checkout.
- :worktrees  Where its worktrees go: `sibling', beside the main
-             checkout, as CHECKOUT-TOPIC; a directory; or nil, under
-             `drover-task-worktree-root', as REPOSITORY/TOPIC.
+ :worktrees  A directory its worktrees go under, as CHECKOUT-TOPIC,
+             rather than `drover-task-worktree-root'.
  :branch-prefix
              What its branches begin with, such as \"val.leon/\".
- :target     The branch work merges into; its default branch by
-             default.
- :finish     How a task's work ends: `merge', merged into the target
-             in the main checkout; `merge-push', merged there, checked
-             with :checks, and pushed; `pr', its branch pushed and a
-             pull request opened with gh, merged by people, the task
-             cleaned up once it is; nil, nothing merged.
- :checks     Shell commands run in the main checkout once merged,
-             before pushing: a failure stops the push.
- :setup      Shell commands run in a new worktree, before any session
-             starts there: a failure starts none.
- :teardown   Shell commands run in a worktree before it is removed.
  :include    Nil not to copy the ignored files `.worktreeinclude'
              names into new worktrees, which they are by default.
 
-The repository of an Org file not named here is known by its
-remote's name, works in worktrees under the root, and merges nothing."
+How the repository works is the repository's to say, never this
+option's: how finished work lands, where its worktrees go when it
+says, the setup of a new worktree and the checks before a push are
+read from its AGENTS.md or CLAUDE.md and its conventional files (see
+`drover-repo-facts'), shown for confirmation the first time, and a
+heading's DROVER_FINISH, DROVER_WORKTREES, DROVER_SETUP, DROVER_CHECKS,
+DROVER_TEARDOWN and DROVER_TARGET, inherited, override them for its
+tasks.  The repository of an Org file not named here is known by its
+remote's name, and works in worktrees under the root."
   :type '(alist :key-type (string :tag "Name")
                 :value-type (plist :options ((:checkout (choice directory (alist :key-type string :value-type directory)))
                                              (:kind (choice (const worktree) (const in-place)))
-                                             (:worktrees (choice (const :tag "Under the root" nil)
-                                                                 (const sibling) directory))
+                                             (:worktrees directory)
                                              (:branch-prefix string)
-                                             (:target string)
-                                             (:finish (choice (const :tag "Nothing merged" nil)
-                                                              (const merge) (const merge-push) (const pr)))
-                                             (:checks (repeat string))
-                                             (:setup (repeat string))
-                                             (:teardown (repeat string))
                                              (:include boolean))))
   :group 'drover)
 
@@ -248,15 +237,17 @@ after KEY when given."
             ((string-empty-p slug) "task")
             (t slug)))))
 
-(defun drover-task--worktree-path (entry checkout slug)
-  "Return where the worktree of SLUG goes, of ENTRY's repository at CHECKOUT."
+(defun drover-task--worktree-path (entry checkout slug &optional placement)
+  "Return where the worktree of SLUG goes, of ENTRY's repository at CHECKOUT.
+PLACEMENT `sibling', as the repository says, puts it beside CHECKOUT,
+as CHECKOUT-TOPIC; else where the user's settings say."
   (let ((setting (plist-get (cdr entry) :worktrees))
         (name (file-name-nondirectory (directory-file-name checkout))))
     (file-name-as-directory
      (cond
-      ((eq setting 'sibling)
+      ((eq placement 'sibling)
        (expand-file-name (concat name "-" slug) (file-name-directory (directory-file-name checkout))))
-      (setting (expand-file-name slug (expand-file-name name (drover-task-canonical setting))))
+      ((stringp setting) (expand-file-name slug (expand-file-name name (drover-task-canonical setting))))
       (t (expand-file-name slug (expand-file-name (replace-regexp-in-string "/" "-" (car entry))
                                                   (or (drover-task--root drover-task-worktree-root)
                                                       (drover-task-canonical "~/local/worktrees/")))))))))
@@ -338,7 +329,8 @@ SETTINGS are the options DIRECTORIES were made of.")
 (defun drover-task--places ()
   "Return the directories tasks' worktrees go under on this host, canonical.
 The root (`drover-task-worktree-root'), each repository's own, and the
-directory holding the checkout of each whose worktrees are siblings."
+directory holding the checkout of each, where a repository may place
+its worktrees beside it."
   (let ((settings (list drover-task-repositories drover-task-worktree-root drover-host
                         drover-task-path-aliases)))
     (unless (equal (car drover-task--places) settings)
@@ -348,13 +340,13 @@ directory holding the checkout of each whose worktrees are siblings."
                    (delq nil
                          (cons (or (drover-task--root drover-task-worktree-root)
                                    (drover-task-canonical "~/local/worktrees/"))
-                               (mapcar (lambda (entry)
+                               (mapcan (lambda (entry)
                                          (let ((setting (plist-get (cdr entry) :worktrees))
                                                (checkout (drover-task-checkout entry)))
-                                           (cond ((and (eq setting 'sibling) checkout)
-                                                  (file-name-directory (directory-file-name checkout)))
-                                                 ((stringp setting)
-                                                  (file-name-as-directory (drover-task-canonical setting))))))
+                                           ;; Beside the checkout, when its repository says so.
+                                           (list (and checkout (file-name-directory (directory-file-name checkout)))
+                                                 (and (stringp setting)
+                                                      (file-name-as-directory (drover-task-canonical setting))))))
                                        drover-task-repositories)))))))
     (cdr drover-task--places)))
 
@@ -774,7 +766,7 @@ else why the first failing did, after which none runs."
     (named-let try ((n 1))
       (let* ((name (if (= n 1) slug (format "%s-%d" slug n)))
              (branch (concat prefix name))
-             (path (drover-task--worktree-path entry checkout name)))
+             (path (drover-task--worktree-path entry checkout name (drover-task--get context :placement))))
         (if (> n 20)
             (funcall next (format "no free name for %s" slug))
           (drover-task-git checkout (list "rev-parse" "--verify" "--quiet" (concat "refs/heads/" branch))
@@ -894,7 +886,7 @@ worktree's branch ignores too, so that none may be committed."
   "Run the setup of the repository in the worktree of CONTEXT, for NEXT.
 Visibly unless CONTEXT is hidden, the worktree's marker telling the
 outcome."
-  (let ((commands (plist-get (cdr (drover-task--get context :entry)) :setup))
+  (let ((commands (drover-task--get context :setup))
         (worktree (drover-task--get context :worktree)))
     (if (null commands)
         (progn (drover-task-git-write-marker worktree (drover-task--get context :id) 'ok)
@@ -1049,6 +1041,169 @@ follows the first prompt, such as what a goal asks (`drover-goal')."
                      (list :title (plist-get plan :title) :agent drover-task-agent)
                      started failed)))))))
 
+;;;; How a repository works
+
+(defun drover-task--parse-override (key text)
+  "Return what TEXT, a heading's override of KEY, means, or `invalid'.
+See `drover-task-org-overrides'."
+  (let ((word (downcase (string-trim text))))
+    (pcase key
+      (:finish (pcase word
+                 ("merge" 'merge) ("merge-push" 'merge-push) ("pr" 'pr) ((or "none" "nothing") 'none)
+                 (_ 'invalid)))
+      (:placement (pcase word ("sibling" 'sibling) ((or "default" "root") 'default) (_ 'invalid)))
+      (:target (if (string-match-p "\\`[A-Za-z0-9._/-]\\{1,200\\}\\'" (string-trim text)) (string-trim text) 'invalid))
+      (_ (drover-repo-split-commands text)))))
+
+(defun drover-task--overrides (raw)
+  "Return the overrides RAW, a plist of strings by key, parsed.
+One that does not parse is left out."
+  (let ((overrides nil))
+    (pcase-dolist (`(,key . ,_) (reverse drover-task-org-overrides))
+      (when-let* ((text (plist-get raw key)))
+        (let ((value (drover-task--parse-override key text)))
+          (unless (eq value 'invalid)
+            (setq overrides (cons key (cons value overrides)))))))
+    overrides))
+
+(defun drover-task--how (facts overrides)
+  "Return how a task works, from the FACTS of its repository and OVERRIDES.
+FACTS are what `drover-repo-facts' read; OVERRIDES what the task's
+heading says, parsed (see `drover-task--overrides').  A plist: :finish,
+a method of `drover-repo-finish-methods' or nil, nothing merged;
+:placement, `sibling' or nil; :setup, :checks and :teardown, shell
+commands; :target, the branch work lands on, or nil for the default."
+  (cl-flet ((commands (key)
+              (if (plist-member overrides key)
+                  (plist-get overrides key)
+                (mapcar (lambda (item) (plist-get item :command)) (plist-get facts key)))))
+    (list :finish (pcase (plist-get overrides :finish)
+                    ('none nil)
+                    ('nil (plist-get (plist-get facts :finish) :method))
+                    (method method))
+          :placement (pcase (plist-get overrides :placement)
+                       ('default nil)
+                       ('nil (plist-get (plist-get facts :placement) :place))
+                       (place place))
+          :setup (commands :setup)
+          :checks (commands :checks)
+          :teardown (plist-get overrides :teardown)
+          :target (plist-get overrides :target))))
+
+(defconst drover-task--finish-labels
+  '((merge-push . "merged into the main branch here, checked, then pushed")
+    (merge . "merged into the main branch here, not pushed")
+    (pr . "a pull request, which people merge"))
+  "How finished work lands, in words, by method.")
+
+(defun drover-task--describe-how (facts overrides)
+  "Return how the repository of FACTS works, with OVERRIDES, as lines to confirm."
+  (let ((heading "the task's heading"))
+    (string-join
+     (delq nil
+           (list
+            (format "Finish: %s — %s"
+                    (let ((method (plist-get (drover-task--how facts overrides) :finish)))
+                      (or (alist-get method drover-task--finish-labels) "nothing merged"))
+                    (cond ((plist-get overrides :finish) heading)
+                          ((plist-get facts :finish) (plist-get (plist-get facts :finish) :source))
+                          (t "the repository does not say")))
+            (format "Worktrees: %s — %s"
+                    (if (plist-get (drover-task--how facts overrides) :placement)
+                        "beside the checkout, as CHECKOUT-TOPIC"
+                      "where your settings put them")
+                    (cond ((plist-get overrides :placement) heading)
+                          ((plist-get facts :placement) (plist-get (plist-get facts :placement) :source))
+                          (t "the repository does not say")))
+            (concat "Setup of a new worktree:\n"
+                    (if (plist-member overrides :setup)
+                        (drover-repo-describe (mapcar (lambda (command) (list :command command :source heading))
+                                                      (plist-get overrides :setup)))
+                      (drover-repo-describe (plist-get facts :setup))))
+            (concat "Checks:\n"
+                    (if (plist-member overrides :checks)
+                        (drover-repo-describe (mapcar (lambda (command) (list :command command :source heading))
+                                                      (plist-get overrides :checks)))
+                      (drover-repo-describe (plist-get facts :checks))))
+            (and (plist-get facts :note) (concat "Note: " (plist-get facts :note)))))
+     "\n")))
+
+(defun drover-task--confirm-how (marker info facts)
+  "Have the user confirm how the repository of FACTS works, for the task at MARKER.
+INFO is what was read of the heading.  What the user changes is
+written on the heading, as its DROVER_ properties, for this task and
+those below it; accepted, the facts are kept confirmed (see
+`drover-repo-confirm').  Return (FACTS . INFO), as accepted; signal a
+`user-error' when cancelled."
+  (catch 'done
+    (while t
+      (let* ((overrides (drover-task--overrides (plist-get info :overrides)))
+             (choice (completing-read
+                      (format "How %s works, as %s says:\n%s\n> " (plist-get facts :key)
+                              (if (plist-get facts :documents)
+                                  (string-join (plist-get facts :documents) " and ")
+                                "its conventional files")
+                              (drover-task--describe-how facts overrides))
+                      '("Accept" "Finish otherwise for this task" "Worktrees otherwise for this task"
+                        "Setup otherwise for this task" "Checks otherwise for this task"
+                        "Read the instructions again" "Cancel")
+                      nil t nil nil "Accept"))
+             (write (lambda (property value)
+                      (drover-task-org-write marker (list (cons property value)))
+                      (setq info (drover-task-read marker (plist-get info :id))))))
+        (pcase choice
+          ("Accept"
+           (throw 'done (cons (if (plist-get facts :confirmed) facts (drover-repo-confirm facts)) info)))
+          ("Finish otherwise for this task"
+           (funcall write "DROVER_FINISH"
+                    (completing-read "Finish: " '("merge-push" "merge" "pr" "none") nil t)))
+          ("Worktrees otherwise for this task"
+           (funcall write "DROVER_WORKTREES" (completing-read "Worktrees: " '("sibling" "default") nil t)))
+          ("Setup otherwise for this task"
+           (funcall write "DROVER_SETUP"
+                    (let ((text (read-string "Setup, joined by &&, or none: "
+                                             (drover-repo-join-commands (plist-get facts :setup)))))
+                      (if (string-blank-p text) "true" text))))
+          ("Checks otherwise for this task"
+           (funcall write "DROVER_CHECKS"
+                    (let ((text (read-string "Checks, joined by &&, or none: "
+                                             (drover-repo-join-commands (plist-get facts :checks)))))
+                      (if (string-blank-p text) "true" text))))
+          ("Read the instructions again"
+           (setq facts (drover-repo-facts-now (plist-get facts :root) t)))
+          (_ (user-error "Task %s left as it is" (plist-get info :title))))))))
+
+(defun drover-task-how (marker info directory &optional quiet)
+  "Return how the task INFO tells of, at MARKER, works, in DIRECTORY's repository.
+Read from the repository, waited for (see `drover-repo-facts'), the
+heading's overrides over it, and confirmed by the user the first time
+unless QUIET.  See `drover-task--how' for the value."
+  (let ((facts (drover-repo-facts-now directory)))
+    (when (and (not quiet) marker (not (plist-get facts :confirmed)))
+      (pcase-let ((`(,accepted . ,read) (drover-task--confirm-how marker info facts)))
+        (setq facts accepted info read)))
+    (drover-task--how facts (drover-task--overrides (plist-get info :overrides)))))
+
+(defconst drover-task--wire-overrides
+  '((:finish . :finish-method) (:placement . :placement) (:setup . :setup-commands)
+    (:checks . :check-commands) (:teardown . :teardown-commands) (:target . :target))
+  "The keys of the overrides of a heading in requests to other hosts.")
+
+(defun drover-task--request-overrides (info keys)
+  "Return the overrides of KEYS INFO's heading gives, as a request carries them."
+  (mapcan (lambda (key)
+            (list (alist-get key drover-task--wire-overrides)
+                  (or (plist-get (plist-get info :overrides) key) :false)))
+          keys))
+
+(defun drover-task--message-overrides (message)
+  "Return the overrides MESSAGE, a peer's request, carries, parsed and bounded."
+  (let ((raw nil))
+    (pcase-dolist (`(,key . ,wire) drover-task--wire-overrides)
+      (when-let* ((text (drover-task--remote-string (plist-get message wire) 2000)))
+        (setq raw (cons key (cons text raw)))))
+    (drover-task--overrides raw)))
+
 ;;;; Planning a start
 
 (defun drover-task--heading-marker ()
@@ -1151,7 +1306,8 @@ from which base are asked too."
              (checkout (and (null host) (drover-task-checkout entry))))
         (when (and (null host) (not (and checkout (file-directory-p checkout))))
           (user-error "No checkout of %s on this host: see `drover-task-repositories'" (car entry)))
-        (let* ((target (or (plist-get properties :target)
+        (let* ((how (and checkout (drover-task-how marker info checkout)))
+               (target (or (plist-get how :target)
                            (and checkout (drover-git-default-branch checkout))
                            "main"))
                (base (if (and ask (eq kind 'worktree))
@@ -1166,7 +1322,11 @@ from which base are asked too."
           (append (list :kind kind :repo (car entry) :entry entry :checkout checkout :target target
                         :branch-prefix (or (plist-get properties :branch-prefix) "")
                         :base-choice base :carry carry
-                        :directory (and (eq kind 'in-place) checkout))
+                        :directory (and (eq kind 'in-place) checkout)
+                        :finish (plist-get how :finish) :placement (plist-get how :placement)
+                        :setup (plist-get how :setup) :checks (plist-get how :checks)
+                        :teardown (plist-get how :teardown))
+                  (list :overrides (plist-get info :overrides))
                   plan))))))
 
 ;;;; Starting
@@ -1258,13 +1418,15 @@ of `drover-task-start-session', with the heading's body."
   (require 'drover-remote)
   (let* ((host (plist-get plan :host))
          (title (plist-get plan :title))
-         (request (list :kind "start" :task (plist-get plan :id) :title title
+         (request (append
+                   (list :kind "start" :task (plist-get plan :id) :title title
                         :repo (plist-get plan :repo) :mode (symbol-name (plist-get plan :kind))
                         :slug (plist-get plan :slug) :jira (or (plist-get plan :jira) :false)
                         :base (let ((base (plist-get plan :base-choice)))
                                 (if (stringp base) base (symbol-name (or base 'fresh))))
                         :carry (if (plist-get plan :carry) t :false)
-                        :body (or (plist-get plan :body) :false))))
+                        :body (or (plist-get plan :body) :false))
+                  (drover-task--request-overrides plan '(:placement :setup :target)))))
     (message "Starting %s on %s…" title host)
     (drover-remote-ask-task
      host request
@@ -1345,9 +1507,10 @@ only writes a prompt for the task."
          (checkout (and entry (drover-task-checkout entry))))
     (list :id (plist-get info :id) :title (plist-get info :title) :jira (plist-get info :jira)
           :slug (drover-task-slug (plist-get info :title) (plist-get info :jira))
-          :target (or (plist-get (cdr entry) :target)
+          :target (or (plist-get (drover-task--overrides (plist-get info :overrides)) :target)
                       (and checkout (file-directory-p checkout) (drover-git-default-branch checkout))
                       "main")
+          :overrides (plist-get info :overrides)
           :kind (if (plist-get attempt :worktree) 'worktree
                   (if entry 'in-place 'folder))
           :repo (plist-get attempt :repo) :entry entry
@@ -1397,14 +1560,14 @@ only writes a prompt for the task."
                                           (drover-warn "No session started for %s: %s" (plist-get info :title) session))))
          (drover-task--remote-session plan)))
       ('setup
-       (let ((context (drover-task--context plan)))
+       (let ((context (drover-task--context (drover-task--with-how marker info plan))))
          (drover-task-git-steps (list #'drover-task--step-setup) context
                                 (lambda (why)
                                   (drover-with-reporting "task setup"
                                     (if why
                                         (drover-warn "Task %s: %s" (plist-get info :title) why)
                                       (drover-task-start-session plan)))))))
-      ('recreate (drover-task--recreate marker plan)))))
+      ('recreate (drover-task--recreate marker (drover-task--with-how marker info plan))))))
 
 (defun drover-task--recreate (marker plan)
   "Make the worktree of PLAN, the task at MARKER, again from its branch."
@@ -1512,11 +1675,24 @@ first.  A task of another host is finished by that host."
     (let ((data (json-parse-string (plist-get result :output) :object-type 'plist)))
       (list :state (plist-get data :state) :head (plist-get data :headRefOid)))))
 
+(defun drover-task--with-how (marker info plan)
+  "Return PLAN, the task INFO tells of at MARKER, with how its repository works.
+Read in its main checkout, confirmed the first time (see
+`drover-task-how'); PLAN alone without a checkout here."
+  (let ((checkout (plist-get plan :checkout)))
+    (if (not (and checkout (file-directory-p checkout)))
+        plan
+      (let ((how (drover-task-how marker info checkout)))
+        (append (list :finish (plist-get how :finish) :placement (plist-get how :placement)
+                      :setup (plist-get how :setup) :checks (plist-get how :checks)
+                      :teardown (plist-get how :teardown))
+                plan)))))
+
 (defun drover-task--finish-here (marker info plan)
   "Finish PLAN, the task INFO tells of at MARKER, on this host."
   (let* ((title (plist-get info :title))
-         (entry (plist-get plan :entry))
-         (method (and (plist-get plan :worktree) (plist-get (cdr entry) :finish)))
+         (plan (drover-task--with-how marker info plan))
+         (method (and (plist-get plan :worktree) (plist-get plan :finish)))
          (worktree (plist-get plan :worktree))
          (exists (and worktree (file-directory-p worktree)))
          (pr-state (and (eq method 'pr) (plist-get plan :pr) exists (drover-task--pr-state plan)))
@@ -1674,7 +1850,7 @@ merge."
 
 (defun drover-task--step-checks (context next)
   "Run the checks of the repository of CONTEXT in the main checkout, for NEXT."
-  (let ((commands (plist-get (cdr (drover-task--get context :entry)) :checks)))
+  (let ((commands (drover-task--get context :checks)))
     (if (or (null commands) (not (drover-task--get context :merged)))
         (funcall next nil)
       (let ((buffer (drover-task--commands-buffer (drover-task--get context :title))))
@@ -1772,7 +1948,7 @@ parent, so that what is discarded can be restored."
 (defun drover-task--step-teardown (context next)
   "Run the teardown of the repository of CONTEXT in its worktree, for NEXT.
 A failure is told, and the cleanup goes on."
-  (let ((commands (plist-get (cdr (drover-task--get context :entry)) :teardown)))
+  (let ((commands (drover-task--get context :teardown)))
     (if (null commands)
         (funcall next nil)
       (let ((buffer (drover-task--commands-buffer (drover-task--get context :title))))
@@ -1892,14 +2068,16 @@ request opened, :removed, non-nil once the worktree went."
          (title (plist-get info :title))
          (done (and (not (plist-get info :done))
                     (y-or-n-p (format "Once finished, mark %s done? " title))))
-         (request (list :kind "finish" :task (plist-get info :id) :title title
+         (request (append
+                   (list :kind "finish" :task (plist-get info :id) :title title
                         :repo (or (plist-get plan :repo) :false)
                         :worktree (or (plist-get plan :worktree) :false)
                         :directory (or (plist-get plan :directory) :false)
                         :branch (or (plist-get plan :branch) :false)
                         :jira (or (plist-get plan :jira) :false)
                         :pr (or (plist-get plan :pr) :false)
-                        :discard :false)))
+                        :discard :false)
+                  (drover-task--request-overrides plan '(:finish :checks :teardown :target)))))
     (cl-labels ((ask (request)
                   (drover-remote-ask-task
                    host request
@@ -2068,37 +2246,50 @@ there, in none either.  The answer tells where it works."
      ((not (and slug (string-match-p drover-task--slug-regexp slug))) (funcall reply nil "no name of a known shape"))
      ((not base) (funcall reply nil "no base of a known shape"))
      (t
-      (let* ((properties (cdr entry))
-             (target (or (plist-get properties :target) (drover-git-default-branch checkout) "main"))
-             (plan (list :id id :title (drover-bound-line title) :jira (drover-task--remote-string (plist-get message :jira) 40)
-                         :body (and (stringp (plist-get message :body))
-                                    (drover-bound-text (plist-get message :body) 400 drover-task-org-body-limit))
-                         :slug slug :kind mode :repo (car entry) :entry entry :checkout checkout :target target
-                         :branch-prefix (or (plist-get properties :branch-prefix) "")
-                         :base-choice base :carry (eq (plist-get message :carry) t)
-                         :directory (and (eq mode 'in-place) checkout) :hidden t)))
-        (drover-task-prepare
-         plan
-         (lambda (outcome)
-           (drover-with-reporting "remote task start"
-             (pcase-let* ((`(,plan . ,why) outcome)
-                          (made (list :worktree (or (plist-get plan :worktree) :false)
-                                      :directory (or (plist-get plan :directory) :false)
-                                      :branch (or (plist-get plan :branch) :false)
-                                      :base (or (plist-get plan :base) :false)
-                                      :base-ref (or (plist-get plan :base-ref) :false))))
-               (cond
-                ((and why (not (plist-get plan :made)) (eq mode 'worktree)) (funcall reply nil why))
-                (why (funcall reply (append (list :failure why) made)))
-                (t (drover-task-start-session
-                    plan t
-                    (lambda (session)
-                      (if (stringp session)
-                          (funcall reply (append (list :failure (concat "no session started: " session)) made))
-                        (funcall reply (append (list :key (vector (symbol-name (drover-session-backend session))
-                                                                  (drover-session-id session))
-                                                     :title (or (drover-session-title session) :false))
-                                               made))))))))))))))))
+      (drover-repo-facts
+       checkout
+       (lambda (facts)
+         (drover-with-reporting "remote task start"
+				(drover-task--remote-prepare message reply entry checkout mode slug base id title
+							     (drover-task--how facts (drover-task--message-overrides message))))))))))
+
+(defun drover-task--remote-prepare (message reply entry checkout mode slug base id title how)
+  "Make the place MESSAGE asks, for a peer, then a session there, telling REPLY.
+Of the repository of ENTRY at CHECKOUT, in MODE, named SLUG from BASE,
+for the task ID of TITLE; HOW is how the repository works (see
+`drover-task--how'), read here, as the peer's heading overrides it."
+  (let* ((properties (cdr entry))
+         (target (or (plist-get how :target) (drover-git-default-branch checkout) "main"))
+         (plan (list :id id :title (drover-bound-line title) :jira (drover-task--remote-string (plist-get message :jira) 40)
+                     :body (and (stringp (plist-get message :body))
+                                (drover-bound-text (plist-get message :body) 400 drover-task-org-body-limit))
+                     :slug slug :kind mode :repo (car entry) :entry entry :checkout checkout :target target
+                     :branch-prefix (or (plist-get properties :branch-prefix) "")
+                     :base-choice base :carry (eq (plist-get message :carry) t)
+                     :directory (and (eq mode 'in-place) checkout) :hidden t
+                     :placement (plist-get how :placement) :setup (plist-get how :setup))))
+    (drover-task-prepare
+     plan
+     (lambda (outcome)
+       (drover-with-reporting "remote task start"
+			      (pcase-let* ((`(,plan . ,why) outcome)
+					   (made (list :worktree (or (plist-get plan :worktree) :false)
+						       :directory (or (plist-get plan :directory) :false)
+						       :branch (or (plist-get plan :branch) :false)
+						       :base (or (plist-get plan :base) :false)
+						       :base-ref (or (plist-get plan :base-ref) :false))))
+				(cond
+				 ((and why (not (plist-get plan :made)) (eq mode 'worktree)) (funcall reply nil why))
+				 (why (funcall reply (append (list :failure why) made)))
+				 (t (drover-task-start-session
+				     plan t
+				     (lambda (session)
+				       (if (stringp session)
+					   (funcall reply (append (list :failure (concat "no session started: " session)) made))
+					 (funcall reply (append (list :key (vector (symbol-name (drover-session-backend session))
+										   (drover-session-id session))
+								      :title (or (drover-session-title session) :false))
+								made)))))))))))))
 
 (defun drover-task--remote-finish (message reply)
   "Finish for a peer the task MESSAGE asks, answering through REPLY.
@@ -2126,50 +2317,56 @@ changes are told back unless the peer said to discard them."
            (not (drover-task-same-file-p (drover-task-git-main-checkout worktree) checkout)))
       (funcall reply nil (format "%s is no worktree of %s here" worktree (car entry))))
      (t
-      (let* ((exists (file-directory-p worktree))
-             (plan (list :id id :title (or (drover-task--remote-string (plist-get message :title) 300) id)
-                         :jira (drover-task--remote-string (plist-get message :jira) 40)
-                         :repo (car entry) :entry entry :checkout checkout
-                         :target (or (plist-get (cdr entry) :target) (drover-git-default-branch checkout) "main")
-                         :worktree worktree :directory worktree :branch branch
-                         :pr (drover-task--remote-string (plist-get message :pr) 300)
-                         :method (plist-get (cdr entry) :finish) :exists exists)))
-        (drover-task-git
-         (if exists worktree checkout) (if exists '("status" "--porcelain=v1" "--untracked-files=all") '("--version"))
-         (lambda (status)
-           (drover-with-reporting "remote task finish"
-             (let ((dirty (and exists (drover-task-git-parse-status (plist-get status :output)))))
-               (if (and dirty (not (eq (plist-get message :discard) t)))
-                   (funcall reply (list :dirty (string-join (seq-take dirty 10) ", ")))
-                 (let ((finish
-                        (lambda (pr-state)
-                          (let ((cleanup (or (not (eq (plist-get plan :method) 'pr))
-                                             (and pr-state (not (equal (plist-get pr-state :state) "OPEN"))))))
-                            (if (and pr-state (equal (plist-get pr-state :state) "OPEN"))
-                                (funcall reply nil (format "its pull request is still open: %s" (plist-get plan :pr)))
-                              (drover-task-finish-plan
-                               (append (list :dirty dirty :pr-state pr-state :cleanup cleanup) plan) t
-                               (lambda (outcome)
-                                 (funcall reply (append (list :note (or (plist-get outcome :note) :false)
-                                                              :removed (if (plist-get outcome :removed) t :false))
-                                                        (and (plist-get outcome :failure)
-                                                             (list :failure (plist-get outcome :failure)))
-                                                        (and (plist-get outcome :pr)
-                                                             (list :pr (plist-get outcome :pr))))))))))))
-                   (if (and (eq (plist-get plan :method) 'pr) (plist-get plan :pr) exists)
-                       (drover-task-run worktree drover-task-gh-program
-                                        (list "pr" "view" (plist-get plan :pr) "--json" "state,headRefOid")
-                                        (lambda (result)
-                                          (let ((data (and (plist-get result :ok)
-                                                           (ignore-errors (json-parse-string (plist-get result :output)
-                                                                                             :object-type 'plist)))))
-                                            (if data
-                                                (funcall finish (list :state (plist-get data :state)
-                                                                      :head (plist-get data :headRefOid)))
-                                              (funcall reply nil (concat "gh pr view failed: "
-                                                                         (drover-task-git-why result))))))
-                                        :timeout 30)
-                     (funcall finish nil)))))))))))))
+      (drover-repo-facts
+       checkout
+       (lambda (facts)
+         (drover-with-reporting "remote task finish"
+				(let* ((how (drover-task--how facts (drover-task--message-overrides message)))
+				       (exists (file-directory-p worktree))
+				       (plan (list :id id :title (or (drover-task--remote-string (plist-get message :title) 300) id)
+						   :jira (drover-task--remote-string (plist-get message :jira) 40)
+						   :repo (car entry) :entry entry :checkout checkout
+						   :target (or (plist-get how :target) (drover-git-default-branch checkout) "main")
+						   :checks (plist-get how :checks) :teardown (plist-get how :teardown)
+						   :worktree worktree :directory worktree :branch branch
+						   :pr (drover-task--remote-string (plist-get message :pr) 300)
+						   :method (plist-get how :finish) :exists exists)))
+				  (drover-task-git
+				   (if exists worktree checkout) (if exists '("status" "--porcelain=v1" "--untracked-files=all") '("--version"))
+				   (lambda (status)
+				     (drover-with-reporting "remote task finish"
+							    (let ((dirty (and exists (drover-task-git-parse-status (plist-get status :output)))))
+							      (if (and dirty (not (eq (plist-get message :discard) t)))
+								  (funcall reply (list :dirty (string-join (seq-take dirty 10) ", ")))
+								(let ((finish
+								       (lambda (pr-state)
+									 (let ((cleanup (or (not (eq (plist-get plan :method) 'pr))
+											    (and pr-state (not (equal (plist-get pr-state :state) "OPEN"))))))
+									   (if (and pr-state (equal (plist-get pr-state :state) "OPEN"))
+									       (funcall reply nil (format "its pull request is still open: %s" (plist-get plan :pr)))
+									     (drover-task-finish-plan
+									      (append (list :dirty dirty :pr-state pr-state :cleanup cleanup) plan) t
+									      (lambda (outcome)
+										(funcall reply (append (list :note (or (plist-get outcome :note) :false)
+													     :removed (if (plist-get outcome :removed) t :false))
+												       (and (plist-get outcome :failure)
+													    (list :failure (plist-get outcome :failure)))
+												       (and (plist-get outcome :pr)
+													    (list :pr (plist-get outcome :pr))))))))))))
+								  (if (and (eq (plist-get plan :method) 'pr) (plist-get plan :pr) exists)
+								      (drover-task-run worktree drover-task-gh-program
+										       (list "pr" "view" (plist-get plan :pr) "--json" "state,headRefOid")
+										       (lambda (result)
+											 (let ((data (and (plist-get result :ok)
+													  (ignore-errors (json-parse-string (plist-get result :output)
+																	    :object-type 'plist)))))
+											   (if data
+											       (funcall finish (list :state (plist-get data :state)
+														     :head (plist-get data :headRefOid)))
+											     (funcall reply nil (concat "gh pr view failed: "
+															(drover-task-git-why result))))))
+										       :timeout 30)
+								    (funcall finish nil))))))))))))))))
 
 (defun drover-task-remote-answer (peer access message reply)
   "Answer the request MESSAGE of PEER, of ACCESS, about tasks, through REPLY.

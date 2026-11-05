@@ -962,7 +962,10 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
       ;; A repository whose tasks it starts and finishes for its peers,
       ;; in sessions of its fake backend.
       (require 'drover-task)
-      (setq drover-task-repositories `(("test/repo" :checkout ,checkout :finish merge))
+      ;; How the repository works is read from it: no model is asked here.
+      (setq drover-repo-generate-function (lambda (_prompt _system callback)
+                                            (funcall callback (list :failure "no model in tests"))))
+      (setq drover-task-repositories `(("test/repo" :checkout ,checkout))
             drover-task-worktree-root (expand-file-name "worktrees/" dir)
             drover-task-harness '(:backend fake :engine fake)))
     (when-let* ((claude (getenv "DROVER_AGENT_CLAUDE")))

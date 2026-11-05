@@ -213,6 +213,23 @@ SUFFIX is \"\" for the first, \"_2\" for the second, and so on."
                 (setq found (file-name-as-directory file)))))))
       found)))
 
+(defconst drover-task-org-overrides
+  '((:finish . "DROVER_FINISH") (:placement . "DROVER_WORKTREES") (:setup . "DROVER_SETUP")
+    (:checks . "DROVER_CHECKS") (:teardown . "DROVER_TEARDOWN") (:target . "DROVER_TARGET"))
+  "The properties of a heading overriding how its repository works, by key.
+DROVER_FINISH is merge-push, merge, pr or none; DROVER_WORKTREES
+sibling or default; DROVER_SETUP, DROVER_CHECKS and DROVER_TEARDOWN
+shell commands joined by &&; DROVER_TARGET the branch work lands on.")
+
+(defun drover-task-org--overrides ()
+  "Return the overrides of the entry at point, inherited, as a plist of strings."
+  (let ((overrides nil))
+    (pcase-dolist (`(,key . ,property) (reverse drover-task-org-overrides))
+      (when-let* ((value (org-entry-get nil property t))
+                  ((not (string-blank-p value))))
+        (setq overrides (cons key (cons (substring-no-properties (string-trim value)) overrides)))))
+    overrides))
+
 (defun drover-task-org-body ()
   "Return the body of the entry at point, its drawers and sub-headings left out.
 Bounded to `drover-task-org-body-limit' characters; nil when empty."
@@ -240,9 +257,12 @@ the task's project, :jira, its Jira key (see `drover-task-org-jira-key'),
 repositories DROVER_REPO names, inherited, :kind, DROVER_KIND,
 inherited, a symbol, :folder, DROVER_FOLDER, inherited, else a
 directory a file link of its entry names, :goal-checks,
-DROVER_GOAL_CHECKS, inherited, the shell command its goals run,
-:attempts, the worktrees or directories it works in, and :tick, what
-tells it changed."
+DROVER_GOAL_CHECKS, inherited, the checks its goals run, joined by &&,
+:overrides, a plist of what the heading says of how its repository
+works, overriding what the repository says, its properties inherited
+and unparsed (see `drover-task-org-overrides'), :attempts, the
+worktrees or directories it works in, and :tick, what tells it
+changed."
   (with-current-buffer (marker-buffer marker)
     (org-with-point-at marker
       (let* ((properties (org-entry-properties nil 'standard))
@@ -275,6 +295,7 @@ tells it changed."
               :folder (or (when-let* ((folder (org-entry-get nil "DROVER_FOLDER" t)))
                             (file-name-as-directory (expand-file-name folder)))
                           (drover-task-org--folder-link))
+              :overrides (drover-task-org--overrides)
               :goal-checks (and goal-checks (not (string-blank-p goal-checks))
                                 (substring-no-properties (string-trim goal-checks)))
               :attempts (nreverse attempts)

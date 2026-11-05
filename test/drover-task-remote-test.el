@@ -68,7 +68,9 @@
         (pcase-let ((`(,finished ,error)
                      (drover-task-remote-test-ask (list :kind "finish" :task "T1-FIX" :title "Task t1-fix"
                                                         :repo "test/repo" :worktree worktree :directory worktree
-                                                        :branch "t1-fix" :jira :false :pr :false :discard :false))))
+                                                        :branch "t1-fix" :jira :false :pr :false :discard :false
+                                                        ;; As the task's heading says: the repository says nothing.
+                                                        :finish-method "merge"))))
           (should-not error)
           (should-not (plist-get finished :failure))
           (should (string-match-p "merged 1 commit into main" (plist-get finished :note)))
