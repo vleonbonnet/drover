@@ -41,11 +41,14 @@
 ;; Another host's sessions carry the summaries their owner wrote, in
 ;; their records: their text never leaves their host but through it.
 ;;
-;; The model answers through OpenCode's service, which bills it to the
-;; provider of `drover-summary-model': a stateless generation, which
+;; The model answers through OpenCode's service, which bills it to its
+;; provider: this host's cheap model (`drover-model-cheap'), unless
+;; `drover-summary-model' names one.  A stateless generation, which
 ;; makes no session, so that none shows among the user's sessions nor
 ;; counts in their usage; drover keeps its own count, per day
-;; (`drover-summary-usage'), up to `drover-summary-daily-limit'.
+;; (`drover-summary-usage'), up to `drover-summary-daily-limit'.  A host
+;; where no cheap model resolves writes no summary but those a turn
+;; needs no model for, which it says once, until one resolves.
 
 ;;; Code:
 
@@ -53,6 +56,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'drover-core)
+(require 'drover-cheap)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
@@ -64,7 +68,6 @@
 (declare-function opencode-error-describe "opencode-http" (error))
 (declare-function opencode-error-status "opencode-http" (error))
 (declare-function opencode-error-tag "opencode-http" (error))
-(declare-function opencode-service-read-registration "opencode-service" ())
 
 (defgroup drover-summary nil
   "Sessions summarized by a cheap model."
@@ -83,14 +86,20 @@ turns is never sent to the model."
                  (repeat :tag "These backends" symbol))
   :group 'drover-summary)
 
-(defcustom drover-summary-model "github-copilot/claude-haiku-5.5"
-  "The model writing summaries, as PROVIDER/MODEL of OpenCode's catalog.
-A small one: a summary reads a few kilobytes and writes a few lines."
-  :type 'string
+(defcustom drover-summary-model nil
+  "The model writing summaries, as PROVIDER/MODEL of OpenCode's catalog, or nil.
+Nil for this host's cheap model, as `drover-model-cheap' resolves it
+from the catalogs of its OpenCode service and the providers it is
+signed in to.  A small one: a summary reads a few kilobytes and
+writes a few lines."
+  :type '(choice (const :tag "This host's cheap model" nil)
+                 (string :tag "PROVIDER/MODEL"))
   :group 'drover-summary)
 
 (defcustom drover-summary-variant "low"
-  "The variant of `drover-summary-model', such as its effort, or nil."
+  "The variant of the model writing summaries, such as its effort, or nil.
+The cheap model runs it when it offers it, else its default; a model
+`drover-summary-model' names runs it whatever it offers."
   :type '(choice (const :tag "The model's default" nil) string)
   :group 'drover-summary)
 
@@ -150,7 +159,8 @@ credentials in URLs: what a regexp matches is replaced by [redacted]."
   "Function asking the model for a summary.
 It is called with PROMPT, a string, and CALLBACK, which it calls once,
 later or at once, with (:text TEXT), what the model wrote, or with
-\(:failure MESSAGE).  It must never wait."
+\(:failure MESSAGE), adding :none t when there is no model to ask, as
+when no cheap model resolves on this host.  It must never wait."
   :type 'function
   :group 'drover-summary)
 
@@ -706,6 +716,28 @@ See `drover-summary-rest'.")
 (defvar drover-summary--capped nil
   "The day the daily limit was reported, or nil.")
 
+(defvar drover-summary--off nil
+  "Why no model may be asked for summaries, a line, or nil.
+Set as the model's function answers there is none, such as when no
+cheap model resolves on this host; said once.")
+
+(defun drover-summary--off-p ()
+  "Return non-nil while there is no model to ask for summaries.
+Once `drover-summary-model' names one, or `drover-model-cheap'
+resolves one, as the catalogs it reads change, summaries resume."
+  (and drover-summary--off
+       (if (or (stringp drover-summary-model) (drover-model-cheap))
+           (setq drover-summary--off nil)
+         t)))
+
+(defun drover-summary--no-model (message)
+  "Note that there is no model to ask for summaries, for MESSAGE; said once.
+Turns needing no model are still summarized."
+  (unless drover-summary--off
+    (drover-message "Drover summarizes no session needing a model: %s"
+                    (or (drover-bound-line message) "no model")))
+  (setq drover-summary--off (or (drover-bound-line message) "no model")))
+
 (defvar drover-summary--usage nil
   "Summaries written by the model, (FILE . ENTRIES) as read from FILE, or nil.
 ENTRIES are (DATE COUNT INPUT OUTPUT), newest first: how many the
@@ -815,6 +847,7 @@ only after a summary was written.  None is asked for a while (see
             (drover-summary--finish token)
             (drover-summary--settle job (car trivial) (cdr trivial) (float-time)))
            ((or (and (drover-summary--resting-p) (not (plist-get job :asked)))
+                (and (not (plist-get job :asked)) (drover-summary--off-p))
                 (not (drover-summary--allowed-p)))
             (drover-summary--finish token))
            (t
@@ -836,9 +869,12 @@ It read INPUT characters."
         (cond
          (parsed
           (setq drover-summary--failing nil
-                drover-summary--failed-at nil)
+                drover-summary--failed-at nil
+                drover-summary--off nil)
           (drover-summary--count input (length text))
           (drover-summary--settle job (car parsed) (cdr parsed) (float-time)))
+         ((plist-get result :none)
+          (drover-summary--no-model (plist-get result :failure)))
          (t (drover-summary--failed (or (plist-get result :failure) "the model wrote nothing"))))))))
 
 (defun drover-summary--settle (job line recap time)
@@ -873,12 +909,29 @@ until it works again.  Lists draw it at once."
       (id . ,(substring drover-summary-model (1+ slash)))
       ,@(and drover-summary-variant `((variant . ,drover-summary-variant))))))
 
-(defun drover-summary--service-running-p ()
-  "Return non-nil when this host's OpenCode service runs, as registered.
-Summaries never start it."
-  (when-let* ((registration (opencode-service-read-registration))
-              (pid (plist-get registration :pid)))
-    (and (natnump pid) (process-attributes pid) t)))
+(defun drover-summary--cheap-ref (cheap)
+  "Return CHEAP, a model of `drover-model-cheap', as OpenCode's model reference.
+It names `drover-summary-variant' when CHEAP offers it."
+  `((providerID . ,(plist-get cheap :provider-id))
+    (id . ,(plist-get cheap :id))
+    ,@(and drover-summary-variant (member drover-summary-variant (plist-get cheap :variants))
+           `((variant . ,drover-summary-variant)))))
+
+(defun drover-summary--with-model (then else)
+  "Call THEN with the reference of the model writing summaries, or ELSE.
+The model is `drover-summary-model', else this host's cheap model (see
+`drover-model-cheap-fetch'), read as needed: ELSE gets (:failure
+MESSAGE) when it cannot be read, with :none t when none resolves.
+Either may be called before this returns."
+  (if drover-summary-model
+      (funcall then (drover-summary--model-ref))
+    (drover-model-cheap-fetch
+     (lambda (answer)
+       (cond
+        ((plist-get answer :failure) (funcall else (list :failure (plist-get answer :failure))))
+        ((plist-get answer :none)
+         (funcall else (list :failure (concat "no cheap model, " (plist-get answer :none)) :none t)))
+        (t (funcall then (drover-summary--cheap-ref answer))))))))
 
 (defvar drover-summary--former-path nil
   "Non-nil once the service knew stateless generation by its former path alone.
@@ -888,33 +941,38 @@ ones keep as an alias of /api/experimental/generate/text.")
 (defun drover-summary-opencode-generate (prompt callback)
   "Have OpenCode's service write what PROMPT asks, then call CALLBACK.
 A stateless generation (POST /api/experimental/generate/text, or its
-former path for a service without it), through `drover-summary-model':
-it makes no session, which neither lists nor usage totals of sessions
-show.  CALLBACK gets (:text TEXT) or (:failure MESSAGE), as
-`drover-summary-generate-function' says."
+former path for a service without it), through `drover-summary-model'
+or this host's cheap model: it makes no session, which neither lists
+nor usage totals of sessions show.  CALLBACK gets (:text TEXT) or
+\(:failure MESSAGE), as `drover-summary-generate-function' says."
   (require 'opencode-http)
-  (if (not (drover-summary--service-running-p))
+  (if (not (drover-cheap-service-running-p))
       (funcall callback (list :failure "OpenCode's service does not run"))
-    (opencode-call-with-service
-     nil #'opencode-request 'post
-     (if drover-summary--former-path "/api/experimental/generate" "/api/experimental/generate/text")
-     :body `((prompt . ,prompt) (model . ,(drover-summary--model-ref)))
-     :directory nil :buffer nil :timeout drover-summary-timeout
-     :then (lambda (response)
-             (drover-with-reporting "summary"
-               (let ((text (alist-get 'text (opencode-request-data response))))
-                 (funcall callback (if (stringp text)
-                                       (list :text (drover-bound-text text 20 2000))
-                                     (list :failure "OpenCode answered no text"))))))
-     :else (lambda (error)
-             (drover-with-reporting "summary"
-               ;; No such route, rather than no such model.
-               (if (and (not drover-summary--former-path)
-                        (eql (opencode-error-status error) 404)
-                        (not (opencode-error-tag error)))
-                   (progn (setq drover-summary--former-path t)
-                          (drover-summary-opencode-generate prompt callback))
-                 (funcall callback (list :failure (opencode-error-describe error)))))))))
+    (drover-summary--with-model
+     (lambda (model)
+       (condition-case err
+           (opencode-call-with-service
+            nil #'opencode-request 'post
+            (if drover-summary--former-path "/api/experimental/generate" "/api/experimental/generate/text")
+            :body `((prompt . ,prompt) (model . ,model))
+            :directory nil :buffer nil :timeout drover-summary-timeout
+            :then (lambda (response)
+                    (drover-with-reporting "summary"
+                      (let ((text (alist-get 'text (opencode-request-data response))))
+                        (funcall callback (if (stringp text)
+                                              (list :text (drover-bound-text text 20 2000))
+                                            (list :failure "OpenCode answered no text"))))))
+            :else (lambda (error)
+                    (drover-with-reporting "summary"
+                      ;; No such route, rather than no such model.
+                      (if (and (not drover-summary--former-path)
+                               (eql (opencode-error-status error) 404)
+                               (not (opencode-error-tag error)))
+                          (progn (setq drover-summary--former-path t)
+                                 (drover-summary-opencode-generate prompt callback))
+                        (funcall callback (list :failure (opencode-error-describe error)))))))
+         (error (funcall callback (list :failure (drover-error-message err))))))
+     callback)))
 
 ;;;; The mode
 
@@ -925,7 +983,8 @@ show.  CALLBACK gets (:text TEXT) or (:failure MESSAGE), as
   (maphash (lambda (_ job) (when (timerp (plist-get job :timer)) (cancel-timer (plist-get job :timer))))
            drover-summary--jobs)
   (setq drover-summary--timer nil
-        drover-summary--asked nil)
+        drover-summary--asked nil
+        drover-summary--off nil)
   (clrhash drover-summary--jobs)
   (clrhash drover-summary--queue)
   (clrhash drover-summary--seen)
@@ -939,8 +998,11 @@ one line on where it stands, which lists show as its summary, and a
 recap of its turn in a few lines, which an expanded session shows (see
 `drover-list-recap-lines').  It reads the recap of the last turn, a
 few kilobytes, secrets redacted (see `drover-summary-input'), through
-`drover-summary-generate-function', OpenCode's service by default; a
-turn is summarized once (see `drover-summary-file').
+`drover-summary-generate-function', OpenCode's service by default,
+with this host's cheap model (see `drover-model-cheap'); a turn is
+summarized once (see `drover-summary-file').  Where no cheap model
+resolves, only turns needing no model are summarized, which is said
+once.
 `drover-summary-harnesses' chooses the backends summarized,
 `drover-summary-daily-limit' bounds the summaries a day, and
 `drover-summarize' summarizes a session now.  Another host's sessions
@@ -988,6 +1050,8 @@ asked for."
        ((not (drover-summary--eligible-p session))
         (when (called-interactively-p 'any)
           (user-error "Not summarized: see `drover-summary-harnesses'")))
+       ((and (drover-summary--off-p) (called-interactively-p 'any))
+        (user-error "No model to summarize with: %s" drover-summary--off))
        (t
         (let ((key (drover-session-key session)))
           (setq drover-summary--asked (cons (cons key (or anew (cdr (assoc key drover-summary--asked))))

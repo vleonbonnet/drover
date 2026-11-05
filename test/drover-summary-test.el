@@ -34,7 +34,11 @@
 (defvar drover-summary-test-prompts nil
   "The prompts the fake model was given, newest first.")
 
-(defvar drover-summary-test-answer '(:text "Done: wrote the feature, tests pass\nAdded the parser.\nTests pass.")
+(defconst drover-summary--test-default-answer
+  '(:text "Done: wrote the feature, tests pass\nAdded the parser.\nTests pass.")
+  "What the fake model answers unless a test says otherwise.")
+
+(defvar drover-summary-test-answer drover-summary--test-default-answer
   "What the fake model answers: a result, a function of the prompt returning one, or `later'.")
 
 (defvar drover-summary-test-pending nil
@@ -85,6 +89,7 @@
              (drover-summary--failed-at nil)
              (drover-summary--former-path nil)
              (drover-summary--capped nil)
+             (drover-summary--off nil)
              (drover-summary--timer nil)
              (drover-summary--asked nil)
              (drover-summary--seen (make-hash-table :test #'equal))
@@ -376,6 +381,42 @@ SLOTS is a plist of slot names as keywords and values."
         (should (seq-some (lambda (message) (string-search "no summary after" message)) messages))
         (should (= (hash-table-count drover-summary--jobs) 0))))))
 
+(ert-deftest drover-summary-test-no-model ()
+  "Without a model, sessions show as they did, said once, until one resolves."
+  (drover-summary-test-with (mapcar (lambda (i) (drover-summary-test-session (format "s%d" i) :status 'working))
+                                    (number-sequence 1 3))
+    (setq drover-summary-test-answer
+          '(:failure "no cheap model, no provider of subscription offers one" :none t))
+    (let* ((cheap nil)
+           (messages
+            (cl-letf (((symbol-function 'drover-model-cheap) (lambda (&rest _) cheap)))
+              (drover-summary-test-messages
+                (drover-summary-test-turn "s1" :status 'done)
+                (drover-summary-test-settle)
+                ;; Nothing more is asked of the model, nor said, but a turn
+                ;; needing no model is still summarized.
+                (setf (alist-get "s3" drover-test-recaps nil nil #'equal) (list :reply "Done: nothing to do"))
+                (drover-summary-test-turn "s2" :status 'done)
+                (drover-summary-test-turn "s3" :status 'done)
+                (drover-summary-test-settle)
+                (should (= (length drover-summary-test-prompts) 1))
+                (should (equal (drover-session-brief (drover-summary-test-of "s3")) "Done: nothing to do"))
+                (should-not (drover-session-brief (drover-summary-test-of "s2")))
+                (should-error (funcall-interactively #'drover-summarize (list (drover-summary-test-of "s2")))
+                              :type 'user-error)
+                ;; Not resting as after a failure: once a model resolves, the next turn has its summary.
+                (should-not drover-summary--failed-at)
+                (setq cheap '(:model "openai/gpt-6-luna")
+                      drover-summary-test-answer drover-summary--test-default-answer)
+                (drover-summary-test-turn "s2" :status 'working)
+                (drover-summary-test-turn "s2" :status 'done)
+                (drover-summary-test-settle)))))
+      (should (equal (seq-filter (lambda (message) (string-search "needing a model" message)) messages)
+                     '("Drover summarizes no session needing a model: no cheap model, no provider of subscription offers one")))
+      (should (= (length drover-summary-test-prompts) 2))
+      (should-not drover-summary--off)
+      (should (equal (drover-session-brief (drover-summary-test-of "s2")) "Done: wrote the feature, tests pass")))))
+
 (ert-deftest drover-summary-test-redacted ()
   "Obvious secrets never reach the model, and what it reads stays small."
   (let ((text (concat "export GITHUB_TOKEN=ghp_" (make-string 36 ?a) "\n"
@@ -464,15 +505,15 @@ SLOTS is a plist of slot names as keywords and values."
 (ert-deftest drover-summary-test-opencode-request ()
   "OpenCode's service is asked a stateless generation, never started for it."
   (let ((requests nil)
-        (results nil))
+        (results nil)
+        (drover-summary-model "github-copilot/claude-haiku-5.5"))
     (cl-letf (((symbol-function 'opencode-service-read-registration)
                (lambda () (list :url "http://127.0.0.1:1" :password "x" :pid (emacs-pid))))
               ((symbol-function 'opencode-request)
                (lambda (method path &rest arguments)
                  (push (append (list method path) arguments) requests)
                  (funcall (plist-get arguments :then) '((data (text . "Done: it works")))))))
-      (let ((drover-summary-model "github-copilot/claude-haiku-5.5")
-            (drover-summary-variant "low"))
+      (let ((drover-summary-variant "low"))
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))))
     (should (equal results '((:text "Done: it works"))))
     (let ((request (car requests)))
@@ -521,6 +562,42 @@ SLOTS is a plist of slot names as keywords and values."
       (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results))))
     (should-not requests)
     (should (equal results '((:failure "OpenCode's service does not run"))))))
+
+(ert-deftest drover-summary-test-opencode-cheap-model ()
+  "Without a model named, this host's cheap model writes, at the variant when it offers it."
+  (let ((requests nil)
+        (results nil)
+        (cheap nil)
+        (drover-summary-model nil)
+        (drover-summary-variant "low"))
+    (cl-letf (((symbol-function 'opencode-service-read-registration)
+               (lambda () (list :url "http://127.0.0.1:1" :password "x" :pid (emacs-pid))))
+              ((symbol-function 'drover-model-cheap-fetch)
+               (lambda (callback) (funcall callback cheap)))
+              ((symbol-function 'opencode-request)
+               (lambda (method path &rest arguments)
+                 (push (list method path (plist-get arguments :body)) requests)
+                 (funcall (plist-get arguments :then) '((data (text . "Done: it works")))))))
+      (dolist (case '(((:model "openai/gpt-6-luna" :provider-id "openai" :id "gpt-6-luna"
+                                :variants ("none" "low" "high"))
+                       ((providerID . "openai") (id . "gpt-6-luna") (variant . "low")))
+                      ((:model "github-copilot/claude-haiku-4.5" :provider-id "github-copilot"
+                               :id "claude-haiku-4.5" :variants ("high" "max"))
+                       ((providerID . "github-copilot") (id . "claude-haiku-4.5")))))
+        (setq cheap (car case) requests nil results nil)
+        (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))
+        (should (equal results '((:text "Done: it works"))))
+        (should (equal (car requests)
+                       `(post "/api/experimental/generate/text"
+                              ((prompt . "the prompt") (model . ,(cadr case)))))))
+      ;; None resolving asks nothing, and says there is none; a failure tells it.
+      (dolist (case '(((:none "no provider offers one")
+                       (:failure "no cheap model, no provider offers one" :none t))
+                      ((:failure "Boom") (:failure "Boom"))))
+        (setq cheap (car case) requests nil results nil)
+        (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))
+        (should-not requests)
+        (should (equal results (cdr case)))))))
 
 ;;;; Briefs in the buffers of sessions
 
