@@ -17,6 +17,10 @@ CLAUDE_CODE_IDE_EL ?= $(HOME)/.emacs.d/elpaca/sources/claude-code-ide
 # with channels and spyglass-reconnect.  Without it, the tests of the
 # remote layer are skipped.
 SPYGLASS_EL ?= $(HOME)/local/projects/spyglass
+# Anvil, whose MCP server drover-anvil's tools register with: its
+# checkout.  Without it, the tests calling them through Anvil's
+# dispatcher are skipped.
+ANVIL_EL ?= $(HOME)/.emacs.d/elpaca/sources/anvil
 # What drover's Package-Requires names, and what those need: a package
 # manager compiles drover with these alone, as elpaca does.
 REQUIRED_PATH = \
@@ -25,7 +29,7 @@ REQUIRED_PATH = \
 LOAD_PATH = -L . -L test $(REQUIRED_PATH) \
   -L $(AGENT_SHELL_EL) -L $(DEPS)/shell-maker -L $(DEPS)/acp \
   -L $(CLAUDE_CODE_IDE_EL) -L $(DEPS)/websocket -L $(DEPS)/web-server \
-  -L $(SPYGLASS_EL)
+  -L $(SPYGLASS_EL) -L $(ANVIL_EL)
 # Stale byte code must never shadow an edited source, in builds or tests.
 PREFER_NEWER = --eval '(setq load-prefer-newer t)'
 BATCH = $(EMACS) -Q --batch $(LOAD_PATH) $(PREFER_NEWER)
@@ -41,7 +45,7 @@ TESTS = $(wildcard test/*-test.el)
 FILE ?=
 SELECTOR ?=
 
-.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review real-data
+.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review bench-usage real-data
 
 all: compile test
 
@@ -234,7 +238,8 @@ bench-idle: compile
 # SEARCH=WORDS, comma-separated, measures instead searches of what was
 # said in the conversations Claude Code recorded on the agent's host,
 # read only, for each word; CLONE=MEGABYTES a Claude Code conversation
-# of a transcript that large cloned to the agent's host and back.  See
+# of a transcript that large cloned to the agent's host and back; NEW=1
+# sessions started on the agent's host from here.  See
 # test/drover-remote-bench.el.
 REMOTE ?=
 SSH ?= ssh
@@ -244,12 +249,21 @@ BACK_ARGS ?=
 BACK_HOST ?=
 SEARCH ?=
 CLONE ?=
+NEW ?=
 bench-remote: compile
 	$(NOPIPE) DROVER_BENCH_REMOTE="$(REMOTE)" DROVER_BENCH_SSH="$(SSH)" \
 	DROVER_BENCH_REMOTE_EMACS="$(REMOTE_EMACS)" DROVER_BENCH_BACK="$(BACK)" \
 	DROVER_BENCH_BACK_ARGS="$(BACK_ARGS)" DROVER_BENCH_BACK_HOST="$(BACK_HOST)" \
-	DROVER_BENCH_SEARCH="$(SEARCH)" DROVER_BENCH_CLONE="$(CLONE)" \
+	DROVER_BENCH_SEARCH="$(SEARCH)" DROVER_BENCH_CLONE="$(CLONE)" DROVER_BENCH_NEW="$(NEW)" \
 	$(BATCH) -l test/drover-test-helpers.el -l test/drover-remote-bench.el -f drover-remote-bench-main
+
+# Times the totals of usage over OpenCode's database of 2500 sessions
+# and 120 Claude Code transcripts, written in a throwaway home: the
+# first read in slices, the facts, each session's totals, the reports,
+# the list with its costs, a turn read, and an Emacs starting from what
+# was kept.  See test/drover-usage-bench.el.
+bench-usage: compile
+	$(BATCH) -l test/drover-test-helpers.el -l test/drover-usage-bench.el -f drover-usage-bench-main
 
 # Indexes the user's own Claude Code transcripts and Codex rollouts,
 # ~/.claude and ~/.codex or DROVER_CLAUDE_HOME and DROVER_CODEX_HOME,

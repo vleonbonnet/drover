@@ -1928,7 +1928,7 @@ A refusal is told on one line, as a warning, the session staying archived."
     (should (equal keys '(drover-list drover-list-side drover-select-project drover-search))))
   (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                          (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                 '("j" "B" "b" "l" "L" "p" "S" "X")))
+                 '("j" "B" "b" "l" "L" "p" "S" "$" "X")))
   ;; opencode.el's search of open buffers stays, unbound.
   (should (fboundp 'opencode-consult-sessions))
   (should-not (ignore-errors (transient-get-suffix 'drover-dispatch 'opencode-consult-sessions)))
@@ -2066,7 +2066,7 @@ once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS)."
             (drover-opencode--install)
             (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                                    (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                           '("j" "B" "b" "l" "L" "p" "S" "X"))))
+                           '("j" "B" "b" "l" "L" "p" "S" "$" "X"))))
         (kill-buffer session-buffer)
         (drover-opencode--install)))))
 
@@ -3266,6 +3266,8 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
       (create (list :agent "plan" :title "Task" :defaults defaults))
       (should (equal (plist-get created :directory) temporary-file-directory))
       (should (equal (plist-get created :title) "Task"))
+      ;; Displayed, unless hidden, as for another host.
+      (should-not (plist-get created :no-display))
       (should (equal (plist-get created :agent) "plan"))
       ;; `opencode-session-create' starts on the agent's pin itself.
       (should-not (plist-get created :model))
@@ -3279,6 +3281,8 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
         (should (equal (drover-session-directory session) temporary-file-directory))
         (puthash "ses_new" new-buffer opencode-session-buffers)
         (should (eq (drover-session-buffer session) new-buffer)))
+      (create (list :agent "plan" :defaults defaults :hidden t))
+      (should (eq (plist-get created :no-display) t))
       ;; A picked variant applies to the pin.
       (create (list :agent "plan" :variant 'low :defaults defaults))
       (should (equal (plist-get created :model)

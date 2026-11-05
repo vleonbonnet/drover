@@ -186,6 +186,13 @@ A longer reply is cut, and a note tells how many lines it goes on for."
   :type 'natnum
   :group 'drover)
 
+(defcustom drover-prompt-host-timeout 15
+  "Seconds the prompt waits for another host to tell what it starts.
+Its agents, models and defaults in a directory, or where a directory of
+this host is there; \[keyboard-quit] stops waiting."
+  :type 'number
+  :group 'drover)
+
 (defcustom drover-prompt-quote-reply-characters 2000
   "Characters of a last reply `drover-prompt-quote-sessions' quotes at most.
 It bounds the quote of replies of few long lines, as
@@ -214,6 +221,42 @@ prompt's directory follows the buffer it was started from.")
 
 (defvar-local drover-prompt--default-directory nil
   "Directory the prompt inherited from the buffer it was started from.")
+
+(defvar-local drover-prompt-host nil
+  "Host a new session of the prompt starts on, a peer's name, or nil for this one.
+Chosen in the target picker, with one of its new sessions, or with the
+directory, \[universal-argument] before its key; its directory there is
+`drover-prompt-host-directory', the buffer's `default-directory' staying
+this host's, for its links and attachments.")
+
+(defvar-local drover-prompt-host-directory nil
+  "Directory of `drover-prompt-host' a new session of the prompt starts in.")
+
+(defvar drover-prompt-remote-functions nil
+  "How the prompt starts sessions on other hosts, or nil when it cannot.
+`drover-remote-mode' sets it, a plist of functions:
+
+ :targets   Of an optional WAIT, seconds, returning the new sessions
+            of other hosts offered, plists (:host NAME :host-label
+            LABEL :backend BACKEND :engine ENGINE :label LABEL).
+ :hosts     Returning the hosts starting sessions, as (NAME . LABEL).
+ :label     Of a host's NAME, returning how views name it.
+ :catalog   Of a host's NAME, a directory of this host LOCAL, one of
+            NAME's DIRECTORY and a WAIT, seconds, returning what NAME
+            told of what it starts there: :engines, an alist (ENGINE
+            :agents :models :default), :where, LOCAL's counterpart.
+ :default-directory
+            Of a host's NAME, a directory of this host and a WAIT,
+            returning the directory there a session of it starts in.
+ :read-directory
+            Of a host's NAME, a PROMPT and a DEFAULT, reading one of
+            its directories.
+ :start     Of a host's NAME, a TARGET, a DIRECTORY there, a TEXT, the
+            start OPTIONS and a function LATER, starting the session
+            there, waited for: returning its host's answer, nil when
+            the wait was stopped, LATER getting it then, or signaling
+            a `user-error'.
+ :open      Of a host's NAME and that answer, opening the session.")
 
 (defvar-local drover-prompt--defaults nil
   "Defaults data of the engines, as an alist (ENGINE . DEFAULTS).
@@ -363,6 +406,8 @@ the defaults are fetched again."
   (setq default-directory (file-name-as-directory (expand-file-name directory))
         drover-prompt--default-directory default-directory
         drover-prompt-directory-picked-p nil
+        drover-prompt-host nil
+        drover-prompt-host-directory nil
         drover-prompt-picked-agent nil
         drover-prompt-picked-model nil
         drover-prompt-picked-variant nil
@@ -385,6 +430,50 @@ goes, having been chosen for the text that left."
     (drover-prompt--fetch-defaults)))
 
 ;;;; What the prompt runs
+
+(defun drover-prompt--remote (key &rest arguments)
+  "Call the function KEY of `drover-prompt-remote-functions' with ARGUMENTS.
+Return nil when there is none, other hosts out of reach."
+  (when-let* ((function (plist-get drover-prompt-remote-functions key)))
+    (apply function arguments)))
+
+(defun drover-prompt--host-label (host)
+  "Return how views name HOST, a peer's name."
+  (or (drover-prompt--remote :label host) host))
+
+(defun drover-prompt--host-targets (host &optional wait)
+  "Return the new sessions HOST starts, as `drover-prompt-remote-functions' tells.
+A host not told yet is waited for WAIT seconds."
+  (seq-filter (lambda (target) (equal (plist-get target :host) host))
+              (drover-prompt--remote :targets wait)))
+
+(defun drover-prompt--host-engines (host directory &optional wait)
+  "Return what HOST told of its engines in DIRECTORY, there, as an alist.
+Each entry is (ENGINE :agents NAMES :models MODELS :default OPTIONS);
+nil until told, asked meanwhile, and waited for WAIT seconds."
+  (and host directory
+       (plist-get (drover-prompt--remote :catalog host nil directory wait) :engines)))
+
+(defun drover-prompt--host-resolve (host directory engine agent model variant)
+  "Return the resolved options a new session of ENGINE on HOST in DIRECTORY runs.
+AGENT, MODEL and VARIANT are the explicit choices; what is not chosen
+is what HOST told a session started without a choice runs, the variant
+of a model chosen its default."
+  (let ((default (plist-get (alist-get engine (drover-prompt--host-engines host directory)) :default)))
+    (list :agent (or agent (plist-get default :agent))
+          :model (or model (plist-get default :model))
+          :variant (or variant
+                       (if model (drover-model-default-variant model) (plist-get default :variant))))))
+
+(defun drover-prompt--host-default-directory (host &optional buffer wait)
+  "Return where a new session of the prompt BUFFER starts on HOST, or nil.
+BUFFER's directory there, when HOST is its host, else what HOST's
+directories map BUFFER's to (see `drover-prompt-remote-functions'),
+told already or waited for WAIT seconds."
+  (with-current-buffer (or buffer (current-buffer))
+    (if (and drover-prompt-host-directory (equal drover-prompt-host host))
+        drover-prompt-host-directory
+      (drover-prompt--remote :default-directory host default-directory wait))))
 
 (defun drover-prompt--runs-p (model engine)
   "Return non-nil when ENGINE can run MODEL, a `drover-model'.
@@ -470,12 +559,18 @@ It is the engine that took a prompt last, else
 there: then the first engine that can.  BUFFER defaults to the current
 one."
   (with-current-buffer (or buffer (current-buffer))
-    (let ((last (or drover-prompt--last-engine drover-prompt-default-engine))
-          (engines (and drover-prompt-picked-model
-                        (drover-model-engines drover-prompt-picked-model))))
-      (if (or (null engines) (memq last engines))
-          last
-        (car engines)))))
+    (let* ((last (or drover-prompt--last-engine drover-prompt-default-engine))
+           (engines (and drover-prompt-picked-model
+                         (drover-model-engines drover-prompt-picked-model)))
+           ;; On another host, among the engines it starts.
+           (there (and drover-prompt-host
+                       (delete-dups (mapcar (lambda (target) (plist-get target :engine))
+                                            (drover-prompt--host-targets drover-prompt-host)))))
+           (runs (if (and there engines) (seq-filter (lambda (engine) (memq engine engines)) there) there)))
+      (cond
+       (there (if (memq last runs) last (or (car runs) (car there))))
+       ((or (null engines) (memq last engines)) last)
+       (t (car engines))))))
 
 (defun drover-prompt--chosen-target (&optional buffer)
   "Return the running session the prompt BUFFER is set to go to, or nil.
@@ -506,15 +601,22 @@ For a prompt `drover-prompt-edit-for' set to go to a running session,
 they are what that session runs now: its model and variant, as its
 backend tells them, the agent unknown.  Otherwise those of a new
 session of the engine that took a prompt last, else of
-`drover-prompt-default-engine'.  BUFFER is the prompt buffer, the
-current one by default.  The pickers' \"Default\" entry names them."
+`drover-prompt-default-engine', on another host what it told such a
+session runs.  BUFFER is the prompt buffer, the current one by default.
+The pickers' \"Default\" entry names them."
   (with-current-buffer (or buffer (current-buffer))
-    (if-let* ((session (drover-prompt--chosen-target)))
-        (let ((current (and (drover-supports-p session :options)
-                            (drover-backend-call session :options))))
-          (list :agent nil :model (plist-get current :model) :variant (plist-get current :variant)))
+    (cond
+     ((drover-prompt--chosen-target)
+      (let* ((session (drover-prompt--chosen-target))
+             (current (and (drover-supports-p session :options)
+                           (drover-backend-call session :options))))
+        (list :agent nil :model (plist-get current :model) :variant (plist-get current :variant))))
+     (drover-prompt-host
+      (drover-prompt--host-resolve drover-prompt-host drover-prompt-host-directory
+                                   (drover-prompt--display-engine) nil nil nil))
+     (t
       (drover-prompt-engine-options (or drover-prompt--last-engine drover-prompt-default-engine)
-                                    nil nil nil))))
+                                    nil nil nil)))))
 
 (defun drover-prompt-effective-options (&optional buffer)
   "Return what the prompt BUFFER shows it runs, as a display plist.
@@ -527,17 +629,28 @@ A prompt `drover-prompt-edit-for' set to go to a running session shows
 what that session runs once sent it, as its entry in the target picker
 does: its own model and variant, the choices applying to it; its agent
 is the one chosen, else unknown.  Otherwise it shows what a new session
-would run."
+would run, on another host (`drover-prompt-host') what that host told:
+its :directory is then the host's, named by :host-label."
   (with-current-buffer (or buffer (current-buffer))
     (let* ((session (drover-prompt--chosen-target))
+           (host (and (not session) drover-prompt-host))
            (entry (and session (drover-prompt--chosen-entry-options session (current-buffer))))
-           (resolved (unless session
-                       (drover-prompt-engine-options (drover-prompt--display-engine)
-                                                     drover-prompt-picked-agent
-                                                     drover-prompt-picked-model
-                                                     drover-prompt-picked-variant))))
-      (list :directory (or default-directory drover-prompt--default-directory)
-            :directory-explicit-p drover-prompt-directory-picked-p
+           (resolved (cond
+                      (session nil)
+                      (host (drover-prompt--host-resolve host drover-prompt-host-directory
+                                                         (drover-prompt--display-engine)
+                                                         drover-prompt-picked-agent
+                                                         drover-prompt-picked-model
+                                                         drover-prompt-picked-variant))
+                      (t (drover-prompt-engine-options (drover-prompt--display-engine)
+                                                       drover-prompt-picked-agent
+                                                       drover-prompt-picked-model
+                                                       drover-prompt-picked-variant)))))
+      (list :directory (if host
+                           drover-prompt-host-directory
+                         (or default-directory drover-prompt--default-directory))
+            :host-label (and host (drover-prompt--host-label host))
+            :directory-explicit-p (or (and host t) drover-prompt-directory-picked-p)
             :agent (if session drover-prompt-picked-agent (plist-get resolved :agent))
             :agent-explicit-p (and drover-prompt-picked-agent t)
             :model (plist-get (if session entry resolved) :model)
@@ -555,6 +668,14 @@ The face is `opencode-setting-chosen' when EXPLICIT-P, else
 `opencode-setting-inherited'."
   (propertize (format "%s" value)
               'face (if explicit-p 'opencode-setting-chosen 'opencode-setting-inherited)))
+
+(defun drover-prompt--directory-label (options)
+  "Return the directory of display OPTIONS as the header shows it, or nil.
+One of another host's is named after its host, as that host spells it."
+  (when-let* ((directory (plist-get options :directory)))
+    (if-let* ((host (plist-get options :host-label)))
+        (format "%s: %s" host directory)
+      (abbreviate-file-name directory))))
 
 (defun drover-prompt--header-option (value explicit-p)
   "Return VALUE in brackets for the header, its face telling EXPLICIT-P, or nil."
@@ -613,7 +734,6 @@ defines it.  The session chosen to send to, if any, follows them."
   (let* ((options (drover-prompt-effective-options))
          (dispatch (or (drover-dispatch-key-description t)
                        (substitute-command-keys "\\[drover-dispatch]")))
-         (directory (plist-get options :directory))
          (model (plist-get options :model))
          (variant (plist-get options :variant))
          (key (lambda (command label &optional prefix)
@@ -629,7 +749,7 @@ defines it.  The session chosen to send to, if any, follows them."
      (drover-prompt--header-target)
      "  |  "
      (funcall key #'drover-prompt-directory "cwd" t)
-     (drover-prompt--header-option (and directory (abbreviate-file-name directory))
+     (drover-prompt--header-option (drover-prompt--directory-label options)
                                    (plist-get options :directory-explicit-p))
      "  " (funcall key #'drover-prompt-agent "agent")
      (drover-prompt--header-option (plist-get options :agent) (plist-get options :agent-explicit-p))
@@ -1328,6 +1448,80 @@ CONTENT leaves the prompt, unless the backend refuses at once."
         (unless refused
           (drover-prompt-consume content buffer))))))
 
+(defun drover-prompt--unchanged-p (content buffer)
+  "Return non-nil when the prompt BUFFER still holds CONTENT as it was taken."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (equal (string-trim (if (plist-get content :region)
+                                 (buffer-substring-no-properties (plist-get content :start) (plist-get content :end))
+                               (buffer-substring-no-properties (point-min) (point-max))))
+                (plist-get content :org)))))
+
+(defun drover-prompt--host-offers-p (host directory engine model)
+  "Return non-nil unless HOST told it runs no MODEL with ENGINE in DIRECTORY.
+Its catalogs not told, it may."
+  (let ((entry (alist-get engine (drover-prompt--host-engines host directory))))
+    (or (null entry)
+        (null (plist-get entry :models))
+        (and (seq-find (lambda (offered) (equal (drover-model-key offered) (drover-model-key model)))
+                       (plist-get entry :models))
+             t))))
+
+(defun drover-prompt--send-to-host (target content buffer)
+  "Start on another host the session TARGET describes, sending it CONTENT.
+CONTENT is the prompt BUFFER's.  TARGET is a new session of another
+host the target picker offers.  It starts in BUFFER's directory there,
+read first unless BUFFER's new sessions start on that host already
+\(`drover-prompt-host'), defaulting to what that host's directories map
+BUFFER's `default-directory' to; the host and directory become
+BUFFER's, kept for the next prompt as a directory chosen is.  The host
+starts it through its own backend, with the options chosen in BUFFER
+and CONTENT's text, waited for: CONTENT
+then leaves the prompt and the session opens here, an OpenCode session
+in a full buffer through its host, a terminal or a shell mirrored.
+When it does not start, a `user-error' says why and the prompt stays.
+Attachments, files of this host, go as their labels in the text."
+  (let* ((host (plist-get target :host))
+         (label (or (plist-get target :host-label) (drover-prompt--host-label host)))
+         (engine (plist-get target :engine))
+         (what (format "%s on %s" (plist-get target :label) label))
+         (directory (or (and (equal (buffer-local-value 'drover-prompt-host buffer) host)
+                             (buffer-local-value 'drover-prompt-host-directory buffer))
+                        (drover-prompt--remote
+                         :read-directory host (format "Start a new %s in: " what)
+                         (drover-prompt--host-default-directory host buffer drover-prompt-host-timeout)))))
+    (with-current-buffer buffer
+      (setq drover-prompt-host host
+            drover-prompt-host-directory directory)
+      (force-mode-line-update))
+    (let* ((explicit (drover-prompt-explicit-options buffer))
+           (model (plist-get explicit :model))
+           (options (list :agent (plist-get explicit :agent)
+                          :model model
+                          :variant (and (or (null model) (drover-prompt--runs-p model engine))
+                                        (plist-get explicit :variant))
+                          :title (buffer-local-value 'drover-prompt-title buffer)))
+           (attachments (plist-get content :attachments)))
+      (when model
+        (unless (drover-prompt--runs-p model engine)
+          (user-error "The %s runs no %s; choose another model" what (drover-model-label model)))
+        (unless (drover-prompt--host-offers-p host directory engine model)
+          (user-error "%s offers no %s to %s there; choose another model"
+                      label (drover-model-label model) (drover-engine-label engine))))
+      (when attachments
+        (drover-warn "%d attachment%s went to %s as text only"
+                     (length attachments) (if (cdr attachments) "s" "") label))
+      (when-let* ((result (drover-prompt--remote
+                           :start host target directory (plist-get content :text) options
+                           (lambda (result)
+                             (if-let* ((why (plist-get result :failure)))
+                                 (drover-warn "No new %s: %s; the prompt stays" what why)
+                               (when (drover-prompt--unchanged-p content buffer)
+                                 (drover-prompt-consume content buffer))
+                               (drover-message "%s started %s" label (or (plist-get result :title) "a session")))))))
+        (drover-prompt-consume content buffer)
+        (drover-prompt--remote :open host result)))))
+
 (defun drover-prompt-submit ()
   "Send the prompt to a session chosen among the running ones and new ones.
 With an active region, only the region is sent.  The text, in Org, is
@@ -1345,9 +1539,10 @@ the prompt action `send'."
     (kill-new (plist-get content :org))
     (let ((target (with-current-buffer buffer
                     (drover-prompt-read-target "Send to session: "))))
-      (if (drover-session-p target)
-          (drover-prompt--send-to-session target content buffer)
-        (drover-prompt--send-to-new target content buffer)))))
+      (cond
+       ((drover-session-p target) (drover-prompt--send-to-session target content buffer))
+       ((plist-get target :host) (drover-prompt--send-to-host target content buffer))
+       (t (drover-prompt--send-to-new target content buffer))))))
 
 (defun drover-prompt-erase ()
   "Erase the text of the prompt, region or not, and close its window.
@@ -1462,11 +1657,10 @@ undisplayed when missing, as from the target picker's option menu."
 (defun drover-prompt--minibuffer-info (buffer)
   "Return what the prompt BUFFER runs, as the target picker shows it, or nil."
   (let* ((options (drover-prompt-effective-options buffer))
-         (directory (plist-get options :directory))
          (model (plist-get options :model))
          (variant (plist-get options :variant))
          (info (concat
-                (drover-prompt--minibuffer-option "cwd" (and directory (abbreviate-file-name directory))
+                (drover-prompt--minibuffer-option "cwd" (drover-prompt--directory-label options)
                                                   (plist-get options :directory-explicit-p))
                 (drover-prompt--minibuffer-option "agent" (plist-get options :agent)
                                                   (plist-get options :agent-explicit-p))
@@ -1526,20 +1720,41 @@ milliseconds with many windows."
       (drover-prompt--update-minibuffer buffer)
       (drover-prompt--refresh-completion))))
 
+(defun drover-prompt--options-host (buffer)
+  "Return the host new sessions of the prompt BUFFER start on, nil for this one.
+Nil too for a prompt set to go to a running session, whose options its
+own host's catalogs do not decide."
+  (with-current-buffer buffer
+    (and drover-prompt-host (not (drover-prompt--chosen-target)) drover-prompt-host)))
+
+(defun drover-prompt--host-catalogs (buffer)
+  "Return what the host of the prompt BUFFER told of its engines, waited for."
+  (with-current-buffer buffer
+    (or (drover-prompt--host-engines drover-prompt-host drover-prompt-host-directory drover-prompt-host-timeout)
+        (user-error "%s did not tell its agents and models in %s"
+                    (drover-prompt--host-label drover-prompt-host) drover-prompt-host-directory))))
+
 (defun drover-prompt-choose-agent ()
   "Choose the agent the prompt runs, among those the engines offer.
-With two agents, switch to the other without asking.  This is the
-prompt action `agent'."
+With two agents, switch to the other without asking.  New sessions of
+another host (see `drover-prompt-host') choose among that host's
+agents.  This is the prompt action `agent'."
   (interactive)
   (let* ((buffer (drover-prompt--options-buffer))
-         (directory (buffer-local-value 'default-directory buffer))
-         (names (drover-agent-names directory))
+         (host (drover-prompt--options-host buffer))
+         (directory (if host
+                        (buffer-local-value 'drover-prompt-host-directory buffer)
+                      (buffer-local-value 'default-directory buffer)))
+         (names (if host
+                    (delete-dups (mapcan (lambda (entry) (copy-sequence (plist-get (cdr entry) :agents)))
+                                         (drover-prompt--host-catalogs buffer)))
+                  (drover-agent-names directory)))
          (current (plist-get (drover-prompt-effective-options buffer) :agent))
          (other (and (= (length names) 2) (member current names)
                      (car (remove current names))))
          (agent (or other
                     (drover-read-agent (plist-get (drover-prompt-inherited-options buffer) :agent)
-                                       directory))))
+                                       directory (and host (lambda () names))))))
     (with-current-buffer buffer
       (setq drover-prompt-picked-agent agent))
     (when other
@@ -1548,12 +1763,21 @@ prompt action `agent'."
 
 (defun drover-prompt-choose-model ()
   "Choose the model the prompt runs, among those the engines offer.
-A variant chosen before is dropped, as it belongs to its model.  This
-is the prompt action `model'."
+A variant chosen before is dropped, as it belongs to its model.  New
+sessions of another host (see `drover-prompt-host') choose among that
+host's models.  This is the prompt action `model'."
   (interactive)
   (let* ((buffer (drover-prompt--options-buffer))
+         (host (drover-prompt--options-host buffer))
+         (models (and host
+                      (drover-model-merge-all
+                       (mapcan (lambda (entry) (copy-sequence (plist-get (cdr entry) :models)))
+                               (drover-prompt--host-catalogs buffer)))))
          (model (drover-read-model (plist-get (drover-prompt-inherited-options buffer) :model)
-                                   (buffer-local-value 'default-directory buffer))))
+                                   (if host
+                                       (buffer-local-value 'drover-prompt-host-directory buffer)
+                                     (buffer-local-value 'default-directory buffer))
+                                   (and host (lambda () models)))))
     (with-current-buffer buffer
       (setq drover-prompt-picked-model model
             drover-prompt-picked-variant nil))
@@ -1578,22 +1802,57 @@ This is the prompt action `effort'."
           (setq drover-prompt-picked-variant variant))
         (drover-prompt--refresh-display buffer))))))
 
-(defun drover-prompt-choose-directory ()
+(defun drover-prompt--read-host (buffer)
+  "Read the host new sessions of the prompt BUFFER start on; nil for this one.
+The candidates are this host and the other hosts starting sessions for
+it (see `drover-prompt-remote-functions'), BUFFER's first."
+  (let* ((hosts (drover-prompt--remote :hosts))
+         (here (format "%s (this host)" drover-host))
+         (candidates (cons (cons here nil) (mapcar (lambda (host) (cons (cdr host) (car host))) hosts)))
+         (default (or (car (rassoc (buffer-local-value 'drover-prompt-host buffer) candidates)) here)))
+    (unless hosts
+      (user-error "No other host starts sessions for this one"))
+    (cdr (assoc (completing-read (format-prompt "New sessions start on" default)
+                                 (mapcar #'car candidates) nil t nil nil default)
+                candidates))))
+
+(defun drover-prompt-choose-directory (&optional elsewhere)
   "Choose the directory a new session of the prompt starts in.
 The engines' defaults are read again for it, as a project's settings
-may change any of them.  This is the prompt action `directory'."
-  (interactive)
+may change any of them.  With a prefix argument, ELSEWHERE, choose the
+host first, this one or another host starting sessions for it (see
+`drover-remote-mode'): the directory is then one of that host's,
+completed there, which `drover-prompt-host' and
+`drover-prompt-host-directory' keep, and its agents, models and
+defaults those that host tells.  New sessions of another host choose
+among its directories.  This is the prompt action `directory'."
+  (interactive "P")
   (let* ((buffer (drover-prompt--options-buffer))
-         (directory (file-name-as-directory
-                     (expand-file-name
-                      (read-directory-name "Working directory: "
-                                           (buffer-local-value 'default-directory buffer) nil t)))))
-    (with-current-buffer buffer
-      (setq default-directory directory
-            drover-prompt-directory-picked-p t)
-      (drover-prompt--fetch-defaults)
-      ;; An open target picker annotates before a scheduled refresh runs.
-      (drover-prompt--refresh-volatile))
+         (host (if elsewhere
+                   (drover-prompt--read-host buffer)
+                 (buffer-local-value 'drover-prompt-host buffer))))
+    (if host
+        (let ((directory (drover-prompt--remote
+                          :read-directory host
+                          (format "Working directory on %s: " (drover-prompt--host-label host))
+                          (drover-prompt--host-default-directory host buffer drover-prompt-host-timeout))))
+          (with-current-buffer buffer
+            (setq drover-prompt-host host
+                  drover-prompt-host-directory directory))
+          ;; Its catalogs there, asked now for the header.
+          (drover-prompt--remote :catalog host nil directory nil))
+      (let ((directory (file-name-as-directory
+                        (expand-file-name
+                         (read-directory-name "Working directory: "
+                                              (buffer-local-value 'default-directory buffer) nil t)))))
+        (with-current-buffer buffer
+          (setq default-directory directory
+                drover-prompt-directory-picked-p t
+                drover-prompt-host nil
+                drover-prompt-host-directory nil)
+          (drover-prompt--fetch-defaults)
+          ;; An open target picker annotates before a scheduled refresh runs.
+          (drover-prompt--refresh-volatile))))
     (drover-prompt--refresh-display buffer)))
 
 (transient-define-prefix drover-prompt-options-menu ()
@@ -1668,10 +1927,11 @@ first, `drover-prompt-remote-limit' at most."
 (defun drover-prompt--entry-options (target current buffer)
   "Return the model and variant TARGET runs once sent the prompt BUFFER.
 TARGET is a running session, whose CURRENT options its backend's
-:options told, or an entry of `drover-prompt-new-targets'.  The choices
-of BUFFER apply as sending applies them: a model the engine cannot run
-drops both model and variant; a new session starts with them, resolved
-by its engine; a running session that cannot change its variant keeps
+:options told, or an entry of `drover-prompt-new-targets', or a new
+session of another host.  The choices of BUFFER apply as sending
+applies them: a model the engine cannot run drops both model and
+variant; a new session starts with them, resolved by its engine, or by
+what its host told; a running session that cannot change its variant keeps
 it; one whose engine runs a model's default variant when switched to
 it (:model-resets-variant) does so.  The value is an entry plist,
 \(:model :model-explicit-p :variant :variant-explicit-p), with the keys
@@ -1685,9 +1945,13 @@ known only; nil for a new session without a prompt buffer."
                        (buffer-local-value 'drover-prompt-picked-variant buffer))))
     (cond
      ((and (not session) live)
-      (let ((resolved (drover-prompt-engine-options
-                       engine (buffer-local-value 'drover-prompt-picked-agent buffer)
-                       model variant buffer)))
+      (let ((resolved (if-let* ((host (plist-get target :host)))
+                          (drover-prompt--host-resolve host (drover-prompt--host-default-directory host buffer)
+                                                       engine (buffer-local-value 'drover-prompt-picked-agent buffer)
+                                                       model variant)
+                        (drover-prompt-engine-options
+                         engine (buffer-local-value 'drover-prompt-picked-agent buffer)
+                         model variant buffer))))
         (list :model (plist-get resolved :model) :model-explicit-p (and model t)
               :variant (plist-get resolved :variant) :variant-explicit-p (and variant t))))
      ((not session) nil)
@@ -1723,7 +1987,9 @@ known only; nil for a new session without a prompt buffer."
   (let* ((session (and (drover-session-p target) target))
          (backend (if session (drover-session-backend session) (plist-get target :backend)))
          (engine (if session (drover-session-engine session) (plist-get target :engine)))
-         (label (drover-backend-label backend)))
+         (label (if (and (not session) (plist-get target :host) (not (memq backend (drover-backends))))
+                    (symbol-name backend)
+                  (drover-backend-label backend))))
     (if (or (null engine) (string= (drover-engine-label engine) label))
         label
       (format "%s (%s)" label (drover-engine-label engine)))))
@@ -1733,9 +1999,11 @@ known only; nil for a new session without a prompt buffer."
 SESSIONS are the running sessions, as (SESSION . BUFFER), named after
 their buffer, those of other hosts, without one, after their titles
 and hosts; TARGETS the entries of `drover-prompt-new-targets' to
-offer.  ENTRY is a plist: :target, the session or new-target entry;
-:current, what a session runs now (see :options); :directory, where it
-runs or would start.  Each NAME carries its target as its
+offer, then the new sessions of other hosts, each with its :host and
+:host-label.  ENTRY is a plist: :target, the session or new-target
+entry; :current, what a session runs now (see :options); :directory,
+where it runs or would start, and :host-label, the host whose
+directory it is, for another's.  Each NAME carries its target as its
 `drover-prompt-target' property."
   (let ((taken (make-hash-table :test #'equal))
         (prompt (drover-prompt-buffer))
@@ -1761,9 +2029,15 @@ runs or would start.  Each NAME carries its target as its
                    :directory (or (drover-session-local-directory session)
                                   (and buffer (buffer-local-value 'default-directory buffer))))))
       (dolist (target targets)
-        (add (format "[New %s…]" (or (plist-get target :label) (plist-get target :engine)))
-             (list :target target
-                   :directory (and prompt (buffer-local-value 'default-directory prompt))))))
+        (if-let* ((host (plist-get target :host)))
+            (add (format "[New %s on %s…]" (or (plist-get target :label) (plist-get target :engine))
+                         (plist-get target :host-label))
+                 (list :target target
+                       :directory (and prompt (drover-prompt--host-default-directory host prompt))
+                       :host-label (plist-get target :host-label)))
+          (add (format "[New %s…]" (or (plist-get target :label) (plist-get target :engine)))
+               (list :target target
+                     :directory (and prompt (buffer-local-value 'default-directory prompt)))))))
     (nreverse candidates)))
 
 (defun drover-prompt--annotator (candidates)
@@ -1789,23 +2063,31 @@ and why it has its status."
                                   'face 'drover-dim)
                   (and options (concat "  " options))
                   (and directory
-                       (concat "  " (propertize (abbreviate-file-name directory) 'face 'drover-dim)))
+                       (concat "  " (propertize (drover-prompt--directory-label
+                                                 (list :directory directory
+                                                       :host-label (plist-get entry :host-label)))
+                                                'face 'drover-dim)))
                   (and summary
                        (concat "  " (propertize summary 'face 'completions-annotations)))))))))
 
 (defun drover-prompt--target-predicate (candidates)
   "Return the predicate hiding the new sessions of CANDIDATES that cannot start.
 A new session's engine must be able to run the model chosen in the
-prompt; running sessions always show, as the user may send to one
-anyway, the model left out."
+prompt, and another host must not have told it runs no such model;
+running sessions always show, as the user may send to one anyway, the
+model left out."
   (lambda (candidate)
     (let* ((name (if (consp candidate) (car candidate) candidate))
-           (target (plist-get (cdr (assoc name candidates)) :target))
+           (entry (cdr (assoc name candidates)))
+           (target (plist-get entry :target))
            (prompt (drover-prompt-buffer))
            (model (and prompt (buffer-local-value 'drover-prompt-picked-model prompt))))
       (or (drover-session-p target)
           (null model)
-          (drover-prompt--runs-p model (plist-get target :engine))))))
+          (and (drover-prompt--runs-p model (plist-get target :engine))
+               (or (not (plist-get target :host))
+                   (drover-prompt--host-offers-p (plist-get target :host) (plist-get entry :directory)
+                                                 (plist-get target :engine) model)))))))
 
 (defun drover-prompt--setup-picker (keymap)
   "Set up the minibuffer of the target picker, with KEYMAP over its own keys.
@@ -1841,11 +2123,14 @@ The candidates are the running sessions whose backend takes prompts
 and that have a live buffer, the current buffer's first, then the most
 recently used, each annotated with its backend, what it runs and its
 status, then the new sessions of `drover-prompt-new-targets' whose
-feature is installed and whose engine can run the model chosen.
+feature is installed and whose engine can run the model chosen, then
+the new sessions other hosts start (see `drover-remote-mode').
 Return the `drover-session' chosen, or for a new session its entry of
 `drover-prompt-new-targets', a plist (:backend BACKEND :engine ENGINE
-...).  A session `drover-prompt-edit-for' set the prompt to go to is
-returned without asking, while it takes prompts.  KEYS are:
+...), or for one of another host a plist (:host NAME :host-label LABEL
+:backend BACKEND :engine ENGINE :label LABEL).  A session
+`drover-prompt-edit-for' set the prompt to go to is returned without
+asking, while it takes prompts.  KEYS are:
 
  :existing-only  Non-nil to offer the running sessions only; signal a
                  `user-error' when there is none.
@@ -1866,7 +2151,9 @@ Where new sessions are offered, or with :options-menu, the key of
        (when (and prompt-buffer (not existing-only))
          (with-current-buffer prompt-buffer
            (drover-prompt--refresh-volatile)))
-       (let* ((targets (unless existing-only (drover-prompt--new-targets)))
+       (let* ((targets (unless existing-only
+                         ;; Other hosts' told already, or soon.
+                         (append (drover-prompt--new-targets) (drover-prompt--remote :targets 2))))
               (candidates (or (drover-prompt--candidates sessions targets)
                               (user-error "No running session takes prompts, and none can start")))
               (names (mapcar #'car candidates))

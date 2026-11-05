@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 18
+(defconst drover-core-generation 19
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1817,8 +1817,11 @@ as `drover-model' describes them: explicit choices (:agent :model
              starting and displaying a session of ENGINE in DIRECTORY.
              OPTIONS is a start-options plist: the explicit :agent,
              :model and :variant, unfiltered, the session's :title or
-             nil, and the :defaults the prompt holds for ENGINE (see
-             `drover-register-engine'), or nil.  It calls THEN with
+             nil, the :defaults the prompt holds for ENGINE (see
+             `drover-register-engine'), or nil, and :hidden, non-nil
+             to start it without displaying it, as for another host,
+             which binds `display-buffer-overriding-action' to show no
+             window meanwhile.  It calls THEN with
              the new `drover-session' as soon as :send may be given
              it, :send waiting for the session to be ready, or ELSE.
  :check      Function of a SESSION, the TEXT about to be sent and the
@@ -2727,6 +2730,17 @@ views draw everything anew."
         (t (setq drover--changed-all t
                  drover--changed-backends (append (drover-backends) drover--changed-backends))))
   (drover--schedule-changed))
+
+(defun drover-views-changed (keys)
+  "Have views draw the sessions KEYS again, their records the same.
+For what views show of sessions besides their records, such as the
+usage their engines recorded (`drover-usage'): `drover-changed-hook'
+runs as for a change backends report, KEYS among the sessions changed."
+  (when keys
+    (setq drover--changed-applied (if (eq drover--changed-applied t)
+                                      t
+                                    (append keys drover--changed-applied)))
+    (drover--schedule-changed)))
 
 (defun drover-changed-now ()
   "Run a pending `drover-changed-hook' at once."

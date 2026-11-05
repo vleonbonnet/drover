@@ -350,24 +350,27 @@ cannot run is reported and left out."
      (drover-agent-shell-start-config (funcall maker) model-id agent)
      (drover-model-effort-candidates model variant))))
 
-(defun drover-agent-shell--start (directory config)
+(defun drover-agent-shell--start (directory config &optional hidden)
   "Start a shell of agent-shell CONFIG for DIRECTORY, display it and return it.
 The shell's directory is the one `agent-shell-cwd' finds from
-DIRECTORY, as when the user starts a shell there."
+DIRECTORY, as when the user starts a shell there.  HIDDEN non-nil
+leaves it undisplayed."
   (let* ((default-directory (file-name-as-directory (expand-file-name directory)))
          (buffer (agent-shell--start :config config :no-focus t :new-session t
                                      :session-strategy 'new)))
-    (agent-shell--display-buffer buffer)
+    (unless hidden
+      (agent-shell--display-buffer buffer))
     buffer))
 
 (defun drover-agent-shell--create (directory engine options then else)
   "Start and display a shell of ENGINE in DIRECTORY with start OPTIONS.
 Call THEN with its session at once, :send waiting for it to start, or
 ELSE with a message when it cannot start.  A title in OPTIONS names
-the shell."
+the shell; :hidden there leaves it undisplayed."
   (let ((buffer (condition-case err
                     (drover-agent-shell--start directory
-                                               (drover-agent-shell--start-config engine options))
+                                               (drover-agent-shell--start-config engine options)
+                                               (plist-get options :hidden))
                   (error (funcall else (drover-error-message err))
                          nil))))
     (when buffer
