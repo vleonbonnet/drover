@@ -106,6 +106,11 @@ list of drover's shows."
 
 ;;;; State
 
+(defconst drover-claude-code-transcripts--reader-version 3
+  "Version of `drover-claude-code-transcripts--read'.
+Raised when it reads anew what it read before, so that what an older
+one read and kept between Emacs sessions is read again.")
+
 (defvar drover-claude-code-transcripts--index nil
   "The index of Claude Code's transcripts, once installed.")
 
@@ -919,11 +924,6 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
 (defun drover-claude-code-transcripts--roots ()
   "Return where Claude Code's transcripts are, for the index."
   (list (list (drover-claude-code-projects-directory) 1 "\\.jsonl\\'")))
-
-(defconst drover-claude-code-transcripts--reader-version 3
-  "Version of `drover-claude-code-transcripts--read'.
-Raised when it reads anew what it read before, so that what an older
-one read and kept between Emacs sessions is read again.")
 
 (defun drover-claude-code-transcripts--make-index ()
   "Return a new index of Claude Code's transcripts."

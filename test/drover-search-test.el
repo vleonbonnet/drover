@@ -608,7 +608,17 @@ B only in tool calls and results; Codex's A \"axolotl\" in its prompt.
     (should-not (drover-search-test-text "grep"))
     ;; Scoped: a filter leaving Codex out leaves its rollouts unsearched.
     (let ((drover-filter '(:harness claude-code)))
-      (should-not (drover-search-test-text "axolotl")))))
+      (should-not (drover-search-test-text "axolotl")))
+    ;; Files past what one command takes, as on Windows, are searched by
+    ;; the runs after: here a file a run.
+    (let ((drover-transcript-search-arguments-limit 10)
+          (runs 0)
+          (make-process (symbol-function 'make-process)))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest arguments) (cl-incf runs) (apply make-process arguments))))
+        (should (equal (drover-search-test-text "narwhal")
+                       (list (list drover-search-test-claude-a "The narwhal agrees: done.")))))
+      (should (> runs 2)))))
 
 (ert-deftest drover-search-test-ripgrep-huge-lines ()
   "A line of 500 kB, a match at its end, gives a snippet bounded."

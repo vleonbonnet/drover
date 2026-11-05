@@ -1,7 +1,7 @@
 #+TITLE: drover across hosts: design
 #+OPTIONS: toc:nil
 
-A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][last]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
+A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][the fourth]]), and the search of what was said in a peer's sessions (see [[*Searching what was said there, as built][last]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
 
 * What was decided
 
@@ -599,3 +599,52 @@ A request whose stream ends before its answer fails: one asking for something is
 ** Tests
 
 Two batch Emacs, the agent running a fake OpenCode service (=test/drover-fake-opencode.el=), registered as OpenCode registers its own, and a backend =opencode= of its sessions: =RET= opens the full buffer, named after the host, its transcript shown, its session the peer's for drover's keys; this host holds no password of that service, its connection a relay's; one stream there; a prompt sent here reaches the service there and its reply streams back; a turn another client runs there shows; the same buffer again on =RET=; a session archived there closes its buffer here; killed here, its stream closes there.  =read= access reads but cannot send, a 403 telling why, nothing but GETs reaching the service.  The link dropped, the buffer follows its session again as it comes back, what ran meanwhile shown, and takes prompts.  A peer whose drover tells no =opencode= shows the view, saying why, and nothing reaches its service.  The owner's checks of each method and path by access, and the pieces of the stream, are tested alone.  opencode.el's own tests run two fake services at once, the remote one directly and through a relay (see its design).
+
+* Searching what was said there, as built
+
+The search of sessions (=drover-search=, =S=) searches what was said in a peer's sessions as in this host's: the third tier of its search, after what records tell and what this host's backends find, its matches joining the others as they come, each row with its host.  The owner searches, with its own backends, as it would for its own user: its Claude Code transcripts and Codex rollouts with ripgrep, its OpenCode sessions through its service's search; nothing of the conversations travels but the matches.
+
+** The protocol, compatible
+
+| What                  | New                                                                                                                                                                                                                                                       |
+|-----------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| capability =search=   | told by a host searching what was said in its sessions for its peers                                                                                                                                                                                      |
+| request =search=      | an identifier the viewer makes, the text (256 characters at most), the sessions of the owner's the search offers, by their keys and their engines' identifiers (20000 at most), whether older and archived sessions show, the project of the filter, the most matches taken; answered at once |
+| message =srm=         | the owner: matches of the search, each naming its session by its key or its engine and identifier, with a snippet (240 characters at most) and a position                                                                                                  |
+| message =sre=         | the owner: its end, with what failed there, a line, if anything did                                                                                                                                                                                       |
+| message =src=         | the viewer: stop it, the text typed past it                                                                                                                                                                                                               |
+
+The viewer names the sessions it offers rather than the owner applying the filter: the search here decides what it offers (the filter, the subagents shown, the older and archived sessions fetched from the owner), and the owner's =:wanted= is then exactly that set, as a local backend's is, so that the owner's ripgrep is given only those files, and a match is never spent on a session the viewer would count out of scope.  The keys are a hundred bytes a session, key and engine's identifier: 553 conversations of Core make about 60 kB, against the records of those sessions the viewer received anyway.  What the owner's backends read of the scope travels too: whether archived sessions show (OpenCode's =:archived=, Codex's archived rollouts) and the project of the filter (OpenCode's =:project=).
+
+** The owner
+
+A request is checked as every other (a peer greeted, of any access: searching reads, as recaps do), then each backend of its own with =:search= is asked, at once, with a =:wanted= of the sessions named; their matches go as they come, in one =srm= per answer of a backend, plain, bounded (=drover-remote--wire-match=); it ends once every backend ended, its limit reached (its backends then stopped), after =drover-remote-search-timeout= (60 s), or as the viewer says =src=.  Two searches at most run for a connection, one for the minibuffer and one for =drover-search-text=: a third stops the oldest, its viewer told.  A connection ending stops its searches; the remote layer stopping stops them all.  A backend failing is noted and told in =sre=, the others going on; the viewer then reports it as the search reports a backend failing, once, after the matches that came.
+
+** The viewer
+
+The proxy's =:search= (=drover-remote--search=) asks only a connected peer telling =search=, and only when the search offers some of its sessions: a peer of an older drover, or one not connected, searches nothing and is told of nowhere, as an OpenCode service without its search route.  The scope of the search gains =:sessions=, a function of a backend returning the sessions of it the search offers, in the list's order, which the proxy sends; the cancelling function the search calls as typing goes on (its debounce, =drover-search-delay=) sends =src=.  Matches are decoded as records are (=drover-remote--decode-match=): a key of short symbols and an identifier, else an engine and an identifier with the host, so that =drover-search--resolve= finds the session among the peer's here, a snippet bounded, a position an integer or a short string; anything else is dropped.  A search whose link ends fails, saying so; one whose owner does not end it past the timeout is stopped there and fails.
+
+** Ripgrep's runs
+
+A search of transcripts gave ripgrep as many files as fit in one command line, 24 kB of names on Windows: on Core, 553 conversations of Claude Code, about 240 were searched, the newest, the rest never.  It now runs ripgrep again for the files that did not fit, a batch after another, until it took its matches (=drover-transcript--search-start=), the cancelling function stopping whichever run is current.  This holds for this host's own search too.
+
+** Measured
+
+=make bench-remote SEARCH=WORDS= has the agent list the conversations Claude Code recorded on its host, read only (=DROVER_AGENT_CLAUDE=), and searches each word five times through the agent's proxy here, as the search of sessions asks it, every conversation offered.  Reaver viewing Core through =myssh -W=, Core's 553 conversations (298 transcripts and their subagents, 1.5 GB):
+
+| Step                                             | Core, SSH | Reaver, 127.0.0.1 (85 conversations) |
+|--------------------------------------------------+-----------+--------------------------------------|
+| a common word (=error=): first match, median of 5 | 82 ms     | 20 ms                                |
+| the same, all its matches (165; Reaver 27)       | 425 ms    | 28 ms                                |
+| the same, slowest of 5                           | 460 ms    | 65 ms                                |
+| a rare word (=kanopy=): first match              | 139 ms    | -                                    |
+| the same, all its matches (2)                    | 273 ms    | -                                    |
+| a word said nowhere (=capybara=): the end        | 263 ms    | -                                    |
+| longest block of this Emacs's main thread        | 0.2 ms    | 0.1 ms                               |
+
+Most of it is ripgrep on Windows reading 1.5 GB in three runs; the link adds a round trip, 3 ms.  Listing the 553 conversations there took 7.7 s, the agent reading them, and blocked this Emacs 190 ms once as its index took them in, before any search.
+
+** Tests
+
+Two batch Emacs, the agent listing Claude Code's transcripts of fixtures in a throwaway home and running the fake OpenCode service, its backend's search a stand-in answering as =opencode-search= does: a word found there in a transcript and in an OpenCode session, both named here with their host and snippets; nothing asked under a filter leaving that host out, nothing found under another project; an archived session there searched only once archived sessions show here; the limit taken there; a search typed past stopped there, its backend's run cancelled; a link dropping fails it here and stops it there; a backend failing there told with what was found; a peer telling no =search= left out silently.  Matches received are checked alone: hostile values (500 kB snippets and positions, wrong types, names not short symbols) bounded or dropped.  Ripgrep's runs are checked with a limit of 10 characters of names, a file a run.
+

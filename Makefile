@@ -225,17 +225,21 @@ bench-idle: compile
 # REMOTE=HOST on another host through SSH -W, its files in a temporary
 # directory there, removed after.  BACK=PROGRAM has the agent dial back
 # through SSH run as PROGRAM there, with BACK_ARGS, comma-separated.
-# See test/drover-remote-bench.el.
+# SEARCH=WORDS, comma-separated, measures instead searches of what was
+# said in the conversations Claude Code recorded on the agent's host,
+# read only, for each word.  See test/drover-remote-bench.el.
 REMOTE ?=
 SSH ?= ssh
 REMOTE_EMACS ?= emacs
 BACK ?=
 BACK_ARGS ?=
 BACK_HOST ?=
+SEARCH ?=
 bench-remote: compile
 	$(NOPIPE) DROVER_BENCH_REMOTE="$(REMOTE)" DROVER_BENCH_SSH="$(SSH)" \
 	DROVER_BENCH_REMOTE_EMACS="$(REMOTE_EMACS)" DROVER_BENCH_BACK="$(BACK)" \
 	DROVER_BENCH_BACK_ARGS="$(BACK_ARGS)" DROVER_BENCH_BACK_HOST="$(BACK_HOST)" \
+	DROVER_BENCH_SEARCH="$(SEARCH)" \
 	$(BATCH) -l test/drover-test-helpers.el -l test/drover-remote-bench.el -f drover-remote-bench-main
 
 # Indexes the user's own Claude Code transcripts and Codex rollouts,

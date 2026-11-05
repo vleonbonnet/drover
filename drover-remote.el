@@ -48,9 +48,11 @@
 ;; in a terminal or a shell mirrors that terminal here, through
 ;; spyglass: its owner shares it with this host alone, taking its input
 ;; as its access allows, resuming a recorded conversation in its front
-;; end first; other sessions show as their host tells them.  A peer
-;; this host cannot reach is tried less and less often, and at once as
-;; the network changes or the machine wakes.  Each peer keeps a history
+;; end first; other sessions show as their host tells them.  The
+;; search of sessions searches what was said in a peer's sessions there,
+;; with the peer's own backends, its matches coming as they are found.
+;; A peer this host cannot reach is tried less and less often, and at
+;; once as the network changes or the machine wakes.  Each peer keeps a history
 ;; of its link, shown by `drover-remote-status'.  See doc/remote.org for
 ;; the whole design.
 
@@ -263,7 +265,7 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent")
+(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -274,7 +276,9 @@ peer opening them, resuming a conversation first when asked;
 \"opencode\": it relays its OpenCode service to its peers, as their
 access allows, for their opencode.el to open its sessions in full
 buffers; \"unsent\": it takes what a buffer the peer mirrors held unsent
-as it closed, as archiving closes it, for the peer's kill ring.")
+as it closed, as archiving closes it, for the peer's kill ring;
+\"search\": it searches what was said in its sessions for its peers,
+with its own backends, sending the matches as they come.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1364,6 +1368,8 @@ one line, once in `drover-error-interval' seconds."
   (drover-with-reporting "remote connection"
     (drover-remote--oc-unrelay connection)
     (drover-remote--oc-drop connection)
+    (drover-remote--search-unserve connection)
+    (drover-remote--search-drop connection)
     (when-let* ((state (drover-remote--current)))
       (drover-remote--next-stream state connection)
       (drover-remote--unsubscribe state connection)
@@ -2857,6 +2863,382 @@ received so far each time an answer of the owner's comes."
                      table)
             (funcall callback (nreverse all))))))))
 
+;;;; Searching what was said
+
+(defcustom drover-remote-search-timeout 60
+  "Seconds a peer searches what was said in its sessions for this host, at most.
+Past them it stops, its matches so far kept, and this host stops
+waiting for it."
+  :type 'number
+  :group 'drover-remote)
+
+(defconst drover-remote-search-keys 20000
+  "Sessions of a peer at most a search here names there.
+The search of what was said in a peer's sessions searches those the
+search offers here, named by their keys: the first ones, in the list's
+order, past this many.")
+
+(defconst drover-remote-search-limit 200
+  "Matches at most a peer sends for one search.")
+
+(defconst drover-remote-search-runs 2
+  "Searches at most a peer runs at once for this host.
+One for the minibuffer's search, one for `drover-search-text': a third
+stops the oldest.")
+
+(defconst drover-remote-search-snippet 240
+  "Characters at most of the snippet of a match a peer sends.")
+
+(defvar drover-remote--searches (make-hash-table :test #'equal)
+  "The searches of peers' sessions running here, by identifier.
+Each a plist: :peer, its name, :connection, a link to the connection
+asked, :callback, the backend's callback, and :timer, giving up.")
+
+(defvar drover-remote--searching (make-hash-table :test #'eq :weakness 'key)
+  "The searches this host runs for its peers, by connection, then identifier.
+Each a plist: :sources, the backends searching and their cancelling
+functions, an alist, :left, the matches still taken, :failed, the
+backends that failed, as (LABEL . MESSAGE), :timer, ending it,
+:start, when it began, and :peer, the peer's name.")
+
+(defvar drover-remote--search-serial 0
+  "The number of the last search of a peer's sessions asked here.")
+
+;;;;; Here, searching a peer's sessions
+
+(defun drover-remote--search (name query scope callback)
+  "Search what was said in the sessions of the peer NAME for QUERY, for CALLBACK.
+The proxy's :search: the peer runs its own backends' searches, scoped
+to its sessions SCOPE's search offers here (see :sessions in
+`drover-register-backend'), named by their keys, and to the older and
+archived ones when they show, and sends its matches as they come.
+Return the function telling it to stop; nil, searching nothing, when
+the peer is not connected, runs a drover that does not search for
+others, or the search offers none of its sessions."
+  (when-let* ((peer (drover-remote--peer name))
+              ((eq (drover-remote--peer-state peer) 'open))
+              ((drover-remote--capable-p peer "search"))
+              (connection (drover-remote--peer-connection peer))
+              (offered (plist-get scope :sessions))
+              ((functionp offered))
+              (sessions (seq-take (funcall offered (drover-remote--peer-backend peer))
+                                  drover-remote-search-keys)))
+    (let* ((id (format "%s-%s-%d" drover-host
+                       (substring (or (drover-remote--state-epoch (drover-remote--current)) "x") 0 8)
+                       (cl-incf drover-remote--search-serial)))
+           (engines (make-hash-table :test #'equal))
+           (project (plist-get (plist-get scope :filter) :project)))
+      (dolist (session sessions)
+        (when-let* ((engine (drover-session-engine session))
+                    (engine-id (drover-remote--wire-id (drover-session-engine-id session))))
+          (puthash (vector (symbol-name engine) engine-id) t engines)))
+      (puthash id (list :peer name :connection (drover-link connection) :callback callback
+                        :timer (run-at-time (+ drover-remote-search-timeout 5) nil
+                                            #'drover-remote--search-expired id))
+               drover-remote--searches)
+      (drover-remote--stat peer :searches)
+      (drover-remote--request
+       peer (list :op "search" :id id
+                  :q (substring query 0 (min (length query) 256))
+                  :keys (vconcat (delq nil (mapcar (lambda (session)
+                                                     (let ((key (drover-session-id session)))
+                                                       (when-let* ((wire (drover-remote--wire-id (cdr key))))
+                                                         (vector (symbol-name (car key)) wire))))
+                                                   sessions)))
+                  :engines (vconcat (hash-table-keys engines))
+                  :history (if (plist-get scope :history) t :false)
+                  :archived (if (plist-get scope :archived) t :false)
+                  :project (if (stringp project) project :false)
+                  :limit (min drover-remote-search-limit
+                              (or (plist-get scope :limit) drover-remote-search-limit)))
+       (lambda (_reply error)
+         (when error
+           (drover-remote--search-end id (list :failure error))))
+       nil t)
+      (lambda () (drover-remote--search-cancel id)))))
+
+(defun drover-remote--search-end (id result)
+  "End the search ID of a peer's sessions here, giving its callback RESULT.
+RESULT is `done' or (:failure MESSAGE); nothing when it ended already."
+  (when-let* ((entry (gethash id drover-remote--searches)))
+    (remhash id drover-remote--searches)
+    (when (timerp (plist-get entry :timer))
+      (cancel-timer (plist-get entry :timer)))
+    (drover-with-reporting "remote search"
+      (funcall (plist-get entry :callback) result))))
+
+(defun drover-remote--search-expired (id)
+  "Give up the search ID of a peer's sessions, whose peer did not finish it."
+  (drover-with-reporting "remote search"
+    (when-let* ((entry (gethash id drover-remote--searches)))
+      (drover-remote--search-tell-stop id entry)
+      (drover-remote--search-end id (list :failure "it did not finish in time")))))
+
+(defun drover-remote--search-tell-stop (id entry)
+  "Tell the peer of ENTRY, the search ID, to stop it, if still connected."
+  (let ((connection (drover-linked (plist-get entry :connection))))
+    (when (and connection (spyglass-connection-live-p connection))
+      (drover-remote--send connection (list :t "src" :id id)))))
+
+(defun drover-remote--search-cancel (id)
+  "Stop the search ID of a peer's sessions: its callback is not called again."
+  (drover-with-reporting "remote search"
+    (when-let* ((entry (gethash id drover-remote--searches)))
+      (remhash id drover-remote--searches)
+      (when (timerp (plist-get entry :timer))
+        (cancel-timer (plist-get entry :timer)))
+      (drover-remote--search-tell-stop id entry))))
+
+(defun drover-remote--decode-match (data name backend)
+  "Return the match DATA of the peer NAME, received, for drover's search, or nil.
+It names a session of BACKEND, the peer's proxy, by the owner's key, or
+a conversation of the peer by its engine and identifier; its snippet
+and position are bounded."
+  (when (and (consp data) (keywordp (car data)))
+    (let ((snippet (or (drover-remote--line (plist-get data :s) drover-remote-search-snippet) ""))
+          (position (let ((position (plist-get data :p)))
+                      (cond ((integerp position) position)
+                            ((stringp position) (drover-remote--line position 128))))))
+      (if-let* ((key (drover-remote--key (plist-get data :k))))
+          (list :key (cons backend key) :snippet snippet :position position)
+        (when-let* ((engine (drover-remote--symbol (plist-get data :e)))
+                    (id (drover-remote--id (plist-get data :i))))
+          (list :engine engine :id id :host name :snippet snippet :position position))))))
+
+(defun drover-remote--on-search-matches (peer message)
+  "Give the search MESSAGE names the matches PEER found."
+  (when-let* ((id (plist-get message :id))
+              (entry (and (stringp id) (gethash id drover-remote--searches)))
+              ((equal (plist-get entry :peer) (drover-remote--peer-name peer))))
+    (let* ((matches (plist-get message :m))
+           (decoded (and (vectorp matches)
+                         (delq nil (mapcar (lambda (data)
+                                             (drover-remote--decode-match
+                                              data (drover-remote--peer-name peer)
+                                              (drover-remote--peer-backend peer)))
+                                           (seq-take matches drover-remote-search-limit))))))
+      (when decoded
+        (drover-remote--stat peer :search-matches (length decoded))
+        (drover-with-reporting "remote search"
+          (funcall (plist-get entry :callback) decoded))))))
+
+(defun drover-remote--on-search-end (peer message)
+  "End the search MESSAGE names, as PEER finished it, or failed it."
+  (when-let* ((id (plist-get message :id))
+              (entry (and (stringp id) (gethash id drover-remote--searches)))
+              ((equal (plist-get entry :peer) (drover-remote--peer-name peer))))
+    ;; The search names the peer, its backend, before why.
+    (let ((why (drover-remote--line (plist-get message :err))))
+      (drover-remote--search-end id (if why (list :failure why) 'done)))))
+
+(defun drover-remote--search-drop (connection)
+  "Fail the searches of peers' sessions asked on CONNECTION, whose stream ended."
+  (let ((ended nil))
+    (maphash (lambda (id entry)
+               (when (eq (drover-linked (plist-get entry :connection)) connection)
+                 (push (cons id entry) ended)))
+             drover-remote--searches)
+    (pcase-dolist (`(,id . ,entry) ended)
+      (drover-remote--search-end
+       id (list :failure (format "the link to %s ended"
+                                 (or (when-let* ((peer (drover-remote--peer (plist-get entry :peer))))
+                                       (drover-remote--label peer))
+                                     (plist-get entry :peer))))))))
+
+;;;;; There, searching this host's sessions for a peer
+
+(defun drover-remote--search-sources ()
+  "Return the backends of this host's own searching what was said."
+  (seq-filter (lambda (backend)
+                (and (functionp (drover-backend-property backend :search))
+                     (not (drover-backend-property backend :remote))))
+              (drover-backends)))
+
+(defun drover-remote--wire-match (match)
+  "Return MATCH, of a backend of this host's, as it travels, or nil.
+It names its session by its key, or by its engine and identifier."
+  (when (listp match)
+    (let* ((key (plist-get match :key))
+           (wire-id (and (consp key) (symbolp (car key)) (drover-remote--wire-id (cdr key))))
+           (engine (plist-get match :engine))
+           (id (drover-remote--wire-id (plist-get match :id)))
+           (snippet (drover-remote--plain (plist-get match :snippet)))
+           (position (let ((position (plist-get match :position)))
+                       (cond ((integerp position) (drover-remote--number position))
+                             ((stringp position) (substring-no-properties (drover-bound-line position 128))))))
+           (rest (append (list :s (or (and snippet (drover-bound-line snippet drover-remote-search-snippet)) ""))
+                         (and position (list :p position)))))
+      (cond (wire-id (append (list :k (vector (symbol-name (car key)) wire-id)) rest))
+            ((and engine (symbolp engine) id) (append (list :e (symbol-name engine) :i id) rest))))))
+
+(defun drover-remote--search-wanted (message)
+  "Return the :wanted of a search of this host's sessions MESSAGE asks.
+It wants the sessions the peer's search offers there, named by their
+keys and their engines' identifiers, as MESSAGE lists them."
+  (let ((keys (make-hash-table :test #'equal))
+        (engines (make-hash-table :test #'equal)))
+    (seq-doseq (wire (seq-take (or (plist-get message :keys) []) drover-remote-search-keys))
+      (when-let* ((key (drover-remote--key wire)))
+        (puthash key t keys)))
+    (seq-doseq (wire (seq-take (or (plist-get message :engines) []) drover-remote-search-keys))
+      (when-let* ((key (drover-remote--key wire)))
+        (puthash key t engines)))
+    (lambda (match)
+      (let ((key (plist-get match :key))
+            (engine (plist-get match :engine))
+            (id (plist-get match :id)))
+        (or (and (consp key) (gethash key keys) t)
+            (and engine id (gethash (cons engine id) engines) t))))))
+
+(defun drover-remote--on-search (peer connection message reply)
+  "Search this host's sessions for PEER, on CONNECTION, as MESSAGE asks.
+REPLY answers at once; the matches follow, in messages \"srm\", then
+its end, \"sre\".  Each backend of this host's searching what was said
+searches the sessions MESSAGE names, and the older and archived ones
+when it says they show there, at most `drover-remote-search-timeout'
+seconds, `drover-remote-search-limit' matches in all."
+  (let ((id (plist-get message :id))
+        (query (plist-get message :q)))
+    (cond
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "malformed search"))
+     ((not (and (stringp query) (not (string-blank-p query))))
+      (funcall reply nil "nothing to search for"))
+     (t
+      (let* ((query (substring-no-properties query 0 (min (length query) 256)))
+             (table (or (gethash connection drover-remote--searching)
+                        (puthash connection (make-hash-table :test #'equal) drover-remote--searching)))
+             (limit (let ((limit (plist-get message :limit)))
+                      (if (natnump limit) (min limit drover-remote-search-limit) drover-remote-search-limit)))
+             (project (drover-remote--line (plist-get message :project)))
+             (scope (list :filter (and project (list :project project))
+                          :history (eq (plist-get message :history) t)
+                          :archived (eq (plist-get message :archived) t)
+                          :limit limit
+                          :wanted (drover-remote--search-wanted message)))
+             (link (drover-link connection))
+             (run (list :sources nil :left limit :failed nil :start (float-time)
+                        :peer (drover-remote--peer-name peer))))
+        ;; The oldest give way, told so.
+        (let ((runs (sort (hash-table-keys table)
+                          :key (lambda (id) (plist-get (gethash id table) :start)))))
+          (while (>= (length runs) drover-remote-search-runs)
+            (let ((old (pop runs)))
+              (drover-remote--search-stop-run connection old "replaced")
+              (drover-remote--send connection (list :t "sre" :id old :err "another search replaced it")))))
+        (puthash id run table)
+        (drover-remote--stat peer :searches-served)
+        (funcall reply (list :ok t))
+        (plist-put run :timer (run-at-time drover-remote-search-timeout nil
+                                           (lambda ()
+                                             (drover-with-reporting "remote search"
+                                               (when-let* ((connection (drover-linked link)))
+                                                 (drover-remote--search-finish connection id))))))
+        (dolist (backend (drover-remote--search-sources))
+          ;; Listed first, so that a backend answering at once, before it
+          ;; returns, ends its part.
+          (let ((source (list backend)))
+            (plist-put run :sources (cons source (plist-get run :sources)))
+            (let ((cancel (condition-case err
+                              (funcall (drover-backend-property backend :search) query scope
+                                       (drover-remote--search-receiver connection id backend))
+                            (error (drover-remote--search-failed
+                                    run backend (drover-error-message err))
+                                   nil))))
+              (cond ((not (memq source (plist-get run :sources)))
+                     (when (functionp cancel)
+                       (drover-with-reporting "remote search" (funcall cancel))))
+                    ((functionp cancel) (setcdr source cancel))
+                    (t (plist-put run :sources (delq source (plist-get run :sources))))))))
+        (drover-remote--search-maybe-finish connection id))))))
+
+(defun drover-remote--search-failed (run backend message)
+  "Note in RUN that BACKEND failed to search, telling MESSAGE, and drop it."
+  (plist-put run :failed (cons (cons (drover-backend-label backend)
+                                     (or (drover-bound-line (format "%s" message) drover-error-length) "failed"))
+                               (plist-get run :failed)))
+  (plist-put run :sources (assq-delete-all backend (plist-get run :sources))))
+
+(defun drover-remote--search-receiver (connection id backend)
+  "Return the function BACKEND reports to, searching for the peer of CONNECTION.
+The search is ID; what comes once it ended is dropped."
+  (let ((link (drover-link connection)))
+    (lambda (result)
+      (drover-with-reporting "remote search"
+        (when-let* ((connection (drover-linked link))
+                    (table (gethash connection drover-remote--searching))
+                    (run (gethash id table)))
+          (cond
+           ((eq result 'done)
+            (plist-put run :sources (assq-delete-all backend (plist-get run :sources)))
+            (drover-remote--search-maybe-finish connection id))
+           ((and (consp result) (eq (car result) :failure))
+            (drover-remote--search-failed run backend (cadr result))
+            (drover-remote--search-maybe-finish connection id))
+           ((listp result)
+            (let ((matches nil))
+              (dolist (match result)
+                (when (> (plist-get run :left) 0)
+                  (when-let* ((wire (drover-remote--wire-match match)))
+                    (plist-put run :left (1- (plist-get run :left)))
+                    (push wire matches))))
+              (when (and matches (spyglass-connection-live-p connection))
+                (drover-remote--send connection (list :t "srm" :id id :m (vconcat (nreverse matches)))))
+              (when (<= (plist-get run :left) 0)
+                (drover-remote--search-finish connection id))))))))))
+
+(defun drover-remote--search-maybe-finish (connection id)
+  "End the search ID of the peer of CONNECTION once no backend searches."
+  (when-let* ((table (gethash connection drover-remote--searching))
+              (run (gethash id table)))
+    (unless (plist-get run :sources)
+      (drover-remote--search-finish connection id))))
+
+(defun drover-remote--search-stop-run (connection id why)
+  "Stop the search ID run for the peer of CONNECTION, its backends too.
+WHY, a symbol's name or nil, is noted in the peer's measures."
+  (when-let* ((table (gethash connection drover-remote--searching))
+              (run (gethash id table)))
+    (remhash id table)
+    (when (timerp (plist-get run :timer))
+      (cancel-timer (plist-get run :timer)))
+    (pcase-dolist (`(,backend . ,cancel) (plist-get run :sources))
+      (when (functionp cancel)
+        (drover-with-reporting (format "search of %s" backend)
+          (funcall cancel))))
+    (plist-put run :sources nil)
+    (when-let* ((peer (drover-remote--peer (plist-get run :peer))))
+      (drover-remote--stat-max peer :search-max (- (float-time) (plist-get run :start)))
+      (when why
+        (drover-remote--stat peer :searches-stopped)))
+    run))
+
+(defun drover-remote--search-finish (connection id)
+  "End the search ID run for the peer of CONNECTION, telling it how it went."
+  (when-let* ((run (drover-remote--search-stop-run connection id nil)))
+    (when (spyglass-connection-live-p connection)
+      (drover-remote--send connection
+                           (append (list :t "sre" :id id)
+                                   (when-let* ((failed (plist-get run :failed)))
+                                     (list :err (drover-bound-line
+                                                 (mapconcat (pcase-lambda (`(,label . ,message))
+                                                              (format "%s: %s" label message))
+                                                            (reverse failed) "; ")
+                                                 drover-error-length))))))))
+
+(defun drover-remote--on-search-stop (connection message)
+  "Stop the search MESSAGE names, its peer, of CONNECTION, typing past it."
+  (when-let* ((id (plist-get message :id))
+              ((stringp id)))
+    (drover-remote--search-stop-run connection id "stopped")))
+
+(defun drover-remote--search-unserve (connection)
+  "Stop the searches run for the peer of CONNECTION, whose stream ended."
+  (when-let* ((table (gethash connection drover-remote--searching)))
+    (dolist (id (hash-table-keys table))
+      (drover-remote--search-stop-run connection id nil))
+    (remhash connection drover-remote--searching)))
+
 ;;;; Messages
 
 (defun drover-remote--handle (connection message)
@@ -2913,7 +3295,10 @@ received so far each time an answer of the owner's comes."
    ((equal type "unsent") (drover-remote--on-unsent peer message))
    ((equal type "ocd") (drover-remote--on-oc-data message))
    ((equal type "oce") (drover-remote--on-oc-end message))
-   ((equal type "occ") (drover-remote--on-oc-cancel connection message))))
+   ((equal type "occ") (drover-remote--on-oc-cancel connection message))
+   ((equal type "srm") (drover-remote--on-search-matches peer message))
+   ((equal type "sre") (drover-remote--on-search-end peer message))
+   ((equal type "src") (drover-remote--on-search-stop connection message))))
 
 (defun drover-remote--on-bye (peer connection message)
   "Take PEER's farewell MESSAGE on CONNECTION.
@@ -2961,6 +3346,7 @@ as an older drover's farewells do."
         ("requests" (drover-remote--on-requests peer key reply))
         ("oc" (drover-remote--on-oc peer message reply))
         ("ocs" (drover-remote--on-oc-stream peer connection message reply))
+        ("search" (drover-remote--on-search peer connection message reply))
         ("recap"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -3045,6 +3431,8 @@ as an older drover's farewells do."
      :prefetch (lambda (sessions)
                  (when-let* ((peer (drover-remote--peer name)))
                    (drover-remote--prefetch peer sessions)))
+     ;; What was said, searched there by its own backends.
+     :search (lambda (query scope callback) (drover-remote--search name query scope callback))
      ;; Actions, which the owner performs and confirms.
      :supports (lambda (session operation) (drover-remote--supports name session operation))
      :unsupported (lambda (session operation) (drover-remote--unsupported name session operation))
@@ -4500,6 +4888,10 @@ starts again at once: its peers keep this host's sessions meanwhile."
         (spyglass-server-stop))))
   (dolist (connection (hash-table-keys drover-remote--oc-relayed))
     (drover-remote--oc-unrelay connection))
+  (dolist (connection (hash-table-keys drover-remote--searching))
+    (drover-remote--search-unserve connection))
+  (dolist (id (hash-table-keys drover-remote--searches))
+    (drover-remote--search-end id (list :failure "the remote layer stopped")))
   (remove-hook 'opencode-state-updated-functions #'drover-remote--oc-updated)
   (when (fboundp 'spyglass-unregister-channel)
     (spyglass-unregister-channel drover-remote-channel))

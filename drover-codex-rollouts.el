@@ -95,6 +95,11 @@ all."
 
 ;;;; State
 
+(defconst drover-codex-rollouts--reader-version 3
+  "Version of `drover-codex-rollouts--read'.
+Raised when it reads anew what it read before, so that what an older
+one read and kept between Emacs sessions is read again.")
+
 (defvar drover-codex-rollouts--index nil
   "The index of Codex's rollouts, once installed.")
 
@@ -670,11 +675,6 @@ The backend's :session."
   (let ((regexp "\\`rollout-.*\\.jsonl\\'"))
     (list (list (expand-file-name "sessions" drover-codex-home) 3 regexp)
           (list (drover-codex-rollouts--archived-directory) 0 regexp))))
-
-(defconst drover-codex-rollouts--reader-version 3
-  "Version of `drover-codex-rollouts--read'.
-Raised when it reads anew what it read before, so that what an older
-one read and kept between Emacs sessions is read again.")
 
 (defun drover-codex-rollouts--make-index ()
   "Return a new index of Codex's rollouts."

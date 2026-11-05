@@ -40,7 +40,10 @@
 ;; With DROVER_AGENT_OPENCODE set, it runs a fake OpenCode service
 ;; (test/drover-fake-opencode.el), which opencode.el finds as its
 ;; service, and a backend `opencode' of its sessions, which drover's
-;; remote layer relays to peers.
+;; remote layer relays to peers, whose search of what was said is a
+;; stand-in of the backend's, as it answers through `opencode-search'.
+;; With DROVER_AGENT_CLAUDE set, it lists the conversations Claude Code
+;; recorded, read only, in the home it names, or in the user's for 1.
 ;; It says READY on
 ;; standard error once it listens, kills itself past 2 GB of resident
 ;; memory, and after ten minutes without a command.  It loads neither
@@ -60,6 +63,9 @@
 (defvar drover-fake-opencode--password)
 (defvar drover-fake-opencode-directory)
 (defvar opencode-service-registration-file)
+(defvar drover-claude-code-home)
+(defvar drover-claude-code-history-days)
+(defvar drover-claude-code-agents-interval)
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
 (declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
@@ -331,6 +337,48 @@ whose newlines are CRLF on Windows."
                            :archived (gethash id drover-remote-agent--oc-archived)
                            :updated (float-time) :created (float-time))))
 
+(defvar drover-remote-agent--search-delay 0.01
+  "Seconds the stand-in of OpenCode's search takes to answer.")
+
+(defvar drover-remote-agent--search-failure nil
+  "What the stand-in of OpenCode's search fails with, or nil when it answers.")
+
+(defun drover-remote-agent--oc-texts (id)
+  "Return the texts of the fake OpenCode session ID's messages, as (MESSAGE-ID . TEXT)."
+  (delq nil (mapcar (lambda (message)
+                      (when-let* ((text (or (alist-get 'text message)
+                                            (alist-get 'text (seq-first (alist-get 'content message))))))
+                        (cons (alist-get 'id message) text)))
+                    (gethash id drover-fake-opencode--messages))))
+
+(defun drover-remote-agent--oc-search (query scope callback)
+  "Search the fake OpenCode service's messages for QUERY, for CALLBACK.
+A stand-in of drover's OpenCode backend's :search, as it answers
+through `opencode-search': later, a match per session naming it by its
+key, the archived sessions only while SCOPE says they show; the calls
+noted, and their cancellations."
+  (push (vector "search" query :false) drover-remote-agent--calls)
+  (let* ((needle (downcase query))
+         (timer (run-at-time
+                 drover-remote-agent--search-delay nil
+                 (lambda ()
+                   (if drover-remote-agent--search-failure
+                       (funcall callback (list :failure drover-remote-agent--search-failure))
+                     (let ((matches nil))
+                       (dolist (id drover-fake-opencode--order)
+                         (when (and (or (plist-get scope :archived)
+                                        (not (gethash id drover-remote-agent--oc-archived)))
+                                    (funcall (plist-get scope :wanted) (list :key (cons 'opencode id))))
+                           (when-let* ((found (seq-find (lambda (entry) (string-search needle (downcase (cdr entry))))
+                                                        (drover-remote-agent--oc-texts id))))
+                             (push (list :key (cons 'opencode id) :snippet (cdr found) :position (car found))
+                                   matches))))
+                       (funcall callback (nreverse matches))
+                       (funcall callback 'done)))))))
+    (lambda ()
+      (push (vector "search-cancel" query :false) drover-remote-agent--calls)
+      (cancel-timer timer))))
+
 (defun drover-remote-agent--opencode ()
   "Start the fake OpenCode service, and the backend of its sessions."
   (require 'drover-fake-opencode)
@@ -340,7 +388,8 @@ whose newlines are CRLF on Windows."
   (drover-register-backend
    'opencode :label "OpenCode"
    :sessions (lambda () (delq nil (mapcar #'drover-remote-agent--opencode-session drover-fake-opencode--order)))
-   :session #'drover-remote-agent--opencode-session))
+   :session #'drover-remote-agent--opencode-session
+   :search #'drover-remote-agent--oc-search))
 
 (defun drover-remote-agent--json (value)
   "Return VALUE, a plist parsed from JSON, with false as nil."
@@ -413,6 +462,16 @@ whose newlines are CRLF on Windows."
        (funcall reply (list :ok t)))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("search-set"
+       ;; How the stand-in of OpenCode's search answers: after DELAY
+       ;; seconds, failing with FAILURE when given.
+       (setq drover-remote-agent--search-delay (or (plist-get args :delay) 0.01)
+             drover-remote-agent--search-failure (plist-get args :failure))
+       (funcall reply (list :ok t)))
+      ("recorded"
+       ;; How many conversations engines recorded the index lists, by engine.
+       (funcall reply (list :claude (seq-count (lambda (session) (eq (drover-session-backend session) 'claude-code))
+                                               (drover-index-sessions)))))
       ("oc-add"
        ;; Sessions of the fake OpenCode service, as (ID TITLE).
        (seq-doseq (pair (plist-get args :sessions))
@@ -636,8 +695,9 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (setq drover-host (or (getenv "DROVER_AGENT_HOST") "agent")
           drover-host-aliases nil
           drover-state-directory (expand-file-name "state/" dir)
-          ;; The fake backend's sessions alone, not those this host's engines recorded.
-          drover-transcript-engines nil
+          ;; The fake backend's sessions alone, not those this host's
+          ;; engines recorded, unless asked for Claude Code's.
+          drover-transcript-engines (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
           drover-refresh-delay 0.02
           spyglass-registration-file (expand-file-name "server.json" dir)
           drover-remote-standby-delay 1
@@ -661,6 +721,14 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (drover-remote-agent--register)
     (when (getenv "DROVER_AGENT_OPENCODE")
       (drover-remote-agent--opencode))
+    (when-let* ((claude (getenv "DROVER_AGENT_CLAUDE")))
+      ;; Its conversations listed, as drover starts, read only: every one
+      ;; live, none asked of the CLI.
+      (require 'drover-claude-code)
+      (unless (member claude '("" "1"))
+        (setq drover-claude-code-home claude))
+      (setq drover-claude-code-history-days nil
+            drover-claude-code-agents-interval nil))
     (spyglass-register-channel "drover-test" #'ignore :request #'drover-remote-agent--command)
     (drover-remote-mode 1)
     (drover-remote-agent--say "READY %s %s" drover-host spyglass-registration-file)

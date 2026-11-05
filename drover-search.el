@@ -357,16 +357,32 @@ or by :engine and :id, and :host for a session of another host."
              (gethash (if host (cons host (cons engine id)) (cons engine id))
                       (drover-search--state-engines state))))))
 
+(defun drover-search--offered (state backend)
+  "Return the sessions of BACKEND STATE offers, in the list's order."
+  (let ((sessions nil))
+    (seq-doseq (entry (drover-search--state-entries state))
+      (let ((session (drover-search--entry-session entry)))
+        (when (eq (drover-session-backend session) backend)
+          (push session sessions))))
+    (nreverse sessions)))
+
 (defun drover-search--scope (state)
-  "Return the scope the backends search within for STATE, a plist."
-  (list :filter drover-filter
-        :history drover-show-history
-        :archived drover-show-archived
-        :limit drover-search-text-limit
-        :wanted (let ((link (drover-link state)))
-                  (lambda (match)
+  "Return the scope the backends search within for STATE, a plist.
+Its :wanted tells whether the search offers the session of a match;
+its :sessions, a function of a backend, the sessions of that backend
+it offers, for a backend searching elsewhere, as a peer's, to name
+them there."
+  (let ((link (drover-link state)))
+    (list :filter drover-filter
+          :history drover-show-history
+          :archived drover-show-archived
+          :limit drover-search-text-limit
+          :wanted (lambda (match)
                     (when-let* ((state (drover-linked link)))
-                      (and (drover-search--resolve state match) t))))))
+                      (and (drover-search--resolve state match) t)))
+          :sessions (lambda (backend)
+                      (when-let* ((state (drover-linked link)))
+                        (drover-search--offered state backend))))))
 
 (defun drover-search--cancel (state)
   "Stop the backends searching for STATE, and forget their answers to come."

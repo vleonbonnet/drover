@@ -27,6 +27,12 @@
 ;;   make bench-remote
 ;;   make bench-remote REMOTE=core SSH=myssh REMOTE_EMACS=/ucrt64/bin/emacs
 ;;
+;; With SEARCH=WORDS, comma-separated, it measures instead searches of
+;; what was said in the conversations Claude Code recorded on the
+;; agent's host, read only, through the agent, for each word:
+;;
+;;   make bench-remote REMOTE=core SSH=myssh REMOTE_EMACS=/ucrt64/bin/emacs SEARCH=error,capybara
+;;
 ;; With BACK=PROGRAM, the agent also dials this host back through SSH
 ;; run as PROGRAM there, with BACK_ARGS (comma-separated), so that both
 ;; directions are checked and the connection both keep is reported.
@@ -170,6 +176,8 @@ changes in at once: views follow them as they do in use, after
 (defun drover-remote-bench--sources ()
   "Return the files the agent needs."
   (append (mapcar #'locate-library '("drover-core.el" "drover-ui.el" "drover-remote.el" "drover-remote-agent.el"
+                                     "drover-model.el" "drover-command.el" "drover-transcript.el"
+                                     "drover-claude-code.el" "drover-claude-code-transcripts.el"
                                      "opencode-look.el" "opencode-common.el" "opencode-transport.el"
                                      "opencode-service.el" "drover-fake-opencode.el"))
           (file-expand-wildcards
@@ -185,16 +193,19 @@ With BACK, the agent will be told to dial this host back."
     (dolist (file (drover-remote-bench--sources))
       (drover-remote-bench--copy file dir))
     (drover-remote-bench--remote-run
-     (format "cd %s && timeout 300 %s -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile opencode-common.el opencode-look.el opencode-transport.el opencode-service.el spyglass*.el drover-core.el drover-ui.el drover-remote.el 2>&1"
-             dir emacs))
+     ;; Warnings fail drover's files alone: the others' are their own.
+     (format "cd %s && timeout 300 %s -Q --batch -L . -f batch-byte-compile opencode-common.el opencode-look.el opencode-transport.el opencode-service.el spyglass*.el 2>&1 && timeout 300 %s -Q --batch -L . --eval '(setq byte-compile-error-on-warn t)' -f batch-byte-compile drover-core.el drover-ui.el drover-remote.el drover-model.el drover-command.el drover-transcript.el drover-claude-code.el drover-claude-code-transcripts.el 2>&1"
+             dir emacs emacs))
     (setq drover-remote-test--agent-output nil
           drover-remote-test--agent-pending ""
           drover-remote-test--agent
           (make-process
            :name "drover-agent" :connection-type 'pipe :noquery t
            :command (list (drover-remote-bench--ssh) "-o" "BatchMode=yes" drover-remote-bench--remote
-                          (format "cd %s && DROVER_AGENT_OPENCODE=1 DROVER_AGENT_ACCESS=full DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
-                                  dir drover-remote-test-agent-name (if back drover-host "") emacs))
+                          (format "cd %s && DROVER_AGENT_OPENCODE=1 DROVER_AGENT_ACCESS=full DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
+                                  dir drover-remote-test-agent-name (if back drover-host "")
+                                  (if (drover-remote-bench--search-words) " DROVER_AGENT_CLAUDE=1" "")
+                                  emacs))
            :filter #'drover-remote-test--agent-filter))
     (drover-remote-test-wait (lambda () (or (seq-some (lambda (line) (string-prefix-p "DROVER-AGENT READY" line))
                                                       drover-remote-test--agent-output)
@@ -465,6 +476,73 @@ renders the other's large turn."
         (when (process-live-p (car forward))
           (delete-process (car forward)))))))
 
+;;;; Searching what was said there
+
+(defun drover-remote-bench--search-words ()
+  "Return the words to search the agent's conversations for, or nil.
+DROVER_BENCH_SEARCH, comma-separated: then the bench measures searches
+alone, of what the agent's host recorded of Claude Code, read only."
+  (and (drover-remote-bench--getenv "DROVER_BENCH_SEARCH")
+       (split-string (getenv "DROVER_BENCH_SEARCH") "," t "[ \t]+")))
+
+(defun drover-remote-bench--conversations ()
+  "Return how many of the agent's Claude Code sessions this host holds."
+  (seq-count (lambda (session) (eq (drover-session-origin session) 'claude-code))
+             (drover-remote-bench--records-here)))
+
+(defun drover-remote-bench--search (words)
+  "Measure searches of the agent's Claude Code conversations for WORDS, adding rows.
+Once this host holds as many as the agent lists, the agent's count
+steady for 3 s, each word is searched five times through the agent's
+backend here, as the search of sessions asks it, every conversation
+offered: the time to the first match and to the end, and the matches,
+at most `drover-search-text-limit'."
+  (let ((name drover-remote-test-agent-name)
+        (start (float-time))
+        (last -1)
+        (since (float-time)))
+    (while (not (and (> last 0) (> (- (float-time) since) 3)
+                     (= last (drover-remote-bench--conversations))))
+      (when (> (- (float-time) start) 300)
+        (error "The agent's conversations were not listed here"))
+      (let ((there (plist-get (drover-remote-test-command "recorded") :claude)))
+        (unless (eql there last)
+          (setq last there since (float-time))))
+      (drover-remote-test-settle 0.5))
+    (drover-remote-bench--row (format "%d conversations listed there, then here" last)
+                              (- (float-time) start) last)
+    (dolist (word words)
+      (let ((firsts nil)
+            (ends nil)
+            (count 0))
+        (dotimes (_ 5)
+          (drover-remote-bench--reset)
+          (let* ((scope (drover-search--scope (drover-search--build)))
+                 (begin (float-time))
+                 (first nil)
+                 (end nil)
+                 (failure nil))
+            (setq count 0)
+            (drover-remote--search name word scope
+                                   (lambda (result)
+                                     (cond ((eq result 'done) (setq end (float-time)))
+                                           ((eq (car-safe result) :failure)
+                                            (setq failure (cadr result) end (float-time)))
+                                           (t (setq first (or first (float-time)))
+                                              (setq count (+ count (length result)))))))
+            (unless (drover-remote-test-wait (lambda () end) 120)
+              (error "The search of %s did not end" word))
+            (when failure
+              (error "The search of %s failed: %s" word failure))
+            (push (- (or first end) begin) firsts)
+            (push (- end begin) ends)))
+        (setq firsts (sort firsts #'<)
+              ends (sort ends #'<))
+        (drover-remote-bench--row (format "search \"%s\": first match (median of 5)" word) (nth 2 firsts) count)
+        (drover-remote-bench--row (format "search \"%s\": all matches (median of 5)" word) (nth 2 ends) count)
+        (drover-remote-bench--row (format "search \"%s\": all matches (slowest of 5)" word) (car (last ends))
+                                  count)))))
+
 ;;;; Main
 
 (defun drover-remote-bench--print ()
@@ -482,6 +560,7 @@ renders the other's large turn."
   "Measure the remote layer and print the table."
   (setq drover-remote-bench--remote (drover-remote-bench--getenv "DROVER_BENCH_REMOTE"))
   (let* ((back (drover-remote-bench--getenv "DROVER_BENCH_BACK"))
+         (search-words (drover-remote-bench--search-words))
          (back-args (and (drover-remote-bench--getenv "DROVER_BENCH_BACK_ARGS")
                          (split-string (getenv "DROVER_BENCH_BACK_ARGS") "," t)))
          (dir (file-name-as-directory (make-temp-file "drover-remote-bench" t)))
@@ -513,6 +592,7 @@ renders the other's large turn."
                                        (drover-remote-bench--start-remote back)
                                      (let ((process-environment (append '("DROVER_AGENT_ACCESS=full"
                                                                           "DROVER_AGENT_OPENCODE=1")
+                                                                        (and search-words '("DROVER_AGENT_CLAUDE=1"))
                                                                         process-environment)))
                                        (drover-remote-test-start-agent dir drover-remote-test-agent-name
                                                                        (and back drover-host))))))
@@ -533,123 +613,126 @@ renders the other's large turn."
                                                         'open))
                                          60)
                 (message "bench: connected")
-                ;; 2511 sessions appear: an update of all of them.
-                (drover-remote-bench--reset)
-                (let ((before (drover-remote-bench--records))
-                      (start (float-time)))
-                  (drover-remote-test-command "sessions" :n 837 :children 2)
-                  (drover-remote-bench--time-until (lambda () (= (length (drover-remote-bench--records-here)) 2511)))
-                  (drover-remote-bench--row "2511 sessions appearing" (- (float-time) start)
-                                            (- (drover-remote-bench--records) before)))
-                ;; A snapshot of them, after a reconnection under no epoch.
-                (drover-remote-bench--reset)
-                (let* ((peer (drover-remote--peer drover-remote-test-agent-name))
-                       (before (drover-remote-bench--records))
-                       (start (float-time)))
-                  (setf (drover-remote--peer-epoch peer) nil (drover-remote--peer-rev peer) nil)
-                  (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
-                  (drover-remote-bench--time-until
-                   (lambda () (and (eq (drover-remote--peer-state peer) 'open)
-                                   (drover-remote--peer-rev peer)
-                                   (not (drover-remote--peer-stale peer)))))
-                  (drover-remote-bench--row "snapshot of 2511" (- (float-time) start)
-                                            (- (drover-remote-bench--records) before)))
-                ;; One session changing: from the command to this host's index.
-                (drover-remote-bench--reset)
-                (let ((times nil))
-                  (dotimes (i 20)
-                    (let ((title (format "One %d" i))
-                          (start (float-time)))
-                      (drover-remote-test-command "change" :ids ["s5"] :title title :now t)
-                      (drover-remote-bench--time-until (lambda () (equal (drover-remote-bench--title "s5") title)))
-                      (push (- (float-time) start) times)))
-                  (setq times (sort times #'<))
-                  (drover-remote-bench--row "one session changed (median of 20)" (nth 10 times) 1)
-                  (drover-remote-bench--row "one session changed (slowest of 20)" (car (last times)) 1))
-                ;; Fifty at once.
-                (drover-remote-bench--reset)
-                (let ((before (drover-remote-bench--records))
-                      (start (float-time)))
-                  (drover-remote-test-command "change" :ids (vconcat (mapcar (lambda (i) (format "s%d" i))
-                                                                             (number-sequence 100 149)))
-                                              :title "Fifty" :now t)
-                  (drover-remote-bench--time-until (lambda () (equal (drover-remote-bench--title "s149") "Fifty")))
-                  (drover-remote-bench--row "50 sessions changed" (- (float-time) start)
-                                            (- (drover-remote-bench--records) before)))
-                ;; The minute's refresh, the peer reporting every change,
-                ;; against a full one, as `g' asks.
-                (drover-changed-now)
-                (dolist (full '(nil t))
-                  (drover-remote-bench--reset)
-                  (let ((times nil))
-                    (dotimes (_ 5)
-                      (let ((start (float-time)))
-                        (drover-index-refresh full)
-                        (push (- (float-time) start) times)))
-                    (drover-remote-bench--row (if full
-                                                  "a full refresh, as g (median of 5)"
-                                                "the minute's refresh (median of 5)")
-                                              (nth 2 (sort times #'<)))))
-                ;; Resynchronizations after changes during an outage.
-                (dolist (count '(10 500))
-                  (drover-remote-bench--reset)
-                  (let* ((peer (drover-remote--peer drover-remote-test-agent-name))
-                         (snapshots (or (plist-get (drover-remote-test-stats) :snapshots) 0))
-                         (before (drover-remote-bench--records))
-                         (start (float-time))
-                         )
-                    (drover-remote-test-command "drop" :change count)
-                    (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 10)
-                    (drover-remote-bench--time-until
-                     (lambda () (and (eq (drover-remote--peer-state peer) 'open)
-                                     (not (drover-remote--peer-stale peer))
-                                     (= (seq-count (lambda (s) (string-prefix-p "Outage" (or (drover-session-title s) "")))
-                                                   (drover-remote-bench--records-here))
-                                        count))))
-                    (drover-remote-bench--row (format "resync after %d changes%s" count
-                                                      (if (= snapshots (or (plist-get (drover-remote-test-stats)
-                                                                                      :snapshots)
-                                                                           0))
-                                                          "" " (SNAPSHOT)"))
-                                              (- (float-time) start)
-                                              (- (drover-remote-bench--records) before))
-                    ;; The next round counts from fresh titles.
-                    (drover-remote-test-command "sessions" :n 837 :children 2)
-                    (drover-remote-bench--time-until
-                     (lambda () (zerop (seq-count (lambda (s) (string-prefix-p "Outage" (or (drover-session-title s) "")))
-                                                  (drover-remote-bench--records-here)))))))
-                ;; A terminal there mirrored here.
-                (drover-remote-bench--mirror)
-                ;; An OpenCode session there in a full buffer here.
-                (drover-remote-bench--opencode)
-                ;; Both directions, when asked.
-                (when back
-                  (unless drover-remote-bench--remote
-                    (drover-remote-test-command "dial" :name drover-host :local spyglass-registration-file))
-                  (when drover-remote-bench--remote
-                    (drover-remote-test-command "dial-ssh" :name drover-host
-                                                :ssh (drover-remote-bench--getenv "DROVER_BENCH_BACK_HOST"
-                                                                                  (drover--system-host))
-                                                :program back :args (vconcat back-args)
-                                                :registration spyglass-registration-file))
-                  (drover-remote-test-wait (lambda () (eq (plist-get (drover-remote-test-stats) :through)
-                                                          (if (string< drover-host drover-remote-test-agent-name)
-                                                              'dialed 'accepted)))
-                                           30)
-                  (drover-remote-test-wait
-                   (lambda () (= 5 (length (plist-get (drover-remote-test-command "hosts") :remote)))) 30)
-                  (let ((theirs (plist-get (drover-remote-test-command "stats" :peer drover-host) :peer)))
-                    (message "bench: both dial: here through %s, there through %s (%s), there error %s"
-                             (plist-get (drover-remote-test-stats) :through)
-                             (plist-get theirs :through) (plist-get theirs :state)
-                             (plist-get theirs :error))
-                    (push (list "both directions: kept here/there, sessions of here there"
-                                (format "%s/%s" (plist-get (drover-remote-test-stats) :through)
-                                        (plist-get theirs :through))
-                                (format "%d" (length (plist-get (drover-remote-test-command "hosts")
-                                                                :remote)))
-                                "-" "-" "-")
-                          drover-remote-bench--rows)))
+                (if search-words
+                    (drover-remote-bench--search search-words)
+                  (progn
+                    ;; 2511 sessions appear: an update of all of them.
+                    (drover-remote-bench--reset)
+                    (let ((before (drover-remote-bench--records))
+			  (start (float-time)))
+                      (drover-remote-test-command "sessions" :n 837 :children 2)
+                      (drover-remote-bench--time-until (lambda () (= (length (drover-remote-bench--records-here)) 2511)))
+                      (drover-remote-bench--row "2511 sessions appearing" (- (float-time) start)
+						(- (drover-remote-bench--records) before)))
+                    ;; A snapshot of them, after a reconnection under no epoch.
+                    (drover-remote-bench--reset)
+                    (let* ((peer (drover-remote--peer drover-remote-test-agent-name))
+			   (before (drover-remote-bench--records))
+			   (start (float-time)))
+                      (setf (drover-remote--peer-epoch peer) nil (drover-remote--peer-rev peer) nil)
+                      (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+                      (drover-remote-bench--time-until
+                       (lambda () (and (eq (drover-remote--peer-state peer) 'open)
+                                       (drover-remote--peer-rev peer)
+                                       (not (drover-remote--peer-stale peer)))))
+                      (drover-remote-bench--row "snapshot of 2511" (- (float-time) start)
+						(- (drover-remote-bench--records) before)))
+                    ;; One session changing: from the command to this host's index.
+                    (drover-remote-bench--reset)
+                    (let ((times nil))
+                      (dotimes (i 20)
+			(let ((title (format "One %d" i))
+                              (start (float-time)))
+			  (drover-remote-test-command "change" :ids ["s5"] :title title :now t)
+			  (drover-remote-bench--time-until (lambda () (equal (drover-remote-bench--title "s5") title)))
+			  (push (- (float-time) start) times)))
+                      (setq times (sort times #'<))
+                      (drover-remote-bench--row "one session changed (median of 20)" (nth 10 times) 1)
+                      (drover-remote-bench--row "one session changed (slowest of 20)" (car (last times)) 1))
+                    ;; Fifty at once.
+                    (drover-remote-bench--reset)
+                    (let ((before (drover-remote-bench--records))
+			  (start (float-time)))
+                      (drover-remote-test-command "change" :ids (vconcat (mapcar (lambda (i) (format "s%d" i))
+										 (number-sequence 100 149)))
+						  :title "Fifty" :now t)
+                      (drover-remote-bench--time-until (lambda () (equal (drover-remote-bench--title "s149") "Fifty")))
+                      (drover-remote-bench--row "50 sessions changed" (- (float-time) start)
+						(- (drover-remote-bench--records) before)))
+                    ;; The minute's refresh, the peer reporting every change,
+                    ;; against a full one, as `g' asks.
+                    (drover-changed-now)
+                    (dolist (full '(nil t))
+                      (drover-remote-bench--reset)
+                      (let ((times nil))
+			(dotimes (_ 5)
+			  (let ((start (float-time)))
+                            (drover-index-refresh full)
+                            (push (- (float-time) start) times)))
+			(drover-remote-bench--row (if full
+                                                      "a full refresh, as g (median of 5)"
+                                                    "the minute's refresh (median of 5)")
+						  (nth 2 (sort times #'<)))))
+                    ;; Resynchronizations after changes during an outage.
+                    (dolist (count '(10 500))
+                      (drover-remote-bench--reset)
+                      (let* ((peer (drover-remote--peer drover-remote-test-agent-name))
+                             (snapshots (or (plist-get (drover-remote-test-stats) :snapshots) 0))
+                             (before (drover-remote-bench--records))
+                             (start (float-time))
+                             )
+			(drover-remote-test-command "drop" :change count)
+			(drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 10)
+			(drover-remote-bench--time-until
+			 (lambda () (and (eq (drover-remote--peer-state peer) 'open)
+					 (not (drover-remote--peer-stale peer))
+					 (= (seq-count (lambda (s) (string-prefix-p "Outage" (or (drover-session-title s) "")))
+                                                       (drover-remote-bench--records-here))
+                                            count))))
+			(drover-remote-bench--row (format "resync after %d changes%s" count
+							  (if (= snapshots (or (plist-get (drover-remote-test-stats)
+											  :snapshots)
+                                                                               0))
+                                                              "" " (SNAPSHOT)"))
+						  (- (float-time) start)
+						  (- (drover-remote-bench--records) before))
+			;; The next round counts from fresh titles.
+			(drover-remote-test-command "sessions" :n 837 :children 2)
+			(drover-remote-bench--time-until
+			 (lambda () (zerop (seq-count (lambda (s) (string-prefix-p "Outage" (or (drover-session-title s) "")))
+                                                      (drover-remote-bench--records-here)))))))
+                    ;; A terminal there mirrored here.
+                    (drover-remote-bench--mirror)
+                    ;; An OpenCode session there in a full buffer here.
+                    (drover-remote-bench--opencode)
+                    ;; Both directions, when asked.
+                    (when back
+                      (unless drover-remote-bench--remote
+			(drover-remote-test-command "dial" :name drover-host :local spyglass-registration-file))
+                      (when drover-remote-bench--remote
+			(drover-remote-test-command "dial-ssh" :name drover-host
+                                                    :ssh (drover-remote-bench--getenv "DROVER_BENCH_BACK_HOST"
+                                                                                      (drover--system-host))
+                                                    :program back :args (vconcat back-args)
+                                                    :registration spyglass-registration-file))
+                      (drover-remote-test-wait (lambda () (eq (plist-get (drover-remote-test-stats) :through)
+                                                              (if (string< drover-host drover-remote-test-agent-name)
+								  'dialed 'accepted)))
+                                               30)
+                      (drover-remote-test-wait
+                       (lambda () (= 5 (length (plist-get (drover-remote-test-command "hosts") :remote)))) 30)
+                      (let ((theirs (plist-get (drover-remote-test-command "stats" :peer drover-host) :peer)))
+			(message "bench: both dial: here through %s, there through %s (%s), there error %s"
+				 (plist-get (drover-remote-test-stats) :through)
+				 (plist-get theirs :through) (plist-get theirs :state)
+				 (plist-get theirs :error))
+			(push (list "both directions: kept here/there, sessions of here there"
+                                    (format "%s/%s" (plist-get (drover-remote-test-stats) :through)
+                                            (plist-get theirs :through))
+                                    (format "%d" (length (plist-get (drover-remote-test-command "hosts")
+                                                                    :remote)))
+                                    "-" "-" "-")
+                              drover-remote-bench--rows)))))
                 ;; What the agent holds, this host holds.
                 (let* ((titles (plist-get (drover-remote-test-command "titles") :titles))
                        (fake (seq-filter (lambda (session) (eq (car (drover-session-id session)) 'fake))

@@ -30,6 +30,8 @@
 (require 'drover-links)
 (require 'drover-list)
 (require 'drover-prompt)
+(require 'drover-search)
+(require 'drover-transcript-fixtures)
 (require 'spyglass nil t)
 
 (defun drover-remote-test--available-p ()
@@ -2143,6 +2145,156 @@ user's service: only the services BODY registers are reached."
           (should-not (opencode-service-get "agent"))
           (should-not (drover-remote-test-oc-requests))
           (kill-buffer view))))))
+
+;;;; Searching what was said there
+
+(defconst drover-remote-test--capybara "11111111-1111-4111-8111-111111111111"
+  "The conversation of the agent's Claude Code speaking of a capybara.")
+
+(defconst drover-remote-test--build "22222222-2222-4222-8222-222222222222"
+  "The conversation of the agent's Claude Code speaking of something else.")
+
+(defun drover-remote-test-start-searching (dir &rest environment)
+  "Start the agent in DIR with Claude Code's transcripts and an OpenCode service.
+ENVIRONMENT is more of it.  Two conversations of Claude Code, one
+speaking of a capybara, and two OpenCode sessions, ses_a speaking of it
+too, are listed here once it is connected."
+  (let ((claude (expand-file-name "agent-claude" dir)))
+    (let ((drover-claude-code-home claude))
+      (drover-fixture-claude drover-remote-test--capybara (expand-file-name "work/alpha/" dir)
+                             :prompt "Teach the capybara to swim" :reply "The capybara swims now")
+      (drover-fixture-claude drover-remote-test--build (expand-file-name "work/beta/" dir)
+                             :prompt "Fix the build" :reply "It builds"))
+    (apply #'drover-remote-test-start-oc dir "read" (concat "DROVER_AGENT_CLAUDE=" claude) environment))
+  (drover-remote-test-command "oc-turn" :id "ses_a" :text "the capybara dives")
+  (drover-remote-test-wait
+   (lambda () (= 2 (seq-count (lambda (session) (eq (drover-session-origin session) 'claude-code))
+                              (drover-remote-test-remote)))))
+  (should (= 2 (seq-count (lambda (session) (eq (drover-session-origin session) 'claude-code))
+                          (drover-remote-test-remote)))))
+
+(defun drover-remote-test-search (query)
+  "Search what was said for QUERY as `drover-search-text' does; return its result."
+  (let ((result nil))
+    (drover-search-text query (lambda (value) (setq result value)))
+    (drover-remote-test-wait (lambda () result) 30)
+    (should result)
+    result))
+
+(defun drover-remote-test-found (result)
+  "Return the sessions RESULT of `drover-search-text' found, as (HOST ID SNIPPET)."
+  (sort (mapcar (pcase-lambda (`(,session ,snippet ,_count))
+                  (list (drover-session-host session) (or (drover-session-engine-id session)
+                                                          (cdr-safe (drover-session-id session)))
+                        snippet))
+                (plist-get result :sessions))
+        :key #'cadr))
+
+(ert-deftest drover-remote-test-search-matches ()
+  "A match travels named by its session, its snippet and position bounded; anything else is dropped."
+  (let ((huge (make-string 500000 ?x)))
+    (should (equal (drover-remote--decode-match '(:k ["opencode" "ses_a"] :s "the capybara" :p "msg_1")
+                                                "core" 'remote:core)
+                   '(:key (remote:core opencode . "ses_a") :snippet "the capybara" :position "msg_1")))
+    (should (equal (drover-remote--decode-match '(:e "claude-code" :i "u-1" :s "x" :p 12) "core" 'remote:core)
+                   '(:engine claude-code :id "u-1" :host "core" :snippet "x" :position 12)))
+    (let ((match (drover-remote--decode-match (list :k ["opencode" "ses_a"] :s huge :p huge) "core" 'remote:core)))
+      ;; Cut, an ellipsis after.
+      (should (<= (length (plist-get match :snippet)) (1+ drover-remote-search-snippet)))
+      (should (<= (length (plist-get match :position)) 129)))
+    (should-not (drover-remote--decode-match '(:k ["Bad Name" "x"] :s "x") "core" 'remote:core))
+    (should-not (drover-remote--decode-match '(:e "claude-code" :i [1 2]) "core" 'remote:core))
+    (should-not (drover-remote--decode-match ["not" "an" "object"] "core" 'remote:core))
+    (should-not (plist-get (drover-remote--decode-match '(:k ["a" "b"] :p (1 2)) "core" 'remote:core)
+                           :position))
+    ;; As this host sends them: plain, bounded, by key or by engine.
+    (should (equal (drover-remote--wire-match (list :key '(opencode . "ses_a")
+                                                    :snippet (propertize "hit" 'face 'bold) :position "msg_1"))
+                   '(:k ["opencode" "ses_a"] :s "hit" :p "msg_1")))
+    (should (equal (drover-remote--wire-match '(:engine claude-code :id "u-1" :snippet "hit" :position 4))
+                   '(:e "claude-code" :i "u-1" :s "hit" :p 4)))
+    (should (<= (length (plist-get (drover-remote--wire-match (list :key '(a . "b") :snippet huge)) :s))
+                (1+ drover-remote-search-snippet)))
+    (should-not (drover-remote--wire-match '(:snippet "no session")))))
+
+(ert-deftest drover-remote-test-search-there ()
+  "Searching what was said here searches another host's sessions there, with its own backends, as scoped here."
+  (skip-unless (executable-find "rg"))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-searching dir)
+    (let ((result (drover-remote-test-search "capybara")))
+      ;; Found there by its transcripts and its OpenCode service, named
+      ;; here as the agent's sessions, with snippets of what was said.
+      (should (equal (mapcar #'butlast (drover-remote-test-found result))
+                     `(("agent" ,drover-remote-test--capybara) ("agent" "ses_a"))))
+      (should (seq-every-p (lambda (found) (string-match-p "capybara" (nth 2 found)))
+                           (drover-remote-test-found result)))
+      (should-not (plist-get result :failed))
+      (should (equal (plist-get (drover-remote-test-stats) :searches) 1))
+      (should (member '("search" "capybara" :false) (drover-remote-test-calls "search"))))
+    ;; As many matches as the search takes, there too.
+    (let ((drover-search-text-limit 1))
+      (should (= 1 (length (plist-get (drover-remote-test-search "capybara") :sessions)))))
+    ;; Only the sessions offered here are searched there: under a filter
+    ;; on another host, none, nothing asked.
+    (let ((drover-filter '(:host (local))))
+      (should-not (plist-get (drover-remote-test-search "capybara") :sessions))
+      (should (= 2 (length (drover-remote-test-calls "search")))))
+    (let ((drover-filter '(:project "beta")))
+      (should-not (plist-get (drover-remote-test-search "capybara") :sessions)))
+    ;; An archived session there is searched while archived ones show here.
+    (drover-remote-test-command "oc-archive" :id "ses_a")
+    (drover-remote-test-wait (lambda () (let ((session (drover-remote-test-oc-session "ses_a")))
+                                          (or (null session) (drover-session-archived-p session)))))
+    (should-not (member "ses_a" (mapcar #'cadr (drover-remote-test-found (drover-remote-test-search "capybara")))))
+    (drover-set-show-archived t)
+    (unwind-protect
+        (progn
+          (drover-remote-test-wait (lambda () (seq-find (lambda (session)
+                                                          (equal (drover-session-id session) '(opencode . "ses_a")))
+                                                        (drover-known-sessions))))
+          (should (member "ses_a" (mapcar #'cadr (drover-remote-test-found (drover-remote-test-search "capybara"))))))
+      (drover-set-show-archived nil))))
+
+(ert-deftest drover-remote-test-search-stops-there ()
+  "A search typed past, or whose link drops, stops there; one failing there says so."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-searching dir)
+    (drover-remote-test-command "search-set" :delay 5)
+    ;; Typed past: stopped there.
+    (let ((stop (drover-search-text "capybara" #'ignore)))
+      (drover-remote-test-wait (lambda () (drover-remote-test-calls "search")))
+      (funcall stop)
+      (drover-remote-test-wait (lambda () (drover-remote-test-calls "search-cancel")))
+      (should (equal (mapcar #'cadr (drover-remote-test-calls "search-cancel")) '("capybara")))
+      (should (equal (plist-get (plist-get (drover-remote-test-command "stats" :peer "viewer") :peer)
+                                :searches-stopped)
+                     1)))
+    (should (= 0 (hash-table-count drover-remote--searches)))
+    ;; The link dropping ends it here, and stops it there.
+    (let ((result nil))
+      (drover-search-text "capybara" (lambda (value) (setq result value)))
+      (drover-remote-test-wait (lambda () (= 2 (length (drover-remote-test-calls "search")))))
+      (spyglass-connection-drop-stream (drover-remote--peer-connection (drover-remote--peer "agent")))
+      (drover-remote-test-wait (lambda () result))
+      (should (string-match-p "link to agent ended" (cdr (assq 'remote:agent (plist-get result :failed)))))
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)))
+      (drover-remote-test-wait (lambda () (= 2 (length (drover-remote-test-calls "search-cancel")))))
+      (should (= 2 (length (drover-remote-test-calls "search-cancel")))))
+    ;; Failing there: what it found stays, the failure told.
+    (drover-remote-test-command "search-set" :delay 0.01 :failure "its index is broken")
+    (let ((result (drover-remote-test-search "capybara")))
+      (should (equal (cdr (assq 'remote:agent (plist-get result :failed)))
+                     "OpenCode: its index is broken")))))
+
+(ert-deftest drover-remote-test-search-older-peer ()
+  "A peer whose drover searches nothing for others is left out of the search, silently."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-searching dir "DROVER_AGENT_CAPS=actions,bye,grant,mirror,opencode")
+    (let ((result (drover-remote-test-search "capybara")))
+      (should-not (plist-get result :sessions))
+      (should-not (plist-get result :failed))
+      (should-not (drover-remote-test-calls "search")))))
 
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

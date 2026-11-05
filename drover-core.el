@@ -1738,9 +1738,12 @@ optional.
              background: it must never wait.  SCOPE is a plist of
              :filter, `drover-filter', :history and :archived, whether
              older and archived sessions show, :limit, the most matches
-             taken, and :wanted, a function of a match returning
+             taken, :wanted, a function of a match returning
              non-nil when its session is among those the search
-             offers.  CALLBACK takes a list of matches, any number of
+             offers, and :sessions, a function of a backend returning
+             the sessions of that backend the search offers, in the
+             list's order, as a peer's backend sends them to the peer
+             searching for it.  CALLBACK takes a list of matches, any number of
              times, then the symbol `done', or (:failure MESSAGE);
              each match a plist naming its session by :key, its
              `drover-session-key', or by :engine and :id, the engine's
