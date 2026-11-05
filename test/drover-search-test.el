@@ -329,7 +329,7 @@ In STATE, by default a search made now."
         (let ((drover-filter '(:project "drover")))
           (drover-search nil)
           (should (string-search "project drover" prompt)))
-        ;; What the Filter group of its menu sets, the subagents shown too.
+        ;; What the view settings of its menu set, the subagents shown too.
         (let ((drover-filter '(:project "drover"))
               (drover-show-subagents 'all)
               (drover-show-history t)

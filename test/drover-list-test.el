@@ -688,7 +688,7 @@ next, drawn in place as drawn anew; all of them, it shows idle too."
 
 (ert-deftest drover-list-test-subagents-toggle ()
   "=u cycles every view through active, no and all subagents, redrawn at once.
-The View menu of the list holds it, in its Filter group."
+The View menu of the list holds it, in its View group."
   (drover-list-test-with (list (drover-test-session "root" :status 'working)
                                (drover-test-session "child" :parent "root" :status 'working)
                                (drover-test-session "ended" :parent "root" :status 'done
@@ -6758,7 +6758,7 @@ set is that of the list in sight."
     (cl-flet ((apt (key) (not (oref (seq-find (lambda (suffix) (equal (oref suffix key) key))
                                               transient--suffixes)
                                     inapt))))
-      (dolist (key '("=u" "=o" "=r" "=g" "=p" "=c" "-f" "-l"))
+      (dolist (key '("=u" "=o" "=r" "=g" "=p" "=c" "-f" "-p"))
         (should (apt key)))
       ;; Peeking needs a list: it would peek at the buffer's own session.
       (should-not (apt "v")))
@@ -6774,13 +6774,15 @@ set is that of the list in sight."
     (should (eq (oref transient--prefix command) 'drover-dispatch))
     (execute-kbd-macro (kbd "C-g"))
     (should (eq (selected-window) first))
-    ;; Hidden, the list leaves the view settings to nothing.  Following
-    ;; showed its session where the user works: back to the code.
+    ;; Hidden, the list leaves the view settings to nothing, and the
+    ;; menu leaves them out.  Following showed its session where the
+    ;; user works: back to the code.
     (delete-window side)
     (set-window-buffer first code)
     (set-buffer code)
     (execute-kbd-macro (kbd "C-'"))
-    (should (oref (seq-find (lambda (suffix) (equal (oref suffix key) "=o")) transient--suffixes) inapt))
+    (dolist (key '("=o" "=p" "-p" "-b" "=u"))
+      (should-not (seq-find (lambda (suffix) (equal (oref suffix key) key)) transient--suffixes)))
     (execute-kbd-macro (kbd "C-g"))))
 
 (defun drover-list-test-menu-text ()
@@ -6790,12 +6792,14 @@ set is that of the list in sight."
 
 (ert-deftest drover-list-test-dispatch-fills-width ()
   "The menu lays its groups out in rows as wide as its window, in few lines.
-The old menu took 24 lines at any width, its View menu apart."
+The old menu took 24 lines at any width, its View menu apart; before
+the settings of a field shared a row, 14 at 240 columns, 18 at 160, 28
+at 100 and 44 at 60."
   (drover-list-test-elsewhere
-    ;; At 240 columns, the Filter group, too wide for two columns of its
-    ;; own beside the others, shows in one; the Task group stacks under
-    ;; the Prompt group, Input under Prompt runs.
-    (pcase-dolist (`(,width . ,bound) '((240 . 14) (160 . 18) (100 . 28) (60 . 60)))
+    ;; The table of fields shows in two halves side by side, or one under
+    ;; the other, as room asks; the view settings show, the list being in
+    ;; sight, the prompt keys editing a prompt buffer do not.
+    (pcase-dolist (`(,width . ,bound) '((240 . 9) (160 . 15) (100 . 25) (60 . 38)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))
@@ -6836,12 +6840,17 @@ The old menu took 24 lines at any width, its View menu apart."
   (drover-list-test-elsewhere
     (execute-kbd-macro (kbd "C-'"))
     (should (string-search "=g group status" (drover-list-test-menu-text)))
-    (should (string-search "=u subagents [all|active|none]" (drover-list-test-menu-text)))
+    (should (string-match-p "subagents +=u \\[all|active|none\\]" (drover-list-test-menu-text)))
     (cl-flet ((face-of (text)
                 (with-current-buffer " *transient*"
                   (goto-char (point-min))
                   (search-forward text)
-                  (get-text-property (match-beginning 0) 'face))))
+                  (get-text-property (match-beginning 0) 'face)))
+              (value-face (key)
+                (with-current-buffer " *transient*"
+                  (goto-char (point-min))
+                  (search-forward (concat key " "))
+                  (get-text-property (point) 'face))))
       (should (eq (face-of "active") 'transient-value))
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "nothing")))
         (execute-kbd-macro (kbd "= g")))
@@ -6853,11 +6862,15 @@ The old menu took 24 lines at any width, its View menu apart."
       (should (eq (face-of "active") 'transient-inactive-value))
       (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "redirect")))
         (execute-kbd-macro (kbd "= f")))
-      (should (string-search "=f text \"redirect\"" (drover-list-test-menu-text)))
+      ;; In the row of the text, the key and value alone.
+      (should (string-match-p "text +=f \"redirect\"" (drover-list-test-menu-text)))
       (execute-kbd-macro (kbd "= c"))
-      (should (string-search "=f text any" (drover-list-test-menu-text)))
-      (execute-kbd-macro (kbd "- l"))
-      (should (eq (face-of "location") 'transient-inactive-value))
+      (should (string-match-p "text +=f any" (drover-list-test-menu-text)))
+      (should (string-match-p "project +=p any +-p shown" (drover-list-test-menu-text)))
+      (should (eq (value-face "-p") 'transient-value))
+      (execute-kbd-macro (kbd "- p"))
+      (should (string-match-p "project +=p any +-p hidden" (drover-list-test-menu-text)))
+      (should (eq (value-face "-p") 'transient-inactive-value))
       (should (equal drover-list-hidden-fields '(location))))
     (execute-kbd-macro (kbd "C-g"))))
 
@@ -7078,7 +7091,7 @@ The old menu took 24 lines at any width, its View menu apart."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-shown
       (revert-buffer)
-      (pcase-dolist (`(,key ,field ,text) '(("m" model "opus high") ("r" provider "P")
+      (pcase-dolist (`(,key ,field ,text) '(("m" model "opus high") ("v" provider "P")
                                             ("x" context "50k")))
         (should (memq field drover-list--fields))
         (should (string-search text (drover-list-test-heading "a")))

@@ -5989,7 +5989,7 @@ shows, in a window, or in the window you work in, the faces
 `opencode-session-open', `opencode-session-shown' and
 `opencode-session-active'.  The keys of `drover-session-map'
 act on the session at point; \\[drover-view] opens the View menu, whose
-Filter group chooses which subagents show, and \\[drover-refresh]
+=u chooses which subagents show, and \\[drover-refresh]
 redraws the list.  Text is drawn in the face
 `drover-list'.
 

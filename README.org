@@ -40,7 +40,7 @@ They are opencode.el's, which its mode line and session pickers show too: =openc
 
 The first three need you (=drover-attention-statuses=). Sessions are ranked by =drover-status-order=, and among those that need you the longest wait comes first; among the others, the newest turn or the latest activity, as the order of last activity places them. Whether you saw a finished turn is the backend's to know: OpenCode records it in the service, so a turn read in any client, the TUI, the desktop app or Emacs, is no longer Done.
 
-Subagent sessions show under their parent, their icon under its title. Which of them show, =drover-show-subagents= says, and ~=u~ in the Filter group of the menu (=V= in the list) cycles it:
+Subagent sessions show under their parent, their icon under its title. Which of them show, =drover-show-subagents= says, and ~=u~ in the Field table of the menu (=V= in the list) cycles it:
 
 | Mode     | Shows                                                                                          |
 |----------+------------------------------------------------------------------------------------------------|
@@ -98,32 +98,35 @@ Drover binds no global key. Its commands are gathered in one menu, =drover-dispa
   (keymap-global-set "C-'" #'drover-dispatch)
 #+end_src
 
-or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in four sets, and no key belongs to two, so the menu holds them all: the global keys everywhere, the session keys in lists of sessions and in prompt buffers, the prompt keys in prompt buffers, the view keys wherever one of drover's lists is in sight. What does not apply where you are is greyed out rather than hidden, and a group none of whose entries applies has its title greyed out too. You may bind the menu to several keys: whichever opened it closes it. The echo area and the hints, such as =C-' X stops=, name the key Emacs's help names for the menu; set =drover-dispatch-key= to name it otherwise, such as ="Caps Lock"= when a key remapper sends that key to Emacs as =<f19>=.
+or, with =use-package=, =:bind ("C-'" . drover-dispatch)=. The keys come in four sets, and no key belongs to two, so the menu holds them all: the global keys everywhere, the session keys in lists of sessions and in prompt buffers, the prompt keys in prompt buffers, the view keys wherever one of drover's lists is in sight. What may apply but does not now is greyed out rather than hidden, and a group none of whose entries applies has its title greyed out too; what cannot apply where you are is left out: the view keys while none of drover's lists is in sight, and the prompt keys that edit or read a prompt buffer (=S-RET=, =i=, =k=, =/=, =@=, =y=, =t=, =T=, =O=) outside prompt buffers. You may bind the menu to several keys: whichever opened it closes it. The echo area and the hints, such as =C-' X stops=, name the key Emacs's help names for the menu; set =drover-dispatch-key= to name it otherwise, such as ="Caps Lock"= when a key remapper sends that key to Emacs as =<f19>=.
 
 ** Values and layout
 
 Settings show their value beside the key that changes it, as Magit's menus show theirs: what the prompt or the session runs, the sort, the grouping, each filter, the subagents, older and archived sessions shown, follow mode and the columns. A value chosen is highlighted, one inherited from the defaults dimmed; changing a setting leaves the menu open, its value redrawn.
 
-The menu has no fixed shape: its groups fill columns of balanced height as wide as its window, one after the other as text fills a newspaper's columns, and in rows of such columns when the window is narrow, so that it takes as few lines as the width allows: across 240 columns, eight to eleven; across 100, about twenty-five, in rows. A group may show in two or three columns side by side, or in one, as the room asks. While the menu stays open, its groups keep their place as long as they fit, as values change or you move in the list. In drover's prompt, 160 columns wide, with the OpenCode backend, it reads:
+The menu has no fixed shape: its groups fill columns of balanced height as wide as its window, one after the other as text fills a newspaper's columns, and in rows of such columns when the window is narrow, so that it takes as few lines as the width allows: across 240 columns, nine to twelve; across 160, fifteen to seventeen; across 100, about twenty-five, in rows. A group may show in two or three columns side by side, or in one, as the room asks. While the menu stays open, its groups keep their place as long as they fit, as values change or you move in the list. In drover's prompt, the list in sight, 160 columns wide, it reads:
 
 #+begin_example
-  Sessions            Prompt runs                Conversation      Session          View                              Filter                           Columns
-   j Next              a Agent plan               t Revert here     o Other window   =o sort urgency                   =u subagents [all|active|none]   -h host
-   B Bury quiet        m Model Opus 5.5           T Cancel revert   u Parent         =r order [ascending|descending]   =O older [hidden|shown]          -H harness
-   b Select            e Effort max               C Compact         c Subagent       =g group status                   =z archived [hidden|shown]       -l location
-   l List              d Directory ~/src/drover   f Fork            v Peek           -f follow [off|on]                =p project drover                -b branch
-   L Side list                                    . Last answer     R Review changes                                   =s status any                    -a agent
-   p Project          Input                       O Open link       A Answer                                           =a agent any                     -m model
-   S Search sessions   RET Send                                     K Interrupt                                        =m model any                     -r provider
-                       S-<return> Schedule                          s Mark seen                                        =v provider any                  -x context
-  Prompt               i Attach                                     E Edit pending prompt 1                            =H harness any                   -c created
-   " Prompt            k Clear                                      + New session                                      =d updated any                   -t age
-   n Task prompt       / Slash command                              g Refresh                                          =f text any                      -p cache
-   ' Show prompt       @ Mention                                    r Rename                                           =c clear                         -s summary
-   # Scheduled         y Copy block                                 x Delete
-                                                                    z Archive
-                                                                    Z Unarchive
+  Sessions        Task                       Input                 Session                             Field       Filter     Column     Columns
+   j Next          n Start or continue        RET Send              o Other window   E Edit pending 1   subagents  =u [all|active|none]   -b branch
+   B Bury quiet    F Finish                   S-<return> Schedule   u Parent         + New session      older      =O [hidden|shown]      -x context
+   b Select        I Link session             i Attach              c Subagent       g Refresh          archived   =z [hidden|shown]      -c created
+   l List          & Attempts                 k Clear               v Peek           r Rename           project    =p drover  -p shown    -k cache
+   L Side list     W Worktrees                / Slash command       R Review         x Delete           status     =s any                 -s summary
+   p Project                                  @ Mention             A Answer         z Archive          agent      =a any     -a shown    -$ cost
+   S Search       Prompt runs                 y Copy block          K Interrupt      Z Unarchive        model      =m any     -m shown    -g goal
+   $ Usage         a Agent plan                                     s Mark seen      G Goal             provider   =v any     -v shown    -# attempt
+                   m Model Opus 5.5          Conversation                                               harness    =H any     -H shown
+  Prompt           e Effort max               t Revert here        View                                 host                  -h shown
+   " Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
+   N Task prompt                              C Compact             =r order [asc|desc]                 text       =f any
+   ' Show prompt                              f Fork                =g group status                                =c clear
+   # Scheduled                                H Clone               -f follow [off|on]
+                                              . Last answer
+                                              O Open link
 #+end_example
+
+The settings of a field share a row of the Field table, aligned: its filter, an option, then whether the list shows its column, a switch, on the same letter, such as ~=m~ and =-m= for the model, the value beside each key; the subagents, older and archived sessions shown head it, as they keep sessions out as the filter does, and ~=c~ under the filters clears them. Where room is short, the table's two halves stack, aligned alike.
 
 While an action on several sessions runs (see below), the Sessions group shows =X Stop actions= with its progress beside it, such as =Archiving 340/2202=, as the menu opened.
 
@@ -259,7 +262,7 @@ Everywhere, through the menu.
 
 ** View keys
 
-Wherever one of drover's lists is in sight (see [[*The menu beside the list][The menu beside the list]]), through the menu, or alone in the View menu, =V= in the list. They come in Magit's families: =-= for switches, ~=~ for options taking a value. Each shows its value; see [[*The View menu][The View menu]].
+Wherever one of drover's lists is in sight (see [[*The menu beside the list][The menu beside the list]]), through the menu, or alone in the View menu, =V= in the list. They come in Magit's families: =-= for switches, ~=~ for options taking a value, a field's filter and column on the same letter, in its row of the Field table. Each shows its value; see [[*The View menu][The View menu]].
 
 | Key  | Command                         | Setting                                              |
 |------+---------------------------------+------------------------------------------------------|
@@ -280,14 +283,13 @@ Wherever one of drover's lists is in sight (see [[*The menu beside the list][The
 | ~=d~ | =drover-view--filter-since=     | filter by last activity                              |
 | ~=f~ | =drover-view--filter-search=    | filter by a text                                     |
 | ~=c~ | =drover-filter-clear=           | clear every filter                                   |
-| =-h= | =drover-view--column-host=      | the column of the host, and so on for each field:    |
-|      |                                 | =-H= harness, =-l= location, =-b= branch, =-a= agent, |
-|      |                                 | =-m= model,                                          |
-|      |                                 | =-r= provider, =-x= context, =-c= created, =-t= age, |
-|      |                                 | =-p= cache, =-s= summary, =-$= cost, =-g= goal,       |
-|      |                                 | =-#= attempt                                         |
+| =-p= | =drover-view--column-location=  | the column of the project, and so on for each field: |
+|      |                                 | =-a= agent, =-m= model, =-v= provider, =-H= harness,  |
+|      |                                 | =-h= host, =-d= age, beside their filters; =-b=       |
+|      |                                 | branch, =-x= context, =-c= created, =-k= cache, =-s=  |
+|      |                                 | summary, =-$= cost, =-g= goal, =-#= attempt           |
 
-Earlier versions reached these through =V= only, on keys of its own: =o=, =r= and =g= are now ~=o~, ~=r~ and ~=g~; the filters =p=, =s=, =a=, =m=, =v=, =h=, =d=, =f= and =c= are ~=p~ … ~=c~; =F= is =-f=; the columns keep their keys.  The subagents, older and archived sessions shown keep sessions out as the filter does: they moved from the View group to the Filter group, and from =U=, =-o= and =-z= to ~=u~, ~=O~ and ~=z~ (~=o~ sorts); the list no longer binds =U= of its own.
+Earlier versions reached these through =V= only, on keys of its own: =o=, =r= and =g= are now ~=o~, ~=r~ and ~=g~; the filters =p=, =s=, =a=, =m=, =v=, =h=, =d=, =f= and =c= are ~=p~ … ~=c~; =F= is =-f=; the columns keep their keys.  The subagents, older and archived sessions shown keep sessions out as the filter does: they moved from the View group to the Filter group, and from =U=, =-o= and =-z= to ~=u~, ~=O~ and ~=z~ (~=o~ sorts); the list no longer binds =U= of its own.  The columns of the fields a filter takes then took their filter's letter, in its row: the project's =-l= is =-p=, the provider's =-r= =-v=, the age's =-t= =-d=, and the cache, whose =-p= the project took, is =-k=.
 
 ** Adding to the menu
 
@@ -434,17 +436,17 @@ While Emacs has no focus, as when you work in another application with a list in
 
 ** The View menu
 
-The view settings are the View, Filter and Columns groups of =C-'=, wherever one of drover's lists is in sight, and the View menu that =V= opens in the list, the same entries on the same keys (see [[*View keys][View keys]]). Either menu stays open as you change its settings and redraws the lists at once:
+The view settings are the View group, the Field table and the Columns group of =C-'=, wherever one of drover's lists is in sight, and the View menu that =V= opens in the list, the same entries on the same keys (see [[*View keys][View keys]]). Either menu stays open as you change its settings and redraws the lists at once:
 
 #+begin_example
-  View                              Filter                                             Columns
-   =o sort last activity             =u subagents [all|active|none]   =v provider any   -h host       -a agent      -c created
-   =r order [ascending|descending]   =O older [hidden|shown]          =H harness any    -H harness    -m model      -t age
-   =g group nothing                  =z archived [hidden|shown]       =d updated any    -l location   -r provider   -p cache
-   -f follow [off|on]                =p project drover                =f text any       -b branch     -x context    -s summary
-                                     =s status any                    =c clear
-                                     =a agent any
-                                     =m model any
+  View                    Field       Filter     Column                                      Columns
+   =o sort last activity   subagents  =u [all|active|none]   provider   =v any     -v shown   -b branch    -s summary
+   =r order [asc|desc]     older      =O [hidden|shown]      harness    =H any     -H shown   -x context   -$ cost
+   =g group nothing        archived   =z [hidden|shown]      host                  -h shown   -c created   -g goal
+   -f follow [off|on]      project    =p drover  -p shown    updated    =d any     -d shown   -k cache     -# attempt
+                           status     =s any                 text       =f any
+                           agent      =a any     -a shown               =c clear
+                           model      =m any     -m shown
 #+end_example
 
 - Sort by last activity (see [[*The order of last activity][The order of last activity]]), the default, newest first, by urgency, the most urgent first, by title, project, branch, agent, model, provider, harness (by its name) or creation, either way (~=r~, descending by default). Subagents stay under their parent: the trees are sorted, then the subagents of each session among themselves.
@@ -452,7 +454,7 @@ The view settings are the View, Filter and Columns groups of =C-'=, wherever one
 - Filter by project, status, agent, model, provider (by name, among the providers of the sessions drover knows), harness (likewise), host, once other hosts are known, last activity (today, the last 24 hours, 7 or 30 days, or any age such as =3d=) and a text found in the title, summary, project or branch. Each picker starts with the value now, which =RET= keeps; the values of status and host are several, separated by commas, and deleting one drops it. An empty answer, or =(any)=, the first candidate, removes the filter, so that =RET= on an empty input clears it whatever your completion UI; ~=c~ clears them all. A subagent that matches shows under its parent, even while subagents are hidden.
 - Filter too which subagents show (all, the active ones, none: ~=u~ cycles them), older sessions (~=O~): those a backend keeps beyond the ones it follows, such as every unarchived OpenCode session, and archived sessions (~=z~, see [[*Archived sessions][Archived sessions]]). Both are fetched when shown, and again by =g=.
 - =-f= turns the list's follow mode on or off.
-- Choose the columns: each switch lets a field show, highlighted, or hides it, dimmed, at once; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
+- Choose the columns: each switch lets a field show, or hides it, at once, in the Field table beside the field's filter, =shown= highlighted or =hidden= dimmed, in the Columns group for the fields no filter takes, the field's name highlighted or dimmed; the list then chooses by width among the fields shown. The title always shows. The switches change =drover-list-hidden-fields= for the session; customize it to keep your choice.
 
 The lists follow sessions as they change while they are displayed; hidden, a list notes which sessions changed, draws nothing meanwhile, and draws them in place once shown again, or whole when many did. Only what changed is drawn: the lines of the sessions that changed, in place, and a session moving, coming or going alone, so that a list of thousands of sessions follows a running turn in a millisecond or two; with the sidebar and the other list both shown, each draws its own lines, but what a change makes is made once for both. A list is drawn whole only when its columns change width, a setting changes, or =g= refreshes it; =g= draws from what the backends reported, then lists every session anew, for what they change without telling, such as a branch, and draws what changed. The sessions of a collapsed group, such as Idle, often most of them, are drawn once it is expanded, searched with Isearch, copied or selected, and otherwise a few at a time while Emacs is idle and the list shown, stopping as you type (=drover-list-deferred-delay=), so that Occur or Consult find them too.
 
@@ -512,7 +514,7 @@ Once you pause (=drover-search-delay=, a quarter of a second) with three charact
 | =C-l= | show its row in the list, a group collapsed around it expanded                 |
 | =C-'= | leave for the menu of what the search searches, keeping what you typed         |
 
-The menu =C-'= opens holds the view keys that scope the search, those of the list's menu on the same keys, since the list shares them: the filter (~=p~ project, ~=s~ status, ~=a~ agent, ~=m~ model, ~=v~ provider, ~=H~ harness, ~=h~ host, ~=d~ since, ~=f~ text, ~=c~ clear), with the subagents, older and archived sessions shown (~=u~, ~=O~, ~=z~), the Filter group of the list's menu; each shows its value, and changing one leaves the menu open, the list following. The key you bind =drover-dispatch= to opens that menu from the minibuffer too, whatever it is. =RET=, or the key that opened the menu again, searches again with what you typed, in the new scope, which the prompt names, such as =Search sessions (project drover, +subagents, +older):=. Opening a conversation found in what was said resumes it as =RET= in the list does, at its end: no front end shows a position yet.
+The menu =C-'= opens holds the view keys that scope the search, those of the list's menu on the same keys, since the list shares them: the filter (~=p~ project, ~=s~ status, ~=a~ agent, ~=m~ model, ~=v~ provider, ~=H~ harness, ~=h~ host, ~=d~ since, ~=f~ text, ~=c~ clear), with the subagents, older and archived sessions shown (~=u~, ~=O~, ~=z~), the Field table of the list's menu, its filters alone; each shows its value, and changing one leaves the menu open, the list following. The key you bind =drover-dispatch= to opens that menu from the minibuffer too, whatever it is. =RET=, or the key that opened the menu again, searches again with what you typed, in the new scope, which the prompt names, such as =Search sessions (project drover, +subagents, +older):=. Opening a conversation found in what was said resumes it as =RET= in the list does, at its end: no front end shows a position yet.
 
 The candidates work with any completion UI, Vertico, Icomplete or the =*Completions*= buffer: the search matches them with a completion style of its own, =drover-search=, for its category, =drover-session=.
 

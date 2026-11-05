@@ -157,7 +157,7 @@ whose parent is not listed, archived, deleted or not loaded, shows as
 any subagent does, at the top of a tree of its own.  A hidden
 subagent never places its parent in a group; whether a parent has
 active subagents, shown or not, its line tells.  Change it for every
-view with `drover-toggle-subagents', =u in the menus' Filter group,
+view with `drover-toggle-subagents', =u in the menus' View group,
 or with `drover-set-show-subagents'."
   :type '(choice (const :tag "All subagents" all)
                  (const :tag "Active subagents" active)

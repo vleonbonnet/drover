@@ -677,26 +677,53 @@ B applies while a quiet session has a buffer."
     ("Prompt" ("\"" "N" "'" "#"))
     ("Task" ("n" "F" "I" "&" "W"))
     ("Prompt runs" ("a" "m" "e" "d"))
-    ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
-    ("Conversation" ("t" "T" "C" "f" "H" "." "O"))
-    ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z" "G"))
-    ("View" ("= o" "= r" "= g" "- f"))
-    ("Filter" ("= u" "= O" "= z" "= p" "= s" "= a" "= m") ("= v" "= H" "= d" "= f" "= c"))
-    ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s" "- $" "- g" "- #")))
-  "The groups of `drover-dispatch' outside lists, and the keys of their columns.")
+    ("Input" ("RET"))
+    ("Conversation" ("C" "f" "H" "."))
+    ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z" "G")))
+  "The groups of `drover-dispatch' outside lists, and the keys of their columns.
+Neither the view settings, which apply while a list is in sight, nor the
+prompt keys editing or reading a prompt buffer show there.")
+
+(defconst drover-keys-test-dispatch-view-layout
+  '(("View" ("= o" "= r" "= g" "- f"))
+    ("Field" ("= u") ("= O") ("= z") ("= p" "- p") ("= s") ("= a" "- a") ("= m" "- m") ("= v" "- v")
+     ("= H" "- H") ("- h") ("= d" "- d") ("= f") ("= c"))
+    ("Columns" ("- b" "- x" "- c" "- k") ("- s" "- $" "- g" "- #")))
+  "The groups of the view settings, and the keys of their columns or rows.
+The Field group is a table, a row a field: its filter, then its column;
+the subagents, older and archived sessions shown first, as filters.")
 
 (ert-deftest drover-keys-test-dispatch-layout ()
-  "The menu has no Global group: each group is titled after what it does."
-  (with-temp-buffer
-    (let ((groups (drover-keys-test-menu 'drover-dispatch)))
-      (should (equal (mapcar (lambda (group) (cons (car group) (mapcar (lambda (column) (mapcar #'car column))
-                                                                       (cdr group))))
-                             groups)
-                     drover-keys-test-dispatch-layout))
-      (should-not (assoc "Global" groups))
-      ;; One key, one command.
-      (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-dispatch))))
-        (should (equal keys (delete-dups (copy-sequence keys))))))))
+  "The menu has no Global group: each group is titled after what it does.
+The view settings show where a list is in sight, the prompt keys in
+prompt buffers."
+  (cl-flet ((layout (groups)
+              (mapcar (lambda (group) (cons (car group) (mapcar (lambda (column) (mapcar #'car column))
+                                                                (cdr group))))
+                      groups)))
+    (with-temp-buffer
+      (let ((groups (drover-keys-test-menu 'drover-dispatch)))
+        (should (equal (layout groups) drover-keys-test-dispatch-layout))
+        (should-not (assoc "Global" groups))
+        ;; One key, one command.
+        (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-dispatch))))
+          (should (equal keys (delete-dups (copy-sequence keys)))))))
+    (drover-keys-test-with (list (drover-test-session "s"))
+      (drover-keys-test-in 'view "s"
+        (let ((groups (layout (drover-keys-test-menu 'drover-dispatch))))
+          (should (equal (seq-filter (lambda (group) (assoc (car group) drover-keys-test-dispatch-view-layout))
+                                     groups)
+                         drover-keys-test-dispatch-view-layout))
+          ;; In a list, the Input group holds Send alone.
+          (should (equal (assoc "Input" groups) '("Input" ("M-RET"))))
+          (should (equal (assoc "Conversation" groups) '("Conversation" ("C" "f" "H" "."))))))
+      (drover-keys-test-in 'prompt "s"
+        (let ((groups (layout (drover-keys-test-menu 'drover-dispatch))))
+          (should (equal (assoc "Input" groups)
+                         '("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))))
+          (should (equal (assoc "Conversation" groups)
+                         '("Conversation" ("t" "T" "C" "f" "H" "." "O"))))
+          (should-not (assoc "Field" groups)))))))
 
 (defun drover-keys-test-layout-suffixes (layout)
   "Return the suffix specifications of LAYOUT, a transient layout.
@@ -797,9 +824,14 @@ the prefix of the other's, which would hide it."
                    ("=s" . drover-view--filter-statuses) ("=a" . drover-view--filter-agent)
                    ("=m" . drover-view--filter-model) ("=v" . drover-view--filter-provider)
                    ("=H" . drover-view--filter-harness) ("-H" . drover-view--column-harness)
-                   ("=h" . drover-view--filter-host) ("=d" . drover-view--filter-since)
+                   ("=h" . drover-view--filter-host) ("-h" . drover-view--column-host)
+                   ("=d" . drover-view--filter-since) ("-d" . drover-view--column-age)
                    ("=f" . drover-view--filter-search) ("=c" . drover-filter-clear)
-                   ("-l" . drover-view--column-location) ("-s" . drover-view--column-summary)
+                   ("-p" . drover-view--column-location) ("-a" . drover-view--column-agent)
+                   ("-m" . drover-view--column-model) ("-v" . drover-view--column-provider)
+                   ("-b" . drover-view--column-branch) ("-x" . drover-view--column-context)
+                   ("-c" . drover-view--column-created) ("-k" . drover-view--column-cache)
+                   ("-s" . drover-view--column-summary)
                    ("-$" . drover-view--column-cost) ("-g" . drover-view--column-goal) ("-#" . drover-view--column-attempt) ("$" . drover-usage)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
                 (cdr entry))))
@@ -846,11 +878,11 @@ It applies only while the session has some, in lists and in its buffer."
         (drover-keys-test-in kind "s"
           (should (member "E" (drover-keys-test-apt 'drover-dispatch)))
           (should (equal (drover-keys-test-description #'drover--dispatch-pending-description)
-                         "Edit pending prompt 2")))
+                         "Edit pending 2")))
         (drover-keys-test-in kind "t"
           (should-not (member "E" (drover-keys-test-apt 'drover-dispatch)))
           (should (equal (drover-keys-test-description #'drover--dispatch-pending-description)
-                         "Edit pending prompt"))))
+                         "Edit pending"))))
       (drover-keys-test-in 'view "s"
         (call-interactively #'drover-edit-pending-prompt)
         (should (equal withdrawn '("s"))))
@@ -986,8 +1018,9 @@ It applies only while the session has some, in lists and in its buffer."
         (should-not (member key (drover-keys-test-apt 'drover-dispatch)))))))
 
 (defconst drover-keys-test-view-keys
-  '("= o" "= r" "= g" "= u" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c"
-    "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $" "- g" "- #")
+  '("= o" "= r" "= g" "= u"
+    "= p" "- p" "= s" "= a" "- a" "= m" "- m" "= v" "- v" "= H" "- H" "- h" "= d" "- d" "= f" "= c"
+    "- b" "- x" "- c" "- k" "- s" "- $" "- g" "- #")
   "The keys of the view settings that apply in one of drover's views.
 Older and archived sessions need a backend keeping them, and follow mode
 a list in a window.")
@@ -1207,18 +1240,20 @@ go after p, more prompt commands after O."
         (transient-append-suffix 'drover-dispatch "b" '("&" "Pick" ignore))
         (transient-append-suffix 'drover-dispatch "p" '("!" "Lists" ignore))
         (transient-append-suffix 'drover-dispatch "O" '("P" "Other" ignore))
-        (with-temp-buffer
-          (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-dispatch t))))
-            (cl-flet ((follows (before after)
-                        (equal (cadr (member before keys)) after)))
-              (should (follows "b" "&"))
-              (should (follows "&" "l"))
-              (should (follows "\"" "N"))
-              (should (follows "N" "'"))
-              (should (follows "'" "%"))
-              (should (follows "%" "#"))
-              (should (follows "p" "!"))
-              (should (follows "O" "P"))))))
+        ;; In a prompt buffer, where every prompt key shows.
+        (drover-keys-test-with nil
+          (drover-keys-test-in 'prompt nil
+            (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-dispatch t))))
+              (cl-flet ((follows (before after)
+                          (equal (cadr (member before keys)) after)))
+                (should (follows "b" "&"))
+                (should (follows "&" "l"))
+                (should (follows "\"" "N"))
+                (should (follows "N" "'"))
+                (should (follows "'" "%"))
+                (should (follows "%" "#"))
+                (should (follows "p" "!"))
+                (should (follows "O" "P")))))))
     (dolist (key '("%" "&" "!" "P"))
       (transient-remove-suffix 'drover-dispatch key))))
 
@@ -1319,42 +1354,213 @@ The value is (PLAN . LINES)."
               (should (member " j Next" dispatch))
               (should (member " l List" dispatch))
               (should (member " =o sort urgency" dispatch))
-              (should (member " k Clear" dispatch))
+              ;; The prompt keys editing a prompt buffer show there alone.
+              (should-not (member " k Clear" dispatch))
+              (should-not (member " S-<return> Schedule" dispatch))
               ;; In a list, RET opens the session rather than send.
               (should (member " RET Open" dispatch))
               (should-not (member " RET Send" dispatch))
-              (should (member " C-n Next session" dispatch))
-              (should (member " S-<return> Schedule" dispatch)))
+              (should (member " C-n Next session" dispatch)))
+            (drover-keys-test-in 'prompt "s"
+              (let ((dispatch (drover-keys-test-render 'drover-dispatch)))
+                (should (member " k Clear" dispatch))
+                (should (member " S-<return> Schedule" dispatch))))
             ;; The order of the layout is checked elsewhere.
+            ;; The filters and the columns of fields with both show their
+            ;; key and value alone, in the row naming the field.
             (should (seq-set-equal-p (drover-keys-test-render 'drover-view)
-                                     '(" =o sort urgency" " =r order [ascending|descending]" " =g group status"
-                                       " =p project any" " =s status any" " =a agent any"
-                                       " =m model any" " =v provider any" " =H harness any"
-                                       " =d updated any"
-                                       " =f text any" " =c clear"
-                                       " -f follow [off|on]" " =u subagents [all|active|none]"
-                                       " =O older [hidden|shown]"
-                                       " =z archived [hidden|shown]"
-                                       " -h host" " -H harness" " -l location" " -b branch" " -a agent"
-                                       " -m model" " -r provider"
-                                       " -x context" " -c created"
-                                       " -t age" " -p cache" " -s summary" " -$ cost" " -g goal" " -# attempt")))
+                                     '(" =o sort urgency" " =r order [asc|desc]" " =g group status"
+                                       " -f follow [off|on]" " =u [all|active|none]"
+                                       " =O [hidden|shown]" " =z [hidden|shown]"
+                                       " =p any" " -p shown" " =s any" " =a any" " -a shown"
+                                       " =m any" " -m shown" " =v any" " -v shown" " =H any" " -H shown"
+                                       " -h shown" " =d any" " -d shown" " =f any" " =c clear"
+                                       " -b branch" " -x context" " -c created" " -k cache"
+                                       " -s summary" " -$ cost" " -g goal" " -# attempt")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
                                       :provider "Anthropic" :harness 'fake :since (- (float-time) 7200))
                   drover-sort-by 'updated
                   drover-sort-descending t
                   drover-group-by nil)
             (let ((view (drover-keys-test-render 'drover-view)))
-              (dolist (line '(" =o sort last activity" " =g group nothing" " =p project drover"
-                              " =s status needs you or done" " =a agent build" " =v provider Anthropic"
-                              " =H harness Fake"
-                              " =d updated since 2h"
-                              " =f text any"))
+              (dolist (line '(" =o sort last activity" " =g group nothing" " =p drover"
+                              " =s needs you or done" " =a build" " =v Anthropic"
+                              " =H Fake"
+                              " =d since 2h"
+                              " =f any"))
                 (should (member line view)))
               ;; The dispatch menu shows the same values on the same keys.
               (dolist (line view)
                 (should (member line (drover-keys-test-render 'drover-dispatch)))))))
       (set-time-zone-rule zone))))
+
+;;;; The table of fields
+
+(defun drover-keys-test-render-menu (prefix width)
+  "Return the lines of the menu of PREFIX as drawn here, WIDTH columns wide."
+  (let* ((setup (drover-keys-test-suffixes prefix))
+         (transient--prefix (car setup))
+         (transient--layout (transient--init-suffixes prefix))
+         (transient--suffixes (transient--flatten-suffixes transient--layout))
+         (transient--predicate-map (transient--make-predicate-map))
+         (transient--shadowed-buffer (current-buffer))
+         (transient--window nil))
+    (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
+      (with-temp-buffer
+        (transient--insert-groups)
+        (split-string (string-trim-right (substring-no-properties (buffer-string))) "\n")))))
+
+(defconst drover-keys-test-field-rows
+  '(("project" "=p" :project "drover" "-p" location)
+    ("status" "=s" :statuses (done) nil nil)
+    ("agent" "=a" :agent "build" "-a" agent)
+    ("model" "=m" :model "opus" "-m" model)
+    ("provider" "=v" :provider "Anthropic" "-v" provider)
+    ("harness" "=H" :harness fake "-H" harness)
+    ("host" "=h" :host ("core") "-h" host)
+    ("updated" "=d" :since nil "-d" age)
+    ("text" "=f" :search "auth" nil nil))
+  "The rows of the table of fields: (LABEL FILTER MEMBER VALUE COLUMN FIELD).
+FILTER sets MEMBER of `drover-filter', VALUE one it may take; COLUMN lets
+the list show FIELD, or hides it.")
+
+(defun drover-keys-test-row-keys (menu)
+  "Return the keys of the rows of the table of fields in MENU, set up here."
+  (mapcar (lambda (row) (mapcar #'car row))
+          (cdr (assoc "Field" (drover-keys-test-menu menu)))))
+
+(ert-deftest drover-keys-test-field-rows ()
+  "Each field shows in a row, its filter then its column, on the same letter.
+The infixes of a row set what the filter and column keys set before
+they shared it: a member of the filter, and the fields the list hides."
+  (drover-keys-test-with (list (drover-test-session "a" :project "drover" :agent "build" :model "opus"
+                                                    :provider-name "Anthropic"))
+    (with-temp-buffer
+      (setq-local drover-view-p t)
+      (let ((drover-hosts-function (lambda () '("core"))))
+        (should (equal (drover-keys-test-row-keys 'drover-view)
+                       (append '(("= u") ("= O") ("= z"))
+                               (mapcar (pcase-lambda (`(,_ ,filter ,_ ,_ ,column ,_))
+                                         (mapcar (lambda (key) (key-description (kbd key)))
+                                                 (delq nil (list filter column))))
+                                       drover-keys-test-field-rows)
+                               '(("= c")))))
+        (pcase-dolist (`(,label ,filter ,member ,value ,column ,field) drover-keys-test-field-rows)
+          (ert-info (label)
+            (pcase-let ((`(,_ . ,infix) (drover-keys-test-setting filter)))
+              ;; The row names the field, the infix filters it.
+              (should (equal (transient--get-description (oref infix parent)) label))
+              (should (eq (oref infix filter-key) member)))
+            (when value
+              (drover-set-filter member value)
+              (should (equal (plist-get drover-filter member) value))
+              (should-not (equal (drover-keys-test-value filter) "any")))
+            (drover-filter-clear)
+            (should (equal (drover-keys-test-value filter) "any"))
+            (when column
+              (pcase-let ((`(,_ . ,infix) (drover-keys-test-setting column)))
+                (should (equal (transient--get-description (oref infix parent)) label)))
+              (should (equal (drover-keys-test-value column) "shown"))
+              (drover-keys-test-choose column)
+              (should (equal drover-list-hidden-fields (list field)))
+              (should (equal (drover-keys-test-value column) "hidden"))
+              (drover-keys-test-choose column)
+              (should-not drover-list-hidden-fields))))))))
+
+(ert-deftest drover-keys-test-field-table-aligned ()
+  "The table of fields lines its filters up, and its columns, under their titles.
+Beside each other or one under the other, its two halves align alike:
+each row's cells are as far from its name as the titles from the
+table's title, the names one column in."
+  (drover-keys-test-with (list (drover-test-session "s"))
+    (with-temp-buffer
+      (setq-local drover-view-p t)
+      (drover-set-filter :project "drover")
+      (let ((drover-hosts-function (lambda () '("core"))))
+        (pcase-dolist (`(,width ,halves) '((60 1) (160 2)))
+          (ert-info ((format "%d columns" width))
+            (let* ((lines (drover-keys-test-render-menu 'drover-view width))
+                   (title (seq-find (lambda (line) (string-match-p "Field +Filter +Column" line)) lines))
+                   (field (string-search "Field" title))
+                   (filter (- (string-search "Filter" title) field))
+                   (column (- (string-search "Column" title) field))
+                   (starts nil))
+              (pcase-dolist (`(,label ,key ,_ ,_ ,switch ,_) drover-keys-test-field-rows)
+                (ert-info (label)
+                  (let* ((line (seq-find (lambda (line) (string-match-p (concat "\\_<" label " +" key " ") line))
+                                         lines))
+                         (start (1- (string-match (concat "\\_<" label " +" key " ") line))))
+                    (push start starts)
+                    (should (= (- (string-search (concat key " ") line start) start) filter))
+                    (when switch
+                      (should (= (- (string-search (concat switch " ") line start) start) column))))))
+              ;; In one column, or in two halves side by side.
+              (should (= (length (delete-dups starts)) halves))
+              (should (seq-find (lambda (line) (string-search "=p drover" line)) lines)))))))))
+
+(ert-deftest drover-keys-test-search-menu-fields ()
+  "The menu of the search shares the rows of the fields, their filters alone.
+The columns, the sort, the grouping and follow mode do not scope a search."
+  (require 'drover-search)
+  (drover-keys-test-with nil
+    (with-temp-buffer
+      (let ((dispatch (progn (setq-local drover-view-p t)
+                             (drover-keys-test-row-keys 'drover-dispatch))))
+        (kill-local-variable 'drover-view-p)
+        ;; The host's row shows no filter until other hosts are known.
+        (should (equal (delq nil (drover-keys-test-row-keys 'drover-search-menu))
+                       (delq nil (mapcar (lambda (row) (seq-remove (lambda (key) (string-prefix-p "-" key)) row))
+                                         dispatch))))
+        (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-search-menu))))
+          (should-not (seq-find (lambda (key) (string-prefix-p "-" key)) keys))
+          (dolist (key '("= o" "= r" "= g"))
+            (should-not (member key keys)))
+          (should (equal (seq-take keys 4) '("RET" "= u" "= O" "= z"))))
+        ;; Drawn, the table has no column of columns.
+        (let ((lines (drover-keys-test-render-menu 'drover-search-menu 160)))
+          (should (string-match-p "\\`Search +Field +Filter\\'" (car lines)))
+          (should-not (seq-find (lambda (line) (string-search "Column" line)) lines)))))))
+
+(defconst drover-keys-test-menu-heights
+  '((view 160 15) (view 240 12) (prompt-list 160 15) (prompt-list 240 12)
+    (elsewhere 160 9) (elsewhere 240 9) (view-menu 160 8) (search 160 7))
+  "The most lines each menu takes, where, as wide: (WHERE WIDTH LINES).
+In one of drover's lists, in a prompt buffer with a list in sight, in
+another buffer, and the View and search menus, a session at point
+with a long title.  The menus took 18 and 14 lines in a list at 160 and
+240 columns, 17 and 13 in a prompt buffer and in another buffer, the
+View menu 8, the search's 8.")
+
+(ert-deftest drover-keys-test-menu-heights ()
+  "The menus take few lines: the settings of a field share a row."
+  (require 'drover-search)
+  (drover-keys-test-with (list (drover-test-session "s" :status 'working :project "drover"
+                                                    :title "Fix the login redirect after the OAuth callback")
+                               (drover-test-session "sub" :parent "s"))
+    (let ((list (generate-new-buffer " list")))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (with-current-buffer list
+              (setq-local drover-view-p t))
+            (pcase-dolist (`(,where ,width ,bound) drover-keys-test-menu-heights)
+              (ert-info ((format "%s at %d" where width))
+                (cl-flet ((lines (kind prefix)
+                            (drover-keys-test-in kind "s"
+                              (drover-keys-test-render-menu prefix width))))
+                  (let ((lines (pcase where
+                                 ('view (lines 'view 'drover-dispatch))
+                                 ('prompt-list
+                                  (let ((side (split-window)))
+                                    (set-window-buffer side list)
+                                    (prog1 (lines 'prompt 'drover-dispatch)
+                                      (delete-window side))))
+                                 ('elsewhere (lines nil 'drover-dispatch))
+                                 ('view-menu (lines 'view 'drover-view))
+                                 ('search (lines 'view 'drover-search-menu)))))
+                    (should (<= (length lines) bound))
+                    (should (<= (apply #'max (mapcar #'string-width lines)) width)))))))
+        (kill-buffer list)))))
 
 ;;;; The View menu
 
@@ -1394,11 +1600,14 @@ MENU is `drover-view' by default."
       (setq-local drover-view-p t)
       (should (equal (drover-keys-test-keys 'drover-view)
                      '(("View" "= o" "= r" "= g" "- f")
-                       ("Filter" "= u" "= O" "= z" "= p" "= s" "= a" "= m" "= v" "= H" "= d" "= f" "= c")
-                       ("Columns" "- h" "- H" "- l" "- b" "- a" "- m" "- r" "- x" "- c" "- t" "- p" "- s" "- $" "- g" "- #"))))
-      ;; Hosts are filtered once there are others.
+                       ("Field" "= u" "= O" "= z" "= p" "- p" "= s" "= a" "- a" "= m" "- m" "= v" "- v"
+                        "= H" "- H" "- h" "= d" "- d" "= f" "= c")
+                       ("Columns" "- b" "- x" "- c" "- k" "- s" "- $" "- g" "- #"))))
+      ;; Hosts are filtered once there are others, in the row of the host.
       (let ((drover-hosts-function (lambda () '("core"))))
-        (should (member "= h" (cdr (assoc "Filter" (drover-keys-test-keys 'drover-view))))))
+        (should (member '("= h" "- h")
+                        (mapcar (lambda (row) (mapcar #'car row))
+                                (cdr (assoc "Field" (drover-keys-test-menu 'drover-view)))))))
       ;; One key, one setting.
       (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-view t))))
         (should (equal keys (delete-dups (copy-sequence keys)))))
@@ -1428,10 +1637,10 @@ MENU is `drover-view' by default."
       (with-temp-buffer
         (setq-local drover-view-p t)
         (let ((view (drover-keys-test-render 'drover-view)))
-          (dolist (line '(" =o sort last activity" " =r order [ascending|descending]" " =g group nothing"))
+          (dolist (line '(" =o sort last activity" " =r order [asc|desc]" " =g group nothing"))
             (should (member line view))))
         (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=o")) '("last activity")))
-        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=r")) '("descending")))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=r")) '("desc")))
         (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=g")) '("nothing")))))))
 
 (ert-deftest drover-keys-test-view-sort-and-group ()
@@ -1451,12 +1660,12 @@ MENU is `drover-view' by default."
         (should (= runs 1))
         (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=o")) '("last activity")))
         ;; The order shows both values, the current one highlighted.
-        (should (equal (substring-no-properties (drover-keys-test-value "=r")) "[ascending|descending]"))
-        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=r")) '("ascending")))
+        (should (equal (substring-no-properties (drover-keys-test-value "=r")) "[asc|desc]"))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=r")) '("asc")))
         (drover-keys-test-choose "=r")
         (should drover-sort-descending)
         (should (eq drover-sort-by 'updated))
-        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=r")) '("descending")))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "=r")) '("desc")))
         (drover-keys-test-choose "=r")
         (should-not drover-sort-descending)
         ;; Grouping by nothing is a grouping too.
@@ -1748,24 +1957,33 @@ host standing for none."
       (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
       (with-temp-buffer
         (setq-local drover-view-p t)
-        ;; Shown as Magit shows a switch: the name, highlighted when on.
-        (should (equal (drover-keys-test-value "-l") "location"))
-        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "-l")) '("location")))
-        (drover-keys-test-choose "-l")
+        ;; In the row of its field, shown or hidden, highlighted when on.
+        (should (equal (drover-keys-test-value "-p") "shown"))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "-p")) '("shown")))
+        (drover-keys-test-choose "-p")
         (should (equal drover-list-hidden-fields '(location)))
         (should (= runs 1))
-        (should-not (drover-keys-test-highlighted (drover-keys-test-value "-l")))
-        (should (eq (get-text-property 0 'face (drover-keys-test-value "-l")) 'transient-inactive-value))
-        (drover-keys-test-choose "-p")
+        (should (equal (drover-keys-test-value "-p") "hidden"))
+        (should-not (drover-keys-test-highlighted (drover-keys-test-value "-p")))
+        (should (eq (get-text-property 0 'face (drover-keys-test-value "-p")) 'transient-inactive-value))
+        ;; Elsewhere, as Magit shows a switch: the name, highlighted when on.
+        (should (equal (drover-keys-test-value "-k") "cache"))
+        (should (equal (drover-keys-test-highlighted (drover-keys-test-value "-k")) '("cache")))
+        (drover-keys-test-choose "-k")
         (should (equal drover-list-hidden-fields '(cache location)))
-        (drover-keys-test-choose "-l")
+        (should (eq (get-text-property 0 'face (drover-keys-test-value "-k")) 'transient-inactive-value))
+        (drover-keys-test-choose "-p")
         (should (equal drover-list-hidden-fields '(cache)))
         (should (= runs 3))
         ;; The title has none.
         (should-error (drover-set-list-field 'title nil))
-        ;; A field the list does not have has no switch.
-        (dlet ((drover-list-fields '((title :priority 0) (agent :priority 1))))
-          (should (equal (cdr (assoc "Columns" (drover-keys-test-keys 'drover-view))) '("- a"))))))))
+        ;; A field the list does not have has no switch: the row of a
+        ;; field then shows its filter alone.
+        (dlet ((drover-list-fields '((title :priority 0) (agent :priority 1) (branch :priority 2))))
+          (let ((keys (drover-keys-test-keys 'drover-view)))
+            (should (equal (seq-filter (lambda (key) (string-prefix-p "-" key)) (mapcan #'cdr keys))
+                           '("- f" "- a" "- b")))
+            (should (equal (cdr (assoc "Columns" keys)) '("- b")))))))))
 
 (ert-deftest drover-keys-test-view-stays-open ()
   "Every setting of the View menu leaves it open, and its values redrawn."

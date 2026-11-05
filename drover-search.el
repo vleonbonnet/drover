@@ -801,7 +801,7 @@ search; its RET, or C-', searches again with the text."
 
 (defun drover-search--prompt ()
   "Return the prompt of the search, telling what scopes it.
-That is what the Filter group of its menu sets: the filter, the older
+That is what the view settings of its menu set: the filter, the older
 and archived sessions shown, and the subagents shown, but the active
 ones, the default."
   (let ((scope (delq nil (list (drover-filter-description)
@@ -926,8 +926,9 @@ See `drover-search--menu-keys'."
 
 (transient-define-prefix drover-search-menu (&optional input)
   "Choose what the search of sessions searches, then search INPUT again.
-The entries are the Filter group of `drover-dispatch', on the same
-keys: the subagents, older and archived sessions shown, and the filter.
+The entries are the view settings of `drover-dispatch' that scope the
+search, on the same keys (`drover--view-columns'): the subagents, older
+and archived sessions shown, and the filter of each field.
 They scope the list too, which shares them.  RET, C-' or the key of
 `drover-dispatch', those leaving the minibuffer for it, search again
 with the text typed."
@@ -936,25 +937,7 @@ with the text typed."
   [:class drover--menu-flow
    [:description drover-search--menu-description
     ("RET" "Search" drover-search-resume)]
-   ["Filter"
-    ("=u" "subagents" drover-toggle-subagents
-     :class drover--setting
-     :getter (lambda () (default-value 'drover-show-subagents))
-     :setter drover-set-show-subagents
-     :chooser drover-next-subagent-mode
-     :options ,drover-subagent-mode-labels)
-    ("=O" drover-view--history :inapt-if-not drover-history-available-p)
-    ("=z" drover-view--archived :inapt-if-not drover-archived-available-p)
-    ("=p" drover-view--filter-project)
-    ("=s" drover-view--filter-statuses)
-    ("=a" drover-view--filter-agent)
-    ("=m" drover-view--filter-model)]
-   [("=v" drover-view--filter-provider)
-    ("=H" drover-view--filter-harness)
-    ("=h" drover-view--filter-host)
-    ("=d" drover-view--filter-since)
-    ("=f" drover-view--filter-search)
-    ("=c" "clear" drover-filter-clear :transient t)]]
+   drover--view-columns]
   ;; The keys leaving the minibuffer for the menu come back.
   [:class transient-column
    :hide always

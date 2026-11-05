@@ -34,14 +34,18 @@
 ;; - Global keys work everywhere, through the menu.
 ;; - View keys change the settings drover's lists share, wherever one of
 ;;   them is in sight, through the menu: options on `=', switches on
-;;   `-', as in Magit's menus; the subagents, older and archived
-;;   sessions shown are options of the Filter group, as they keep
-;;   sessions out as the filter does.  `drover-view', the View menu, V
-;;   in the lists, shows them alone, on the same keys.
+;;   `-', as in Magit's menus.  The settings of a field share a row of
+;;   the Field table (`drover--menu-table'): its filter, then its
+;;   column, on the same letter, such as =m and -m for the model.
+;;   `drover-view', the View menu, V in the lists, shows them alone,
+;;   on the same keys, and the menu of the search those scoping it.
 ;;
 ;; Settings show their value beside their key, and changing one leaves
 ;; the menu open.  The menu has no fixed shape: its groups fill columns
-;; of balanced height as wide as its window (`drover--menu-flow').
+;; of balanced height as wide as its window (`drover--menu-flow').  What
+;; cannot apply where it opens is left out: the view settings while no
+;; list is in sight, the prompt keys editing or reading a prompt buffer
+;; elsewhere; what may, greyed out.
 ;;
 ;; While the menu acts on drover's list, here or beside, a List group
 ;; moves in that list, the menu staying open: C-n, C-p, M-n, M-p, M-<
@@ -787,18 +791,37 @@ on a group's heading."
   "Return non-nil when the dispatch menu acts on one of drover's views."
   (plist-get (drover--scope) :view))
 
+(defun drover--menu-p (command)
+  "Return non-nil while the menu of COMMAND, a prefix, is being set up or shown."
+  (when-let* ((prefix (transient-prefix-object)))
+    (eq (oref prefix command) command)))
+
 (defun drover--view-menu-p ()
   "Return non-nil while the View menu, `drover-view', is being set up or shown."
-  (when-let* ((prefix (transient-prefix-object)))
-    (eq (oref prefix command) 'drover-view)))
+  (drover--menu-p 'drover-view))
+
+(defun drover--search-menu-p ()
+  "Return non-nil while the menu of the search, `drover-search-menu', is up.
+Its view settings scope the search, wherever the list is: it has the
+filter's, without the sort, the grouping, follow mode and the columns."
+  (drover--menu-p 'drover-search-menu))
 
 (defun drover-dispatch-view-shown-p ()
   "Return non-nil when the menus may change the settings of drover's views.
 That is while one of drover's views is current, or shows in a window of
 a visible frame: the settings, shared by every view, then apply from any
-buffer, a session buffer included.  The View menu opens in a view only."
+buffer, a session buffer included.  The View menu opens in a view only,
+and the menu of the search scopes the search with them."
   (or (drover--view-menu-p)
+      (drover--search-menu-p)
       (plist-get (drover--scope) :shown)))
+
+(defun drover--dispatch-layout-p ()
+  "Return non-nil when the menus may change how the lists lay sessions out.
+That is the sort, the grouping, follow mode and the fields shown,
+wherever the view settings apply but in the menu of the search, which
+they do not scope."
+  (and (drover-dispatch-view-shown-p) (not (drover--search-menu-p))))
 
 (defun drover--dispatch-foreign-subagents-p ()
   "Return non-nil when =u of the menu acts on a list of another front end.
@@ -863,6 +886,13 @@ On an Org heading, or on a session in this buffer, while
            (let ((scope (drover--scope)))
              (and (not (plist-get scope :window))
                   (plist-get scope :session))))))
+
+(defun drover-dispatch-prompt-buffer-p ()
+  "Return non-nil when the dispatch menu acts from a prompt buffer.
+That is a buffer performing prompt actions (see `drover-prompt-define'):
+the prompt keys editing or reading what such a buffer shows apply
+there alone, and the menu leaves them out elsewhere."
+  (and drover-prompt-actions t))
 
 (defun drover-dispatch-prompt-p (action)
   "Return non-nil when prompt ACTION applies from where the dispatch menu acts.
@@ -1191,8 +1221,11 @@ Magit shows choices; otherwise the current value, as LABELER returns
 it, or \"any\" for nil.")
 
 (defclass drover--filter-setting (drover--setting)
-  ((filter-key :initarg :filter-key :documentation "The member of `drover-filter' it sets."))
-  "An infix of `drover-view' setting one member of the variable `drover-filter'.")
+  ((format :initform " %k %v")
+   (filter-key :initarg :filter-key :documentation "The member of `drover-filter' it sets."))
+  "An infix of `drover-view' setting one member of the variable `drover-filter'.
+It shows its key and value alone, in the row of a `drover--menu-table'
+naming the field it filters.")
 
 (cl-defgeneric drover--setting-value (obj)
   "Return the current value of the setting OBJ shows.")
@@ -1276,7 +1309,7 @@ The value of an entry that does not apply is dimmed."
   :getter (lambda () drover-sort-descending)
   :setter (lambda (descending) (drover-set-sort drover-sort-by descending))
   :chooser #'not
-  :options '((nil . "ascending") (t . "descending")))
+  :options '((nil . "asc") (t . "desc")))
 
 (transient-define-infix drover-view--group-by ()
   "Group the sessions of every view."
@@ -1403,6 +1436,28 @@ frame, the one used last of several."
   :chooser #'not
   :options '((nil . "hidden") (t . "shown")))
 
+;;;; Tables of settings
+
+(defclass drover--menu-table (transient-column)
+  ((headings :initarg :headings :initform nil
+             :documentation "The title of each column of cells, a string or nil.")
+   (lines :initform nil
+          :documentation "Its lines as last formatted, see `drover--menu-table-update'."))
+  "A group of the settings of fields, a row each, aligned in columns.
+Each child is a `drover--menu-table-row', whose description names its
+field, and whose suffixes are its cells: the Nth suffix of each row
+shows in the Nth column, so that a row lacking one, or one an :if
+leaves out, leaves its cell empty, and a column whose cells are all
+left out takes no room; the last cell of a row spans the columns after
+it, which it leaves empty, so that a long value widens no column.  The
+title names the column of the fields, as the description, then the
+others, as HEADINGS, each above its column.
+A row formats as its whole line, so that a table lays out wherever a
+column of entries does.")
+
+(defclass drover--menu-table-row (transient-row) ()
+  "A row of a `drover--menu-table': the name of a field, then its settings.")
+
 ;;;; Columns
 
 (defvar drover-list-fields)
@@ -1435,7 +1490,9 @@ keep the change."
   ((field :initarg :field :documentation "The field of `drover-list-fields' it lets show."))
   "An infix of `drover-view' letting the list show one field, or not.
 It shows the name of the field as Magit shows a switch: highlighted
-while the list may show the field, dimmed otherwise.")
+while the list may show the field, dimmed otherwise.  In the row of a
+`drover--menu-table', which names the field, it shows \"shown\" or
+\"hidden\" instead.")
 
 (cl-defmethod drover--setting-value ((obj drover--column-setting))
   "Return non-nil when the list may show the field of OBJ."
@@ -1446,11 +1503,16 @@ while the list may show the field, dimmed otherwise.")
   (drover-set-list-field (oref obj field) value))
 
 (cl-defmethod transient-format-value ((obj drover--column-setting))
-  "Return the name of the field of OBJ, highlighted when the list may show it."
-  (propertize (alist-get (oref obj field) drover-list-field-labels)
-              'face (if (and (drover--setting-value obj) (not (oref obj inapt)))
-                        'transient-value
-                      'transient-inactive-value)))
+  "Return the name of the field of OBJ, highlighted when the list may show it.
+In a row of a table, return whether it is shown."
+  (let ((shown (drover--setting-value obj)))
+    (propertize (cond ((not (cl-typep (oref obj parent) 'drover--menu-table-row))
+                       (alist-get (oref obj field) drover-list-field-labels))
+                      (shown "shown")
+                      (t "hidden"))
+                'face (if (and shown (not (oref obj inapt)))
+                          'transient-value
+                        'transient-inactive-value))))
 
 (defun drover--list-field-p (field)
   "Return non-nil when FIELD is one of `drover-list-fields'.
@@ -1459,14 +1521,15 @@ Before the list is loaded, any field is."
       (assq field drover-list-fields)))
 
 (defmacro drover--define-column-switch (field)
-  "Define the infix of the View menu letting the list show FIELD, or not."
+  "Define the infix of the View menu letting the list show FIELD, or not.
+It shows where the list has FIELD, but in the menu of the search."
   `(transient-define-infix ,(intern (format "drover-view--column-%s" field)) ()
      ,(format "Let the list show the field `%s', or not." field)
      :class 'drover--column-setting
      :field ',field
      :format " %k %v"
      :chooser #'not
-     :if (lambda () (drover--list-field-p ',field))))
+     :if (lambda () (and (drover--list-field-p ',field) (not (drover--search-menu-p))))))
 
 (drover--define-column-switch goal)
 (drover--define-column-switch attempt)
@@ -1520,6 +1583,8 @@ The first line is its title, the empty string for a column continuing
 the one before it; the others are its entries shown.  Nil when it shows
 no entry."
   (let* ((transient--pending-group column)
+         ;; Before the entries: a table formats its rows with its title.
+         (title (or (transient-format-description column) ""))
          (entries (delq nil (mapcar (lambda (suffix)
                                       (unless (and (cl-typep suffix 'transient-suffix)
                                                    (oref suffix inactive))
@@ -1527,7 +1592,7 @@ no entry."
                                           (and (not (equal line "")) line))))
                                     (oref column suffixes)))))
     (when entries
-      (cons (or (transient-format-description column) "") entries))))
+      (cons title entries))))
 
 (defun drover--menu-lines-width (lines)
   "Return the width of the widest of LINES, in columns."
@@ -1710,6 +1775,115 @@ them lacks.  See `drover--menu-plan' for plans."
         (dolist (line (drover--menu-side-by-side columns))
           (insert line ?\n))))))
 
+(defun drover--menu-table-cell (suffix)
+  "Return the cell SUFFIX shows in the row of a table, or nil for none.
+The space entries begin with is left out, the row beginning with one."
+  (unless (and (cl-typep suffix 'transient-suffix) (oref suffix inactive))
+    (let ((cell (transient-format suffix)))
+      (cond ((equal cell "") nil)
+            ((string-prefix-p " " cell) (substring cell 1))
+            (t cell)))))
+
+(defun drover--menu-table-line (cells stops)
+  "Return CELLS, strings or nil for an empty cell, each at its column of STOPS.
+No line ends in padding."
+  (let ((line ""))
+    (cl-mapc (lambda (cell stop)
+               (when cell
+                 (setq line (concat line (make-string (max 0 (- stop (string-width line))) ?\s) cell))))
+             cells stops)
+    line))
+
+(defun drover--menu-table-update (table title)
+  "Format the lines of TABLE, a `drover--menu-table' titled TITLE, and return them.
+The value is (TITLE . ROWS): TITLE followed by the headings of the
+columns shown, each above its column, and ROWS an alist (ROW . LINE)
+of the rows showing a cell; it is kept in TABLE, for its rows to
+format as their line.  The name of a field is dimmed when none of its
+cells applies.  Columns are `drover--menu-gap' apart."
+  (let* ((rows (delq nil (mapcar (lambda (row)
+                                   (when (cl-typep row 'drover--menu-table-row)
+                                     (let* ((transient--pending-group row)
+                                            (cells (mapcar #'drover--menu-table-cell (oref row suffixes))))
+                                       (when (seq-some #'identity cells)
+                                         (list row (drover--menu-table-label row) cells)))))
+                                 (oref table suffixes))))
+         (headings (oref table headings))
+         (count (apply #'max 0 (mapcar (lambda (row) (length (nth 2 row))) rows)))
+         ;; The width of each column, 0 for one whose cells are all empty.
+         ;; A row's last cell before the last column spans the columns
+         ;; after it, which it leaves empty: it counts for none.
+         (widths (mapcar (lambda (index)
+                           (if (seq-some (lambda (row) (nth index (nth 2 row))) rows)
+                               (apply #'max 1 (string-width (or (nth index headings) ""))
+                                      (mapcar (lambda (row)
+                                                (let ((cells (nth 2 row)))
+                                                  (if (and (nth index cells)
+                                                           (or (= index (1- count))
+                                                               (seq-some #'identity (nthcdr (1+ index) cells))))
+                                                      (string-width (nth index cells))
+                                                    0)))
+                                              rows))
+                             0))
+                         (number-sequence 0 (1- count))))
+         (stop (max (1+ (apply #'max 0 (mapcar (lambda (row) (string-width (nth 1 row))) rows)))
+                    (string-width title)))
+         (stops (mapcar (lambda (width)
+                          (prog1 (+ stop drover--menu-gap)
+                            (when (> width 0)
+                              (setq stop (+ stop drover--menu-gap width)))))
+                        widths))
+         (face (if (oref table inapt) 'transient-inapt-suffix 'transient-heading))
+         (lines (cons (drover--menu-table-line
+                       (cons title (cl-mapcar (lambda (width heading)
+                                                (and (> width 0) heading (propertize heading 'face face)))
+                                              widths
+                                              (append headings (make-list count nil))))
+                       (cons 0 stops))
+                      (mapcar (pcase-lambda (`(,row ,label ,cells))
+                                (cons row (drover--menu-table-line (cons label cells) (cons 1 stops))))
+                              rows))))
+    (oset table lines lines)
+    lines))
+
+(defun drover--menu-table-label (row)
+  "Return the name of the field of ROW, a row of a table, as it shows.
+It is dimmed when none of the cells of ROW shown applies."
+  (let ((label (or (transient--get-description row) "")))
+    (if (seq-every-p (lambda (suffix)
+                       (or (not (cl-typep suffix 'transient-suffix))
+                           (oref suffix inactive)
+                           (oref suffix inapt)))
+                     (oref row suffixes))
+        (propertize label 'face 'transient-inapt-suffix)
+      label)))
+
+(cl-defmethod transient-format-description ((table drover--menu-table))
+  "Return the title of TABLE, naming its columns, its lines formatted anew.
+Its rows then format as their line, see `drover--menu-table-update'."
+  (car (drover--menu-table-update table (or (cl-call-next-method) ""))))
+
+(cl-defmethod transient-format ((row drover--menu-table-row))
+  "Return the line of ROW in its table, or the empty string when it shows no cell.
+The lines are those the title of the table formatted last, or anew."
+  (let ((table (oref row parent)))
+    (or (cdr (assq row (cdr (or (oref table lines)
+                                (drover--menu-table-update table ""))))) "")))
+
+(defun drover--menu-column-parts (column)
+  "Return the parts COLUMN, a group of the menu being drawn, may show in.
+Each part is a list of lines, as `drover--menu-column' returns, the
+parts after the first continuing it: the menu shows them beside each
+other, or under, as room asks.  A table's rows, aligned whatever the
+part they fall in, show in two parts; another group in one.  Nil when
+COLUMN shows no entry."
+  (let ((lines (drover--menu-column column)))
+    (if (and (cl-typep column 'drover--menu-table) (nthcdr 3 lines))
+        (let ((half (/ (length (cdr lines)) 2)))
+          (list (cons (car lines) (take (- (length (cdr lines)) half) (cdr lines)))
+                (cons "" (last lines half))))
+      (and lines (list lines)))))
+
 (cl-defmethod transient--insert-group ((group drover--menu-flow))
   "Insert the groups of GROUP in columns of balanced height, filling the width.
 Shown in one column, or aligned for a variable pitch font, they are
@@ -1720,12 +1894,12 @@ inserted as transient inserts columns."
     (let ((blocks nil)
           (continued nil))
       (dolist (column (oref group suffixes))
-        (let ((lines (transient-with-shadowed-buffer (drover--menu-column column))))
-          (cond ((null lines))
-                ((and continued (equal (car lines) ""))
-                 (setcar blocks (append (car blocks) (list lines))))
-                (t (push (list lines) blocks)))
-          (setq continued (and lines t))))
+        (let ((parts (transient-with-shadowed-buffer (drover--menu-column-parts column))))
+          (cond ((null parts))
+                ((and continued (equal (car (car parts)) ""))
+                 (setcar blocks (append (car blocks) parts)))
+                (t (push parts blocks)))
+          (setq continued (and parts t))))
       (let* ((blocks (mapcar #'drover--menu-block-layouts (nreverse blocks)))
              (width (drover--menu-width))
              (keep (cl-typep transient--prefix 'drover--menu-prefix))
@@ -1885,8 +2059,8 @@ when it has some."
                    (drover-pending-prompts session)
                  0)))
     (if (> count 0)
-        (concat "Edit pending prompt " (propertize (format "%d" count) 'face 'transient-value))
-      "Edit pending prompt")))
+        (concat "Edit pending " (propertize (format "%d" count) 'face 'transient-value))
+      "Edit pending")))
 
 (defun drover--dispatch-pending-p ()
   "Return non-nil when the session at point has pending prompts to edit."
@@ -1948,65 +2122,63 @@ when inherited from the defaults or when the entry does not apply.")
   "Return non-nil when the menus may show or hide archived sessions."
   (and (drover-dispatch-view-shown-p) (drover-archived-available-p)))
 
-(defun drover--view-description ()
-  "Return the title of the View group, dimmed unless the view settings apply."
-  (if (drover-dispatch-view-shown-p)
-      "View"
-    (propertize "View" 'face 'transient-inapt-suffix)))
-
-(defun drover--filter-description ()
-  "Return the title of the Filter group, dimmed unless one of its entries applies.
-The group applies wherever the view settings do, and =u in a list of
-another front end."
-  (if (drover--dispatch-subagents-p)
-      "Filter"
-    (propertize "Filter" 'face 'transient-inapt-suffix)))
-
 (transient-define-group drover--view-columns
-  [:description drover--view-description
-   ("=o" drover-view--sort-by :inapt-if-not drover-dispatch-view-shown-p)
-   ("=r" drover-view--sort-order :inapt-if-not drover-dispatch-view-shown-p)
-   ("=g" drover-view--group-by :inapt-if-not drover-dispatch-view-shown-p)
+  ["View"
+   :if drover--dispatch-layout-p
+   ("=o" drover-view--sort-by)
+   ("=r" drover-view--sort-order)
+   ("=g" drover-view--group-by)
    ("-f" drover-view--follow)]
-  ;; What shows beside what matches: settings that keep sessions out, as
-  ;; the filter does, on the filter's keys.
-  [:description drover--filter-description
-   ("=u" "subagents" drover-toggle-subagents
-    :class drover--setting
-    :getter (lambda () (unless (drover--dispatch-foreign-subagents-p)
-                         (default-value 'drover-show-subagents)))
-    :setter drover-set-show-subagents
-    :chooser drover-next-subagent-mode
-    :options ,drover-subagent-mode-labels
-    :inapt-if-not drover--dispatch-subagents-p)
-   ("=O" drover-view--history :inapt-if-not drover--dispatch-history-p)
-   ("=z" drover-view--archived :inapt-if-not drover--dispatch-archived-p)
-   ("=p" drover-view--filter-project :inapt-if-not drover-dispatch-view-shown-p)
-   ("=s" drover-view--filter-statuses :inapt-if-not drover-dispatch-view-shown-p)
-   ("=a" drover-view--filter-agent :inapt-if-not drover-dispatch-view-shown-p)
-   ("=m" drover-view--filter-model :inapt-if-not drover-dispatch-view-shown-p)]
-  [:inapt-if-not drover-dispatch-view-shown-p
-   ("=v" drover-view--filter-provider)
-   ("=H" drover-view--filter-harness)
-   ("=h" drover-view--filter-host)
-   ("=d" drover-view--filter-since)
-   ("=f" drover-view--filter-search)
-   ("=c" "clear" drover-filter-clear :transient t)]
+  ;; A row a field: its filter, then its column, on the same letter.
+  ;; The subagents, older and archived sessions shown come first, as
+  ;; they keep sessions out as the filter does, on the filter's keys.
+  [:class drover--menu-table
+   :description "Field"
+   :headings ("Filter" "Column")
+   :if drover--dispatch-subagents-p
+   ["subagents" :class drover--menu-table-row
+    ("=u" "subagents" drover-toggle-subagents
+     :class drover--setting
+     :format " %k %v"
+     :getter (lambda () (unless (drover--dispatch-foreign-subagents-p)
+                          (default-value 'drover-show-subagents)))
+     :setter drover-set-show-subagents
+     :chooser drover-next-subagent-mode
+     :options ,drover-subagent-mode-labels
+     :inapt-if-not drover--dispatch-subagents-p)]
+   ["older" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=O" drover-view--history :inapt-if-not drover--dispatch-history-p :format " %k %v")]
+   ["archived" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=z" drover-view--archived :inapt-if-not drover--dispatch-archived-p :format " %k %v")]
+   ["project" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=p" drover-view--filter-project) ("-p" drover-view--column-location)]
+   ["status" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=s" drover-view--filter-statuses)]
+   ["agent" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=a" drover-view--filter-agent) ("-a" drover-view--column-agent)]
+   ["model" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=m" drover-view--filter-model) ("-m" drover-view--column-model)]
+   ["provider" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=v" drover-view--filter-provider) ("-v" drover-view--column-provider)]
+   ["harness" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=H" drover-view--filter-harness) ("-H" drover-view--column-harness)]
+   ["host" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=h" drover-view--filter-host) ("-h" drover-view--column-host)]
+   ["updated" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=d" drover-view--filter-since) ("-d" drover-view--column-age)]
+   ["text" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=f" drover-view--filter-search)]
+   ;; Under the filters, which it clears.
+   ["" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+    ("=c" "clear" drover-filter-clear :transient t)]]
+  ;; The fields no filter takes.
   ["Columns"
-   :inapt-if-not drover-dispatch-view-shown-p
-   ("-h" drover-view--column-host)
-   ("-H" drover-view--column-harness)
-   ("-l" drover-view--column-location)
-   ("-b" drover-view--column-branch)]
-  [:inapt-if-not drover-dispatch-view-shown-p
-   ("-a" drover-view--column-agent)
-   ("-m" drover-view--column-model)
-   ("-r" drover-view--column-provider)
-   ("-x" drover-view--column-context)]
-  [:inapt-if-not drover-dispatch-view-shown-p
+   :if drover--dispatch-layout-p
+   ("-b" drover-view--column-branch)
+   ("-x" drover-view--column-context)
    ("-c" drover-view--column-created)
-   ("-t" drover-view--column-age)
-   ("-p" drover-view--column-cache)
+   ("-k" drover-view--column-cache)]
+  [:if drover--dispatch-layout-p
    ("-s" drover-view--column-summary)
    ("-$" drover-view--column-cost)
    ("-g" drover-view--column-goal)
@@ -2051,11 +2223,15 @@ on sessions and prompts work everywhere; session commands act on the
 session at point, in lists and in prompt buffers; prompt commands
 perform the prompt actions of the current buffer; the view settings,
 shared by drover's lists, apply while one shows.  Commands that do not
-apply here are shown, greyed out, but Stop actions, shown only while
-actions on several sessions run, their progress beside it.  Settings
-show their value beside their key, as Magit shows them, and changing
-one leaves the menu open; Edit pending prompt shows how many prompts
-of the session at point wait pending.
+apply here are shown, greyed out, but those that cannot where the menu
+opens, left out: the view settings while no list is in sight, the
+prompt keys editing or reading a prompt buffer outside prompt buffers,
+and Stop actions but while actions on several sessions run, their
+progress beside it.  Settings show their value beside their key, as
+Magit shows them, and changing one leaves the menu open; Edit pending
+shows how many prompts of the session at point wait pending.  The
+settings of a field share a row of the Field table: its filter, then
+whether the list shows it, on the same letter, such as =m and -m.
 
 From a buffer telling no session, such as the prompt or a file, while
 one of drover's lists shows in a window of the frame, session commands
@@ -2111,26 +2287,31 @@ session chosen for it, else to one asked for, unshown."
     ("M-RET" drover--dispatch-send-description drover-prompt-send
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
      :if drover-dispatch-list-return-p)
-    ("S-<return>" "Schedule" drover-prompt-schedule
+    ;; These edit or read what a prompt buffer shows: only there.
+    ("S-<return>" "Schedule" drover-prompt-schedule :if drover-dispatch-prompt-buffer-p
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'schedule)))
-    ("i" "Attach" drover-prompt-attach :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))
-    ("k" "Clear" drover-prompt-clear :inapt-if-not (lambda () (drover-dispatch-prompt-p 'clear)))]
-   [("/" "Slash command" drover-prompt-slash :inapt-if-not (lambda () (drover-dispatch-prompt-p 'slash)))
+    ("i" "Attach" drover-prompt-attach :if drover-dispatch-prompt-buffer-p
+     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))
+    ("k" "Clear" drover-prompt-clear :if drover-dispatch-prompt-buffer-p
+     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'clear)))]
+   [:if drover-dispatch-prompt-buffer-p
+    ("/" "Slash command" drover-prompt-slash :inapt-if-not (lambda () (drover-dispatch-prompt-p 'slash)))
     ("@" "Mention" drover-prompt-mention :inapt-if-not (lambda () (drover-dispatch-prompt-p 'mention)))
     ("y" "Copy block" drover-prompt-copy-block
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'copy-block)))]
    ["Conversation"
-    ("t" "Revert here" drover-prompt-revert :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert)))
-    ("T" "Cancel revert" drover-prompt-revert-cancel
+    ("t" "Revert here" drover-prompt-revert :if drover-dispatch-prompt-buffer-p
+     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert)))
+    ("T" "Cancel revert" drover-prompt-revert-cancel :if drover-dispatch-prompt-buffer-p
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert-cancel)))
     ("C" "Compact" drover-compact :inapt-if-not (lambda () (drover-dispatch-prompt-p 'compact)))
     ("f" "Fork" drover-fork :inapt-if-not (lambda () (drover-dispatch-prompt-p 'fork)))
-    ("H" "Clone to host" drover-clone
+    ("H" "Clone" drover-clone
      :advice* drover--dispatch-in-list
      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-clone-p)))
     ("." "Last answer" drover-prompt-last-answer
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'last-answer)))
-    ("O" "Open link" drover-prompt-open-link
+    ("O" "Open link" drover-prompt-open-link :if drover-dispatch-prompt-buffer-p
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'open-link)))]
    ["Session"
     :advice* drover--dispatch-in-list
@@ -2142,7 +2323,7 @@ session chosen for it, else to one asked for, unshown."
      :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
     ("v" "Peek" drover-peek
      :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
-    ("R" "Review changes" drover-review
+    ("R" "Review" drover-review
      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
     ("A" "Answer" drover-respond
      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
@@ -2197,12 +2378,16 @@ session chosen for it, else to one asked for, unshown."
 Its entries are the view settings of `drover-dispatch', on the same
 keys, for lists that bind it to V.  Each setting shows its value;
 changing one redraws the lists at once, and the menu stays open.
-Sorting keeps subagents under their parent.  A filter left empty keeps
-every session; its pickers clear it on an empty answer or (any).  =u
-cycles the subagents shown (all, active, none), =O shows older
-sessions, =z archived ones, -f turns follow mode on in the list.  The columns are the fields the list may show, as room allows:
-each switch lets a field show, or hides it, for this session
-\(`drover-list-hidden-fields' keeps the choice)."
+Sorting keeps subagents under their parent.  =u cycles the subagents
+shown (all, active, none), =O shows older sessions, =z archived ones,
+-f turns follow mode on in the list.  The Field table has a row a
+field: its filter, an option, then its column, a switch, on the same
+letter.  A filter left empty keeps every session; its pickers clear it
+on an empty answer or (any), and =c clears them all.  The columns are
+the fields the list may show, as room allows: each switch lets a field
+show, or hides it, for this session (`drover-list-hidden-fields' keeps
+the choice); the Columns group holds those of the fields no filter
+takes."
   :class 'drover--menu-prefix
   :refresh-suffixes t
   [:class drover--menu-flow
