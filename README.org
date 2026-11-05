@@ -633,6 +633,8 @@ A link may name the host a conversation runs on, =agent-session://HOST/ENGINE/ID
 
 =C-' #= (=drover-schedule-list=) lists them: =k= cancels one, =r= retries one that failed or sends now one still waiting, =RET= shows it whole.
 
+
+A peer telling it may schedule prompts for this host's sessions, as the Android client does (=drover-remote.el=, see =doc/remote.org=, The phone, as built): this queue keeps them and delivers them out of every window, and the peer follows the queue, cancels and retries its prompts.
 ** Events
 
 Your configuration may define events prompts wait for, such as a restart, and tell drover when they happen:

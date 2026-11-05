@@ -95,6 +95,20 @@
 (declare-function drover-conversation-readable-p "drover-conversation" (session))
 (declare-function drover-conversation-stop-all "drover-conversation" ())
 (declare-function drover-conversation-file "drover-conversation" (session))
+(declare-function drover-schedule-load "drover-schedule" ())
+(declare-function drover-schedule-add "drover-schedule" (target time prompt &optional instruction reference-time))
+(declare-function drover-schedule-add-after-turn "drover-schedule" (target prompt &optional instruction))
+(declare-function drover-schedule-add-after-trigger "drover-schedule" (target trigger prompt &optional instruction))
+(declare-function drover-schedule-cancel "drover-schedule" (&optional job))
+(declare-function drover-schedule-retry-job "drover-schedule" (job &optional now))
+(declare-function drover-schedule-triggers "drover-schedule" ())
+(declare-function drover-schedule--jobs "drover-schedule" ())
+(declare-function drover-schedule--job "drover-schedule" (id))
+(declare-function drover-schedule--trigger-label "drover-schedule" (trigger))
+(declare-function drover-schedule-conversation "drover-schedule" (job))
+(declare-function drover-links-conversation "drover-links" (session))
+(declare-function drover-links-link "drover-links" (conversation))
+(defvar drover-schedule-changed-hook)
 (declare-function drover-remote-push-start "drover-remote-push" ())
 (declare-function drover-remote-push-stop "drover-remote-push" ())
 (declare-function drover-remote-push-available-p "drover-remote-push" ())
@@ -301,7 +315,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage"
-    "push" "opts" "dirs" "conv")
+    "push" "opts" "dirs" "conv" "jobs")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -330,7 +344,11 @@ with options), and lists the directories its sessions ran in (request
 `dirs'), for a phone to start sessions in; \"conv\": it tells what
 was said in a session as entries, read from what its engine records,
 pages from the end (request `cv') and lines appended as they come
-\(request `cvs', messages `cvd' and `cve', `cvc' stopping it).")
+\(request `cvs', messages `cvd' and `cve', `cvc' stopping it); \"jobs\":
+it tells its queue of scheduled prompts as it changes (request and
+message `jobs'), the events a prompt may wait for (`triggers'), and
+schedules, cancels and retries prompts for its peers (`schedule',
+`unschedule', `retry'), delivering them out of every window.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -479,6 +497,12 @@ asked, as (LINK . NAME), LINK their connection's `drover-link', and
 
 (defvar drover-remote--state nil
   "The state of the remote layer while `drover-remote-mode' is on.")
+
+(defvar drover-remote--jobs-followers (make-hash-table :test #'eq :weakness 'key)
+  "Connections whose peers follow this host's queue of scheduled prompts.")
+
+(defvar drover-remote--jobs-timer nil
+  "Timer telling the followers the queue changed, coalescing its changes.")
 
 (defun drover-remote--current ()
   "Return the state of the remote layer, or nil when it does not run.
@@ -1463,6 +1487,7 @@ one line, once in `drover-error-interval' seconds."
     (drover-remote--search-drop connection)
     (drover-remote--clone-drop connection)
     (drover-remote--cv-drop connection)
+    (remhash connection drover-remote--jobs-followers)
     (when-let* ((state (drover-remote--current)))
       (drover-remote--next-stream state connection)
       (drover-remote--unsubscribe state connection)
@@ -2878,6 +2903,214 @@ as when the file is replaced."
   (dolist (entry (gethash connection drover-remote--cv-streams))
     (funcall (cdr entry)))
   (remhash connection drover-remote--cv-streams))
+
+(defvar drover-remote-jobs-functions nil
+  "Functions called with a peer and a `jobs' message it sent.
+A view of the peer's queue of scheduled prompts it follows (request
+`jobs' with :follow) takes them there as they change.")
+
+(defconst drover-remote-jobs-limit 200
+  "Scheduled prompts at most a host tells its peers, the newest.")
+
+(defun drover-remote--wire-job (job)
+  "Return the scheduled prompt JOB as it travels to peers."
+  (let* ((conversation (ignore-errors (drover-schedule-conversation job)))
+         (record (and conversation
+                      (seq-find (lambda (session)
+                                  (and (eq (drover-session-backend session) (plist-get job :backend))
+                                       (equal (drover-session-engine-key session)
+                                              (cons (plist-get conversation :engine) (plist-get conversation :id)))))
+                                (drover-index-sessions))))
+         (options (plist-get job :options))
+         (model (plist-get options :model))
+         (prompt (or (plist-get job :prompt) "")))
+    (list :id (plist-get job :id)
+          :k (if-let* ((record) (id (drover-remote--wire-id (drover-session-id record))))
+                 (vector (symbol-name (drover-session-backend record)) id)
+               :false)
+          :ln (or (drover-remote--plain (plist-get job :link)) :false)
+          :ti (or (drover-bound-line (plist-get job :title)) "")
+          :p (if (> (length prompt) 2000) (substring prompt 0 2000) prompt)
+          :pn (length prompt)
+          :o (list :a (or (plist-get options :agent) :false)
+                   :m (if (drover-model-p model)
+                          (vector (or (drover-model-provider-id model) :false) (or (drover-model-id model) ""))
+                        :false)
+                   :v (if (and (plist-get options :variant) (symbolp (plist-get options :variant)))
+                          (symbol-name (plist-get options :variant))
+                        :false))
+          :w (cond ((plist-get job :due) (list :at (plist-get job :due)))
+                   ((plist-get job :turn) (list :turn t))
+                   (t (list :after (drover-schedule--trigger-label (plist-get job :trigger))
+                            :tr (if (symbolp (plist-get job :trigger)) (symbol-name (plist-get job :trigger)) ""))))
+          :st (symbol-name (plist-get job :status))
+          :er (or (drover-remote--plain (plist-get job :error)) :false)
+          :c (or (drover-remote--number (plist-get job :created)) :false)
+          :sa (or (drover-remote--number (plist-get job :sent-at)) :false)
+          :by (or (plist-get job :by) :false))))
+
+(defun drover-remote--wire-jobs ()
+  "Return this host's scheduled prompts as they travel, the newest first."
+  (vconcat (mapcar #'drover-remote--wire-job
+                   (seq-take (sort (copy-sequence (drover-schedule--jobs))
+                                   (lambda (a b) (> (or (plist-get a :created) 0) (or (plist-get b :created) 0))))
+                             drover-remote-jobs-limit))))
+
+(defun drover-remote--on-jobs (connection message reply)
+  "Tell CONNECTION's peer, through REPLY, this host's scheduled prompts.
+With MESSAGE's :follow, the peer is told them again as they change, in
+`jobs' messages."
+  (require 'drover-schedule)
+  (condition-case err
+      (progn
+        (drover-schedule-load)
+        (when (eq (plist-get message :follow) t)
+          (puthash connection t drover-remote--jobs-followers)
+          (add-hook 'drover-schedule-changed-hook #'drover-remote--jobs-changed))
+        (funcall reply (list :jobs (drover-remote--wire-jobs))))
+    (error (funcall reply nil (drover-error-message err)))))
+
+(defun drover-remote--jobs-changed ()
+  "Tell the peers following the queue it changed, half a second later.
+For `drover-schedule-changed-hook'."
+  (drover-with-reporting "remote jobs"
+    (unless drover-remote--jobs-timer
+      (setq drover-remote--jobs-timer
+            (run-at-time 0.5 nil
+                         (lambda ()
+                           (drover-with-reporting "remote jobs"
+                             (setq drover-remote--jobs-timer nil)
+                             (when (> (hash-table-count drover-remote--jobs-followers) 0)
+                               (let ((jobs (drover-remote--wire-jobs)))
+                                 (dolist (connection (hash-table-keys drover-remote--jobs-followers))
+                                   (if (spyglass-connection-live-p connection)
+                                       (drover-remote--send connection (list :t "jobs" :jobs jobs))
+                                     (remhash connection drover-remote--jobs-followers))))))))))))
+
+(defun drover-remote--on-triggers (reply)
+  "Tell a peer, through REPLY, the events a prompt may wait for here."
+  (require 'drover-schedule)
+  (funcall reply (list :tr (vconcat (mapcar (lambda (trigger)
+                                              (list :n (symbol-name (car trigger))
+                                                    :l (or (drover-bound-line (format "%s" (cdr trigger)) 80) "")))
+                                            (seq-take (drover-schedule-triggers) 32))))))
+
+(defun drover-remote--on-schedule (state peer key message reply)
+  "Schedule for PEER the prompt MESSAGE describes for session KEY, in STATE.
+MESSAGE's :text, then :at, an absolute time of this host's clock in
+the future, :turn, the end of the session's turn, or :trigger, an
+event's name, and :o, the options to apply first.  Its :id has it
+scheduled once, asked again after a stream ended.  It is delivered by
+this host's queue as its own prompts are, out of every window; REPLY
+gets the prompt scheduled, or why it was not."
+  (require 'drover-schedule)
+  (require 'drover-links)
+  (let* ((id (plist-get message :id))
+         (known (and (stringp id) (gethash id (drover-remote--state-outcomes state)))))
+    (cond
+     ((not (drover-remote--allows-p (drover-remote--access peer) "send"))
+      (funcall reply nil (drover-remote--refuse-action peer "schedule a prompt"
+                                                       (format "%s has %s access" (drover-remote--label peer)
+                                                               (drover-remote--access peer)))))
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "no identifier"))
+     ((and known (car known)) (drover-remote--new-reply reply (cdr known)))
+     (known (setcdr known (cons reply (cdr known))))
+     (t
+      (let* ((record (car (and key (drover-remote--served key))))
+             (text (plist-get message :text))
+             (at (drover-remote--number (plist-get message :at)))
+             (turn (eq (plist-get message :turn) t))
+             (trigger (and (stringp (plist-get message :trigger))
+                           (drover-remote--symbol (plist-get message :trigger))))
+             (options (let ((o (plist-get message :o)))
+                        (if (and (consp o) (keywordp (car o)))
+                            (drover-remote--check-options (list :agent (plist-get o :a) :model (plist-get o :m)
+                                                                :variant (plist-get o :v))
+                                                          nil)
+                          (list :agent nil :model nil :variant nil))))
+             (conversation (and record (drover-links-conversation record)))
+             (why (cond
+                   ((not record) "no such session here")
+                   ((not (drover-supports-p record :submit)) "it takes no prompt from another host")
+                   ((not (and (stringp text) (not (string-blank-p text))
+                              (<= (length text) drover-remote-prompt-limit)))
+                    "no prompt, or one too long")
+                   ((stringp options) options)
+                   ((not conversation) "its conversation is not known yet")
+                   ((not (or at turn trigger)) "no time, turn nor event")
+                   ((and at (<= at (float-time))) "a time already past")
+                   ((and trigger (not (assq trigger (drover-schedule-triggers))))
+                    (format "no event %s here" trigger)))))
+        (if why
+            (funcall reply nil (drover-remote--refuse-action peer "schedule a prompt" why))
+          (drover-remote--begin-outcome state id reply)
+          (let* ((engine (drover-session-engine record))
+                 (asked (plist-get options :model))
+                 (model (and asked engine (drover-remote--told-model engine (car asked) (cdr asked))))
+                 (target (list :link (drover-links-link conversation)
+                               :backend (drover-session-backend record)
+                               :directory (or (drover-session-directory record) (expand-file-name "~/"))
+                               :title (or (drover-session-title record) (format "%s" (cdr key)))
+                               :options (and (or (plist-get options :agent) model (plist-get options :variant))
+                                             (list :agent (plist-get options :agent) :model model
+                                                   :variant (and model (plist-get options :variant))))
+                               :by (drover-remote--peer-name peer)
+                               :hidden t))
+                 (instruction (format "scheduled from %s" (drover-remote--label peer)))
+                 (answer (condition-case err
+                             (let* ((inhibit-interaction t)
+                                    (job (cond (at (drover-schedule-add target (seconds-to-time at) text instruction))
+                                               (turn (drover-schedule-add-after-turn target text instruction))
+                                               (t (drover-schedule-add-after-trigger target trigger text instruction)))))
+                               (drover-remote--event peer 'schedule "scheduled a prompt for %s" (plist-get job :title))
+                               (list :job (drover-remote--wire-job job)))
+                           (error (list :failure (or (drover-bound-line (drover-error-message err)) "failed"))))))
+            (let ((entry (gethash id (drover-remote--state-outcomes state))))
+              (puthash id (cons t answer) (drover-remote--state-outcomes state))
+              (dolist (pending (cdr entry))
+                (drover-with-reporting "remote schedule"
+                  (drover-remote--new-reply pending answer)))))))))))
+
+(defun drover-remote--peer-job (peer message reply action)
+  "Return the scheduled prompt MESSAGE's :job names, for PEER's ACTION, or nil.
+Nil when PEER may not, or there is no such prompt, REPLY told why."
+  (require 'drover-schedule)
+  (let ((id (plist-get message :job)))
+    (cond
+     ((not (drover-remote--allows-p (drover-remote--access peer) "send"))
+      (funcall reply nil (drover-remote--refuse-action peer action
+                                                       (format "%s has %s access" (drover-remote--label peer)
+                                                               (drover-remote--access peer))))
+      nil)
+     ((not (and (stringp id) (< (length id) 100)))
+      (funcall reply nil "no scheduled prompt named")
+      nil)
+     ((progn (ignore-errors (drover-schedule-load)) (drover-schedule--job id)))
+     (t (funcall reply nil "no such scheduled prompt here") nil))))
+
+(defun drover-remote--on-unschedule (peer message reply)
+  "Cancel for PEER the scheduled prompt MESSAGE names, answering through REPLY.
+One cancelled already is answered done."
+  (when-let* ((job (drover-remote--peer-job peer message reply "cancel a scheduled prompt")))
+    (condition-case err
+        (progn
+          (unless (eq (plist-get job :status) 'cancelled)
+            (let ((inhibit-interaction t))
+              (drover-schedule-cancel job)))
+          (funcall reply (list :ok t)))
+      (error (funcall reply nil (drover-error-message err))))))
+
+(defun drover-remote--on-retry (peer message reply)
+  "Retry for PEER the scheduled prompt MESSAGE names, answering through REPLY.
+With MESSAGE's :now, one waiting for an event or a turn is sent now."
+  (when-let* ((job (drover-remote--peer-job peer message reply "retry a scheduled prompt")))
+    (condition-case err
+        (progn
+          (let ((inhibit-interaction t))
+            (drover-schedule-retry-job job (eq (plist-get message :now) t)))
+          (funcall reply (list :ok t)))
+      (error (funcall reply nil (drover-error-message err))))))
 
 (defconst drover-remote-dirs-limit 300
   "Directories at most a host tells a peer its sessions ran in.")
@@ -5559,6 +5792,8 @@ when of that peer, opened here once started.  For
    ((equal type "cvc") (drover-remote--cv-stop connection (plist-get message :id) nil))
    ((member type '("cvd" "cve"))
     (drover-run-hook-reporting 'drover-remote-conversation-functions peer message))
+   ((equal type "jobs")
+    (drover-run-hook-reporting 'drover-remote-jobs-functions peer message))
    ((equal type "fg")
     (when (featurep 'drover-remote-push)
       (drover-remote-push-foreground peer (eq (plist-get message :on) t))))
@@ -5632,6 +5867,11 @@ as an older drover's farewells do."
         ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
         ("opts" (drover-remote--on-opts peer key reply))
+        ("jobs" (drover-remote--on-jobs connection message reply))
+        ("triggers" (drover-remote--on-triggers reply))
+        ("schedule" (drover-remote--on-schedule state peer key message reply))
+        ("unschedule" (drover-remote--on-unschedule peer message reply))
+        ("retry" (drover-remote--on-retry peer message reply))
         ("cv" (drover-remote--on-cv key message reply))
         ("cvs" (drover-remote--on-cvs peer connection key message reply))
         ("dirs" (drover-remote--on-dirs peer message reply))
@@ -7401,6 +7641,11 @@ starts again at once: its peers keep this host's sessions meanwhile."
   (mapc #'drover-remote--export-drop (hash-table-keys drover-remote--exports))
   (dolist (connection (hash-table-keys drover-remote--cv-streams))
     (drover-remote--cv-drop connection))
+  (clrhash drover-remote--jobs-followers)
+  (when drover-remote--jobs-timer
+    (cancel-timer drover-remote--jobs-timer)
+    (setq drover-remote--jobs-timer nil))
+  (remove-hook 'drover-schedule-changed-hook #'drover-remote--jobs-changed)
   (remove-hook 'opencode-state-updated-functions #'drover-remote--oc-updated)
   (when (fboundp 'spyglass-unregister-channel)
     (spyglass-unregister-channel drover-remote-channel))

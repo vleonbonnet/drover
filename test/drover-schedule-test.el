@@ -798,6 +798,51 @@ drawn.  Buffers of sessions BODY makes are killed."
       (drover-schedule-test-reload)
       (should (numberp (plist-get (car (drover-schedule--jobs)) :sent-at))))))
 
+(ert-deftest drover-schedule-test-hidden-delivery ()
+  "A prompt another host scheduled is delivered out of every window, no frame made."
+  (drover-schedule-test-state
+    (drover-schedule-test-session)
+    (let* ((buffer (drover-schedule-test-buffer))
+           (job (drover-schedule-add (append (drover-schedule-test-target) (list :by "adept" :hidden t))
+                                     (time-add (current-time) 3600) "from the phone"))
+           (displayed nil)
+           (frames (frame-list))
+           (windows (mapcar #'window-buffer (window-list)))
+           (drover-schedule-display-function (lambda (&rest _) (setq displayed t) (selected-window)))
+           run)
+      (drover-schedule--run (plist-get job :id))
+      (setq run (gethash (plist-get job :id) (drover-schedule--active)))
+      (should-not displayed)
+      (should-not (plist-get run :window))
+      (should (eq (plist-get run :buffer) buffer))
+      (drover-schedule--poll job run)
+      (should (equal (cadr (car drover-schedule-test-submitted)) "from the phone"))
+      (should (equal (frame-list) frames))
+      (should (equal (mapcar #'window-buffer (window-list)) windows))
+      (should (equal (plist-get job :by) "adept")))))
+
+(ert-deftest drover-schedule-test-retry-job ()
+  "A prompt is retried without asking; one waiting is sent now only when told so."
+  (drover-schedule-test-state
+    (let ((changed 0)
+          (drover-schedule-changed-hook nil))
+      (cl-letf (((symbol-function 'drover-schedule--refresh)
+                 (lambda () (drover-run-hook-reporting 'drover-schedule-changed-hook))))
+        (add-hook 'drover-schedule-changed-hook (lambda () (cl-incf changed)))
+        (let ((job (drover-schedule-test-job)))
+          (should (> changed 0))
+          (drover-schedule-cancel job)
+          (should (eq (plist-get job :status) 'cancelled))
+          (drover-schedule-retry-job job)
+          (should (eq (plist-get job :status) 'pending)))
+        (drover-schedule-test-session :status 'working)
+        (let ((job (drover-schedule-add-after-turn (drover-schedule-test-target) "after")))
+          (should-error (drover-schedule-retry-job job))
+          (drover-schedule-retry-job job t)
+          (should (numberp (plist-get job :due))))
+        (drover-schedule-define-trigger 'restart "Emacs restart")
+        (should (equal (drover-schedule-triggers) '((restart . "Emacs restart"))))))))
+
 (ert-deftest drover-schedule-test-delivery-interrupted ()
   "A submission the front end refuses is interrupted: whether it went out is not known."
   (drover-schedule-test-state

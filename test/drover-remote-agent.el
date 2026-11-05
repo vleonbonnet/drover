@@ -309,14 +309,19 @@ directory named \"fail\"; in one named \"slow\", a second later."
 
 (defun drover-remote-agent--register-engines ()
   "Register the engine `fake', its agents, models and defaults."
-  (drover-register-engine 'fake :label "Fake"
+  (apply #'drover-register-engine 'fake :label "Fake"
+                          ;; Its conversations linked, as engines telling where they ran are.
+                          (append
+                           (and (getenv "DROVER_AGENT_LINKABLE")
+                                (list :directory (lambda (_id then _else) (funcall then "/work/project/"))))
+                           (list
                           :defaults (lambda (_directory callback)
                                       (run-at-time 0.02 nil (lambda () (funcall callback (list :agent "build")))))
                           :resolve (lambda (defaults agent model variant)
                                      (list :agent (or agent (plist-get defaults :agent))
                                            :model (or model (car (drover-remote-agent--models)))
                                            :variant (or variant (and (not model) 'high))))
-                          :agents (lambda (_directory) (list "build" "plan")))
+                          :agents (lambda (_directory) (list "build" "plan")))))
   (drover-register-model-source 'fake (lambda (_directory) (drover-remote-agent--models)) 0))
 
 (defun drover-remote-agent--register ()

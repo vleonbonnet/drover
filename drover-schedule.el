@@ -132,6 +132,11 @@ names backends, and printed models whole.")
 (defvar drover-schedule--triggers nil
   "Events prompts may wait for, an alist (NAME . PLIST) in registration order.")
 
+(defvar drover-schedule-changed-hook nil
+  "Hook run, with no argument, whenever the scheduled prompts changed.
+A prompt scheduled, its status changed, or the queue read again: as the
+list redraws.  Its functions run out of a command, reported briefly.")
+
 (defun drover-schedule--stray-timers ()
   "Cancel the timers of scheduled prompts no queue knows any more."
   (dolist (timer timer-list)
@@ -421,6 +426,11 @@ place."
 (defun drover-schedule-undefine-trigger (name)
   "Forget event NAME; the prompts waiting for it go on waiting."
   (setq drover-schedule--triggers (assq-delete-all name drover-schedule--triggers)))
+
+(defun drover-schedule-triggers ()
+  "Return the events prompts may wait for, as (NAME . LABEL), in order."
+  (mapcar (lambda (entry) (cons (car entry) (plist-get (cdr entry) :label)))
+          drover-schedule--triggers))
 
 (defun drover-schedule--trigger-label (trigger)
   "Return the label of event TRIGGER, its name when undefined."
@@ -1061,20 +1071,28 @@ What the resume calls back with stays scoped to RUN."
           (directory (plist-get job :directory)))
       (unless (file-directory-p directory)
         (error "Session directory is unavailable: %s" directory))
-      (with-selected-window (if (window-live-p window) window (selected-window))
-        (let ((default-directory directory)
-              (current-prefix-arg nil)
-              (enable-local-variables :safe)
-              (enable-local-eval nil)
-              (display-buffer-overriding-action '(display-buffer-same-window))
-              (display-buffer-alist nil))
-          (drover-resume-with (plist-get job :backend) engine id directory
-                              (lambda (buffer)
-                                (drover-schedule--guard job run 'failed
-                                  (drover-schedule--attached job run buffer)))
-                              (lambda (message)
-                                (drover-schedule--guard job run 'failed
-                                  (drover-schedule--finish job run 'failed message)))))))))
+      (cl-flet ((resume ()
+                  (let ((default-directory directory)
+                        (current-prefix-arg nil)
+                        (enable-local-variables :safe)
+                        (enable-local-eval nil)
+                        (display-buffer-overriding-action
+                         (if (plist-get job :hidden)
+                             '(display-buffer-no-window (allow-no-window . t))
+                           '(display-buffer-same-window)))
+                        (display-buffer-alist nil))
+                    (drover-resume-with (plist-get job :backend) engine id directory
+                                        (lambda (buffer)
+                                          (drover-schedule--guard job run 'failed
+                                            (drover-schedule--attached job run buffer)))
+                                        (lambda (message)
+                                          (drover-schedule--guard job run 'failed
+                                            (drover-schedule--finish job run 'failed message)))))))
+        (if (plist-get job :hidden)
+            ;; Scheduled by another host: resumed out of every window.
+            (save-window-excursion (resume))
+          (with-selected-window (if (window-live-p window) window (selected-window))
+            (resume)))))))
 
 (defun drover-schedule--submit (job run)
   "Hand JOB's prompt to RUN's buffer through its backend's :submit."
@@ -1158,8 +1176,10 @@ From the prompt's timer."
                   (drover-links-load-front-end (plist-get job :backend))
                   (drover-schedule--restore job)
                   (let ((buffer (drover-schedule--buffer job)))
+                    ;; Scheduled by another host: nothing shows here.
                     (setf (plist-get run :window)
-                          (funcall drover-schedule-display-function buffer (plist-get job :title)))
+                          (unless (plist-get job :hidden)
+                            (funcall drover-schedule-display-function buffer (plist-get job :title))))
                     (if buffer
                         (drover-schedule--attached job run buffer)
                       (drover-schedule--open job run)))
@@ -1177,7 +1197,9 @@ From the prompt's timer."
         (t (format "after %s" (drover-schedule--trigger-label (plist-get job :trigger))))))
 
 (defun drover-schedule--refresh ()
-  "Draw the list of scheduled prompts again, if it exists, without displaying it."
+  "Draw the list of scheduled prompts again, if it exists, without displaying it.
+`drover-schedule-changed-hook' runs too."
+  (drover-run-hook-reporting 'drover-schedule-changed-hook)
   (when-let* ((buffer (get-buffer drover-schedule--list-buffer)))
     (with-current-buffer buffer
       (setq tabulated-list-entries
@@ -1217,6 +1239,30 @@ waiting for it."
     (when waiting
       (drover-schedule--release job))))
 
+(defun drover-schedule-retry-job (job &optional now)
+  "Retry JOB, a failed, interrupted or cancelled scheduled prompt, at once.
+One still waiting for an event or for the end of a turn is sent now
+instead, with NOW only.  Signal an error when JOB can be neither."
+  (cond
+   ((drover-schedule--waiting-p job)
+    (unless now (error "This prompt waits for the %s" (drover-schedule--trigger-label (plist-get job :trigger))))
+    (setf (plist-get job :due) (float-time))
+    (drover-schedule--status job 'pending)
+    (drover-schedule--arm job 0)
+    (drover-schedule--release job))
+   ((drover-schedule--turn-waiting-p job)
+    (unless now (error "This prompt waits for the end of a turn"))
+    (setf (plist-get job :due) (float-time))
+    (drover-schedule--status job 'pending)
+    (drover-schedule--arm job 0))
+   ((not (memq (plist-get job :status) '(failed interrupted cancelled)))
+    (error "This prompt cannot be retried"))
+   (t
+    (unless (plist-get job :due)
+      (setf (plist-get job :due) (float-time)))
+    (drover-schedule--status job 'pending)
+    (drover-schedule--arm job 0))))
+
 (defun drover-schedule-retry ()
   "Retry the failed, interrupted or cancelled prompt at point now.
 A prompt still waiting for an event, or for the end of a turn, is sent
@@ -1227,23 +1273,15 @@ now instead."
      ((drover-schedule--waiting-p job)
       (when (y-or-n-p (format "Send now instead of after the %s? "
                               (drover-schedule--trigger-label (plist-get job :trigger))))
-        (setf (plist-get job :due) (float-time))
-        (drover-schedule--status job 'pending)
-        (drover-schedule--arm job 0)
-        (drover-schedule--release job)))
+        (drover-schedule-retry-job job t)))
      ((drover-schedule--turn-waiting-p job)
       (when (y-or-n-p (format "Send now instead of after the turn of %s? " (plist-get job :title)))
-        (setf (plist-get job :due) (float-time))
-        (drover-schedule--status job 'pending)
-        (drover-schedule--arm job 0)))
+        (drover-schedule-retry-job job t)))
      ((not (memq (plist-get job :status) '(failed interrupted cancelled)))
       (user-error "This prompt cannot be retried"))
      ((or (not (eq (plist-get job :status) 'interrupted))
           (y-or-n-p "Delivery was uncertain.  Send the prompt again? "))
-      (unless (plist-get job :due)
-        (setf (plist-get job :due) (float-time)))
-      (drover-schedule--status job 'pending)
-      (drover-schedule--arm job 0)))))
+      (drover-schedule-retry-job job)))))
 
 (defun drover-schedule--describe-options (options)
   "Describe OPTIONS, the agent, model and effort of a scheduled prompt."
