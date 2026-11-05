@@ -58,7 +58,6 @@
   (load "drover-core" nil t))
 
 (declare-function drover-cheap-generate "drover-cheap" (prompt system callback &rest keys))
-(defvar drover-summary-generate-function)
 
 ;;;; Options
 
@@ -288,21 +287,10 @@ Every evidence is a line or a sentence of the text copied exactly, the one the i
 
 (defun drover-repo-generate (prompt system callback)
   "Have this host's cheap model write what PROMPT asks, under SYSTEM.
-Through `drover-cheap-generate' where drover-cheap has it, else
-through the generation of summaries; CALLBACK gets (:text TEXT) or
+Through `drover-cheap-generate'; CALLBACK gets (:text TEXT) or
 \(:failure MESSAGE).  The default `drover-repo-generate-function'."
-  (if (or (fboundp 'drover-cheap-generate)
-          (and (require 'drover-cheap nil t) (fboundp 'drover-cheap-generate)))
-      (drover-cheap-generate prompt system callback)
-    (drover-repo--summary-generate prompt system callback)))
-
-(defun drover-repo--summary-generate (prompt system callback)
-  "Have the model of summaries write what PROMPT asks under SYSTEM.
-CALLBACK gets what it wrote, as for `drover-repo-generate'."
-  (if (or (and (boundp 'drover-summary-generate-function) (functionp drover-summary-generate-function))
-          (and (require 'drover-summary nil t) (functionp drover-summary-generate-function)))
-      (funcall drover-summary-generate-function (concat system "\n\n" prompt) callback)
-    (funcall callback (list :failure "no model can be asked on this host"))))
+  (require 'drover-cheap)
+  (drover-cheap-generate prompt system callback))
 
 (defun drover-repo-prompt (documents hints)
   "Return what the model reads: HINTS, then DOCUMENTS, of one repository."
