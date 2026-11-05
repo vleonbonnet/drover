@@ -1319,5 +1319,174 @@ Past the limit, the search ends, its callback told it is done."
                                                  current))
                (t (funcall callback 'done))))))))))
 
+;;;; Reading whole files in slices
+
+(defconst drover-transcript-read-chunk 524288
+  "Bytes of a file `drover-transcript-read-lines' reads at a time.")
+
+(defun drover-transcript-read-lines (files keys function then)
+  "Read the lines of FILES holding one of KEYS, in slices, and return at once.
+FILES is a list of (FILE . FROM), each FILE read from byte FROM to its
+end, one after the other; a line FROM cuts is skipped.  KEYS are literal
+strings: only a line holding one of them is parsed, as JSON, and
+FUNCTION called with FILE and the object it holds, an alist, arrays as
+lists, null and false as nil; a line that does not parse is skipped.
+The bytes are read `drover-transcript-read-chunk' at a time, and each
+line decoded as UTF-8 once whole, so that a character cut between two
+reads still decodes; each slice of the work takes about
+`drover-transcript-slice' seconds, from a timer, so that Emacs never
+waits for a file however large.  THEN is called once, with nil once
+every file was read, or with a message when one could not be: the
+others are read still.  Return a function of no argument stopping the
+reading, after which neither FUNCTION nor THEN is called.  FUNCTION and
+THEN run out of a command: an error they signal is reported briefly."
+  (let* ((regexp (regexp-opt keys))
+         (queue (copy-sequence files))
+         (file nil) (position nil) (size nil)
+         (partial "")
+         (failure nil)
+         (stopped nil)
+         (timer nil))
+    (cl-labels
+        ((next-file ()
+           (setq file nil)
+           (while (and queue (not file))
+             (pcase-let ((`(,name . ,from) (pop queue)))
+               (let ((attributes (file-attributes name)))
+                 (if (not attributes)
+                     (setq failure (format "No such file: %s" (abbreviate-file-name name)))
+                   (setq file name
+                         size (file-attribute-size attributes)
+                         position (min (or from 0) size)
+                         ;; A line cut at the start is not whole.
+                         partial (if (> position 0) nil ""))))))
+           file)
+         (lines (start)
+           ;; The whole lines of the current buffer from START, those
+           ;; holding a key, given to FUNCTION.
+           (goto-char start)
+           (while (re-search-forward regexp nil t)
+             (let* ((bol (line-beginning-position))
+                    (eol (line-end-position))
+                    (record (ignore-errors
+                              (json-parse-string
+                               (decode-coding-string (buffer-substring-no-properties bol eol)
+                                                     'utf-8-unix t)
+                               :object-type 'alist :array-type 'list
+                               :null-object nil :false-object nil))))
+               (when (and (consp record) (consp (car record)))
+                 (drover-with-reporting "reading lines"
+                   (funcall function file record)))
+               (goto-char (min (1+ eol) (point-max))))))
+         (chunk ()
+           ;; Read one chunk of the current file, give the whole lines it
+           ;; completes, and keep the last, cut, for the next.  PARTIAL
+           ;; is nil while the line cut at the start is skipped.
+           (with-temp-buffer
+             (set-buffer-multibyte nil)
+             (let ((end (min size (+ position drover-transcript-read-chunk))))
+               (when partial (insert partial))
+               (let ((start (point)))
+                 (insert-file-contents-literally file nil position end)
+                 (setq position end)
+                 (unless partial
+                   (goto-char start)
+                   (if (search-forward "\n" nil t)
+                       (progn (delete-region (point-min) (point))
+                              (setq partial ""))
+                     (erase-buffer)))))
+             (cond ((null partial))
+                   ((>= position size)
+                    ;; The last line counts, whole or not.
+                    (lines (point-min))
+                    (setq partial ""))
+                   ((progn (goto-char (point-max)) (search-backward "\n" nil t))
+                    (let ((rest (buffer-substring-no-properties (1+ (point)) (point-max))))
+                      (delete-region (1+ (point)) (point-max))
+                      (lines (point-min))
+                      (setq partial rest)))
+                   (t (setq partial (buffer-string))))))
+         (finish ()
+           (setq stopped t)
+           (drover-with-reporting "reading lines"
+             (funcall then failure)))
+         (run ()
+           (setq timer nil)
+           (unless stopped
+             (drover-with-reporting "reading lines"
+               (let ((until (+ (float-time) drover-transcript-slice)))
+                 (while (and (not stopped) (< (float-time) until)
+                             (or file (next-file)))
+                   (condition-case err
+                       (progn (chunk)
+                              (when (>= position size)
+                                (setq file nil)))
+                     (file-error
+                      (setq failure (drover-error-message err)
+                            file nil))))
+                 (cond (stopped)
+                       ((or file queue)
+                        (setq timer (run-at-time 0.005 nil #'run)))
+                       (t (finish))))))))
+      (setq timer (run-at-time 0 nil #'run))
+      (lambda ()
+        (setq stopped t)
+        (when timer (cancel-timer timer))))))
+
+;;;; Changes recorded
+
+(defun drover-transcript-hunk (old-start old-lines new-start new-lines lines)
+  "Return a hunk of a unified diff, its LINES, strings with their prefix.
+OLD-START, OLD-LINES, NEW-START and NEW-LINES are its header's numbers."
+  (concat (format "@@ -%d,%d +%d,%d @@\n" old-start old-lines new-start new-lines)
+          (mapconcat (lambda (line) (concat line "\n")) lines "")))
+
+(defun drover-transcript-whole-hunk (content added)
+  "Return a hunk adding CONTENT, a file's text, or deleting it unless ADDED."
+  (let* ((lines (split-string (string-remove-suffix "\n" content) "\n"))
+         (lines (if (equal content "") nil lines))
+         (count (length lines)))
+    (drover-transcript-hunk (if added 0 1) (if added 0 count) (if added 1 0) (if added count 0)
+                            (mapcar (lambda (line) (concat (if added "+" "-") line)) lines))))
+
+(defun drover-transcript-changes (edits directory)
+  "Return the files EDITS changed, as `drover-review' takes them.
+EDITS is a list of (FILE STATUS PATCH), in the order they were made:
+FILE a name, absolute or relative to DIRECTORY, STATUS `added',
+`deleted', `modified' or (renamed . FROM), PATCH the hunks of a unified
+diff.  The edits of a file are gathered in one entry, in the place of
+its first, their hunks one after the other, each numbered as the file
+was when it was made: what a conversation records is what each of its
+tools did, not the difference between the first and the last state of
+a file, which only the file system holds.  A file added then edited is
+added; one deleted last is deleted.  Each entry is a plist of :file,
+:status, :from for a file renamed, :additions, :deletions and :patch."
+  (let ((table (make-hash-table :test #'equal))
+        (order nil))
+    (pcase-dolist (`(,file ,status ,patch) edits)
+      (let* ((name (drover-relative-file-name file directory))
+             ;; (STATUS FROM ADDITIONS DELETIONS PATCHES)
+             (entry (or (gethash name table)
+                        (progn (push name order)
+                               (puthash name (list (if (consp status) 'renamed status)
+                                                   (and (consp status)
+                                                        (drover-relative-file-name (cdr status) directory))
+                                                   0 0 nil)
+                                        table)))))
+        (when (and (eq status 'deleted) (not (eq (car entry) 'added)))
+          (setcar entry 'deleted))
+        (dolist (line (split-string (or patch "") "\n"))
+          (cond ((string-prefix-p "@@" line))
+                ((string-prefix-p "+" line) (cl-incf (nth 2 entry)))
+                ((string-prefix-p "-" line) (cl-incf (nth 3 entry)))))
+        (push (or patch "") (nth 4 entry))))
+    (mapcar (lambda (name)
+              (pcase-let ((`(,status ,from ,additions ,deletions ,patches) (gethash name table)))
+                (append (list :file name :status status)
+                        (and from (list :from from))
+                        (list :additions additions :deletions deletions
+                              :patch (apply #'concat (reverse patches))))))
+            (nreverse order))))
+
 (provide 'drover-transcript)
 ;;; drover-transcript.el ends here

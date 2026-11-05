@@ -37,6 +37,14 @@
 ;; of a transcript that large cloned to the agent, in a throwaway home
 ;; there, and back here.
 ;;
+;; With NEW set, it measures instead sessions started on the agent from
+;; here: what it starts told, its catalogs in a directory, a directory
+;; listed there, a session of its terminal front end started, listed
+;; here and mirrored, and one of its OpenCode service started and shown
+;; here through it, its prompt's turn echoed:
+;;
+;;   make bench-remote REMOTE=core SSH=myssh REMOTE_EMACS=/ucrt64/bin/emacs NEW=1
+;;
 ;; With BACK=PROGRAM, the agent also dials this host back through SSH
 ;; run as PROGRAM there, with BACK_ARGS (comma-separated), so that both
 ;; directions are checked and the connection both keep is reported.
@@ -482,6 +490,105 @@ renders the other's large turn."
         (when (process-live-p (car forward))
           (delete-process (car forward)))))))
 
+;;;; Sessions started there
+
+(defun drover-remote-bench--new-p ()
+  "Return non-nil when the bench measures sessions started on the agent alone."
+  (drover-remote-bench--getenv "DROVER_BENCH_NEW"))
+
+(defun drover-remote-bench--median (times)
+  "Return the median and the slowest of TIMES, as (MEDIAN . SLOWEST)."
+  (let ((sorted (sort (copy-sequence times) #'<)))
+    (cons (nth (/ (length sorted) 2) sorted) (car (last sorted)))))
+
+(defun drover-remote-bench--rows-of (what times)
+  "Add the rows of WHAT, its median and slowest of TIMES, then measure anew."
+  (let ((median (drover-remote-bench--median times)))
+    (drover-remote-bench--row (format "%s (median of %d)" what (length times)) (car median))
+    (drover-remote-bench--row (format "%s (slowest of %d)" what (length times)) (cdr median)))
+  (drover-remote-bench--reset))
+
+(defun drover-remote-bench--new ()
+  "Measure sessions started on the agent from here, adding rows.
+What it starts told, its catalogs in a directory there, a directory
+listed, then five sessions of its terminal front end, each until its
+host answered, until listed here and until mirrored live, and five of
+its OpenCode service, each until its host answered and until its
+buffer here shows the turn its prompt ran."
+  (let* ((name drover-remote-test-agent-name)
+         (peer (drover-remote--peer name))
+         (opencode-notification-os-filter nil))
+    (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted peer) 'full)) 10)
+    (let ((work (plist-get (drover-remote-test-command "mkdir" :name "work") :directory))
+          (times nil))
+      (drover-remote-bench--reset)
+      (dotimes (_ 5)
+        (drover-remote--catalog-forget name)
+        (let ((start (float-time)))
+          (unless (drover-remote-catalog name nil nil 30) (error "No targets told"))
+          (push (- (float-time) start) times)))
+      (drover-remote-bench--rows-of "what it starts told" times)
+      (setq times nil)
+      (dotimes (_ 5)
+        (drover-remote--catalog-forget name)
+        (let ((start (float-time)))
+          (unless (drover-remote-catalog name nil work 30) (error "No catalogs told"))
+          (push (- (float-time) start) times)))
+      (drover-remote-bench--rows-of "its catalogs in a directory" times)
+      (setq times nil)
+      (dotimes (_ 20)
+        (let ((start (float-time)))
+          (when (cadr (drover-remote--wait peer (list :op "ls" :directory work) 10))
+            (error "No listing"))
+          (push (- (float-time) start) times)))
+      (drover-remote-bench--rows-of "a directory listed there" times)
+      ;; Its terminal front end.
+      (let ((target (seq-find (lambda (target) (eq (plist-get target :backend) 'fake))
+                              (drover-remote--prompt-targets 10)))
+            (answered nil) (listed nil) (mirrored nil))
+        (unless target (error "The agent starts no fake session"))
+        (save-window-excursion
+          (delete-other-windows)
+          (dotimes (i 5)
+            (let* ((start (float-time))
+                   (result (drover-remote-start name target work (format "Hello %d" i) nil #'ignore)))
+              (push (- (float-time) start) answered)
+              (unless (drover-remote-test-wait (lambda () (drover-remote--started-record peer result)) 30)
+                (error "The session started is not listed"))
+              (push (- (float-time) start) listed)
+              (drover-remote-open-started name result)
+              (let ((mirror (window-buffer (selected-window))))
+                (unless (drover-remote-test-wait (lambda () (eq (spyglass-mirror-state mirror) 'live)) 30)
+                  (error "The session started is not mirrored"))
+                (push (- (float-time) start) mirrored)
+                (kill-buffer mirror)))))
+        (drover-remote-bench--rows-of "terminal session started, its host answering" answered)
+        (drover-remote-bench--rows-of "terminal session started, listed here" listed)
+        (drover-remote-bench--rows-of "terminal session started, mirrored live" mirrored))
+      ;; Its OpenCode service.
+      (let ((target (seq-find (lambda (target) (eq (plist-get target :backend) 'opencode))
+                              (drover-remote--prompt-targets 10)))
+            (answered nil) (shown nil))
+        (unless target (error "The agent starts no OpenCode session"))
+        (save-window-excursion
+          (delete-other-windows)
+          (dotimes (i 5)
+            (let* ((text (format "Hello service %d" i))
+                   (start (float-time))
+                   (result (drover-remote-start name target work text nil #'ignore)))
+              (push (- (float-time) start) answered)
+              (drover-remote-open-started name result)
+              (let ((buffer (drover-remote-test-wait
+                             (lambda () (drover-remote--oc-buffer name (plist-get result :key))) 30)))
+                (unless (and buffer (drover-remote-test-wait
+                                     (lambda () (drover-remote-bench--oc-buffer-shows-p buffer (concat "Echo: " text)))
+                                     30))
+                  (error "The OpenCode session started does not show its turn"))
+                (push (- (float-time) start) shown)
+                (kill-buffer buffer)))))
+        (drover-remote-bench--rows-of "OpenCode session started, its host answering" answered)
+        (drover-remote-bench--rows-of "OpenCode session started, its turn shown here" shown)))))
+
 ;;;; Searching what was said there
 
 (defun drover-remote-bench--search-words ()
@@ -715,6 +822,7 @@ records' directory rewritten."
                                          60)
                 (message "bench: connected")
                 (cond
+                 ((drover-remote-bench--new-p) (drover-remote-bench--new))
                  (search-words (drover-remote-bench--search search-words))
                  (clone-size (drover-remote-bench--clone clone-size))
                  (t

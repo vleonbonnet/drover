@@ -151,7 +151,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
                             ("Z" . drover-unarchive) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
-                            ("V" . drover-view)))
+                            ("R" . drover-review) ("V" . drover-view)))
                          (lambda (a b) (string< (car a) (car b))))))
     (dolist (binding bindings)
       (should (commandp (cdr binding))))))
@@ -557,6 +557,21 @@ B applies while a quiet session has a buffer."
     (should (equal (reverse drover-test-calls)
                    '((:new "/work/s/") (:new "/work/list/") (:new "/work/empty/") (:new "/work/here/"))))))
 
+(ert-deftest drover-keys-test-new-session-elsewhere ()
+  "With a prefix argument, a new session's host is chosen, through the remote layer."
+  (drover-keys-test-with (list (drover-test-session "remote" :directory "/on/core/" :host "core"))
+    (let ((asked nil))
+      (let ((drover-new-session-elsewhere-function nil)
+            (current-prefix-arg '(4)))
+        (should (string-match-p "drover-remote-mode"
+                                (cadr (should-error (call-interactively #'drover-new-session) :type 'user-error)))))
+      (let ((drover-new-session-elsewhere-function (lambda (session) (setq asked (list session)))))
+        (drover-keys-test-in 'view "remote"
+          (let ((current-prefix-arg '(4)))
+            (call-interactively #'drover-new-session))))
+      (should (equal (drover-session-id (car asked)) "remote"))
+      (should-not drover-test-calls))))
+
 (ert-deftest drover-keys-test-new-session-backend-choice ()
   (drover-keys-test-with nil
     (drover-register-backend 'other :label "Other" :sessions #'ignore
@@ -663,7 +678,7 @@ B applies while a quiet session has a buffer."
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
     ("Conversation" ("t" "T" "C" "f" "H" "." "O"))
-    ("Session" ("o" "u" "c" "v" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
+    ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
     ("View" ("= o" "= r" "= g" "- f"))
     ("Filter" ("= u" "= O" "= z" "= p" "= s" "= a" "= m") ("= v" "= H" "= d" "= f" "= c"))
     ("Columns" ("- h" "- H" "- l" "- b") ("- a" "- m" "- r" "- x") ("- c" "- t" "- p" "- s" "- $")))

@@ -58,6 +58,7 @@
 (require 'subr-x)
 (require 'drover-core)
 (require 'drover-model)
+(require 'drover-transcript)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
@@ -492,6 +493,97 @@ prompt, unless the CLI recorded the last prompt apart."
                          (push (copy-sequence change) merged)))
                      (nreverse merged))
           :error error)))
+
+;;;; Changes
+
+(defconst drover-claude-code--turn-tail (* 8 1024 1024)
+  "Bytes at the end of a transcript looked at first for the last turn's changes.
+Past them, the whole transcript is read, the newest prompt being further
+back.")
+
+(defun drover-claude-code--edit (record)
+  "Return what RECORD's tool result changed, as (TIME FILE STATUS PATCH), or nil.
+A file written whole, new, is added, its lines the patch; an edit, or a
+file written over, is modified by the hunks of its patch, as the tool
+numbered them.  TIME is when, a float time or nil."
+  (let ((result (alist-get 'toolUseResult record)))
+    (when-let* (((drover-json-object-p result))
+                (file (alist-get 'filePath result))
+                ((stringp file)))
+      (let ((time (drover-transcript-time (alist-get 'timestamp record))))
+        (if (equal (alist-get 'type result) "create")
+            (let ((content (alist-get 'content result)))
+              (list time file 'added (drover-transcript-whole-hunk (if (stringp content) content "") t)))
+          (let ((hunks (delq nil (mapcar (lambda (hunk)
+                                           (let-alist (and (drover-json-object-p hunk) hunk)
+                                             (and (natnump .oldStart) (natnump .oldLines)
+                                                  (natnump .newStart) (natnump .newLines)
+                                                  (listp .lines)
+                                                  (drover-transcript-hunk .oldStart .oldLines .newStart .newLines
+                                                                          (seq-filter #'stringp .lines)))))
+                                         (let ((patch (alist-get 'structuredPatch result)))
+                                           (and (listp patch) patch))))))
+            (and hunks (list time file 'modified (apply #'concat hunks)))))))))
+
+(defun drover-claude-code-changes (id scope directory callback)
+  "Find the files Claude Code conversation ID changed, and call CALLBACK with them.
+SCOPE is `turn', the changes since its newest prompt, or `session',
+every change; DIRECTORY is where it ran.  They are what its tools wrote
+and edited, as its transcript recorded them, its subagents' included
+\(see `drover-claude-code--edit'), gathered by file (see
+`drover-transcript-changes').  The transcript is read in slices, and
+CALLBACK called once, later, with (:files FILES :notes NOTES), or
+\(:failure MESSAGE).  The engine's :changes."
+  (let* ((files (ignore-errors (drover-claude-code-session-files id directory)))
+         (transcript (car files)))
+    (if (not transcript)
+        (funcall callback (list :failure "No transcript of this conversation"))
+      (let* ((agents (let ((dir (and (cdr files) (expand-file-name "subagents" (cdr files)))))
+                       (and dir (file-directory-p dir)
+                            (directory-files dir t "\\.jsonl\\'"))))
+             (size (or (file-attribute-size (file-attributes transcript)) 0))
+             (tail (and (eq scope 'turn) (> size drover-claude-code--turn-tail)
+                        (- size drover-claude-code--turn-tail)))
+             (keys '("\"toolUseResult\"" "\"type\":\"user\"")))
+        (cl-labels
+            ((scan (from)
+               (let ((prompt nil)
+                     (edits nil))
+                 (drover-transcript-read-lines
+                  (cons (cons transcript from) (mapcar (lambda (file) (cons file 0)) agents))
+                  keys
+                  (lambda (file record)
+                    (if (and (equal file transcript)
+                             (not (alist-get 'isSidechain record))
+                             (drover-claude-code--prompt-p record))
+                        (setq prompt (or (drover-transcript-time (alist-get 'timestamp record)) 0.0)
+                              ;; Only the changes since the newest prompt
+                              ;; of the main conversation make its turn.
+                              edits (if (eq scope 'turn)
+                                        (seq-filter (lambda (edit) (not (equal (nth 4 edit) transcript)))
+                                                    edits)
+                                      edits))
+                      (when-let* ((edit (drover-claude-code--edit record)))
+                        (push (append edit (list file)) edits))))
+                  (lambda (failure)
+                    (cond
+                     ((and failure (null edits))
+                      (funcall callback (list :failure failure)))
+                     ((and (eq scope 'turn) (not prompt) from)
+                      ;; The newest prompt is further back.
+                      (scan nil))
+                     (t
+                      (let* ((since (and (eq scope 'turn) prompt))
+                             (kept (seq-filter (lambda (edit)
+                                                 (or (not since) (not (car edit)) (>= (car edit) since)))
+                                               (nreverse edits))))
+                        (funcall callback
+                                 (list :files (drover-transcript-changes
+                                               (mapcar (lambda (edit) (seq-subseq edit 1 4))
+                                                       (sort kept :key (lambda (edit) (or (car edit) 0.0))))
+                                               directory)
+                                       :notes (and failure (list failure))))))))))))
+          (scan tail))))))
 
 ;;;; Settings
 
@@ -995,6 +1087,7 @@ THEN gets ID, ELSE why it could not.  The engine's :import."
                           :agents #'drover-claude-code--agents
                           :last-used #'drover-claude-code--last-used
                           :directory #'drover-claude-code--directory
+                          :changes #'drover-claude-code-changes
                           :export #'drover-claude-code--export
                           :import #'drover-claude-code--import
                           :record-directory #'drover-claude-code--record-directory))

@@ -41,7 +41,7 @@ TESTS = $(wildcard test/*-test.el)
 FILE ?=
 SELECTOR ?=
 
-.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-usage real-data
+.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review bench-usage real-data
 
 all: compile test
 
@@ -201,6 +201,12 @@ bench-search:
 	@$(MAKE) --no-print-directory bench \
 	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-search-bench.el --eval '(drover-search-bench-run)'"
 
+# Times the review of large diffs: 5000 lines changed in one file and
+# in 100, 50,000 in 200, with comments to place.  See
+# test/drover-review-bench.el.
+bench-review: compile
+	$(BATCH) -l test/drover-test-helpers.el -l test/drover-review-bench.el -f drover-review-bench-main
+
 # Measures what drover costs in a graphical Emacs while nothing happens,
 # while a session streams, and once Emacs lost focus: processor time,
 # allocation, redisplays, the minute's refresh.  Not part of test; it
@@ -228,7 +234,8 @@ bench-idle: compile
 # SEARCH=WORDS, comma-separated, measures instead searches of what was
 # said in the conversations Claude Code recorded on the agent's host,
 # read only, for each word; CLONE=MEGABYTES a Claude Code conversation
-# of a transcript that large cloned to the agent's host and back.  See
+# of a transcript that large cloned to the agent's host and back; NEW=1
+# sessions started on the agent's host from here.  See
 # test/drover-remote-bench.el.
 REMOTE ?=
 SSH ?= ssh
@@ -238,11 +245,12 @@ BACK_ARGS ?=
 BACK_HOST ?=
 SEARCH ?=
 CLONE ?=
+NEW ?=
 bench-remote: compile
 	$(NOPIPE) DROVER_BENCH_REMOTE="$(REMOTE)" DROVER_BENCH_SSH="$(SSH)" \
 	DROVER_BENCH_REMOTE_EMACS="$(REMOTE_EMACS)" DROVER_BENCH_BACK="$(BACK)" \
 	DROVER_BENCH_BACK_ARGS="$(BACK_ARGS)" DROVER_BENCH_BACK_HOST="$(BACK_HOST)" \
-	DROVER_BENCH_SEARCH="$(SEARCH)" DROVER_BENCH_CLONE="$(CLONE)" \
+	DROVER_BENCH_SEARCH="$(SEARCH)" DROVER_BENCH_CLONE="$(CLONE)" DROVER_BENCH_NEW="$(NEW)" \
 	$(BATCH) -l test/drover-test-helpers.el -l test/drover-remote-bench.el -f drover-remote-bench-main
 
 # Times the totals of usage over OpenCode's database of 2500 sessions

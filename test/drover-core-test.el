@@ -1658,7 +1658,8 @@ defines Send, and a function failing tells none."
 (ert-deftest drover-test-session-record-keeps-its-layout ()
   "New slots of the session record come last, after those compiled code reads."
   (let ((slots (mapcar #'car (cdr (cl-struct-slot-info 'drover-session)))))
-    (should (equal (last slots 7) '(agent-display context-estimated archived host origin stale default-branch)))
+    (should (equal (last slots 9) '(agent-display context-estimated archived host origin stale default-branch
+                                    brief brief-recap)))
     (should (equal (seq-take slots 4) '(backend id title directory)))))
 
 (ert-deftest drover-test-format-tokens ()

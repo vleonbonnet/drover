@@ -94,6 +94,8 @@
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 (autoload 'drover-schedule-list "drover-schedule" nil t)
 (autoload 'drover-search "drover-search" nil t)
+(autoload 'drover-review "drover-review" nil t)
+(autoload 'drover-reviewable-p "drover-review")
 
 (defvar drover-prompt-mode)
 
@@ -445,22 +447,35 @@ Tell how many sessions were buried and how many windows restored."
                                backends)))
            (cdr (assoc (completing-read prompt labels nil t) labels)))))))
 
-(defun drover-new-session (directory backend)
+(defvar drover-new-session-elsewhere-function nil
+  "Function starting a session on a host chosen among this one and others, or nil.
+`drover-remote-mode' sets it; it takes the session at point, or nil.")
+
+(defun drover-new-session (directory backend &optional elsewhere)
   "Start a session of BACKEND in DIRECTORY.
 Interactively, DIRECTORY is the directory of the session at point, or
 `default-directory' without one or for a session of another host, and
 BACKEND the backend of that session, or the backend that starts
-sessions, chosen among several."
+sessions, chosen among several.  With a prefix argument, ELSEWHERE,
+the host is chosen first, this one or another starting sessions for it
+\=(see `drover-new-session-elsewhere-function'), the session at point's
+first: on another, among the sessions it starts, in a directory of its."
   (interactive
-   (let ((session (drover-session-at-point t)))
-     (list (or (and session (drover-session-local-directory session)) default-directory)
-           (if (and session (drover-supports-p session :new))
-               (drover-session-backend session)
-             (drover--read-backend :new "Start a session of: ")))))
-  (let ((start (drover-backend-property backend :new)))
-    (unless (functionp start)
-      (user-error "%s cannot start sessions" (drover-backend-label backend)))
-    (funcall start directory)))
+   (if current-prefix-arg
+       (list nil nil t)
+     (let ((session (drover-session-at-point t)))
+       (list (or (and session (drover-session-local-directory session)) default-directory)
+             (if (and session (drover-supports-p session :new))
+                 (drover-session-backend session)
+               (drover--read-backend :new "Start a session of: "))))))
+  (if elsewhere
+      (if (functionp drover-new-session-elsewhere-function)
+          (funcall drover-new-session-elsewhere-function (drover-session-at-point t))
+        (user-error "No other host starts sessions: enable `drover-remote-mode'"))
+    (let ((start (drover-backend-property backend :new)))
+      (unless (functionp start)
+        (user-error "%s cannot start sessions" (drover-backend-label backend)))
+      (funcall start directory))))
 
 ;;;; Projects
 
@@ -581,6 +596,7 @@ other lists."
   "g" #'drover-refresh
   "+" #'drover-new-session
   "v" #'drover-peek
+  "R" #'drover-review
   "V" #'drover-view)
 
 (define-minor-mode drover-session-keys-mode
@@ -1737,9 +1753,10 @@ The value is that of `drover--option'."
                                      (drover--menu-model-name (plist-get options :model)))
                                 (plist-get options :model-explicit-p)))
         ('effort (drover--option (plist-get options :variant) (plist-get options :variant-explicit-p)))
-        ('directory (drover--option (and (plist-get options :directory)
-                                         (abbreviate-file-name
-                                          (directory-file-name (plist-get options :directory))))
+        ('directory (drover--option (when-let* ((directory (plist-get options :directory)))
+                                      (if-let* ((host (plist-get options :host-label)))
+                                          (format "%s: %s" host (directory-file-name directory))
+                                        (abbreviate-file-name (directory-file-name directory))))
                                     (plist-get options :directory-explicit-p)))))))
 
 (defun drover--session-option (session action)
@@ -2068,6 +2085,8 @@ session chosen for it, else to one asked for, unshown."
      :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
     ("v" "Peek" drover-peek
      :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
+    ("R" "Review changes" drover-review
+     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
     ("A" "Answer" drover-respond
      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
     ("K" "Interrupt" drover-interrupt

@@ -1522,6 +1522,78 @@ of a frame stays."
         (drover-prompt-read-target "To: " :existing-only t)
         (should (equal offered '("session a")))))))
 
+(ert-deftest drover-prompt-test-other-hosts ()
+  "Other hosts' new sessions follow this host's; a host chosen with the directory shows its agents, models and defaults, and starts there."
+  (drover-prompt-test-with
+    (let* ((drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake session")))
+           (fast (drover-test-model "fast" :name "Fast"))
+           (deep (drover-test-model "deep" :name "Deep"))
+           (local (drover-test-model "local" :name "Local"))
+           (started nil)
+           (opened nil)
+           (drover-prompt-remote-functions
+            (list :targets (lambda (&optional _wait)
+                             (list (list :host "core" :host-label "Core" :backend 'fake :engine 'fake
+                                         :label "Fake session")))
+                  :hosts (lambda () '(("core" . "Core")))
+                  :label (lambda (_host) "Core")
+                  :catalog (lambda (_host _local directory &optional _wait)
+                             (and directory
+                                  (list :engines (list (list 'fake :agents '("build" "plan") :models (list fast deep)
+                                                             :default (list :agent "build" :model fast :variant 'low))))))
+                  :default-directory (lambda (_host _local &optional _wait) "C:/Users/val/work/")
+                  :read-directory (lambda (_host _prompt default) default)
+                  :start (lambda (host target directory text options _later)
+                           (setq started (list host (plist-get target :engine) directory text
+                                               (plist-get options :model) (plist-get options :agent)))
+                           (list :key '(fake . "n1") :title "Started"))
+                  :open (lambda (host result) (setq opened (list host (plist-get result :key)))))))
+      (drover-prompt-test-choosing (lambda (names) (car (last names)))
+        (should (equal (plist-get (drover-prompt-read-target "To: ") :host) "core"))
+        (should (equal offered '("[New Fake session…]" "[New Fake session on Core…]"))))
+      (with-current-buffer (drover-prompt-buffer t)
+        (insert "Do it there")
+        ;; A model chosen here that host does not offer hides its new sessions.
+        (setq drover-prompt-picked-model local)
+        (drover-prompt-test-choosing (lambda (names) (car names))
+          (drover-prompt-read-target "To: ")
+          (should (equal offered '("[New Fake session…]"))))
+        (setq drover-prompt-picked-model nil)
+        ;; The directory under a prefix argument: the host, then one of its.
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "Core")))
+          (drover-prompt-choose-directory t))
+        (should (equal drover-prompt-host "core"))
+        (should (equal drover-prompt-host-directory "C:/Users/val/work/"))
+        (should (string-search "Core: C:/Users/val/work/" (drover-prompt--header-line)))
+        (should (equal (plist-get (drover-prompt-effective-options) :agent) "build"))
+        (should (eq (plist-get (drover-prompt-effective-options) :model) fast))
+        (should (eq (plist-get (drover-prompt-effective-options) :variant) 'low))
+        ;; Its models and agents offered, not this host's.
+        (drover-prompt-test-choosing (lambda (names) (seq-find (lambda (name) (string-search "Deep" name)) names))
+          (drover-prompt-choose-model)
+          (should (equal offered '("Default (Fast)" "Fast" "Deep"))))
+        (should (eq drover-prompt-picked-model deep))
+        ;; Two agents: the other one, without asking.
+        (drover-prompt-choose-agent)
+        (should (equal drover-prompt-picked-agent "plan"))
+        ;; Sent there: started, the prompt taken, the session opened.
+        (drover-prompt-test-choosing (lambda (names) (car (last names)))
+          (drover-prompt-submit)))
+      (should (equal started (list "core" 'fake "C:/Users/val/work/" "Do it there" deep "plan")))
+      (should (equal opened '("core" (fake . "n1"))))
+      (should-not (get-buffer drover-prompt-buffer-name))
+      ;; Not started there: the prompt stays.
+      (with-current-buffer (drover-prompt-buffer t)
+        (insert "Again")
+        (setq drover-prompt-host "core" drover-prompt-host-directory "C:/Users/val/work/"))
+      (setq drover-prompt-remote-functions
+            (plist-put (copy-sequence drover-prompt-remote-functions) :start
+                       (lambda (&rest _) (user-error "No new Fake session on Core: refused"))))
+      (drover-prompt-test-choosing (lambda (names) (car (last names)))
+        (with-current-buffer (drover-prompt-buffer)
+          (should-error (drover-prompt-submit) :type 'user-error)))
+      (should (equal (with-current-buffer (drover-prompt-buffer) (buffer-string)) "Again")))))
+
 (ert-deftest drover-prompt-test-target-annotation ()
   "Candidates show their status, backend and engine, what they would run, directory and summary."
   (drover-prompt-test-with

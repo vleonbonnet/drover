@@ -65,15 +65,17 @@
 (require 'subr-x)
 (require 'drover-core)
 (require 'drover-ui)
+(require 'drover-model)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 16))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
 (defvar spyglass-instance-id)
 (defvar spyglass-remote-registration-file)
 (declare-function spyglass-server "ext:spyglass-conn" ())
+(declare-function drover-review-fetch "drover-review" (session scope callback))
 (declare-function spyglass-server-start "ext:spyglass-conn" (&rest arguments))
 (declare-function spyglass-server-stop "ext:spyglass-conn" ())
 (declare-function spyglass-connect "ext:spyglass-conn" (transport &rest arguments))
@@ -272,7 +274,8 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "usage")
+(defconst drover-remote-capabilities
+  '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -287,7 +290,11 @@ as it closed, as archiving closes it, for the peer's kill ring;
 \"search\": it searches what was said in its sessions for its peers,
 with its own backends, sending the matches as they come; \"clone\": it
 exports its conversations for its peers to clone, and takes clones of
-theirs from peers of full access.")
+theirs from peers of full access; \"review\": it tells the changes its
+sessions made, as `drover-review' shows them, for its peers to review;
+\"new\": it starts sessions for its peers of act or full access, in
+directories of its own they choose among those it lists, on its own
+engines' agents and models, which it tells them.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -636,6 +643,10 @@ identifier cannot travel."
         (put :context-estimated (and (drover-session-context-estimated record) t))
         (put :archived (let ((archived (drover-session-archived record)))
                          (if (eq archived t) t (drover-remote--number archived))))
+        ;; Written here, by this host's model: peers never summarize
+        ;; another host's sessions.
+        (put :brief (drover-remote--plain (drover-session-brief record)))
+        (put :brief-recap (drover-remote--plain (drover-session-brief-recap record)))
         (put :ops (drover-remote--record-ops record)))
       (nreverse out))))
 
@@ -659,7 +670,8 @@ greys out what its access forbids, and this host checks it again."
   "Return the symbol VALUE, a string received, names, or nil when it may not.
 Only short names of lowercase letters, digits and dashes are interned."
   (and (stringp value)
-       (string-match-p drover-remote--symbol-regexp value)
+       (let ((case-fold-search nil))
+         (string-match-p drover-remote--symbol-regexp value))
        (intern value)))
 
 (defun drover-remote--id (value)
@@ -780,7 +792,10 @@ minus this host's.  Nil when DATA names no session."
         :agent-display (drover-remote--faced-value (plist-get data :agent-display))
         :context-estimated (eq (plist-get data :context-estimated) t)
         :archived (let ((archived (plist-get data :archived)))
-                    (if (eq archived t) t (drover-remote--time archived offset))))))))
+                    (if (eq archived t) t (drover-remote--time archived offset)))
+        :brief (drover-remote--line (plist-get data :brief))
+        :brief-recap (let ((recap (plist-get data :brief-recap)))
+                       (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines))))))))
 
 ;;;; Serving this host's sessions
 
@@ -1845,6 +1860,120 @@ it, here, where they are: the peer names them as received."
                                                                      (or (drover-remote--number (nth 2 change)) :false))))
                                                       (and (listp changes) (seq-take changes 100))))))))
     out))
+
+;;;; Reviews
+
+(defconst drover-remote--review-limit (* 2 1024 1024)
+  "Characters of patches a review sent to a peer holds at most.")
+
+(defconst drover-remote--review-timeout 120
+  "Seconds a peer's review of a session waits for the owner's answer.
+The owner may read a long conversation whole first.")
+
+(defun drover-remote--review-older (label)
+  "Return why the peer LABEL names tells no changes: it runs an older drover."
+  (format "%s runs an older drover, which tells no changes: update it there" label))
+
+(defun drover-remote--review (peer session scope callback)
+  "Fetch the changes SESSION made in SCOPE through PEER, for CALLBACK.
+CALLBACK gets them as `drover-review-fetch' tells them, the owner
+computing them with its own backends; a peer running an older drover
+tells none, which the failure says."
+  (let ((label (drover-remote--label peer)))
+    (if (and (drover-remote--peer-caps peer) (not (drover-remote--capable-p peer "review")))
+        (funcall callback (list :failure (drover-remote--review-older label)))
+      (drover-remote--request
+       peer (list :op "review" :key (drover-remote--wire-key session) :scope (symbol-name scope))
+       (lambda (reply error)
+         (let ((review (and (null error) (plist-get reply :review))))
+           (funcall callback
+                    (cond ((and (consp review) (keywordp (car review)))
+                           (drover-remote--decode-review review))
+                          ((and error (string-match-p "unknown request" error))
+                           (list :failure (drover-remote--review-older label)))
+                          (t (list :failure (or error (format "%s told no changes" label))))))))
+       (+ (float-time) drover-remote--review-timeout)))))
+
+(defun drover-remote--encode-review (review)
+  "Return REVIEW, as `drover-review-fetch' tells it, as it travels.
+Its patches are cut past `drover-remote--review-limit' characters, the
+files after showing their counts, which a note tells."
+  (if-let* ((failure (plist-get review :failure)))
+      (list :failure (drover-remote--plain failure))
+    (let ((room drover-remote--review-limit)
+          (cut nil))
+      (list :files (vconcat
+                    (mapcar (lambda (file)
+                              (let ((patch (plist-get file :patch)))
+                                (when (and patch (> (length patch) room))
+                                  (setq cut (or cut (plist-get file :file)) patch nil room 0))
+                                (when patch (setq room (- room (length patch))))
+                                (vector (drover-remote--plain (plist-get file :file))
+                                        (or (drover-remote--plain (plist-get file :from)) :false)
+                                        (symbol-name (plist-get file :status))
+                                        (or (drover-remote--number (plist-get file :additions)) :false)
+                                        (or (drover-remote--number (plist-get file :deletions)) :false)
+                                        (if (plist-get file :binary) t :false)
+                                        (or (drover-remote--plain patch) :false))))
+                            (plist-get review :files)))
+            :base (or (drover-remote--plain (plist-get review :base)) :false)
+            :how (or (drover-remote--plain (plist-get review :how)) :false)
+            :commits (vconcat (mapcar (lambda (commit) (vector (car commit) (cdr commit)))
+                                      (plist-get review :commits)))
+            :notes (vconcat (append (plist-get review :notes)
+                                    (and cut (list (format "The diff sent is cut past %d MB: from %s on, files show their counts alone"
+                                                           (/ drover-remote--review-limit 1024 1024) cut)))))))))
+
+(defun drover-remote--decode-review (review)
+  "Return REVIEW, as received, as `drover-review-fetch' tells one.
+Every value is checked and bounded: names and notes to lines, patches
+to `drover-remote--review-limit' characters in all, files, notes and
+commits in number."
+  (if-let* ((failure (plist-get review :failure)))
+      (list :failure (or (drover-remote--line failure) "failed"))
+    (let ((room drover-remote--review-limit)
+          (files nil))
+      (seq-doseq (file (seq-take (let ((files (plist-get review :files))) (and (vectorp files) files)) 2000))
+        (when (and (vectorp file) (= (length file) 7) (stringp (aref file 0)))
+          (let ((patch (and (stringp (aref file 6)) (aref file 6))))
+            (when (and patch (> (length patch) room))
+              (setq patch nil room 0))
+            (when patch (setq room (- room (length patch))))
+            (push (list :file (drover-remote--line (aref file 0) 1024)
+                        :from (drover-remote--line (aref file 1) 1024)
+                        :status (cdr (assoc (aref file 2) '(("added" . added) ("deleted" . deleted)
+                                                            ("modified" . modified) ("renamed" . renamed))))
+                        :additions (drover-remote--count (aref file 3))
+                        :deletions (drover-remote--count (aref file 4))
+                        :binary (eq (aref file 5) t)
+                        :patch patch)
+                  files))))
+      (list :files (seq-filter (lambda (file) (plist-get file :file)) (nreverse files))
+            :base (drover-remote--line (plist-get review :base) 64)
+            :how (drover-remote--line (plist-get review :how))
+            :commits (delq nil (mapcar (lambda (commit)
+                                         (and (vectorp commit) (= (length commit) 2)
+                                              (stringp (aref commit 0)) (stringp (aref commit 1))
+                                              (cons (drover-remote--line (aref commit 0) 64)
+                                                    (or (drover-remote--line (aref commit 1)) ""))))
+                                       (seq-take (let ((commits (plist-get review :commits)))
+                                                   (and (vectorp commits) commits))
+                                                 100)))
+            :notes (delq nil (mapcar #'drover-remote--line
+                                     (seq-take (let ((notes (plist-get review :notes)))
+                                                 (and (vectorp notes) notes))
+                                               10)))))))
+
+(defun drover-remote--on-review (served message reply)
+  "Tell the changes the session SERVED made, as MESSAGE asks, through REPLY."
+  (let ((scope (cdr (assoc (plist-get message :scope) '(("turn" . turn) ("session" . session) ("tree" . tree))))))
+    (cond ((not served) (funcall reply nil "no such session here"))
+          ((not scope) (funcall reply nil "unknown scope"))
+          (t
+           (require 'drover-review)
+           (drover-review-fetch (car served) scope
+                                (lambda (review)
+                                  (funcall reply (list :review (drover-remote--encode-review review)))))))))
 
 (defun drover-remote--preview (peer session callback)
   "Fetch where SESSION stands through PEER, and call CALLBACK with it or nil."
@@ -4055,6 +4184,910 @@ For `drover-clone-function'."
             (drover-remote--clone-there session (cdr target))
           (drover-remote--clone-here session)))))))
 
+;;;; New sessions on peers
+
+;; The prompt's new sessions on another host: what a peer starts, its
+;; engines' agents, models and defaults, are the peer's, asked of it
+;; (`catalogs'), and so are the directories completed there (`ls',
+;; names alone); the peer starts the session through its own backend,
+;; without a window, hands it the prompt, and answers its key (`new'),
+;; which opens here once its records list it.  A peer of `act' access
+;; may start sessions, as it may send prompts and resume conversations.
+
+(declare-function drover-new-session "drover-keys" (directory backend &optional elsewhere))
+(defvar drover-prompt-new-targets)
+(defvar drover-prompt-remote-functions)
+(defvar drover-new-session-elsewhere-function)
+
+(defcustom drover-remote-new-timeout 60
+  "Seconds a session started on another host may take to start there.
+Its host answers once its backend made the session and took its
+prompt: a front end starting a terminal, or a service fetching its
+catalogs first, may take a while."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-catalog-timeout 10
+  "Seconds this host waits for its engines' defaults, telling a peer its catalogs.
+An engine whose defaults did not come by then tells the models it
+remembers, and no agent, since reading more would wait for them."
+  :type 'number
+  :group 'drover-remote)
+
+(defcustom drover-remote-catalog-ttl 300
+  "Seconds what a peer told of the sessions it starts is used as it is.
+Past them it is still used, and asked again meanwhile."
+  :type 'number
+  :group 'drover-remote)
+
+(defconst drover-remote-catalog-models 1000
+  "Models of an engine at most a host tells its peers.")
+
+(defconst drover-remote-ls-limit 2000
+  "Entries of a directory at most a host looks at, listing it for a peer.
+It tells the subdirectories among them alone, by name.")
+
+(defconst drover-remote-listing-ttl 30
+  "Seconds the subdirectories a peer listed are used without asking again.")
+
+(defconst drover-remote-catalog-failed-ttl 10
+  "Seconds a peer that did not tell its catalogs is not asked again.")
+
+(defvar drover-remote--catalogs (make-hash-table :test #'equal)
+  "What peers told of the sessions they start, by (NAME LOCAL DIRECTORY).
+LOCAL is a directory of this host whose counterpart there was asked,
+DIRECTORY one there whose engines' catalogs were, either nil; (NAME nil
+nil) holds what NAME told last of what it starts and of its home.  Each
+entry is a plist: :time, when told or failed, :data, the answer
+decoded, :failed, why it failed, :waiting, the callbacks awaiting the
+answer asked.")
+
+(defvar drover-remote--listings (make-hash-table :test #'equal)
+  "Subdirectories of peers' directories by (NAME . DIRECTORY), as (TIME . NAMES).")
+
+(defvar drover-remote--told-models (make-hash-table :test #'equal)
+  "Models this host told its peers of, by (ENGINE PROVIDER-ID . ID).
+A session a peer starts on one of them runs this host's record of it,
+with the names its front ends take for it.")
+
+;;;;; There, starting sessions for peers
+
+(defun drover-remote--target-label (backend engine)
+  "Return how a new session of BACKEND running ENGINE reads, unlabelled."
+  (let ((label (drover-backend-label backend))
+        (engine-label (drover-remote--engine-label engine)))
+    (if (string= label engine-label)
+        (format "%s session" label)
+      (format "%s session (%s)" label engine-label))))
+
+(defvar drover-remote--located (make-hash-table :test #'eq)
+  "Whether the features of front ends not loaded are installed, by feature.
+Each is (TIME . FOUND), looked for again ten minutes later: looking a
+library up in `load-path' costs milliseconds a time.")
+
+(defun drover-remote--installed-p (feature)
+  "Return non-nil when FEATURE is loaded, or `locate-library' finds it."
+  (or (featurep feature)
+      (let ((known (gethash feature drover-remote--located)))
+        (if (and known (< (- (float-time) (car known)) 600))
+            (cdr known)
+          (let ((found (and (locate-library (symbol-name feature)) t)))
+            (puthash feature (cons (float-time) found) drover-remote--located)
+            found)))))
+
+(defun drover-remote--startable ()
+  "Return the sessions this host starts for its peers, as plists.
+Each is (:backend BACKEND :engine ENGINE :label LABEL :feature FEATURE):
+the new sessions this host's prompt offers (`drover-prompt-new-targets')
+whose front end is installed, then those of the other backends
+registered that start sessions, one per engine."
+  (let ((targets nil))
+    (cl-flet ((add (backend engine label feature)
+                (unless (seq-find (lambda (target) (and (eq (plist-get target :backend) backend)
+                                                         (eq (plist-get target :engine) engine)))
+                                  targets)
+                  (push (list :backend backend :engine engine :label label :feature feature) targets))))
+      (dolist (entry (and (boundp 'drover-prompt-new-targets) drover-prompt-new-targets))
+        (let ((backend (plist-get entry :backend))
+              (engine (plist-get entry :engine))
+              (feature (plist-get entry :feature)))
+          (when (and backend engine (symbolp backend) (symbolp engine) (symbolp feature)
+                     (or (null feature) (drover-remote--installed-p feature))
+                     ;; Registered, its backend tells what it starts.
+                     (or (not (memq backend (drover-backends)))
+                         (memq engine (drover-with-reporting "remote targets"
+                                        (drover-backend-engines backend)))))
+            (add backend engine
+                 (or (drover-remote--plain (plist-get entry :label))
+                     (drover-remote--target-label backend engine))
+                 feature))))
+      (dolist (backend (drover-backends))
+        (when (and (functionp (drover-backend-property backend :create))
+                   (not (drover-backend-property backend :remote)))
+          (dolist (engine (drover-with-reporting "remote targets" (drover-backend-engines backend)))
+            (when (symbolp engine)
+              (add backend engine (drover-remote--target-label backend engine) nil))))))
+    (nreverse targets)))
+
+(defun drover-remote--wire-model (model)
+  "Return MODEL, a `drover-model', as it travels to a peer."
+  (list :p (or (drover-remote--plain (drover-model-provider-id model)) :false)
+        :pn (or (drover-remote--plain (drover-model-provider-name model)) :false)
+        :id (or (drover-remote--plain (drover-model-id model)) "")
+        :n (or (drover-remote--plain (drover-model-name model)) :false)
+        :v (vconcat (mapcar (lambda (variant)
+                              (vector (symbol-name (car variant))
+                                      (or (drover-remote--plain (plist-get (cdr variant) :effort)) :false)))
+                            (seq-take (seq-filter (lambda (variant) (and (consp variant) (symbolp (car variant))))
+                                                  (drover-model-variants model))
+                                      16)))
+        :dv (if (and (drover-model-default-variant model) (symbolp (drover-model-default-variant model)))
+                (symbol-name (drover-model-default-variant model))
+              :false)
+        :vk (if (drover-model-variants-known model) t :false)
+        :en (vconcat (mapcar #'symbol-name (seq-take (seq-filter #'symbolp (drover-model-engines model)) 8)))))
+
+(defun drover-remote--tell-model (engine model)
+  "Note that this host told its peers of MODEL, of ENGINE.
+Return MODEL as it travels."
+  (when (> (hash-table-count drover-remote--told-models) (* 8 drover-remote-catalog-models))
+    (clrhash drover-remote--told-models))
+  (puthash (cons engine (drover-model-key model)) model drover-remote--told-models)
+  (drover-remote--wire-model model))
+
+(defun drover-remote--engine-catalog (engine directory answer)
+  "Return what this host tells of ENGINE's new sessions in DIRECTORY.
+ANSWER is (DEFAULTS) once ENGINE's :defaults answered, else nil: an
+engine whose defaults did not come tells only the models it remembers,
+since reading its catalogs would wait for them, unless its defaults
+read local files alone (:volatile).  It tells its agents, its models
+and what a session started without a choice runs."
+  (let* ((ready (or (consp answer) (drover-engine-property engine :volatile)))
+         (resolved (drover-with-reporting "remote catalogs"
+                     (drover-engine-resolve engine (car-safe answer) nil nil nil)))
+         (agents (when-let* ((function (and ready (drover-engine-property engine :agents))))
+                   (drover-with-reporting "remote catalogs" (funcall function directory))))
+         (models (drover-with-reporting "remote catalogs"
+                   (if ready (drover--engine-models engine directory) (drover-remembered-models engine))))
+         (model (plist-get resolved :model))
+         (variant (plist-get resolved :variant)))
+    (list :e (symbol-name engine)
+          :agents (vconcat (mapcar #'substring-no-properties
+                                   (seq-take (seq-filter (lambda (agent) (and (stringp agent) (< (length agent) 200)))
+                                                         agents)
+                                             100)))
+          :models (vconcat (mapcar (lambda (model) (drover-remote--tell-model engine model))
+                                   (seq-take (seq-filter #'drover-model-p models) drover-remote-catalog-models)))
+          :default (list :a (or (drover-remote--plain (plist-get resolved :agent)) :false)
+                         :m (if (drover-model-p model) (drover-remote--tell-model engine model) :false)
+                         :v (if (and variant (symbolp variant)) (symbol-name variant) :false)))))
+
+(defun drover-remote--engine-defaults (engines directory callback)
+  "Call CALLBACK once with what ENGINES' :defaults deliver for DIRECTORY.
+Its argument is an alist (ENGINE . ANSWER), ANSWER (DEFAULTS) for an
+engine whose defaults came, nil for one whose did not within
+`drover-remote-catalog-timeout' seconds or which has none."
+  (let ((answers (mapcar #'list engines))
+        (left (length engines))
+        (done nil)
+        (timer nil))
+    (cl-labels ((finish ()
+                  (unless done
+                    (setq done t)
+                    (when timer (cancel-timer timer))
+                    (funcall callback answers)))
+                (take (engine defaults)
+                  (let ((cell (assq engine answers)))
+                    (unless (or done (cdr cell))
+                      (setcdr cell (list defaults))
+                      (when (zerop (cl-decf left))
+                        (finish))))))
+      (setq timer (run-at-time drover-remote-catalog-timeout nil
+                               (lambda () (drover-with-reporting "remote catalogs" (finish)))))
+      (dolist (engine engines)
+        (let ((function (drover-engine-property engine :defaults)))
+          (if (not function)
+              (progn (setcdr (assq engine answers) nil)
+                     (when (zerop (cl-decf left)) (finish)))
+            (condition-case nil
+                (funcall function directory
+                         (lambda (defaults)
+                           (drover-with-reporting "remote catalogs"
+                             (take engine defaults))))
+              (error (when (zerop (cl-decf left)) (finish)))))))
+      (when (null engines)
+        (finish)))))
+
+(defun drover-remote--new-allowed (peer action)
+  "Return why PEER's access refuses ACTION, a line told PEER, or nil."
+  (unless (drover-remote--allows-p (drover-remote--access peer) "new")
+    (drover-remote--refuse-action peer action (format "%s has %s access, which starts no session"
+                                                      (drover-remote--label peer)
+                                                      (drover-remote--access peer)))))
+
+(defun drover-remote--on-catalogs (peer message reply)
+  "Tell PEER, through REPLY, what this host starts for it, as MESSAGE asks.
+What it starts, by backend and engine, and this host's home; with
+:local, a directory of PEER's, where its counterpart is here, as
+`drover-remote--clone-map' finds it; with :directory, one of this host's,
+the agents, models and defaults of its engines there.  For a peer that
+may start sessions here."
+  (if-let* ((why (drover-remote--new-allowed peer "list what it starts")))
+      (funcall reply nil why)
+    (let* ((targets (drover-remote--startable))
+           (local (drover-remote--line (plist-get message :local) 1024))
+           (where (and local (drover-remote--clone-map
+                              peer local (drover-remote--line (plist-get message :home) 1024))))
+           (asked (drover-remote--line (plist-get message :directory) 1024))
+           (directory (and asked (file-name-absolute-p asked)
+                           (file-name-as-directory (expand-file-name asked))))
+           (answer (list :home (file-name-as-directory (expand-file-name "~"))
+                         :where (or (car where) :false)
+                         :exists (if (cdr where) t :false)
+                         :targets (vconcat (mapcar (lambda (target)
+                                                     (list :b (symbol-name (plist-get target :backend))
+                                                           :e (symbol-name (plist-get target :engine))
+                                                           :l (plist-get target :label)))
+                                                   targets)))))
+      (cond
+       ((not asked) (funcall reply answer))
+       ((not (and directory (file-directory-p directory)))
+        (funcall reply (append answer (list :directory (or directory asked) :missing t))))
+       (t
+        (drover-remote--engine-defaults
+         (delete-dups (mapcar (lambda (target) (plist-get target :engine)) targets))
+         directory
+         (lambda (answers)
+           (funcall reply
+                    (append answer
+                            (list :directory directory
+                                  :engines (vconcat (delq nil (mapcar (pcase-lambda (`(,engine . ,answer))
+                                                                        (drover-with-reporting "remote catalogs"
+                                                                          (drover-remote--engine-catalog
+                                                                           engine directory answer)))
+                                                                      answers)))))))))))))
+
+(defun drover-remote--on-ls (peer message reply)
+  "Tell PEER, through REPLY, the subdirectories of the directory MESSAGE names.
+Their names alone, sorted, of the first `drover-remote-ls-limit'
+entries: nothing of what files hold.  For a peer that may start
+sessions here, in a directory it chooses."
+  (let* ((asked (drover-remote--line (plist-get message :directory) 1024))
+         (directory (and asked (file-name-absolute-p asked)
+                         (file-name-as-directory (expand-file-name asked)))))
+    (cond
+     ((when-let* ((why (drover-remote--new-allowed peer "list directories")))
+        (funcall reply nil why)
+        t))
+     ((not (and directory (file-directory-p directory)))
+      (funcall reply (list :directory (or directory asked :false) :missing t)))
+     (t
+      (let* ((entries (condition-case nil
+                          (directory-files directory nil nil t drover-remote-ls-limit)
+                        (error nil)))
+             (names (seq-filter (lambda (name)
+                                  (and (not (member name '("." "..")))
+                                       (<= (length name) 255)
+                                       (file-directory-p (expand-file-name name directory))))
+                                entries)))
+        (funcall reply (list :directory directory
+                             :dirs (vconcat (sort names #'string<))
+                             :truncated (if (>= (length entries) drover-remote-ls-limit) t :false))))))))
+
+(defun drover-remote--told-model (engine provider id)
+  "Return this host's model PROVIDER's ID for ENGINE, as a peer names it.
+This host's record of it when told to peers or remembered, else one
+made from its names, its variants unknown."
+  (let ((key (cons provider id)))
+    (or (gethash (cons engine key) drover-remote--told-models)
+        (seq-find (lambda (model) (equal (drover-model-key model) key))
+                  (drover-with-reporting "remote new" (drover-remembered-models engine)))
+        (drover-model-create :provider-id provider :id id :variants-known nil
+                             :engines (drover-model-engines-for provider id)))))
+
+(defun drover-remote--new-args (message)
+  "Return what the request MESSAGE asks to start, checked, as a plist.
+A line tells why it cannot be started here."
+  (let* ((backend (drover-remote--symbol (plist-get message :b)))
+         (engine (drover-remote--symbol (plist-get message :e)))
+         (target (and backend engine
+                      (seq-find (lambda (target) (and (eq (plist-get target :backend) backend)
+                                                      (eq (plist-get target :engine) engine)))
+                                (drover-remote--startable))))
+         (asked (drover-remote--line (plist-get message :directory) 1024))
+         (directory (and asked (file-name-absolute-p asked)
+                         (file-name-as-directory (expand-file-name asked))))
+         (text (plist-get message :text))
+         (model (plist-get message :model))
+         (agent (drover-remote--line (plist-get message :agent) 200)))
+    (cond
+     ((not target)
+      (format "this host starts no %s session" (drover-bound-line (format "%s/%s" (plist-get message :b)
+                                                                          (plist-get message :e))
+                                                                  80)))
+     ((not (and directory (file-directory-p directory)))
+      (format "no directory %s here" (or asked "named")))
+     ((not (or (memq text '(nil :false))
+               (and (stringp text) (<= (length text) drover-remote-prompt-limit))))
+      "a prompt too long")
+     ((not (or (memq model '(nil :false))
+               (and (vectorp model) (= (length model) 2)
+                    (or (eq (aref model 0) :false) (drover-remote--line (aref model 0) 200))
+                    (drover-remote--line (aref model 1) 200))))
+      "a model of no known shape")
+     (t
+      (list :target target :directory directory
+            :text (and (stringp text) (not (string-blank-p text)) text)
+            :agent (and agent (not (string-empty-p agent)) agent)
+            :model (and (vectorp model)
+                        (drover-remote--told-model engine
+                                                   (and (stringp (aref model 0))
+                                                        (drover-remote--line (aref model 0) 200))
+                                                   (drover-remote--line (aref model 1) 200)))
+            :variant (drover-remote--symbol (plist-get message :variant))
+            :title (let ((title (drover-remote--line (plist-get message :title))))
+                     (and title (not (string-empty-p title)) title)))))))
+
+(defun drover-remote--new-reply (reply answer)
+  "Answer ANSWER, the outcome of a `new', through REPLY: a failure as an error."
+  (if-let* ((why (plist-get answer :failure)))
+      (funcall reply nil why)
+    (funcall reply answer)))
+
+(defun drover-remote--on-new (state peer message reply)
+  "Start for PEER the session MESSAGE asks, answering through REPLY once started.
+STATE is the remote layer's.  The request's identifier has it started
+once, asked again after its stream ended."
+  (let* ((id (plist-get message :id))
+         (known (and (stringp id) (gethash id (drover-remote--state-outcomes state)))))
+    (cond
+     ((when-let* ((why (drover-remote--new-allowed peer "start a session")))
+        (funcall reply nil why)
+        t))
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "no identifier"))
+     ((and known (car known)) (drover-remote--new-reply reply (cdr known)))
+     (known (setcdr known (cons reply (cdr known))))
+     (t
+      (let ((args (drover-remote--new-args message)))
+        (if (stringp args)
+            (funcall reply nil (drover-remote--refuse-action peer "start a session" args))
+          (drover-remote--begin-outcome state id reply)
+          (drover-remote--start-new state peer id args)))))))
+
+(defun drover-remote--new-send (session text)
+  "Hand TEXT to the backend of SESSION, just started, as the prompt does.
+Its :send waits for SESSION to be ready.  Return why it did not take
+it, a line, or nil."
+  (let ((send (drover-backend-property session :send)))
+    (if (not (functionp send))
+        "its backend takes no prompt"
+      (condition-case err
+          (save-window-excursion
+            (save-current-buffer
+              (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+                (funcall send session text nil)
+                nil)))
+        (error (drover-error-message err))))))
+
+(defun drover-remote--start-new (state peer id args)
+  "Start for PEER the session ARGS describe, answering request ID once started.
+From a timer: its front end is required, its engine's defaults fetched,
+then its backend's :create starts it in no window (a Ghostel terminal
+goes to spyglass's parking frame once a peer mirrors it), and its
+prompt is handed to it.  STATE's outcome of ID is its key, title and
+engine's identifier, or why it did not start, within
+`drover-remote-new-timeout' seconds."
+  (let* ((target (plist-get args :target))
+         (backend (plist-get target :backend))
+         (engine (plist-get target :engine))
+         (directory (plist-get args :directory))
+         (state-link (drover-link state))
+         (peer-link (drover-link peer))
+         (timer nil)
+         (done nil))
+    (drover-remote--event peer 'new "starting a %s in %s" (plist-get target :label) directory)
+    (cl-labels ((finish (answer)
+                  (unless done
+                    (setq done t)
+                    (when timer (cancel-timer timer))
+                    (let ((state (drover-linked state-link))
+                          (peer (drover-linked peer-link)))
+                      (drover-remote--event peer 'new "%s"
+                                            (if (plist-get answer :failure)
+                                                (format "did not start a %s: %s" (plist-get target :label)
+                                                        (plist-get answer :failure))
+                                              (format "started %s" (plist-get answer :title))))
+                      (let ((entry (gethash id (drover-remote--state-outcomes state))))
+                        (unless (car entry)
+                          (puthash id (cons t answer) (drover-remote--state-outcomes state))
+                          (dolist (reply (cdr entry))
+                            (drover-with-reporting "remote new"
+                              (drover-remote--new-reply reply answer))))))))
+                (fail (why)
+                  (finish (list :failure (or (drover-bound-line (format "%s" why)) "failed"))))
+                (started (session)
+                  (drover-with-reporting "remote new"
+                    (if (not (drover-session-p session))
+                        (fail "its backend told no session")
+                      (let* ((key (drover-session-key session))
+                             (unsent (and (plist-get args :text)
+                                          (drover-remote--new-send session (plist-get args :text)))))
+                        (finish (list :key (vector (symbol-name (car key)) (drover-remote--wire-id (cdr key)))
+                                      :title (or (drover-remote--plain (drover-session-display-title session)) "")
+                                      :engine (symbol-name engine)
+                                      :eid (or (drover-remote--wire-id (drover-session-engine-id session)) :false)
+                                      :unsent (or unsent :false)))))))
+                (create (defaults)
+                  (unless done
+                    (condition-case err
+                        (save-window-excursion
+                          (save-current-buffer
+                            (let ((display-buffer-overriding-action
+                                   '(display-buffer-no-window (allow-no-window . t))))
+                              (funcall (drover-backend-property backend :create)
+                                       directory engine
+                                       (list :agent (plist-get args :agent) :model (plist-get args :model)
+                                             :variant (plist-get args :variant) :title (plist-get args :title)
+                                             :defaults defaults :hidden t)
+                                       #'started
+                                       (lambda (why) (drover-with-reporting "remote new" (fail why)))))))
+                      (error (fail (drover-error-message err)))))))
+      (setq timer (run-at-time drover-remote-new-timeout nil
+                               (lambda () (drover-with-reporting "remote new" (fail "it did not start in time")))))
+      (run-at-time 0 nil
+                   (lambda ()
+                     (drover-with-reporting "remote new"
+                       (condition-case err
+                           (progn
+                             (when-let* ((feature (plist-get target :feature)))
+                               (require feature))
+                             (if (not (and (memq backend (drover-backends))
+                                           (functionp (drover-backend-property backend :create))
+                                           (memq engine (drover-backend-engines backend))))
+                                 (fail (format "%s starts no %s session here" (drover-backend-label backend)
+                                               (drover-remote--engine-label engine)))
+                               (drover-remote--engine-defaults
+                                (list engine) directory
+                                (lambda (answers) (create (car (alist-get engine answers)))))))
+                         (error (fail (drover-error-message err))))))))))
+
+;;;;; Here, starting sessions on peers
+
+(defun drover-remote--new-refusal (peer)
+  "Return why PEER starts no session for this host now, a line, or nil."
+  (if (not peer)
+      "Not a peer"
+    (let ((label (drover-remote--label peer))
+          (granted (or (drover-remote--peer-granted peer) 'read)))
+      (cond
+       ((not (eq (drover-remote--peer-state peer) 'open)) (format "%s is not connected" label))
+       ((not (drover-remote--capable-p peer "new"))
+        (format "%s runs an older drover, which starts no session for other hosts: update it there" label))
+       ((not (drover-remote--allows-p granted "new"))
+        (format "%s grants this host %s access, which starts no session" label granted))))))
+
+(defun drover-remote--new-peers ()
+  "Return the peers starting sessions for this host now."
+  (seq-remove #'drover-remote--new-refusal (drover-remote--peers)))
+
+(defun drover-remote--decode-model (data)
+  "Return the `drover-model' DATA, a model a peer told, describes, or nil."
+  (when-let* (((and (consp data) (keywordp (car data))))
+              (id (drover-remote--line (plist-get data :id) 200))
+              ((not (string-empty-p id))))
+    (let ((variants (plist-get data :v))
+          (engines (plist-get data :en)))
+      (drover-model-create
+       :provider-id (drover-remote--line (plist-get data :p) 200)
+       :provider-name (drover-remote--line (plist-get data :pn) 200)
+       :id id
+       :name (drover-remote--line (plist-get data :n) 200)
+       :variants (and (vectorp variants)
+                      (delq nil (mapcar (lambda (pair)
+                                          (when-let* (((and (vectorp pair) (= (length pair) 2)))
+                                                      (name (drover-remote--symbol (aref pair 0))))
+                                            (cons name (and (stringp (aref pair 1))
+                                                            (list :effort (drover-remote--line (aref pair 1) 48))))))
+                                        (seq-take variants 16))))
+       :default-variant (drover-remote--symbol (plist-get data :dv))
+       :variants-known (eq (plist-get data :vk) t)
+       :engines (and (vectorp engines)
+                     (delete-dups (delq nil (mapcar #'drover-remote--symbol (seq-take engines 8)))))))))
+
+(defun drover-remote--decode-catalog (data)
+  "Return DATA, what a peer told of the sessions it starts, checked and bounded.
+A plist: :home, :where and :exists, :directory and :missing as told;
+:targets, plists (:backend :engine :label); :engines, an alist (ENGINE
+:agents NAMES :models MODELS :default (:agent :model :variant))."
+  (when (and (consp data) (keywordp (car data)))
+    (let ((targets (plist-get data :targets))
+          (engines (plist-get data :engines)))
+      (list :home (drover-remote--line (plist-get data :home) 1024)
+            :where (drover-remote--line (plist-get data :where) 1024)
+            :exists (eq (plist-get data :exists) t)
+            :directory (drover-remote--line (plist-get data :directory) 1024)
+            :missing (eq (plist-get data :missing) t)
+            :targets (and (vectorp targets)
+                          (delq nil (mapcar (lambda (target)
+                                              (when-let* (((and (consp target) (keywordp (car target))))
+                                                          (backend (drover-remote--symbol (plist-get target :b)))
+                                                          (engine (drover-remote--symbol (plist-get target :e))))
+                                                (list :backend backend :engine engine
+                                                      :label (or (drover-remote--line (plist-get target :l) 80)
+                                                                 (format "%s session" backend)))))
+                                            (seq-take targets 32))))
+            :engines (and (vectorp engines)
+                          (delq nil (mapcar (lambda (entry)
+                                              (when-let* (((and (consp entry) (keywordp (car entry))))
+                                                          (engine (drover-remote--symbol (plist-get entry :e))))
+                                                (let ((agents (plist-get entry :agents))
+                                                      (models (plist-get entry :models))
+                                                      (default (plist-get entry :default)))
+                                                  (list engine
+                                                        :agents (and (vectorp agents)
+                                                                     (delete-dups
+                                                                      (delq nil (mapcar (lambda (agent) (drover-remote--line agent 200))
+                                                                                        (seq-take agents 100)))))
+                                                        :models (and (vectorp models)
+                                                                     (delq nil (mapcar #'drover-remote--decode-model
+                                                                                       (seq-take models drover-remote-catalog-models))))
+                                                        :default (and (consp default) (keywordp (car default))
+                                                                      (list :agent (drover-remote--line (plist-get default :a) 200)
+                                                                            :model (drover-remote--decode-model (plist-get default :m))
+                                                                            :variant (drover-remote--symbol (plist-get default :v))))))))
+                                            (seq-take engines 16))))))))
+
+(defun drover-remote--catalog-forget (name)
+  "Forget what the peer NAME told of the sessions it starts, and its directories."
+  (dolist (table (list drover-remote--catalogs drover-remote--listings))
+    (dolist (key (hash-table-keys table))
+      (when (equal (car key) name)
+        (remhash key table)))))
+
+(defun drover-remote--catalog-ask (peer local directory callback)
+  "Ask PEER what it starts, for LOCAL and DIRECTORY, then call CALLBACK.
+CALLBACK takes (DATA ERROR).
+See `drover-remote--catalogs'.  An answer asked already is waited for
+rather than asked again."
+  (let* ((name (drover-remote--peer-name peer))
+         (key (list name local directory))
+         (entry (gethash key drover-remote--catalogs)))
+    (if (plist-get entry :waiting)
+        (puthash key (plist-put (copy-sequence entry) :waiting (cons callback (plist-get entry :waiting)))
+                 drover-remote--catalogs)
+      (puthash key (plist-put (copy-sequence entry) :waiting (list callback)) drover-remote--catalogs)
+      (drover-remote--request
+       peer (list :op "catalogs" :local (or local :false)
+                  :home (or (and local (drover-remote--clone-home-relative local)) :false)
+                  :directory (or directory :false))
+       (lambda (reply error)
+         (let* ((data (and (null error) (drover-remote--decode-catalog reply)))
+                (entry (gethash key drover-remote--catalogs))
+                (waiting (plist-get entry :waiting)))
+           (if data
+               (progn
+                 (puthash key (list :time (float-time) :data data) drover-remote--catalogs)
+                 (unless (equal key (list name nil nil))
+                   (puthash (list name nil nil)
+                            (append (list :time (float-time)
+                                          :data (list :targets (plist-get data :targets) :home (plist-get data :home)))
+                                    (let ((waiting (plist-get (gethash (list name nil nil) drover-remote--catalogs)
+                                                              :waiting)))
+                                      (and waiting (list :waiting waiting))))
+                            drover-remote--catalogs)))
+             (puthash key (list :time (float-time) :data (plist-get entry :data)
+                                :failed (or error "it told nothing"))
+                      drover-remote--catalogs))
+           (dolist (callback (reverse waiting))
+             (drover-with-reporting "remote catalogs"
+               (funcall callback data error)))))
+       (+ (float-time) drover-remote-catalog-timeout drover-remote-request-timeout)
+       t))))
+
+(defun drover-remote-catalog (name &optional local directory wait)
+  "Return what the peer NAME told of the sessions it starts, or nil.
+Without LOCAL nor DIRECTORY, what it starts and its home; with LOCAL, a
+directory of this host, where its counterpart there is; with DIRECTORY,
+one of NAME's, its engines' agents, models and defaults there.  See
+`drover-remote--decode-catalog'.  An answer older than
+`drover-remote-catalog-ttl' is asked again, and returned meanwhile; one
+missing is asked, and with WAIT, seconds, waited for that long at most,
+else nil.  Nil for a peer starting no session for this host."
+  (when-let* ((peer (drover-remote--peer name))
+              ((not (drover-remote--new-refusal peer))))
+    (let* ((key (list name local directory))
+           (entry (gethash key drover-remote--catalogs))
+           (age (and entry (plist-get entry :time) (- (float-time) (plist-get entry :time))))
+           (fresh (and age (< age (if (plist-get entry :failed)
+                                      drover-remote-catalog-failed-ttl
+                                    drover-remote-catalog-ttl)))))
+      (unless (or fresh (plist-get entry :waiting))
+        (drover-remote--catalog-ask peer local directory #'ignore))
+      (when (and wait (not (plist-get entry :data)) (not fresh))
+        (let ((deadline (+ (float-time) wait)))
+          (while (and (plist-get (gethash key drover-remote--catalogs) :waiting)
+                      (< (float-time) deadline))
+            (accept-process-output nil 0.02))))
+      (plist-get (gethash key drover-remote--catalogs) :data))))
+
+(defun drover-remote--there (peer local)
+  "Return PEER's directory LOCAL, one of this host's, maps to, or nil.
+PEER's :directories (THEIRS . OURS) map it, the first OURS a prefix of
+it."
+  (when (stringp local)
+    (let ((ours (drover-remote--clone-slashed (expand-file-name local))))
+      (seq-some (pcase-lambda (`(,theirs . ,here))
+                  (when (and (stringp theirs) (stringp here))
+                    (let ((prefix (drover-remote--clone-slashed (expand-file-name here))))
+                      (and (string-prefix-p prefix ours (memq system-type '(windows-nt ms-dos cygwin darwin)))
+                           (concat (drover-remote--clone-slashed theirs) (substring ours (length prefix)))))))
+                (plist-get (drover-remote--peer-properties peer) :directories)))))
+
+(defun drover-remote-default-directory (name local &optional wait)
+  "Return the directory of the peer NAME a session of LOCAL starts in there.
+NAME's :directories here map LOCAL, else NAME's own map it back, else
+the same directory under NAME's home as LOCAL under this host's, else
+NAME's home; nil when unknown.  NAME is asked, waited for WAIT seconds
+at most when it has not told yet."
+  (when-let* ((peer (drover-remote--peer name)))
+    (or (drover-remote--there peer local)
+        (let ((data (drover-remote-catalog name local nil wait)))
+          (or (plist-get data :where) (plist-get data :home)))
+        (plist-get (drover-remote-catalog name) :home))))
+
+(defun drover-remote--recent-directories (peer)
+  "Return the directories PEER's sessions run in, the latest active first."
+  (let ((directories nil))
+    (dolist (session (sort (seq-filter #'drover-session-directory
+                                       (hash-table-values (drover-remote--peer-records peer)))
+                           :key (lambda (session) (- (drover--time (or (drover-session-since session)
+                                                                      (drover-session-updated session)))))))
+      (let ((directory (file-name-as-directory (drover-session-directory session))))
+        (unless (member directory directories)
+          (push directory directories))))
+    (seq-take (nreverse directories) 50)))
+
+(defun drover-remote--subdirectories (peer directory)
+  "Return the names of the subdirectories of PEER's DIRECTORY, as PEER lists them.
+Asked and waited for a few seconds at most, the answer kept
+`drover-remote-listing-ttl' seconds; nil when PEER does not answer."
+  (let* ((key (cons (drover-remote--peer-name peer) directory))
+         (cached (gethash key drover-remote--listings)))
+    (if (and cached (< (- (float-time) (car cached)) drover-remote-listing-ttl))
+        (cdr cached)
+      (pcase-let* ((`(,reply ,error) (drover-remote--wait peer (list :op "ls" :directory directory) 3))
+                   (dirs (and (null error) (plist-get reply :dirs)))
+                   (names (and (vectorp dirs)
+                               (delq nil (mapcar (lambda (name)
+                                                   (and (stringp name) (<= (length name) 255)
+                                                        (not (string-match-p "[/\\\0]" name))
+                                                        (not (member name '("." "..")))
+                                                        name))
+                                                 (seq-take dirs drover-remote-ls-limit))))))
+        (unless error
+          (puthash key (cons (float-time) names) drover-remote--listings))
+        names))))
+
+(defvar drover-remote--directory-history nil
+  "Directories of peers read, the latest first.")
+
+(defun drover-remote--directory-table (peer recent)
+  "Return a completion table of PEER's directories, RECENT ones first.
+It completes the last component of a directory as file names complete,
+on the subdirectories PEER lists; an input without a slash completes on
+RECENT directories."
+  (lambda (string predicate action)
+    (let ((start (let ((position (string-match-p "[/\\][^/\\]*\\'" string)))
+                   (if position (1+ position) 0))))
+      (pcase action
+        ('metadata '(metadata (category . drover-remote-directory)
+                              (display-sort-function . identity)
+                              (cycle-sort-function . identity)))
+        (`(boundaries . ,suffix)
+         `(boundaries ,start . ,(or (string-match-p "[/\\]" suffix) (length suffix))))
+        (_
+         (if (zerop start)
+             (complete-with-action action recent string predicate)
+           (let ((parent (substring string 0 start)))
+             (completion-table-with-context
+              parent (mapcar (lambda (name) (concat name "/")) (drover-remote--subdirectories peer parent))
+              (substring string start) predicate action))))))))
+
+(defun drover-remote-read-directory (name prompt &optional default)
+  "Read with PROMPT a directory of the peer NAME, starting from DEFAULT.
+It completes on the directories NAME lists, names alone, and on those
+its sessions run in.  Return it, with a trailing slash."
+  (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
+         (recent (drover-remote--recent-directories peer))
+         (directory (string-trim (completing-read prompt (drover-remote--directory-table peer recent)
+                                                  nil nil default 'drover-remote--directory-history))))
+    (unless (and (not (string-empty-p directory)) (file-name-absolute-p directory))
+      (user-error "%s is not a directory of %s" (if (string-empty-p directory) "Nothing" directory)
+                  (drover-remote--label peer)))
+    (file-name-as-directory directory)))
+
+(defun drover-remote--new (peer target directory text options callback)
+  "Have PEER start the session TARGET describes in DIRECTORY, its, with TEXT.
+OPTIONS are the start options (:agent :model :variant :title); TEXT is
+nil for no prompt.  CALLBACK gets, once, what PEER answers, decoded: a
+plist (:key KEY :title TITLE :engine ENGINE :eid ID :unsent WHY), or
+\(:failure WHY)."
+  (let* ((label (drover-remote--label peer))
+         (model (plist-get options :model))
+         (variant (plist-get options :variant)))
+    (drover-remote--request
+     peer (list :op "new" :id (drover-remote--action-id peer)
+                :b (symbol-name (plist-get target :backend)) :e (symbol-name (plist-get target :engine))
+                :directory directory
+                :text (if (stringp text) (substring-no-properties text) :false)
+                :agent (or (drover-remote--plain (plist-get options :agent)) :false)
+                :model (if (drover-model-p model)
+                           (vector (or (drover-model-provider-id model) :false) (drover-model-id model))
+                         :false)
+                :variant (if (and variant (symbolp variant)) (symbol-name variant) :false)
+                :title (or (drover-remote--plain (plist-get options :title)) :false))
+     (lambda (reply error)
+       (funcall callback
+                (let ((key (and (null error) (drover-remote--key (plist-get reply :key)))))
+                  (cond
+                   (error (list :failure error))
+                   ((not key) (list :failure (format "%s told no session" label)))
+                   (t (list :key key
+                            :title (drover-remote--line (plist-get reply :title))
+                            :engine (drover-remote--symbol (plist-get reply :engine))
+                            :eid (drover-remote--id (plist-get reply :eid))
+                            :unsent (drover-remote--line (plist-get reply :unsent))))))))
+     (+ (float-time) drover-remote-new-timeout))))
+
+(defun drover-remote-start (name target directory text options later)
+  "Start on the peer NAME the session TARGET describes, in DIRECTORY, with TEXT.
+TARGET is a plist (:backend :engine :label), as the peer tells it;
+OPTIONS the start options (:agent :model :variant :title); TEXT a
+prompt, or nil.  Waited for in the command, `drover-remote-new-timeout'
+seconds at most: return what NAME answered, (:key KEY :title TITLE
+:engine ENGINE :eid ID :unsent WHY), or signal a `user-error' telling
+why it did not start.  \\[keyboard-quit] stops waiting: return nil,
+LATER being called, from a timer, with the answer once it comes, or
+\(:failure WHY)."
+  (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
+         (label (drover-remote--label peer))
+         (what (format "%s on %s" (or (plist-get target :label) "session") label))
+         (box (list nil nil)))
+    (when-let* ((why (drover-remote--new-refusal peer)))
+      (user-error "%s" why))
+    (drover-remote--new peer target directory text options
+                        (lambda (result)
+                          (if (cadr box)
+                              (run-at-time 0 nil (lambda ()
+                                                   (drover-with-reporting "remote new"
+                                                     (funcall later result))))
+                            (setcar box result))))
+    (if (drover-remote--clone-wait box (lambda () (format "Starting a new %s... (C-g: go on in the background)" what)))
+        (let ((result (car box)))
+          (drover-message "")
+          (when-let* ((why (plist-get result :failure)))
+            (user-error "No new %s: %s" what why))
+          result)
+      (setf (cadr box) t)
+      (drover-message "Starting a new %s in the background" what)
+      nil)))
+
+(defun drover-remote--started-record (peer result)
+  "Return PEER's record of the session RESULT, its `new' answer, names, or nil."
+  (let ((key (plist-get result :key))
+        (engine (plist-get result :engine))
+        (eid (plist-get result :eid)))
+    (or (drover-remote--peer-session peer key)
+        (and engine eid
+             (seq-find (lambda (record)
+                         (and (eq (drover-session-engine record) engine)
+                              (equal (drover-session-engine-id record) eid)))
+                       (hash-table-values (drover-remote--peer-records peer)))))))
+
+(defun drover-remote-open-started (name result)
+  "Open the session the peer NAME started, as RESULT, its answer, names it.
+Once NAME's records list it, waited for in the command,
+`drover-remote-open-timeout' seconds at most: an OpenCode session in a
+full buffer through NAME, a terminal or a shell mirrored.  Return its
+record, or nil when not listed in time, which the echo area tells."
+  (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
+         (deadline (+ (float-time) drover-remote-open-timeout))
+         (record nil))
+    (while (and (not (setq record (drover-remote--started-record peer result)))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.02))
+    (when-let* ((why (plist-get result :unsent)))
+      (drover-warn "%s started %s, which did not take the prompt: %s; it is in the kill ring"
+                   (drover-remote--label peer) (or (plist-get result :title) "a session") why))
+    (if (not record)
+        (progn (drover-message "%s started %s; it opens from the list once listed"
+                               (drover-remote--label peer) (or (plist-get result :title) "a session"))
+               nil)
+      (drover-changed-now)
+      (drover-open (or (drover-index-session (drover-session-key record)) record))
+      record)))
+
+(defun drover-remote--prompt-targets (&optional wait)
+  "Return the new sessions of other hosts the prompt offers, as plists.
+Each is (:host NAME :host-label LABEL :backend :engine :label), of the
+peers starting sessions for this host, in the order configured, as each
+told; one that has not told yet is asked, and waited for WAIT seconds."
+  (mapcan (lambda (peer)
+            (let ((name (drover-remote--peer-name peer)))
+              (mapcar (lambda (target)
+                        (append (list :host name :host-label (drover-remote--label peer)) target))
+                      (plist-get (drover-remote-catalog name nil nil wait) :targets))))
+          (drover-remote--new-peers)))
+
+(defun drover-remote--prompt-hosts ()
+  "Return the peers starting sessions for this host, as (NAME . LABEL)."
+  (mapcar (lambda (peer) (cons (drover-remote--peer-name peer) (drover-remote--label peer)))
+          (drover-remote--new-peers)))
+
+(defun drover-remote--prompt-label (name)
+  "Return how views name the peer NAME."
+  (if-let* ((peer (drover-remote--peer name)))
+      (drover-remote--label peer)
+    name))
+
+(defconst drover-remote--prompt-functions
+  (list :targets #'drover-remote--prompt-targets
+        :hosts #'drover-remote--prompt-hosts
+        :label #'drover-remote--prompt-label
+        :catalog #'drover-remote-catalog
+        :default-directory #'drover-remote-default-directory
+        :read-directory #'drover-remote-read-directory
+        :start #'drover-remote-start
+        :open #'drover-remote-open-started)
+  "How the prompt starts sessions on other hosts.
+See `drover-prompt-remote-functions'.")
+
+(defun drover-remote--report-later (title)
+  "Return the function reporting a session of TITLE started in the background."
+  (lambda (result)
+    (if-let* ((why (plist-get result :failure)))
+        (drover-warn "%s did not start: %s" title why)
+      (drover-message "%s started: %s" title (or (plist-get result :title) "")))))
+
+(defun drover-remote-new-session (&optional session)
+  "Start a session, without a prompt, on a host chosen among this one and peers.
+The peers are those starting sessions for this host; the host of
+SESSION, the session at point, comes first.  On this host, as
+`drover-new-session' does; on a peer, of a harness it starts, in a
+directory read there (see `drover-remote-read-directory'), SESSION's
+when of that peer, opened here once started.  For
+`drover-new-session-elsewhere-function'."
+  (interactive (list (drover-session-at-point t)))
+  (let* ((hosts (drover-remote--prompt-hosts))
+         (here (format "%s (this host)" drover-host))
+         (candidates (append (mapcar (lambda (host) (cons (cdr host) (car host))) hosts)
+                             (list (cons here nil))))
+         (session-host (and session (drover-session-host session) (assoc (drover-session-host session) hosts)))
+         (default (if session-host (cdr session-host) here))
+         (choice (completing-read (format-prompt "Start a session on" default)
+                                  (mapcar #'car candidates) nil t nil nil default))
+         (name (cdr (assoc choice candidates))))
+    (if (not name)
+        (let ((current-prefix-arg nil))
+          (call-interactively #'drover-new-session))
+      (let* ((label (drover-remote--prompt-label name))
+             (targets (or (plist-get (drover-remote-catalog name nil nil drover-remote-open-timeout) :targets)
+                          (user-error "%s tells no session it starts" label)))
+             (labels (mapcar (lambda (target) (cons (plist-get target :label) target)) targets))
+             (target (cdr (assoc (completing-read (format "New session on %s: " label) labels nil t)
+                                 labels)))
+             (directory (drover-remote-read-directory
+                         name (format "Directory on %s: " label)
+                         (if (and session (equal (drover-session-host session) name)
+                                  (drover-session-directory session))
+                             (file-name-as-directory (drover-session-directory session))
+                           (drover-remote-default-directory name default-directory drover-remote-open-timeout))))
+             (what (format "%s on %s" (plist-get target :label) label))
+             (result (drover-remote-start name target directory nil nil (drover-remote--report-later what))))
+        (when result
+          (drover-remote-open-started name result))))))
+
 ;;;; Messages
 
 (defun drover-remote--handle (connection message)
@@ -4106,7 +5139,12 @@ For `drover-clone-function'."
    ((equal type "grant")
     (let ((access (plist-get message :access)))
       (setf (drover-remote--peer-granted peer)
-            (and (member access '("read" "act" "full")) (intern access)))))
+            (and (member access '("read" "act" "full")) (intern access)))
+      ;; What it starts, asked now for the prompt's targets.
+      (drover-remote--catalog-forget (drover-remote--peer-name peer))
+      (when (and (eq connection (drover-remote--peer-connection peer))
+                 (not (drover-remote--new-refusal peer)))
+        (drover-remote--catalog-ask peer nil nil #'ignore))))
    ((equal type "bye") (drover-remote--on-bye peer connection message))
    ((equal type "unsent") (drover-remote--on-unsent peer message))
    ((equal type "ocd") (drover-remote--on-oc-data message))
@@ -4173,6 +5211,9 @@ as an older drover's farewells do."
         ("clone-piece" (drover-remote--on-clone-piece peer message reply))
         ("clone-where" (drover-remote--on-clone-where peer message reply))
         ("clone" (drover-remote--on-clone peer message reply))
+        ("catalogs" (drover-remote--on-catalogs peer message reply))
+        ("ls" (drover-remote--on-ls peer message reply))
+        ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
         ("recap"
          (if (not served)
@@ -4188,6 +5229,7 @@ as an older drover's farewells do."
                (funcall reply nil "unknown kind")
              (funcall reply (list :ok t))
              (drover-remote--serve-fetch connection kind (plist-get message :gen)))))
+        ("review" (drover-remote--on-review served message reply))
         ("preview"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -4277,6 +5319,11 @@ CALLBACK gets (REPLY ERROR) once."
                 (if-let* ((peer (drover-remote--peer name)))
                     (drover-remote--preview peer session callback)
                   (funcall callback nil)))
+     ;; The changes of a session, computed by its owner.
+     :review (lambda (session scope callback)
+               (if-let* ((peer (drover-remote--peer name)))
+                   (drover-remote--review peer session scope callback)
+                 (funcall callback (list :failure (format "%s is not a peer" name)))))
      :history (lambda (callback)
                 (when-let* ((peer (drover-remote--peer name)))
                   (drover-remote--fetch peer "history" callback)))
@@ -4334,6 +5381,7 @@ EPHEMERAL non-nil for one accepted without configuration."
         (drover-remote--peer-epoch peer) nil
         (drover-remote--peer-rev peer) nil)
   (clrhash (drover-remote--peer-ops peer))
+  (drover-remote--catalog-forget (drover-remote--peer-name peer))
   (drover-remote--fail-outbox peer (format "%s closed: %s" (drover-remote--label peer) why))
   (drover-remote--oc-close peer)
   (let ((keys (hash-table-keys (drover-remote--peer-records peer))))
@@ -5818,7 +6866,9 @@ ID, ELSE why it could not.  For the engine's :import (see
           drover-host-label-function #'drover-remote--host-label
           drover-host-state-function #'drover-remote--host-state
           drover-links-remote-function #'drover-remote--open-conversation
-          drover-clone-function #'drover-remote--clone)
+          drover-clone-function #'drover-remote--clone
+          drover-prompt-remote-functions drover-remote--prompt-functions
+          drover-new-session-elsewhere-function #'drover-remote-new-session)
     (drover-remote-reconfigure)
     ;; Connections made before, by a remote layer of this Emacs gone
     ;; since: their peers are told it restarted, as they still serve it
@@ -5883,6 +6933,8 @@ starts again at once: its peers keep this host's sessions meanwhile."
         drover-host-state-function nil
         drover-links-remote-function nil
         drover-clone-function nil
+        drover-prompt-remote-functions nil
+        drover-new-session-elsewhere-function nil
         drover-remote--state nil))
 
 ;;;###autoload

@@ -39,6 +39,7 @@
                                    (drover-attention--visited nil)
                                    (drover-attention--started nil)
                                    (drover-attention-round-lifetime 300)
+                                   (drover-attention-open-patience 10)
                                    (drover-attention-statuses '(waiting failed done))
                                    (drover-attention-echo t)
                                    (drover-attention--pads (make-hash-table :test #'equal))
@@ -543,13 +544,37 @@ pixels; spaces displayed as stretches advance by their width."
       (drover-attention-test-press))
     (setq drover-test-sessions
           (list (drover-test-session "w" :status 'idle)
-                (drover-test-session "d2" :status 'done :since 40.0)
-                (drover-test-session "n" :status 'waiting :since 1.0)
+                (drover-test-session "d2" :status 'waiting :since 1.0)
                 (drover-test-session "d1" :status 'done :since 30.0)))
     (drover-attention-test-press)
     (drover-attention-test-press)
-    (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "n" "d1")))
-    (should (equal drover-attention--cycle '((fake . "n") (fake . "d1") (fake . "d2"))))))
+    (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "d2" "d1")))
+    (should (equal drover-attention--cycle '((fake . "d2") (fake . "d1"))))))
+
+(ert-deftest drover-attention-test-next-newcomers-come-next ()
+  "Sessions coming to need you during a round come next, in the order as it stands.
+The sessions of the round keep their order after them, and those
+visited, still needing you, do not come again."
+  (drover-attention-test-with (drover-attention-test-sessions)
+    (should (equal (drover-attention-test-messages (drover-next)) '("1/4")))
+    (setq drover-test-sessions
+          (append drover-test-sessions
+                  (list (drover-test-session "m" :status 'done :since 5.0)
+                        (drover-test-session "n" :status 'waiting :since 70.0))))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (should (equal (drover-attention-test-messages
+                     (dotimes (_ 5)
+                       (drover-attention-test-press)))
+                   '("2/6" "3/6" "4/6" "5/6" "6/6")))
+    (should (equal (drover-attention-test-opened) '("w" "n" "m" "f" "d1" "d2")))
+    ;; One coming once the round reached its last still comes before a new round.
+    (setq drover-test-sessions
+          (append drover-test-sessions (list (drover-test-session "o" :status 'failed :since 1.0))))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (should (equal (drover-attention-test-messages (drover-attention-test-press)) '("7/7")))
+    (should (equal (car (last (drover-attention-test-opened))) "o"))))
 
 (ert-deftest drover-attention-test-next-skips-gone-sessions ()
   (drover-attention-test-with (drover-attention-test-sessions)
@@ -581,12 +606,17 @@ pixels; spaces displayed as stretches advance by their width."
     (drover-next)
     (should (equal (drover-attention-test-opened) '("w" "f" "f")))))
 
-(ert-deftest drover-attention-test-next-restarts-when-cycle-gone ()
+(ert-deftest drover-attention-test-next-newcomer-when-cycle-gone ()
+  "The round's sessions gone, one that came to need you since comes next."
   (drover-attention-test-with (list (drover-test-session "a" :status 'waiting))
     (drover-next)
     (setq drover-test-sessions (list (drover-test-session "b" :status 'done)))
     (drover-attention-test-press)
     (should (equal (drover-attention-test-opened) '("a" "b")))
+    (should (equal drover-attention--cycle '((fake . "a") (fake . "b"))))
+    ;; Then a new round.
+    (drover-attention-test-press)
+    (should (equal (drover-attention-test-opened) '("a" "b" "b")))
     (should (equal drover-attention--cycle '((fake . "b"))))))
 
 (ert-deftest drover-attention-test-next-single-session-wraps ()
@@ -765,24 +795,85 @@ runs `drover-next' itself, and <f17> another command."
     (should (equal (drover-attention-test-opened) '("a" "c")))))
 
 (ert-deftest drover-attention-test-keys-session-fetched ()
-  "A session its backend shows later leaves the window as it was: pressing again goes on."
+  "Pressed again before a session fetched shows, it waits for it; then goes on.
+The session shown late would otherwise cover the next one visited."
   (drover-attention-test-with-keys '("a" "b" "c")
-    (cl-letf (((symbol-function 'drover-attention-test-show)
-               (lambda (session &rest _)
-                 (push (list :open (drover-session-id session) nil) drover-test-calls))))
-      (drover-attention-test-keys "<f19> j <f19> j"))
-    (should (equal (drover-attention-test-opened) '("a" "b")))))
+    (let ((home (window-buffer (selected-window))))
+      (cl-letf (((symbol-function 'drover-attention-test-show)
+                 (lambda (session &rest _)
+                   (push (list :open (drover-session-id session) nil) drover-test-calls))))
+        (should (equal (remove "" (drover-attention-test-messages
+                                    (drover-attention-test-keys "<f19> j <f19> j <f18>")))
+                       '("1/3" "1/3 Session a is still opening" "1/3 Session a is still opening")))
+        (should (equal (drover-attention-test-opened) '("a")))
+        (should (eq (window-buffer (selected-window)) home))
+        ;; It shows: the round goes on from it.
+        (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "a"))
+        (drover-attention-test-keys "<f19> j")
+        (should (equal (drover-attention-test-opened) '("a" "b")))
+        ;; Never shown, the round goes on once the patience ran out.
+        (setcar (nthcdr 4 drover-attention--visited) (- (float-time) 11))
+        (drover-attention-test-keys "<f19> j")
+        (should (equal (drover-attention-test-opened) '("a" "b" "c")))))))
+
+(ert-deftest drover-attention-test-keys-session-fetched-no-patience ()
+  "With no patience, a press goes on past a session still fetched."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (let ((drover-attention-open-patience nil))
+      (cl-letf (((symbol-function 'drover-attention-test-show)
+                 (lambda (session &rest _)
+                   (push (list :open (drover-session-id session) nil) drover-test-calls))))
+        (drover-attention-test-keys "<f19> j <f19> j"))
+      (should (equal (drover-attention-test-opened) '("a" "b"))))))
 
 (ert-deftest drover-attention-test-keys-open-fails ()
-  "A session its backend fails to open does not hold the round."
+  "A session its backend fails to open is told on one line; the next press goes on."
   (drover-attention-test-with-keys '("a" "b")
     (cl-letf (((symbol-function 'drover-attention-test-show)
                (lambda (session &rest _)
                  (push (list :open (drover-session-id session) nil) drover-test-calls)
-                 (user-error "Cannot open"))))
-      (should-error (drover-next) :type 'user-error)
-      (should-error (drover-next) :type 'user-error))
+                 (error "Cannot open\n%s" (make-string 500000 ?x)))))
+      (let ((messages (remove "" (drover-attention-test-messages
+                                   (drover-attention-test-keys "<f19> j")
+                                   (drover-attention-test-keys "<f18>")))))
+        (should (= (length messages) 2))
+        (should (string-prefix-p "1/2 Session a did not open: Cannot open" (car messages)))
+        (should (string-prefix-p "2/2 Session b did not open: Cannot open" (cadr messages)))
+        (should (seq-every-p (lambda (message)
+                               (and (not (string-search "\n" message)) (< (length message) 400)))
+                             messages))))
     (should (equal (drover-attention-test-opened) '("a" "b")))))
+
+(ert-deftest drover-attention-test-keys-one-press-one-visit ()
+  "One press visits one session and tells one place, from the menu or a key."
+  (dolist (keys '("<f19> j" "<f18>"))
+    (drover-attention-test-with-keys '("a" "b" "c")
+      (should (equal (list keys (remove "" (drover-attention-test-messages (drover-attention-test-keys keys))))
+                     (list keys '("1/3"))))
+      (should (equal (drover-attention-test-opened) '("a")))
+      (should (equal (list keys (remove "" (drover-attention-test-messages (drover-attention-test-keys keys))))
+                     (list keys '("2/3"))))
+      (should (equal (drover-attention-test-opened) '("a" "b"))))))
+
+(ert-deftest drover-attention-test-keys-newcomer-comes-next ()
+  "A session whose turn ends during a round is the next one visited.
+On a session waiting for you, the first press stays on it; a session
+ending its turn then comes next, not the round's second."
+  (dolist (keys '("<f19> j" "<f18>"))
+    (drover-attention-test-with-keys '(("a" :status waiting) "b" "c")
+      (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "a"))
+      (should (equal (remove "" (drover-attention-test-messages (drover-attention-test-keys keys)))
+                     '("1/3")))
+      (drover-attention-test-reshow
+       (append drover-attention-test-shown
+               (list (drover-attention-test-shown-session "d" :since 9.0))))
+      (should (equal (remove "" (drover-attention-test-messages (drover-attention-test-keys keys)))
+                     '("2/4")))
+      (should (eq (window-buffer (selected-window)) (drover-attention-test-shown-buffer "d")))
+      (drover-attention-test-keys (concat keys " " keys))
+      (should (equal (list keys (drover-attention-test-opened))
+                     (list keys '("a" "d" "b" "c"))))
+      (kill-buffer (drover-attention-test-shown-buffer "d")))))
 
 (ert-deftest drover-attention-test-keys-main-window ()
   "From a list beside the window where sessions show, the round goes on there."
@@ -885,7 +976,8 @@ Even on the session visited: the order as it then stands comes first."
 (ert-deftest drover-attention-test-keys-fetched-left-and-back ()
   "The buffer a visit left counts only while the user stayed on it."
   (drover-attention-test-with-keys '("a" "b" "c")
-    (let ((home (get-buffer-create "*drover-attention-test home*")))
+    (let ((home (get-buffer-create "*drover-attention-test home*"))
+          (drover-attention-open-patience nil))
       (unwind-protect
           (cl-letf (((symbol-function 'drover-attention-test-show)
                      (lambda (session &rest _)

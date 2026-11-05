@@ -101,6 +101,7 @@
 (declare-function opencode-session-fork "opencode-session" (id &optional message-id))
 (declare-function opencode-session-compact "opencode-session" (id))
 (declare-function opencode-session-last-turn "opencode-session" (id callback))
+(declare-function opencode-session-diff "opencode-session" (id callback &optional whole context))
 (declare-function opencode-agent-display "opencode-display" (id &optional directory))
 (declare-function opencode--sync-requests "opencode-requests" (callback))
 (declare-function opencode--form-find "opencode-form" (key value))
@@ -430,6 +431,39 @@ times of the database files stand in.  The engine's :last-used."
                                                  (concat drover-opencode-database "-wal"))))))
         (apply #'max times))))
 
+(defun drover-opencode--changes (id scope _directory callback)
+  "Find the files OpenCode session ID changed, and call CALLBACK with them.
+SCOPE is `turn', its last turn, or `session', every turn.  They are the
+service's diffs of the snapshots it took of the session's working tree
+\(see `opencode-session-diff'), files Git does not track included, and
+CALLBACK gets (:files FILES :notes NOTES), or (:failure MESSAGE).  A
+file whose patch the service did not make, too large, keeps its counts
+of lines; a folder the service stopped listing early is told in the
+notes.  The engine's :changes."
+  (if (not (fboundp 'opencode-session-diff))
+      (funcall callback (list :failure "This opencode.el tells no diff of a session: update it"))
+    (opencode-session-diff
+     id
+     (lambda (data)
+       (drover-with-reporting "OpenCode changes"
+         (if (eq (car-safe data) :failure)
+             (funcall callback data)
+           (let ((files nil)
+                 (notes nil))
+             (dolist (entry data)
+               (let-alist entry
+                 (cond ((not (stringp .file)))
+                       (.more (push (format "The service stopped listing %s early" .file) notes))
+                       (t (push (list :file .file
+                                      :status (pcase .status
+                                                ("added" 'added) ("deleted" 'deleted) (_ 'modified))
+                                      :additions (and (natnump .additions) .additions)
+                                      :deletions (and (natnump .deletions) .deletions)
+                                      :patch (and (stringp .patch) .patch))
+                                files)))))
+             (funcall callback (list :files (nreverse files) :notes (nreverse notes)))))))
+     (eq scope 'session))))
+
 (defun drover-opencode--register-engine ()
   "Register the `opencode' engine and its catalog as a model source."
   (apply #'drover-register-engine 'opencode
@@ -440,7 +474,8 @@ times of the database files stand in.  The engine's :last-used."
                 :agents #'drover-opencode--agents
                 :last-used #'drover-opencode--last-used
                 :model-resets-variant t
-                :directory #'drover-opencode--directory)))
+                :directory #'drover-opencode--directory
+                :changes #'drover-opencode--changes)))
   (drover-register-model-source 'opencode #'drover-opencode--catalog-source 0))
 
 (drover-opencode--register-engine)
@@ -1535,6 +1570,7 @@ else the default model."
 
 (defun drover-opencode--create (directory engine options then else)
   "Start an OpenCode session in DIRECTORY with start OPTIONS, and display it.
+With :hidden in OPTIONS, its buffer is made but not displayed.
 ENGINE must be `opencode', the one engine the backend starts.  The
 session runs the agent of OPTIONS when DIRECTORY has it as an agent
 a session can run, else the default agent, named so that the agent's
@@ -1583,6 +1619,7 @@ exists, ELSE a message.  The backend's :create."
                       :model (drover-opencode--new-session-model
                               (plist-get options :defaults) agent
                               (plist-get options :model) (plist-get options :variant))
+                      :no-display (plist-get options :hidden)
                       :callback (lambda (info)
                                   (funcall settle then
                                            (drover-opencode--session-of

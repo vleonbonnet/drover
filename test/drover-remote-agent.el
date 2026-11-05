@@ -45,6 +45,11 @@
 ;; With DROVER_AGENT_CLAUDE set, it lists the conversations Claude Code
 ;; recorded in the home it names, its directory's for "here", or the
 ;; user's for 1, read only; DROVER_AGENT_CODEX likewise for Codex.
+;; Its backends start sessions for peers (:create): the fake one a
+;; session of the engine `fake' with a terminal, displayed as front ends
+;; display theirs, failing in a directory named \"fail\" and starting a
+;; second late in one named \"slow\"; the OpenCode one a session of its
+;; fake service; each engine with its agents, models and defaults.
 ;; It says READY on
 ;; standard error once it listens, kills itself past 2 GB of resident
 ;; memory, and after ten minutes without a command.  It loads neither
@@ -69,6 +74,10 @@
 (defvar drover-claude-code-agents-interval)
 (defvar drover-codex-home)
 (defvar drover-codex-history-days)
+(defvar drover-summary-delay)
+(defvar drover-summary-catch-up)
+(defvar drover-summary-generate-function)
+(declare-function drover-summary-mode "drover-summary" (&optional arg))
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
 (declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
@@ -246,8 +255,64 @@ whose newlines are CRLF on Windows."
   (pop-to-buffer-same-window (or (drover-remote-agent--buffer session)
                                  (drover-remote-agent--terminal (drover-session-id session) "pty"))))
 
+(defvar drover-remote-agent--created 0
+  "How many sessions its backends started for peers.")
+
+(defun drover-remote-agent--models ()
+  "Return the models of the engine `fake'."
+  (list (drover-model-create :provider-id "fakeco" :provider-name "FakeCo" :id "fast-1" :name "Fast 1"
+                             :variants '((low :effort "low") (high :effort "high")) :default-variant 'low
+                             :engines '(fake))
+        (drover-model-create :provider-id "fakeco" :provider-name "FakeCo" :id "deep-2" :name "Deep 2"
+                             :variants '((max :effort "max")) :default-variant 'max
+                             :engines '(fake))))
+
+(defun drover-remote-agent--note-create (directory engine options)
+  "Note that a session of ENGINE was asked in DIRECTORY with start OPTIONS."
+  (let ((model (plist-get options :model)))
+    (push (vector "create" directory
+                  (format "%s %s %s %s %s %s" engine (or (plist-get options :agent) "-")
+                          (if (drover-model-p model) (drover-model-id model) "-")
+                          (or (plist-get options :variant) "-")
+                          (or (plist-get options :title) "-")
+                          (if (plist-get options :hidden) "hidden" "shown")))
+          drover-remote-agent--calls)))
+
+(defun drover-remote-agent--create (directory engine options then else)
+  "Start a fake session of ENGINE in DIRECTORY with start OPTIONS, its terminal shown.
+As a front end does: THEN gets its session, ELSE why not, in a
+directory named \"fail\"; in one named \"slow\", a second later."
+  (drover-remote-agent--note-create directory engine options)
+  (let ((start (lambda ()
+                 (if (string-match-p "fail" directory)
+                     (funcall else "the fake front end failed")
+                   (let* ((id (format "new%d" (cl-incf drover-remote-agent--created)))
+                          (session (drover-remote-agent--session
+                                    id 0 :status 'idle :directory directory
+                                    :title (or (plist-get options :title) (format "New %s" id)))))
+                     (drover-remote-agent--set id session)
+                     (pop-to-buffer (drover-remote-agent--terminal id "pty"))
+                     (drover-changed-now)
+                     (funcall then session))))))
+    (if (string-match-p "slow" directory)
+        (run-at-time 1 nil start)
+      (funcall start))))
+
+(defun drover-remote-agent--register-engines ()
+  "Register the engine `fake', its agents, models and defaults."
+  (drover-register-engine 'fake :label "Fake"
+                          :defaults (lambda (_directory callback)
+                                      (run-at-time 0.02 nil (lambda () (funcall callback (list :agent "build")))))
+                          :resolve (lambda (defaults agent model variant)
+                                     (list :agent (or agent (plist-get defaults :agent))
+                                           :model (or model (car (drover-remote-agent--models)))
+                                           :variant (or variant (and (not model) 'high))))
+                          :agents (lambda (_directory) (list "build" "plan")))
+  (drover-register-model-source 'fake (lambda (_directory) (drover-remote-agent--models)) 0))
+
 (defun drover-remote-agent--register ()
   "Register the fake backend, and a front end resuming its conversations."
+  (drover-remote-agent--register-engines)
   (drover-register-resumer 'fake 'fake (lambda (id _directory)
                                          (drover-remote-agent--terminal id "pty"))
                            :by-id t)
@@ -281,6 +346,10 @@ whose newlines are CRLF on Windows."
    :submit (lambda (session text then _else)
              (push (vector "send" (drover-session-id session) text) drover-remote-agent--calls)
              (drover-remote-agent--confirm then))
+   :engines '(fake)
+   :create #'drover-remote-agent--create
+   :send (lambda (session text _token &optional _attachments)
+           (push (vector "prompt" (drover-session-id session) text) drover-remote-agent--calls))
    :requests (lambda (session callback)
                (funcall callback
                         (and (drover-session-requests session)
@@ -391,11 +460,26 @@ noted, and their cancellations."
   (require 'opencode-service)
   (setq opencode-service-registration-file
         (drover-fake-opencode-start (or (getenv "DROVER_AGENT_DIR") default-directory)))
+  (drover-register-engine 'opencode :label "OpenCode"
+                          :defaults (lambda (_directory callback) (funcall callback nil))
+                          :agents (lambda (_directory) (list "build")))
   (drover-register-backend
    'opencode :label "OpenCode"
    :sessions (lambda () (delq nil (mapcar #'drover-remote-agent--opencode-session drover-fake-opencode--order)))
    :session #'drover-remote-agent--opencode-session
-   :search #'drover-remote-agent--oc-search))
+   :search #'drover-remote-agent--oc-search
+   ;; A session of its service, as drover's OpenCode backend starts one.
+   :engines '(opencode)
+   :create (lambda (directory engine options then _else)
+             (drover-remote-agent--note-create directory engine options)
+             (let ((id (format "ses_new%d" (cl-incf drover-remote-agent--created))))
+               (drover-fake-opencode-add id (or (plist-get options :title) "New session"))
+               (drover-backend-changed 'opencode id)
+               (drover-changed-now)
+               (run-at-time 0.05 nil (lambda () (funcall then (drover-remote-agent--opencode-session id))))))
+   :send (lambda (session text _token &optional _attachments)
+           (push (vector "prompt" (drover-session-id session) text) drover-remote-agent--calls)
+           (drover-fake-opencode-turn (drover-session-id session) text))))
 
 (defun drover-remote-agent--json (value)
   "Return VALUE, a plist parsed from JSON, with false as nil."
@@ -466,8 +550,38 @@ noted, and their cancellations."
                                          :requests (list (list :kind 'permission :summary "ls"))))))
        (drover-changed-now)
        (funcall reply (list :ok t)))
+      ("review-set"
+       ;; The changes the fake engine tells of each conversation: a file
+       ;; whose patch adds LINES lines, naming the conversation and the
+       ;; scope, and a file deleted.
+       (let ((lines (or (plist-get args :lines) 2)))
+         (require 'drover-model)
+         (drover-register-engine
+          'fake :label "Fake"
+          :changes (lambda (id scope _directory callback)
+                     (funcall callback
+                              (list :files (list (list :file "src/a.el" :status 'modified
+                                                       :additions lines :deletions 1
+                                                       :patch (concat (format "@@ -1,1 +1,%d @@ %s %s\n" lines id scope)
+                                                                      "-old\n"
+                                                                      (mapconcat (lambda (index) (format "+new %d\n" index))
+                                                                                 (number-sequence 1 lines) "")))
+                                                 (list :file "gone.el" :status 'deleted))
+                                    :notes (list "A note")))))
+         (funcall reply (list :ok t))))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("summaries"
+       ;; Summaries written as turns end, by a stand-in model.
+       (require 'drover-summary)
+       (setq drover-summary-delay 0
+             drover-summary-catch-up nil
+             drover-summary-generate-function
+             (lambda (_prompt callback)
+               (funcall callback (list :text "Done: summarized on the agent\nIts recap"))))
+       (drover-summary-mode 1)
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
       ("search-set"
        ;; How the stand-in of OpenCode's search answers: after DELAY
        ;; seconds, failing with FAILURE when given.
@@ -491,11 +605,15 @@ noted, and their cancellations."
                                    (secure-hash 'md5 (current-buffer))))
                     (list :size :false)))))
       ("mkdir"
-       ;; A directory NAME of its own directory, made; its name.
+       ;; A directory NAME of its own directory, made; its name.  With
+       ;; FILE, a file of that name in it too, holding TEXT.
        (let ((directory (file-name-as-directory
                          (expand-file-name (plist-get args :name)
                                            (or (getenv "DROVER_AGENT_DIR") default-directory)))))
          (make-directory directory t)
+         (when (plist-get args :file)
+           (with-temp-file (expand-file-name (plist-get args :file) directory)
+             (insert (or (plist-get args :text) ""))))
          (funcall reply (list :directory directory))))
       ("claude-file"
        ;; Where Claude Code records conversation ID run in DIRECTORY,

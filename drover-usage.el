@@ -60,7 +60,7 @@
 (require 'drover-codex)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 19))
   (load "drover-core" nil t))
 
 (defvar drover-opencode-database)
