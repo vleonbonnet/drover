@@ -123,7 +123,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 13))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -2733,13 +2733,16 @@ dropped."
                drover-list--recaps))))
 
 (defcustom drover-list-recap-lines
-  '((request . 6) (error . 6) (prompt . 3) (reply . 8) (changes . 2))
+  '((summary . 4) (request . 6) (error . 6) (prompt . 3) (reply . 8) (changes . 2))
   "Lines each part of the details of an expanded session takes at most.
-The details recap the session's last turn: what it waits for, the
-error that ended it, the user's prompt, the agent's reply and the files
-it changed.  A part cut short ends in an ellipsis; the whole reply
-shows in the session itself, or in a preview.  An alist (PART . LINES)."
-  :type '(alist :key-type (choice (const :tag "What the session waits for" request)
+The details recap the session's last turn: the recap a model wrote of
+it (see `drover-summary-mode'), what it waits for, the error that ended
+it, the user's prompt, the agent's reply and the files it changed.  A
+part cut short ends in an ellipsis; the whole reply shows in the
+session itself, or in a preview.  An alist (PART . LINES); a part of 0
+lines is left out."
+  :type '(alist :key-type (choice (const :tag "Recap written by a model" summary)
+                                  (const :tag "What the session waits for" request)
                                   (const :tag "Error" error)
                                   (const :tag "Prompt" prompt)
                                   (const :tag "Reply" reply)
@@ -2812,7 +2815,8 @@ icon alone shows."
 (defun drover-list--details (session layout)
   "Return the details of SESSION, as a list of (LABEL TEXT LINES FACE).
 They recap its last turn, from what the session tells and the recap
-its backend fetches (see `drover-list--recap-entry'): what it waits
+its backend fetches (see `drover-list--recap-entry'): the recap a model
+wrote of it, if any (see `drover-session-brief-recap'), what it waits
 for, the error that ended or holds it, the user's last prompt, the
 agent's reply and the files it changed, then what its line leaves out
 in LAYOUT.  TEXT takes at most LINES lines, wrapped; LINES nil keeps it
@@ -2826,8 +2830,16 @@ to one, cut.  FACE, if any, is that of TEXT."
                            (drover-session-detail session))))
          (details nil))
     (cl-flet ((add (label text part &optional face)
-                (when (and text (not (string-blank-p text)))
+                (when (and text (not (string-blank-p text))
+                           (not (and part (zerop (drover-list--recap-lines part)))))
                   (push (list label text (and part (drover-list--recap-lines part)) face) details))))
+      (add "Summary" (let ((brief (drover-session-brief session))
+                           (recap (drover-session-brief-recap session)))
+                       ;; Its line is the summary its row shows, if any.
+                       (if (or (null brief) (memq 'summary (plist-get layout :fields)))
+                           recap
+                         (string-join (delq nil (list brief recap)) "\n")))
+           'summary)
       (dolist (request (drover-session-requests session))
         (add (if (eq (plist-get request :kind) 'question) "Question" "Permission")
              (plist-get request :summary) 'request 'opencode-session-status-waiting))

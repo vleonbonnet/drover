@@ -1,0 +1,499 @@
+;;; drover-summary-test.el --- Tests of the summaries a model writes  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026  Valentin Leon
+
+;; This program is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; A fake model, `drover-summary-test--generate', writes summaries for
+;; the fake backend's sessions: at once, later on command, or failing.
+;; The other host's sessions are in drover-remote-test.el, which starts
+;; a second batch Emacs.
+
+;;; Code:
+
+(require 'drover-test-helpers)
+(require 'drover-summary)
+(require 'drover-list)
+(require 'opencode-http)
+
+(defvar drover-summary-test-prompts nil
+  "The prompts the fake model was given, newest first.")
+
+(defvar drover-summary-test-answer '(:text "Done: wrote the feature, tests pass\nAdded the parser.\nTests pass.")
+  "What the fake model answers: a result, a function of the prompt returning one, or `later'.")
+
+(defvar drover-summary-test-pending nil
+  "Callbacks the fake model holds, newest first, while its answer is `later'.")
+
+(defvar drover-summary-test-clock 1800000000.0
+  "The time of the last activity the tests give sessions.")
+
+(defun drover-summary-test--generate (prompt callback)
+  "Answer PROMPT through CALLBACK as `drover-summary-test-answer' says."
+  (push prompt drover-summary-test-prompts)
+  (pcase drover-summary-test-answer
+    ('later (push callback drover-summary-test-pending))
+    ((pred functionp) (funcall callback (funcall drover-summary-test-answer prompt)))
+    (answer (funcall callback answer))))
+
+(defun drover-summary-test-session (id &rest properties)
+  "Return the fake session ID with PROPERTIES, a long reply recapped for it."
+  (apply #'drover-test-session id
+         (append properties (list :engine 'fake :engine-id id :updated drover-summary-test-clock))))
+
+(defconst drover-summary-test-reply
+  (concat "I added the parser and its tests.\n" (make-string 200 ?x) "\nAll 48 tests pass.")
+  "A reply long enough to need the model.")
+
+(defmacro drover-summary-test-with (sessions &rest body)
+  "Run BODY with the fake backend serving SESSIONS, summaries on, state fresh."
+  (declare (indent 1) (debug t))
+  `(drover-test-with-backend ,sessions
+     (drover-test-with-state
+       (let ((drover-summary-delay 0)
+             (drover-summary-catch-up nil)
+             (drover-summary-concurrency 2)
+             (drover-summary-daily-limit 200)
+             (drover-summary-timeout 60)
+             (drover-summary-harnesses t)
+             (drover-summary-generate-function #'drover-summary-test--generate)
+             (drover-summary-test-prompts nil)
+             (drover-summary-test-answer drover-summary-test-answer)
+             (drover-summary-test-pending nil)
+             (drover-summary-test-clock drover-summary-test-clock)
+             (drover-summary--store nil)
+             (drover-summary--usage nil)
+             (drover-summary--dirty nil)
+             (drover-summary--save-timer nil)
+             (drover-summary--warned nil)
+             (drover-summary--failing nil)
+             (drover-summary--capped nil)
+             (drover-summary--timer nil)
+             (drover-summary--forced nil)
+             (drover-summary--seen (make-hash-table :test #'equal))
+             (drover-summary--queue (make-hash-table :test #'equal))
+             (drover-summary--jobs (make-hash-table :test #'eql))
+             (drover-summary--copies (make-hash-table :test #'eq :weakness 'key))
+             (drover-brief-function nil)
+             (kill-emacs-hook nil))
+         (setq drover-test-recaps
+               (mapcar (lambda (session)
+                         (let ((id (drover-session-id session)))
+                           (cons id (list :prompt (concat "Write the parser of " id)
+                                          :reply drover-summary-test-reply
+                                          :changes '(("parser.el" 40 2))))))
+                       drover-test-sessions))
+         (unwind-protect
+             (progn
+               (drover-summary-mode 1)
+               (drover-summary-test-settle)
+               ,@body)
+           (drover-summary-mode -1)
+           (when (timerp drover-summary--save-timer)
+             (cancel-timer drover-summary--save-timer)))))))
+
+(defun drover-summary-test-settle (&optional seconds)
+  "Run changes and timers until summaries settle, SECONDS at most, 5 by default."
+  (let ((end (+ (float-time) (or seconds 5))))
+    (drover-changed-now)
+    (while (and (< (float-time) end)
+                (or (timerp drover--change-timer)
+                    (and (> (hash-table-count drover-summary--queue) 0)
+                         (< (hash-table-count drover-summary--jobs) drover-summary-concurrency))
+                    (and (> (hash-table-count drover-summary--jobs) 0)
+                         (not (eq drover-summary-test-answer 'later)))))
+      (accept-process-output nil 0.01)
+      (drover-changed-now))
+    (drover-changed-now)))
+
+(defun drover-summary-test-turn (id &rest slots)
+  "Change the fake session ID as a turn would: SLOTS set, its activity later.
+SLOTS is a plist of slot names as keywords and values."
+  (setq drover-test-sessions
+        (mapcar (lambda (session)
+                  (if (not (equal (drover-session-id session) id))
+                      session
+                    (let ((copy (copy-sequence session)))
+                      (cl-loop for (slot value) on slots by #'cddr
+                               do (setf (cl-struct-slot-value 'drover-session
+                                                              (intern (substring (symbol-name slot) 1))
+                                                              copy)
+                                        value))
+                      (setf (drover-session-updated copy) (cl-incf drover-summary-test-clock))
+                      copy)))
+                drover-test-sessions))
+  (drover-backend-changed 'fake id))
+
+(defun drover-summary-test-of (id)
+  "Return the record of the fake session ID the index holds."
+  (drover-index-session (cons 'fake id)))
+
+(defmacro drover-summary-test-messages (&rest body)
+  "Run BODY and return the messages it showed, oldest first."
+  (declare (indent 0) (debug t))
+  `(let ((messages nil))
+     (cl-letf (((symbol-function 'message)
+                (lambda (format &rest arguments)
+                  (when format
+                    (push (apply #'format-message format arguments) messages)))))
+       ,@body)
+     (nreverse messages)))
+
+;;;; Writing summaries
+
+(ert-deftest drover-summary-test-turn-ended ()
+  "A turn ended is summarized once, the line in lists and the recap in details."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working)
+                                  (drover-summary-test-session "s2" :status 'idle))
+    (should-not drover-summary-test-prompts)
+    ;; A session at work is never summarized, however often it changes.
+    (dotimes (_ 3)
+      (drover-summary-test-turn "s1" :status 'working)
+      (drover-summary-test-settle))
+    (should-not drover-summary-test-prompts)
+    (should-not drover-test-recap-calls)
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 1))
+    (should (string-search "Write the parser of s1" (car drover-summary-test-prompts)))
+    (should (string-search "parser.el (+40 -2)" (car drover-summary-test-prompts)))
+    (let ((session (drover-summary-test-of "s1")))
+      (should (equal (drover-session-brief session) "Done: wrote the feature, tests pass"))
+      (should (equal (drover-session-brief-recap session) "Added the parser.\nTests pass."))
+      (should (equal (drover-session-summary session) "Done: wrote the feature, tests pass"))
+      ;; Expanded, it shows the recap above the turn as it was said.
+      (let ((details (drover-list--details session (list :fields '(title summary)))))
+        (should (equal (car (car details)) "Summary"))
+        (should (equal (nth 1 (car details)) "Added the parser.\nTests pass."))
+        (should (assoc "Reply" details)))
+      ;; Without the summary's column, the line goes there too.
+      (should (string-prefix-p "Done: wrote the feature"
+                               (nth 1 (car (drover-list--details session (list :fields '(title))))))))
+    ;; The other session, unchanged, was not summarized.
+    (should-not (drover-session-brief (drover-summary-test-of "s2")))
+    ;; Counted, for usage totals.
+    (should (equal (mapcar (lambda (entry) (nth 1 entry)) (drover-summary-usage)) '(1)))))
+
+(ert-deftest drover-summary-test-debounced ()
+  "Changes coming fast ask for one summary, once the session settled."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'idle))
+    (let ((drover-summary-delay 0.3))
+      (drover-summary-test-turn "s1" :status 'done)
+      (drover-changed-now)
+      (accept-process-output nil 0.1)
+      (drover-summary-test-turn "s1" :status 'done :title "Renamed")
+      (drover-changed-now)
+      (accept-process-output nil 0.1)
+      (should-not drover-summary-test-prompts)
+      (drover-summary-test-settle)
+      (should (= (length drover-summary-test-prompts) 1)))))
+
+(ert-deftest drover-summary-test-cached ()
+  "A turn summarized is not summarized again, in this Emacs or the next."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'idle))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 1))
+    ;; Renamed, then seen: the same turn, its recap read again.
+    (drover-summary-test-turn "s1" :status 'done :title "Renamed")
+    (drover-summary-test-settle)
+    (drover-summary-test-turn "s1" :status 'idle)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 1))
+    (should (equal (drover-session-brief (drover-summary-test-of "s1")) "Done: wrote the feature, tests pass"))
+    ;; Kept as Emacs exits, read by the next, which neither recaps nor asks.
+    (let ((updated (drover-session-updated (drover-summary-test-of "s1"))))
+      (drover-summary-mode -1)
+      (should-not (drover-session-brief (progn (drover-summary-test-settle) (drover-summary-test-of "s1"))))
+      (should (file-exists-p (drover-summary-file)))
+      (setq drover-summary--store nil
+            drover-test-recap-calls nil)
+      (drover-summary-mode 1)
+      (drover-summary-test-settle)
+      (let ((session (drover-summary-test-of "s1")))
+        (should (equal (drover-session-updated session) updated))
+        (should (equal (drover-session-brief session) "Done: wrote the feature, tests pass")))
+      (should-not drover-test-recap-calls)
+      (should (= (length drover-summary-test-prompts) 1)))
+    ;; Asked anew, it is written again.
+    (drover-summarize (list (drover-summary-test-of "s1")) t)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 2))))
+
+(ert-deftest drover-summary-test-works-again ()
+  "A summary goes as its session works, and the next turn gets its own."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'idle))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (drover-session-brief (drover-summary-test-of "s1")))
+    (drover-summary-test-turn "s1" :status 'working)
+    (drover-summary-test-settle)
+    (should-not (drover-session-brief (drover-summary-test-of "s1")))
+    ;; Its turn ends with another reply: the summary of the turn before
+    ;; does not show meanwhile.
+    (setq drover-summary-test-answer 'later)
+    (setf (alist-get "s1" drover-test-recaps nil nil #'equal)
+          (list :prompt "Now fix the bug" :reply (concat "Fixed it.\n" drover-summary-test-reply)))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-pending) 1))
+    (should-not (drover-session-brief (drover-summary-test-of "s1")))
+    (funcall (pop drover-summary-test-pending) '(:text "Done: fixed the bug"))
+    (drover-summary-test-settle)
+    (should (equal (drover-session-brief (drover-summary-test-of "s1")) "Done: fixed the bug"))
+    (should-not (drover-session-brief-recap (drover-summary-test-of "s1")))))
+
+(ert-deftest drover-summary-test-waiting ()
+  "A session waiting is summarized for what it asks, anew as that changes."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working))
+    (setq drover-summary-test-answer
+          (lambda (prompt)
+            (list :text (if (string-search "git push" prompt)
+                            "Waiting for approval to push the fix"
+                          "Waiting for approval to run the tests"))))
+    (drover-summary-test-turn "s1" :status 'waiting
+                              :requests (list (list :kind 'permission :summary "git push origin main")))
+    (drover-summary-test-settle)
+    (should (string-search "permission: git push origin main" (car drover-summary-test-prompts)))
+    (should (equal (drover-session-summary (drover-summary-test-of "s1"))
+                   "Waiting for approval to push the fix"))
+    ;; Another request: the summary goes until written anew.
+    (setq drover-summary-test-answer
+          (let ((answer drover-summary-test-answer))
+            (lambda (prompt) (funcall answer prompt))))
+    (let ((drover-summary-delay 10))
+      (drover-summary-test-turn "s1" :status 'waiting
+                                :requests (list (list :kind 'permission :summary "make test")))
+      (drover-changed-now)
+      (should (equal (drover-session-summary (drover-summary-test-of "s1")) "permit: make test")))
+    (drover-summarize (list (drover-summary-test-of "s1")))
+    (drover-summary-test-settle)
+    (should (equal (drover-session-summary (drover-summary-test-of "s1"))
+                   "Waiting for approval to run the tests"))))
+
+(ert-deftest drover-summary-test-trivial ()
+  "A turn of one short reply needs no model, a turn of nothing no summary."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working)
+                                  (drover-summary-test-session "s2" :status 'working))
+    (setq drover-test-recaps (list (cons "s1" (list :prompt "Which branch?" :reply "We are on main."))
+                                   (cons "s2" (list :prompt nil :reply nil))))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-turn "s2" :status 'done)
+    (drover-summary-test-settle)
+    (should-not drover-summary-test-prompts)
+    (should (equal (drover-session-brief (drover-summary-test-of "s1")) "We are on main."))
+    (should-not (drover-session-brief (drover-summary-test-of "s2")))))
+
+(ert-deftest drover-summary-test-concurrency ()
+  "Two summaries are asked for at once, at most; the others wait their turn."
+  (drover-summary-test-with (mapcar (lambda (i) (drover-summary-test-session (format "s%d" i) :status 'working))
+                                    (number-sequence 1 5))
+    (setq drover-summary-test-answer 'later)
+    (dotimes (i 5)
+      (drover-summary-test-turn (format "s%d" (1+ i)) :status 'done))
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-pending) 2))
+    (should (= (hash-table-count drover-summary--jobs) 2))
+    (let ((done 0))
+      (while (and drover-summary-test-pending (< done 10))
+        (funcall (pop drover-summary-test-pending) '(:text "Done: one more"))
+        (cl-incf done)
+        (drover-summary-test-settle)
+        (should (<= (hash-table-count drover-summary--jobs) 2)))
+      (should (= done 5)))
+    (should (seq-every-p (lambda (i) (drover-session-brief (drover-summary-test-of (format "s%d" i))))
+                         (number-sequence 1 5)))))
+
+(ert-deftest drover-summary-test-daily-limit ()
+  "Past the daily limit, sessions show as before, said once that day."
+  (drover-summary-test-with (mapcar (lambda (i) (drover-summary-test-session (format "s%d" i) :status 'working))
+                                    (number-sequence 1 3))
+    (let* ((drover-summary-daily-limit 1)
+           (messages (drover-summary-test-messages
+                       (dolist (id '("s1" "s2" "s3"))
+                         (drover-summary-test-turn id :status 'failed :detail (concat "boom " id)))
+                       (drover-summary-test-settle))))
+      (should (= (length drover-summary-test-prompts) 1))
+      (should (= (seq-count (lambda (message) (string-search "drover-summary-daily-limit" message)) messages)
+                 1))
+      (should (= (seq-count (lambda (id) (drover-session-brief (drover-summary-test-of id))) '("s1" "s2" "s3"))
+                 1))
+      (should (seq-some (lambda (id) (equal (drover-session-summary (drover-summary-test-of id))
+                                            (concat "boom " id)))
+                        '("s1" "s2" "s3"))))))
+
+(ert-deftest drover-summary-test-failure-falls-back ()
+  "A model failing leaves sessions as they showed, said once until it works again."
+  (drover-summary-test-with (mapcar (lambda (i) (drover-summary-test-session (format "s%d" i) :status 'working))
+                                    (number-sequence 1 3))
+    (setq drover-summary-test-answer '(:failure "HTTP 503"))
+    (let ((messages (drover-summary-test-messages
+                      (drover-summary-test-turn "s1" :status 'waiting
+                                                :requests (list (list :kind 'question :summary "Which one?")))
+                      (drover-summary-test-turn "s2" :status 'done)
+                      (drover-summary-test-settle))))
+      (should (= (length drover-summary-test-prompts) 2))
+      (should (equal (seq-filter (lambda (message) (string-search "could not summarize" message)) messages)
+                     '("Drover could not summarize a session, shown as before: HTTP 503")))
+      (should (equal (drover-session-summary (drover-summary-test-of "s1")) "asks: Which one?"))
+      (should-not (drover-session-brief (drover-summary-test-of "s2"))))
+    ;; A model never answering is given up, as a failure.
+    (let ((drover-summary-timeout 0.1))
+      (setq drover-summary-test-answer 'later)
+      (let ((messages (drover-summary-test-messages
+                        (setq drover-summary--failing nil)
+                        (drover-summary-test-turn "s3" :status 'done)
+                        (drover-summary-test-settle)
+                        (accept-process-output nil 0.3))))
+        (should (seq-some (lambda (message) (string-search "no summary after" message)) messages))
+        (should (= (hash-table-count drover-summary--jobs) 0))))))
+
+(ert-deftest drover-summary-test-redacted ()
+  "Obvious secrets never reach the model, and what it reads stays small."
+  (let ((text (concat "export GITHUB_TOKEN=ghp_" (make-string 36 ?a) "\n"
+                      "aws AKIAABCDEFGHIJKLMNOP and sk-ant-api03-" (make-string 30 ?b) "\n"
+                      "curl -H 'Authorization: Bearer Zyxw9876543210vutsrq' https://user:hunter22@example.com/x\n"
+                      "password = \"correct horse\" and api_key: s3cr3tValue\n"
+                      "slack xoxb-1234567890-abcdefghij and a key AbCdEfGh1234567890IjKlMnOpQrStUvWx\n"
+                      "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+                      "commit 0123456789abcdef0123456789abcdef01234567 stays")))
+    (let ((redacted (drover-summary-redact text)))
+      (dolist (secret (list (make-string 36 ?a) "AKIAABCDEFGHIJKLMNOP" (make-string 30 ?b)
+                            "Zyxw9876543210vutsrq" "hunter22" "correct horse" "s3cr3tValue"
+                            "xoxb-1234567890" "AbCdEfGh1234567890IjKlMnOpQrStUvWx" "b3BlbnNzaC1rZXktdjEAAAAA"))
+        (ert-info (secret)
+          (should-not (string-search secret redacted))))
+      (should (string-search "0123456789abcdef0123456789abcdef01234567 stays" redacted))
+      (should (string-search "https://user:[redacted]@example.com" redacted))
+      (should (string-search "Authorization: Bearer [redacted]" redacted)))
+    (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working))
+      (setq drover-test-recaps (list (cons "s1" (list :prompt (concat text (make-string 500000 ?y))
+                                                      :reply (concat text (make-string 500000 ?z))))))
+      (drover-summary-test-turn "s1" :status 'done)
+      (drover-summary-test-settle)
+      (let ((prompt (car drover-summary-test-prompts)))
+        (should prompt)
+        (should-not (string-search "AKIAABCDEFGHIJKLMNOP" prompt))
+        (should (<= (length prompt) (+ drover-summary-input-limit (length drover-summary-instructions) 40)))))))
+
+(ert-deftest drover-summary-test-bounded ()
+  "What the model writes is bounded, its marks of lists and emphasis dropped."
+  (should (equal (drover-summary-parse "\n- **Done: added FTS search**\n\n* first\n2. second\n")
+                 '("Done: added FTS search" . "first\nsecond")))
+  (should-not (drover-summary-parse "  \n \n"))
+  (let ((parsed (drover-summary-parse (concat (make-string 500000 ?a) "\n" (make-string 500000 ?b)))))
+    (should (<= (length (car parsed)) 101))
+    (should (<= (length (cdr parsed)) 201))))
+
+(ert-deftest drover-summary-test-opted-out ()
+  "Sessions of a harness left out are neither sent nor briefed."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (drover-session-brief (drover-summary-test-of "s1")))
+    (let ((drover-summary-harnesses '(other)))
+      (drover-backend-changed 'fake "s1")
+      (drover-summary-test-settle)
+      (should-not (drover-session-brief (drover-summary-test-of "s1")))
+      (drover-summary-test-turn "s1" :status 'working)
+      (drover-summary-test-turn "s1" :status 'done)
+      (drover-summary-test-settle)
+      (should (= (length drover-summary-test-prompts) 1))
+      (should-not (drover-session-brief (drover-summary-test-of "s1"))))
+    (let ((drover-summary-harnesses nil))
+      (should (zerop (drover-summarize (list (drover-summary-test-of "s1"))))))))
+
+(ert-deftest drover-summary-test-catch-up ()
+  "Sessions found settled are summarized only when recently active."
+  (let ((now (float-time)))
+    (drover-summary-test-with (list (drover-summary-test-session "recent" :status 'done :updated (- now 60))
+                                    (drover-summary-test-session "old" :status 'done :updated (- now 86400)))
+      (should-not drover-summary-test-prompts)
+      (let ((drover-summary-catch-up 900))
+        (drover-summary-mode -1)
+        (drover-summary-mode 1)
+        (drover-summary-test-settle))
+      (should (= (length drover-summary-test-prompts) 1))
+      (should (drover-session-brief (drover-summary-test-of "recent")))
+      (should-not (drover-session-brief (drover-summary-test-of "old"))))))
+
+(ert-deftest drover-summary-test-records-compare-alike ()
+  "Records listed again with the same brief are the same record, compared once."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'working))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (let* ((listed (seq-find (lambda (session) (equal (drover-session-id session) "s1")) drover-test-sessions))
+           (first (drover--bound-record listed)))
+      (should (drover-session-brief first))
+      (should (eq first (drover--bound-record listed)))
+      (should-not (drover-session-brief listed)))
+    ;; Listed anew, nothing changed.
+    (let ((ran nil))
+      (let ((drover-changed-hook (list (lambda () (push drover-changed-sessions ran)))))
+        (drover-index-refresh t))
+      (should-not ran))))
+
+(ert-deftest drover-summary-test-opencode-request ()
+  "OpenCode's service is asked a stateless generation, never started for it."
+  (let ((requests nil)
+        (results nil))
+    (cl-letf (((symbol-function 'opencode-service-read-registration)
+               (lambda () (list :url "http://127.0.0.1:1" :password "x" :pid (emacs-pid))))
+              ((symbol-function 'opencode-request)
+               (lambda (method path &rest arguments)
+                 (push (append (list method path) arguments) requests)
+                 (funcall (plist-get arguments :then) '((data (text . "Done: it works")))))))
+      (let ((drover-summary-model "github-copilot/claude-haiku-5.5")
+            (drover-summary-variant "low"))
+        (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))))
+    (should (equal results '((:text "Done: it works"))))
+    (let ((request (car requests)))
+      (should (equal (seq-take request 2) '(post "/api/experimental/generate/text")))
+      (should (equal (plist-get (cddr request) :body)
+                     '((prompt . "the prompt")
+                       (model . ((providerID . "github-copilot") (id . "claude-haiku-5.5") (variant . "low"))))))
+      (should (plist-member (cddr request) :directory))
+      (should-not (plist-get (cddr request) :directory)))
+    ;; Its errors are told; a service not running is not started.
+    (setq requests nil results nil)
+    (cl-letf (((symbol-function 'opencode-service-read-registration) (lambda () nil))
+              ((symbol-function 'opencode-request)
+               (lambda (&rest arguments) (push arguments requests))))
+      (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results))))
+    (should-not requests)
+    (should (equal results '((:failure "OpenCode's service does not run"))))))
+
+(ert-deftest drover-summary-test-prints-in-proportion ()
+  "What summaries keep prints in proportion to the sessions."
+  (let ((sessions (mapcar (lambda (i) (drover-summary-test-session (format "s%d" i) :status 'working))
+                          (number-sequence 1 50))))
+    (drover-summary-test-with sessions
+      (setq drover-summary-test-answer
+            (lambda (_) (list :text (concat "Done: " (make-string 300 ?l) "\n" (make-string 3000 ?r)))))
+      (dolist (session sessions)
+        (drover-summary-test-turn (drover-session-id session) :status 'done))
+      (drover-summary-test-settle 20)
+      (should (= (length drover-summary-test-prompts) 50))
+      ;; Some asked for, not answered yet.
+      (setq drover-summary-test-answer 'later)
+      (drover-summarize (list (drover-summary-test-of "s1") (drover-summary-test-of "s2")) t)
+      (drover-summary-test-settle)
+      (drover-test-prints-in-proportion
+       50 (list (cons "a record briefed" (drover-summary-test-of "s3"))
+                (cons "a summary kept" (drover-summary--entry (drover-summary-test-of "s3"))))))))
+
+(provide 'drover-summary-test)
+;;; drover-summary-test.el ends here

@@ -31,6 +31,7 @@
 (require 'drover-list)
 (require 'drover-prompt)
 (require 'drover-search)
+(require 'drover-summary)
 (require 'drover-transcript-fixtures)
 (require 'spyglass nil t)
 
@@ -601,6 +602,35 @@ Their sessions stay, as received."
         (drover-links-open (list :engine 'fake :id "s2" :host "agent"))
         (should (equal (drover-session-id (drover-session-at-point)) '(fake . "s2")))
         (kill-buffer)))))
+
+(ert-deftest drover-remote-test-summaries-by-their-owner ()
+  "A host's sessions carry the summaries it wrote; its peers summarize none of them."
+  (drover-remote-test-with nil
+    (let* ((asked nil)
+           (drover-summary-delay 0)
+           (drover-summary-catch-up 3600)
+           (drover-summary-generate-function (lambda (prompt _callback) (push prompt asked))))
+      (drover-summary-mode 1)
+      (unwind-protect
+          (progn
+            (drover-remote-test-connect (drover-remote-test-start-agent dir))
+            (drover-remote-test-command "sessions" :n 3)
+            (drover-remote-test-synced 3)
+            (drover-remote-test-command "summaries")
+            ;; The turn of s0 ends there: its owner summarizes it.
+            (drover-remote-test-command "change" :ids ["s0"] :status "idle" :now t)
+            (drover-remote-test-synced
+             3 (lambda (_) (equal (drover-session-brief (drover-index-session '(remote:agent fake . "s0")))
+                                  "Done: summarized on the agent")))
+            (let ((session (drover-index-session '(remote:agent fake . "s0"))))
+              (should (equal (drover-session-brief-recap session) "Its recap"))
+              (should (equal (drover-session-summary session) "Done: summarized on the agent")))
+            ;; Its turns, recent as they are, are never sent from here.
+            (drover-remote-test-settle 0.3)
+            (should-not asked)
+            (should-not (seq-some (lambda (key) (drover-session-host (drover-index-session key)))
+                                  (hash-table-keys drover-summary--seen))))
+        (drover-summary-mode -1)))))
 
 (ert-deftest drover-remote-test-older-and-archived ()
   "Older and archived sessions of another host come through it, while shown."

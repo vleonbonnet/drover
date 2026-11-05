@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 17
+(defconst drover-core-generation 18
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -687,12 +687,44 @@ A float time, set while that host is not connected: the record is as it
 was then, its status perhaps past.")
   (default-branch nil :documentation "The default branch of the repository of a session of another host, or nil.
 As its owner read it: the file system of this host is never looked at
-for a session of another (see `drover-session-default-branch-p')."))
+for a session of another (see `drover-session-default-branch-p').")
+  (brief nil :documentation "One line on where the session stands, written by a model, or nil.
+Such as \"Waiting for approval to push the fix\": lists show it as the
+summary while it describes the session's last turn as it stands (see
+`drover-brief-function'); a session of another host carries its
+owner's.")
+  (brief-recap nil :documentation "A recap of the session's last turn in a few lines, or nil.
+Written with BRIEF, which an expanded session shows above its last turn."))
 
 (drover-note-layout 'drover-session)
 
 (defconst drover--session-length (length (drover-session-create))
   "How many slots a record of `drover-session' has, its type's first.")
+
+(defconst drover-brief-recap-lines 6
+  "Lines at most of the recap written with a session's brief.
+See `drover-session-brief-recap'.")
+
+(defvar drover-brief-function nil
+  "Function giving a record of this host its brief, or nil.
+Called with each record drover takes in from a backend of this host,
+it returns the record itself, or a copy with the slots `brief' and
+`brief-recap' set to describe its last turn, as `drover-summary-mode'
+writes them.  It is called for every record listed, thousands at
+once: it must cost a lookup, and return the same copy for the same
+record and brief, so that records compare alike.")
+
+(defun drover--briefed (record)
+  "Return RECORD as `drover-brief-function' gives it its brief.
+RECORD itself without the function, for a session of another host,
+whose brief its owner wrote, or when the function fails."
+  (or (and drover-brief-function
+           (drover-session-p record)
+           (null (drover-session-host record))
+           (drover-with-reporting "session brief"
+             (let ((briefed (funcall drover-brief-function record)))
+               (and (drover-session-p briefed) briefed))))
+      record))
 
 (defun drover--whole-record (record)
   "Return RECORD, or a copy of it with the slots it lacks, nil.
@@ -711,9 +743,11 @@ signal reading past its end."
 Its title and the other fields shown on a line are cut to their first
 line and `drover-line-limit' characters (see `drover-bound-line'), its
 detail and the summaries of its requests to `drover-text-lines' lines
-and `drover-text-limit' characters.  RECORD itself when within those,
-and of all the slots of a `drover-session' now (see
-`drover--whole-record')."
+and `drover-text-limit' characters, its brief to a line and its recap to
+`drover-brief-recap-lines' lines.  RECORD itself when within those, and
+of all the slots of a `drover-session' now (see
+`drover--whole-record'), unless `drover-brief-function' gives it a
+brief (see `drover--briefed')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -733,11 +767,17 @@ and of all the slots of a `drover-session' now (see
         (line drover-session-project)
         (line drover-session-branch)
         (line drover-session-host)
-        (line drover-session-default-branch))
+        (line drover-session-default-branch)
+        (line drover-session-brief))
       (let ((detail (drover-session-detail whole)))
         (when (and (stringp detail) (not (eq (drover-bound-text detail) detail)))
           (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-detail copy) (drover-bound-text detail))))
+      (let ((recap (drover-session-brief-recap whole)))
+        (when (and (stringp recap)
+                   (not (eq (drover-bound-text recap drover-brief-recap-lines) recap)))
+          (unless copy (setq copy (copy-sequence whole)))
+          (setf (drover-session-brief-recap copy) (drover-bound-text recap drover-brief-recap-lines))))
       (let ((requests (drover-session-requests whole)))
         (when (seq-some (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))
@@ -751,7 +791,7 @@ and of all the slots of a `drover-session' now (see
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (or copy record))))
+      (drover--briefed (or copy record)))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -790,11 +830,14 @@ See `drover-active-statuses'."
 
 (defun drover-session-summary (session)
   "Return one line on why SESSION has its status, or nil.
-A waiting session shows its oldest request, another its detail."
-  (if-let* ((request (car (drover-session-requests session))))
-      (concat (if (eq (plist-get request :kind) 'question) "asks: " "permit: ")
-              (plist-get request :summary))
-    (drover-session-detail session)))
+Its brief, written by a model, while it tells where the session stands
+\(see `drover-session-brief'); else a waiting session shows its oldest
+request, another its detail."
+  (or (drover-session-brief session)
+      (if-let* ((request (car (drover-session-requests session))))
+          (concat (if (eq (plist-get request :kind) 'question) "asks: " "permit: ")
+                  (plist-get request :summary))
+        (drover-session-detail session))))
 
 ;;;; Harnesses
 
