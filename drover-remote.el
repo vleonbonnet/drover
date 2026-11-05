@@ -90,6 +90,11 @@
 (declare-function spyglass-connection-last-recv "ext:spyglass-conn" (connection))
 (declare-function spyglass-connection-set-heartbeat "ext:spyglass-conn" (connection interval timeout))
 (declare-function spyglass-connection-set-resume "ext:spyglass-conn" (connection seconds))
+(declare-function drover-conversation-page "drover-conversation" (session before count callback))
+(declare-function drover-conversation-follow "drover-conversation" (session from generation callback))
+(declare-function drover-conversation-readable-p "drover-conversation" (session))
+(declare-function drover-conversation-stop-all "drover-conversation" ())
+(declare-function drover-conversation-file "drover-conversation" (session))
 (declare-function drover-remote-push-start "drover-remote-push" ())
 (declare-function drover-remote-push-stop "drover-remote-push" ())
 (declare-function drover-remote-push-available-p "drover-remote-push" ())
@@ -296,7 +301,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage"
-    "push" "opts" "dirs")
+    "push" "opts" "dirs" "conv")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -322,7 +327,10 @@ gave it (see drover-remote-push.el); \"opts\": it tells a session's
 agent, model and effort and those its engine offers (request `opts'),
 applies others to it (action `options') or before a prompt (`send'
 with options), and lists the directories its sessions ran in (request
-`dirs'), for a phone to start sessions in.")
+`dirs'), for a phone to start sessions in; \"conv\": it tells what
+was said in a session as entries, read from what its engine records,
+pages from the end (request `cv') and lines appended as they come
+\(request `cvs', messages `cvd' and `cve', `cvc' stopping it).")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1454,6 +1462,7 @@ one line, once in `drover-error-interval' seconds."
     (drover-remote--search-unserve connection)
     (drover-remote--search-drop connection)
     (drover-remote--clone-drop connection)
+    (drover-remote--cv-drop connection)
     (when-let* ((state (drover-remote--current)))
       (drover-remote--next-stream state connection)
       (drover-remote--unsubscribe state connection)
@@ -2748,6 +2757,127 @@ tells them."
                           :cat (drover-with-reporting "remote options"
                                  (drover-remote--engine-catalog engine directory
                                                                 (cdr (assq engine answers)))))))))))))
+
+(defvar drover-remote-conversation-functions nil
+  "Functions called with a peer and a `cvd' or `cve' message it sent.
+A view of a conversation of the peer it follows (request `cvs') takes
+its entries there, as they are appended, and its end.")
+
+(defconst drover-remote-cv-streams 4
+  "Conversations at most one connection follows: a fifth stops the oldest.")
+
+(defconst drover-remote-cv-streams-total 16
+  "Conversations at most this host follows for its peers.")
+
+(defconst drover-remote-cv-piece (* 256 1024)
+  "Bytes at most of the entries of one message of a conversation followed.")
+
+(defvar drover-remote--cv-streams (make-hash-table :test #'eq :weakness 'key)
+  "Conversations followed for peers, by connection.
+Each value is a list of (ID . STOP), newest first.")
+
+(defun drover-remote--on-cv (key message reply)
+  "Answer through REPLY a page of what was said in session KEY, as MESSAGE asks.
+MESSAGE's :before, the start of the first line of a page told before,
+and :n, how many entries.  A session whose engine records nothing
+drover reads answers an error beginning with \"none:\"."
+  (require 'drover-conversation)
+  (let ((record (and key (drover-remote--owner-record key "cv")))
+        (before (plist-get message :before))
+        (count (plist-get message :n)))
+    (cond
+     ((not record) (funcall reply nil "no such session here"))
+     ((not (drover-conversation-readable-p record))
+      (funcall reply nil "none: its engine records nothing drover reads"))
+     (t
+      (drover-conversation-page
+       record (and (natnump before) before) (and (natnump count) count)
+       (lambda (page)
+         (if-let* ((failure (plist-get page :failure)))
+             (funcall reply nil (concat "none: " (drover-bound-line failure)))
+           (funcall reply (append page (list :eng (symbol-name (drover-session-engine record))))))))))))
+
+(defun drover-remote--cv-send (connection id entries to)
+  "Send CONNECTION's peer ENTRIES of the conversation it follows as ID, up to TO.
+In pieces of `drover-remote-cv-piece' bytes at most, the last telling
+TO, where the next line begins."
+  (let ((piece nil) (bytes 0))
+    (cl-flet ((flush (last)
+                (when (or piece last)
+                  (drover-remote--send connection
+                                       (list :t "cvd" :id id :e (vconcat (nreverse piece))
+                                             :to (if last to :false)))
+                  (setq piece nil bytes 0))))
+      (dolist (entry entries)
+        (let ((size (length (json-serialize entry :null-object nil :false-object :false))))
+          (when (and piece (> (+ bytes size) drover-remote-cv-piece))
+            (flush nil))
+          (push entry piece)
+          (setq bytes (+ bytes size))))
+      (flush t))))
+
+(defun drover-remote--on-cvs (peer connection key message reply)
+  "Follow session KEY's conversation for PEER on CONNECTION, as MESSAGE asks.
+MESSAGE's :id names the stream, :from is where the lines to send begin,
+:g the generation of the file a page told.  REPLY answers at once; the
+entries appended come in `cvd' messages, and the stream's end in `cve',
+as when the file is replaced."
+  (require 'drover-conversation)
+  (let* ((id (plist-get message :id))
+         (from (plist-get message :from))
+         (generation (plist-get message :g))
+         (record (and key (drover-remote--owner-record key "cv")))
+         (streams (gethash connection drover-remote--cv-streams))
+         (total (apply #'+ (mapcar #'length (hash-table-values drover-remote--cv-streams)))))
+    (cond
+     ((not (and (stringp id) (string-match-p drover-remote--id-regexp id)))
+      (funcall reply nil "no identifier"))
+     ((not (natnump from)) (funcall reply nil "no offset"))
+     ((not record) (funcall reply nil "no such session here"))
+     ((not (drover-conversation-readable-p record))
+      (funcall reply nil "none: its engine records nothing drover reads"))
+     ((and (>= total drover-remote-cv-streams-total) (null streams))
+      (funcall reply nil (drover-remote--refuse-action peer "follow a conversation" "this host follows as many as it may")))
+     (t
+      (when (>= (length streams) drover-remote-cv-streams)
+        (drover-remote--cv-stop connection (car (car (last streams))) "a newer one is followed"))
+      (let* ((link (drover-link connection))
+             (stop (drover-conversation-follow
+                    record from (and (stringp generation) generation)
+                    (lambda (event)
+                      (drover-with-reporting "remote conversation"
+                        (let ((connection (drover-linked link)))
+                          (when (and connection (spyglass-connection-live-p connection))
+                            (if-let* ((why (plist-get event :reset)))
+                                (progn
+                                  (drover-remote--cv-forget connection id)
+                                  (drover-remote--send connection (list :t "cve" :id id :why why :reset t)))
+                              (drover-remote--cv-send connection id (plist-get event :entries)
+                                                      (plist-get event :to))))))))))
+        (puthash connection (cons (cons id stop) (gethash connection drover-remote--cv-streams))
+                 drover-remote--cv-streams)
+        (funcall reply (list :ok t :sz (or (file-attribute-size
+                                            (file-attributes (or (drover-conversation-file record) "")))
+                                           0))))))))
+
+(defun drover-remote--cv-forget (connection id)
+  "Forget the stream ID of CONNECTION, without stopping it."
+  (puthash connection (assoc-delete-all id (gethash connection drover-remote--cv-streams))
+           drover-remote--cv-streams))
+
+(defun drover-remote--cv-stop (connection id why)
+  "Stop following the conversation ID for CONNECTION's peer; tell it WHY, if any."
+  (when-let* ((entry (assoc id (gethash connection drover-remote--cv-streams))))
+    (drover-remote--cv-forget connection id)
+    (funcall (cdr entry))
+    (when (and why (spyglass-connection-live-p connection))
+      (drover-remote--send connection (list :t "cve" :id id :why why :reset :false)))))
+
+(defun drover-remote--cv-drop (connection)
+  "Stop following the conversations of CONNECTION, whose stream ended."
+  (dolist (entry (gethash connection drover-remote--cv-streams))
+    (funcall (cdr entry)))
+  (remhash connection drover-remote--cv-streams))
 
 (defconst drover-remote-dirs-limit 300
   "Directories at most a host tells a peer its sessions ran in.")
@@ -5426,6 +5556,9 @@ when of that peer, opened here once started.  For
                  (not (drover-remote--new-refusal peer)))
         (drover-remote--catalog-ask peer nil nil #'ignore))))
    ((equal type "bye") (drover-remote--on-bye peer connection message))
+   ((equal type "cvc") (drover-remote--cv-stop connection (plist-get message :id) nil))
+   ((member type '("cvd" "cve"))
+    (drover-run-hook-reporting 'drover-remote-conversation-functions peer message))
    ((equal type "fg")
     (when (featurep 'drover-remote-push)
       (drover-remote-push-foreground peer (eq (plist-get message :on) t))))
@@ -5499,6 +5632,8 @@ as an older drover's farewells do."
         ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
         ("opts" (drover-remote--on-opts peer key reply))
+        ("cv" (drover-remote--on-cv key message reply))
+        ("cvs" (drover-remote--on-cvs peer connection key message reply))
         ("dirs" (drover-remote--on-dirs peer message reply))
         ("push" (if (featurep 'drover-remote-push)
                     (drover-remote-push-on-request peer message reply)
@@ -7264,6 +7399,8 @@ starts again at once: its peers keep this host's sessions meanwhile."
   (dolist (xid (hash-table-keys drover-remote--clones))
     (drover-remote--clone-fail xid "the remote layer stopped"))
   (mapc #'drover-remote--export-drop (hash-table-keys drover-remote--exports))
+  (dolist (connection (hash-table-keys drover-remote--cv-streams))
+    (drover-remote--cv-drop connection))
   (remove-hook 'opencode-state-updated-functions #'drover-remote--oc-updated)
   (when (fboundp 'spyglass-unregister-channel)
     (spyglass-unregister-channel drover-remote-channel))

@@ -330,6 +330,14 @@ NAME is the agent program sessions run, such as `opencode',
              Function of a directory of this host returning how the
              engine's records spell it, to which the :cwd of the parts
              of a clone is rewritten as they arrive.
+ :transcript Function of a conversation's ID and the DIRECTORY it ran
+             in returning the file the engine records it in, a line a
+             record, or nil; with :entries, a peer reads what was said
+             in it as entries (see `drover-conversation-readers', which
+             give Claude Code's and Codex's).
+ :entries    Function of a parsed record of that file, an alist, and
+             the session's DIRECTORY, returning its entries, plists of
+             :y, its kind, and what it holds (see drover-conversation.el).
  :changes    Function of a conversation's ID, a SCOPE, `turn' or
              `session', the DIRECTORY it ran in, nil when not on this
              host, and a CALLBACK finding the files the conversation

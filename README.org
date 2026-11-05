@@ -694,7 +694,7 @@ While a phone is not connected, this host pushes it what needs the user, through
 
 ** What a phone changes and starts
 
-A peer may read a session's agent, model and effort, and what its engine offers, have others applied to it, alone or before a prompt, and list the directories this host's sessions ran in to start one there, as its access allows: the phone's composer and new sessions.
+A peer may read what was said in a session, Claude Code's or Codex's, from what its engine records: a page from the end at a time, then what is appended as it comes, as entries a phone draws at its own width.  A peer may read a session's agent, model and effort, and what its engine offers, have others applied to it, alone or before a prompt, and list the directories this host's sessions ran in to start one there, as its access allows: the phone's composer and new sessions.
 
 ** How they connect
 

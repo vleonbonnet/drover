@@ -2820,6 +2820,57 @@ too, are listed here once it is connected."
     (insert-file-contents-literally file)
     (buffer-string)))
 
+(ert-deftest drover-remote-test-conversation ()
+  "A peer reads what was said in a conversation there, and follows what is appended."
+  (drover-remote-test-cloning
+    (let* ((agent-claude (expand-file-name "agent-claude" dir))
+           (there (expand-file-name "work/alpha" dir))
+           (id drover-remote-test--capybara)
+           (file (let ((drover-claude-code-home agent-claude))
+                   (drover-fixture-claude id there :prompt "Teach the capybara to swim"
+                                          :reply "The capybara swims now")))
+           (messages nil)
+           (drover-remote-conversation-functions
+            (list (lambda (_peer message) (push message messages)))))
+      (drover-remote-test-clone-start dir "read" (concat "DROVER_AGENT_CLAUDE=" agent-claude))
+      (should (drover-remote--capable-p (drover-remote--peer "agent") "conv"))
+      (let* ((session (drover-remote-test-engine-session 'claude-code id))
+             (key (drover-remote--wire-key session))
+             (peer (drover-remote--peer "agent")))
+        (pcase-let ((`(,page ,error) (drover-remote--wait peer (list :op "cv" :key key :n 50) 10)))
+          (should-not error)
+          (should (equal (plist-get page :eng) "claude-code"))
+          (let ((texts (mapcar (lambda (entry) (plist-get entry :x)) (plist-get page :e))))
+            (should (member "Teach the capybara to swim" texts))
+            (should (member "The capybara swims now" texts)))
+          (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "cvs" :id "viewer-cv-1" :key key
+                                                                         :from (plist-get page :to)
+                                                                         :g (plist-get page :g))
+                                                             10)))
+            (should-not error)
+            (should (eq (plist-get reply :ok) t)))
+          (let ((drover-claude-code-home agent-claude))
+            (drover-fixture-claude-append file (drover-fixture-claude-user id there 1790000100.0 "And to dive")))
+          (drover-remote-test-wait (lambda () messages) 10)
+          (let ((cvd (car messages)))
+            (should (equal (plist-get cvd :t) "cvd"))
+            (should (equal (plist-get cvd :id) "viewer-cv-1"))
+            (should (equal (plist-get (aref (plist-get cvd :e) 0) :x) "And to dive"))
+            (should (= (plist-get cvd :to) (file-attribute-size (file-attributes file)))))
+          ;; Stopped there: nothing more comes.
+          (drover-remote--send (drover-remote-test--agent-connection) (list :t "cvc" :id "viewer-cv-1"))
+          (drover-remote-test-settle 0.3)
+          (setq messages nil)
+          (let ((drover-claude-code-home agent-claude))
+            (drover-fixture-claude-append file (drover-fixture-claude-user id there 1790000200.0 "Unseen")))
+          (drover-remote-test-settle 1.5)
+          (should-not messages))
+        ;; A session of no engine drover reads tells none.
+        (drover-remote-test-command "sessions" :n 1)
+        (drover-remote-test-synced 2)
+        (pcase-let ((`(,_ ,error) (drover-remote--wait peer (list :op "cv" :key ["fake" "s0"]) 10)))
+          (should (string-prefix-p "none:" error)))))))
+
 (ert-deftest drover-remote-test-clone-claude-here ()
   "A Claude Code conversation of another host is cloned here, in a directory of this host, its origin noted, then resumed."
   (drover-remote-test-cloning
