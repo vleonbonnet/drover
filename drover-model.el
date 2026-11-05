@@ -330,6 +330,15 @@ NAME is the agent program sessions run, such as `opencode',
              Function of a directory of this host returning how the
              engine's records spell it, to which the :cwd of the parts
              of a clone is rewritten as they arrive.
+ :changes    Function of a conversation's ID, a SCOPE, `turn' or
+             `session', the DIRECTORY it ran in, nil when not on this
+             host, and a CALLBACK finding the files the conversation
+             changed, in its last turn or in all, as the engine recorded
+             them: CALLBACK gets, once, possibly before returning,
+             \(:files FILES :notes NOTES), FILES as
+             `drover-review-fetch' tells them, or (:failure MESSAGE).
+             It must never wait.  The review of a session shows them
+             (see `drover-review').
 
 Every property is optional.  Registering NAME again replaces its
 properties and keeps its place."

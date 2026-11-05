@@ -74,6 +74,10 @@
 (defvar drover-claude-code-agents-interval)
 (defvar drover-codex-home)
 (defvar drover-codex-history-days)
+(defvar drover-summary-delay)
+(defvar drover-summary-catch-up)
+(defvar drover-summary-generate-function)
+(declare-function drover-summary-mode "drover-summary" (&optional arg))
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
 (declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
@@ -546,8 +550,38 @@ noted, and their cancellations."
                                          :requests (list (list :kind 'permission :summary "ls"))))))
        (drover-changed-now)
        (funcall reply (list :ok t)))
+      ("review-set"
+       ;; The changes the fake engine tells of each conversation: a file
+       ;; whose patch adds LINES lines, naming the conversation and the
+       ;; scope, and a file deleted.
+       (let ((lines (or (plist-get args :lines) 2)))
+         (require 'drover-model)
+         (drover-register-engine
+          'fake :label "Fake"
+          :changes (lambda (id scope _directory callback)
+                     (funcall callback
+                              (list :files (list (list :file "src/a.el" :status 'modified
+                                                       :additions lines :deletions 1
+                                                       :patch (concat (format "@@ -1,1 +1,%d @@ %s %s\n" lines id scope)
+                                                                      "-old\n"
+                                                                      (mapconcat (lambda (index) (format "+new %d\n" index))
+                                                                                 (number-sequence 1 lines) "")))
+                                                 (list :file "gone.el" :status 'deleted))
+                                    :notes (list "A note")))))
+         (funcall reply (list :ok t))))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("summaries"
+       ;; Summaries written as turns end, by a stand-in model.
+       (require 'drover-summary)
+       (setq drover-summary-delay 0
+             drover-summary-catch-up nil
+             drover-summary-generate-function
+             (lambda (_prompt callback)
+               (funcall callback (list :text "Done: summarized on the agent\nIts recap"))))
+       (drover-summary-mode 1)
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
       ("search-set"
        ;; How the stand-in of OpenCode's search answers: after DELAY
        ;; seconds, failing with FAILURE when given.
