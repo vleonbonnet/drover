@@ -631,6 +631,54 @@ CHOSEN is what `drover-schedule-read-when' returns."
           ((symbolp when) (drover-schedule-add-after-trigger target when text input))
           (t (drover-schedule-add target when text input read-at)))))
 
+;;;; Prompts other modules deliver
+
+(defun drover-schedule-deliver (target prompt &rest properties)
+  "Deliver PROMPT to TARGET now, through the queue, and return the prompt.
+TARGET is as for `drover-schedule-add'.  PROPERTIES are properties more
+the prompt keeps, keywords it has not, such as :hidden t, resuming the
+session in no window, or :origin, a string naming what sent it, as a
+goal (`drover-goal').  As a prompt scheduled, it is saved before it is
+armed, goes one at a time to its conversation, restores an archived
+one first, and is submitted once the session's backend can take it
+without touching a draft (its :blocker and :submit).  Its delivery is
+followed with `drover-schedule-job' as `drover-schedule-changed-hook'
+runs; `drover-schedule-forget' removes it from the queue once over."
+  (unless (and (stringp prompt) (not (string-blank-p prompt)))
+    (error "Need a nonempty prompt"))
+  (let ((job (drover-schedule--new-job target prompt nil :due (float-time))))
+    (cl-loop for (key value) on properties by #'cddr
+             unless (plist-member job key)
+             do (setq job (plist-put job key value)))
+    (drover-schedule--push job)
+    (drover-schedule--arm job 0)
+    (drover-schedule--refresh)
+    job))
+
+(defun drover-schedule-job (id)
+  "Return the scheduled prompt ID, a plist, or nil, reading nothing.
+Its :status tells how its delivery stands, one of
+`drover-schedule--statuses', :sent-at when it went, and :error why it
+failed.  Nil before the queue was read."
+  (and (drover-layout-current-p drover-schedule--queue 'drover-schedule--queue)
+       (drover-schedule--queue-loaded drover-schedule--queue)
+       (drover-schedule--job id)))
+
+(defun drover-schedule-forget (id)
+  "Remove the scheduled prompt ID from the queue, once it went or failed.
+Return non-nil when it was removed; one pending or being delivered
+stays.  Signal an error when the queue cannot be saved."
+  (when-let* ((job (drover-schedule-job id))
+              ((memq (plist-get job :status) '(sent failed interrupted cancelled))))
+    (let ((queue (drover-schedule--state)))
+      (setf (drover-schedule--queue-jobs queue) (delq job (drover-schedule--queue-jobs queue)))
+      (condition-case err
+          (drover-schedule--save)
+        (error (push job (drover-schedule--queue-jobs queue))
+               (signal (car err) (cdr err))))
+      (drover-schedule--refresh)
+      t)))
+
 ;;;; Reading the time
 
 (defconst drover-schedule-day-parts

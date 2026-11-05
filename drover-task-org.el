@@ -239,8 +239,10 @@ the task's project, :jira, its Jira key (see `drover-task-org-jira-key'),
 :ejira, non-nil for a heading ejira syncs, :file, :repos, the
 repositories DROVER_REPO names, inherited, :kind, DROVER_KIND,
 inherited, a symbol, :folder, DROVER_FOLDER, inherited, else a
-directory a file link of its entry names, :attempts, the worktrees or
-directories it works in, and :tick, what tells it changed."
+directory a file link of its entry names, :goal-checks,
+DROVER_GOAL_CHECKS, inherited, the shell command its goals run,
+:attempts, the worktrees or directories it works in, and :tick, what
+tells it changed."
   (with-current-buffer (marker-buffer marker)
     (org-with-point-at marker
       (let* ((properties (org-entry-properties nil 'standard))
@@ -248,6 +250,7 @@ directories it works in, and :tick, what tells it changed."
              (todo (org-get-todo-state))
              (repos (org-entry-get nil "DROVER_REPO" t))
              (kind (org-entry-get nil "DROVER_KIND" t))
+             (goal-checks (org-entry-get nil "DROVER_GOAL_CHECKS" t))
              (type (cdr (assoc "TYPE" properties)))
              (attempts nil))
         (let ((attempt (drover-task-org--attempt "")))
@@ -272,6 +275,8 @@ directories it works in, and :tick, what tells it changed."
               :folder (or (when-let* ((folder (org-entry-get nil "DROVER_FOLDER" t)))
                             (file-name-as-directory (expand-file-name folder)))
                           (drover-task-org--folder-link))
+              :goal-checks (and goal-checks (not (string-blank-p goal-checks))
+                                (substring-no-properties (string-trim goal-checks)))
               :attempts (nreverse attempts)
               :tick (cons (current-buffer) (buffer-chars-modified-tick)))))))
 

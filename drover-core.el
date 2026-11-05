@@ -1915,6 +1915,22 @@ no scheduled prompt.
              lists ran its last turn.  A backend whose sessions run in
              their buffers (:runs-in-buffer) needs none.
 
+Goals with a criterion (`drover-goal') run through the harness's own
+goal, where it has one, by the following operations, both optional.
+
+ :goal-command
+             Function of a SESSION, an ACTION, `set', `pause', `resume'
+             or `clear', a TEXT, the objective of `set', THEN and ELSE:
+             running the harness's goal command in SESSION without
+             touching a draft, THEN with no argument once it took, ELSE
+             with a message, at most one of them once.
+ :goal-state
+             Function of a SESSION and a CALLBACK fetching where its
+             harness's goal stands, and calling CALLBACK once with a
+             plist: :status, `active', `paused' or `complete', nil
+             without a goal, :rounds and :max-rounds, the rounds run
+             and their limit, :reason, a line; or (:failure MESSAGE).
+
 A session's parent and subagents need no operation: drover finds them
 among the sessions through `drover-session-parent'.
 

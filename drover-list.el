@@ -300,11 +300,25 @@ only when needed."
      (cost :priority 13 :min 4 :align right :label "Cost")
      (age :priority 1 :min 3 :align right :narrow line :label "Age")
      (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+    ((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+     (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
+     (branch :priority 10 :min 6 :max 24 :label "Branch")
+     (agent :priority 11 :min 5 :max 14 :label "Agent")
+     (model :priority 6 :min 8 :max 22 :label "Model")
+     (provider :priority 8 :min 2 :max 12 :label "Provider")
+     (context :priority 7 :min 9 :narrow icon :label "Context")
+     (created :priority 12 :min 3 :align right :label "Created")
+     (cost :priority 13 :min 4 :align right :label "Cost")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
      (summary :priority 4 :min 12 :narrow below :label "Summary")))
   "The former standard values of `drover-list-fields'.
 Before the harness's field, then before the context's pie in two lines,
 then before the cost, then before the pill of a task's project in two
-lines.")
+lines, then before the goal.")
 
 ;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the list takes the new one.
@@ -313,6 +327,7 @@ lines.")
 
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+    (goal :priority 2 :min 3 :max 16 :narrow line :label "Goal")
     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
     (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
@@ -330,6 +345,9 @@ lines.")
 Each entry is (FIELD . PROPERTIES).  FIELD is one of:
 
  title     The status icon and the title; it is always shown.
+ goal      The goal the session works under, if any (see
+           `drover-list-goal-function'): its glyph, the iterations
+           run of their limit, and how it stands.
  host      The host of a session of another host, and how long ago it
            was last heard from while it is not connected; in two lines,
            an icon too (see `drover-host-icon'), and in the sidebar,
@@ -414,7 +432,8 @@ and the harness's so too, after the age and the prompt cache."
 The list chooses among the other fields by the room they take; the
 title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
 changes it for the session, with one switch per field."
-  :type '(set (const :tag "Host" host)
+  :type '(set (const :tag "Goal" goal)
+              (const :tag "Host" host)
               (const :tag "Harness" harness)
               (const :tag "Project" location)
               (const :tag "Branch" branch)
@@ -431,6 +450,7 @@ changes it for the session, with one switch per field."
 
 (defconst drover-list-field-descriptions
   '((title . "The status of the session, the subagents at work under it, and its title")
+    (goal . "The goal the session works under: iterations run of their limit, and how it stands")
     (host . "The host the session runs on, if another; and since when it is not connected")
     (harness . "What runs the session: its front end, or the CLI that recorded it")
     (location . "The project the session works in")
@@ -995,7 +1015,7 @@ The list reads the clock through it, so that tests may stop the clock."
 ;;;; Fields
 
 (defconst drover-list--text-fields
-  '(host harness location branch agent model provider context created cost age summary)
+  '(goal host harness location branch agent model provider context created cost age summary)
   "The fields of `drover-list-fields' a row holds a text for.")
 
 (defun drover-list--one-line (string)
@@ -1041,6 +1061,21 @@ FORM `column' and `value' while the field `cost' is hidden."
        (or (eq form 'details) (drover-list-field-enabled-p 'cost))
        (drover-with-reporting "usage"
          (funcall drover-list-usage-function session form))))
+
+(defvar drover-list-goal-function nil
+  "Function of a session and a form returning what the list shows of its goal.
+The form is `column', for the field `goal', a string or nil, or
+`value', what it is made of, compared with `equal' to tell a row to
+make anew; nil shows no goal.  `drover-goal-mode' sets it.")
+
+(defun drover-list--goal (session form)
+  "Return the goal of SESSION as FORM shows it, or nil.
+See `drover-list-goal-function'.  Nil without the function, or while
+the field `goal' is hidden."
+  (and drover-list-goal-function
+       (drover-list-field-enabled-p 'goal)
+       (drover-with-reporting "goal"
+         (funcall drover-list-goal-function session form))))
 
 (defun drover-list--field-spec (field)
   "Return the properties of FIELD in `drover-list-fields', or nil."
@@ -1468,6 +1503,7 @@ the time ages count up to and the width of a character.  The prompt cache has no
 text: it is drawn apart."
   (let ((now (plist-get metrics :now)))
     (or (pcase field
+          ('goal (drover-list--goal session 'column))
           ('host (unless (eq (car group) 'host)
                    (drover-list--host-text session now)))
           ('harness (unless (eq (car group) 'harness)
@@ -1569,8 +1605,9 @@ active subagents and STATE, what changes with time, its ages, whether
 its prompt cache is live, the frame of its animated glyph, the age of
 its archiving and since when its host is not connected, the stamp of
 METRICS (see `drover-list--metrics-stamp'), its usage, which its
-cost shows (see `drover-list-usage-function'), and the task it serves,
-whose project its project shows (see `drover-session-task')."
+cost shows (see `drover-list-usage-function'), the task it serves,
+whose project its project shows (see `drover-session-task'), and its
+goal (see `drover-list-goal-function')."
   (let* ((now (plist-get metrics :now))
          (status (drover-session-status session))
          (archived (drover-session-archived session))
@@ -1588,7 +1625,8 @@ whose project its project shows (see `drover-session-task')."
             (drover-list--host-age session now)
             (plist-get metrics :stamp)
             (drover-list--usage session 'value)
-            (drover-session-task session))))
+            (drover-session-task session)
+            (drover-list--goal session 'value))))
 
 (defun drover-list--same-inputs-p (a b &optional any-stamp)
   "Return non-nil when row inputs A and B are the same.

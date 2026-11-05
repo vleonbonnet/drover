@@ -107,7 +107,7 @@ directly; and :pid, once the runner told it.")
 
 ;;;; Running
 
-(defun drover-command-run (name command callback &optional directory)
+(defun drover-command-run (name command callback &optional directory tail)
   "Run COMMAND, a list of strings, in DIRECTORY, and return at once.
 NAME, a short string such as \"claude agents\", names it in reports.
 CALLBACK is called once, later, with a plist: (:exit STATUS :output
@@ -115,16 +115,18 @@ STRING :errors STRING) once the command ran, its exit status, and up to
 `drover-command-output-limit' bytes of its output and errors, as UTF-8,
 :truncated non-nil when either was cut; else (:failure MESSAGE), when
 it could not run, or ran out of `drover-command-timeout'.  DIRECTORY
-defaults to the home directory.  Return the command's identifier, for
-`drover-command-live-p' and `drover-command-cancel'.  Starting the
-runner may signal an error."
+defaults to the home directory.  With TAIL non-nil, the last bytes of
+the output and errors are read rather than the first, from the start
+of a line, as for a test suite whose failures it reports last.  Return
+the command's identifier, for `drover-command-live-p' and
+`drover-command-cancel'.  Starting the runner may signal an error."
   (let* ((directory (expand-file-name (or directory "~/")))
          (id (cl-incf drover-command--serial))
          (runner (and (not (seq-some (lambda (argument) (string-match-p "[\n\r\0]" argument))
                                      (cons directory command)))
                       (not (file-remote-p directory))
                       (drover-command--current-runner))))
-    (puthash id (list :name name :callback callback) drover-command--jobs)
+    (puthash id (list :name name :callback callback :tail tail) drover-command--jobs)
     (condition-case err
         (if runner
             (progn
@@ -136,7 +138,7 @@ runner may signal an error."
                                          " ")
                               "\n")))
           (drover-command--put id :direct t)
-          (drover-command--put id :process (drover-command--start-directly id command directory)))
+          (drover-command--put id :process (drover-command--start-directly id command directory tail)))
       (error (remhash id drover-command--jobs)
              (signal (car err) (cdr err))))
     (drover-command--put id :timer (run-at-time drover-command-timeout nil
@@ -265,7 +267,8 @@ An error is reported, and lets Emacs exit."
                   ;; Cancelled or timed out before it started.
                   (ignore-errors (signal-process number 'SIGTERM)))
               (let ((result (and (gethash id drover-command--jobs)
-                                 (drover-command--read-result runner id number))))
+                                 (drover-command--read-result
+                                  runner id number (plist-get (gethash id drover-command--jobs) :tail)))))
                 (drover-command--delete-files runner id)
                 (when result
                   (drover-command--finish id result))))))))))
@@ -295,29 +298,40 @@ An error is reported, and lets Emacs exit."
   (dolist (file (drover-command--files runner id))
     (ignore-errors (delete-file file))))
 
-(defun drover-command--read (file)
-  "Return the start of FILE, as (TEXT . TRUNCATED), \"\" when unreadable."
+(defun drover-command--read (file &optional tail)
+  "Return the start of FILE, as (TEXT . TRUNCATED), \"\" when unreadable.
+With TAIL, its end, from the start of a line, when it is longer than
+`drover-command-output-limit'."
   (with-temp-buffer
-    (let ((coding-system-for-read 'utf-8))
+    (let* ((coding-system-for-read 'utf-8)
+           (size (or (file-attribute-size (file-attributes file)) 0))
+           (cut (> size drover-command-output-limit)))
       (ignore-error file-error
-        (insert-file-contents file nil 0 drover-command-output-limit))
-      (cons (buffer-string)
-            (> (or (file-attribute-size (file-attributes file)) 0) drover-command-output-limit)))))
+        (if (and tail cut)
+            (insert-file-contents file nil (- size drover-command-output-limit) size)
+          (insert-file-contents file nil 0 drover-command-output-limit)))
+      (when (and tail cut)
+        (goto-char (point-min))
+        (delete-region (point-min) (min (point-max) (1+ (line-end-position)))))
+      (cons (buffer-string) cut))))
 
-(defun drover-command--read-result (runner id status)
-  "Return the result of the command ID of RUNNER, which ended with STATUS."
+(defun drover-command--read-result (runner id status &optional tail)
+  "Return the result of the command ID of RUNNER, which ended with STATUS.
+With TAIL, the ends of its output and errors are read (see
+`drover-command--read')."
   (pcase-let ((`(,out ,err) (drover-command--files runner id)))
-    (let ((output (drover-command--read out))
-          (errors (drover-command--read err)))
+    (let ((output (drover-command--read out tail))
+          (errors (drover-command--read err tail)))
       (list :exit status :output (car output) :errors (car errors)
             :truncated (or (cdr output) (cdr errors))))))
 
 ;;;; Without a runner
 
-(defun drover-command--start-directly (id command directory)
+(defun drover-command--start-directly (id command directory &optional tail)
   "Start COMMAND in DIRECTORY as the command ID, a process of Emacs's own.
 The command ends once both it and the pipe of its errors ended, so that
-it is told all it wrote."
+it is told all it wrote.  With TAIL, the end of what it writes is kept
+rather than its start (see `drover-command-run')."
   (let* ((output (generate-new-buffer " *drover command*" t))
          (errors (generate-new-buffer " *drover command errors*" t))
          (default-directory (file-name-as-directory directory))
@@ -328,9 +342,16 @@ it is told all it wrote."
                    (drover-with-reporting "commands"
                      (when (buffer-live-p (process-buffer process))
                        (with-current-buffer (process-buffer process)
-                         (if (< (buffer-size) limit)
-                             (insert text)
-                           (process-put process 'drover-command-truncated t)))))))
+                         (cond ((< (buffer-size) limit) (insert text))
+                               (tail
+                                (goto-char (point-max))
+                                (insert text)
+                                (when (> (buffer-size) (* 2 limit))
+                                  (delete-region (point-min) (- (point-max) limit))
+                                  (goto-char (point-min))
+                                  (delete-region (point-min) (min (point-max) (1+ (line-end-position)))))
+                                (process-put process 'drover-command-truncated t))
+                               (t (process-put process 'drover-command-truncated t))))))))
          (sentinel
           (lambda (_process _event)
             (drover-with-reporting "commands"
@@ -341,8 +362,8 @@ it is told all it wrote."
                      id
                      (if (eq (process-status process) 'exit)
                          (list :exit (process-exit-status process)
-                               :output (drover-command--buffer-text output limit)
-                               :errors (drover-command--buffer-text errors limit)
+                               :output (drover-command--buffer-text output limit tail)
+                               :errors (drover-command--buffer-text errors limit tail)
                                :truncated (or (process-get process 'drover-command-truncated)
                                               (process-get stderr 'drover-command-truncated)))
                        (list :failure (format "%s: %s" (file-name-nondirectory (car command))
@@ -362,12 +383,17 @@ it is told all it wrote."
              (kill-buffer errors)
              (signal (car err) (cdr err))))))
 
-(defun drover-command--buffer-text (buffer limit)
-  "Return the first LIMIT characters of BUFFER, or \"\" when it was killed."
-  (if (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (buffer-substring-no-properties (point-min) (min (point-max) (1+ limit))))
-    ""))
+(defun drover-command--buffer-text (buffer limit &optional tail)
+  "Return the first LIMIT characters of BUFFER, or \"\" when it was killed.
+With TAIL, its last LIMIT characters, from the start of a line."
+  (cond ((not (buffer-live-p buffer)) "")
+        ((and tail (> (buffer-size buffer) limit))
+         (with-current-buffer buffer
+           (save-excursion
+             (goto-char (- (point-max) limit))
+             (buffer-substring-no-properties (min (point-max) (1+ (line-end-position))) (point-max)))))
+        (t (with-current-buffer buffer
+             (buffer-substring-no-properties (point-min) (min (point-max) (1+ limit)))))))
 
 (provide 'drover-command)
 ;;; drover-command.el ends here

@@ -1720,6 +1720,56 @@ nothing; one refusing or failing is a failure.  Without
              (append (and (not (plist-get scope :archived)) (list :archived nil))
                      (and project (list :project project)))))))
 
+(defun drover-opencode--goal-command (session action text then else)
+  "Run the service's /goal in SESSION, then call THEN, or ELSE with a message.
+ACTION is `set', TEXT being the objective, or `pause', `resume' or
+`clear'.  Run as the session's own slash command, past any draft, in
+its buffer, opened without display when it has none, as a scheduled
+prompt is submitted.  The backend's :goal-command."
+  (let ((settled nil))
+    (cl-flet ((settle (function &rest arguments)
+                (unless settled
+                  (setq settled t)
+                  (drover-with-reporting "OpenCode goal"
+                    (apply function arguments)))))
+      (drover-opencode--in-buffer
+       session
+       (lambda ()
+         (opencode-session-command
+          "goal" (if (eq action 'set) text (symbol-name action))
+          :accept-thinking-loss t
+          :then (lambda (_) (settle then))
+          :else (lambda (error) (settle else (opencode-error-describe error)))))
+       (lambda (message) (settle else message))))))
+
+(defun drover-opencode--goal-state (session callback)
+  "Fetch where the service's /goal of SESSION stands, then call CALLBACK.
+CALLBACK gets a plist: :status, `active', `paused' or `complete', nil
+without a goal; :rounds and :max-rounds, the continuations sent since
+it was set or resumed and their limit; :reason, why it last changed,
+bounded; or (:failure MESSAGE), as from a service without /goal.
+Through the plugin's RPC, `opencode.goal' `get'.  The backend's
+:goal-state."
+  (opencode-request
+   'post "/api/rpc/opencode.goal/get"
+   :body `((input . ((sessionID . ,(drover-session-id session)))))
+   :directory (drover-session-directory session) :buffer nil :timeout 20
+   :then (lambda (response)
+           (drover-with-reporting "OpenCode goal"
+             (let* ((data (opencode-request-data response))
+                    (goal (and (consp data) (alist-get 'output data))))
+               (funcall callback
+                        (if (consp goal)
+                            (list :status (pcase (alist-get 'status goal)
+                                            ("active" 'active) ("paused" 'paused) ("complete" 'complete))
+                                  :rounds (and (numberp (alist-get 'rounds goal)) (alist-get 'rounds goal))
+                                  :max-rounds (and (numberp (alist-get 'maxRounds goal)) (alist-get 'maxRounds goal))
+                                  :reason (drover-bound-line (alist-get 'reason goal)))
+                          (list :status nil))))))
+   :else (lambda (error)
+           (drover-with-reporting "OpenCode goal"
+             (funcall callback (list :failure (opencode-error-describe error)))))))
+
 (defun drover-opencode--register ()
   "Register the `opencode' backend."
   (apply
@@ -1771,6 +1821,8 @@ nothing; one refusing or failing is a failure.  Without
      :options #'drover-opencode--options
      :blocker #'drover-opencode--blocker
      :submit #'drover-opencode--submit
+     :goal-command #'drover-opencode--goal-command
+     :goal-state #'drover-opencode--goal-state
      :ready #'drover-opencode--ready)))
   (drover-register-resumer 'opencode 'opencode (drover-opencode--here #'drover-opencode-resume)
                            :by-id t :async t))

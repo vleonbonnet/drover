@@ -97,6 +97,8 @@
 (autoload 'drover-task-sweep "drover-task" nil t)
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 (autoload 'drover-schedule-list "drover-schedule" nil t)
+(autoload 'drover-goal "drover-goal" nil t)
+(autoload 'drover-goal-list "drover-goal" nil t)
 (autoload 'drover-search "drover-search" nil t)
 (autoload 'drover-review "drover-review" nil t)
 (autoload 'drover-reviewable-p "drover-review")
@@ -601,6 +603,7 @@ other lists."
   "+" #'drover-new-session
   "v" #'drover-peek
   "R" #'drover-review
+  "G" #'drover-goal
   "V" #'drover-view)
 
 (define-minor-mode drover-session-keys-mode
@@ -841,6 +844,14 @@ buffer."
         (and (not (plist-get scope :window))
              (when-let* ((session (plist-get scope :session)))
                (drover-session-task session))))))
+
+(defun drover-dispatch-goal-p ()
+  "Return non-nil when the dispatch menu may set a goal, or act on one.
+On an Org heading, a task, or on a session at point, of this host:
+another host runs its own sessions' goals."
+  (or (drover-dispatch-org-task-p)
+      (when-let* ((session (drover-dispatch-session)))
+        (not (drover-session-host session)))))
 
 (defun drover-dispatch-task-link-p ()
   "Return non-nil when the dispatch menu may link a session to a task.
@@ -1389,7 +1400,7 @@ frame, the one used last of several."
 (defvar drover-list-hidden-fields)
 
 (defconst drover-list-field-labels
-  '((host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
+  '((goal . "goal") (host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
     (model . "model") (provider . "provider") (context . "context") (created . "created") (cost . "cost")
     (age . "age") (cache . "cache") (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
@@ -1448,6 +1459,7 @@ Before the list is loaded, any field is."
      :chooser #'not
      :if (lambda () (drover--list-field-p ',field))))
 
+(drover--define-column-switch goal)
 (drover--define-column-switch host)
 (drover--define-column-switch harness)
 (drover--define-column-switch location)
@@ -1986,7 +1998,8 @@ another front end."
    ("-t" drover-view--column-age)
    ("-p" drover-view--column-cache)
    ("-s" drover-view--column-summary)
-   ("-$" drover-view--column-cost)])
+   ("-$" drover-view--column-cost)
+   ("-g" drover-view--column-goal)])
 
 (defvar drover--dispatch-close-keys nil
   "The keys of `drover-dispatch' where it last opened, which close it.")
@@ -2068,7 +2081,9 @@ session chosen for it, else to one asked for, unshown."
     ("n" "Start or continue" drover-task-start :inapt-if-not drover-dispatch-task-p)
     ("F" "Finish" drover-task-finish :inapt-if-not drover-dispatch-task-p)
     ("I" "Link session" drover-task-link-session :inapt-if-not drover-dispatch-task-link-p)
-    ("W" "Worktrees" drover-task-sweep)]
+    ("W" "Worktrees" drover-task-sweep)
+    ("G" "Goal" drover-goal :advice* drover--dispatch-in-list :inapt-if-not drover-dispatch-goal-p)
+    ("^" "Goals" drover-goal-list)]
    [:description drover--dispatch-options-description
     ("a" "Agent" drover-prompt-agent :class drover--prompt-option :action agent
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))

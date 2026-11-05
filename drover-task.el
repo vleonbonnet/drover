@@ -1001,11 +1001,15 @@ and the heading's body."
   "Start a session for PLAN in its directory, sent its first prompt.
 Of `drover-task--harness', in no window when HIDDEN.  CALLBACK, if any,
 gets the session, or a string telling why it did not start.  The
-session is noted as serving the task."
+session is noted as serving the task.  PLAN's :prompt-more, Org text,
+follows the first prompt, such as what a goal asks (`drover-goal')."
   (let* ((target (drover-task--harness))
          (backend (plist-get target :backend))
          (engine (plist-get target :engine))
-         (text (funcall drover-task-prompt-function plan))
+         (text (concat (funcall drover-task-prompt-function plan)
+                       (if-let* ((more (plist-get plan :prompt-more)))
+                           (concat "\n\n" more)
+                         "")))
          (callback (or callback #'ignore)))
     (when-let* ((feature (plist-get target :feature)))
       (require feature))
@@ -1189,8 +1193,11 @@ from which base are asked too."
               (if-let* ((note (plist-get plan :base-note))) (concat "; " note) ""))
     (format "Working in %s, on %s." (abbreviate-file-name (plist-get plan :directory)) (or host drover-host))))
 
-(defun drover-task--start-here (marker plan)
-  "Start PLAN, the task at MARKER, here: its place, then a session there."
+(defun drover-task--start-here (marker plan &optional before-session)
+  "Start PLAN, the task at MARKER, here: its place, then a session there.
+BEFORE-SESSION, if any, is called with PLAN and a function of a plan
+starting the session, once the place is made and set up: it may call
+that function later, with the plan completed, or never."
   (let ((title (plist-get plan :title)))
     (message "Starting %s…" title)
     (drover-task-prepare
@@ -1208,18 +1215,43 @@ from which base are asked too."
              (when-let* ((buffer (plist-get plan :buffer)))
                (display-buffer buffer)))
             (t
-             (drover-task-start-session
-              plan nil
-              (lambda (session)
-                (drover-with-reporting "task start"
-                  (if (stringp session)
-                      (drover-warn "Task %s: no session started: %s" title session)
-                    (drover-message "Task %s started in %s" title
-                                    (abbreviate-file-name (plist-get plan :directory))))))))))))
+             (let ((start
+                    (lambda (plan)
+                      (drover-task-start-session
+                       plan nil
+                       (lambda (session)
+                         (drover-with-reporting "task start"
+                           (if (stringp session)
+                               (drover-warn "Task %s: no session started: %s" title session)
+                             (drover-message "Task %s started in %s" title
+                                             (abbreviate-file-name (plist-get plan :directory))))))))))
+               (if before-session
+                   (funcall before-session plan start)
+                 (funcall start plan))))))))
      (lambda (plan)
        (drover-task-org-write marker (drover-task--attempt-properties plan)
                               (drover-task--made-note plan))
        (drover-task-read marker)))))
+
+(defun drover-task-start-heading (marker before-session)
+  "Start the task of the heading at MARKER here, calling BEFORE-SESSION first.
+Its place is planned as `drover-task-start' plans it, asking what is
+left to decide, then made; BEFORE-SESSION is called as
+`drover-task--start-here' says, before its session starts.  A task its
+heading places on another host is refused: that host starts it."
+  (let ((plan (drover-task--plan-for marker nil)))
+    (when (plist-get plan :host)
+      (user-error "Task %s starts on %s" (plist-get plan :title) (plist-get plan :host)))
+    (drover-task--start-here marker plan before-session)))
+
+(defun drover-task-attempt-plan (marker info)
+  "Return the plan of the place the task INFO tells of, at MARKER, works in.
+Asked among several; nil when it works nowhere yet.  The plan is that
+of `drover-task-start-session', with the heading's body."
+  (when-let* ((attempt (drover-task--attempt-here info)))
+    (append (drover-task--plan-of-attempt info attempt)
+            (list :body (with-current-buffer (marker-buffer marker)
+                          (org-with-point-at marker (drover-task-org-body)))))))
 
 (defun drover-task--start-there (marker plan)
   "Have the host of PLAN start the task at MARKER: its place, a session."
