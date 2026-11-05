@@ -1770,7 +1770,11 @@ as `drover-model' describes them: explicit choices (:agent :model
              OPTIONS is a start-options plist: the explicit :agent,
              :model and :variant, unfiltered, the session's :title or
              nil, and the :defaults the prompt holds for ENGINE (see
-             `drover-register-engine'), or nil.  It calls THEN with
+             `drover-register-engine'), or nil; :no-display non-nil
+             starts the session without showing it, as agents start
+             sessions (see `drover-anvil'), whatever the caller binds
+             `display-buffer-overriding-action' to meanwhile not
+             covering what shows later.  It calls THEN with
              the new `drover-session' as soon as :send may be given
              it, :send waiting for the session to be ready, or ELSE.
  :check      Function of a SESSION, the TEXT about to be sent and the

@@ -624,6 +624,30 @@ Drover never lets an error of its own, out of a command, reach Emacs's reporting
 
 =DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL=, =AGENT_SHELL_EL= and =CLAUDE_CODE_IDE_EL= the checkouts of opencode.el, agent-shell and claude-code-ide the backends are built and tested against, such as =make test OPENCODE_EL=../opencode.el= for a worktree of opencode.el: drover draws with its look, so a change to it is tested with drover's. =make bench= compiles a copy of =OPENCODE_EL='s sources, as an installed opencode.el is, so that the look costs what it costs the user. Tests use a fake backend and fake engines, or stub the front ends; they never touch a running Emacs or OpenCode service, nor read the agents' own configuration.
 
+
+* Agents
+
+=drover-anvil= gives agents, through [[https://github.com/zawatton/anvil.el][Anvil]]'s MCP server in your Emacs, the sessions you have, of every harness and host: they list and read them, start sessions and prompt them, wait for their turns to end, answer their questions, interrupt and archive them.  =drover-anvil-enable= registers the tools with Anvil:
+
+#+begin_src emacs-lisp
+  (with-eval-after-load 'anvil
+    (require 'drover-anvil)
+    (drover-anvil-enable))
+#+end_src
+
+| Tool                       | Does                                                                                                         |
+|----------------------------+--------------------------------------------------------------------------------------------------------------|
+| =drover-sessions=          | Lists the sessions, the most urgent first, filtered by status, harness, project, host and attention          |
+| =drover-session=           | Reads one: where it stands, its model, the recap of its last turn, what its pending requests ask             |
+| =drover-session-create=    | Starts a session, unseen, with a harness, directory, model, effort, agent and first prompt; returns its key  |
+| =drover-session-send=      | Sends a session a prompt, as its front end delivers prompts: OpenCode queues or steers the running turn      |
+| =drover-session-wait=      | Waits until a session's turn ends or it needs you, with a timeout; Emacs never waits, the call does          |
+| =drover-session-answer=    | Answers a pending question or permission, or dismisses it                                                    |
+| =drover-session-interrupt= | Stops a session's running turn                                                                               |
+| =drover-session-archive=   | Archives a session                                                                                           |
+| =drover-job=               | Returns the answer of a job a tool answered with, for clients that cannot wait                               |
+
+What agents may do is yours to say, =drover-anvil-permissions=, action by action: on any session, on those of the caller's project (its repository, worktrees included), on those the caller started, or never.  By default they read every session and wait on any, start and prompt sessions of their own project, interrupt, archive and answer the questions of the sessions they started, and answer no permission.  The caller is the session whose agent calls, as its client names it (OpenCode does); one not named may do only what applies to any session.  No tool acts on the caller itself, nor on a session whose turn waits for the caller's, nor waits for one waiting for it.  Every call is logged in =anvil.log= of =drover-state-directory= (=drover-anvil-log-file=), and an action that cannot be logged is not taken.  Agents start sessions of the harnesses of =drover-anvil-create-harnesses=, OpenCode's by default, which start without showing.
 * License
 
 GPL-3.0-or-later. Copyright Valentin Leon.

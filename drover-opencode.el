@@ -1542,7 +1542,8 @@ reminder is stored before the first prompt; and the model of
 `drover-opencode--new-session-model'.  The agent catalog is waited for
 at most `drover-opencode-timeout' seconds, and so is the session, both
 asynchronously.  THEN receives the new `drover-session' once its buffer
-exists, ELSE a message.  The backend's :create."
+exists, ELSE a message.  With :no-display in OPTIONS, the buffer shows
+in no window.  The backend's :create."
   (let* ((agent (plist-get options :agent))
          (agent (and agent (not (string-empty-p agent)) agent))
          (title (plist-get options :title))
@@ -1580,6 +1581,7 @@ exists, ELSE a message.  The backend's :create."
                                               #'fail "Timed out waiting for the new OpenCode session"))
                      (opencode-session-create
                       :directory directory :title title :agent agent
+                      :no-display (plist-get options :no-display)
                       :model (drover-opencode--new-session-model
                               (plist-get options :defaults) agent
                               (plist-get options :model) (plist-get options :variant))

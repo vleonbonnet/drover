@@ -1889,7 +1889,8 @@ it, here, where they are: the peer names them as received."
 (defconst drover-remote--operations
   '((:interrupt . "interrupt") (:mark-seen . "mark-seen") (:archive . "archive")
     (:unarchive . "unarchive") (:delete . "delete") (:rename . "rename")
-    (:respond . "answer") (:send . "send"))
+    (:respond . "answer") (:send . "send") (:submit . "send")
+    (:requests . "answer") (:answer . "answer"))
   "The operations of a peer's proxy forwarded to the owner, by action.")
 
 (defun drover-remote--refusal (peer &optional session action)
@@ -2031,6 +2032,42 @@ prompt; attachments, files of this host, do not travel."
                           (lambda (message)
                             (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
                                          title message))))))
+
+(defun drover-remote--submit (name session text then else)
+  "Have the peer NAME submit TEXT as a prompt of SESSION, then call THEN, or ELSE.
+For the proxy's :submit: the owner submits it through its backend, as it
+delivers a scheduled prompt, and THEN is called once it did, ELSE with a
+line once it refused or failed."
+  (if (> (length text) drover-remote-prompt-limit)
+      (funcall else (format "the prompt is longer than %d characters, which go to another host at most"
+                            drover-remote-prompt-limit))
+    (drover-remote--act name "send" session (list :text (substring-no-properties text)) then else)))
+
+(defun drover-remote--fetch-requests (name session callback)
+  "Fetch from the peer NAME what the pending requests of SESSION ask.
+For the proxy's :requests: CALLBACK gets them, as the owner's backend
+tells them, checked and bounded, or (:failure MESSAGE).  Nothing waits."
+  (let ((peer (drover-remote--peer name)))
+    (if-let* ((refusal (if peer (drover-remote--refusal peer session "answer") (format "%s is not a peer" name))))
+        (funcall callback (list :failure refusal))
+      (drover-remote--request
+       peer (list :op "requests" :key (drover-remote--wire-key session))
+       (lambda (reply error)
+         (funcall callback (if error
+                               (list :failure error)
+                             (drover-remote--decode-requests (plist-get reply :requests)))))))))
+
+(defun drover-remote--answer-request (name session id answer then else)
+  "Have the peer NAME answer the request ID of SESSION with ANSWER.
+For the proxy's :answer, ANSWER as the backends' :answer takes it; THEN
+is called once the owner answered, ELSE with a line."
+  (let ((args (cond
+               ((plist-get answer :dismiss) (list :request id :dismiss t))
+               ((plist-get answer :decision) (list :request id :decision (plist-get answer :decision)))
+               (t (list :request id
+                        :answer (vconcat (mapcar (lambda (pair) (vector (car pair) (cdr pair)))
+                                                 (plist-get answer :answer))))))))
+    (drover-remote--act name "answer" session args then else)))
 
 (defun drover-remote--wait (peer message timeout)
   "Ask PEER MESSAGE and wait for its answer, TIMEOUT seconds at most.
@@ -4276,7 +4313,12 @@ as an older drover's farewells do."
      :rename (lambda (session title) (drover-remote--rename name session title))
      :respond (lambda (session) (drover-remote--respond name session))
      :send (lambda (session text token &optional attachments)
-             (drover-remote--send-prompt name session text token attachments)))))
+             (drover-remote--send-prompt name session text token attachments))
+     ;; Without asking, as agents act (see `drover-anvil').
+     :submit (lambda (session text then else) (drover-remote--submit name session text then else))
+     :requests (lambda (session callback) (drover-remote--fetch-requests name session callback))
+     :answer (lambda (session id answer then else)
+               (drover-remote--answer-request name session id answer then else)))))
 
 (defun drover-remote--add-peer (state name properties &optional ephemeral)
   "Add the peer NAME with PROPERTIES to STATE, registering its backend.

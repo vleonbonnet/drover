@@ -17,6 +17,10 @@ CLAUDE_CODE_IDE_EL ?= $(HOME)/.emacs.d/elpaca/sources/claude-code-ide
 # with channels and spyglass-reconnect.  Without it, the tests of the
 # remote layer are skipped.
 SPYGLASS_EL ?= $(HOME)/local/projects/spyglass
+# Anvil, whose MCP server drover-anvil's tools register with: its
+# checkout.  Without it, the tests calling them through Anvil's
+# dispatcher are skipped.
+ANVIL_EL ?= $(HOME)/.emacs.d/elpaca/sources/anvil
 # What drover's Package-Requires names, and what those need: a package
 # manager compiles drover with these alone, as elpaca does.
 REQUIRED_PATH = \
@@ -25,7 +29,7 @@ REQUIRED_PATH = \
 LOAD_PATH = -L . -L test $(REQUIRED_PATH) \
   -L $(AGENT_SHELL_EL) -L $(DEPS)/shell-maker -L $(DEPS)/acp \
   -L $(CLAUDE_CODE_IDE_EL) -L $(DEPS)/websocket -L $(DEPS)/web-server \
-  -L $(SPYGLASS_EL)
+  -L $(SPYGLASS_EL) -L $(ANVIL_EL)
 # Stale byte code must never shadow an edited source, in builds or tests.
 PREFER_NEWER = --eval '(setq load-prefer-newer t)'
 BATCH = $(EMACS) -Q --batch $(LOAD_PATH) $(PREFER_NEWER)

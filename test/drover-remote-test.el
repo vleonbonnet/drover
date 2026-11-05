@@ -1198,6 +1198,35 @@ leading back to what holds it would print it again from each."
                            (drover-remote-test-wait (lambda () (null (drover-session-requests (drover-remote-test-session "s1")))))
                            (should (eq (drover-session-status (drover-remote-test-session "s1")) 'working))))
 
+(ert-deftest drover-remote-test-agent-operations ()
+  "The proxy submits, tells what requests ask and answers them without asking, as agents act."
+  (drover-remote-test-with nil
+                           (drover-remote-test-start-full dir)
+                           (drover-remote-test-command "sessions" :n 2)
+                           (drover-remote-test-command "ask" :ids ["s1"])
+                           (drover-remote-test-synced 2 (lambda (_) (drover-session-requests (drover-remote-test-session "s1"))))
+                           (let ((session (drover-remote-test-session "s1"))
+                                 (submitted nil)
+                                 (requests nil)
+                                 (answered nil))
+                             (should (drover-supports-p session :submit))
+                             (should (drover-supports-p session :answer))
+                             (drover-backend-call (drover-remote-test-session "s0") :submit "Hello there"
+                                                  (lambda () (setq submitted t))
+                                                  (lambda (message) (setq submitted message)))
+                             (drover-remote-test-wait (lambda () submitted))
+                             (should (eq submitted t))
+                             (should (equal (nth 2 (car (drover-remote-test-calls "send"))) "Hello there"))
+                             (drover-backend-call session :requests (lambda (value) (setq requests (or value 'none))))
+                             (drover-remote-test-wait (lambda () requests))
+                             (should (equal (plist-get (car requests) :choices) '("once" "always" "reject")))
+                             (drover-backend-call session :answer (plist-get (car requests) :id) '(:decision "once")
+                                                  (lambda () (setq answered t))
+                                                  (lambda (message) (setq answered message)))
+                             (drover-remote-test-wait (lambda () answered))
+                             (should (eq answered t))
+                             (should (equal (car (drover-remote-test-calls "answer")) '("answer" "s1" "once"))))))
+
 (ert-deftest drover-remote-test-refused-by-access ()
   "A peer of read access acts on nothing: greyed out here, refused there whatever is asked, told once."
   (drover-remote-test-with nil
