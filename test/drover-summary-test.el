@@ -44,6 +44,9 @@
 (defvar drover-summary-test-pending nil
   "Callbacks the fake model holds, newest first, while its answer is `later'.")
 
+(defvar drover-summary-test-cancelled 0
+  "How many requests held were cancelled.")
+
 (defvar drover-summary-test-clock 1800000000.0
   "The time of the last activity the tests give sessions.")
 
@@ -51,7 +54,8 @@
   "Answer PROMPT through CALLBACK as `drover-summary-test-answer' says."
   (push prompt drover-summary-test-prompts)
   (pcase drover-summary-test-answer
-    ('later (push callback drover-summary-test-pending))
+    ('later (push callback drover-summary-test-pending)
+            (lambda () (cl-incf drover-summary-test-cancelled)))
     ((pred functionp) (funcall callback (funcall drover-summary-test-answer prompt)))
     (answer (funcall callback answer))))
 
@@ -87,7 +91,7 @@
              (drover-summary--warned nil)
              (drover-summary--failing nil)
              (drover-summary--failed-at nil)
-             (drover-summary--former-path nil)
+             (drover-cheap--former-path nil)
              (drover-summary--capped nil)
              (drover-summary--off nil)
              (drover-summary--timer nil)
@@ -369,16 +373,21 @@ SLOTS is a plist of slot names as keywords and values."
     (drover-summarize (list (drover-summary-test-of "s2")))
     (drover-summary-test-settle)
     (should (= (length drover-summary-test-prompts) 2))
-    ;; A model never answering is given up, as a failure.
-    (let ((drover-summary-timeout 0.1))
+    ;; A model never answering is given up, as a failure, once each model
+    ;; it might ask was given its time, and its request cancelled.
+    (let ((drover-summary-timeout 0.1)
+          (drover-cheap-attempts 2)
+          (drover-summary-test-cancelled 0))
       (setq drover-summary-test-answer 'later)
       (let ((messages (drover-summary-test-messages
                         (setq drover-summary--failing nil
                               drover-summary--failed-at nil)
                         (drover-summary-test-turn "s3" :status 'done)
                         (drover-summary-test-settle)
-                        (accept-process-output nil 0.3))))
-        (should (seq-some (lambda (message) (string-search "no summary after" message)) messages))
+                        (should (= (hash-table-count drover-summary--jobs) 1))
+                        (accept-process-output nil 0.4))))
+        (should (seq-some (lambda (message) (string-search "no summary after 0.2 s" message)) messages))
+        (should (= drover-summary-test-cancelled 1))
         (should (= (hash-table-count drover-summary--jobs) 0))))))
 
 (ert-deftest drover-summary-test-no-model ()
@@ -515,7 +524,7 @@ SLOTS is a plist of slot names as keywords and values."
                  (funcall (plist-get arguments :then) '((data (text . "Done: it works")))))))
       (let ((drover-summary-variant "low"))
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))))
-    (should (equal results '((:text "Done: it works"))))
+    (should (equal results '((:text "Done: it works" :model "github-copilot/claude-haiku-5.5"))))
     (let ((request (car requests)))
       (should (equal (seq-take request 2) '(post "/api/experimental/generate/text")))
       (should (equal (plist-get (cddr request) :body)
@@ -535,12 +544,13 @@ SLOTS is a plist of slot names as keywords and values."
                      (funcall (plist-get arguments :else)
                               (opencode-error--make :status 404 :method method :path path :message "Not Found"))
                    (funcall (plist-get arguments :then) '((data (text . "Done: it works"))))))))
-      (let ((drover-summary--former-path nil))
+      (let ((drover-cheap--former-path nil))
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))))
     (should (equal (reverse requests) '("/api/experimental/generate/text" "/api/experimental/generate"
                                         "/api/experimental/generate")))
-    (should (equal results '((:text "Done: it works") (:text "Done: it works"))))
+    (should (equal results '((:text "Done: it works" :model "github-copilot/claude-haiku-5.5")
+                             (:text "Done: it works" :model "github-copilot/claude-haiku-5.5"))))
     (setq requests nil results nil)
     (cl-letf (((symbol-function 'opencode-service-read-registration)
                (lambda () (list :url "http://127.0.0.1:1" :password "x" :pid (emacs-pid))))
@@ -550,7 +560,7 @@ SLOTS is a plist of slot names as keywords and values."
                  (funcall (plist-get arguments :else)
                           (opencode-error--make :status 404 :tag "ModelNotFoundError" :method method :path path
                                                 :message "Model not found: github-copilot/nope")))))
-      (let ((drover-summary--former-path nil))
+      (let ((drover-cheap--former-path nil))
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))))
     (should (equal requests '("/api/experimental/generate/text")))
     (should (string-search "Model not found" (plist-get (car results) :failure)))
@@ -586,7 +596,7 @@ SLOTS is a plist of slot names as keywords and values."
                        ((providerID . "github-copilot") (id . "claude-haiku-4.5")))))
         (setq cheap (car case) requests nil results nil)
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))
-        (should (equal results '((:text "Done: it works"))))
+        (should (equal results `((:text "Done: it works" :model ,(plist-get (car case) :model)))))
         (should (equal (car requests)
                        `(post "/api/experimental/generate/text"
                               ((prompt . "the prompt") (model . ,(cadr case)))))))

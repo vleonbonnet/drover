@@ -21,21 +21,31 @@
 ;;; Commentary:
 
 ;; `drover-model-cheap' tells the model small requests of this host
-;; should run, such as the summaries of `drover-summary': the best
-;; cheap model the providers of this host's OpenCode service offer, as
-;; the user prefers them, chosen from the service's catalogs alone.
+;; should run, such as the summaries of `drover-summary', and the
+;; models to try after it: the cheap models the providers of this
+;; host's OpenCode service offer, as the user prefers them, chosen from
+;; the service's catalogs alone.  `drover-cheap-generate' has them
+;; write what a prompt asks, trying the next when one is unavailable.
 ;;
-;; Providers are taken in the order of the classes this kind of host
-;; uses (`drover-cheap-host-kind', `drover-cheap-provider-orders'), a
-;; provider belonging to the first class of that order it matches
-;; (`drover-cheap-provider-classes'): by its identifier, or by how the
-;; service is signed in to it, a subscription, a key, or a plugin's own
-;; credentials.  The first class with a provider offering a cheap model
-;; gives the model: the first tier of `drover-cheap-families' its
-;; providers offer, and in that tier the model released last.  A
-;; provider the service is not signed in to, one excluded
-;; (`drover-cheap-excluded-providers'), a provider disabled and a model
-;; disabled or deprecated are never chosen.
+;; Every model of a tier of `drover-cheap-families' a usable provider
+;; offers is ranked.  A model is current when its version, read from
+;; its identifier (`drover-cheap-versions'), is the newest the usable
+;; providers offer of its family, outdated otherwise: outdated models
+;; come after every current one.  Then come providers in the order of
+;; the classes this kind of host uses (`drover-cheap-host-kind',
+;; `drover-cheap-provider-orders'), a provider belonging to the first
+;; class of that order it matches (`drover-cheap-provider-classes'):
+;; by its identifier, or by how the service is signed in to it, a
+;; subscription, a key, or a plugin's own credentials.  Then the tier,
+;; then, within a tier, the newer version and the model released last,
+;; the edition not premium and the cheaper.  The chain tried is the
+;; best model of each provider, in that order, since what makes a model
+;; unavailable, a quota, a login, an outage, is mostly its provider's.
+;;
+;; A provider the service is not signed in to, one excluded
+;; (`drover-cheap-excluded-providers'), a provider disabled, a model
+;; excluded (`drover-cheap-excluded-models', spot capacity by default)
+;; and a model disabled or deprecated are never chosen.
 ;;
 ;; The resolution is kept until a catalog changes; how the service is
 ;; signed in to each provider comes from its integrations
@@ -62,6 +72,7 @@
 (declare-function opencode-events-unregister "opencode-events" (type function))
 (declare-function opencode-request "opencode-http" (method path &rest arguments))
 (declare-function opencode-request-data "opencode-http" (response))
+(declare-function opencode-error-data "opencode-http" (error))
 (declare-function opencode-error-describe "opencode-http" (error))
 (declare-function opencode-error-status "opencode-http" (error))
 (declare-function opencode-error-tag "opencode-http" (error))
@@ -89,10 +100,9 @@ in its configuration: it is not guessed."
 (defcustom drover-cheap-provider-classes
   '((github-copilot :id "\\`github-copilot\\'")
     (grove-bedrock :id "\\`ai-gateway-\\(?:anthropic\\|openai\\|misc\\)\\'")
-    (grove-azure :id "\\`grove-")
     (fireworks :id "\\`fireworks-ai\\'")
     (prodsec :id "\\`prodsec-gateway\\'")
-    (mongodb-ai :id "\\`\\(?:ai-gateway-\\(?:anthropic\\|openai\\|misc\\)\\|grove-.+\\|prodsec-gateway\\)\\'")
+    (mongodb-ai :id "\\`\\(?:ai-gateway-\\(?:anthropic\\|openai\\|misc\\)\\|prodsec-gateway\\)\\'")
     (subscription :auth (subscription))
     (api :auth (api plugin)))
   "Classes of providers, which `drover-cheap-provider-orders' orders.
@@ -108,10 +118,9 @@ Each entry is (CLASS . CONDITIONS), CONDITIONS a plist of:
 A provider is of CLASS when it meets every condition given.  The
 defaults name MongoDB's providers, as the Grove plugin and the
 MongoDB relay name them: the Grove gateway's providers by wire format
-\(`grove-bedrock'), those of the legacy Grove gateway on Azure, if any
-\(`grove-azure'), Fireworks, the ProdSec gateway, and all of those
-but Copilot and Fireworks as the relay serves them to another host
-\(`mongodb-ai')."
+\(`grove-bedrock'), Fireworks, the ProdSec gateway, and the Grove
+gateway's and the ProdSec gateway's as the relay serves them to
+another host (`mongodb-ai')."
   :type '(alist :key-type (symbol :tag "Class")
                 :value-type (plist :options ((:id regexp)
                                              (:auth (repeat (choice (const subscription) (const api)
@@ -119,14 +128,15 @@ but Copilot and Fireworks as the relay serves them to another host
   :group 'drover-cheap)
 
 (defcustom drover-cheap-provider-orders
-  '((mongodb github-copilot grove-bedrock grove-azure fireworks prodsec)
+  '((mongodb github-copilot grove-bedrock fireworks prodsec)
     (personal subscription mongodb-ai api))
   "The classes of providers each kind of host uses, in its order of preference.
 Each entry is (KIND . CLASSES), KIND a value of
 `drover-cheap-host-kind', CLASSES keys of `drover-cheap-provider-classes'.
 A provider belongs to the first of CLASSES it is of; one of none is
-not used.  The first class with a provider offering a cheap model gives
-the model, the best its providers offer (see `drover-cheap-families')."
+not used.  Among current models (see `drover-cheap-versions'), those
+of the first class come first, the best its providers offer (see
+`drover-cheap-families'), then those of the next."
   :type '(alist :key-type (symbol :tag "Kind of host") :value-type (repeat (symbol :tag "Class")))
   :group 'drover-cheap)
 
@@ -146,11 +156,36 @@ Each entry is (TIER :family REGEXP :id REGEXP): a model is of TIER when
 the family the catalog gives it matches :family, or, for a model of no
 family, when its identifier matches :id, both downcased.  A tier may
 take several families, as `open-weight' takes DeepSeek's and GLM's
-flash models, the one released last winning.  The defaults are
-Anthropic's Haiku, OpenAI's Luna, then the flash models of DeepSeek
-and GLM."
+flash models.  Within a tier, the newer version of a family comes
+first, then the model released last.  The defaults are Anthropic's
+Haiku, OpenAI's Luna, then the flash models of DeepSeek and GLM.  A
+tier ranks models of the same currency and class of provider: see
+`drover-cheap-versions' and `drover-cheap-provider-orders'."
   :type '(alist :key-type (symbol :tag "Tier")
                 :value-type (plist :options ((:family regexp) (:id regexp))))
+  :group 'drover-cheap)
+
+(defcustom drover-cheap-versions
+  '(("claude-haiku" . "claude-haiku-\\([0-9]+\\)\\(?:[.-]\\([0-9]\\{1,2\\}\\)\\)?\\(?:[^0-9]\\|\\'\\)\\|claude-\\([0-9]+\\)\\(?:[.-]\\([0-9]\\{1,2\\}\\)\\)?-haiku")
+    ("gpt-luna" . "gpt-\\([0-9]+\\)\\(?:\\.\\([0-9]+\\)\\)?-luna")
+    ("deepseek-flash" . "deepseek-v\\([0-9]+\\)\\(?:[.p]\\([0-9]+\\)\\)?\\(?:[^0-9]\\|\\'\\)")
+    ("glm-flash" . "glm-\\([0-9]+\\)\\(?:[.p]\\([0-9]+\\)\\)?\\(?:[^0-9]\\|\\'\\)"))
+  "How the identifier of a model of each family tells its version.
+Each entry is (FAMILY . REGEXP), FAMILY a family as catalogs name them,
+REGEXP matched against the last part of a model's identifier, after
+its last slash, downcased: the numbers its groups match, in order, are
+the version, compared as `version-list-<' does, such as 5.5 for
+claude-haiku-5-5 and claude-haiku-5.5-20261007, 4.1 for
+deepseek-v4p1-flash-1017.  A model of no family is of the first FAMILY
+whose REGEXP its identifier matches.
+
+The current version of a family is the newest the usable providers of
+this host offer, whatever the dates catalogs tell, which differ from
+one provider to another, or are missing: its models are current, those
+of an older version outdated, and so is one whose identifier tells no
+version, such as a router to the latest, when another tells one.
+Outdated models come after every current one, whatever their provider."
+  :type '(alist :key-type (string :tag "Family") :value-type regexp)
   :group 'drover-cheap)
 
 (defcustom drover-cheap-premium-regexp "-\\(?:fast\\|ultrafast\\|priority\\)\\'"
@@ -158,6 +193,32 @@ and GLM."
 Such as gpt-6-luna-fast beside gpt-6-luna: of two models released the
 same day, the premium edition comes after."
   :type '(choice (const :tag "None" nil) regexp)
+  :group 'drover-cheap)
+
+(defcustom drover-cheap-excluded-models '("-spot\\(?:-\\|\\'\\)")
+  "Regexps of the identifiers of models never chosen, downcased.
+The defaults exclude the editions run on spot capacity, such as
+Fireworks' deepseek-v4p1-flash-1017-spot, which the provider may take
+back at any time."
+  :type '(repeat regexp)
+  :group 'drover-cheap)
+
+(defcustom drover-cheap-attempts 4
+  "How many models `drover-cheap-generate' asks at most, one after another.
+The next is asked only when one was unavailable (see
+`drover-cheap-fallback-p')."
+  :type 'natnum
+  :group 'drover-cheap)
+
+(defcustom drover-cheap-variant "low"
+  "Variant `drover-cheap-generate' runs a model at, when it offers it, or nil.
+Such as low, the least effort.  A model without it runs its default."
+  :type '(choice (const :tag "The model's default" nil) string)
+  :group 'drover-cheap)
+
+(defcustom drover-cheap-request-timeout 60
+  "Seconds `drover-cheap-generate' waits for a model's answer."
+  :type 'number
   :group 'drover-cheap)
 
 (defcustom drover-cheap-timeout 10
@@ -247,13 +308,20 @@ order, which is not used."
                           (and id-regexp (stringp id) (string-match-p id-regexp (downcase id))))))
                     drover-cheap-families)))
 
+(defun drover-cheap--excluded-model-p (id)
+  "Return non-nil when the model ID is never chosen.
+See `drover-cheap-excluded-models'."
+  (let ((id (downcase id)))
+    (seq-some (lambda (regexp) (string-match-p regexp id)) drover-cheap-excluded-models)))
+
 (defun drover-cheap--usable-p (model)
   "Return non-nil when MODEL, an entry of the model catalog, may be chosen.
-Neither disabled nor deprecated."
+Neither disabled, deprecated nor excluded."
   (and (stringp (alist-get 'id model))
        (stringp (alist-get 'providerID model))
        (not (memq (alist-get 'enabled model t) '(nil :false)))
-       (not (equal (alist-get 'status model) "deprecated"))))
+       (not (equal (alist-get 'status model) "deprecated"))
+       (not (drover-cheap--excluded-model-p (alist-get 'id model)))))
 
 (defun drover-cheap--released (model)
   "Return when MODEL was released, in milliseconds, 0 when unknown."
@@ -274,23 +342,61 @@ See `drover-cheap-premium-regexp'."
   (and drover-cheap-premium-regexp
        (string-match-p drover-cheap-premium-regexp (alist-get 'id model))))
 
+(defun drover-cheap--base-name (model)
+  "Return the identifier of MODEL after its last slash, downcased."
+  (car (last (split-string (downcase (alist-get 'id model)) "/"))))
+
+(defun drover-cheap--family (model)
+  "Return the family of MODEL, downcased, or nil.
+The family the catalog gives it, else the first of
+`drover-cheap-versions' its identifier matches."
+  (let ((family (alist-get 'family model)))
+    (if (and (stringp family) (not (string-empty-p family)))
+        (downcase family)
+      (let ((name (drover-cheap--base-name model)))
+        (car (seq-find (lambda (entry) (string-match-p (cdr entry) name)) drover-cheap-versions))))))
+
+(defun drover-cheap--version (model family)
+  "Return the version of MODEL, of FAMILY, a list of numbers, or nil.
+Its identifier tells it, as `drover-cheap-versions' reads it."
+  (when-let* ((regexp (cdr (assoc family drover-cheap-versions)))
+              (name (drover-cheap--base-name model))
+              ((string-match regexp name)))
+    (let ((version nil))
+      (dotimes (group (/ (length (match-data)) 2))
+        (when-let* (((> group 0))
+                     (number (match-string group name)))
+          (push (string-to-number number) version)))
+      (nreverse version))))
+
+(defun drover-cheap--newer-p (a b)
+  "Return non-nil when version A is newer than version B, either nil."
+  (and a (or (null b) (version-list-< b a))))
+
 (defun drover-cheap--better-p (a b)
   "Return non-nil when candidate A comes before candidate B.
-Each is (TIER POSITION RELEASED . MODEL).  The better tier first, then
-the model released last, then the edition not premium, then the
-cheaper, then the provider listed first, then the shorter identifier,
-then the first in order."
-  (let ((ma (cdddr a)) (mb (cdddr b)))
-    (cl-flet ((differ (x y) (not (equal x y))))
+Each is a plist of `drover-cheap--candidates'.  The current before the
+outdated, then the provider of the class first in the host's order,
+then the better tier, then the newer version of a family, then the
+model released last, then the edition not premium, then the cheaper,
+then the provider listed first, then the shorter identifier, then the
+first in order."
+  (let ((ma (plist-get a :model)) (mb (plist-get b :model)))
+    (cl-flet ((differ (key) (not (equal (plist-get a key) (plist-get b key)))))
       (cond
-       ((differ (car a) (car b)) (< (car a) (car b)))
-       ((differ (nth 2 a) (nth 2 b)) (> (nth 2 a) (nth 2 b)))
-       ((differ (drover-cheap--premium-p ma) (drover-cheap--premium-p mb))
+       ((differ :outdated) (not (plist-get a :outdated)))
+       ((differ :rank) (< (plist-get a :rank) (plist-get b :rank)))
+       ((differ :tier) (< (plist-get a :tier) (plist-get b :tier)))
+       ((and (equal (plist-get a :family) (plist-get b :family))
+             (not (version-list-= (or (plist-get a :version) '(-1)) (or (plist-get b :version) '(-1)))))
+        (drover-cheap--newer-p (plist-get a :version) (plist-get b :version)))
+       ((differ :released) (> (plist-get a :released) (plist-get b :released)))
+       ((not (eq (not (drover-cheap--premium-p ma)) (not (drover-cheap--premium-p mb))))
         (not (drover-cheap--premium-p ma)))
-       ((differ (drover-cheap--cost ma) (drover-cheap--cost mb))
+       ((/= (drover-cheap--cost ma) (drover-cheap--cost mb))
         (< (drover-cheap--cost ma) (drover-cheap--cost mb)))
-       ((differ (cadr a) (cadr b)) (< (cadr a) (cadr b)))
-       ((differ (length (alist-get 'id ma)) (length (alist-get 'id mb)))
+       ((differ :position) (< (plist-get a :position) (plist-get b :position)))
+       ((/= (length (alist-get 'id ma)) (length (alist-get 'id mb)))
         (< (length (alist-get 'id ma)) (length (alist-get 'id mb))))
        (t (string< (alist-get 'id ma) (alist-get 'id mb)))))))
 
@@ -318,71 +424,117 @@ latest date, in milliseconds."
         released
       (gethash (downcase name) dates 0))))
 
-(defun drover-cheap--describe (model provider tier class auth released)
-  "Return the plist describing MODEL of PROVIDER, of TIER and CLASS.
-The service is signed in to PROVIDER as AUTH; MODEL was RELEASED, in
-milliseconds, 0 when unknown."
-  (let ((provider-id (alist-get 'providerID model))
-        (id (alist-get 'id model)))
+(defun drover-cheap--candidates (models providers auths kind)
+  "Return the models of MODELS a host of KIND may choose, as plists.
+PROVIDERS and AUTHS are as `drover-cheap-rank' takes them.  Each is
+\(:model MODEL :provider PROVIDER :class CLASS :rank RANK :auth AUTH
+:tier TIER :position POSITION :released RELEASED :family FAMILY
+:version VERSION :outdated OUTDATED): the catalog's entries of the
+model and of its provider, the class of the provider and its index in
+KIND's order, how the service is signed in to it, the index of the
+model's tier, the provider's position among those usable, when the
+model was released, in milliseconds, 0 when unknown, its family, its
+version, a list of numbers or nil, and whether it is outdated (see
+`drover-cheap-versions')."
+  (let ((entries (make-hash-table :test #'equal))
+        (order (drover-cheap--order kind))
+        (position 0)
+        (dates (drover-cheap--release-dates models))
+        (newest (make-hash-table :test #'equal))
+        (candidates nil))
+    (dolist (provider providers)
+      (let ((id (and (consp provider) (alist-get 'id provider))))
+        (when (and (stringp id) (not (equal (alist-get 'activation provider) "disabled"))
+                   (not (gethash id entries)))
+          (let* ((auth (drover-cheap-provider-auth provider auths))
+                 (class (drover-cheap-provider-class id auth kind)))
+            (when class
+              (puthash id (list class auth provider (cl-incf position)) entries))))))
+    (dolist (model models)
+      (when-let* (((consp model))
+                  ((drover-cheap--usable-p model))
+                  (entry (gethash (alist-get 'providerID model) entries))
+                  (tier (drover-cheap--tier model)))
+        (let* ((family (drover-cheap--family model))
+               (version (drover-cheap--version model family)))
+          (when (and family (drover-cheap--newer-p version (gethash family newest)))
+            (puthash family version newest))
+          (push (list :model model :provider (nth 2 entry) :class (car entry)
+                      :rank (cl-position (car entry) order) :auth (nth 1 entry)
+                      :tier tier :position (nth 3 entry)
+                      :released (drover-cheap--released-of model dates)
+                      :family family :version version)
+                candidates))))
+    (dolist (candidate candidates)
+      (let ((newest (gethash (plist-get candidate :family) newest)))
+        (nconc candidate (list :outdated (and newest (drover-cheap--newer-p newest (plist-get candidate :version))
+                                              t)))))
+    (nreverse candidates)))
+
+(defun drover-cheap--describe (candidate)
+  "Return the plist describing CANDIDATE, of `drover-cheap--candidates'."
+  (let* ((model (plist-get candidate :model))
+         (provider-id (alist-get 'providerID model))
+         (id (alist-get 'id model))
+         (released (plist-get candidate :released))
+         (version (plist-get candidate :version)))
     (list :model (concat provider-id "/" id)
           :provider-id provider-id
-          :provider-name (alist-get 'name provider)
+          :provider-name (alist-get 'name (plist-get candidate :provider))
           :id id
           :name (alist-get 'name model)
           :family (alist-get 'family model)
-          :tier tier
-          :class class
-          :auth auth
+          :tier (car (nth (plist-get candidate :tier) drover-cheap-families))
+          :class (plist-get candidate :class)
+          :auth (plist-get candidate :auth)
           :released (and (> released 0) released)
+          :version (and version (mapconcat #'number-to-string version "."))
+          :outdated (plist-get candidate :outdated)
           :variants (delq nil (mapcar (lambda (variant)
                                         (let ((name (and (consp variant) (alist-get 'id variant))))
                                           (and (stringp name) name)))
                                       (alist-get 'variants model))))))
 
-(defun drover-cheap-resolve (models providers auths &optional kind)
-  "Return the cheap model of MODELS a host of KIND would choose, or nil.
+(defun drover-cheap-rank (models providers auths &optional kind)
+  "Return every cheap model of MODELS a host of KIND may choose, best first.
 MODELS and PROVIDERS are the service's model and provider catalogs,
 AUTHS how it is signed in to its integrations (see
 `drover-cheap-provider-auth'); KIND defaults to
-`drover-cheap-host-kind'.  The classes of KIND's order are taken in
-turn; the first with a provider offering a model of a tier of
-`drover-cheap-families' gives the best of those (see
-`drover-cheap--better-p'), a model listed without its date released
-taking the date the catalog gives its name elsewhere.  The model is a
-plist: :model, \"PROVIDER/ID\"; :provider-id, :provider-name, :id,
-:name, :family, :tier, :class, :auth, :released, in milliseconds or
-nil, and :variants, the names of its variants."
-  (let ((classes (make-hash-table :test #'equal))
-        (positions (make-hash-table :test #'equal))
-        (position 0))
-    (dolist (provider providers)
-      (let ((id (and (consp provider) (alist-get 'id provider))))
-        (when (and (stringp id) (not (equal (alist-get 'activation provider) "disabled")))
-          (let* ((auth (drover-cheap-provider-auth provider auths))
-                 (class (drover-cheap-provider-class id auth kind)))
-            (when class
-              (puthash id (list class auth provider) classes)
-              (puthash id (cl-incf position) positions))))))
-    (let ((candidates nil)
-          (dates (drover-cheap--release-dates models)))
-      (dolist (model models)
-        (when-let* (((consp model))
-                    ((drover-cheap--usable-p model))
-                    (entry (gethash (alist-get 'providerID model) classes))
-                    (tier (drover-cheap--tier model)))
-          (push (cons (car entry) (cl-list* tier (gethash (alist-get 'providerID model) positions)
-                                            (drover-cheap--released-of model dates) model))
-                candidates)))
-      (catch 'chosen
-        (dolist (class (drover-cheap--order kind))
-          (when-let* ((offered (mapcar #'cdr (seq-filter (lambda (candidate) (eq (car candidate) class))
-                                                          candidates))))
-            (let* ((best (car (sort offered :lessp #'drover-cheap--better-p)))
-                   (model (cdddr best))
-                   (entry (gethash (alist-get 'providerID model) classes)))
-              (throw 'chosen (drover-cheap--describe model (nth 2 entry)
-                                                     (car (nth (car best) drover-cheap-families))
-                                                     class (nth 1 entry) (nth 2 best))))))))))
+`drover-cheap-host-kind'.  A model may be chosen when its provider is
+of a class of KIND's order (see `drover-cheap-provider-orders') and
+it is of a tier of `drover-cheap-families'.  The current come first
+\(see `drover-cheap-versions'), then the provider of the class first in
+KIND's order, then the tier; see `drover-cheap--better-p'.  A model
+listed without its date released takes the date the catalog gives its
+name elsewhere.  Each model is a plist: :model, \"PROVIDER/ID\";
+:provider-id, :provider-name, :id, :name, :family, :tier, :class,
+:auth, :released, in milliseconds or nil, :version, the version its
+identifier tells, as \"5.5\", or nil, :outdated, non-nil when a newer
+version of its family is offered, and :variants, the names of its
+variants."
+  (mapcar #'drover-cheap--describe
+          (sort (drover-cheap--candidates models providers auths (or kind drover-cheap-host-kind))
+                :lessp #'drover-cheap--better-p)))
+
+(defun drover-cheap-chain (models providers auths &optional kind)
+  "Return the models a host of KIND tries in turn, the best of each provider.
+The models of MODELS as `drover-cheap-rank' ranks them, from PROVIDERS
+and AUTHS, as it takes them, a provider's best alone: what makes a
+model unavailable, a quota, a login, an outage, is mostly its
+provider's, so that its other models would fail as well."
+  (let ((seen nil))
+    (seq-filter (lambda (model)
+                  (unless (member (plist-get model :provider-id) seen)
+                    (push (plist-get model :provider-id) seen)))
+                (drover-cheap-rank models providers auths kind))))
+
+(defun drover-cheap-resolve (models providers auths &optional kind)
+  "Return the cheap model of MODELS a host of KIND would choose, or nil.
+The first of `drover-cheap-chain' of MODELS, PROVIDERS and AUTHS,
+with :fallbacks, the models of the chain after it, each described as
+the first is (see `drover-cheap-rank')."
+  (when-let* ((chain (drover-cheap-chain models providers auths kind)))
+    (append (car chain) (list :fallbacks (cdr chain)))))
 
 (defun drover-cheap-none-reason (&optional kind)
   "Return why no cheap model resolves for a host of KIND, a line."
@@ -493,7 +645,8 @@ service told of a change since."
   "Return what this host's cheap model is resolved from, compared with `equal'."
   (list (bound-and-true-p opencode-catalog-generation) (car drover-cheap--auths)
         drover-cheap-host-kind drover-cheap-provider-classes drover-cheap-provider-orders
-        drover-cheap-excluded-providers drover-cheap-families drover-cheap-premium-regexp))
+        drover-cheap-excluded-providers drover-cheap-excluded-models drover-cheap-families
+        drover-cheap-versions drover-cheap-premium-regexp))
 
 (defun drover-cheap--ready-p ()
   "Return non-nil when the local service's catalogs and integrations are read."
@@ -581,15 +734,170 @@ the model, or why there is none."
         (drover-message "No cheap model on this %s host: %s" drover-cheap-host-kind (plist-get answer :none))
         nil)
        (t
-        (drover-message "Cheap model of this %s host: %s (%s), %s, %s%s"
-                 drover-cheap-host-kind
-                 (plist-get answer :model) (or (plist-get answer :name) (plist-get answer :id))
-                 (or (plist-get answer :provider-name) (plist-get answer :provider-id))
-                 (plist-get answer :class)
-                 (if-let* ((released (plist-get answer :released)))
-                     (format-time-string ", released %F" (/ released 1000.0))
-                   ""))
+        (drover-message "Cheap model of this %s host: %s (%s), %s, %s%s%s"
+                        drover-cheap-host-kind
+                        (plist-get answer :model) (or (plist-get answer :name) (plist-get answer :id))
+                        (or (plist-get answer :provider-name) (plist-get answer :provider-id))
+                        (plist-get answer :class)
+                        (if-let* ((released (plist-get answer :released)))
+                            (format-time-string ", released %F" (/ released 1000.0))
+                          "")
+                        (if-let* ((fallbacks (plist-get answer :fallbacks)))
+                            (format "; then %s"
+                                    (mapconcat (lambda (model) (plist-get model :model))
+                                               (seq-take fallbacks (max 0 (1- drover-cheap-attempts)))
+                                               ", "))
+                          ""))
         answer)))))
+
+;;;; Asking it
+
+(defvar drover-cheap--former-path nil
+  "Non-nil once the service knew stateless generation by its former path alone.
+Services before 2.2 answer POST /api/experimental/generate, which later
+ones keep as an alias of /api/experimental/generate/text.")
+
+(defun drover-cheap-fold-system (prompt system)
+  "Return PROMPT under the instructions SYSTEM, as one prompt.
+OpenCode's stateless generation takes a prompt alone, no system
+prompt: SYSTEM, when neither nil nor blank, comes first, then a blank
+line and PROMPT."
+  (if (and (stringp system) (not (string-blank-p system)))
+      (concat (string-trim system) "\n\n" prompt)
+    prompt))
+
+(defun drover-cheap--named (model)
+  "Return MODEL, \"PROVIDER/ID\", as a plist of `drover-cheap-rank', or nil.
+Its variants are not known: a variant asked is sent as it is."
+  (let ((slash (and (stringp model) (string-search "/" model))))
+    (and slash (> slash 0) (< (1+ slash) (length model))
+         (list :model model :provider-id (substring model 0 slash) :id (substring model (1+ slash))
+               :variants t))))
+
+(defun drover-cheap--ref (model variant)
+  "Return MODEL, a plist of `drover-cheap-rank', as OpenCode's model reference.
+It names VARIANT when MODEL offers it."
+  `((providerID . ,(plist-get model :provider-id))
+    (id . ,(plist-get model :id))
+    ,@(and variant (or (eq (plist-get model :variants) t) (member variant (plist-get model :variants)))
+           `((variant . ,variant)))))
+
+(defun drover-cheap-fallback-p (error)
+  "Return non-nil when ERROR, of a generation, leaves another model to ask.
+ERROR is an `opencode-error'.  A model or a provider unavailable, out
+of quota or not signed in, a model or provider the service does not
+know or cannot run, the service unable to reach the provider, no
+answer in time: another model may answer.  Content a provider's filter
+refused, a request a provider or the service found invalid, the
+service refusing the request: any model would fail alike.  A service
+before 2.2 tells a model it cannot select as an invalid request (see
+`drover-cheap--former-path'), and an opencode.el not keeping an
+error's object tells no provider error's reason, taken then for an
+unavailable provider."
+  (let* ((data (and (fboundp 'opencode-error-data) (opencode-error-data error)))
+         (data (and (consp data) data))
+         (status (opencode-error-status error)))
+    (pcase (opencode-error-tag error)
+      ("ProviderRequestError"
+       (not (member (alist-get 'reason data) '("content_filter" "invalid_request"))))
+      ((or "ModelNotFoundError" "ProviderNotFoundError" "UnsupportedModelError" "ServiceUnavailableError") t)
+      ("InvalidRequestError"
+       (let ((field (alist-get 'field data)))
+         (if (stringp field) (string-prefix-p "model" field) drover-cheap--former-path)))
+      ((pred stringp) nil)
+      (_ (or (null status) (>= status 500))))))
+
+;;;###autoload
+(cl-defun drover-cheap-generate (prompt system callback
+                                        &key model (variant drover-cheap-variant)
+                                        (timeout drover-cheap-request-timeout)
+                                        (attempts drover-cheap-attempts))
+  "Have this host's cheap model write what PROMPT asks, then call CALLBACK.
+SYSTEM, a string or nil, gives the instructions, folded into the
+prompt (see `drover-cheap-fold-system').  It is a stateless generation
+of the local OpenCode service (POST /api/experimental/generate/text, or
+its former path for a service without it): it makes no session, which
+neither lists nor usage totals of sessions show.
+
+The models asked are this host's cheap model, then the others of its
+chain (see `drover-cheap-chain'), ATTEMPTS at most, by default
+`drover-cheap-attempts': the next only when one was unavailable (see
+`drover-cheap-fallback-p').  MODEL, \"PROVIDER/ID\", names the one model
+to ask instead.  Each runs at VARIANT, by default
+`drover-cheap-variant', when it offers it, and is waited for TIMEOUT
+seconds, by default `drover-cheap-request-timeout'.
+
+CALLBACK is called once, later or at once, with (:text TEXT :model
+MODEL :name NAME), what the model MODEL, \"PROVIDER/ID\", named NAME,
+wrote, or with (:failure MESSAGE), adding :none t when no cheap model
+resolves on this host.  Return a function cancelling the request:
+CALLBACK is then never called, and no other model asked.  Nothing here
+waits, nor starts the service."
+  (require 'opencode-http)
+  (let ((done nil)
+        (failures nil)
+        (text (drover-cheap-fold-system prompt system)))
+    (cl-labels
+        ((finish (result)
+           (unless done
+             (setq done t)
+             (funcall callback result)))
+         (give-up ()
+           (finish (list :failure (string-join (reverse failures) "; "))))
+         (note (model message)
+           (push (drover-bound-line (format "%s: %s" (plist-get model :model) message)) failures))
+         (answered (model response)
+           (let ((answer (alist-get 'text (opencode-request-data response))))
+             (if (and (stringp answer) (not (string-blank-p answer)))
+                 (finish (list :text (drover-bound-text answer 400 40000)
+                               :model (plist-get model :model) :name (plist-get model :name)))
+               (note model "OpenCode answered no text")
+               (give-up))))
+         (failed (chain error)
+           (if (and (not drover-cheap--former-path)
+                    (eql (opencode-error-status error) 404)
+                    (not (opencode-error-tag error)))
+               ;; No such route, rather than no such model.
+               (progn (setq drover-cheap--former-path t)
+                      (ask chain))
+             (note (car chain) (opencode-error-describe error))
+             (if (and (cdr chain) (drover-cheap-fallback-p error))
+                 (ask (cdr chain))
+               (give-up))))
+         (ask (chain)
+           (unless done
+             (let ((model (car chain)))
+               (condition-case err
+                   (opencode-call-with-service
+                    nil #'opencode-request 'post
+                    (if drover-cheap--former-path "/api/experimental/generate" "/api/experimental/generate/text")
+                    :body `((prompt . ,text) (model . ,(drover-cheap--ref model variant)))
+                    :directory nil :buffer nil :timeout timeout
+                    :then (lambda (response)
+                            (drover-with-reporting "cheap model"
+                              (unless done (answered model response))))
+                    :else (lambda (error)
+                            (drover-with-reporting "cheap model"
+                              (unless done (failed chain error)))))
+                 (error (note model (drover-error-message err))
+                        (give-up)))))))
+      (cond
+       ((not (drover-cheap-service-running-p))
+        (finish (list :failure "OpenCode's service does not run")))
+       (model
+        (if-let* ((named (drover-cheap--named model)))
+            (ask (list named))
+          (finish (list :failure (format "Not a model, PROVIDER/ID: %s" (drover-bound-line (format "%s" model)))))))
+       (t
+        (drover-model-cheap-fetch
+         (lambda (answer)
+           (cond
+            (done)
+            ((plist-get answer :failure) (finish (list :failure (plist-get answer :failure))))
+            ((plist-get answer :none)
+             (finish (list :failure (concat "no cheap model, " (plist-get answer :none)) :none t)))
+            (t (ask (seq-take (cons answer (plist-get answer :fallbacks)) (max 1 attempts)))))))))
+      (lambda () (setq done t)))))
 
 (defun drover-cheap-unload-function ()
   "Stop following the integrations of the local service."

@@ -166,9 +166,28 @@ ordinary window may show at once, each laid out for its width, with its
 own point and its own sessions expanded.")
 
 (defcustom drover-list-display-action
-  '((display-buffer-reuse-window display-buffer-same-window))
+  '((display-buffer-reuse-window
+     display-buffer-same-window
+     drover-list-display-in-main-window))
   "Action by which `drover-list' displays its buffer in an ordinary window.
-See `display-buffer' for the form of an action."
+The default shows the list in the window of the selected frame already
+showing it, else in the selected window, else, from a window that may
+not show it, such as the sidebar's, in the window where you work, as
+sessions opened from the sidebar show there (see
+`drover-list-display-in-main-window').  See `display-buffer' for the
+form of an action."
+  :type 'sexp
+  :group 'drover-list)
+
+(defcustom drover-list-other-window-display-action
+  '((display-buffer-reuse-window drover-list-display-in-other-window)
+    (inhibit-same-window . t))
+  "Action by which `drover-list' displays its buffer given a prefix argument.
+The default shows the list in another window of the selected frame
+already showing it, else in another window than the one
+`drover-list-display-action' would choose (see
+`drover-list-display-in-other-window').  See `display-buffer' for the
+form of an action."
   :type 'sexp
   :group 'drover-list)
 
@@ -5090,6 +5109,56 @@ sessions open in the main window; from an ordinary one, as usual."
     (and window (window-parameter window 'window-side)
          (drover-list--main-window (window-frame window)))))
 
+(defun drover-list--may-show-p (window)
+  "Return non-nil when WINDOW may be given the list of `drover-list' to show.
+Side windows, such as the sidebar's, minibuffer windows and windows
+dedicated to their buffer may not."
+  (and (window-live-p window)
+       (not (window-minibuffer-p window))
+       (not (window-parameter window 'window-side))
+       (not (window-dedicated-p window))))
+
+(defun drover-list--home-window ()
+  "Return the window `drover-list' shows its list in by default, or nil.
+It is the selected window when it may show the list, else the window
+where you work, such as from the sidebar (see `drover-list--main-window'),
+when that one may."
+  (if (drover-list--may-show-p (selected-window))
+      (selected-window)
+    (when-let* ((main (drover-list--main-window)))
+      (and (drover-list--may-show-p main) main))))
+
+(defun drover-list-display-in-main-window (buffer alist)
+  "Display BUFFER in the window where you work, and return that window.
+It is an action function for `display-buffer', for the list of
+`drover-list' shown from a window that may not show it, such as the
+sidebar's: the list takes the window where you work, as sessions
+opened from the sidebar do, rather than a window split from it.  That
+window is the most recently used of the selected frame outside side
+windows, showing no list and not dedicated to its buffer; without one,
+or when it is the selected window and ALIST has a non-nil
+`inhibit-same-window' entry, return nil."
+  (when-let* ((window (drover-list--main-window))
+              ((drover-list--may-show-p window))
+              ((not (and (eq window (selected-window))
+                         (cdr (assq 'inhibit-same-window alist))))))
+    (window--display-buffer buffer window 'reuse alist)))
+
+(defun drover-list-display-in-other-window (buffer alist)
+  "Display BUFFER in another window than the list's default one, and return it.
+It is an action function for `display-buffer', for the list of
+`drover-list' given a prefix argument.  The default window is the
+selected one, or, from a window that may not show the list, such as the
+sidebar's, the window where you work (see `drover-list--home-window').
+The other window is chosen as `drover-other-window' chooses one for a
+session: the one used last, else one split from the default window.
+Return nil when there is none, ALIST being the action's alist."
+  (when-let* ((home (drover-list--home-window)))
+    (let* ((windows (window-list (window-frame home) 'nomini))
+           (window (ignore-error user-error (drover-other-window home))))
+      (when window
+        (window--display-buffer buffer window (if (memq window windows) 'reuse 'window) alist)))))
+
 ;;;; Where sessions are
 
 ;; The colour of a title tells where its session is in Emacs.  Windows
@@ -5482,18 +5551,30 @@ ordinary window."
           (drover-list--goto-first-session))))))
 
 ;;;###autoload
-(defun drover-list ()
+(defun drover-list (&optional other-window)
   "Show the list of every agent session in an ordinary window, and select it.
-It lists the sessions `drover-filter' keeps, grouped as
+\\<drover-list-mode-map>It lists the sessions `drover-filter' keeps, grouped as
 `drover-group-by' says and sorted as `drover-sort-by' says; see
-`drover-list-mode' for the keys.  The sidebar of `drover-list-side' is
-a list of its own: both may show at once, each laid out for its width,
-with its own point, but side by side, where the sidebar steps aside
-until the list leaves (see `drover-list--place-sidebar')."
-  (interactive)
+`drover-list-mode' for the keys.
+
+A window of the frame already showing the list is selected.  Otherwise
+the list takes the selected window, or, from a window that may not show
+it, such as the sidebar's, the window where you work, as sessions opened
+there do, rather than splitting a window; \\[drover-list-quit] in the list brings
+back the buffer it replaced (see `drover-list-display-action').  With
+prefix argument OTHER-WINDOW, it shows in another window instead (see
+`drover-list-other-window-display-action').
+
+The sidebar of `drover-list-side' is a list of its own: both may show
+at once, each laid out for its width, with its own point, but side by
+side, where the sidebar steps aside until the list leaves (see
+`drover-list--place-sidebar')."
+  (interactive "P")
   (drover-start)
   (let ((buffer (drover-list--buffer)))
-    (pop-to-buffer buffer drover-list-display-action)
+    (pop-to-buffer buffer (if other-window
+                              drover-list-other-window-display-action
+                            drover-list-display-action))
     ;; Before drawing, for the width the sidebar leaves.
     (drover-list--place-sidebar (selected-frame))
     (with-current-buffer buffer

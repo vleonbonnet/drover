@@ -79,6 +79,7 @@ settings hold a key; :activation."
                                  :name "Claude Haiku 5.5" :cost 0.1
                                  :variants '("low" "medium" "high" "xhigh" "max"))
         (drover-cheap-test-model "github-copilot" "gpt-6-luna" "gpt-luna" "2026-09-22" :cost 0.1)
+        (drover-cheap-test-model "github-copilot" "gpt-5.6-luna" "gpt-luna" "2026-07-09" :cost 0.2)
         (drover-cheap-test-model "github-copilot" "gemini-3.8-flash" "gemini-flash" "2026-09-02" :cost 0.75)
         (drover-cheap-test-model "ai-gateway-anthropic" "claude-haiku-4-5" "claude-haiku" "2025-11-18"
                                  :name "Claude Haiku 4.5" :cost 0.74 :variants nil)
@@ -87,13 +88,23 @@ settings hold a key; :activation."
         (drover-cheap-test-model "ai-gateway-openai" "gpt-5-nano" "gpt-nano" "2025-08-07" :cost 0.037)
         (drover-cheap-test-model "ai-gateway-misc" "fw-deepseek-v4.1-flash" "deepseek-flash" "2026-09-10" :cost 0.179)
         (drover-cheap-test-model "ai-gateway-misc" "fw-glm-5.3-flash" "glm-flash" "2026-08-26" :cost 0.122)
+        (drover-cheap-test-model "ai-gateway-misc" "deepseek-v4-flash" "deepseek-flash" "2026-04-24" :cost 0.1406)
+        (drover-cheap-test-model "ai-gateway-misc" "deepseek-v4-flash-0731" "deepseek-flash" "2026-04-24" :cost 0.3256)
         (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/routers/deepseek-flash-latest"
+                                 "deepseek-flash" "2026-10-17" :cost 0.3)
+        (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/models/deepseek-v4p1-flash-1017"
                                  "deepseek-flash" "2026-10-17" :cost 0.3)
         (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/models/deepseek-v4p1-flash-1017-priority"
                                  "deepseek-flash" "2026-10-17" :cost 0.375)
         (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot"
                                  "deepseek-flash" "2026-10-17" :cost 0.21)
+        (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/models/deepseek-v4p1-flash"
+                                 "deepseek-flash" "2026-09-10" :cost 0.3)
+        (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/routers/deepseek-v4p1-flash-spot"
+                                 "deepseek-flash" "2026-09-10" :cost 0.21)
         (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/models/glm-5p3-flash" "glm-flash" "2026-08-26" :cost 0.15)
+        (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/routers/glm-flash-latest" "glm-flash" "2026-08-26"
+                                 :name "GLM Flash Latest (GLM 5.3 Flash)" :cost 0.15)
         (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/models/minimax-m3p1-flash" "minimax" "2026-10-19" :cost 0.15)
         (drover-cheap-test-model "prodsec-gateway" "claude-haiku-5-5" "claude-haiku" nil
                                  :name "Claude Haiku 5.5" :cost 0.1)
@@ -200,31 +211,41 @@ settings hold a key; :activation."
 
 ;;;; A MongoDB host
 
+(defun drover-cheap-test-chain (kind models providers integrations)
+  "Return \"PROVIDER/ID\" of the chain a host of KIND resolves from its catalogs."
+  (mapcar (lambda (model) (plist-get model :model))
+          (drover-cheap-chain models providers (drover-cheap-integration-auths integrations) kind)))
+
 (ert-deftest drover-cheap-test-mongodb-host ()
-  "A MongoDB host takes Copilot first, then the Grove gateway, Fireworks, the ProdSec gateway."
+  "A MongoDB host takes the current first, then Copilot, the Grove gateway, Fireworks, the ProdSec gateway."
   (let ((models drover-cheap-test-reaver-models)
         (providers drover-cheap-test-reaver-providers)
         (integrations drover-cheap-test-reaver-integrations))
     (dolist (case
              `(;; Copilot's newest Haiku, not the one it calls latest.
                (,models "github-copilot/claude-haiku-5.5 github-copilot")
-               ;; Copilot missing: the Grove gateway's Haiku, older than its Luna, a better tier.
+               ;; Copilot missing: the Grove gateway's Haiku 4.5 is outdated, the
+               ;; ProdSec gateway offering 5.5; the gateway's Luna, current, first.
                (,(drover-cheap-test-without models "github-copilot")
-                "ai-gateway-anthropic/claude-haiku-4-5 grove-bedrock")
-               ;; No Haiku there: its newest Luna.
-               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-anthropic")
                 "ai-gateway-openai/gpt-6-luna grove-bedrock")
-               ;; No Luna either: its newest open-weight flash, DeepSeek's over GLM's.
-               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-anthropic" "ai-gateway-openai")
+               ;; No Haiku 5.5 anywhere: the gateway's 4.5 is current, the better tier.
+               (,(drover-cheap-test-without models "github-copilot" "prodsec-gateway")
+                "ai-gateway-anthropic/claude-haiku-4-5 grove-bedrock")
+               ;; No Luna there either: its newest open-weight flash, DeepSeek's over GLM's.
+               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-openai")
                 "ai-gateway-misc/fw-deepseek-v4.1-flash grove-bedrock")
-               ;; Fireworks' three of the same day: not the premium edition, the cheapest.
-               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-anthropic" "ai-gateway-openai"
-                                            "ai-gateway-misc")
-                "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot fireworks")
+               ;; Fireworks' DeepSeek V4.1 of the latest snapshot: not its premium
+               ;; edition, its router without a version nor its spot capacity.
+               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-openai" "ai-gateway-misc")
+                "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017 fireworks")
                ;; Then the ProdSec gateway's Haiku, undated.
-               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-anthropic" "ai-gateway-openai"
-                                            "ai-gateway-misc" "fireworks-ai")
+               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-openai" "ai-gateway-misc"
+                                            "fireworks-ai")
                 "prodsec-gateway/claude-haiku-5-5 prodsec")
+               ;; The gateway's Haiku 4.5 alone: current, nothing newer offered.
+               (,(drover-cheap-test-without models "github-copilot" "ai-gateway-openai" "ai-gateway-misc"
+                                            "fireworks-ai" "prodsec-gateway")
+                "ai-gateway-anthropic/claude-haiku-4-5 grove-bedrock")
                ;; Secateur's copies are never chosen: no cheap model.
                (,(drover-cheap-test-without models "github-copilot" "ai-gateway-anthropic" "ai-gateway-openai"
                                             "ai-gateway-misc" "fireworks-ai" "prodsec-gateway")
@@ -234,7 +255,7 @@ settings hold a key; :activation."
     ;; Copilot not signed in is skipped, as is a provider disabled.
     (should (equal (drover-cheap-test-resolve 'mongodb models providers
                                               (drover-cheap-test-signed-out "github-copilot"))
-                   "ai-gateway-anthropic/claude-haiku-4-5 grove-bedrock"))
+                   "ai-gateway-openai/gpt-6-luna grove-bedrock"))
     (should (equal (drover-cheap-test-resolve
                     'mongodb models
                     (mapcar (lambda (provider)
@@ -243,16 +264,17 @@ settings hold a key; :activation."
                                 provider))
                             drover-cheap-test-reaver-providers)
                     integrations)
-                   "ai-gateway-anthropic/claude-haiku-4-5 grove-bedrock"))
-    ;; A provider no class of MongoDB's names is never used there, even its own Haiku.
+                   "ai-gateway-openai/gpt-6-luna grove-bedrock"))
+    ;; A provider no class of MongoDB's names is never used there, even its own
+    ;; Haiku, whose version leaves the others current.
     (should (equal (drover-cheap-test-resolve
                     'mongodb
                     (cons (drover-cheap-test-model "anthropic" "claude-haiku-6" "claude-haiku" "2026-11-01")
-                          (drover-cheap-test-without models "github-copilot"))
+                          (drover-cheap-test-without models "github-copilot" "prodsec-gateway"))
                     (cons (drover-cheap-test-provider "anthropic" :key t) providers)
                     integrations)
                    "ai-gateway-anthropic/claude-haiku-4-5 grove-bedrock"))
-    ;; A provider of the legacy Grove gateway on Azure comes after Bedrock's, before Fireworks.
+    ;; Nor is the legacy Grove gateway on Azure, of no class now.
     (should (equal (drover-cheap-test-resolve
                     'mongodb
                     (cons (drover-cheap-test-model "grove-openai" "gpt-6-luna" "gpt-luna" "2026-09-22")
@@ -260,10 +282,53 @@ settings hold a key; :activation."
                                                      "ai-gateway-openai" "ai-gateway-misc"))
                     (cons (drover-cheap-test-provider "grove-openai" :integration :none :key t) providers)
                     integrations)
-                   "grove-openai/gpt-6-luna grove-azure"))))
+                   "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017 fireworks"))
+    (should-not (assq 'grove-azure drover-cheap-provider-classes))
+    (should-not (memq 'grove-azure (drover-cheap--order 'mongodb)))
+    (should-not (drover-cheap-provider-class "grove-openai" 'api 'mongodb))
+    (should (eq (drover-cheap-provider-class "grove-openai" 'plugin 'personal) 'api))))
+
+(ert-deftest drover-cheap-test-mongodb-chain ()
+  "Reaver tries Copilot's Haiku 5.5, the gateway's Luna 6 and DeepSeek V4.1, then Fireworks'."
+  (should (equal (drover-cheap-test-chain 'mongodb drover-cheap-test-reaver-models drover-cheap-test-reaver-providers
+                                          drover-cheap-test-reaver-integrations)
+                 '("github-copilot/claude-haiku-5.5"
+                   "ai-gateway-openai/gpt-6-luna"
+                   "ai-gateway-misc/fw-deepseek-v4.1-flash"
+                   "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017"
+                   "prodsec-gateway/claude-haiku-5-5"
+                   ;; Outdated, last.
+                   "ai-gateway-anthropic/claude-haiku-4-5")))
+  ;; Every model ranked: the current first, by class, then tier; spot capacity never.
+  (let ((ranked (mapcar (lambda (model) (plist-get model :model))
+                        (drover-cheap-rank drover-cheap-test-reaver-models drover-cheap-test-reaver-providers
+                                           (drover-cheap-integration-auths drover-cheap-test-reaver-integrations)
+                                           'mongodb))))
+    (should (equal (seq-take ranked 9)
+                   '("github-copilot/claude-haiku-5.5"
+                     "github-copilot/gpt-6-luna"
+                     "ai-gateway-openai/gpt-6-luna"
+                     "ai-gateway-misc/fw-deepseek-v4.1-flash"
+                     "ai-gateway-misc/fw-glm-5.3-flash"
+                     "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017"
+                     "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017-priority"
+                     "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash"
+                     "fireworks-ai/accounts/fireworks/models/glm-5p3-flash")))
+    (should (equal (nth 9 ranked) "prodsec-gateway/claude-haiku-5-5"))
+    ;; The outdated after, by class too: Copilot's first, the newer version first.
+    (should (equal (nthcdr 10 ranked)
+                   '("github-copilot/claude-haiku-4.5"
+                     "github-copilot/gpt-5.6-luna"
+                     "ai-gateway-anthropic/claude-haiku-4-5"
+                     "ai-gateway-openai/gpt-5.6-luna"
+                     "ai-gateway-misc/deepseek-v4-flash"
+                     "ai-gateway-misc/deepseek-v4-flash-0731"
+                     "fireworks-ai/accounts/fireworks/routers/deepseek-flash-latest"
+                     "fireworks-ai/accounts/fireworks/routers/glm-flash-latest")))
+    (should-not (seq-some (lambda (id) (string-search "spot" id)) ranked))))
 
 (ert-deftest drover-cheap-test-mongodb-host-described ()
-  "The model chosen tells its provider, family, tier, class, release and variants."
+  "The model chosen tells its provider, family, tier, class, version, release, variants and the models after it."
   (let ((cheap (drover-cheap-resolve drover-cheap-test-reaver-models drover-cheap-test-reaver-providers
                                      (drover-cheap-integration-auths drover-cheap-test-reaver-integrations)
                                      'mongodb)))
@@ -272,12 +337,104 @@ settings hold a key; :activation."
                          :provider-name "github-copilot" :id "claude-haiku-5.5" :name "Claude Haiku 5.5"
                          :family "claude-haiku" :tier 'haiku :class 'github-copilot :auth 'subscription)))
     (should (equal (plist-get cheap :released) (drover-cheap-test-date "2026-10-07")))
-    (should (equal (plist-get cheap :variants) '("low" "medium" "high" "xhigh" "max")))))
+    (should (equal (plist-get cheap :version) "5.5"))
+    (should (plist-member cheap :outdated))
+    (should-not (plist-get cheap :outdated))
+    (should (equal (plist-get cheap :variants) '("low" "medium" "high" "xhigh" "max")))
+    (should (equal (mapcar (lambda (model) (plist-get model :model)) (plist-get cheap :fallbacks))
+                   (cdr (drover-cheap-test-chain 'mongodb drover-cheap-test-reaver-models
+                                                 drover-cheap-test-reaver-providers
+                                                 drover-cheap-test-reaver-integrations))))
+    (let ((last (car (last (plist-get cheap :fallbacks)))))
+      (should (equal (list (plist-get last :model) (plist-get last :version) (plist-get last :outdated))
+                     '("ai-gateway-anthropic/claude-haiku-4-5" "4.5" t)))
+      (should-not (plist-member last :fallbacks)))))
+
+;;;; Versions
+
+(ert-deftest drover-cheap-test-versions ()
+  "A model's identifier tells its version; the newest the usable providers offer is current."
+  (dolist (case '(("claude-haiku-5.5" "claude-haiku" (5 5))
+                  ("claude-haiku-5-5" "claude-haiku" (5 5))
+                  ("claude-haiku-4-5-20251001" "claude-haiku" (4 5))
+                  ("claude-haiku-4-20250101" "claude-haiku" (4))
+                  ("claude-3-5-haiku-20241022" "claude-haiku" (3 5))
+                  ("anthropic.claude-haiku-5-5-v1:0" "claude-haiku" (5 5))
+                  ("gpt-6-luna" "gpt-luna" (6))
+                  ("gpt-5.6-luna" "gpt-luna" (5 6))
+                  ("gpt-6-luna-fast" "gpt-luna" (6))
+                  ("fw-deepseek-v4.1-flash" "deepseek-flash" (4 1))
+                  ("accounts/fireworks/models/deepseek-v4p1-flash-1017" "deepseek-flash" (4 1))
+                  ("deepseek-v4-flash-0731" "deepseek-flash" (4))
+                  ("deepseek-v4.1-flash-free" "deepseek-flash" (4 1))
+                  ("accounts/fireworks/routers/deepseek-flash-latest" "deepseek-flash" nil)
+                  ("accounts/fireworks/models/glm-5p3-flash" "glm-flash" (5 3))
+                  ("fw-glm-5.3-flash" "glm-flash" (5 3))
+                  ("glm-flash-latest" "glm-flash" nil)
+                  ("gemini-3.8-flash" "gemini-flash" nil)))
+    ;; A model of a version is known by its identifier; one of none, by
+    ;; the family its catalog gives it.
+    (let ((model (drover-cheap-test-model "api" (car case) (and (null (nth 2 case)) (nth 1 case)) "2026-09-22")))
+      (should (equal (list (car case) (drover-cheap--family model)
+                           (drover-cheap--version model (drover-cheap--family model)))
+                     case))))
+  (should-not (drover-cheap--family (drover-cheap-test-model "api" "glm-flash-latest" nil "2026-09-22")))
+  ;; Versions compare as numbers: 6 is newer than 5.6, 5.10 than 5.9.
+  (let ((providers (list (drover-cheap-test-provider "api" :key t))))
+    (dolist (case '((("gpt-5.6-luna" "gpt-6-luna") "api/gpt-6-luna")
+                    (("gpt-5.10-luna" "gpt-5.9-luna") "api/gpt-5.10-luna")))
+      (should (equal (plist-get (drover-cheap-resolve
+                                 (mapcar (lambda (id)
+                                           ;; The older dated later, as catalogs may.
+                                           (drover-cheap-test-model "api" id "gpt-luna"
+                                                                    (if (equal id (car (car case)))
+                                                                        "2026-12-01" "2026-01-01")))
+                                         (car case))
+                                 providers nil 'personal)
+                                :model)
+                     (cadr case))))
+    ;; A family of no version told: none outdated, the dates decide.
+    (should (equal (mapcar (lambda (model) (list (plist-get model :model) (plist-get model :outdated)))
+                           (drover-cheap-rank
+                            (list (drover-cheap-test-model "api" "glm-flash-latest" "glm-flash" "2026-08-26")
+                                  (drover-cheap-test-model "api" "glm-flash-turbo" "glm-flash" "2026-09-26"))
+                            providers nil 'personal))
+                   '(("api/glm-flash-turbo" nil) ("api/glm-flash-latest" nil))))
+    ;; Versions come from the identifier alone: whatever its date, the older is outdated.
+    (let ((ranked (drover-cheap-rank
+                   (list (drover-cheap-test-model "api" "claude-haiku-4-5" "claude-haiku" "2026-12-01")
+                         (drover-cheap-test-model "api" "claude-haiku-5-5" "claude-haiku" nil)
+                         (drover-cheap-test-model "api" "gpt-6-luna" "gpt-luna" "2026-09-22"))
+                   providers nil 'personal)))
+      (should (equal (mapcar (lambda (model) (list (plist-get model :model) (plist-get model :outdated))) ranked)
+                     '(("api/claude-haiku-5-5" nil) ("api/gpt-6-luna" nil) ("api/claude-haiku-4-5" t)))))))
+
+(ert-deftest drover-cheap-test-spot-excluded ()
+  "Spot capacity is never chosen, however cheap; other exclusions are options."
+  (let ((providers (list (drover-cheap-test-provider "fireworks-ai" :key t)))
+        (spot (list (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/routers/deepseek-v4p1-flash-spot"
+                                             "deepseek-flash" "2026-09-10" :cost 0.21)
+                    (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot"
+                                             "deepseek-flash" "2026-10-17" :cost 0.21))))
+    (should-not (drover-cheap-resolve spot providers nil 'personal))
+    (should (equal (plist-get (drover-cheap-resolve
+                               (cons (drover-cheap-test-model "fireworks-ai" "accounts/fireworks/models/deepseek-v4p1-flash"
+                                                              "deepseek-flash" "2026-09-10" :cost 0.3)
+                                     spot)
+                               providers nil 'personal)
+                              :model)
+                   "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash"))
+    (let ((drover-cheap-excluded-models nil))
+      (should (equal (plist-get (drover-cheap-resolve spot providers nil 'personal) :model)
+                     "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-1017-spot")))
+    (let ((drover-cheap-excluded-models '("-1017")))
+      (should (equal (plist-get (drover-cheap-resolve spot providers nil 'personal) :model)
+                     "fireworks-ai/accounts/fireworks/routers/deepseek-v4p1-flash-spot")))))
 
 ;;;; A personal host
 
 (ert-deftest drover-cheap-test-personal-host ()
-  "A personal host takes subscriptions first, then MongoDB's relay, then APIs."
+  "A personal host takes the current first, then subscriptions, MongoDB's relay, then APIs."
   (let ((models drover-cheap-test-core-models)
         (providers drover-cheap-test-core-providers)
         (integrations drover-cheap-test-core-integrations))
@@ -291,13 +448,13 @@ settings hold a key; :activation."
                     (cons '((id . "github-copilot") (connections . (((method . "oauth")))))
                           (cdr integrations)))
                    "github-copilot/claude-haiku-5.5 subscription"))
-    ;; No subscription: the relay's newest Haiku, the ProdSec gateway's dated by Copilot's listing.
+    ;; No subscription: the relay's newest Haiku, the ProdSec gateway's.
     (should (equal (drover-cheap-test-resolve 'personal models providers nil)
                    "prodsec-gateway/claude-haiku-5-5 mongodb-ai"))
-    ;; Undated everywhere, it comes after a Haiku dated.
+    ;; Undated everywhere, still the newest: versions decide, not dates.
     (should (equal (drover-cheap-test-resolve 'personal (drover-cheap-test-without models "github-copilot")
                                               providers nil)
-                   "ai-gateway-anthropic/claude-haiku-4-5 mongodb-ai"))
+                   "prodsec-gateway/claude-haiku-5-5 mongodb-ai"))
     ;; No relay: OpenCode's free open-weight flash, the newest family's.
     (should (equal (drover-cheap-test-resolve
                     'personal models
@@ -311,6 +468,18 @@ settings hold a key; :activation."
                  (drover-cheap-test-without models "openai" "opencode" "github-copilot" "ai-gateway-anthropic"
                                             "ai-gateway-openai" "ai-gateway-misc" "prodsec-gateway")
                  providers integrations))))
+
+(ert-deftest drover-cheap-test-personal-chain ()
+  "Core tries ChatGPT's Luna 6, the relay's Haiku 5.5, Luna 6 and DeepSeek V4.1, then OpenCode's."
+  (should (equal (drover-cheap-test-chain 'personal drover-cheap-test-core-models drover-cheap-test-core-providers
+                                          drover-cheap-test-core-integrations)
+                 '("openai/gpt-6-luna"
+                   "prodsec-gateway/claude-haiku-5-5"
+                   "ai-gateway-openai/gpt-6-luna"
+                   "ai-gateway-misc/fw-deepseek-v4.1-flash"
+                   "opencode/deepseek-v4.1-flash-free"
+                   ;; Outdated, last.
+                   "ai-gateway-anthropic/claude-haiku-4-5"))))
 
 (ert-deftest drover-cheap-test-ties-and-exclusions ()
   "Ties of a day go to the edition not premium, the cheaper, the shorter; some models never."
@@ -435,12 +604,12 @@ without the route."
       (drover-cheap--integrations-changed)
       (drover-model-cheap-fetch (lambda (result) (push result results)))
       (should (member '(get "/api/integration" nil) drover-cheap-test-requests))
-      (should (equal (plist-get (car results) :model) "ai-gateway-anthropic/claude-haiku-4-5"))
-      ;; Its models gone too: the catalog changes, the model with it.
-      (setf (alist-get 'model catalogs)
-            (drover-cheap-test-without drover-cheap-test-reaver-models "github-copilot" "ai-gateway-anthropic"))
-      (drover-model-cheap-fetch (lambda (result) (push result results)))
       (should (equal (plist-get (car results) :model) "ai-gateway-openai/gpt-6-luna"))
+      ;; The gateway's Luna gone too: the catalog changes, the model with it.
+      (setf (alist-get 'model catalogs)
+            (drover-cheap-test-without drover-cheap-test-reaver-models "github-copilot" "ai-gateway-openai"))
+      (drover-model-cheap-fetch (lambda (result) (push result results)))
+      (should (equal (plist-get (car results) :model) "ai-gateway-misc/fw-deepseek-v4.1-flash"))
       ;; Nothing cheap left: none, with why.
       (setf (alist-get 'model catalogs) nil)
       (drover-model-cheap-fetch (lambda (result) (push result results)))
@@ -471,6 +640,235 @@ without the route."
         (drover-cheap--integrations-changed)
         (drover-model-cheap-fetch (lambda (result) (push result results)))
         (should (string-search "Boom" (plist-get (car results) :failure)))))))
+
+;;;; Asking it
+
+(defvar drover-cheap-test-asked nil
+  "The generations the stubbed service was asked, (PATH MODEL PROMPT), newest first.")
+
+(defun drover-cheap-test-error (tag status &rest data)
+  "Return the `opencode-error' of a generation, TAG and STATUS, DATA its other fields."
+  (opencode-error--make :status status :tag tag :method 'post :path "/api/experimental/generate/text"
+                        :message (or (plist-get data :message) "failed")
+                        :data (and tag `((_tag . ,tag)
+                                         ,@(cl-loop for (key value) on data by #'cddr
+                                                    collect (cons (intern (substring (symbol-name key) 1)) value))))))
+
+(defmacro drover-cheap-test-with-generation (answer &rest body)
+  "Run BODY with a stubbed service answering generations through ANSWER.
+ANSWER is called with the path and the model reference asked, and
+returns the text the model writes, an `opencode-error', or `hang' for
+no answer yet.  The cheap model is Reaver's, its chain behind it."
+  (declare (indent 1) (debug t))
+  `(let ((drover-cheap-test-asked nil)
+         (drover-cheap--former-path nil)
+         (drover-cheap-attempts 4)
+         (drover-cheap-variant "low"))
+     (cl-letf (((symbol-function 'opencode-service-read-registration)
+                (lambda () (list :url "http://127.0.0.1:1" :password "x" :pid (emacs-pid))))
+               ((symbol-function 'drover-model-cheap-fetch)
+                (lambda (callback)
+                  (funcall callback (drover-cheap-resolve drover-cheap-test-reaver-models
+                                                          drover-cheap-test-reaver-providers
+                                                          (drover-cheap-integration-auths
+                                                           drover-cheap-test-reaver-integrations)
+                                                          'mongodb))))
+               ((symbol-function 'opencode-request)
+                (lambda (method path &rest arguments)
+                  (should (eq method 'post))
+                  (should (plist-member arguments :directory))
+                  (should-not (plist-get arguments :directory))
+                  (let* ((body (plist-get arguments :body))
+                         (model (alist-get 'model body))
+                         (answer (funcall ,answer path model)))
+                    (push (list path (format "%s/%s" (alist-get 'providerID model) (alist-get 'id model))
+                                (alist-get 'prompt body))
+                          drover-cheap-test-asked)
+                    (cond
+                     ((eq answer 'hang))
+                     ((stringp answer) (funcall (plist-get arguments :then) `((data (text . ,answer)))))
+                     (t (funcall (plist-get arguments :else) answer)))))))
+       ,@body)))
+
+(defun drover-cheap-test-asked-models ()
+  "Return the models the stubbed service was asked, in order."
+  (mapcar #'cadr (reverse drover-cheap-test-asked)))
+
+(ert-deftest drover-cheap-test-generate ()
+  "The cheap model answers the prompt, the instructions folded before it, at its variant."
+  (let ((results nil)
+        (bodies nil))
+    (drover-cheap-test-with-generation (lambda (_path model) (push model bodies) "feat: add it")
+      (drover-cheap-generate "Changes:\n+x" "Write a commit message." (lambda (result) (push result results)))
+      (should (equal (car results) '(:text "feat: add it" :model "github-copilot/claude-haiku-5.5"
+                                           :name "Claude Haiku 5.5")))
+      (should (equal (car drover-cheap-test-asked)
+                     '("/api/experimental/generate/text" "github-copilot/claude-haiku-5.5"
+                       "Write a commit message.\n\nChanges:\n+x")))
+      (should (equal (car bodies) '((providerID . "github-copilot") (id . "claude-haiku-5.5") (variant . "low"))))
+      ;; Without instructions, the prompt alone; a model without the variant runs its default.
+      (setq drover-cheap-test-asked nil)
+      (drover-cheap-generate "Summarize" "  " (lambda (result) (push result results)) :variant "minimal")
+      (should (equal (nth 2 (car drover-cheap-test-asked)) "Summarize"))
+      (should (equal (car bodies) '((providerID . "github-copilot") (id . "claude-haiku-5.5"))))
+      ;; A model named is the one asked, at the variant asked.
+      (setq drover-cheap-test-asked nil)
+      (drover-cheap-generate "Summarize" nil (lambda (result) (push result results))
+                             :model "openai/gpt-6-luna" :variant "none")
+      (should (equal (drover-cheap-test-asked-models) '("openai/gpt-6-luna")))
+      (should (equal (car bodies) '((providerID . "openai") (id . "gpt-6-luna") (variant . "none"))))
+      (should (equal (plist-get (car results) :model) "openai/gpt-6-luna"))
+      (setq drover-cheap-test-asked nil)
+      (drover-cheap-generate "Summarize" nil (lambda (result) (push result results)) :model "gpt-6-luna")
+      (should-not drover-cheap-test-asked)
+      (should (string-search "PROVIDER/ID" (plist-get (car results) :failure))))))
+
+(ert-deftest drover-cheap-test-generate-fallback ()
+  "A model unavailable, out of quota or not signed in leaves the next of the chain to answer."
+  (dolist (error (list (drover-cheap-test-error "ProviderRequestError" 502 :reason "rate_limit")
+                       (drover-cheap-test-error "ProviderRequestError" 502 :reason "authentication")
+                       (drover-cheap-test-error "ProviderRequestError" 502 :reason "overloaded")
+                       (drover-cheap-test-error "ProviderRequestError" 502 :reason "provider")
+                       (drover-cheap-test-error "ModelNotFoundError" 404)
+                       (drover-cheap-test-error "ProviderNotFoundError" 404)
+                       (drover-cheap-test-error "UnsupportedModelError" 422)
+                       (drover-cheap-test-error "ServiceUnavailableError" 503)
+                       (drover-cheap-test-error "InvalidRequestError" 400 :field "model")
+                       (drover-cheap-test-error "InvalidRequestError" 400 :field "model.variant")
+                       (drover-cheap-test-error nil 500)
+                       (drover-cheap-test-error nil nil)))
+    (let ((results nil))
+      (drover-cheap-test-with-generation
+          (lambda (_path model) (if (equal (alist-get 'providerID model) "github-copilot") error "feat: add it"))
+        (drover-cheap-generate "Changes" nil (lambda (result) (push result results)))
+        (should (equal (list (opencode-error-tag error) (drover-cheap-test-asked-models))
+                       (list (opencode-error-tag error)
+                             '("github-copilot/claude-haiku-5.5" "ai-gateway-openai/gpt-6-luna"))))
+        (should (equal results '((:text "feat: add it" :model "ai-gateway-openai/gpt-6-luna" :name "gpt-6-luna"))))))))
+
+(ert-deftest drover-cheap-test-generate-no-fallback ()
+  "What any model would fail alike is told at once, no other model asked."
+  (dolist (error (list (drover-cheap-test-error "ProviderRequestError" 502 :reason "content_filter"
+                                                :message "Refused by the content filter")
+                       (drover-cheap-test-error "ProviderRequestError" 502 :reason "invalid_request")
+                       (drover-cheap-test-error "InvalidRequestError" 400)
+                       (drover-cheap-test-error "InvalidRequestError" 400 :field "prompt")
+                       (drover-cheap-test-error "LocationNotFoundError" 404)
+                       (drover-cheap-test-error nil 401)
+                       (drover-cheap-test-error nil 400)))
+    (let ((results nil))
+      (drover-cheap-test-with-generation (lambda (_path _model) error)
+        (drover-cheap-generate "Changes" nil (lambda (result) (push result results)))
+        (should (equal (list (opencode-error-status error) (opencode-error-tag error) (drover-cheap-test-asked-models))
+                       (list (opencode-error-status error) (opencode-error-tag error)
+                             '("github-copilot/claude-haiku-5.5"))))
+        (should (= (length results) 1))
+        (should (string-prefix-p "github-copilot/claude-haiku-5.5: POST" (plist-get (car results) :failure))))))
+  ;; A model answering nothing is a failure too, the next not asked.
+  (let ((results nil))
+    (drover-cheap-test-with-generation (lambda (_path _model) "  ")
+      (drover-cheap-generate "Changes" nil (lambda (result) (push result results)))
+      (should (= (length drover-cheap-test-asked) 1))
+      (should (string-search "no text" (plist-get (car results) :failure))))))
+
+(ert-deftest drover-cheap-test-generate-bounded ()
+  "No more models are asked than `drover-cheap-attempts'; every failure is told."
+  (let ((results nil))
+    (drover-cheap-test-with-generation
+        (lambda (_path model)
+          (drover-cheap-test-error "ProviderRequestError" 502 :reason "rate_limit"
+                                   :message (format "Quota of %s exceeded" (alist-get 'providerID model))))
+      (drover-cheap-generate "Changes" nil (lambda (result) (push result results)))
+      (should (equal (drover-cheap-test-asked-models)
+                     '("github-copilot/claude-haiku-5.5" "ai-gateway-openai/gpt-6-luna"
+                       "ai-gateway-misc/fw-deepseek-v4.1-flash"
+                       "fireworks-ai/accounts/fireworks/models/deepseek-v4p1-flash-1017")))
+      (should (= (length results) 1))
+      (let ((failure (plist-get (car results) :failure)))
+        (should (string-search "Quota of github-copilot exceeded" failure))
+        (should (string-search "Quota of fireworks-ai exceeded" failure))
+        (should-not (string-search "prodsec" failure)))
+      (setq drover-cheap-test-asked nil results nil)
+      (drover-cheap-generate "Changes" nil (lambda (result) (push result results)) :attempts 2)
+      (should (= (length drover-cheap-test-asked) 2))
+      ;; The whole chain, when asked to.
+      (setq drover-cheap-test-asked nil results nil)
+      (drover-cheap-generate "Changes" nil (lambda (result) (push result results)) :attempts 10)
+      (should (= (length drover-cheap-test-asked) 6))
+      ;; A model named is the only one asked.
+      (setq drover-cheap-test-asked nil results nil)
+      (drover-cheap-generate "Changes" nil (lambda (result) (push result results)) :model "openai/gpt-6-luna")
+      (should (= (length drover-cheap-test-asked) 1)))))
+
+(ert-deftest drover-cheap-test-generate-former-path ()
+  "A service knowing generation by its former path alone is asked there; its invalid request is a model's."
+  (let ((results nil))
+    (drover-cheap-test-with-generation
+        (lambda (path model)
+          (cond
+           ((equal path "/api/experimental/generate/text")
+            (opencode-error--make :status 404 :method 'post :path path :message "Not Found"))
+           ;; Before 2.2, a model the service cannot select is an invalid request, untold.
+           ((equal (alist-get 'providerID model) "github-copilot")
+            (opencode-error--make :status 400 :tag "InvalidRequestError" :method 'post :path path
+                                  :message "Model unavailable" :data '((_tag . "InvalidRequestError"))))
+           (t "Done: it works")))
+      (drover-cheap-generate "Summarize" nil (lambda (result) (push result results)))
+      (should (equal (mapcar (lambda (asked) (list (car asked) (cadr asked))) (reverse drover-cheap-test-asked))
+                     '(("/api/experimental/generate/text" "github-copilot/claude-haiku-5.5")
+                       ("/api/experimental/generate" "github-copilot/claude-haiku-5.5")
+                       ("/api/experimental/generate" "ai-gateway-openai/gpt-6-luna"))))
+      (should (equal (plist-get (car results) :text) "Done: it works"))
+      (should drover-cheap--former-path))))
+
+(ert-deftest drover-cheap-test-generate-without-error-data ()
+  "Without the object of an error, a provider's error is taken for one of availability."
+  (let ((results nil))
+    (drover-cheap-test-with-generation
+        (lambda (_path model)
+          (if (equal (alist-get 'providerID model) "github-copilot")
+              (drover-cheap-test-error "ProviderRequestError" 502 :reason "content_filter")
+            "feat: add it"))
+      (cl-letf (((symbol-function 'opencode-error-data) nil))
+        (should-not (fboundp 'opencode-error-data))
+        (drover-cheap-generate "Changes" nil (lambda (result) (push result results)))
+        (should (= (length drover-cheap-test-asked) 2))
+        ;; An invalid request tells no field then: the request's, but before 2.2.
+        (should-not (drover-cheap-fallback-p (drover-cheap-test-error "InvalidRequestError" 400 :field "model")))
+        (let ((drover-cheap--former-path t))
+          (should (drover-cheap-fallback-p (drover-cheap-test-error "InvalidRequestError" 400)))))
+      (should (equal (plist-get (car results) :model) "ai-gateway-openai/gpt-6-luna")))))
+
+(ert-deftest drover-cheap-test-generate-cancel-and-failures ()
+  "A request cancelled calls back never and asks no other model; failures to begin are told."
+  (let ((results nil)
+        (else nil))
+    (drover-cheap-test-with-generation (lambda (_path _model) 'hang)
+      (cl-letf* ((request (symbol-function 'opencode-request))
+                 ((symbol-function 'opencode-request)
+                  (lambda (method path &rest arguments)
+                    (setq else (plist-get arguments :else))
+                    (apply request method path arguments))))
+        (let ((cancel (drover-cheap-generate "Changes" nil (lambda (result) (push result results)))))
+          (should (functionp cancel))
+          (funcall cancel)
+          (funcall else (drover-cheap-test-error "ProviderRequestError" 502 :reason "rate_limit"))
+          (should (= (length drover-cheap-test-asked) 1))
+          (should-not results)))
+      ;; A service not running is never asked, nor started.
+      (setq drover-cheap-test-asked nil)
+      (cl-letf (((symbol-function 'opencode-service-read-registration) (lambda () nil)))
+        (drover-cheap-generate "Changes" nil (lambda (result) (push result results))))
+      (should-not drover-cheap-test-asked)
+      (should (equal results '((:failure "OpenCode's service does not run"))))
+      ;; No cheap model: said so, nothing asked; the catalogs unread: told.
+      (dolist (case '(((:none "no provider offers one") (:failure "no cheap model, no provider offers one" :none t))
+                      ((:failure "Boom") (:failure "Boom"))))
+        (setq results nil)
+        (cl-letf (((symbol-function 'drover-model-cheap-fetch) (lambda (callback) (funcall callback (car case)))))
+          (drover-cheap-generate "Changes" nil (lambda (result) (push result results))))
+        (should-not drover-cheap-test-asked)
+        (should (equal results (cdr case)))))))
 
 (provide 'drover-cheap-test)
 ;;; drover-cheap-test.el ends here
