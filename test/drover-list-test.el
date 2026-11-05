@@ -2480,7 +2480,7 @@ Of their keys, only g is a session key, and it refreshes either way."
                           (should (eq theirs #'revert-buffer))
                         (should-not (commandp theirs)))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.
@@ -6667,8 +6667,8 @@ The old menu took 24 lines at any width, its View menu apart."
           (oset transient--prefix plan wide)
           (execute-kbd-macro (kbd "= u"))
           (should (equal (oref transient--prefix plan) wide))
-          ;; As high as the highest group: a title and seven entries.
-          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 8))
+          ;; As high as the highest group: a title and eight entries.
+          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 9))
           ;; Narrower than it, the menu is laid out anew.
           (setq width 160)
           (execute-kbd-macro (kbd "= u"))

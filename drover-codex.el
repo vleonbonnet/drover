@@ -37,6 +37,9 @@
 (require 'subr-x)
 (require 'drover-core)
 (require 'drover-model)
+(require 'drover-transcript)
+
+(declare-function drover-codex-rollouts--file "drover-codex-rollouts" (id))
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 1))
@@ -333,6 +336,167 @@ the one Codex reported last.  Only the end of FILE is read."
                      (nreverse merged))
           :error (and (stringp error) error))))
 
+;;;; Changes
+
+(defconst drover-codex--turn-tail (* 8 1024 1024)
+  "Bytes at the end of a rollout looked at first for the last turn's changes.
+Past them, the whole rollout is read, the newest prompt being further
+back.")
+
+(defun drover-codex--patch-edits (patch)
+  "Return the edits PATCH, in Codex's apply_patch format, makes.
+A list of (FILE STATUS PATCH), in its order, as
+`drover-transcript-changes' takes them: an update's hunks keep the
+lines of context Codex placed them by, in their headers, with no line
+numbers, which the patch does not tell; a file added has its lines; a
+file deleted no patch, its lines unknown."
+  (let ((edits nil)
+        (current nil))
+    (cl-flet ((close ()
+                (when current
+                  (pcase-let ((`(,file ,status ,kind ,lines) current))
+                    (let ((lines (nreverse lines)))
+                      (push (list file status
+                                  (pcase kind
+                                    ('add (drover-transcript-hunk 0 0 1 (length lines) lines))
+                                    ('delete "")
+                                    (_ (mapconcat (lambda (line) (concat line "\n")) lines ""))))
+                            edits)))
+                  (setq current nil))))
+      (dolist (line (split-string patch "\n"))
+        (cond ((string-match "\\`\\*\\*\\* \\(Add\\|Update\\|Delete\\) File: \\(.+\\)\\'" line)
+               (close)
+               (let ((kind (intern (downcase (match-string 1 line)))))
+                 (setq current (list (string-trim (match-string 2 line))
+                                     (pcase kind ('add 'added) ('delete 'deleted) (_ 'modified))
+                                     kind nil))))
+              ((not current))
+              ((string-match "\\`\\*\\*\\* Move to: \\(.+\\)\\'" line)
+               (setf (nth 1 current) (cons 'renamed (car current))
+                     (nth 0 current) (string-trim (match-string 1 line))))
+              ((string-prefix-p "***" line)
+               (unless (string-prefix-p "*** End of File" line)
+                 (close)))
+              ((string-prefix-p "@@" line)
+               (push line (nth 3 current)))
+              ((and (string-match-p "\\`[-+ ]" line))
+               (unless (or (eq (nth 2 current) 'add) (nth 3 current))
+                 ;; Lines before any header begin a hunk of their own.
+                 (push "@@" (nth 3 current)))
+               (push line (nth 3 current)))))
+      (close))
+    (nreverse edits)))
+
+(defun drover-codex--file-changes (changes)
+  "Return the edits CHANGES, a map of files to what Codex did to each, made.
+As Codex records a patch applied: an alist of file names, as symbols,
+to objects of `type' add, with the `content' added, delete, with the
+`content' deleted, or update, with its `unified_diff' and the
+`move_path' a file moved to.  A list of (FILE STATUS PATCH)."
+  (let ((edits nil))
+    (pcase-dolist (`(,file . ,change) (and (listp changes) changes))
+      (let ((file (if (symbolp file) (symbol-name file) file)))
+        (when (and (stringp file) (drover-json-object-p change))
+          (let-alist change
+            (pcase .type
+              ("add" (push (list file 'added (drover-transcript-whole-hunk (if (stringp .content) .content "") t))
+                           edits))
+              ("delete" (push (list file 'deleted
+                                    (drover-transcript-whole-hunk (if (stringp .content) .content "") nil))
+                              edits))
+              ("update"
+               (let ((patch (if (stringp .unified_diff) .unified_diff "")))
+                 ;; Headers before the first hunk name the file again.
+                 (when-let* ((start (string-match "^@@" patch)))
+                   (setq patch (substring patch start)))
+                 (push (if (and (stringp .move_path) (not (string-empty-p .move_path)))
+                           (list .move_path (cons 'renamed file) patch)
+                         (list file 'modified patch))
+                       edits))))))))
+    (nreverse edits)))
+
+(defun drover-codex--record-edits (record)
+  "Return (KIND ID EDITS) of the patch rollout RECORD tells of, or nil.
+KIND is `raw' for the apply_patch call, its input parsed, ID its call's;
+`applied' for what Codex recorded it applied, a patch_apply_end event
+or a file change completed, ID the call's too: those win over the call
+they tell of, telling line numbers.  A patch that failed or was
+declined changed nothing."
+  (let ((payload (alist-get 'payload record)))
+    (when (drover-json-object-p payload)
+      (pcase (list (alist-get 'type record) (alist-get 'type payload))
+        (`("response_item" ,(or "custom_tool_call" "function_call"))
+         (when-let* (((drover-codex--changes record))
+                     (input (or (alist-get 'input payload)
+                                (let ((arguments (alist-get 'arguments payload)))
+                                  (and (stringp arguments)
+                                       (let ((parsed (ignore-errors
+                                                       (json-parse-string arguments :object-type 'alist))))
+                                         (or (and (consp parsed) (alist-get 'input parsed)) arguments))))))
+                     ((stringp input)))
+           (list 'raw (alist-get 'call_id payload) (drover-codex--patch-edits input))))
+        (`("event_msg" "patch_apply_end")
+         (list 'applied (alist-get 'call_id payload)
+               (and (alist-get 'success payload)
+                    (member (or (alist-get 'status payload) "completed") '("completed"))
+                    (drover-codex--file-changes (alist-get 'changes payload)))))
+        (`("event_msg" "item_completed")
+         (let ((item (alist-get 'item payload)))
+           (when (and (drover-json-object-p item) (equal (alist-get 'type item) "FileChange"))
+             (list 'applied (alist-get 'id item)
+                   (and (member (or (alist-get 'status item) "completed") '("completed"))
+                        (drover-codex--file-changes (alist-get 'changes item)))))))))))
+
+(defun drover-codex-changes (id scope directory callback)
+  "Find the files Codex conversation ID changed, and call CALLBACK with them.
+SCOPE is `turn', the changes since its newest prompt, or `session',
+every change; DIRECTORY is where it ran.  They are the patches it
+applied, as its rollout recorded them (see
+`drover-codex--record-edits'), gathered by file (see
+`drover-transcript-changes').  The rollout is read in slices, and
+CALLBACK called once, later, with (:files FILES :notes NOTES), or
+\(:failure MESSAGE).  The engine's :changes."
+  (let* ((file (or (and (fboundp 'drover-codex-rollouts--file) (drover-codex-rollouts--file id))
+                   (drover-codex-rollout-file id)))
+         (size (and file (file-attribute-size (file-attributes file)))))
+    (if (not size)
+        (funcall callback (list :failure "No rollout of this conversation"))
+      (cl-labels
+          ((scan (from)
+             (let ((prompt nil)
+                   (patches nil))
+               (drover-transcript-read-lines
+                (list (cons file (or from 0)))
+                '("\"apply_patch\"" "\"patch_apply_end\"" "\"FileChange\"" "\"user_message\"" "\"role\":\"user\"")
+                (lambda (_file record)
+                  (if (drover-codex-prompt record)
+                      (progn (setq prompt t)
+                             (when (eq scope 'turn)
+                               (setq patches nil)))
+                    (when-let* ((patch (drover-codex--record-edits record)))
+                      (push patch patches))))
+                (lambda (failure)
+                  (cond
+                   ((and failure (null patches))
+                    (funcall callback (list :failure failure)))
+                   ((and (eq scope 'turn) (not prompt) from)
+                    ;; The newest prompt is further back.
+                    (scan nil))
+                   (t
+                    (let* ((patches (nreverse patches))
+                           (applied (delq nil (mapcar (lambda (patch)
+                                                        (and (eq (car patch) 'applied) (nth 1 patch)))
+                                                      patches)))
+                           (edits (mapcan (lambda (patch)
+                                            (unless (and (eq (car patch) 'raw) (nth 1 patch)
+                                                         (member (nth 1 patch) applied))
+                                              (copy-sequence (nth 2 patch))))
+                                          patches)))
+                      (funcall callback (list :files (drover-transcript-changes edits directory)
+                                              :notes (and failure (list failure))))))))))))
+        (scan (and (eq scope 'turn) (> size drover-codex--turn-tail)
+                   (- size drover-codex--turn-tail)))))))
+
 ;;;; Where conversations ran
 
 (defconst drover-codex--meta-limit 1048576
@@ -437,6 +601,7 @@ arrived.  THEN gets ID, ELSE why it could not.  The engine's :import."
                           :resolve #'drover-codex--resolve
                           :last-used #'drover-codex--last-used
                           :directory #'drover-codex--directory
+                          :changes #'drover-codex-changes
                           :export #'drover-codex--export
                           :import #'drover-codex--import
                           :record-directory #'drover-codex--record-directory))

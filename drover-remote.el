@@ -74,6 +74,7 @@
 (defvar spyglass-instance-id)
 (defvar spyglass-remote-registration-file)
 (declare-function spyglass-server "ext:spyglass-conn" ())
+(declare-function drover-review-fetch "drover-review" (session scope callback))
 (declare-function spyglass-server-start "ext:spyglass-conn" (&rest arguments))
 (declare-function spyglass-server-stop "ext:spyglass-conn" ())
 (declare-function spyglass-connect "ext:spyglass-conn" (transport &rest arguments))
@@ -272,7 +273,8 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone")
+(defconst drover-remote-capabilities
+  '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -287,7 +289,8 @@ as it closed, as archiving closes it, for the peer's kill ring;
 \"search\": it searches what was said in its sessions for its peers,
 with its own backends, sending the matches as they come; \"clone\": it
 exports its conversations for its peers to clone, and takes clones of
-theirs from peers of full access.")
+theirs from peers of full access; \"review\": it tells the changes its
+sessions made, as `drover-review' shows them, for its peers to review.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1852,6 +1855,120 @@ it, here, where they are: the peer names them as received."
                                                                      (or (drover-remote--number (nth 2 change)) :false))))
                                                       (and (listp changes) (seq-take changes 100))))))))
     out))
+
+;;;; Reviews
+
+(defconst drover-remote--review-limit (* 2 1024 1024)
+  "Characters of patches a review sent to a peer holds at most.")
+
+(defconst drover-remote--review-timeout 120
+  "Seconds a peer's review of a session waits for the owner's answer.
+The owner may read a long conversation whole first.")
+
+(defun drover-remote--review-older (label)
+  "Return why the peer LABEL names tells no changes: it runs an older drover."
+  (format "%s runs an older drover, which tells no changes: update it there" label))
+
+(defun drover-remote--review (peer session scope callback)
+  "Fetch the changes SESSION made in SCOPE through PEER, for CALLBACK.
+CALLBACK gets them as `drover-review-fetch' tells them, the owner
+computing them with its own backends; a peer running an older drover
+tells none, which the failure says."
+  (let ((label (drover-remote--label peer)))
+    (if (and (drover-remote--peer-caps peer) (not (drover-remote--capable-p peer "review")))
+        (funcall callback (list :failure (drover-remote--review-older label)))
+      (drover-remote--request
+       peer (list :op "review" :key (drover-remote--wire-key session) :scope (symbol-name scope))
+       (lambda (reply error)
+         (let ((review (and (null error) (plist-get reply :review))))
+           (funcall callback
+                    (cond ((and (consp review) (keywordp (car review)))
+                           (drover-remote--decode-review review))
+                          ((and error (string-match-p "unknown request" error))
+                           (list :failure (drover-remote--review-older label)))
+                          (t (list :failure (or error (format "%s told no changes" label))))))))
+       (+ (float-time) drover-remote--review-timeout)))))
+
+(defun drover-remote--encode-review (review)
+  "Return REVIEW, as `drover-review-fetch' tells it, as it travels.
+Its patches are cut past `drover-remote--review-limit' characters, the
+files after showing their counts, which a note tells."
+  (if-let* ((failure (plist-get review :failure)))
+      (list :failure (drover-remote--plain failure))
+    (let ((room drover-remote--review-limit)
+          (cut nil))
+      (list :files (vconcat
+                    (mapcar (lambda (file)
+                              (let ((patch (plist-get file :patch)))
+                                (when (and patch (> (length patch) room))
+                                  (setq cut (or cut (plist-get file :file)) patch nil room 0))
+                                (when patch (setq room (- room (length patch))))
+                                (vector (drover-remote--plain (plist-get file :file))
+                                        (or (drover-remote--plain (plist-get file :from)) :false)
+                                        (symbol-name (plist-get file :status))
+                                        (or (drover-remote--number (plist-get file :additions)) :false)
+                                        (or (drover-remote--number (plist-get file :deletions)) :false)
+                                        (if (plist-get file :binary) t :false)
+                                        (or (drover-remote--plain patch) :false))))
+                            (plist-get review :files)))
+            :base (or (drover-remote--plain (plist-get review :base)) :false)
+            :how (or (drover-remote--plain (plist-get review :how)) :false)
+            :commits (vconcat (mapcar (lambda (commit) (vector (car commit) (cdr commit)))
+                                      (plist-get review :commits)))
+            :notes (vconcat (append (plist-get review :notes)
+                                    (and cut (list (format "The diff sent is cut past %d MB: from %s on, files show their counts alone"
+                                                           (/ drover-remote--review-limit 1024 1024) cut)))))))))
+
+(defun drover-remote--decode-review (review)
+  "Return REVIEW, as received, as `drover-review-fetch' tells one.
+Every value is checked and bounded: names and notes to lines, patches
+to `drover-remote--review-limit' characters in all, files, notes and
+commits in number."
+  (if-let* ((failure (plist-get review :failure)))
+      (list :failure (or (drover-remote--line failure) "failed"))
+    (let ((room drover-remote--review-limit)
+          (files nil))
+      (seq-doseq (file (seq-take (let ((files (plist-get review :files))) (and (vectorp files) files)) 2000))
+        (when (and (vectorp file) (= (length file) 7) (stringp (aref file 0)))
+          (let ((patch (and (stringp (aref file 6)) (aref file 6))))
+            (when (and patch (> (length patch) room))
+              (setq patch nil room 0))
+            (when patch (setq room (- room (length patch))))
+            (push (list :file (drover-remote--line (aref file 0) 1024)
+                        :from (drover-remote--line (aref file 1) 1024)
+                        :status (cdr (assoc (aref file 2) '(("added" . added) ("deleted" . deleted)
+                                                            ("modified" . modified) ("renamed" . renamed))))
+                        :additions (drover-remote--count (aref file 3))
+                        :deletions (drover-remote--count (aref file 4))
+                        :binary (eq (aref file 5) t)
+                        :patch patch)
+                  files))))
+      (list :files (seq-filter (lambda (file) (plist-get file :file)) (nreverse files))
+            :base (drover-remote--line (plist-get review :base) 64)
+            :how (drover-remote--line (plist-get review :how))
+            :commits (delq nil (mapcar (lambda (commit)
+                                         (and (vectorp commit) (= (length commit) 2)
+                                              (stringp (aref commit 0)) (stringp (aref commit 1))
+                                              (cons (drover-remote--line (aref commit 0) 64)
+                                                    (or (drover-remote--line (aref commit 1)) ""))))
+                                       (seq-take (let ((commits (plist-get review :commits)))
+                                                   (and (vectorp commits) commits))
+                                                 100)))
+            :notes (delq nil (mapcar #'drover-remote--line
+                                     (seq-take (let ((notes (plist-get review :notes)))
+                                                 (and (vectorp notes) notes))
+                                               10)))))))
+
+(defun drover-remote--on-review (served message reply)
+  "Tell the changes the session SERVED made, as MESSAGE asks, through REPLY."
+  (let ((scope (cdr (assoc (plist-get message :scope) '(("turn" . turn) ("session" . session) ("tree" . tree))))))
+    (cond ((not served) (funcall reply nil "no such session here"))
+          ((not scope) (funcall reply nil "unknown scope"))
+          (t
+           (require 'drover-review)
+           (drover-review-fetch (car served) scope
+                                (lambda (review)
+                                  (funcall reply (list :review (drover-remote--encode-review review)))))))))
 
 (defun drover-remote--preview (peer session callback)
   "Fetch where SESSION stands through PEER, and call CALLBACK with it or nil."
@@ -4194,6 +4311,7 @@ as an older drover's farewells do."
                (funcall reply nil "unknown kind")
              (funcall reply (list :ok t))
              (drover-remote--serve-fetch connection kind (plist-get message :gen)))))
+        ("review" (drover-remote--on-review served message reply))
         ("preview"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -4255,6 +4373,11 @@ as an older drover's farewells do."
                 (if-let* ((peer (drover-remote--peer name)))
                     (drover-remote--preview peer session callback)
                   (funcall callback nil)))
+     ;; The changes of a session, computed by its owner.
+     :review (lambda (session scope callback)
+               (if-let* ((peer (drover-remote--peer name)))
+                   (drover-remote--review peer session scope callback)
+                 (funcall callback (list :failure (format "%s is not a peer" name)))))
      :history (lambda (callback)
                 (when-let* ((peer (drover-remote--peer name)))
                   (drover-remote--fetch peer "history" callback)))

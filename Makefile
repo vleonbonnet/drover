@@ -41,7 +41,7 @@ TESTS = $(wildcard test/*-test.el)
 FILE ?=
 SELECTOR ?=
 
-.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote real-data
+.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review real-data
 
 all: compile test
 
@@ -200,6 +200,12 @@ bench-bulk:
 bench-search:
 	@$(MAKE) --no-print-directory bench \
 	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-search-bench.el --eval '(drover-search-bench-run)'"
+
+# Times the review of large diffs: 5000 lines changed in one file and
+# in 100, 50,000 in 200, with comments to place.  See
+# test/drover-review-bench.el.
+bench-review: compile
+	$(BATCH) -l test/drover-test-helpers.el -l test/drover-review-bench.el -f drover-review-bench-main
 
 # Measures what drover costs in a graphical Emacs while nothing happens,
 # while a session streams, and once Emacs lost focus: processor time,

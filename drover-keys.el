@@ -93,6 +93,8 @@
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 (autoload 'drover-schedule-list "drover-schedule" nil t)
 (autoload 'drover-search "drover-search" nil t)
+(autoload 'drover-review "drover-review" nil t)
+(autoload 'drover-reviewable-p "drover-review")
 
 (defvar drover-prompt-mode)
 
@@ -580,6 +582,7 @@ other lists."
   "g" #'drover-refresh
   "+" #'drover-new-session
   "v" #'drover-peek
+  "R" #'drover-review
   "V" #'drover-view)
 
 (define-minor-mode drover-session-keys-mode
@@ -2064,6 +2067,8 @@ session chosen for it, else to one asked for, unshown."
      :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
     ("v" "Peek" drover-peek
      :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
+    ("R" "Review changes" drover-review
+     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
     ("A" "Answer" drover-respond
      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
     ("K" "Interrupt" drover-interrupt

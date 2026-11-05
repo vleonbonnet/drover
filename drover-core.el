@@ -1694,6 +1694,11 @@ PROPERTIES is a plist of:
              its last turn, and calling CALLBACK once with it, possibly
              before returning; it must never wait.  See `drover-recap'
              for the recap.
+ :review     Function of a session, a SCOPE and a CALLBACK fetching the
+             changes the session made, for a backend whose sessions
+             run elsewhere, as another host's: drover finds those of
+             the others itself, from their engines and Git.  See
+             `drover-review-fetch' for SCOPE and the changes.
  :supports   Function of a session and an OPERATION, a keyword the
              backend implements, returning nil when OPERATION does not
              apply to that session, such as :fork for a session whose
