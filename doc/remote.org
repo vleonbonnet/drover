@@ -1,7 +1,7 @@
 #+TITLE: drover across hosts: design
 #+OPTIONS: toc:nil
 
-A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][the fourth]]), the search of what was said in a peer's sessions (see [[*Searching what was said there, as built][after]]) and clones (see [[*Clones, as built][last]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
+A design, accepted, its first four milestones built (see [[*The first milestone, as built][below]], [[*The second milestone, as built][after]], [[*The third milestone, as built][after that]] and [[*The fourth milestone, as built][the fourth]]), the search of what was said in a peer's sessions (see [[*Searching what was said there, as built][after]]), clones (see [[*Clones, as built][Clones, as built]]) and new sessions on another host (see [[*New sessions on other hosts, as built][last]]): drover on one machine lists, opens and acts on the sessions of drover on the others, each host the authority over the sessions it runs.  It builds on spyglass for connections and live buffers, and on a version of opencode.el talking to several OpenCode services at once.
 
 * What was decided
 
@@ -127,7 +127,7 @@ The viewer never changes a remote record itself: an action is a request, its out
 | =rename=                            | the backend's, with the title read here                                                                                           |                                                                                       |
 | =fork=                              | the backend's, its buffer kept off the owner's windows                                                                            | the viewer then opens the fork; forking here is a clone (see [[*Clone or fork here][Clone or fork here]])      |
 | =send=                              | =:check= skipped, then =:apply-options= and =:send=                                                                               | from =*drover*= to a remote target; =:check= asks the user, which only the viewer can |
-| =create=                            | =:create= in a directory of the owner's, with the start options                                                                   | a later milestone: the prompt's new-session targets gain each peer's engines          |
+| =create=                            | =:create= in a directory of the owner's, with the start options                                                                   | built as =new=: see [[*New sessions on other hosts, as built][New sessions on other hosts]]                    |
 | =schedule=, =unschedule=, =retry=   | the queue's own functions                                                                                                         |                                                                                       |
 | =seen=                              | a mirror shown in a selected window is a session viewed, sent at most once a second                                               | the owner's notion of unseen turns follows the user wherever they look                |
 
@@ -286,7 +286,7 @@ Each is useful alone, and lands with its tests, =make compile=, =make lint= and 
 | 4 | opencode.el's services (built)          | in opencode.el, each step keeping the local service as today: (a) the service object and requests; (b) a stream per service; (c) a registry per service with its policy; (d) catalogs and directories per service; (e) buffers per service, files off for remote ones  |
 | 5 | Remote OpenCode buffers (built, with 4) | the owner relaying its service instead of forwards and =svc=, services registered from peers, full buffers mapped to remote records; not the owner's Emacs down (see the fourth milestone)                                                                             |
 | 6 | Clones (built)                          | OpenCode, Claude Code and Codex conversations cloned here, directories mapped                                                                                                                                                                                          |
-| 7 | New sessions elsewhere                  | the prompt's targets on peers: their engines, models and defaults over the protocol, =create=                                                                                                                                                                          |
+| 7 | New sessions elsewhere (built)          | the prompt's targets on peers: their engines, models and defaults over the protocol, =create=                                                                                                                                                                          |
 | 8 | The gateway                             | a first gateway and a phone client reading sessions and needing-you notifications                                                                                                                                                                                      |
 
 Spyglass and the remote layer are optional: =drover-remote.el= requires spyglass only as it activates, declaring what it uses, as the backends of optional front ends do, so that =make compile='s standalone check holds.
@@ -710,3 +710,75 @@ Toward Core it is spyglass's pacing that bounds it: a stream to Emacs on Windows
 
 Two batch Emacs, the agent's Claude Code and Codex homes throwaway, and its fake OpenCode service, which exports and imports as the fork's routes do; this host's homes throwaway, and a fake service of its own for OpenCode: a Claude Code conversation of the agent cloned here, its transcript and subagents where the CLI resumes them, its =cwd= rewritten and nothing else changed, its origin noted, resumed through =drover-links-open=, the agent's export dropped, a second clone refused; this host's conversation cloned to the agent granting =full= access, there where the CLI resumes it, listed there and opened here through it, its origin noted there; refused by an agent granting =act=, whatever this host asks; a Codex rollout cloned here, among this host's under its day, its directory rewritten; an OpenCode session cloned into this host's service, under the directory the peer's table maps, its messages all, not twice; a clone whose link drops fails, its staged files removed.  Alone: the rewrite, a piece at every cut and a byte a piece; the directories mapped, by the table, by the home, nothing outside it; descriptions of clones with hostile names and sizes; a file of records to its last whole record and the =cwd= it writes; an OpenCode export made an import as it is, or parsed when shaped otherwise.
 
+* New sessions on other hosts, as built
+
+The seventh milestone: the prompt starts a session on another host as it starts one here.  Its target picker offers, after this host's new sessions, a new session of each harness each connected peer starts for this host, =[New OpenCode session on Core…]=, =[New Claude Code IDE session on Core…]=, =[New agent-shell session (Codex) on Core…]=; choosing one asks for the directory there, the prompt's directory mapped (below), and the peer starts the session through its own backend, in no window, hands it the prompt and answers its key; the prompt then leaves =*drover*= and the session opens here once the peer's records list it: an OpenCode session in its full =*OpenCode@core: Title*= buffer through the relay, a terminal or a shell mirrored, live.  It does not start, the peer refusing, failing or going away: one line says why, and the prompt stays in =*drover*=, with the host and directory chosen, for another try.
+
+** Keys
+
+| Where                     | What                                                                                                                                                                                                                                                 |
+|---------------------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| the target picker         | =[New HARNESS session on HOST…]=, after this host's new sessions, for each harness HOST starts; its annotation tells what it runs and the directory there, =Core: C:/Users/val/src/=; a model chosen that HOST runs nowhere hides its entries |
+| =d= in the prompt's menus | with =C-u=, the host first, this one or a peer, then a directory there; without, a directory of the host chosen, if any                                                                                                                          |
+| =a=, =m=, =e=             | the agents, models and efforts that host tells, of the engines it starts, in the directory there                                                                                                                                              |
+| the header                | =cwd [Core: C:/Users/val/src/]=, and the agent, model and effort a session there runs, as that host resolves them                                                                                                                                  |
+| =C-u += (=drover-new-session=) | the host first, the session at point's first; on a peer, a harness it starts and a directory there, then a session started without a prompt, opened here                                                                                    |
+
+The prompt's buffer keeps its own =default-directory=, this host's, for its links and attachments: the host's directory is =drover-prompt-host-directory=, beside =drover-prompt-host=; clearing the prompt keeps both, as a directory chosen stays, and a prompt begun anew (=drover-prompt--reset=) forgets them.  The prompt's code reaches the remote layer only through =drover-prompt-remote-functions=, which =drover-remote-mode= sets, so that it loads without it.
+
+** Directories there
+
+The directory there defaults to this host's =:directories= of that peer, =(THEIRS . OURS)=, read backwards (a directory under OURS goes under THEIRS), else what the peer maps it to with its own =:directories= for this host, as for clones, else the same directory under its home as under this host's, else its home.  It is read with completion on the peer's directories, which the peer lists (=ls=): the names of the subdirectories of the directory typed, sorted, of its first 2000 entries, nothing else, never a file's name nor what any file holds, each listing kept 30 s; the last component completes as file names do (the table's boundaries), so that every completion style and UI works; without a slash, the directories the peer's sessions run in, the latest active first.  No TRAMP, no SSH command: the peer's drover answers.  A directory there that does not exist is refused there.
+
+** Catalogs
+
+What a peer starts, its engines' agents, models and defaults, are the peer's, asked of it (=catalogs=) and kept =drover-remote-catalog-ttl= (300 s), asked again past it, the old answer used meanwhile: what it starts as it greets (=grant=), the counterpart of a directory of this host when asked for one, the catalogs of its engines in a directory of its when asked for one.  The owner asks its own engines as its prompt does: each engine's =:defaults= for the directory, the catalogs of a service fetched without waiting in a request handler, =drover-remote-catalog-timeout= (10 s) at most; then each engine's agents (=:agents=), models (its first model source, as =drover-models= reads them) and what a session started without a choice runs (=:resolve=); an engine whose defaults did not come tells only the models it remembers, since reading more would wait.  The harnesses it starts are its prompt's new sessions (=drover-prompt-new-targets=) whose front end is installed, then those of its other backends with =:create=.  Models travel as their provider, identifier, names, variants with their efforts, default variant and engines, and are found again on the owner by provider and identifier, among those it told or remembers, with the names its front ends take for them (aliases), which do not travel.
+
+** The protocol, compatible
+
+| What                | New                                                                                                                                                                                                                                                                                 |
+|---------------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| capability =new=    | told by a host starting sessions for its peers; a peer without it is offered nowhere, and =drover-remote-start= says it runs an older drover                                                                                                                                         |
+| request =catalogs=  | =local= and =home=, a directory of the viewer's, and =directory=, one of the owner's, each optional: answered with =targets= (=b=, =e=, =l=: backend, engine, label), =home=, =where= and =exists=, and for =directory= its =engines= (=e=, =agents=, =models=, =default=) or =missing= |
+| request =ls=        | =directory=: answered with =dirs=, the names of its subdirectories, sorted, and =truncated=, or =missing=                                                                                                                                                                       |
+| request =new=       | an identifier, =b= and =e=, =directory=, =text= (256 kB at most, or none), =agent=, =model= (=[PROVIDER ID]=), =variant=, =title=: answered once started with =key=, =title=, =engine=, =eid= (the engine's identifier) and =unsent= (why its backend did not take the prompt), or the reason it did not start |
+
+A =new= asked again after a stream ended, its identifier the same, gets the outcome of the first rather than start a second session (=drover-remote-test-new-survives-a-drop=).  Every field is checked as an action's are: names as short lowercase symbols (=drover-remote--symbol= now folds no case: =BAD= was interned as a variant), lines bounded, a directory absolute and there, a prompt of =drover-remote-prompt-limit= characters, models of two short strings; what comes back is decoded as records are (=drover-remote--decode-catalog=, =drover-remote--decode-model=).
+
+** Access
+
+=act= starts sessions, lists directories and tells catalogs, as =full= does; =read= none of them, refused there whatever the viewer asks (=drover-remote--new-allowed=), the refusal noted in the history and warned once per =drover-error-interval=.  A peer of =act= access sends prompts to the owner's sessions, resumes its conversations in its front ends, and through the relay creates OpenCode sessions already (=POST /api/session= is not a deletion): starting a session in a directory it chooses gives it nothing these did not, and deleting stays =full='s.  Listing directories gives names only, of a host the peer runs agents on anyway.
+
+** On the owner
+
+The request is performed from a timer, never in the stream's filter: the harness's feature is required, the engine's defaults fetched for the directory (=drover-remote-catalog-timeout= at most), then the backend's =:create= runs with =:hidden= among its start options and =display-buffer-overriding-action= showing no window, in =save-window-excursion=: OpenCode's backend creates the session without displaying it (=opencode-session-create='s =:no-display=), agent-shell's starts its shell undisplayed, claude-code-ide's terminal starts in no window, and Ghostel renders it in spyglass's parking frame once the viewer mirrors it, as for a conversation resumed for a peer.  Its THEN gives the session, whose key is answered at once, the prompt handed to the backend's =:send= under the same binding, which waits for the session to be ready as the prompt's does; its ELSE, a signal, or =drover-remote-new-timeout= (60 s) without either, answer why.  The owner's records then list the session as any of its own, and serve it.
+
+** Prompts and attachments
+
+The prompt goes as text, converted to Markdown as for a session here.  Attachments do not travel: they are this host's files and buffers, whose labels go in the text, and the echo area says how many went as text only, as for a prompt sent to a session of another host.  The prompt leaves =*drover*= once the peer answered the session started; =C-g= while waiting leaves the prompt and lets the start go on, the outcome told when it comes, the prompt then taken only when =*drover*= still holds it unchanged.
+
+** Measured
+
+=make bench-remote NEW=1=, Reaver viewing an agent (a batch Emacs in a temporary directory, its fake terminal front end and fake OpenCode service), through 127.0.0.1 and on Core through =myssh -W=, medians of 5 (20 for listings):
+
+| Step                                                       | Reaver, 127.0.0.1 | Core, SSH |
+|------------------------------------------------------------+-------------------+-----------|
+| what it starts told                                        | 14.7 ms           | CORE1     |
+| its catalogs in a directory                                | 30.7 ms           | CORE2     |
+| a directory listed there                                   | 14.9 ms           | CORE3     |
+| a terminal session started, its host answering             | 37.4 ms           | CORE4     |
+| the same, listed here                                      | 37.4 ms           | CORE5     |
+| the same, mirrored live                                    | 69.9 ms           | CORE6     |
+| an OpenCode session started, its host answering            | 54.1 ms           | CORE7     |
+| the same, its prompt's turn shown here through the relay   | 101.4 ms          | CORE8     |
+| longest block of this Emacs's main thread, outside opencode.el | 14 ms          | CORE9     |
+
+The waits of a command poll every 20 ms, which most of a local round trip is.  The first OpenCode buffer opened blocked this Emacs 171 ms, opencode.el loading and rendering its first buffer, as opening any relayed buffer first does.
+
+** Tests
+
+Two batch Emacs, the agent's fake backend starting a session of a terminal on =:create= (failing in a directory named =fail=, starting late in one named =slow=), its fake OpenCode service creating one, each engine with agents, models and defaults: a terminal session started there in no window of the owner's, its options and prompt as asked, mirrored here; an OpenCode session, for a peer of =act= access, opened in its relayed buffer, its prompt's echo shown; directories listed by name alone, no file nor content, a missing one told, completed as file names on their last component, recent ones without a slash; the default directory mapped by this host's =:directories=, by the peer's home; a peer of =read= access offered nothing, refused there whatever is asked, the refusal noted; a peer telling no =new= offered nowhere; from the prompt, an owner failing keeping the prompt, its host and directory, the header naming them, that host's models offered, then started, the prompt taken and the session mirrored; a link dropped mid-request starting the session once; the owner going away failing it here; hostile catalogs bounded or dropped.  The prompt's own tests stub =drover-prompt-remote-functions=: the picker's order, a model the host does not offer hiding its entries, =C-u d=, the header, agents and models of the host, a session started or the prompt kept.
+
+** Live check
+
+APPLIED-LIVE

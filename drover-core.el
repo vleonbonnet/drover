@@ -1769,8 +1769,11 @@ as `drover-model' describes them: explicit choices (:agent :model
              starting and displaying a session of ENGINE in DIRECTORY.
              OPTIONS is a start-options plist: the explicit :agent,
              :model and :variant, unfiltered, the session's :title or
-             nil, and the :defaults the prompt holds for ENGINE (see
-             `drover-register-engine'), or nil.  It calls THEN with
+             nil, the :defaults the prompt holds for ENGINE (see
+             `drover-register-engine'), or nil, and :hidden, non-nil
+             to start it without displaying it, as for another host,
+             which binds `display-buffer-overriding-action' to show no
+             window meanwhile.  It calls THEN with
              the new `drover-session' as soon as :send may be given
              it, :send waiting for the session to be ready, or ELSE.
  :check      Function of a SESSION, the TEXT about to be sent and the

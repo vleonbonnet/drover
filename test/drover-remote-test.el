@@ -2649,5 +2649,294 @@ too, are listed here once it is connected."
         (should (zerop (hash-table-count drover-remote--clones)))
         (should-not (file-exists-p (drover-fixture-claude-file id here)))))))
 
+;;;; New sessions on other hosts
+
+(defun drover-remote-test-mkdir (name &optional file text)
+  "Have the agent make the directory NAME of its own, FILE in it holding TEXT; return it."
+  (plist-get (apply #'drover-remote-test-command "mkdir" :name name (and file (list :file file :text text)))
+             :directory))
+
+(defun drover-remote-test-target (backend)
+  "Return the new session of BACKEND the agent starts, as the prompt offers it."
+  (seq-find (lambda (target) (eq (plist-get target :backend) backend))
+            (drover-remote--prompt-targets 10)))
+
+(ert-deftest drover-remote-test-new-terminal ()
+  "A session started on another host, its front end running terminals: in no window there, its prompt handed to it, mirrored here."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (let* ((work (drover-remote-test-mkdir "work"))
+           (target (drover-remote-test-target 'fake)))
+      (should target)
+      (should (equal (plist-get target :host) "agent"))
+      (should (equal (plist-get target :host-label) "agent"))
+      (should (equal (plist-get target :label) "Fake session"))
+      ;; Its engine's agents, models and defaults there, as it tells them.
+      (let* ((engines (plist-get (drover-remote-catalog "agent" nil work 10) :engines))
+             (fake (alist-get 'fake engines))
+             (default (plist-get fake :default)))
+        (should (equal (plist-get fake :agents) '("build" "plan")))
+        (should (equal (mapcar #'drover-model-id (plist-get fake :models)) '("fast-1" "deep-2")))
+        (should (equal (drover-model-label (car (plist-get fake :models))) "FakeCo: Fast 1"))
+        (should (equal (drover-model-variants (car (plist-get fake :models))) '((low :effort "low") (high :effort "high"))))
+        (should (equal (drover-model-engines (car (plist-get fake :models))) '(fake)))
+        (should (equal (plist-get default :agent) "build"))
+        (should (equal (drover-model-id (plist-get default :model)) "fast-1"))
+        (should (eq (plist-get default :variant) 'high))
+        ;; Asked once, kept.
+        (should (eq (drover-remote-catalog "agent" nil work) (drover-remote-catalog "agent" nil work)))
+        ;; A directory missing there starts nothing.
+        (should (string-match-p "no directory"
+                                (cadr (should-error (drover-remote-start "agent" target (concat work "nowhere/")
+                                                                         "Hello" nil #'ignore)
+                                                    :type 'user-error))))
+        (save-window-excursion
+          (delete-other-windows)
+          (let ((result (drover-remote-start "agent" target work "Hello new"
+                                             (list :agent "plan" :model (cadr (plist-get fake :models))
+                                                   :variant 'max :title "Started here")
+                                             #'ignore)))
+            (should (equal (plist-get result :key) '(fake . "new1")))
+            (should (equal (plist-get result :title) "Started here"))
+            (should (equal (plist-get result :eid) "new1"))
+            ;; Started there through its backend, in no window, its prompt handed to it.
+            (should (equal (drover-remote-test-calls "create")
+                           (list (list "create" work "fake plan deep-2 max Started here hidden"))))
+            (should (equal (drover-remote-test-calls "prompt") '(("prompt" "new1" "Hello new"))))
+            (should-not (seq-find (lambda (name) (string-match-p "fake terminal" name))
+                                  (plist-get (drover-remote-test-command "windows") :windows)))
+            ;; Opened here once listed: its terminal mirrored.
+            (should (drover-remote-open-started "agent" result))
+            (let ((mirror (window-buffer (selected-window))))
+              (should (equal (buffer-local-value 'drover-remote--mirror-kind mirror) "terminal"))
+              (drover-remote-test-live mirror)
+              (kill-buffer mirror))))
+        (should (member "new" (mapcar (lambda (event) (aref event 0))
+                                      (plist-get (drover-remote-test-command "history" :peer "viewer") :events))))))))
+
+(ert-deftest drover-remote-test-new-opencode ()
+  "A session started on another host's OpenCode service, granting act access, opens in a full buffer through that host."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "act")
+      (let* ((work (drover-remote-test-mkdir "work"))
+             (target (drover-remote-test-target 'opencode)))
+        (should target)
+        (should (equal (plist-get (alist-get 'opencode (plist-get (drover-remote-catalog "agent" nil work 10) :engines))
+                                  :agents)
+                       '("build")))
+        (save-window-excursion
+          (let ((result (drover-remote-start "agent" target work "Hello service" nil #'ignore)))
+            (should (equal (plist-get result :key) '(opencode . "ses_new1")))
+            (drover-remote-open-started "agent" result)
+            (let ((buffer (drover-remote-test-wait
+                           (lambda () (drover-remote--oc-buffer "agent" '(opencode . "ses_new1"))))))
+              (should buffer)
+              (should (string-prefix-p "*OpenCode@agent" (buffer-name buffer)))
+              (drover-remote-test-shows buffer "Echo: Hello service")
+              (kill-buffer buffer))))
+        (should (equal (drover-remote-test-calls "create") (list (list "create" work "opencode - - - - hidden"))))
+        (should (equal (drover-remote-test-calls "prompt") '(("prompt" "ses_new1" "Hello service"))))))))
+
+(ert-deftest drover-remote-test-new-directories ()
+  "Another host's directories complete there by name alone; a new session's directory maps this host's there."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-synced 2)
+    (let ((root (drover-remote-test-mkdir "tree"))
+          (peer (drover-remote--peer "agent")))
+      (drover-remote-test-mkdir "tree/alpha" "secret.txt" "the capybara's secret")
+      (drover-remote-test-mkdir "tree/beta")
+      (drover-remote-test-mkdir "tree" "notes.txt" "not a directory")
+      (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "ls" :directory root) 10)))
+        (should-not error)
+        ;; Its directories, by name: never its files, nor what they hold.
+        (should (equal (plist-get reply :dirs) ["alpha" "beta"]))
+        (should-not (string-search "capybara" (format "%S" reply)))
+        (should-not (string-search "notes" (format "%S" reply))))
+      (should (eq (plist-get (car (drover-remote--wait peer (list :op "ls" :directory (concat root "nowhere/")) 10))
+                             :missing)
+                  t))
+      (should (equal (cadr (drover-remote--wait peer (list :op "ls" :directory "relative/") 10)) nil))
+      ;; Completed as file names are, on their last component.
+      (let ((table (drover-remote--directory-table peer (drover-remote--recent-directories peer))))
+        (should (equal (all-completions (concat root "a") table) '("alpha/")))
+        (should (equal (try-completion (concat root "b") table) (concat root "beta/")))
+        (should (equal (car (completion-boundaries (concat root "al") table nil "")) (length root)))
+        ;; Without a directory, where its sessions run.
+        (should (equal (all-completions "" table) '("/work/project/"))))
+      ;; Listed once a while.
+      (should (gethash (cons "agent" root) drover-remote--listings))
+      ;; Where a directory of this host is there: this host's map, else
+      ;; that host's, else the same under its home.
+      (let ((mapped (drover-remote--peer-make :name "core" :properties '(:directories (("C:/Users/val/" . "/home/me/"))))))
+        (should (equal (drover-remote--there mapped "/home/me/src/proj/") "C:/Users/val/src/proj/"))
+        (should-not (drover-remote--there mapped "/elsewhere/")))
+      (let ((local (file-name-as-directory (expand-file-name "drover-test-somewhere" "~"))))
+        (should (equal (drover-remote-default-directory "agent" local 10) local))))))
+
+(ert-deftest drover-remote-test-new-refused-by-access ()
+  "A host granting read access starts nothing for this one: offered nothing here, refused there whatever is asked."
+  (drover-remote-test-with nil
+    (drover-remote-test-connect (drover-remote-test-start-agent dir))
+    (drover-remote-test-wait (lambda () (drover-remote--peer-granted (drover-remote--peer "agent"))))
+    (let ((peer (drover-remote--peer "agent")))
+      (should (string-match-p "read access" (drover-remote--new-refusal peer)))
+      (should-not (drover-remote--prompt-targets))
+      (should-not (drover-remote-catalog "agent"))
+      (should (string-match-p "read access"
+                              (cadr (should-error (drover-remote-start "agent" '(:backend fake :engine fake :label "Fake")
+                                                                       dir "x" nil #'ignore)
+                                                  :type 'user-error))))
+      ;; Asked anyway, past this host's checks: refused there.
+      (dolist (message (list (list :op "catalogs")
+                             (list :op "ls" :directory dir)
+                             (list :op "new" :id "viewer-x-1" :b "fake" :e "fake" :directory dir :text "x")))
+        (pcase-let ((`(,reply ,error) (drover-remote--wait peer message 10)))
+          (should-not reply)
+          (should (string-match-p "read access" error))))
+      (should-not (drover-remote-test-calls "create"))
+      (should (member "refused" (mapcar (lambda (event) (aref event 0))
+                                        (plist-get (drover-remote-test-command "history" :peer "viewer") :events)))))))
+
+(ert-deftest drover-remote-test-new-older-peer ()
+  "A host whose drover starts no session for others is not offered, and says why."
+  (drover-remote-test-with nil
+    (let ((process-environment (append '("DROVER_AGENT_ACCESS=full"
+                                         "DROVER_AGENT_CAPS=actions,bye,grant,mirror,unsent,search,clone")
+                                       process-environment)))
+      (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+    (drover-remote-test-wait (lambda () (drover-remote--peer-granted (drover-remote--peer "agent"))))
+    (should (string-match-p "older drover" (drover-remote--new-refusal (drover-remote--peer "agent"))))
+    (should-not (drover-remote--prompt-targets 1))
+    (should-not (drover-remote--prompt-hosts))
+    (let ((buffer (drover-prompt-buffer t)))
+      (unwind-protect
+          (with-current-buffer buffer
+            (should-not (seq-find (lambda (candidate) (string-search " on " (car candidate)))
+                                  (drover-prompt--candidates nil (drover-prompt--remote :targets)))))
+        (kill-buffer buffer)))))
+
+(ert-deftest drover-remote-test-new-from-prompt ()
+  "The prompt offers another host's new sessions: one that does not start keeps the prompt, one that does takes it and opens."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (let* ((fail (drover-remote-test-mkdir "fail"))
+           (work (drover-remote-test-mkdir "work"))
+           (target (drover-remote-test-target 'fake))
+           (buffer (drover-prompt-buffer t)))
+      (unwind-protect
+          (progn
+            (with-current-buffer buffer
+              (insert "Hello from the prompt")
+              ;; Offered after this host's new sessions, named after its host.
+              (let ((names (mapcar #'car (drover-prompt--candidates
+                                          nil (append (drover-prompt--new-targets) (drover-prompt--remote :targets))))))
+                (should (member "[New Fake session on agent…]" names))))
+            (cl-letf (((symbol-function 'drover-prompt-read-target) (lambda (&rest _) target))
+                      ((symbol-function 'drover-remote-read-directory) (lambda (&rest _) fail)))
+              ;; Failing there: the prompt stays, its host and directory too.
+              (with-current-buffer buffer
+                (should (string-match-p "the fake front end failed"
+                                        (cadr (should-error (drover-prompt-submit) :type 'user-error)))))
+              (should (buffer-live-p buffer))
+              (should (equal (with-current-buffer buffer (buffer-string)) "Hello from the prompt"))
+              (should (equal (buffer-local-value 'drover-prompt-host buffer) "agent"))
+              (should (equal (buffer-local-value 'drover-prompt-host-directory buffer) fail))
+              (with-current-buffer buffer
+                (should (string-search (concat "agent: " fail) (drover-prompt--header-line)))
+                ;; What a new session there runs, as that host tells.
+                (drover-remote-catalog "agent" nil fail 10)
+                (should (equal (plist-get (drover-prompt-effective-options) :agent) "build"))
+                (should (equal (drover-model-id (plist-get (drover-prompt-effective-options) :model)) "fast-1"))
+                ;; Its agents and models offered, that host's.
+                (cl-letf (((symbol-function 'completing-read)
+                           (lambda (_prompt collection &rest _)
+                             (seq-find (lambda (candidate) (string-match-p "Deep 2" candidate))
+                                       (all-completions "" collection)))))
+                  (drover-prompt-choose-model))
+                (should (equal (drover-model-id drover-prompt-picked-model) "deep-2"))
+                (setq drover-prompt-host-directory work))
+              ;; Started: the prompt taken, the session opened.
+              (save-window-excursion
+                (with-current-buffer buffer
+                  (drover-prompt-submit))
+                (should-not (buffer-live-p buffer))
+                (should (equal (drover-remote-test-calls "prompt") '(("prompt" "new1" "Hello from the prompt"))))
+                (should (string-match-p "deep-2" (nth 2 (car (last (drover-remote-test-calls "create"))))))
+                (let ((mirror (window-buffer (selected-window))))
+                  (should (equal (buffer-local-value 'drover-remote--mirror-kind mirror) "terminal"))
+                  (kill-buffer mirror)))))
+        (when (buffer-live-p buffer)
+          (kill-buffer buffer))))))
+
+(ert-deftest drover-remote-test-new-survives-a-drop ()
+  "A session asked of another host whose link drops meanwhile is started there once, its answer coming once connected anew."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (let ((slow (drover-remote-test-mkdir "slow"))
+          (target (drover-remote-test-target 'fake))
+          (peer (drover-remote--peer "agent"))
+          (result nil))
+      (drover-remote--new peer target slow "Once" nil (lambda (answer) (setq result answer)))
+      (drover-remote-test-wait (lambda () (drover-remote-test-calls "create")))
+      (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+      (drover-remote-test-wait (lambda () result) 30)
+      (should (equal (plist-get result :key) '(fake . "new1")))
+      (should (= (length (drover-remote-test-calls "create")) 1))
+      (should (equal (drover-remote-test-calls "prompt") '(("prompt" "new1" "Once")))))))
+
+(ert-deftest drover-remote-test-new-owner-gone ()
+  "A session asked of another host that goes away meanwhile fails here, saying so."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (let ((slow (drover-remote-test-mkdir "slow"))
+          (target (drover-remote-test-target 'fake)))
+      ;; Its remote layer turned off a moment later, as its Emacs quits.
+      (run-at-time 0.3 nil (lambda ()
+                             (spyglass-channel-request (drover-remote-test--agent-connection) "drover-test"
+                                                       (list :op "quit" :off t) #'ignore 5)))
+      (should (string-match-p "closed\\|ended\\|connected"
+                              (cadr (should-error (drover-remote-start "agent" target slow "Lost" nil #'ignore)
+                                                  :type 'user-error)))))))
+
+(ert-deftest drover-remote-test-new-hostile-catalog ()
+  "What a host tells of the sessions it starts is checked and bounded here: hostile values dropped or cut."
+  (let* ((long (make-string 500000 ?x))
+         (data (list :home long
+                     :targets (vector (list :b "fake" :e "fake" :l long) (list :b "Bad Name" :e "x")
+                                      "junk" (list :b long :e "fake"))
+                     :engines (vector (list :e "fake" :agents (vector long 3 "plan")
+                                            :models (vector (list :id long :p 5
+                                                                  :v (vector (vector "high" long) (vector "BAD" "x") "junk")
+                                                                  :en (vector "fake" "Not One" 7))
+                                                            "junk" (list :id ""))
+                                            :default (list :a long :m "junk" :v "Not A Symbol"))
+                                      (list :e "UPPER"))))
+         (decoded (drover-remote--decode-catalog data))
+         (fake (alist-get 'fake (plist-get decoded :engines)))
+         (model (car (plist-get fake :models))))
+    ;; Cut, an ellipsis after.
+    (should (<= (length (plist-get decoded :home)) 1025))
+    (should (= (length (plist-get decoded :targets)) 1))
+    (should (<= (length (plist-get (car (plist-get decoded :targets)) :label)) 81))
+    (should (= (length (plist-get decoded :engines)) 1))
+    (should (= (length (plist-get fake :agents)) 2))
+    (should (<= (length (car (plist-get fake :agents))) 201))
+    (should (= (length (plist-get fake :models)) 1))
+    (should (<= (length (drover-model-id model)) 201))
+    (should-not (drover-model-provider-id model))
+    (should (equal (mapcar #'car (drover-model-variants model)) '(high)))
+    (should (<= (length (plist-get (cdr (car (drover-model-variants model))) :effort)) 49))
+    (should (equal (drover-model-engines model) '(fake)))
+    (should (<= (length (plist-get (plist-get fake :default) :agent)) 201))
+    (should-not (plist-get (plist-get fake :default) :model))
+    (should-not (plist-get (plist-get fake :default) :variant))
+    (should-not (drover-remote--decode-catalog "junk"))
+    (should-not (drover-remote--decode-model (list :id 5)))))
+
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

@@ -1535,6 +1535,7 @@ else the default model."
 
 (defun drover-opencode--create (directory engine options then else)
   "Start an OpenCode session in DIRECTORY with start OPTIONS, and display it.
+With :hidden in OPTIONS, its buffer is made but not displayed.
 ENGINE must be `opencode', the one engine the backend starts.  The
 session runs the agent of OPTIONS when DIRECTORY has it as an agent
 a session can run, else the default agent, named so that the agent's
@@ -1583,6 +1584,7 @@ exists, ELSE a message.  The backend's :create."
                       :model (drover-opencode--new-session-model
                               (plist-get options :defaults) agent
                               (plist-get options :model) (plist-get options :variant))
+                      :no-display (plist-get options :hidden)
                       :callback (lambda (info)
                                   (funcall settle then
                                            (drover-opencode--session-of
