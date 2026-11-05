@@ -421,6 +421,12 @@ CALLER is the identifier of a fake session, or nil for none named."
       (should-error (drover-anvil--tool-create nil other "Start"))
       (should-error (drover-anvil--tool-create "opencode" nil "Start"))
       (should-error (drover-anvil--tool-create nil (expand-file-name "missing" project) "Start"))
+      ;; A model its engine does not run.
+      (drover-test-with-engines
+        (drover-register-model-source 'fake (lambda (_directory)
+                                              (list (drover-test-model "elsewhere" :engines '(other)))))
+        (let ((err (should-error (drover-anvil--tool-create nil nil "Start" "elsewhere"))))
+          (should (string-match-p "does not run" (cadr err)))))
       (should-not (assq :create drover-test-calls)))))
 
 (ert-deftest drover-anvil-test-not-own-refused ()

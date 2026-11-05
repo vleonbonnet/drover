@@ -1102,6 +1102,8 @@ MCP Parameters:
       (drover-anvil--log "drover-session-create" caller nil "refused" why)
       (drover-anvil--refuse "%s" why))
     (let* ((model (and (stringp model) (not (string-blank-p model)) (drover-anvil--find-model model directory)))
+           (_ (when (and model (not (drover-model-runs-on-p model engine)))
+                (drover-anvil--refuse "%s does not run %s" (drover-engine-label engine) (drover-model-label model))))
            (variant (drover-anvil--find-variant (and (stringp effort) (not (string-blank-p effort)) effort) model))
            (options (list :agent (and (stringp agent) (not (string-blank-p agent)) (drover-bound-line agent 60))
                           :model model :variant variant
