@@ -58,7 +58,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 12))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
   (load "drover-core" nil t))
 
 (declare-function drover-list-reveal "drover-list" (session))
@@ -198,7 +198,8 @@ conversations (see :recorded in `drover-register-backend')."
   (downcase (mapconcat #'identity
                        (delq nil (append (list (drover-session-title session)
                                                (drover-session-summary session)
-                                               (drover-session-project session)
+                                               (drover-session-view-project session)
+                                               (plist-get (drover-session-task session) :title)
                                                (drover-session-branch session))
                                          texts))
                        "\n")))

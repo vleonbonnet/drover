@@ -75,7 +75,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 12))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -91,6 +91,10 @@
 (autoload 'drover-list-last-session "drover-list" nil t)
 (autoload 'drover-prompt-dwim "drover-prompt" nil t)
 (autoload 'drover-prompt-org-task "drover-prompt" nil t)
+(autoload 'drover-task-start "drover-task" nil t)
+(autoload 'drover-task-finish "drover-task" nil t)
+(autoload 'drover-task-link-session "drover-task" nil t)
+(autoload 'drover-task-sweep "drover-task" nil t)
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 (autoload 'drover-schedule-list "drover-schedule" nil t)
 (autoload 'drover-search "drover-search" nil t)
@@ -481,7 +485,7 @@ first: on another, among the sessions it starts, in a directory of its."
 
 (defun drover--projects ()
   "Return the projects of the sessions lists show, sorted, without duplicates."
-  (sort (delete-dups (delq nil (mapcar #'drover-session-project (drover-known-sessions))))
+  (sort (delete-dups (delq nil (mapcar #'drover-session-view-project (drover-known-sessions))))
         #'string<))
 
 (defun drover-select-project (project)
@@ -825,6 +829,27 @@ That is in an Org buffer other than drover's prompt, which is one too:
 `drover-prompt-org-task' finds the task point is under."
   (and (derived-mode-p 'org-mode) (not (drover-dispatch-in-prompt-p))))
 
+(defvar drover-session-task-function)
+
+(defun drover-dispatch-task-p ()
+  "Return non-nil when the dispatch menu may start, continue or finish a task.
+That is on an Org heading, in a buffer other than drover's prompt, or
+on a session serving a task (see `drover-session-task'), in this
+buffer."
+  (or (drover-dispatch-org-task-p)
+      (and (not (plist-get (drover--scope) :window))
+           (when-let* ((session (drover-session-at-point t)))
+             (drover-session-task session)))))
+
+(defun drover-dispatch-task-link-p ()
+  "Return non-nil when the dispatch menu may link a session to a task.
+On an Org heading, or on a session in this buffer, while
+`drover-task-mode' tells the tasks of sessions."
+  (and drover-session-task-function
+       (or (drover-dispatch-org-task-p)
+           (and (not (plist-get (drover--scope) :window))
+                (drover-session-at-point t)))))
+
 (defun drover-dispatch-prompt-p (action)
   "Return non-nil when prompt ACTION applies from where the dispatch menu acts.
 For `compact' and `fork', a list's session at point whose backend
@@ -1036,7 +1061,7 @@ CURRENT is the value now, or nil.  Return nil to clear the filter (see
 
 (defun drover--read-filter-project (current)
   "Read the project to list, CURRENT being the one listed now, or nil."
-  (drover--read-known "Project" #'drover-session-project current))
+  (drover--read-known "Project" #'drover-session-view-project current))
 
 (defun drover--read-filter-agent (current)
   "Read the agent whose sessions to list, CURRENT being the one now, or nil."
@@ -1122,7 +1147,7 @@ This host is `local'; an empty answer lists every host's sessions."
   "Display name of each field of `drover-sort-fields'.")
 
 (defconst drover-grouping-labels
-  '((status . "status") (project . "project") (branch . "branch") (agent . "agent")
+  '((status . "status") (project . "project") (task . "task") (branch . "branch") (agent . "agent")
     (model . "model") (provider . "provider") (harness . "harness") (host . "host")
     (updated . "last activity") (nil . "nothing"))
   "Display name of each grouping of `drover-groupings'.")
@@ -2034,9 +2059,14 @@ session chosen for it, else to one asked for, unshown."
     ("X" drover--dispatch-stop-description drover-stop-actions :if drover-actions-progress)]
    ["Prompt"
     ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
-    ("n" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
+    ("N" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
     ("'" "Show prompt" drover-prompt-toggle)
     ("#" "Scheduled" drover-schedule-list)]
+   ["Task"
+    ("n" "Start or continue" drover-task-start :inapt-if-not drover-dispatch-task-p)
+    ("F" "Finish" drover-task-finish :inapt-if-not drover-dispatch-task-p)
+    ("I" "Link session" drover-task-link-session :inapt-if-not drover-dispatch-task-link-p)
+    ("W" "Worktrees" drover-task-sweep)]
    [:description drover--dispatch-options-description
     ("a" "Agent" drover-prompt-agent :class drover--prompt-option :action agent
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))

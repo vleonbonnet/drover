@@ -92,6 +92,16 @@ A Nerd Font icon by default; any short string will do, such as \"⇄\"."
   :type 'string
   :group 'drover)
 
+(defcustom drover-project-icon "\U000F09DE" ; nf-md-circle_medium
+  "Icon of the project of a session's task, in the project's colour.
+Lists show it before the project's name, alone in two lines and in the
+sidebar, in a cell lining it up (see `drover-list-fields'), for the
+sessions of a task (see `drover-session-task'), whose project has a
+colour of its own.  A Nerd Font icon by default; any short string will
+do, such as \"●\"."
+  :type 'string
+  :group 'drover)
+
 (defcustom drover-context-pie-icons
   (mapcar (lambda (slice) (string (+ #xF0A9E slice))) (number-sequence 0 7))
   "Icons of a pie filling by eighths, as a session fills its context.
@@ -207,6 +217,9 @@ Grouping by status, the group `archived' holds the archived sessions."
     ('status (if (eq value 'archived) "Archived" (opencode-session-status-label value)))
     ('updated (or (alist-get value drover-activity-labels) "No activity"))
     ('harness (replace-regexp-in-string "[\n\r\t]+" " " (drover-harness-name value)))
+    ('task (if value
+               (replace-regexp-in-string "[\n\r\t]+" " " (format "%s" (or (cdr-safe value) value)))
+             "No task"))
     ('host (replace-regexp-in-string
             "[\n\r\t]+" " "
             (concat (drover-host-label value)

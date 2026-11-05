@@ -774,7 +774,8 @@ the prefix of the other's, which would hide it."
   "Each key of the menu runs the command of the shared key tables."
   (dolist (entry '(("j" . drover-next) ("B" . drover-bury-quiet-sessions) ("b" . drover-select)
                    ("\"" . drover-prompt-dwim)
-                   ("n" . drover-prompt-org-task) ("'" . drover-prompt-toggle) ("l" . drover-list)
+                   ("N" . drover-prompt-org-task) ("n" . drover-task-start) ("F" . drover-task-finish)
+                   ("I" . drover-task-link-session) ("W" . drover-task-sweep) ("'" . drover-prompt-toggle) ("l" . drover-list)
                    ("L" . drover-list-side) ("p" . drover-select-project) ("S" . drover-search)
                    ("a" . drover-prompt-agent)
                    ("m" . drover-prompt-model) ("e" . drover-prompt-effort)
