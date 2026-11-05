@@ -331,9 +331,41 @@ found; never kept.")
     (drover-task--save-links)
     (drover-task--views-changed)))
 
+(defvar drover-task--places nil
+  "Where tasks' worktrees go on this host, as (SETTINGS . DIRECTORIES), or nil.
+SETTINGS are the options DIRECTORIES were made of.")
+
+(defun drover-task--places ()
+  "Return the directories tasks' worktrees go under on this host, canonical.
+The root (`drover-task-worktree-root'), each repository's own, and the
+directory holding the checkout of each whose worktrees are siblings."
+  (let ((settings (list drover-task-repositories drover-task-worktree-root drover-host
+                        drover-task-path-aliases)))
+    (unless (equal (car drover-task--places) settings)
+      (setq drover-task--places
+            (cons settings
+                  (delete-dups
+                   (delq nil
+                         (cons (or (drover-task--root drover-task-worktree-root)
+                                   (drover-task-canonical "~/local/worktrees/"))
+                               (mapcar (lambda (entry)
+                                         (let ((setting (plist-get (cdr entry) :worktrees))
+                                               (checkout (drover-task-checkout entry)))
+                                           (cond ((and (eq setting 'sibling) checkout)
+                                                  (file-name-directory (directory-file-name checkout)))
+                                                 ((stringp setting)
+                                                  (file-name-as-directory (drover-task-canonical setting))))))
+                                       drover-task-repositories)))))))
+    (cdr drover-task--places)))
+
 (defun drover-task--directory-id (directory)
-  "Return the task the worktree of DIRECTORY serves, as its Git directory says."
-  (when-let* ((gitdir (drover-git-directory-cached directory))
+  "Return the task the worktree of DIRECTORY serves, as its Git directory says.
+Only a directory where tasks' worktrees go is looked at (see
+`drover-task--places'): others, such as a network share's, cost no
+look at their files."
+  (when-let* ((canonical (drover-task-canonical (file-name-as-directory directory)))
+              ((seq-some (lambda (place) (string-prefix-p place canonical)) (drover-task--places)))
+              (gitdir (drover-git-directory-cached directory))
               ;; A linked worktree's Git directory is in the common one's worktrees/.
               ((string-match-p "/worktrees/[^/]+/\\'" gitdir)))
     (let ((entry (gethash gitdir drover-task--directories))
