@@ -232,7 +232,8 @@ Bounded to `drover-task-org-body-limit' characters; nil when empty."
 
 (defun drover-task-org-read (marker)
   "Return what the heading at MARKER tells of its task, as a plist.
-:id, its ID, :orig-id, the ID ejira replaced, :title, :todo, its TODO
+:id, its ID, :orig-id, the ID ejira replaced, :title, plain text, its
+links shown as their descriptions, :todo, its TODO
 keyword, :done, non-nil for a done one, :category, its Org category,
 the task's project, :jira, its Jira key (see `drover-task-org-jira-key'),
 :ejira, non-nil for a heading ejira syncs, :file, :repos, the
@@ -256,7 +257,8 @@ directories it works in, and :tick, what tells it changed."
                    while next do (push next attempts)))
         (list :id id
               :orig-id (cdr (assoc "ORIG_ID" properties))
-              :title (org-get-heading t t t t)
+              ;; Its links as their descriptions, without the buffer's faces nor prefixes.
+              :title (org-link-display-format (substring-no-properties (org-get-heading t t t t)))
               :todo todo
               :done (and todo (member todo org-done-keywords) t)
               :category (let ((category (org-get-category)))

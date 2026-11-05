@@ -505,6 +505,16 @@ Said once.
   (drover-task-test-with-org "* TODO A\n:PROPERTIES:\n:ID: a\n:END:\n"
     (should (equal (plist-get (drover-task-org-read (drover-task-org-marker "a")) :category) "work"))))
 
+(ert-deftest drover-task-test-titles-plain ()
+  "A task's title is plain text, its links their descriptions, its name of words alone."
+  (drover-task-test-with-org "* TODO Read: [[mu4e:msgid:0100019d3e@x.com][Welcome aboard]] now\n:PROPERTIES:\n:ID: a\n:END:\n"
+    (goto-char (point-min))
+    (put-text-property (point) (line-end-position) 'line-prefix "**")
+    (let ((title (plist-get (drover-task-org-read (drover-task-org-marker "a")) :title)))
+      (should (equal title "Read: Welcome aboard now"))
+      (should-not (text-properties-at 0 title))
+      (should (equal (drover-task-slug title) "read-welcome-aboard-now")))))
+
 (ert-deftest drover-task-test-writes-only-its-own ()
   "Drover writes DROVER_ properties and a LOGBOOK note, and nothing else of the heading."
   (drover-task-test-with-org drover-task-test-ejira
