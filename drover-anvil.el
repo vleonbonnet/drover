@@ -114,9 +114,8 @@ scratch directory where agents try things out."
 
 (defcustom drover-anvil-create-harnesses '(opencode)
   "Harnesses whose sessions agents may start, backend names.
-A backend starts a session there without showing it in a window, as
-OpenCode's does (see the option :no-display of :create in
-`drover-register-backend'); terminals and shells show as they start."
+Agents start sessions without showing them in a window (see the
+option :hidden of :create in `drover-register-backend')."
   :type '(repeat symbol)
   :group 'drover-anvil)
 
@@ -1107,7 +1106,7 @@ MCP Parameters:
            (options (list :agent (and (stringp agent) (not (string-blank-p agent)) (drover-bound-line agent 60))
                           :model model :variant variant
                           :title (and (stringp title) (not (string-blank-p title)) (drover-bound-line title 160))
-                          :no-display t)))
+                          :hidden t)))
       (drover-anvil--log-or-refuse "drover-session-create" caller nil
                                    (format "%s in %s%s" backend (abbreviate-file-name directory)
                                            (if prompt (concat ", " (drover-anvil--prompt-note prompt)) "")))

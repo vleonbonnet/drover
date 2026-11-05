@@ -51,8 +51,9 @@
 ;;   VARIANT), AGENT a string, MODEL a `drover-model', VARIANT a symbol,
 ;;   each nil when not chosen; an empty agent is nil.
 ;; - start options, given to a backend's :create: the options, unfiltered,
-;;   with :title, the new session's title or nil, and :defaults, the
-;;   engine's defaults data the prompt holds, or nil.
+;;   with :title, the new session's title or nil, :defaults, the
+;;   engine's defaults data the prompt holds, or nil, and :hidden,
+;;   non-nil to start it in no window, as for another host.
 ;; - resolved options, what a new session runs: (:agent :model :variant),
 ;;   as `drover-engine-resolve' returns them.
 ;; - display options, for the prompt's header and minibuffer: resolved
@@ -329,6 +330,15 @@ NAME is the agent program sessions run, such as `opencode',
              Function of a directory of this host returning how the
              engine's records spell it, to which the :cwd of the parts
              of a clone is rewritten as they arrive.
+ :changes    Function of a conversation's ID, a SCOPE, `turn' or
+             `session', the DIRECTORY it ran in, nil when not on this
+             host, and a CALLBACK finding the files the conversation
+             changed, in its last turn or in all, as the engine recorded
+             them: CALLBACK gets, once, possibly before returning,
+             \(:files FILES :notes NOTES), FILES as
+             `drover-review-fetch' tells them, or (:failure MESSAGE).
+             It must never wait.  The review of a session shows them
+             (see `drover-review').
 
 Every property is optional.  Registering NAME again replaces its
 properties and keeps its place."
@@ -814,14 +824,16 @@ MINIBUFFER is gone."
         (drover-with-reporting "completion refresh"
           (funcall function))))))
 
-(defun drover-read-model (&optional default directory)
+(defun drover-read-model (&optional default directory models)
   "Read a model among those the engines offer in DIRECTORY, or the default.
 The first candidate, \"Default\", stands for no choice and returns nil;
 it names DEFAULT, the model a new session would run without one, when
-known.  The others come from `drover-models', annotated with
-`drover-model-annotation', in the category `drover-model'.  Models
-arriving while it reads (see `drover-models-changed') are offered as
-they come.  Return the `drover-model' chosen, or nil."
+known.  The others come from `drover-models', or from MODELS, a
+function of no argument returning them, such as those another host
+told, annotated with `drover-model-annotation', in the category
+`drover-model'.  Models arriving while it reads (see
+`drover-models-changed') are offered as they come.  Return the
+`drover-model' chosen, or nil."
   (let* ((directory (or directory default-directory))
          (default-label (if default
                             (format "Default (%s)" (drover-model-label default))
@@ -829,7 +841,9 @@ they come.  Return the `drover-model' chosen, or nil."
          (candidates nil)
          (collect (lambda ()
                     (setq candidates (cons (cons default-label nil)
-                                           (drover-model-candidates (drover-models directory))))))
+                                           (drover-model-candidates (if models
+                                                                        (funcall models)
+                                                                      (drover-models directory)))))))
          (minibuffer nil)
          (refresh (lambda (_engine)
                     (funcall collect)
@@ -877,15 +891,16 @@ none."
                                 (funcall function directory)))))
            (drover-engines))))
 
-(defun drover-read-agent (&optional default directory)
+(defun drover-read-agent (&optional default directory names)
   "Read an agent among those the engines offer in DIRECTORY, or the default.
-DIRECTORY defaults to `default-directory'.  The first candidate,
-\"Default\", stands for no choice and returns nil; it names DEFAULT,
-the agent a new session would run without one, when known.  Return an
-agent name, or nil.  Signal a `user-error' when no engine offers an
-agent and DEFAULT is nil."
+DIRECTORY defaults to `default-directory'.  NAMES, a function of no
+argument, returns the agents offered instead, such as those another
+host told.  The first candidate, \"Default\", stands for no choice and
+returns nil; it names DEFAULT, the agent a new session would run
+without one, when known.  Return an agent name, or nil.  Signal a
+`user-error' when no engine offers an agent and DEFAULT is nil."
   (let* ((directory (or directory default-directory))
-         (names (drover-agent-names directory))
+         (names (if names (funcall names) (drover-agent-names directory)))
          (default-label (if default (format "Default (%s)" default) "Default"))
          (candidates (cons (cons default-label nil)
                            (mapcar (lambda (name) (cons name name)) names))))

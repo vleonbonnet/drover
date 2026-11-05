@@ -49,6 +49,11 @@
 (require 'drover-codex-rollouts)
 (require 'drover-command)
 
+;; Lists show no usage in tests but those of `drover-usage', which read
+;; it from homes of their own.
+(defvar drover-list-usage-function)
+(setq-default drover-list-usage-function nil)
+
 ;; No test may touch the user's state.  Models are not remembered unless
 ;; a test asks for it, so that tests of sources see their answers alone,
 ;; and the state directory is a temporary one.

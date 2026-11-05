@@ -471,7 +471,11 @@ the shell started with."
         (should (eq (drover-session-engine session) 'claude-code))
         (should (equal (drover-session-title session) "Fix the build"))
         (should (equal (buffer-name shell) "Fix the build"))
-        (should-not drover-agent-shell-test--warnings)))))
+        (should-not drover-agent-shell-test--warnings)
+        ;; Hidden, as for another host: started, not displayed.
+        (should (eq (car (car (drover-agent-shell-test--create "/work/drover" 'codex '(:hidden t)))) 'then))
+        (should (= (length (drover-agent-shell-test--calls-of 'agent-shell--start)) 2))
+        (should (= (length (drover-agent-shell-test--calls-of 'agent-shell--display-buffer)) 1))))))
 
 (ert-deftest drover-agent-shell-test-create-opencode-inherits ()
   "A new OpenCode shell without a model starts on what the engine resolves."

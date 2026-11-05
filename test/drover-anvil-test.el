@@ -383,7 +383,7 @@ CALLER is the identifier of a fake session, or nil for none named."
         (let ((key (alist-get 'key answer))
               (create (assq :create drover-test-calls)))
           (should (equal (nth 1 create) project))
-          (should (plist-get (nth 3 create) :no-display))
+          (should (plist-get (nth 3 create) :hidden))
           (should (equal (plist-get (nth 3 create) :agent) "build"))
           (should (equal (plist-get (nth 3 create) :title) "Child"))
           (should (equal (assq :send drover-test-calls) (list :send (cdr (drover-anvil--parse-key key)) "Start" nil)))
