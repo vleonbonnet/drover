@@ -392,7 +392,8 @@ Views ask for it several times per row as they draw.")
 The task the user linked it to, else the one it was found serving this
 Emacs session, else the one its worktree serves, else the one its first
 prompt links.  Known of each record until something telling tasks
-changes (see `drover-task--changed'), or a minute passed."
+changes (see `drover-task--changed'): a link made, a session started,
+a worktree's marker written, first prompts found."
   (let ((known (gethash session drover-task--ids)))
     (if (eql (car known) drover-task--generation)
         (cdr known)
@@ -2130,8 +2131,6 @@ nil and why it is refused."
 (defun drover-task--oc-tick ()
   "Read the first prompts of OpenCode's sessions now and then, while lists show."
   (drover-with-reporting "task prompts of OpenCode"
-    ;; Worktrees made or gone meanwhile, by hand or by Git: looked at anew.
-    (drover-task--changed)
     (when (or (null drover-task--oc-read)
               (seq-some (lambda (buffer) (and (buffer-local-value 'drover-view-p buffer)
                                               (get-buffer-window buffer t)))
