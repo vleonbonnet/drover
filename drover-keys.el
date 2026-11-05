@@ -81,6 +81,7 @@
 (autoload 'drover-next "drover-attention" nil t)
 (autoload 'drover-select "drover-attention" nil t)
 (autoload 'drover-list "drover-list" nil t)
+(autoload 'drover-usage "drover-usage-report" nil t)
 (autoload 'drover-list-side "drover-list" nil t)
 (autoload 'drover-list-next-session "drover-list" nil t)
 (autoload 'drover-list-previous-session "drover-list" nil t)
@@ -1346,8 +1347,8 @@ frame, the one used last of several."
 
 (defconst drover-list-field-labels
   '((host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
-    (model . "model") (provider . "provider") (context . "context") (created . "created") (age . "age") (cache . "cache")
-    (summary . "summary"))
+    (model . "model") (provider . "provider") (context . "context") (created . "created") (cost . "cost")
+    (age . "age") (cache . "cache") (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
 
 (defun drover-list-field-enabled-p (field)
@@ -1413,6 +1414,7 @@ Before the list is loaded, any field is."
 (drover--define-column-switch provider)
 (drover--define-column-switch context)
 (drover--define-column-switch created)
+(drover--define-column-switch cost)
 (drover--define-column-switch age)
 (drover--define-column-switch cache)
 (drover--define-column-switch summary)
@@ -1939,7 +1941,8 @@ another front end."
    ("-c" drover-view--column-created)
    ("-t" drover-view--column-age)
    ("-p" drover-view--column-cache)
-   ("-s" drover-view--column-summary)])
+   ("-s" drover-view--column-summary)
+   ("-$" drover-view--column-cost)])
 
 (defvar drover--dispatch-close-keys nil
   "The keys of `drover-dispatch' where it last opened, which close it.")
@@ -2009,6 +2012,7 @@ session chosen for it, else to one asked for, unshown."
     ("L" "Side list" drover-list-side)
     ("p" "Project" drover-select-project)
     ("S" "Search" drover-search)
+    ("$" "Usage" drover-usage)
     ;; Only while an action on several sessions runs.
     ("X" drover--dispatch-stop-description drover-stop-actions :if drover-actions-progress)]
    ["Prompt"

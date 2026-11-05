@@ -272,7 +272,7 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone")
+(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "usage")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -4173,6 +4173,7 @@ as an older drover's farewells do."
         ("clone-piece" (drover-remote--on-clone-piece peer message reply))
         ("clone-where" (drover-remote--on-clone-where peer message reply))
         ("clone" (drover-remote--on-clone peer message reply))
+        ("usage" (drover-remote--on-usage message reply))
         ("recap"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -4196,6 +4197,34 @@ as an older drover's farewells do."
                                  (funcall reply (list :text (or (drover-remote--plain text) :false)))))
              (error (funcall reply nil (drover-error-message err))))))
         (_ (funcall reply nil "unknown request")))))))
+
+;;;; Usage
+
+(declare-function drover-usage-remote-answer "drover-usage" (message))
+
+(defun drover-remote--on-usage (message reply)
+  "Answer a peer's MESSAGE asking this host's totals of usage, through REPLY.
+This host totals its own (see `drover-usage-remote-answer')."
+  (require 'drover-usage)
+  (condition-case err
+      (funcall reply (drover-usage-remote-answer message))
+    (error (funcall reply nil (drover-error-message err)))))
+
+(defun drover-remote-usage-peers ()
+  "Return the names of the peers connected whose drover sends its usage."
+  (mapcar #'drover-remote--peer-name
+          (seq-filter (lambda (peer)
+                        (and (eq (drover-remote--peer-state peer) 'open)
+                             (drover-remote--capable-p peer "usage")))
+                      (drover-remote--peers))))
+
+(defun drover-remote-ask-usage (name request callback)
+  "Ask the peer NAME for its totals of usage REQUEST tells, for CALLBACK.
+REQUEST is a plist of :period and :by (see `drover-usage-remote-answer');
+CALLBACK gets (REPLY ERROR) once."
+  (if-let* ((peer (drover-remote--peer name)))
+      (drover-remote--request peer (append (list :op "usage") request) callback nil t)
+    (funcall callback nil (format "%s is not a peer" name))))
 
 (defun drover-remote--request-handler (connection message reply)
   "Answer MESSAGE, a request of CONNECTION's peer, through REPLY, or its error."

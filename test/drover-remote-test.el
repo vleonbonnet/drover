@@ -2649,5 +2649,72 @@ too, are listed here once it is connected."
         (should (zerop (hash-table-count drover-remote--clones)))
         (should-not (file-exists-p (drover-fixture-claude-file id here)))))))
 
+;;;; Usage
+
+(defconst drover-remote-test--usage-id "33333333-3333-4333-8333-333333333333"
+  "The conversation of the agent's Claude Code whose usage is totalled.")
+
+(ert-deftest drover-remote-test-usage ()
+  "A peer's usage is its own to total and price, sent as asked: the period's and each session's."
+  (require 'drover-usage)
+  (drover-remote-test-with nil
+    (let ((claude (expand-file-name "agent-claude" dir))
+          (directory (expand-file-name "work/alpha/" dir))
+          (now (float-time))
+          (drover-usage--started nil)
+          (drover-usage--claude-index nil)
+          (drover-usage--codex-index nil)
+          (drover-usage--oc nil)
+          (drover-usage--facts nil)
+          (drover-usage--remote (make-hash-table :test #'equal))
+          (drover-usage-remote-reading-interval 0.3)
+          (drover-usage-filter nil)
+          (drover-usage-changed-hook nil)
+          (id drover-remote-test--usage-id))
+      (let ((drover-claude-code-home claude))
+        (let ((file (drover-fixture-claude id directory :start (- now 100))))
+          (cl-flet ((reply (time message usage)
+                      (drover-fixture-claude-assistant id directory time "Done." :message message
+                                                       :usage (apply #'drover-fixture-claude-usage usage))))
+            (drover-fixture-claude-append
+             file
+             (reply (- now 50) "msg_1" '(:input 10 :minutes 100 :read 1000 :output 50))
+             (reply (- now 49) "msg_1" '(:input 10 :minutes 100 :read 1000 :output 70))
+             (reply (- now 40) "msg_2" '(:input 5 :hour 200 :read 2000 :output 30))))))
+      (let ((process-environment (append (list (concat "DROVER_AGENT_CLAUDE=" claude) "DROVER_AGENT_CODEX=here")
+                                         process-environment)))
+        (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+      (should (member "agent" (drover-usage--remote-hosts)))
+      ;; The period's totals, priced there at drover's estimate of Opus.
+      (let ((cost (/ (+ 2925 3775) 1e6))
+            (total nil))
+        (drover-remote-test-wait
+         (lambda ()
+           (let ((entry (gethash '("agent" . all) drover-usage--remote)))
+             (setq total (plist-get (drover-usage-report 'all 'session 'model) :total))
+             (and entry (plist-get entry :facts) (not (plist-get entry :reading))
+                  (= (drover-usage-sum-output total) 100))))
+         30)
+        (should (equal (list (drover-usage-sum-input total) (drover-usage-sum-output total)
+                             (drover-usage-sum-read total) (drover-usage-sum-write total))
+                       '(15 100 3000 300)))
+        (should (< (abs (- (drover-usage-sum-cost total) cost)) 1e-9))
+        (let ((group (car (plist-get (drover-usage-report 'all 'host nil) :groups))))
+          (should (equal (car group) "agent")))
+        ;; Each session's, for the list.
+        (drover-remote-test-wait
+         (lambda ()
+           (drover-changed-now)
+           (seq-find (lambda (session) (equal (drover-session-engine-id session) id))
+                     (drover-remote-test-remote))))
+        (let ((session (seq-find (lambda (session) (equal (drover-session-engine-id session) id))
+                                 (drover-remote-test-remote)))
+              (sum nil))
+          (should session)
+          (drover-remote-test-wait (lambda () (setq sum (drover-usage-session-totals session))) 30)
+          (should sum)
+          (should (= (drover-usage-sum-output sum) 100))
+          (should (< (abs (- (drover-usage-sum-cost sum) cost)) 1e-9)))))))
+
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

@@ -440,6 +440,12 @@ listed again only once its modification time tells files came or went."
                     ((consp data)))
           (setq data (plist-put data :reader version)))
         (pcase-let ((`(,size ,mtime ,inode) (drover-transcript--stamp attributes)))
+          ;; A reader that read part of a long file tells where it
+          ;; stopped: the rest is read in the next steps.
+          (when-let* ((upto (and (consp data) (plist-get data :read-to))))
+            (when (and (natnump upto) (< upto size))
+              (setq size upto)
+              (drover-transcript--enqueue index file)))
           (puthash file (drover-transcript--create :file file :size size :mtime mtime
                                                    :inode inode :data data)
                    entries))

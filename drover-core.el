@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 17
+(defconst drover-core-generation 18
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -2679,6 +2679,17 @@ views draw everything anew."
         (t (setq drover--changed-all t
                  drover--changed-backends (append (drover-backends) drover--changed-backends))))
   (drover--schedule-changed))
+
+(defun drover-views-changed (keys)
+  "Have views draw the sessions KEYS again, their records the same.
+For what views show of sessions besides their records, such as the
+usage their engines recorded (`drover-usage'): `drover-changed-hook'
+runs as for a change backends report, KEYS among the sessions changed."
+  (when keys
+    (setq drover--changed-applied (if (eq drover--changed-applied t)
+                                      t
+                                    (append keys drover--changed-applied)))
+    (drover--schedule-changed)))
 
 (defun drover-changed-now ()
   "Run a pending `drover-changed-hook' at once."
