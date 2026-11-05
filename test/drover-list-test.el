@@ -4979,6 +4979,159 @@ filling part of it, as the sidebar did once back beside the list."
     (should-not drover-list--place-timer)
     (should-not (drover-list--side-window))))
 
+;;;; Where the list shows
+
+(defmacro drover-list-test-alone-beside (&rest body)
+  "Run BODY with one ordinary window, `first', and the sidebar left of it.
+The frame is 160 columns wide.  `first' shows `work', a buffer of its
+own, as a session's buffer would, and is selected; the sidebar's
+window is `side'.  The list's buffer is `buffer', shown nowhere yet."
+  (declare (indent 0) (debug t))
+  `(drover-list-test-with (drover-list-test-side-sample)
+     (let ((size (cons (frame-width) (frame-height))))
+       (unwind-protect
+           (progn
+             (set-frame-size (selected-frame) 160 50)
+             (let ((first (selected-window))
+                   (work (get-buffer-create "*other work*")))
+               (switch-to-buffer work)
+               (let ((side (drover-list-side)))
+                 (should (eq (selected-window) first))
+                 (ignore side)
+                 ,@body)))
+         (set-frame-size (selected-frame) (car size) (cdr size))))))
+
+(defun drover-list-test-ordinary-windows ()
+  "Return the windows of the selected frame outside side windows, in order.
+That is from the top left one, whichever is selected."
+  (seq-remove (lambda (window) (window-parameter window 'window-side))
+              (window-list nil 'nomini (frame-first-window))))
+
+(defun drover-list-test-quit ()
+  "Type q in the selected window, the list's, and place the sidebars."
+  (execute-kbd-macro (kbd "q"))
+  (drover-list-test-place))
+
+(ert-deftest drover-list-test-takes-the-selected-window ()
+  "The list takes the selected window rather than splitting it, and q gives it back.
+In a frame of one ordinary window beside the sidebar, the list shows in
+that window, the sidebar stepping aside, then coming back once q brings
+back the buffer the list replaced."
+  (drover-list-test-alone-beside
+    (drover-list)
+    (should (equal (drover-list-test-ordinary-windows) (list first)))
+    (should (eq (selected-window) first))
+    (should (eq (window-buffer first) buffer))
+    (should-not (drover-list--side-window))
+    (should (frame-parameter nil 'drover-list-sidebar-aside))
+    (drover-list-test-quit)
+    (should (equal (drover-list-test-ordinary-windows) (list first)))
+    (should (eq (window-buffer first) work))
+    (should (eq (selected-window) first))
+    (should (drover-list--side-window))
+    (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+    ;; Again, the list buried rather than killed.
+    (drover-list)
+    (should (equal (drover-list-test-ordinary-windows) (list first)))
+    (should (eq (window-buffer first) buffer))))
+
+(ert-deftest drover-list-test-from-the-sidebar ()
+  "From the sidebar, the list takes the window where you work, as sessions do.
+It never splits a window, nor shows in the sidebar's; the sidebar steps
+aside, and q brings back the buffer it replaced, and the sidebar."
+  (drover-list-test-alone-beside
+    (select-window side)
+    (drover-list)
+    (should (equal (drover-list-test-ordinary-windows) (list first)))
+    (should (eq (selected-window) first))
+    (should (eq (window-buffer first) buffer))
+    (should-not (drover-list--side-window))
+    (drover-list-test-quit)
+    (should (equal (drover-list-test-ordinary-windows) (list first)))
+    (should (eq (window-buffer first) work))
+    (should (drover-list--side-window))
+    ;; A window dedicated to its buffer is not where you work: the list
+    ;; takes the other one, used last.
+    (let ((second (split-window first nil 'below)))
+      (set-window-buffer second (get-buffer-create "*other 2*"))
+      (select-window second)
+      (select-window first)
+      (set-window-dedicated-p first t)
+      (drover-list)
+      (should (equal (drover-list-test-ordinary-windows) (list first second)))
+      (should (eq (window-buffer first) work))
+      (should (eq (window-buffer second) buffer))
+      (should (eq (selected-window) second)))))
+
+(ert-deftest drover-list-test-where-it-shows ()
+  "The list shows in the selected one of two windows, or where it already shows.
+Already shown, the command selects its window, which keeps it."
+  (drover-list-test-alone-beside
+    (let ((second (split-window first nil 'right))
+          (other (get-buffer-create "*other 2*")))
+      (set-window-buffer second other)
+      (select-window second)
+      (drover-list)
+      (should (equal (drover-list-test-ordinary-windows) (list first second)))
+      (should (eq (window-buffer second) buffer))
+      (should (eq (window-buffer first) work))
+      (should (eq (selected-window) second))
+      ;; Not beside the sidebar: it stays.
+      (drover-list-test-place)
+      (should (drover-list--side-window))
+      ;; Shown, from the other window: selected where it is.
+      (select-window first)
+      (drover-list)
+      (should (equal (drover-list-test-ordinary-windows) (list first second)))
+      (should (eq (window-buffer first) work))
+      (should (eq (window-buffer second) buffer))
+      (should (eq (selected-window) second))
+      ;; From the sidebar too.
+      (select-window side)
+      (drover-list)
+      (should (eq (window-buffer first) work))
+      (should (eq (selected-window) second))
+      (drover-list-test-quit)
+      (should (eq (window-buffer second) other)))))
+
+(ert-deftest drover-list-test-other-window ()
+  "With a prefix argument, the list shows in another window.
+That is the one used last, else one split from the selected window, or
+from the window where you work when the sidebar is selected; q deletes
+a window split for it."
+  (drover-list-test-alone-beside
+    (drover-list t)
+    (let ((windows (drover-list-test-ordinary-windows)))
+      (should (= (length windows) 2))
+      (should (eq (window-buffer first) work))
+      (should-not (eq (selected-window) first))
+      (should (eq (window-buffer (selected-window)) buffer))
+      (drover-list-test-quit)
+      (should (equal (drover-list-test-ordinary-windows) (list first)))
+      (should (eq (window-buffer first) work)))
+    ;; From the sidebar, back from stepping aside.
+    (select-window (or (drover-list--side-window) (error "No sidebar")))
+    (drover-list t)
+    (should (= (length (drover-list-test-ordinary-windows)) 2))
+    (should (eq (window-buffer first) work))
+    (should (eq (window-buffer (selected-window)) buffer))
+    (drover-list-test-quit)
+    ;; Of two windows, in the other one.
+    (let ((second (split-window first nil 'right))
+          (other (get-buffer-create "*other 2*")))
+      (set-window-buffer second other)
+      (select-window first)
+      (drover-list t)
+      (should (equal (drover-list-test-ordinary-windows) (list first second)))
+      (should (eq (window-buffer first) work))
+      (should (eq (window-buffer second) buffer))
+      (should (eq (selected-window) second))
+      ;; Already shown there, from there: in another window.
+      (drover-list t)
+      (should (equal (drover-list-test-ordinary-windows) (list first second)))
+      (should (eq (window-buffer first) buffer))
+      (should (eq (selected-window) first)))))
+
 ;;;; The sidebar and the list at once
 
 (defmacro drover-list-test-two-lists (&rest body)
