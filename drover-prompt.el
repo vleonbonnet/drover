@@ -856,6 +856,28 @@ backend."
                           (format "%s sends it to %s" keys title)
                         (format "it goes to %s" title))))))
 
+;;;###autoload
+(defun drover-prompt-send-to (session text)
+  "Send TEXT, in Org, to SESSION at once, as the prompt sends it.
+The prompt is left as it is.  TEXT goes to the kill ring, then as
+Markdown (see `drover-prompt-to-markdown') through SESSION's backend,
+its checks first: when they cancel, nothing is sent.  A session drover
+archived is restored first (see `drover-unarchive-to-send'); one that
+cannot be signals a `user-error'.  Return non-nil once the backend has
+TEXT.  Front ends call this to send a prompt of their own making, as a
+review of a session's changes does (see `drover-review')."
+  (let* ((markdown (drover-prompt-to-markdown text))
+         (check (drover-backend-property session :check))
+         (token (and (functionp check) (funcall check session markdown nil))))
+    (kill-new text)
+    (if (eq token 'cancel)
+        (progn (message "Not sent to %s; the prompt is in the kill ring"
+                        (drover-session-display-title session))
+               nil)
+      (drover-unarchive-to-send session)
+      (drover-prompt--deliver session (drover-session-buffer session) markdown token)
+      t)))
+
 (defun drover-prompt-forget-target ()
   "Forget the session the prompt goes to: sending it asks where again.
 The session is the one `drover-prompt-edit-for' chose; the text stays."
