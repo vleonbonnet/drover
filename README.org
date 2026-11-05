@@ -228,6 +228,7 @@ Everywhere, through the menu.
 | =L= | =drover-list-side=           | the sidebar, a list of sessions beside your work, or hide it   |
 | =p= | =drover-select-project=      | the list of the sessions of a project                          |
 | =S= | =drover-search=              | search the sessions, by what they tell and what was said       |
+| =$= | =drover-usage=               | what agents cost, in tokens and money (see [[*Usage][Usage]])               |
 | ="= | =drover-prompt-dwim=         | write a prompt, with the context at point                      |
 | =n= | =drover-prompt-org-task=     | write a prompt for the Org task point is in                    |
 | ='= | =drover-prompt-toggle=       | show or hide the prompt                                        |
@@ -275,7 +276,7 @@ Wherever one of drover's lists is in sight (see [[*The menu beside the list][The
 |      |                                 | =-H= harness, =-l= location, =-b= branch, =-a= agent, |
 |      |                                 | =-m= model,                                          |
 |      |                                 | =-r= provider, =-x= context, =-c= created, =-t= age, |
-|      |                                 | =-p= cache, =-s= summary                             |
+|      |                                 | =-p= cache, =-s= summary, =-$= cost                  |
 
 Earlier versions reached these through =V= only, on keys of its own: =o=, =r= and =g= are now ~=o~, ~=r~ and ~=g~; the filters =p=, =s=, =a=, =m=, =v=, =h=, =d=, =f= and =c= are ~=p~ … ~=c~; =F= is =-f=; the columns keep their keys.  The subagents, older and archived sessions shown keep sessions out as the filter does: they moved from the View group to the Filter group, and from =U=, =-o= and =-z= to ~=u~, ~=O~ and ~=z~ (~=o~ sorts); the list no longer binds =U= of its own.
 
@@ -498,6 +499,22 @@ They show as OpenCode's sessions do. A conversation whose last turn ended in a r
 - =z=, =Z= and =x= archive, restore and delete them as the table of [[*Archived sessions][Archived sessions]] says; Codex's through its CLI, =drover-codex-program=, when found.
 
 Drover reads only what it needs of each file, its head and tail, then what was appended, and looks at the files every =drover-transcript-scan-interval= seconds, in slices that give way to your typing: those of the last day at every look, every file every eighth look. What it read it keeps in =drover-state-directory=, =claude-code-transcripts.eld= and =codex-rollouts.eld=, a cache checked against the files, so that an Emacs starting reads only what changed. =drover-claude-code-history-days= and =drover-codex-history-days= move conversations idle longer among the older sessions, shown on demand (the view key ~=O~); nil, the default, lists them all. =drover-codex-include-non-interactive= lists what =codex exec= ran too.
+
+* Usage
+
+=C-' $= (=drover-usage=) shows in =*drover usage*= what agents cost: the tokens they used, input, output, read from and written into prompt caches, and what those cost, today, this week, this month or ever, grouped by session (its subagents' usage with it), project, harness, provider, model, host or day, each group broken down by another, then where each cost comes from. =V= there opens its menu, on the families of keys of the list's: ~=d~ the period, ~=g~ the grouping, ~=b~ what each group is broken down by, ~=o~ the order, ~=p~, ~=H~, ~=h~, ~=m~ and ~=v~ total one project, harness, host, model or provider, ~=c~ all of them again; =g= reads anew what changed, =RET= on a session opens it. The list shows each session's totals, its subagents' included, in its details, and in the column =cost=, hidden by default (=-$= in the View menu). =drover-usage-mode-line-mode= shows today's cost in the mode line, its tooltip by harness.
+
+Each engine's usage comes from what it records:
+
+| Engine      | Tokens                                                                                   | Cost                                                                    |
+|-------------+------------------------------------------------------------------------------------------+-------------------------------------------------------------------------|
+| OpenCode    | each step its service records in its database (=drover-opencode-database=), read only     | as its service recorded it, at its catalog's prices                     |
+| Claude Code | the usage of each reply of its transcripts, a reply recorded twice, as by a fork, once    | priced: =drover-usage-prices=, then OpenCode's catalog, then drover's own |
+| Codex       | the tokens of each request of its rollouts, its cached input apart                       | priced as Claude Code's                                                 |
+
+A subscription paying for usage includes it (=drover-usage-billing=): GitHub Copilot through OpenCode, Claude Code logged in to an account without an API key nor a gateway of its own, Codex logged in through ChatGPT. Its tokens show, its cost reads =included= rather than money it did not cost; a total of both reads =$12.40 + included=, =$12.40+= in a column. A cost drover could not price ends in =?=. The report tells, for each harness, provider and model, where its cost came from: recorded by OpenCode, your prices, OpenCode's catalog and the provider pricing it there, drover's estimate, or included.
+
+Drover reads each transcript and rollout whole once, then what was appended, a few hundred kilobytes a slice, and OpenCode's database forward from where it stopped, its history once, newest first, a few hundred steps a slice, as its sessions change; it keeps what it read in =drover-state-directory=, =claude-code-usage.eld=, =codex-usage.eld= and =opencode-usage.eld=, so that an Emacs starting reads only what changed. It starts as the report, a column of costs, a session's details or the mode line first asks. Each host totals its own usage, with its own prices, and sends its totals to its peers as they ask; the report shows them by host, as of when received.
 
 * The prompt
 

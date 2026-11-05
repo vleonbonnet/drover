@@ -157,11 +157,11 @@ One of the groupings of `drover-usage-group-by'."
   :type '(choice (const cost) (const tokens) (const name))
   :group 'drover-usage)
 
-(defconst drover-usage-read-chunk (* 4 1024 1024)
+(defconst drover-usage-read-chunk (* 128 1024)
   "Bytes of a transcript or rollout read at most in one step of its index.
 A longer one is read in several steps, in slices of the index's work.")
 
-(defconst drover-usage-oc-page 400
+(defconst drover-usage-oc-page 200
   "Messages of OpenCode's database read at most in one query.")
 
 (defconst drover-usage-oc-slice 0.008
@@ -603,7 +603,8 @@ Nil before the sources started.  One made anew is started."
   (file nil :documentation "The database read, its true name.")
   (forward nil :documentation "Where reading on begins, (TIME . ID): messages after it are new.")
   (back nil :documentation "Where reading the history goes on, (TIME . ID), or t once all read.")
-  (meta 0 :documentation "The time of the newest change of a session read, in milliseconds.")
+  (meta (cons 0 "") :documentation "Where reading the sessions changed goes on, (TIME . ID).
+TIME is when the session ID changed, in milliseconds.")
   (sessions (make-hash-table :test #'equal)
             :documentation "Sessions by identifier, as (PARENT DIRECTORY TITLE ROWS).
 ROWS are vectors [DAY PROVIDER MODEL INPUT OUTPUT CACHE-READ CACHE-WRITE COST].")
@@ -659,7 +660,7 @@ One made by another version of drover is made anew."
              (when (and (equal file (drover-usage--oc-file oc))
                         (consp forward) (numberp (car forward))
                         (or (eq back t) (and (consp back) (numberp (car back))))
-                        (numberp meta))
+                        (consp meta) (numberp (car meta)) (stringp (cdr meta)))
                (setf (drover-usage--oc-forward oc) forward
                      (drover-usage--oc-back oc) back
                      (drover-usage--oc-meta oc) meta)
@@ -763,28 +764,42 @@ STEP is as `drover-usage--oc-step' returns it."
     (setf (drover-usage--oc-dirty oc) t)
     (car step)))
 
-(defun drover-usage--oc-meta-read (oc db)
-  "Read what changed of OpenCode's sessions in DB into OC.
-Their parents, directories and titles.  Return the sessions read."
-  (let ((rows (sqlite-select db "SELECT id, parent_id, directory, title, time_updated FROM session_v2 WHERE time_updated >= ?"
-                             (list (drover-usage--oc-meta oc))))
-        (ids nil))
-    (pcase-dolist (`(,id ,parent ,directory ,title ,updated) rows)
-      (when (stringp id)
-        (let ((session (drover-usage--oc-session oc id))
-              (directory (and (stringp directory) (not (string-empty-p directory))
-                              (file-name-as-directory (drover-usage--name directory)))))
-          (unless (and (equal (nth 0 session) (drover-usage--name parent))
-                       (equal (nth 1 session) directory)
-                       (equal (nth 2 session) (drover-usage--name title)))
-            (setf (nth 0 session) (drover-usage--name parent)
-                  (nth 1 session) directory
-                  (nth 2 session) (drover-usage--name title)
-                  (drover-usage--oc-dirty oc) t)
-            (push id ids))
-          (when (and (numberp updated) (> updated (drover-usage--oc-meta oc)))
-            (setf (drover-usage--oc-meta oc) updated)))))
-    ids))
+(defun drover-usage--oc-meta-read (oc db deadline)
+  "Read what changed of OpenCode's sessions in DB into OC, until DEADLINE.
+Their parents, directories and titles, by the time they changed, a page
+at a time.  Return (DONE . SESSIONS), the sessions read."
+  (let ((ids nil)
+        (done nil))
+    (while (and (not done) (< (float-time) deadline))
+      (let* ((from (drover-usage--oc-meta oc))
+             (rows (sqlite-select
+                    db (format "SELECT id, parent_id, directory, title, time_updated FROM session_v2 WHERE time_updated > ?1 OR (time_updated = ?1 AND id > ?2) ORDER BY time_updated, id LIMIT %d"
+                               drover-usage-oc-page)
+                    (list (car from) (cdr from)))))
+        (when (< (length rows) drover-usage-oc-page)
+          (setq done t))
+        (pcase-dolist (`(,id ,parent ,directory ,title ,updated) rows)
+          (when (and (stringp id) (numberp updated))
+            (setf (drover-usage--oc-meta oc) (cons updated id))
+            (push (drover-usage--oc-meta-take oc id parent directory title) ids)))))
+    (cons done (delq nil ids))))
+
+(defun drover-usage--oc-meta-take (oc id parent directory title)
+  "Take into OC the session ID of PARENT, in DIRECTORY, titled TITLE.
+Return ID when that changed what OC knew of it."
+  (let ((session (drover-usage--oc-session oc id))
+        (parent (drover-usage--name parent))
+        (directory (and (stringp directory) (not (string-empty-p directory))
+                        (file-name-as-directory (drover-usage--name directory))))
+        (title (drover-usage--name title)))
+    (unless (and (equal (nth 0 session) parent)
+                 (equal (nth 1 session) directory)
+                 (equal (nth 2 session) title))
+      (setf (nth 0 session) parent
+            (nth 1 session) directory
+            (nth 2 session) title
+            (drover-usage--oc-dirty oc) t)
+      id)))
 
 (defun drover-usage--oc-forward-pass (oc db deadline)
   "Read the steps of DB since OC's forward point, until DEADLINE.
@@ -850,7 +865,7 @@ Return the sessions read."
               (drover-usage--oc-forward oc) nil
               (drover-usage--oc-back oc) nil
               (drover-usage--oc-live oc) nil
-              (drover-usage--oc-meta oc) 0
+              (drover-usage--oc-meta oc) (cons 0 "")
               (drover-usage--oc-loaded oc) nil))
       (drover-usage--oc-load oc)
       (condition-case err
@@ -867,7 +882,8 @@ what is new, until nothing is left."
   (when (drover-layout-current-p oc 'drover-usage--oc)
     (setf (drover-usage--oc-timer oc) nil)
     (let ((more nil)
-          (sessions nil))
+          (sessions nil)
+          (history (consp (drover-usage--oc-back oc))))
       (drover-with-reporting "usage of OpenCode"
         (when-let* ((db (drover-usage--oc-open oc)))
           (unwind-protect
@@ -879,11 +895,15 @@ what is new, until nothing is left."
                         (setf (drover-usage--oc-forward oc) start
                               (drover-usage--oc-back oc) start)))
                     (when (> (- (float-time) (drover-usage--oc-checked oc)) 5)
-                      (setf (drover-usage--oc-checked oc) (float-time))
-                      (setq sessions (drover-usage--oc-meta-read oc db)))
+                      (pcase-let ((`(,done . ,read) (drover-usage--oc-meta-read oc db deadline)))
+                        (setq sessions read)
+                        ;; Read on in the next slice, until done.
+                        (if done
+                            (setf (drover-usage--oc-checked oc) (float-time))
+                          (setq more t))))
                     (pcase-let ((`(,done . ,read) (drover-usage--oc-forward-pass oc db deadline)))
                       (setq sessions (append read sessions)
-                            more (not done)))
+                            more (or more (not done))))
                     (unless more
                       (setq sessions (append (drover-usage--oc-back-pass oc db deadline) sessions)
                             more (consp (drover-usage--oc-back oc)))))
@@ -896,7 +916,8 @@ what is new, until nothing is left."
              (setf (drover-usage--oc-timer oc)
                    (run-at-time 0.05 nil #'drover-usage--oc-work oc)))
             (t (setf (drover-usage--oc-busy oc) nil)
-               (drover-usage--oc-save oc (not (consp (drover-usage--oc-back oc)))))))))
+               ;; Kept at once when the history was read to its start.
+               (drover-usage--oc-save oc (and history (not (consp (drover-usage--oc-back oc))))))))))
 
 (defun drover-usage--oc-look (&optional delay)
   "Look at OpenCode's database for new usage after DELAY seconds, or soon."
@@ -991,7 +1012,8 @@ its end."
   (when-let* ((oc (drover-usage--oc-current)))
     (when (timerp (drover-usage--oc-timer oc))
       (cancel-timer (drover-usage--oc-timer oc)))
-    (setf (drover-usage--oc-busy oc) t)
+    (setf (drover-usage--oc-busy oc) t
+          (drover-usage--oc-checked oc) 0)
     (let ((drover-usage-oc-slice 3600))
       (drover-usage--oc-work oc))))
 
@@ -1528,12 +1550,17 @@ the parents above them, whose totals hold theirs."
 (defconst drover-usage-dimensions '("session" "day" "harness" "provider" "model" "project")
   "The dimensions a peer may ask a host's totals by.")
 
+(defvar drover-usage--projects (make-hash-table :test #'equal)
+  "The projects of directories as the usage names them, by directory.")
+
 (defun drover-usage--project (fact)
-  "Return the project of FACT, a name, or nil."
+  "Return the project of FACT, a name, or nil.
+That of its directory, else the directory, abbreviated."
   (or (drover-usage--fact-project fact)
       (when-let* ((directory (drover-usage--fact-directory fact)))
-        (or (drover-transcript-project directory)
-            (abbreviate-file-name (directory-file-name directory))))))
+        (with-memoization (gethash directory drover-usage--projects)
+          (or (drover-transcript-project directory)
+              (abbreviate-file-name (directory-file-name directory)))))))
 
 (defun drover-usage--in-period-p (fact start)
   "Return non-nil when FACT is of a day from START, a day, or START is nil."
@@ -1839,7 +1866,9 @@ MODEL SOURCE SUM); and :hosts, how each peer's totals stand, as
   (let* ((facts (drover-usage--current-facts))
          (start (drover-usage-period-start period))
          (remote (drover-usage--remote-facts period))
-         (context (list :facts facts :titles (drover-usage--titles facts) :remote (cdr remote)))
+         (context (list :facts facts :remote (cdr remote)
+                        :titles (and (memq 'session (list grouping breakdown))
+                                     (drover-usage--titles facts))))
          (pricer (drover-usage--pricer))
          (total (drover-usage-sum-make))
          (groups (make-hash-table :test #'equal))

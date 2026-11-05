@@ -1890,7 +1890,7 @@ A refusal is told on one line, as a warning, the session staying archived."
     (should (equal keys '(drover-list drover-list-side drover-select-project drover-search))))
   (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                          (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                 '("j" "B" "b" "l" "L" "p" "S" "X")))
+                 '("j" "B" "b" "l" "L" "p" "S" "$" "X")))
   ;; opencode.el's search of open buffers stays, unbound.
   (should (fboundp 'opencode-consult-sessions))
   (should-not (ignore-errors (transient-get-suffix 'drover-dispatch 'opencode-consult-sessions)))
@@ -2028,7 +2028,7 @@ once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS)."
             (drover-opencode--install)
             (should (equal (mapcar (lambda (child) (plist-get (cdr child) :key))
                                    (aref (transient-get-suffix 'drover-dispatch '(0 0)) 2))
-                           '("j" "B" "b" "l" "L" "p" "S" "X"))))
+                           '("j" "B" "b" "l" "L" "p" "S" "$" "X"))))
         (kill-buffer session-buffer)
         (drover-opencode--install)))))
 

@@ -414,7 +414,7 @@ As (VALUE . LABEL)."
 
 ;;;###autoload
 (define-minor-mode drover-usage-mode-line-mode
-  "Show in the mode line what agents cost today; mouse-1 shows the report."
+  "Show in the mode line what agents cost today; a click shows the report."
   :global t
   :group 'drover-usage
   (if drover-usage-mode-line-mode

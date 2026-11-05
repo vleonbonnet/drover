@@ -6667,8 +6667,8 @@ The old menu took 24 lines at any width, its View menu apart."
           (oset transient--prefix plan wide)
           (execute-kbd-macro (kbd "= u"))
           (should (equal (oref transient--prefix plan) wide))
-          ;; As high as the highest group: a title and seven entries.
-          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 8))
+          ;; As high as the highest group: a title and eight entries.
+          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 9))
           ;; Narrower than it, the menu is laid out anew.
           (setq width 160)
           (execute-kbd-macro (kbd "= u"))
