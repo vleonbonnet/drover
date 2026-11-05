@@ -2249,6 +2249,59 @@ user's service: only the services BODY registers are reached."
             (drover-remote-test-shows buffer "Echo: after")
             (kill-buffer buffer)))))))
 
+(ert-deftest drover-remote-test-oc-survives-a-restart ()
+  "The remote layer restarting, as reloading drover does, an OpenCode buffer follows its session again once its host is back."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "act")
+      (save-window-excursion
+        (let ((buffer (drover-remote-test-open-oc "ses_a"))
+              (service (opencode-service-get "agent")))
+          (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)))
+          (drover-remote-mode -1)
+          (should (opencode-svc-closed service))
+          (should (string-match-p "closed" (format "%s" (buffer-local-value 'header-line-format buffer))))
+          (drover-remote-mode 1)
+          (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)))
+          (drover-remote-test-wait (lambda () (not (opencode-svc-closed service))))
+          (should-not (opencode-svc-closed service))
+          (should (eq (opencode-service-get "agent") service))
+          (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)) 10)
+          (drover-remote-test-wait (lambda () (not (local-variable-p 'header-line-format buffer))))
+          (should-not (local-variable-p 'header-line-format buffer))
+          ;; Its buffer talks to its session again.
+          (with-current-buffer buffer
+            (opencode-session-send "after the restart" :show t))
+          (drover-remote-test-shows buffer "Echo: after the restart")
+          ;; Archived there, it closes here as before the restart.
+          (drover-remote-test-command "oc-archive" :id "ses_a")
+          (drover-remote-test-wait (lambda () (not (buffer-live-p buffer))))
+          (should-not (buffer-live-p buffer)))))))
+
+(ert-deftest drover-remote-test-oc-reopened-from-the-list ()
+  "RET on a session whose buffer outlived its host's OpenCode service follows that service again."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "act")
+      (save-window-excursion
+        (let ((buffer (drover-remote-test-open-oc "ses_a"))
+              (service (opencode-service-get "agent"))
+              (failure nil))
+          (drover-remote-test-wait (lambda () (opencode-call-with-service service #'opencode-events-connected-p)))
+          ;; Closed while its host stays connected, as a remote layer
+          ;; of an older drover left it.
+          (opencode-service-unregister service)
+          (with-current-buffer buffer
+            (opencode-session-send "refused" :else (lambda (error) (setq failure error))))
+          (drover-remote-test-wait (lambda () failure))
+          (should (string-match-p "closed" (opencode-error-describe failure)))
+          (should (eq (drover-remote-test-open-oc "ses_a") buffer))
+          (should-not (opencode-svc-closed service))
+          (with-current-buffer buffer
+            (opencode-session-send "reopened" :show t))
+          (drover-remote-test-shows buffer "Echo: reopened")
+          (kill-buffer buffer))))))
+
 (ert-deftest drover-remote-test-oc-older-peer ()
   "A peer whose drover relays no OpenCode service shows its OpenCode sessions as it tells them, saying why."
   (drover-remote-test-with nil

@@ -6440,18 +6440,40 @@ kept."
       (opencode-transport-relay-fail (drover-linked exchange) 'closed "the link to its host ended"))))
 
 (defun drover-remote--oc-resume (peer)
-  "Have PEER's OpenCode service, if registered here, reopen its stream at once.
-PEER is connected anew: opencode.el would wait for its backoff."
+  "Have PEER's OpenCode service, if registered here, follow PEER again at once.
+PEER is connected anew: opencode.el would wait for its backoff.  A
+service closed as PEER went for good, or as the remote layer stopped,
+which reloading drover does, is registered again, so that the buffers
+of its sessions still open follow them anew rather than refuse every
+request."
   (when-let* (((drover-remote--opencode-here-p))
-              (service (opencode-service-get (drover-remote--peer-name peer)))
-              ((not (opencode-svc-closed service))))
+              (name (drover-remote--peer-name peer))
+              (service (opencode-service-get name)))
     (run-at-time 0 nil (lambda ()
                          (drover-with-reporting "remote OpenCode"
-                           (opencode-call-with-service service #'opencode-events-reopen))))))
+                           (if (opencode-svc-closed service)
+                               (drover-remote--oc-reopen name)
+                             (opencode-call-with-service service #'opencode-events-reopen)))))))
+
+(defun drover-remote--oc-reopen (name)
+  "Register again the OpenCode service of the peer NAME, closed here.
+Only while NAME is connected and relays its service; its buffers then
+close again once their sessions are archived there."
+  (when-let* ((peer (drover-remote--peer name))
+              ((eq (drover-remote--peer-state peer) 'open))
+              ((drover-remote--capable-p peer "opencode"))
+              (service (opencode-service-get name))
+              ((opencode-svc-closed service)))
+    (drover-remote--oc-service peer)
+    (when (seq-some (lambda (shown) (equal (car shown) name))
+                    (hash-table-keys drover-remote--oc-buffers))
+      (add-hook 'opencode-state-updated-functions #'drover-remote--oc-updated))
+    (drover-remote--event peer 'opencode "followed its OpenCode service again")))
 
 (defun drover-remote--oc-close (peer)
   "Close PEER's OpenCode service here, PEER gone for good.
-Its buffers stay, saying so."
+Its buffers stay, saying so, until PEER connects again
+\(see `drover-remote--oc-resume')."
   (when-let* (((drover-remote--opencode-here-p))
               (service (opencode-service-get (drover-remote--peer-name peer))))
     (opencode-service-unregister service)
@@ -6485,7 +6507,11 @@ already; otherwise it shows once the session's info arrives."
          (key (drover-session-id session))
          (existing (drover-remote--oc-buffer name key)))
     (if existing
-        (progn (pop-to-buffer-same-window existing) existing)
+        (progn
+          ;; Its service closed here as the remote layer stopped: follow it again.
+          (drover-remote--oc-reopen name)
+          (pop-to-buffer-same-window existing)
+          existing)
       (let ((service (drover-remote--oc-service peer))
             (window (selected-window))
             (title (drover-bound-line (drover-session-display-title session) 60)))
