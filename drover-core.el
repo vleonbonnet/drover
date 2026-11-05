@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 16
+(defconst drover-core-generation 17
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -926,8 +926,8 @@ the cache is expired or its expiry or lifetime is unknown."
   "Return what the prompt cache of SESSION shows of its lifetime left at NOW.
 It is `drover-session-cache-fraction', but nil for a subagent: the user
 sends to its parent, never to it, so its cache tells nothing they can
-act on.  Lists draw a cache's bar from it, and `drover-attention-order'
-visits first the sessions it tells a live cache of."
+act on.  Lists draw a cache's bar from it, and `drover-attention-cache'
+tells from it which sessions `drover-attention-order' visits first."
   (and (not (drover-session-parent session))
        (drover-session-cache-fraction session now)))
 
@@ -2448,20 +2448,49 @@ without it."
         (place trees)))
     positions))
 
+(defun drover-attention-target (session)
+  "Return the session to visit for SESSION, a session needing the user.
+That is SESSION, but for a subagent waiting for the user: the session at
+the top of its tree, as the index tells it, whose buffer answers its
+subagents' requests (see `drover-session-to-answer') and whose turn the
+answer resumes.  A subagent whose tree the index does not hold is its
+own."
+  (or (and (eq (drover-session-status session) 'waiting)
+           (drover-session-parent session)
+           (let* ((key (drover-session-key session))
+                  (root (drover-index-root key)))
+             (and (not (equal root key)) (drover-index-session root))))
+      session))
+
+(defun drover-attention-cache (session &optional now)
+  "Return when the prompt cache answering SESSION expires, if live at NOW.
+SESSION needs the user; the cache is the one of the session visited
+for it (see `drover-attention-target'), as lists show it (see
+`drover-session-shown-cache-fraction'): a subagent waiting for the user
+has the cache of the top of its tree, which its answer reuses, another
+subagent none.  NOW defaults to the current time; nil when no cache
+lives then."
+  (let ((target (drover-attention-target session)))
+    (and (drover-session-shown-cache-fraction target now)
+         (drover-session-cache-expires target))))
+
 (defun drover-attention-order (sessions &optional now)
   "Return SESSIONS, sessions needing the user, in the order to visit them.
 First come those with a live prompt cache at NOW, the current time by
 default, the cache to expire soonest first: a turn sent while it lives
 reuses it.  A cache is live as lists show it (see
-`drover-session-shown-cache-fraction'): a subagent's never is.  The
-others follow in the order lists draw them (see `drover-view-groups'),
-as `drover-group-by' groups them and `drover-sort-by' sorts them, each
-subagent under its parent: a subagent lists hide but come in the place
-they would draw it, and a session `drover-filter' leaves out after
-those it keeps, in the order lists would draw it without the filter
-\(see `drover--view-positions').  Caches expiring alike come in that
-order too.  `drover-next' visits sessions in this order, the mode
-line's tooltip lists them in it, and `drover-select' offers them in it."
+`drover-attention-cache'): a subagent's never is, but a subagent
+waiting for the user has the cache of the top of its tree, which
+answering it resumes.  The others follow in the order lists draw them
+\(see `drover-view-groups'), as `drover-group-by' groups them and
+`drover-sort-by' sorts them, each subagent under its parent: a
+subagent lists hide but come in the place they would draw it, and a
+session `drover-filter' leaves out after those it keeps, in the order
+lists would draw it without the filter (see `drover--view-positions').
+Caches expiring alike come in that order too.  `drover-next' visits
+sessions in this order, a subagent waiting through the top of its
+tree, the mode line's tooltip lists them in it, and `drover-select'
+offers them in it."
   (when sessions
     (let ((now (or now (float-time)))
           (keys (make-hash-table :test #'equal)))
@@ -2470,8 +2499,7 @@ line's tooltip lists them in it, and `drover-select' offers them in it."
       (let* ((positions (drover--view-positions (drover--listed-sessions) keys now))
              (keyed (mapcar (lambda (session)
                               (list session
-                                    (and (drover-session-shown-cache-fraction session now)
-                                         (drover-session-cache-expires session))
+                                    (drover-attention-cache session now)
                                     (gethash (drover-session-key session) positions
                                              most-positive-fixnum)))
                             sessions)))

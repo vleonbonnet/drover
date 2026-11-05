@@ -20,6 +20,7 @@
 (require 'drover-test-helpers)
 (require 'drover-attention)
 (require 'drover-keys)
+(require 'drover-prompt)
 
 (defmacro drover-attention-test-with (sessions &rest body)
   "Run BODY with the fake backend serving SESSIONS and the mode's state isolated."
@@ -36,6 +37,8 @@
                                    (drover-attention--cycle nil)
                                    (drover-attention--position 0)
                                    (drover-attention--visited nil)
+                                   (drover-attention--started nil)
+                                   (drover-attention-round-lifetime 300)
                                    (drover-attention-statuses '(waiting failed done))
                                    (drover-attention-echo t)
                                    (drover-attention--pads (make-hash-table :test #'equal))
@@ -72,8 +75,10 @@
   (drover-next))
 
 (defun drover-attention-test-leave ()
-  "Leave the session shown for another buffer, in the selected window."
-  (set-window-buffer (selected-window) (get-buffer-create " *drover-attention-test elsewhere*")))
+  "Leave the session shown for another buffer, in the selected window.
+Its name begins otherwise than with a space, as the buffers windows
+remember having shown (see `window-prev-buffers')."
+  (set-window-buffer (selected-window) (get-buffer-create "*drover-attention-test elsewhere*")))
 
 (defun drover-attention-test-help (string)
   "Return the tooltip of STRING, the mode line count, as hovering it shows it."
@@ -506,7 +511,8 @@ pixels; spaces displayed as stretches advance by their width."
       (drover-next)
       (drover-attention-test-press)
       (drover-attention-test-press))
-    (should (equal (drover-attention-test-opened) '("asking" "alone" "asking")))))
+    ;; The subagent through its parent, which answers it.
+    (should (equal (drover-attention-test-opened) '("root" "alone" "root")))))
 
 (ert-deftest drover-attention-test-next-cycles-and-wraps ()
   (drover-attention-test-with (drover-attention-test-sessions)
@@ -623,7 +629,7 @@ pixels; spaces displayed as stretches advance by their width."
 
 (defun drover-attention-test-shown-buffer (id)
   "Return the buffer the backend `shown' shows session ID in."
-  (get-buffer-create (format " *drover-attention-test %s*" id)))
+  (get-buffer-create (format "*drover-attention-test %s*" id)))
 
 (defun drover-attention-test-shown-session (id &rest properties)
   "Return a session ID of the backend `shown', ended unseen, with PROPERTIES."
@@ -642,23 +648,32 @@ does; nothing marks it seen, as for a session of another host."
                                        drover-attention-test-shown))))
     (set-window-buffer (selected-window) (drover-attention-test-shown-buffer id))))
 
+(defun drover-attention-test-spec-id (spec)
+  "Return the identifier of SPEC, an identifier or (ID . PROPERTIES)."
+  (if (consp spec) (car spec) spec))
+
 (defmacro drover-attention-test-with-keys (ids &rest body)
   "Run BODY with sessions IDS of the backend `shown', which needs you each.
-<f19> opens `drover-dispatch', where j runs `drover-next', as Caps Lock
-does; <f18> runs `drover-next' itself, and <f17> another command."
+Each of IDS is an identifier, or (ID . PROPERTIES) for a session of
+other properties than having ended unseen.  <f19> opens
+`drover-dispatch', where j runs `drover-next', as Caps Lock does; <f18>
+runs `drover-next' itself, and <f17> another command."
   (declare (indent 1) (debug t))
   `(drover-attention-test-with nil
      (let ((drover-attention-test-shown
-            (seq-map-indexed (lambda (id index)
-                               (drover-attention-test-shown-session id :since (float (1+ index))))
+            (seq-map-indexed (lambda (spec index)
+                               (apply #'drover-attention-test-shown-session
+                                      (drover-attention-test-spec-id spec)
+                                      (append (and (consp spec) (cdr spec))
+                                              (list :since (float (1+ index))))))
                              ,ids))
            (map (make-sparse-keymap))
            (window-buffer (window-buffer (selected-window))))
        (drover-test-register-simple 'shown (lambda () drover-attention-test-shown)
                                     :open #'drover-attention-test-show
                                     :buffer (lambda (session)
-                                              (drover-attention-test-shown-buffer
-                                               (drover-session-id session))))
+                                              (get-buffer (format "*drover-attention-test %s*"
+                                                                  (drover-session-id session)))))
        (drover-backend-changed 'shown)
        (drover-changed-now)
        (keymap-set map "<f19>" #'drover-dispatch)
@@ -668,8 +683,8 @@ does; <f18> runs `drover-next' itself, and <f17> another command."
            (let ((overriding-local-map map))
              ,@body)
          (set-window-buffer (selected-window) window-buffer)
-         (dolist (id ,ids)
-           (kill-buffer (drover-attention-test-shown-buffer id)))))))
+         (dolist (spec ,ids)
+           (kill-buffer (drover-attention-test-shown-buffer (drover-attention-test-spec-id spec))))))))
 
 (defun drover-attention-test-keys (keys)
   "Type KEYS, as `kbd' reads them, through the command loop."
@@ -789,6 +804,182 @@ does; <f18> runs `drover-next' itself, and <f17> another command."
         (delete-window side)
         (kill-buffer list)))))
 
+(defun drover-attention-test-reshow (sessions)
+  "Have the backend `shown' serve SESSIONS from now on."
+  (setq drover-attention-test-shown sessions)
+  (drover-backend-changed 'shown)
+  (drover-changed-now))
+
+(defmacro drover-attention-test-with-prompt (&rest body)
+  "Run BODY with `prompt' bound to a buffer of drover's prompt."
+  (declare (indent 0) (debug t))
+  `(let ((prompt (get-buffer-create "*drover-attention-test prompt*")))
+     (unwind-protect
+         (progn
+           (with-current-buffer prompt
+             (drover-prompt-mode 1))
+           ,@body)
+       (kill-buffer prompt))))
+
+(defmacro drover-attention-test-with-side (buffer &rest body)
+  "Run BODY with `side' bound to a side window showing BUFFER, deleted after."
+  (declare (indent 1) (debug t))
+  `(let ((side (display-buffer-in-side-window ,buffer '((side . bottom)))))
+     (unwind-protect
+         (progn ,@body)
+       (when (window-live-p side)
+         (delete-window side)))))
+
+(ert-deftest drover-attention-test-keys-stale-round ()
+  "A round whose order outlived `drover-attention-round-lifetime' begins anew.
+Even on the session visited: the order as it then stands comes first."
+  (pcase-dolist (`(,lifetime ,age ,expected) '((300 301 ("a" "c")) (300 299 ("a" "b")) (nil 3600 ("a" "b"))))
+    (drover-attention-test-with-keys '("a" "b" "c")
+      (let ((drover-attention-round-lifetime lifetime)
+            (now (float-time)))
+        (drover-attention-test-keys "<f19> j")
+        ;; c's cache now lives: a new order begins with it.
+        (drover-attention-test-reshow
+         (append (seq-take drover-attention-test-shown 2)
+                 (list (drover-attention-test-shown-session "c" :since 3.0 :cache-expires (+ now 600)
+                                                            :cache-ttl 3600))))
+        (setq drover-attention--started (- drover-attention--started age))
+        (drover-attention-test-keys "<f19> j")
+        (should (equal (list lifetime age (drover-attention-test-opened))
+                       (list lifetime age expected)))))))
+
+(ert-deftest drover-attention-test-keys-stale-round-direct ()
+  "A key of its own begins a round anew alike once its order is too old."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (drover-attention-test-keys "<f18>")
+    (setq drover-attention--started (- drover-attention--started 400))
+    ;; Shown, a is seen: the new round begins past it.
+    (should (equal (remove "" (drover-attention-test-messages (drover-attention-test-keys "<f18>")))
+                   '("2/3")))
+    (should (equal (drover-attention-test-opened) '("a" "b")))
+    (should (< (- (float-time) drover-attention--started) 60))))
+
+(ert-deftest drover-attention-test-keys-fresh-order-after-leaving ()
+  "Having left the session, the next round takes the order as it then stands."
+  (let ((now (float-time)))
+    (drover-attention-test-with-keys '("a" "b" "c")
+      (drover-attention-test-keys "<f19> j")
+      (drover-attention-test-reshow
+       (append (seq-take drover-attention-test-shown 2)
+               (list (drover-attention-test-shown-session "c" :since 3.0 :cache-expires (+ now 600)
+                                                          :cache-ttl 3600))))
+      (drover-attention-test-leave)
+      (drover-attention-test-keys "<f18>")
+      (should (equal (drover-attention-test-opened) '("a" "c")))
+      (should (equal drover-attention--cycle '((shown . "c") (shown . "a") (shown . "b")))))))
+
+(ert-deftest drover-attention-test-keys-other-session-buffer ()
+  "On the buffer of another session of the round, the next press begins anew."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (drover-attention-test-keys "<f19> j")
+    (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "c"))
+    (drover-attention-test-keys "<f19> j")
+    (should (equal (drover-attention-test-opened) '("a" "a")))
+    (should (= drover-attention--position 0))))
+
+(ert-deftest drover-attention-test-keys-fetched-left-and-back ()
+  "The buffer a visit left counts only while the user stayed on it."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (let ((home (get-buffer-create "*drover-attention-test home*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'drover-attention-test-show)
+                     (lambda (session &rest _)
+                       (push (list :open (drover-session-id session) nil) drover-test-calls))))
+            (set-window-buffer (selected-window) home)
+            (drover-attention-test-keys "<f19> j")
+            (drover-attention-test-leave)
+            (set-window-buffer (selected-window) home)
+            (drover-attention-test-keys "<f19> j")
+            (should (equal (drover-attention-test-opened) '("a" "a")))
+            ;; Staying on it, the round goes on.
+            (drover-attention-test-keys "<f17> <f19> j")
+            (should (equal (drover-attention-test-opened) '("a" "a" "b"))))
+        (kill-buffer home)))))
+
+(ert-deftest drover-attention-test-keys-prompt-from-session ()
+  "From the prompt reached from the session visited, the round goes on where it was."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (drover-attention-test-with-prompt
+      (let ((main (selected-window)))
+        (drover-attention-test-keys "<f19> j")
+        (drover-attention-test-with-side prompt
+          (select-window side)
+          (drover-attention-test-keys "<f19> j")
+          (should (equal (drover-attention-test-opened) '("a" "b")))
+          (should (eq (window-buffer main) (drover-attention-test-shown-buffer "b")))
+          (should (eq (window-buffer side) prompt))
+          ;; Through a key of its own alike.
+          (select-window side)
+          (drover-attention-test-keys "<f18>")
+          (should (equal (drover-attention-test-opened) '("a" "b" "c")))
+          (should (eq (window-buffer main) (drover-attention-test-shown-buffer "c"))))))))
+
+(ert-deftest drover-attention-test-keys-prompt-from-elsewhere ()
+  "The prompt reached from another buffer than the session visited begins a new round."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (drover-attention-test-with-prompt
+      (let ((main (selected-window)))
+        (drover-attention-test-keys "<f19> j <f19> j")
+        (drover-attention-test-leave)
+        (drover-attention-test-with-side prompt
+          (select-window side)
+          (drover-attention-test-keys "<f19> j")
+          (should (equal (drover-attention-test-opened) '("a" "b" "a")))
+          (should (eq (window-buffer main) (drover-attention-test-shown-buffer "a"))))))))
+
+(ert-deftest drover-attention-test-keys-prompt-in-window ()
+  "The prompt shown in the window of the session counts when reached from it."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (drover-attention-test-with-prompt
+      (drover-attention-test-keys "<f19> j")
+      (set-window-buffer (selected-window) prompt)
+      (drover-attention-test-keys "<f19> j")
+      (should (equal (drover-attention-test-opened) '("a" "b")))
+      ;; From another buffer, it does not.
+      (drover-attention-test-leave)
+      (set-window-buffer (selected-window) prompt)
+      (drover-attention-test-keys "<f19> j")
+      (should (equal (drover-attention-test-opened) '("a" "b" "a"))))))
+
+(ert-deftest drover-attention-test-keys-new-round-on-waiting ()
+  "A new round begins on its first session even shown, when it waits for you."
+  (drover-attention-test-with-keys '(("a" :status waiting) "b" "c")
+    (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "a"))
+    (should (equal (remove "" (drover-attention-test-messages (drover-attention-test-keys "<f19> j")))
+                   '("1/3")))
+    (drover-attention-test-keys "<f19> j")
+    (should (equal (drover-attention-test-opened) '("a" "b")))))
+
+(ert-deftest drover-attention-test-keys-subagent-through-root ()
+  "A subagent waiting is visited through the top of its tree, by its cache, once."
+  (let* ((now (float-time))
+         (sessions `(("s" :cache-expires ,(+ now 1200) :cache-ttl 3600)
+                     ("r" :status working :cache-expires ,(+ now 600) :cache-ttl 3600)
+                     ("k" :parent "r" :status waiting
+                      :requests ((:kind permission :summary "Edit emacs.org")))
+                     ("j" :parent "r" :status waiting)
+                     "u")))
+    (drover-attention-test-with-keys sessions
+      (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions) now))
+                     '("k" "j" "s" "u")))
+      (should (equal (remove "" (drover-attention-test-messages (drover-attention-test-keys "<f19> j")))
+                     '("1/3")))
+      (should (eq (window-buffer (selected-window)) (drover-attention-test-shown-buffer "r")))
+      (drover-attention-test-keys "<f19> j <f18>")
+      (should (equal (drover-attention-test-opened) '("r" "s" "u")))
+      (should (equal drover-attention--cycle '((shown . "r") (shown . "s") (shown . "u"))))
+      ;; Shown, the top of the tree still waits for an answer: a new round
+      ;; begins on it.
+      (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "r"))
+      (setq drover-attention--started (- drover-attention--started 400))
+      (drover-attention-test-keys "<f18>")
+      (should (equal (drover-attention-test-opened) '("r" "s" "u" "r"))))))
+
 ;;;; The order of visits
 
 (defun drover-attention-test-ids (sessions)
@@ -822,7 +1013,35 @@ An expired cache counts as none, and so does a subagent's."
       (drover-next)
       (dotimes (_ 6)
         (drover-attention-test-press))
-      (should (equal (drover-attention-test-opened) '("c2" "c1" "w" "k" "x" "d1" "c2"))))))
+      (should (equal (drover-attention-test-opened) '("c2" "c1" "w" "root" "x" "d1" "c2"))))))
+
+(ert-deftest drover-attention-test-order-subagent-by-root-cache ()
+  "A subagent waiting ranks by the cache of the top of its tree, which answering it resumes.
+The tree is visited once, through its top, where the subagent is answered."
+  (let ((now (float-time)))
+    (pcase-dolist (`(,root-expires ,expected)
+                   `((,(+ now 2000) ("agent" "spp" "u")) (,(+ now 3500) ("spp" "agent" "u"))
+                     (nil ("spp" "agent" "u"))))
+      (drover-attention-test-with
+          (list (drover-test-session "spp" :status 'done :since 10.0
+                                     :cache-expires (+ now 3000) :cache-ttl 3600)
+                (drover-test-session "u" :status 'done :since 5.0)
+                (drover-test-session "drover" :status 'working :since 1.0
+                                     :cache-expires root-expires :cache-ttl 3600)
+                (drover-test-session "agent" :parent "drover" :status 'waiting :since 2.0
+                                     :requests '((:kind permission :summary "Edit emacs.org"))))
+        (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions) now))
+                       expected))
+        (should (equal (drover-attention-cache (drover-test-session "agent" :parent "drover"
+                                                                    :status 'waiting)
+                                               now)
+                       root-expires))
+        (should (equal (drover-attention-test-messages
+                         (dotimes (_ 3)
+                           (drover-attention-test-press)))
+                       '("1/3" "2/3" "3/3")))
+        (should (equal (drover-attention-test-opened)
+                       (mapcar (lambda (id) (if (equal id "agent") "drover" id)) expected)))))))
 
 (ert-deftest drover-attention-test-order-caches-alike ()
   "Caches expiring at the same time come in the order lists draw them."

@@ -30,9 +30,11 @@
 ;;   mouse-1 on it visits the first of them, mouse-3 chooses one.
 ;; - `drover-next' visits the session that needs you whose prompt cache
 ;;   expires soonest, or, when no cache is live, the first the list
-;;   shows; pressed again while that session still shows, it walks
+;;   shows, a subagent waiting for you through the top of its tree;
+;;   pressed again while you are still on that session, it walks
 ;;   through the others, in the order of the first press
-;;   (`drover-attention-order'), then starts a new round.
+;;   (`drover-attention-order'), then starts a new round, as it does
+;;   once that order is `drover-attention-round-lifetime' old.
 ;; - `drover-select' chooses any session with completion, grouped by
 ;;   status, those needing you first, in the order `drover-next' visits
 ;;   them.
@@ -47,13 +49,22 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 14))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 17))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
   "Whether `drover-next' tells the place in the cycle of the session it visits.
 Such as \"2/5\" in the echo area: the buffer visited shows the session."
   :type 'boolean
+  :group 'drover)
+
+(defcustom drover-attention-round-lifetime 300
+  "Seconds a round of `drover-next' keeps the order of its first press.
+A press once they passed begins a new round, in the order as it then
+stands, even on the session last visited: meanwhile caches expire, and
+other sessions come to need you.  nil keeps a round however old."
+  :type '(choice (const :tag "As long as you stay on its sessions" nil)
+                 (number :tag "Seconds"))
   :group 'drover)
 
 ;;;; Mode line
@@ -64,10 +75,15 @@ Such as \"2/5\" in the echo area: the buffer visited shows the session."
 (defvar drover-attention--position 0
   "Position in `drover-attention--cycle' of the session last visited.")
 
+(defvar drover-attention--started nil
+  "When `drover-next' fixed the order of its round, as `float-time' tells, or nil.")
+
 (defvar drover-attention--visited nil
-  "Where `drover-next' last left the user, as (KEY WINDOW BUFFER), or nil.
+  "Where `drover-next' last left the user, as (KEY WINDOW BUFFER BEFORE), or nil.
 KEY is the session visited, WINDOW the window it was shown in, BUFFER
-the buffer WINDOW showed once the session's backend had opened it.")
+the buffer WINDOW showed once the session's backend had opened it, and
+BEFORE the buffers WINDOW showed before, as `drover-attention--before'
+tells them then.")
 
 (defvar drover-attention-mode-line nil
   "The mode line construct of `drover-attention-mode', or nil.
@@ -360,53 +376,121 @@ starts the backends."
     (setq drover-attention-mode-line nil
           drover-attention--sessions nil
           drover-attention--cycle nil
+          drover-attention--started nil
           drover-attention--visited nil)
     (force-mode-line-update t)))
 
 ;;;; Visiting the next session
 
-(defun drover-attention--visit (session position)
-  "Display SESSION, at POSITION in the cycle, in the selected window.
+(defvar drover-prompt-mode)
+
+(defun drover-attention--window ()
+  "Return the window `drover-next' shows sessions in.
+It is `drover-session-window', but from a side window, such as the
+prompt's, where no session shows: the window the user came from, the
+one of its frame used most recently that may show a session (see
+`drover--session-window-p'), if any."
+  (let ((window (drover-session-window)))
+    (or (and (window-parameter window 'window-side)
+             (car (sort (seq-filter #'drover--session-window-p
+                                    (window-list (window-frame window) 'nomini))
+                        (lambda (a b) (> (window-use-time a) (window-use-time b))))))
+        window)))
+
+(defun drover-attention--visit (session position window)
+  "Display SESSION, at POSITION in the cycle, in WINDOW, and select it.
 Where it shows is remembered even when its backend fails to open it, so
 that the round moves on from it."
   (setq drover-attention--position position)
+  (unless (eq window (selected-window))
+    (select-window window))
   (unwind-protect
       (drover-open session)
     (let ((window (selected-window)))
       (setq drover-attention--visited
-            (list (drover-session-key session) window (window-buffer window)))))
+            (list (drover-session-key session) window (window-buffer window)
+                  (drover-attention--before window)))))
   (when drover-attention-echo
     (message "%d/%d" (1+ position) (length drover-attention--cycle))))
 
+(defun drover-attention--before (window)
+  "Return the buffers WINDOW showed before its buffer, the latest first.
+They are those of `window-prev-buffers', which showing another buffer
+in WINDOW and coming back changes, but not a menu shown and gone."
+  (mapcar #'car (window-prev-buffers window)))
+
+(defun drover-attention--session-buffer-p (buffer key)
+  "Return non-nil when BUFFER is the session of KEY's own.
+It is the session's buffer (see `drover-session-buffer'), or one that
+tells that session as its own, such as the view of a session of another
+host (see `drover-session-at-point-function'); the session at point of
+a list is merely its row, and does not count."
+  (or (when-let* ((session (drover-index-session key)))
+        (eq buffer (drover-session-buffer session)))
+      (with-current-buffer buffer
+        (and drover-session-at-point-function
+             (not (drover-session-list-p))
+             (when-let* ((session (funcall drover-session-at-point-function)))
+               (equal (drover-session-key session) key))))))
+
 (defun drover-attention--shows-p (window key)
   "Return non-nil when WINDOW shows the session of KEY.
-Its buffer is the session's (see `drover-session-buffer'), or one that
-tells that session as its own, such as its prompt buffer or the view of
-a session of another host (see `drover-session-at-point-function'); the
-session at point of a list is merely its row, and does not count."
-  (let ((buffer (window-buffer window)))
-    (or (when-let* ((session (drover-index-session key)))
-          (eq buffer (drover-session-buffer session)))
-        (with-current-buffer buffer
-          (and drover-session-at-point-function
-               (not (drover-session-list-p))
-               (when-let* ((session (funcall drover-session-at-point-function)))
-                 (equal (drover-session-key session) key)))))))
+See `drover-attention--session-buffer-p'."
+  (drover-attention--session-buffer-p (window-buffer window) key))
+
+(defun drover-attention--left-p (window buffer before)
+  "Return non-nil when BUFFER, in WINDOW, is where the last visit left the user.
+BEFORE is the list of buffers WINDOW showed before BUFFER, the latest
+first.  BUFFER is the session visited's own (see
+`drover-attention--session-buffer-p'), however reached since; or, in
+the window of the visit and while the session has no buffer of its
+own, its backend fetching it first or having failed to open it, the
+buffer the visit left there, as long as the user stayed on it: BEFORE,
+without the buffer WINDOW shows, is then as it was."
+  (pcase drover-attention--visited
+    (`(,key ,visited ,left ,left-before)
+     (or (drover-attention--session-buffer-p buffer key)
+         (and (eq window visited)
+              (eq buffer left)
+              (not (when-let* ((session (drover-index-session key)))
+                     (drover-session-buffer session)))
+              (let ((shown (window-buffer window)))
+                (equal (remq shown before) (remq shown left-before))))))))
+
+(defun drover-attention--prompt-p (buffer)
+  "Return non-nil when BUFFER is drover's prompt."
+  (and (boundp 'drover-prompt-mode)
+       (buffer-local-value 'drover-prompt-mode buffer)))
+
+(defun drover-attention--stale-p (&optional now)
+  "Return non-nil when the order of the round is too old to go on with at NOW.
+See `drover-attention-round-lifetime'; a round of unknown age is."
+  (and drover-attention-round-lifetime
+       (or (not (numberp drover-attention--started))
+           (>= (- (or now (float-time)) drover-attention--started)
+               drover-attention-round-lifetime))))
 
 (defun drover-attention--continues-p (window)
   "Return non-nil when `drover-next' goes on with its round in WINDOW.
-WINDOW is where it shows sessions.  The round goes on while WINDOW
-shows what the last visit left there: the buffer it showed once the
-session was opened, which a session its backend fetches first leaves
-until it arrives, or the session visited, however reached since.
-Commands run meanwhile do not matter, a menu opened to press the key
-again nor an answer typed to the session: having left it for another
-buffer starts a new round."
-  (pcase drover-attention--visited
-    (`(,key ,visited ,buffer)
-     (and drover-attention--cycle
-          (or (and (eq window visited) (eq (window-buffer window) buffer))
-              (drover-attention--shows-p window key))))))
+WINDOW is where it shows sessions.  The round goes on while its order is
+recent enough (see `drover-attention-round-lifetime') and the user is
+still where the last visit left them (see `drover-attention--left-p'):
+on the session visited, or the buffer the visit showed, or on the
+prompt they went to from there, in that window.  From a side window,
+such as the prompt's, WINDOW is the one they came from (see
+`drover-attention--window').  Commands run meanwhile do not matter, a
+menu opened to press the key again nor an answer typed to the session:
+having left the session for another buffer starts a new round, and so
+does the prompt reached from another buffer."
+  (and drover-attention--cycle
+       drover-attention--visited
+       (not (drover-attention--stale-p))
+       (let ((buffer (window-buffer window))
+             (before (drover-attention--before window)))
+         (or (drover-attention--left-p window buffer before)
+             (and (drover-attention--prompt-p buffer)
+                  before
+                  (drover-attention--left-p window (car before) (cdr before)))))))
 
 (defun drover-attention--following ()
   "Return the session after the last one visited, and its position, as a cons.
@@ -422,19 +506,47 @@ is left after it, the round being over."
               (number-sequence (1+ drover-attention--position)
                                (1- (length drover-attention--cycle))))))
 
+(defun drover-attention--visits (sessions)
+  "Return the visits of SESSIONS, needing the user, in the order to make them.
+Each is (SESSION . WAITING): SESSION is the session to show for some of
+SESSIONS, their `drover-attention-target', once, in the place of the
+first of them, so that a subagent waiting is answered from the top of
+its tree, which comes once however many of its tree need the user;
+WAITING is non-nil when one of them waits for the user."
+  (let ((visits nil)
+        (seen (make-hash-table :test #'equal)))
+    (dolist (session sessions)
+      (let* ((target (drover-attention-target session))
+             (key (drover-session-key target))
+             (visit (gethash key seen)))
+        (unless visit
+          (setq visit (list target))
+          (puthash key visit seen)
+          (push visit visits))
+        (when (eq (drover-session-status session) 'waiting)
+          (setcdr visit t))))
+    (nreverse visits)))
+
 (defun drover-attention--start (window)
   "Begin a round of `drover-next', showing its first session in WINDOW.
-When WINDOW shows that session already and others need the user, the
-round begins with the second: a session its backend cannot mark seen,
-as one of another host, would otherwise come first again each time."
-  (let* ((sessions (drover-attention-order (drover-attention-sessions)))
-         (position (if (and (cdr sessions)
-                            (drover-attention--shows-p window (drover-session-key (car sessions))))
+The round visits the sessions needing the user in the order as it
+stands, a tree once (see `drover-attention--visits').  When WINDOW shows
+the first already and others need the user, the round begins with the
+second, unless the first waits for the user: shown, a session whose
+turn ended was seen, even one its backend cannot mark seen, as one of
+another host, which would otherwise come first again each time, but a
+request still waits for its answer."
+  (let* ((visits (drover-attention--visits (drover-attention-order (drover-attention-sessions))))
+         (first (car visits))
+         (position (if (and (cdr visits)
+                            (not (cdr first))
+                            (drover-attention--shows-p window (drover-session-key (car first))))
                        1
                      0)))
-    (setq drover-attention--cycle (mapcar #'drover-session-key sessions))
-    (if sessions
-        (drover-attention--visit (nth position sessions) position)
+    (setq drover-attention--cycle (mapcar (lambda (visit) (drover-session-key (car visit))) visits)
+          drover-attention--started (float-time))
+    (if visits
+        (drover-attention--visit (car (nth position visits)) position window)
       (setq drover-attention--visited nil)
       (message "No session needs you"))))
 
@@ -444,21 +556,26 @@ as one of another host, would otherwise come first again each time."
 First come the sessions whose prompt cache lives, the one to expire
 soonest first, so that a turn sent to it reuses it; then the others,
 in the order the list and the sidebar show them, as `drover-group-by'
-and `drover-sort-by' arrange them (see `drover-attention-order').
-Pressed again while the session visited still shows where it showed,
-whatever was done in it meanwhile and however the command is reached,
-from `drover-dispatch' or a key of its own, it visits the following
-session, skipping those gone.  The order is the one of the first
-press, so that sessions changing status meanwhile, as the ones visited
-do, and caches expiring or renewed by a turn keep their place.  After
-the last, or once you left the session for another buffer, a new round
-begins, in the order as it then stands, past the session shown if it
-comes first."
+and `drover-sort-by' arrange them (see `drover-attention-order').  A
+subagent waiting for you is visited through the top of its tree, where
+you answer it and whose cache it ranks by, the tree coming once.
+Pressed again while you are still on the session visited, whatever was
+done in it meanwhile and however the command is reached, from
+`drover-dispatch' or a key of its own, or from the prompt you went to
+from it, it visits the following session, skipping those gone.  The
+order is the one of the first press, so that sessions changing status
+meanwhile, as the ones visited do, and caches expiring or renewed by a
+turn keep their place.  After the last, once you left the session for
+another buffer, or once the order is `drover-attention-round-lifetime'
+old, a new round begins, in the order as it then stands, past the
+session shown if it comes first and does not wait for you.  From a
+side window, such as the prompt's, sessions show in the window you
+came from."
   (interactive)
-  (let ((window (drover-session-window)))
+  (let ((window (drover-attention--window)))
     (if-let* ((following (and (drover-attention--continues-p window)
                               (drover-attention--following))))
-        (drover-attention--visit (car following) (cdr following))
+        (drover-attention--visit (car following) (cdr following) window)
       (drover-attention--start window))))
 
 ;;;; Choosing a session

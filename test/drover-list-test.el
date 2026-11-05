@@ -5133,16 +5133,17 @@ activity first."
 
 (defun drover-list-test-attention-order ()
   "Return the identifiers of the sessions needing the user in the order to visit them.
-At the clock of the tests, as a pair (CACHED . OTHERS): those with a
-live prompt cache, and the others, both in order."
+At the clock of the tests, as a pair (CACHED . OTHERS): those visited
+for a live prompt cache, theirs or the top of their tree's (see
+`drover-attention-cache'), and the others, both in order."
   (let ((order (drover-attention-order (drover-attention-sessions) drover-list-test-clock)))
     (cons (mapcar #'drover-session-id
                   (seq-filter (lambda (session)
-                                (drover-session-shown-cache-fraction session drover-list-test-clock))
+                                (drover-attention-cache session drover-list-test-clock))
                               order))
           (mapcar #'drover-session-id
                   (seq-remove (lambda (session)
-                                (drover-session-shown-cache-fraction session drover-list-test-clock))
+                                (drover-attention-cache session drover-list-test-clock))
                               order)))))
 
 (ert-deftest drover-list-test-attention-order-follows-both-lists ()
@@ -5163,11 +5164,21 @@ window, which share the view settings, under several of them."
       (drover-set-sort sort descending)
       (pcase-let* ((`(,cached . ,others) (drover-list-test-attention-order))
                    (records (mapcar (lambda (id) (drover-list-test-find id)) cached))
-                   (expiries (mapcar #'drover-session-cache-expires records)))
+                   (expiries (mapcar (lambda (record)
+                                       (drover-attention-cache record drover-list-test-clock))
+                                     records)))
         (should cached)
         (should others)
         (should (equal expiries (sort (copy-sequence expiries) #'<)))
-        (should-not (seq-some #'drover-session-parent records))
+        ;; A subagent ranks by the cache of the top of its tree, when it
+        ;; waits, never by its own.
+        (dolist (record records)
+          (let ((target (drover-attention-target record)))
+            (should-not (drover-session-parent target))
+            (should (equal (drover-session-cache-expires target)
+                           (drover-attention-cache record drover-list-test-clock)))
+            (unless (eq target record)
+              (should (eq (drover-session-status record) 'waiting)))))
         (dolist (list (list sidebar buffer))
           (with-current-buffer list
             (should (equal (list mode grouping sort descending
