@@ -99,6 +99,7 @@
 (autoload 'drover-schedule-list "drover-schedule" nil t)
 (autoload 'drover-goal "drover-goal" nil t)
 (autoload 'drover-goal-list "drover-goal" nil t)
+(autoload 'drover-fanout "drover-fanout" nil t)
 (autoload 'drover-search "drover-search" nil t)
 (autoload 'drover-review "drover-review" nil t)
 (autoload 'drover-reviewable-p "drover-review")
@@ -1408,7 +1409,7 @@ frame, the one used last of several."
 (defvar drover-list-hidden-fields)
 
 (defconst drover-list-field-labels
-  '((goal . "goal") (host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
+  '((goal . "goal") (attempt . "attempt") (host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
     (model . "model") (provider . "provider") (context . "context") (created . "created") (cost . "cost")
     (age . "age") (cache . "cache") (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
@@ -1468,6 +1469,7 @@ Before the list is loaded, any field is."
      :if (lambda () (drover--list-field-p ',field))))
 
 (drover--define-column-switch goal)
+(drover--define-column-switch attempt)
 (drover--define-column-switch host)
 (drover--define-column-switch harness)
 (drover--define-column-switch location)
@@ -2007,7 +2009,8 @@ another front end."
    ("-p" drover-view--column-cache)
    ("-s" drover-view--column-summary)
    ("-$" drover-view--column-cost)
-   ("-g" drover-view--column-goal)])
+   ("-g" drover-view--column-goal)
+   ("-#" drover-view--column-attempt)])
 
 (defvar drover--dispatch-close-keys nil
   "The keys of `drover-dispatch' where it last opened, which close it.")
@@ -2089,6 +2092,7 @@ session chosen for it, else to one asked for, unshown."
     ("n" "Start or continue" drover-task-start :inapt-if-not drover-dispatch-task-p)
     ("F" "Finish" drover-task-finish :inapt-if-not drover-dispatch-task-p)
     ("I" "Link session" drover-task-link-session :inapt-if-not drover-dispatch-task-link-p)
+    ("&" "Attempts" drover-fanout :inapt-if-not drover-dispatch-task-p)
     ("W" "Worktrees" drover-task-sweep)]
    [:description drover--dispatch-options-description
     ("a" "Agent" drover-prompt-agent :class drover--prompt-option :action agent

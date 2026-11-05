@@ -692,7 +692,8 @@ this host's cheap model tells, when it answers."
                           (drover-error-message err))))))
 
 (defun drover-goal--end (goal state reason)
-  "End GOAL in STATE, `met', `given-up' or `stopped', for REASON, a line."
+  "End GOAL in STATE, `met', `given-up' or `stopped', for REASON, a line.
+Its :on-end, a function of drover, is then called with GOAL."
   (drover-goal--stop-running goal)
   (setf (plist-get goal :spent) (drover-goal--spent goal))
   (drover-goal--set goal state reason)
@@ -706,7 +707,13 @@ this host's cheap model tells, when it answers."
                                     (if (plist-get goal :commands)
                                         (format "\nChecks: %s" (drover-repo-join-commands (plist-get goal :commands)))
                                       "")))
-    (drover-message "%s" line)))
+    (drover-message "%s" line))
+  (when-let* ((function (plist-get goal :on-end))
+              ((symbolp function))
+              ((string-prefix-p "drover-" (symbol-name function)))
+              ((fboundp function)))
+    (drover-with-reporting "goal end"
+      (funcall function goal))))
 
 (defun drover-goal--pause (goal reason)
   "Pause GOAL for REASON, a line: what runs for it stops, the user resumes it."
@@ -1025,8 +1032,9 @@ Within the 4000 characters a harness's goal takes."
     (append (list :id (drover-goal--uuid)
                   :link (plist-get target :link) :backend (plist-get target :backend)
                   :directory (or (plist-get properties :directory) (plist-get target :directory))
-                  :title (plist-get target :title)
+                  :title (or (plist-get properties :title) (plist-get target :title))
                   :task (plist-get properties :task)
+                  :on-end (plist-get properties :on-end)
                   :kind (or (plist-get properties :kind) 'check)
                   :commands (plist-get properties :commands)
                   :sources (plist-get properties :sources)
@@ -1073,6 +1081,8 @@ run first, once; :baseline, non-nil to run the checks before the
 session's next turn, on a fresh worktree; :prompt, text sent with the
 goal's statement now, or nil; :objective, the condition of a
 criterion goal; :task, the ID of the heading the session serves;
+:title, what logs and notes call it, by default the session's title;
+:on-end, a function of drover called with it once it ends;
 :iterations, :minutes, :budget and :rounds, its limits, by default
 those of the options.  A check goal on a session at work waits for the
 end of its turn; on an idle one, its prompt is sent, else the checks
@@ -1369,28 +1379,37 @@ repository's own (see `drover-repo-facts'), waited for."
                        :prompt (and prompt (not (string-blank-p prompt)) prompt)
                        :task (plist-get (cdr task) :id))))
 
-(defun drover-goal--start-task-session (marker info plan confirmed)
+(defun drover-goal--start-task-session (marker info plan confirmed &optional properties then)
   "Start the session of the task INFO at MARKER, in PLAN's place, under a goal.
 CONFIRMED is (CHECKS SETUP BASELINE).  The setup and the baseline run
 first, in PLAN's directory; the session's first prompt then states
-the goal."
+the goal, in no window when PLAN is :hidden.  PROPERTIES, a plist of
+`drover-goal-start', go to the goal, such as its limits.  THEN, if
+any, is called with the session and the goal once both are, else with
+why not, a string, and nil."
   (let* ((directory (file-name-as-directory (plist-get plan :directory)))
          (commands (mapcar (lambda (item) (plist-get item :command)) (car confirmed)))
+         (then (or then #'ignore))
          (pending (list :id (drover-goal--uuid) :directory directory :commands commands :task (plist-get info :id)
-                        :iteration 0 :iterations drover-goal-iterations :title (plist-get info :title))))
+                        :iteration 0 :iterations (or (plist-get properties :iterations) drover-goal-iterations)
+                        :title (plist-get info :title))))
     (cl-labels
         ((start-session (baseline)
            (let ((statement (drover-goal--kickoff (append (list :baseline baseline) pending) nil)))
              (drover-task-start-session
-              (append (list :prompt-more statement) plan) nil
+              (append (list :prompt-more statement) plan) (plist-get plan :hidden)
               (lambda (session)
                 (drover-with-reporting "goal"
                   (if (stringp session)
-                      (drover-warn "Task %s: no session started: %s" (plist-get info :title) session)
-                    (let ((goal (drover-goal--make session :commands commands :task (plist-get info :id)
-                                                   :directory directory
-                                                   :sources (mapcar (lambda (item) (plist-get item :source))
-                                                                    (car confirmed)))))
+                      (progn
+                        (drover-warn "Task %s: no session started: %s" (plist-get info :title) session)
+                        (funcall then session nil))
+                    (let ((goal (apply #'drover-goal--make session
+                                       (append properties
+                                               (list :commands commands :task (plist-get info :id)
+                                                     :directory directory
+                                                     :sources (mapcar (lambda (item) (plist-get item :source))
+                                                                      (car confirmed)))))))
                       (setf (plist-get goal :baseline) baseline)
                       (drover-goal--push goal)
                       (drover-goal-mode-ensure)
@@ -1399,7 +1418,8 @@ the goal."
                       (drover-goal--tree directory
                                          (lambda (tree)
                                            (setf (plist-get goal :accepted) tree)
-                                           (drover-goal--wait-turn goal session)))))))))))
+                                           (drover-goal--wait-turn goal session)))
+                      (funcall then session goal)))))))))
       (let ((runner (list :id (plist-get pending :id) :task (plist-get info :id))))
         (cl-flet ((baseline-then-start ()
                     (if (not (nth 2 confirmed))
@@ -1409,9 +1429,11 @@ the goal."
                        (lambda (checked)
                          (drover-with-reporting "goal"
                            (if-let* ((why (drover-goal--unrunnable (plist-get checked :failed) t)))
-                               (drover-warn "Task %s: no goal, the checks cannot run here: %s; start it with %s"
-                                            (plist-get info :title) why
-                                            (substitute-command-keys "\\[drover-task-start]"))
+                               (progn
+                                 (drover-warn "Task %s: no goal, the checks cannot run here: %s; start it with %s"
+                                              (plist-get info :title) why
+                                              (substitute-command-keys "\\[drover-task-start]"))
+                                 (funcall then (concat "the checks cannot run here: " why) nil))
                              (start-session
                               (unless (plist-get checked :ok)
                                 (list :failure (drover-goal--describe-failure (plist-get checked :failed))
@@ -1426,8 +1448,9 @@ the goal."
                (drover-with-reporting "goal"
                  (if (plist-get done :ok)
                      (baseline-then-start)
-                   (drover-warn "Task %s: no goal, its setup failed: %s" (plist-get info :title)
-                                (drover-goal--describe-failure (plist-get done :failed)))))))))))
+                   (let ((why (drover-goal--describe-failure (plist-get done :failed))))
+                     (drover-warn "Task %s: no goal, its setup failed: %s" (plist-get info :title) why)
+                     (funcall then (concat "its setup failed: " why) nil))))))))))
     (ignore marker)))
 
 (defun drover-goal-set-on-heading (marker)

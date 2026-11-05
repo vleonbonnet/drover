@@ -65,6 +65,9 @@ another checkout tracks.  Files of linked worktrees are refused anyway."
 (defconst drover-task-org-body-limit 6000
   "Characters of a heading's body a task's prompt quotes at most.")
 
+(defconst drover-task-org-attempts 9
+  "Attempts a heading tells at most, the properties of each ending in its number.")
+
 ;;;; Files
 
 (defun drover-task-org-linked-worktree-p (file)
@@ -185,13 +188,19 @@ Its JIRA property, else its ID when ejira made it the key."
   (or (cdr (assoc "JIRA" properties))
       (and (stringp id) (let ((case-fold-search nil)) (string-match-p drover-task-org-jira-regexp id)) id)))
 
-(defun drover-task-org--attempt (suffix)
-  "Return the attempt of the heading at point whose properties end in SUFFIX.
-SUFFIX is \"\" for the first, \"_2\" for the second, and so on."
-  (let ((worktree (org-entry-get nil (concat "DROVER_WORKTREE" suffix)))
-        (directory (org-entry-get nil (concat "DROVER_DIRECTORY" suffix))))
+(defun drover-task-org-attempt-suffix (number)
+  "Return what the properties of the attempt NUMBER end in: \"\" for the first."
+  (if (= number 1) "" (format "_%d" number)))
+
+(defun drover-task-org--attempt (number)
+  "Return the attempt NUMBER of the heading at point, from its properties.
+Those of the first end in nothing, of the second in _2, and so on."
+  (let* ((suffix (drover-task-org-attempt-suffix number))
+         (worktree (org-entry-get nil (concat "DROVER_WORKTREE" suffix)))
+         (directory (org-entry-get nil (concat "DROVER_DIRECTORY" suffix))))
     (when (or worktree directory)
-      (list :worktree worktree
+      (list :number number
+            :worktree worktree
             :directory (or directory worktree)
             :branch (org-entry-get nil (concat "DROVER_BRANCH" suffix))
             :host (org-entry-get nil (concat "DROVER_HOST" suffix))
@@ -261,8 +270,8 @@ DROVER_GOAL_CHECKS, inherited, the checks its goals run, joined by &&,
 :overrides, a plist of what the heading says of how its repository
 works, overriding what the repository says, its properties inherited
 and unparsed (see `drover-task-org-overrides'), :attempts, the
-worktrees or directories it works in, and :tick, what tells it
-changed."
+worktrees or directories it works in, each with its :number, and
+:tick, what tells it changed."
   (with-current-buffer (marker-buffer marker)
     (org-with-point-at marker
       (let* ((properties (org-entry-properties nil 'standard))
@@ -273,11 +282,10 @@ changed."
              (goal-checks (org-entry-get nil "DROVER_GOAL_CHECKS" t))
              (type (cdr (assoc "TYPE" properties)))
              (attempts nil))
-        (let ((attempt (drover-task-org--attempt "")))
-          (when attempt (push attempt attempts))
-          (cl-loop for n from 2 to 9
-                   for next = (drover-task-org--attempt (format "_%d" n))
-                   while next do (push next attempts)))
+        ;; A fan-out may leave gaps, an attempt whose place was never made.
+        (cl-loop for n from 1 to drover-task-org-attempts
+                 for attempt = (drover-task-org--attempt n)
+                 when attempt do (push attempt attempts))
         (list :id id
               :orig-id (cdr (assoc "ORIG_ID" properties))
               ;; Its links as their descriptions, without the buffer's faces nor prefixes.

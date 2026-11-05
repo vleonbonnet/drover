@@ -333,11 +333,26 @@ only when needed."
      (cost :priority 13 :min 4 :align right :label "Cost")
      (age :priority 1 :min 3 :align right :narrow line :label "Age")
      (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+    ((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (goal :priority 2 :min 3 :max 16 :narrow line :label "Goal")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+     (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
+     (branch :priority 10 :min 6 :max 24 :label "Branch")
+     (agent :priority 11 :min 5 :max 14 :label "Agent")
+     (model :priority 6 :min 8 :max 22 :label "Model")
+     (provider :priority 8 :min 2 :max 12 :label "Provider")
+     (context :priority 7 :min 9 :narrow icon :label "Context")
+     (created :priority 12 :min 3 :align right :label "Created")
+     (cost :priority 13 :min 4 :align right :label "Cost")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
      (summary :priority 4 :min 12 :narrow below :label "Summary")))
   "The former standard values of `drover-list-fields'.
 Before the harness's field, then before the context's pie in two lines,
 then before the cost, then before the pill of a task's project in two
-lines, then before the goal.")
+lines, then before the goal, then before the attempt.")
 
 ;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the list takes the new one.
@@ -347,6 +362,7 @@ lines, then before the goal.")
 (defcustom drover-list-fields
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
     (goal :priority 2 :min 3 :max 16 :narrow line :label "Goal")
+    (attempt :priority 2 :min 2 :max 20 :narrow line :label "Attempt")
     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
     (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
@@ -367,6 +383,9 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  goal      The goal the session works under, if any (see
            `drover-list-goal-function'): its glyph, the iterations
            run of their limit, and how it stands.
+ attempt   The attempt the session works in, of a task worked on in
+           several places, such as a fan-out's (see `drover-fanout'):
+           its number, and the harness and model it was given.
  host      The host of a session of another host, and how long ago it
            was last heard from while it is not connected; in two lines,
            an icon too (see `drover-host-icon'), and in the sidebar,
@@ -452,6 +471,7 @@ The list chooses among the other fields by the room they take; the
 title always shows.  The View menu, \\<drover-session-map>\\[drover-view] in the list,
 changes it for the session, with one switch per field."
   :type '(set (const :tag "Goal" goal)
+              (const :tag "Attempt" attempt)
               (const :tag "Host" host)
               (const :tag "Harness" harness)
               (const :tag "Project" location)
@@ -470,6 +490,7 @@ changes it for the session, with one switch per field."
 (defconst drover-list-field-descriptions
   '((title . "The status of the session, the subagents at work under it, and its title")
     (goal . "The goal the session works under: iterations run of their limit, and how it stands")
+    (attempt . "The attempt of its task the session works in, and the model it was given")
     (host . "The host the session runs on, if another; and since when it is not connected")
     (harness . "What runs the session: its front end, or the CLI that recorded it")
     (location . "The project the session works in")
@@ -1034,7 +1055,7 @@ The list reads the clock through it, so that tests may stop the clock."
 ;;;; Fields
 
 (defconst drover-list--text-fields
-  '(goal host harness location branch agent model provider context created cost age summary)
+  '(goal attempt host harness location branch agent model provider context created cost age summary)
   "The fields of `drover-list-fields' a row holds a text for.")
 
 (defun drover-list--one-line (string)
@@ -1095,6 +1116,18 @@ the field `goal' is hidden."
        (drover-list-field-enabled-p 'goal)
        (drover-with-reporting "goal"
          (funcall drover-list-goal-function session form))))
+
+(defun drover-list--attempt-text (session)
+  "Return the attempt SESSION works in as its column shows it, or nil.
+Its number, then its label, of the task SESSION serves (see
+`drover-task--attempt-view'); nil while the field `attempt' is hidden."
+  (when-let* (((drover-list-field-enabled-p 'attempt))
+              (task (drover-session-task session))
+              (number (plist-get task :attempt))
+              ((natnump number)))
+    (let ((label (plist-get task :attempt-label)))
+      (concat (drover-face (format "#%d" number) 'bold)
+              (if (stringp label) (concat " " (drover-list--one-line label)) "")))))
 
 (defun drover-list--field-spec (field)
   "Return the properties of FIELD in `drover-list-fields', or nil."
@@ -1523,6 +1556,7 @@ text: it is drawn apart."
   (let ((now (plist-get metrics :now)))
     (or (pcase field
           ('goal (drover-list--goal session 'column))
+          ('attempt (drover-list--attempt-text session))
           ('host (unless (eq (car group) 'host)
                    (drover-list--host-text session now)))
           ('harness (unless (eq (car group) 'harness)

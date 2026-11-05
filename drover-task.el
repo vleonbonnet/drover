@@ -457,12 +457,42 @@ as views show it, or (:missing TIME) for a heading not found then.")
   (list :foreground (drover-task-project-color project)))
 
 (defun drover-task--make-view (info)
-  "Return the task of INFO as views show it (see `drover-session-task')."
-  (let ((project (plist-get info :category)))
-    (list :id (plist-get info :id)
-          :title (plist-get info :title)
-          :project project
-          :face (and project (drover-task-project-face project)))))
+  "Return the task of INFO as views show it (see `drover-session-task').
+A task working in several places tells them, :attempts, an alist
+\(NUMBER . DIRECTORY), so that each session shows its attempt."
+  (let ((project (plist-get info :category))
+        (attempts (plist-get info :attempts)))
+    (append (list :id (plist-get info :id)
+                  :title (plist-get info :title)
+                  :project project
+                  :face (and project (drover-task-project-face project)))
+            (and (cdr attempts)
+                 (list :attempts
+                       (delq nil (mapcar (lambda (attempt)
+                                           (when-let* ((directory (plist-get attempt :directory)))
+                                             (cons (plist-get attempt :number)
+                                                   (file-name-as-directory (drover-task-canonical directory)))))
+                                         attempts)))))))
+
+(defvar drover-task-attempt-label-function nil
+  "Function of a task's ID and an attempt's number returning its label, or nil.
+Such as the harness and model the attempt runs; `drover-fanout' sets it.")
+
+(defun drover-task--attempt-view (view session)
+  "Return VIEW, a task as views show it, with the attempt SESSION works in.
+With :attempt, its number, and :attempt-label, when VIEW tells
+several attempts and SESSION works in one of them; else VIEW."
+  (let ((directory (drover-session-local-directory session)))
+    (if-let* ((attempts (plist-get view :attempts))
+              (directory (and directory (file-name-as-directory (drover-task-canonical directory))))
+              (attempt (seq-find (lambda (attempt) (string-prefix-p (cdr attempt) directory)) attempts)))
+        (append (list :attempt (car attempt)
+                      :attempt-label (and drover-task-attempt-label-function
+                                          (drover-with-reporting "attempt label"
+                                            (funcall drover-task-attempt-label-function
+                                                     (plist-get view :id) (car attempt)))))
+                view)
+      view)))
 
 (defun drover-task--schedule ()
   "Read the pending headings soon, while Emacs is idle."
@@ -491,9 +521,12 @@ A heading not read, or changed since, is read soon, views then told."
 
 (defun drover-task--session-task (session)
   "Return the task SESSION serves as views show it, or nil.
-The value of `drover-session-task-function' in `drover-task-mode'."
-  (when-let* ((id (drover-task-id-of session)))
-    (drover-task-view id)))
+The value of `drover-session-task-function' in `drover-task-mode'.  A
+session of a task working in several places tells its attempt (see
+`drover-task--attempt-view')."
+  (when-let* ((id (drover-task-id-of session))
+              (view (drover-task-view id)))
+    (drover-task--attempt-view view session)))
 
 (defun drover-task--take (id info)
   "Keep INFO, read of the heading of ID; return non-nil when its view changed."
@@ -885,13 +918,14 @@ worktree's branch ignores too, so that none may be committed."
 (defun drover-task--step-setup (context next)
   "Run the setup of the repository in the worktree of CONTEXT, for NEXT.
 Visibly unless CONTEXT is hidden, the worktree's marker telling the
-outcome."
+outcome; in the buffer of CONTEXT's :commands-title, else its title's."
   (let ((commands (drover-task--get context :setup))
         (worktree (drover-task--get context :worktree)))
     (if (null commands)
         (progn (drover-task-git-write-marker worktree (drover-task--get context :id) 'ok)
                (funcall next nil))
-      (let ((buffer (drover-task--commands-buffer (drover-task--get context :title))))
+      (let ((buffer (drover-task--commands-buffer (or (drover-task--get context :commands-title)
+                                                      (drover-task--get context :title)))))
         (drover-task--put context :buffer buffer)
         (drover-task--insert buffer (format "Setting up %s for %s\n\n" worktree (drover-task--get context :title)))
         (unless (drover-task--get context :hidden)
@@ -991,13 +1025,20 @@ and the heading's body."
 
 (defun drover-task-start-session (plan &optional hidden callback)
   "Start a session for PLAN in its directory, sent its first prompt.
-Of `drover-task--harness', in no window when HIDDEN.  CALLBACK, if any,
-gets the session, or a string telling why it did not start.  The
+Of PLAN's :harness, an entry of `drover-prompt-new-targets', else of
+`drover-task--harness', running PLAN's :model, a `drover-model', its
+:variant, a symbol, and its :agent, else `drover-task-agent', each the
+harness's default when nil; in no window when HIDDEN.  CALLBACK, if
+any, gets the session, or a string telling why it did not start.  The
 session is noted as serving the task.  PLAN's :prompt-more, Org text,
 follows the first prompt, such as what a goal asks (`drover-goal')."
-  (let* ((target (drover-task--harness))
+  (let* ((target (or (plist-get plan :harness) (drover-task--harness)))
          (backend (plist-get target :backend))
          (engine (plist-get target :engine))
+         (options (list :title (plist-get plan :title)
+                        :agent (or (plist-get plan :agent) drover-task-agent)
+                        :model (plist-get plan :model)
+                        :variant (plist-get plan :variant)))
          (text (concat (funcall drover-task-prompt-function plan)
                        (if-let* ((more (plist-get plan :prompt-more)))
                            (concat "\n\n" more)
@@ -1034,12 +1075,9 @@ follows the first prompt, such as what a goal asks (`drover-goal')."
           (if hidden
               (save-window-excursion
                 (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
-                  (funcall create (plist-get plan :directory) engine
-                           (list :title (plist-get plan :title) :agent drover-task-agent :hidden t)
+                  (funcall create (plist-get plan :directory) engine (append options (list :hidden t))
                            started failed)))
-            (funcall create (plist-get plan :directory) engine
-                     (list :title (plist-get plan :title) :agent drover-task-agent)
-                     started failed)))))))
+            (funcall create (plist-get plan :directory) engine options started failed)))))))
 
 ;;;; How a repository works
 
@@ -1331,17 +1369,30 @@ from which base are asked too."
 
 ;;;; Starting
 
+(defun drover-task-attempt-properties (plan &optional host number)
+  "Return the properties of the heading telling the place of PLAN, run on HOST.
+Those of the attempt NUMBER, the first by default, end in its suffix
+\(see `drover-task-org-attempt-suffix')."
+  (let ((suffix (drover-task-org-attempt-suffix (or number 1))))
+    (mapcar (lambda (property) (cons (concat (car property) suffix) (cdr property)))
+            (if (eq (plist-get plan :kind) 'worktree)
+                (list (cons "DROVER_WORKTREE" (abbreviate-file-name (plist-get plan :worktree)))
+                      (cons "DROVER_BRANCH" (plist-get plan :branch))
+                      (cons "DROVER_BASE" (plist-get plan :base))
+                      (cons "DROVER_ATTEMPT_REPO" (plist-get plan :repo))
+                      (cons "DROVER_HOST" (or host drover-host)))
+              (list (cons "DROVER_DIRECTORY" (abbreviate-file-name (plist-get plan :directory)))
+                    (cons "DROVER_ATTEMPT_REPO" (plist-get plan :repo))
+                    (cons "DROVER_HOST" (or host drover-host)))))))
+
 (defun drover-task--attempt-properties (plan &optional host)
   "Return the properties of the heading telling the place of PLAN, run on HOST."
-  (if (eq (plist-get plan :kind) 'worktree)
-      (list (cons "DROVER_WORKTREE" (abbreviate-file-name (plist-get plan :worktree)))
-            (cons "DROVER_BRANCH" (plist-get plan :branch))
-            (cons "DROVER_BASE" (plist-get plan :base))
-            (cons "DROVER_ATTEMPT_REPO" (plist-get plan :repo))
-            (cons "DROVER_HOST" (or host drover-host)))
-    (list (cons "DROVER_DIRECTORY" (abbreviate-file-name (plist-get plan :directory)))
-          (cons "DROVER_ATTEMPT_REPO" (plist-get plan :repo))
-          (cons "DROVER_HOST" (or host drover-host)))))
+  (drover-task-attempt-properties plan host))
+
+(defconst drover-task-attempt-property-names
+  '("DROVER_WORKTREE" "DROVER_DIRECTORY" "DROVER_BRANCH" "DROVER_BASE" "DROVER_HOST" "DROVER_ATTEMPT_REPO"
+    "DROVER_PR")
+  "The properties telling an attempt's place, without the suffix of its number.")
 
 (defun drover-task--made-note (plan &optional host)
   "Return the LOGBOOK note telling where PLAN works, on HOST."
@@ -1627,9 +1678,11 @@ only writes a prompt for the task."
       (cons marker (drover-task-read marker id)))))
 
 (defun drover-task--snapshot-name (plan)
-  "Return the ref the snapshot of PLAN's worktree goes to."
-  (concat "refs/drover/snapshots/"
-          (replace-regexp-in-string "[^A-Za-z0-9._/-]" "-" (or (plist-get plan :branch) (plist-get plan :slug) "task"))))
+  "Return the ref the snapshot of PLAN's worktree goes to.
+PLAN's :snapshot-ref, else one named after its branch."
+  (or (plist-get plan :snapshot-ref)
+      (concat "refs/drover/snapshots/"
+              (replace-regexp-in-string "[^A-Za-z0-9._/-]" "-" (or (plist-get plan :branch) (plist-get plan :slug) "task")))))
 
 ;;;###autoload
 (defun drover-task-finish ()
@@ -1647,6 +1700,10 @@ first.  A task of another host is finished by that host."
   (interactive)
   (drover-start)
   (pcase-let* ((`(,marker . ,info) (drover-task--finish-context))
+               (_ (when (cdr (plist-get info :attempts))
+                    (user-error "Task %s has %d attempts: keep one first (%s)" (plist-get info :title)
+                                (length (plist-get info :attempts))
+                                (substitute-command-keys "\\[drover-fanout]"))))
                (attempt (or (drover-task--attempt-here info)
                             (user-error "Task %s works nowhere" (plist-get info :title))))
                (plan (drover-task--plan-of-attempt info attempt))
@@ -1744,9 +1801,7 @@ OUTCOME is a plist: :failure, why it stopped; :note, what was done;
       (drover-message "Task %s: pull request %s; finish it again once merged" title (plist-get outcome :pr)))
      (t
       (drover-task-org-write marker
-                             (mapcar (lambda (name) (cons name nil))
-                                     '("DROVER_WORKTREE" "DROVER_DIRECTORY" "DROVER_BRANCH" "DROVER_BASE"
-                                       "DROVER_HOST" "DROVER_ATTEMPT_REPO" "DROVER_PR"))
+                             (mapcar (lambda (name) (cons name nil)) drover-task-attempt-property-names)
                              (plist-get outcome :note))
       (let ((sessions (drover-task-sessions info)))
         (when sessions

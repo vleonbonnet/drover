@@ -1456,6 +1456,70 @@ names them."
     (when (and engine (stringp id))
       (cons engine id))))
 
+(defun drover-usage--percentile (sorted fraction)
+  "Return the value of SORTED, numbers in increasing order, at FRACTION of them.
+The nearest rank: the median at 0.5."
+  (nth (max 0 (1- (ceiling (* fraction (length sorted))))) sorted))
+
+(defun drover-usage-estimate (engine provider model &optional directories days)
+  "Return what sessions of ENGINE running MODEL of PROVIDER cost before.
+The sessions of this host of the last DAYS days, 30 by default, each
+with its subagents, whose own model, the one their own steps used most,
+is MODEL, of PROVIDER unless it is nil; of those, the sessions run under
+one of DIRECTORIES when at least 3 were.  A plist: :sessions, how many;
+:median and :p75, the dollars they were billed, nil without one;
+:scope, `here' when of DIRECTORIES, else `all'; :billing, how ENGINE's
+use of PROVIDER is billed now, `included' or `priced' (see
+`drover-usage-billing').  Nil before the usage is read."
+  (drover-usage--ensure)
+  (when (and drover-usage--started (stringp model))
+    (let* ((facts (drover-usage--current-facts))
+           (parents (drover-usage--facts-parents facts))
+           (pricer (drover-usage--pricer))
+           (start (drover-usage-day (- (float-time) (* 86400 (or days 30)))))
+           (roots (make-hash-table :test #'equal)))
+      ;; Each root: [COST MODELS DIRECTORY], MODELS its own steps' tokens by (PROVIDER . MODEL).
+      (dolist (fact (drover-usage--facts-facts facts))
+        (when (and (eq (drover-usage--fact-harness fact) engine)
+                   (null (drover-usage--fact-host fact))
+                   (let ((day (drover-usage--fact-day fact))) (and day (>= day start))))
+          (let* ((id (drover-usage--fact-id fact))
+                 (root (or (drover-usage--root-in parents engine id) id))
+                 (entry (or (gethash root roots) (puthash root (vector 0 nil nil) roots)))
+                 (cost (nth 1 (funcall pricer fact))))
+            (when cost
+              (aset entry 0 (+ (aref entry 0) cost)))
+            (when (equal id root)
+              (let* ((key (cons (drover-usage--fact-provider fact) (drover-usage--fact-model fact)))
+                     (tokens (+ (drover-usage--fact-input fact) (drover-usage--fact-output fact)
+                                (drover-usage--fact-read fact) (drover-usage--fact-write fact)))
+                     (cell (assoc key (aref entry 1))))
+                (if cell
+                    (setcdr cell (+ (cdr cell) tokens))
+                  (aset entry 1 (cons (cons key tokens) (aref entry 1))))
+                (unless (aref entry 2)
+                  (aset entry 2 (drover-usage--fact-directory fact))))))))
+      (let ((all nil) (here nil))
+        (maphash (lambda (_root entry)
+                   (when-let* ((own (car (sort (copy-sequence (aref entry 1)) :key #'cdr :reverse t)))
+                               ((equal (cdar own) model))
+                               ((or (null provider) (equal (caar own) provider))))
+                     (push (aref entry 0) all)
+                     (when (and (stringp (aref entry 2))
+                                (seq-some (lambda (directory)
+                                            (string-prefix-p (file-name-as-directory (expand-file-name directory))
+                                                             (file-name-as-directory (expand-file-name (aref entry 2)))))
+                                          directories))
+                       (push (aref entry 0) here))))
+                 roots)
+        (let* ((scope (if (>= (length here) 3) 'here 'all))
+               (costs (sort (if (eq scope 'here) here all) #'<)))
+          (list :sessions (length costs)
+                :median (and costs (drover-usage--percentile costs 0.5))
+                :p75 (and costs (drover-usage--percentile costs 0.75))
+                :scope scope
+                :billing (drover-usage-billing engine provider)))))))
+
 ;;;; Formatting
 
 (defun drover-usage-format-cost (sum)
