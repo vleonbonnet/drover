@@ -805,32 +805,34 @@ Return ID when that changed what OC knew of it."
   "Read the steps of DB since OC's forward point, until DEADLINE.
 Settled steps from there on are taken in and the point moves past them;
 from the first step running, every step is a live one, read again next
-time.  Return (DONE . SESSIONS): DONE nil when DEADLINE came first."
+time.  Return (DONE . SESSIONS): DONE nil when DEADLINE came first;
+SESSIONS those of the steps taken, and of the live ones when those
+changed."
   (let ((from (drover-usage--oc-forward oc))
         (live nil)
         (holding nil)
-        (sessions nil)
+        (taken nil)
         (done nil))
     (while (and (not done) (< (float-time) deadline))
       (let ((rows (drover-usage--oc-query db 'forward from)))
         (dolist (row rows)
           (when-let* ((step (drover-usage--oc-step row)))
             (if (and (nth 2 step) (not holding))
-                (progn (push (drover-usage--oc-take oc step) sessions)
+                (progn (push (drover-usage--oc-take oc step) taken)
                        ;; Counted once: no longer among the live ones.
                        (setf (drover-usage--oc-live oc)
                              (assoc-delete-all (nth 0 row) (drover-usage--oc-live oc)))
                        (setf (drover-usage--oc-forward oc) (cons (nth 2 row) (nth 0 row))))
               (setq holding t)
-              (push (cons (nth 0 row) step) live)
-              (push (car step) sessions)))
+              (push (cons (nth 0 row) step) live)))
           (setq from (cons (nth 2 row) (nth 0 row))))
         (when (< (length rows) drover-usage-oc-page)
           (setq done t))))
-    (let ((before (mapcar (lambda (entry) (cadr entry)) (drover-usage--oc-live oc))))
-      (when done
-        (setf (drover-usage--oc-live oc) live))
-      (cons done (append before sessions)))))
+    (let ((before (drover-usage--oc-live oc)))
+      (if (or (not done) (equal before live))
+          (cons done taken)
+        (setf (drover-usage--oc-live oc) live)
+        (cons done (append (mapcar #'cadr before) (mapcar #'cadr live) taken))))))
 
 (defun drover-usage--oc-back-pass (oc db deadline)
   "Read the history of DB before OC's back point, newest first, until DEADLINE.
@@ -1899,13 +1901,20 @@ MODEL SOURCE SUM); and :hosts, how each peer's totals stand, as
     (list :total total
           :groups (drover-usage--sorted
                    (mapcar (pcase-lambda (`(,value ,label ,sum ,items))
-                             (list value label sum (drover-usage--sorted (hash-table-values items))))
-                           (hash-table-values groups)))
+                             (list value label sum
+                                   (drover-usage--sorted (seq-filter #'drover-usage--used-p
+                                                                     (hash-table-values items)))))
+                           (seq-filter #'drover-usage--used-p (hash-table-values groups))))
           :sources (sort (mapcar (pcase-lambda (`(,key . ,sum)) (append key (list sum)))
                                  (hash-table-values sources))
                          :key (lambda (source) (- (drover-usage-sum-tokens (nth 5 source))))
                          :in-place t)
           :hosts (cdr remote))))
+
+(defun drover-usage--used-p (entry)
+  "Return non-nil when ENTRY, a list (VALUE LABEL SUM ...), used tokens or money."
+  (let ((sum (nth 2 entry)))
+    (or (> (drover-usage-sum-tokens sum) 0) (> (drover-usage-sum-cost sum) 0))))
 
 (defun drover-usage--sorted (entries)
   "Return ENTRIES, lists (VALUE LABEL SUM ...), sorted.
