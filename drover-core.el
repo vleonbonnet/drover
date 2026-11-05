@@ -5808,6 +5808,68 @@ finds, else in a list the session at point."
       (drover-backend-call session :compact)
     (drover--prompt-or-backend 'compact)))
 
+;;;; Cloning to another host
+
+(defvar drover-clone-function nil
+  "Function cloning the conversation of a session to another host, or nil.
+It takes a SESSION and CHECK: with CHECK non-nil, it returns non-nil
+when SESSION may be cloned to some host now, otherwise it clones it,
+asking where.  The remote layer (`drover-remote') sets it.")
+
+(defun drover-clone-p (session)
+  "Return non-nil when the conversation of SESSION may be cloned to another host."
+  (and drover-clone-function
+       (drover-with-reporting "clone"
+         (funcall drover-clone-function session t))))
+
+(defvar drover-recorded-functions nil
+  "Abnormal hook run with an ENGINE and a FILE drover placed where it records.
+As a clone from another host arrives: the backends listing what ENGINE
+recorded look at FILE at once, rather than at their next look.")
+
+(defun drover-clone (session)
+  "Clone the conversation of SESSION to another host, to go on there.
+The clone is a conversation of that host, which owns it, carrying the
+conversation's history; the original stays as it is.  Interactively,
+SESSION is the session at point; the host and the directory there are
+asked for.  Needs `drover-remote-mode'."
+  (interactive (list (drover-session-at-point)))
+  (unless drover-clone-function
+    (user-error "Cloning to another host needs `drover-remote-mode'"))
+  (funcall drover-clone-function session nil))
+
+(defconst drover--recorded-cwd-limit 1048576
+  "Bytes at the start of a file of records `drover-recorded-cwd' reads.")
+
+(defun drover-recorded-cwd (file)
+  "Return how the records of FILE spell their working directory, or nil.
+The text of the first \"cwd\" member's JSON string, escapes as written,
+among the first `drover--recorded-cwd-limit' bytes of FILE, as the
+records of Claude Code's transcripts and Codex's rollouts carry it."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file nil 0 drover--recorded-cwd-limit)
+    (goto-char (point-min))
+    (when (re-search-forward "\"cwd\":\"\\(\\(?:[^\"\\\\\n]\\|\\\\.\\)\\{1,4096\\}\\)\"" nil t)
+      (decode-coding-string (match-string 1) 'utf-8))))
+
+(defun drover-lines-size (file)
+  "Return the size of FILE, of lines, up to its last line's end.
+A line being written as FILE is read is left out, so that a copy of
+those bytes holds whole records."
+  (let ((size (file-attribute-size (file-attributes file))))
+    (if (or (null size) (zerop size))
+        0
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (let ((start (max 0 (- size 1048576))))
+          (insert-file-contents-literally file nil start size)
+          (goto-char (point-max))
+          (if (search-backward "\n" nil t)
+              (+ start (point))
+            ;; A line longer than what was read: the file whole, as written.
+            size))))))
+
 ;;;; Resuming conversations
 
 (declare-function drover-engine-label "drover-model" (engine))

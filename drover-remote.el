@@ -51,6 +51,8 @@
 ;; end first; other sessions show as their host tells them.  The
 ;; search of sessions searches what was said in a peer's sessions there,
 ;; with the peer's own backends, its matches coming as they are found.
+;; A conversation is cloned to another host, which takes its files from
+;; its owner in pieces and owns the clone (`drover-clone').
 ;; A peer this host cannot reach is tried less and less often, and at
 ;; once as the network changes or the machine wakes.  Each peer keeps a history
 ;; of its link, shown by `drover-remote-status'.  See doc/remote.org for
@@ -155,6 +157,11 @@ NAME is the host's name, its `drover-host' there.  PROPERTIES is a plist:
                 list and read them; `act', to act on them too, but
                 delete them; `full', to delete them too.
  :aliases       Other names of it, in links.
+ :directories   Where its conversations go when cloned here: an alist
+                (THEIRS . OURS) of directories, a directory of its
+                under THEIRS cloned under OURS, the first matching;
+                otherwise one under its home goes under this host's
+                home.  See `drover-clone'.
 
 A host connecting under a name not here is refused, unless
 `drover-remote-accept-unknown' says otherwise.  Change it, then call
@@ -265,7 +272,7 @@ Peers of the same version understand each other; what a version adds is
 told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
-(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search")
+(defconst drover-remote-capabilities '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -278,7 +285,9 @@ access allows, for their opencode.el to open its sessions in full
 buffers; \"unsent\": it takes what a buffer the peer mirrors held unsent
 as it closed, as archiving closes it, for the peer's kill ring;
 \"search\": it searches what was said in its sessions for its peers,
-with its own backends, sending the matches as they come.")
+with its own backends, sending the matches as they come; \"clone\": it
+exports its conversations for its peers to clone, and takes clones of
+theirs from peers of full access.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1370,6 +1379,7 @@ one line, once in `drover-error-interval' seconds."
     (drover-remote--oc-drop connection)
     (drover-remote--search-unserve connection)
     (drover-remote--search-drop connection)
+    (drover-remote--clone-drop connection)
     (when-let* ((state (drover-remote--current)))
       (drover-remote--next-stream state connection)
       (drover-remote--unsubscribe state connection)
@@ -3239,6 +3249,812 @@ WHY, a symbol's name or nil, is noted in the peer's measures."
       (drover-remote--search-stop-run connection id nil))
     (remhash connection drover-remote--searching)))
 
+;;;; Cloning a conversation to another host
+
+(declare-function drover-engine-property "drover-model" (engine property))
+(declare-function drover-engine-label "drover-model" (engine))
+(declare-function drover-links-open "drover-links" (conversation &optional front-end))
+(declare-function drover-links-parse "drover-links" (path &optional engine))
+
+(defcustom drover-remote-clone-limit (* 1024 1024 1024)
+  "Bytes at most of a conversation cloned to or from another host."
+  :type 'natnum
+  :group 'drover-remote)
+
+(defcustom drover-remote-clone-timeout 900
+  "Seconds a clone between hosts may take, its transfer included."
+  :type 'number
+  :group 'drover-remote)
+
+(defconst drover-remote-clone-piece 262144
+  "Bytes of a conversation one request of a clone carries.")
+
+(defconst drover-remote-clone-window 4
+  "Requests of a clone's pieces awaiting their answers at once.")
+
+(defconst drover-remote-clone-idle 300
+  "Seconds a conversation exported for a peer waits for its next request.
+It is dropped past them.")
+
+(defconst drover-remote-clone-parts 10001
+  "Files at most of a conversation cloned.")
+
+(defconst drover-remote-clone-origins 1000
+  "Clones this host received whose origins it keeps, the newest.")
+
+(defconst drover-remote--clone-engines '(claude-code codex opencode)
+  "The engines whose conversations hosts clone, their files named after them.")
+
+(defvar drover-remote--exports (make-hash-table :test #'equal)
+  "Conversations exported for peers to clone, by identifier.
+Each a plist: :peer, the peer's name, :parts, a vector of (NAME SOURCE
+SIZE), SOURCE a file of this host or bytes, :served, the bytes sent,
+and :timer, dropping it once unused.")
+
+(defvar drover-remote--clones (make-hash-table :test #'equal)
+  "Clones this host receives, by the identifier of their export.
+See `drover-remote--clone-receive'.")
+
+(defvar drover-remote--clone-serial 0
+  "The number of the last conversation exported for a peer.")
+
+;;;;; Directories
+
+(defun drover-remote--clone-home-relative (directory)
+  "Return DIRECTORY relative to this host's home, or nil when not under it."
+  (when (stringp directory)
+    (let ((home (file-name-as-directory (expand-file-name "~")))
+          (directory (file-name-as-directory (expand-file-name directory))))
+      (and (string-prefix-p home directory (memq system-type '(windows-nt ms-dos cygwin darwin)))
+           (substring directory (length home))))))
+
+(defun drover-remote--clone-slashed (directory)
+  "Return DIRECTORY with forward slashes and a trailing one, for comparing."
+  (file-name-as-directory (replace-regexp-in-string "\\\\" "/" directory)))
+
+(defun drover-remote--clone-map (peer directory home)
+  "Return where a conversation of PEER run in DIRECTORY goes here, or nil.
+DIRECTORY is PEER's, HOME the same relative to PEER's home, or nil.
+PEER's :directories map it, their first prefix of it; else, under this
+host's home, HOME.  The value is (DIRECTORY . EXISTS), EXISTS non-nil
+when that directory is here."
+  (let* ((theirs (and (stringp directory) (drover-remote--clone-slashed directory)))
+         (mapped
+          (or (and theirs
+                   (seq-some (pcase-lambda (`(,prefix . ,ours))
+                               (when (and (stringp prefix) (stringp ours))
+                                 (let ((prefix (drover-remote--clone-slashed prefix)))
+                                   (and (string-prefix-p prefix theirs t)
+                                        (expand-file-name (substring theirs (length prefix))
+                                                          (expand-file-name ours))))))
+                             (plist-get (drover-remote--peer-properties peer) :directories)))
+              (and (stringp home)
+                   (not (string-match-p "\\(?:\\`\\|/\\)\\.\\.\\(?:/\\|\\'\\)" home))
+                   (not (file-name-absolute-p home))
+                   (expand-file-name home "~")))))
+    (when mapped
+      (let ((mapped (file-name-as-directory mapped)))
+        (cons mapped (file-directory-p mapped))))))
+
+;;;;; There, exporting this host's conversation
+
+(defun drover-remote--clone-engine (engine property &optional loaded)
+  "Return ENGINE's PROPERTY for clones, :export or :import, or nil.
+Only for the engines hosts clone the conversations of: Claude Code's
+and Codex's, their engines' (see `drover-register-engine'), their files
+loaded unless LOADED; OpenCode's, this host's service's, which this
+layer relays (see `drover-remote--oc-export')."
+  (cond
+   ((eq engine 'opencode)
+    (and (drover-remote--serves-opencode-p)
+         (pcase property
+           (:export #'drover-remote--oc-export)
+           (:import #'drover-remote--oc-import))))
+   ((memq engine drover-remote--clone-engines)
+    (unless (or loaded (and (fboundp 'drover-engine-property) (drover-engine-property engine property)))
+      (require (intern (concat "drover-" (symbol-name engine))) nil t))
+    (and (fboundp 'drover-engine-property)
+         (drover-engine-property engine property)))))
+
+(defun drover-remote--engine-label (engine)
+  "Return how views name ENGINE, a symbol or nil."
+  (cond ((null engine) "Its")
+        ((fboundp 'drover-engine-label) (drover-engine-label engine))
+        (t (symbol-name engine))))
+
+(defun drover-remote--clone-part-name-p (name)
+  "Return non-nil when NAME may be the name of a part of a clone.
+A relative file name of slashes, none of its components empty, \".\"
+or \"..\"."
+  (and (stringp name) (< 0 (length name) 512)
+       (not (string-match-p "[\\\\:\0]\\|\\`[/~]" name))
+       (not (seq-some (lambda (part) (member part '("" "." "..")))
+                      (split-string name "/")))))
+
+(defun drover-remote--clone-link (host engine id)
+  "Return the link naming conversation ID of ENGINE on HOST."
+  (format "agent-session://%s/%s/%s" host engine id))
+
+(defun drover-remote--export (record peer-name callback)
+  "Export the conversation of RECORD, of this host, for PEER-NAME to clone.
+CALLBACK gets what the peer needs, a plist as it travels, or nil and
+why not, a line, once.  Its engine gathers the files (its :export);
+they stay where they are, read as the peer asks for them."
+  (let* ((engine (drover-session-engine record))
+         (id (drover-session-engine-id record))
+         (export (and engine (drover-remote--clone-engine engine :export))))
+    (cond
+     ((not (drover-remote--local-p record))
+      (funcall callback nil "it is not a conversation of this host"))
+     ((not (and (stringp id) (functionp export)))
+      (funcall callback nil (format "%s conversations are not cloned" (drover-remote--engine-label engine))))
+     ((drover-session-parent record)
+      (funcall callback nil "a subagent is not cloned alone"))
+     (t
+      (funcall export id
+               (lambda (result)
+                 (drover-with-reporting "clone export"
+                   (if (eq (car-safe result) :failure)
+                       (funcall callback nil (drover-bound-line (format "%s" (cadr result))))
+                     (drover-remote--export-register record peer-name result callback)))))))))
+
+(defun drover-remote--export-register (record peer-name result callback)
+  "Keep RESULT, the export of RECORD's conversation, for PEER-NAME; tell CALLBACK."
+  (let ((parts nil)
+        (total 0)
+        (why nil))
+    (dolist (part (plist-get result :parts))
+      (pcase part
+        ((and `(,name :bytes ,bytes) (guard (and (drover-remote--clone-part-name-p name) (stringp bytes))))
+         (let ((bytes (if (multibyte-string-p bytes) (encode-coding-string bytes 'utf-8) bytes)))
+           (push (list name 'bytes bytes (length bytes)) parts)))
+        ((and `(,name ,file ,size)
+              (guard (and (drover-remote--clone-part-name-p name) (stringp file) (natnump size))))
+         (if (file-readable-p file)
+             (push (list name 'file file size) parts)
+           (setq why (format "a file it cannot read: %s" (drover-bound-line name 80)))))
+        (_ (setq why "a part it cannot send"))))
+    (setq parts (nreverse parts))
+    (dolist (part parts)
+      (setq total (+ total (nth 3 part))))
+    (cond
+     (why (funcall callback nil why))
+     ((> (length parts) drover-remote-clone-parts)
+      (funcall callback nil (format "more than %d files" drover-remote-clone-parts)))
+     ((> total drover-remote-clone-limit)
+      (funcall callback nil (format "%s, more than `drover-remote-clone-limit'" (file-size-human-readable total))))
+     (t
+      (let* ((xid (format "%s-%s-%d" drover-host
+                          (substring (or (drover-remote--state-epoch (drover-remote--current)) "x") 0 8)
+                          (cl-incf drover-remote--clone-serial)))
+             (engine (drover-session-engine record))
+             (id (drover-session-engine-id record))
+             (directory (drover-session-directory record)))
+        (puthash xid (list :peer peer-name :served 0 :parts (vconcat parts)
+                           :timer (run-at-time drover-remote-clone-idle nil #'drover-remote--export-drop xid))
+                 drover-remote--exports)
+        (funcall callback
+                 (list :x xid :engine (symbol-name engine) :id id
+                       :title (or (drover-remote--plain (drover-session-title record)) "")
+                       :directory (or (drover-remote--plain directory) :false)
+                       :home (or (drover-remote--clone-home-relative directory) :false)
+                       :cwd (or (drover-remote--plain (plist-get result :cwd)) :false)
+                       :origin (drover-remote--clone-link drover-host engine id)
+                       :size total
+                       :parts (vconcat (mapcar (lambda (part) (vector (car part) (nth 3 part))) parts)))
+                 nil))))))
+
+(defun drover-remote--export-drop (xid)
+  "Forget the conversation exported as XID."
+  (drover-with-reporting "clone export"
+    (when-let* ((entry (gethash xid drover-remote--exports)))
+      (remhash xid drover-remote--exports)
+      (when (timerp (plist-get entry :timer))
+        (cancel-timer (plist-get entry :timer))))))
+
+(defun drover-remote--on-clone-export (peer key reply)
+  "Export the conversation of this host's session KEY for PEER to clone it.
+REPLY answers with what PEER needs, its parts named and sized.  A peer
+of any access may: it reads the conversation anyway."
+  (if-let* ((record (drover-remote--owner-record key "clone")))
+      (drover-remote--export record (drover-remote--peer-name peer)
+                             (lambda (description why)
+                               (if description
+                                   (progn
+                                     (drover-remote--event peer 'clone "exported %s for it to clone"
+                                                           (drover-bound-line (plist-get description :title) 60))
+                                     (funcall reply description))
+                                 (funcall reply nil why))))
+    (funcall reply nil "no such session here")))
+
+(defun drover-remote--on-clone-piece (peer message reply)
+  "Answer through REPLY the piece of a conversation exported that MESSAGE asks.
+The export must be PEER's: X its identifier, I its part, O the offset,
+N the bytes, `drover-remote-clone-piece' at most; they go in base64."
+  (let* ((xid (plist-get message :x))
+         (entry (and (stringp xid) (gethash xid drover-remote--exports)))
+         (index (plist-get message :i))
+         (offset (plist-get message :o))
+         (count (plist-get message :n))
+         (part (and entry (natnump index) (< index (length (plist-get entry :parts)))
+                    (aref (plist-get entry :parts) index))))
+    (cond
+     ((not (and entry (equal (plist-get entry :peer) (drover-remote--peer-name peer))))
+      (funcall reply nil "no such export here"))
+     ((not (and part (natnump offset) (natnump count) (<= count drover-remote-clone-piece)
+                (<= (+ offset count) (nth 3 part))))
+      (funcall reply nil "no such piece"))
+     (t
+      (let ((bytes (drover-remote--export-read part offset count)))
+        (if (not (= (length bytes) count))
+            (funcall reply nil "its file is shorter than when exported")
+          (when (timerp (plist-get entry :timer))
+            (cancel-timer (plist-get entry :timer)))
+          (plist-put entry :timer (run-at-time drover-remote-clone-idle nil #'drover-remote--export-drop xid))
+          (plist-put entry :served (+ (plist-get entry :served) count))
+          (funcall reply (list :d (base64-encode-string bytes t)))))))))
+
+(defun drover-remote--export-read (part offset count)
+  "Return COUNT bytes of PART of an export from OFFSET, a unibyte string."
+  (pcase-let ((`(,_name ,kind ,source ,_size) part))
+    (if (eq kind 'bytes)
+        (substring source offset (+ offset count))
+      (with-temp-buffer
+        (set-buffer-multibyte nil)
+        (insert-file-contents-literally source nil offset (+ offset count))
+        (buffer-string)))))
+
+;;;;; Here, receiving a clone
+
+(defun drover-remote--clone-rewrite (carry chunk pairs final)
+  "Return CHUNK, after CARRY, its NEEDLES replaced, as (OUT . CARRY).
+PAIRS is a list of (NEEDLE . REPLACEMENT), unibyte strings, the needle
+found first replaced first.  The end of CHUNK that may begin a needle is
+held back as the new CARRY, unless FINAL: a needle cut between two
+pieces is found whole."
+  (let* ((text (concat carry chunk))
+         (keep (if final 0 (1- (apply #'max (mapcar (lambda (pair) (length (car pair))) pairs)))))
+         (start 0)
+         (out nil))
+    (while (let ((found nil))
+             (dolist (pair pairs)
+               (when-let* ((at (string-search (car pair) text start)))
+                 (when (or (null found) (< at (car found)))
+                   (setq found (cons at pair)))))
+             (when found
+               (push (substring text start (car found)) out)
+               (push (cddr found) out)
+               (setq start (+ (car found) (length (cadr found))))
+               t)))
+    (let ((safe (max start (- (length text) keep))))
+      (push (substring text start safe) out)
+      (cons (apply #'concat (nreverse out)) (substring text safe)))))
+
+(defun drover-remote--clone-pairs (engine cwd directory)
+  "Return what the records of a clone of ENGINE have replaced, for DIRECTORY.
+CWD is how the records spell the directory it ran in there, as JSON
+writes it; the value is a list of (NEEDLE . REPLACEMENT), unibyte, or
+nil when nothing is."
+  (when-let* (((stringp cwd))
+              ((not (string-empty-p cwd)))
+              (spell (drover-remote--clone-engine engine :record-directory))
+              (ours (funcall spell directory))
+              (needle (encode-coding-string (concat "\"cwd\":\"" cwd "\"") 'utf-8))
+              (replacement (encode-coding-string (concat "\"cwd\":" (json-serialize ours)) 'utf-8))
+              ((not (equal needle replacement))))
+    (list (cons needle replacement))))
+
+(defun drover-remote--clone-description (data)
+  "Return DATA, a description of a conversation to clone received, checked.
+A plist of :x, :engine, a symbol, :id, :title, :directory and :home of
+the host it comes from, :cwd, :origin, :size and :parts, a list of
+\(NAME SIZE), or a line telling why it does not fit."
+  (let* ((xid (plist-get data :x))
+         (engine (drover-remote--symbol (plist-get data :engine)))
+         (id (plist-get data :id))
+         (parts (plist-get data :parts))
+         (checked (and (vectorp parts) (<= (length parts) drover-remote-clone-parts)
+                       (mapcar (lambda (part)
+                                 (and (vectorp part) (= (length part) 2)
+                                      (drover-remote--clone-part-name-p (aref part 0))
+                                      (natnump (aref part 1))
+                                      (list (aref part 0) (aref part 1))))
+                               parts)))
+         (total (apply #'+ (mapcar (lambda (part) (or (cadr part) 0)) checked))))
+    (cond
+     ((not (and (stringp xid) (string-match-p drover-remote--id-regexp xid))) "no export")
+     ((not (memq engine drover-remote--clone-engines)) "not a conversation hosts clone")
+     ((not (and (stringp id) (string-match-p "\\`[A-Za-z0-9._-]\\{1,128\\}\\'" id))) "no conversation")
+     ((or (null checked) (memq nil checked)) "files it cannot take")
+     ((> total drover-remote-clone-limit)
+      (format "%s, more than `drover-remote-clone-limit'" (file-size-human-readable total)))
+     (t (list :x xid :engine engine :id id
+              :title (or (drover-remote--line (plist-get data :title)) "")
+              :directory (drover-remote--line (plist-get data :directory) 1024)
+              :home (drover-remote--line (plist-get data :home) 1024)
+              :cwd (drover-remote--line (plist-get data :cwd) 4096)
+              :origin (drover-remote--line (plist-get data :origin) 1024)
+              :size total :parts checked)))))
+
+(defun drover-remote--clone-receive (peer description directory callback)
+  "Receive from PEER the conversation DESCRIPTION describes, as a clone here.
+DESCRIPTION is as `drover-remote--clone-description' returns it,
+DIRECTORY this host's directory the clone runs in.  The parts come in
+pieces, `drover-remote-clone-window' requests awaiting answers at once,
+staged in a temporary directory, the records' spelling of the directory
+rewritten as they arrive (see `drover-remote--clone-pairs'); then the
+engine makes them a conversation of this host (its :import).  CALLBACK
+gets its identifier here, or nil and why not, once, within
+`drover-remote-clone-timeout' seconds.  Return the clone's identifier,
+the export's."
+  (let* ((xid (plist-get description :x))
+         (engine (plist-get description :engine))
+         (state (list :peer (drover-remote--peer-name peer) :description description
+                      :directory directory :callback callback
+                      :parts (vconcat (plist-get description :parts))
+                      :index 0 :next 0 :written 0 :flight 0 :carry ""
+                      :pending (make-hash-table :test #'eql)
+                      :pairs (drover-remote--clone-pairs engine (plist-get description :cwd) directory)
+                      :staging (make-temp-file "drover-clone-" t)
+                      :files nil :received 0 :start (float-time)
+                      :timer (run-at-time drover-remote-clone-timeout nil #'drover-remote--clone-fail
+                                          xid "it took too long"))))
+    (puthash xid state drover-remote--clones)
+    (drover-remote--event peer 'clone "receiving %s, %s"
+                          (drover-bound-line (plist-get description :title) 60)
+                          (file-size-human-readable (plist-get description :size)))
+    (drover-remote--clone-pump xid)
+    xid))
+
+(defun drover-remote--clone-staged (state)
+  "Return the file of STATE staging its current part."
+  (expand-file-name (format "%d" (plist-get state :index)) (plist-get state :staging)))
+
+(defun drover-remote--clone-pump (xid)
+  "Ask for the next pieces of the clone XID, or end it once all arrived."
+  (drover-with-reporting "clone"
+    (when-let* ((state (gethash xid drover-remote--clones))
+                (peer (drover-remote--peer (plist-get state :peer))))
+      (let ((parts (plist-get state :parts)))
+        (if (>= (plist-get state :index) (length parts))
+            (drover-remote--clone-import xid)
+          (pcase-let ((`(,_name ,size) (aref parts (plist-get state :index))))
+            (unless (file-exists-p (drover-remote--clone-staged state))
+              (let ((coding-system-for-write 'no-conversion))
+                (write-region "" nil (drover-remote--clone-staged state) nil 'silent)))
+            (if (and (= (plist-get state :written) size) (= (plist-get state :flight) 0))
+                (drover-remote--clone-next xid)
+              (while (and (eq state (gethash xid drover-remote--clones))
+                          (< (plist-get state :flight) drover-remote-clone-window)
+                          (< (plist-get state :next) size))
+                (let* ((offset (plist-get state :next))
+                       (count (min drover-remote-clone-piece (- size offset)))
+                       (index (plist-get state :index)))
+                  (plist-put state :next (+ offset count))
+                  (plist-put state :flight (1+ (plist-get state :flight)))
+                  (drover-remote--request
+                   peer (list :op "clone-piece" :x xid :i index :o offset :n count)
+                   (lambda (reply error)
+                     (drover-remote--clone-arrived xid index offset count reply error))
+                   (+ (float-time) drover-remote-clone-timeout) t))))))))))
+
+(defun drover-remote--clone-arrived (xid index offset count reply error)
+  "Take the piece of part INDEX of the clone XID from OFFSET, COUNT bytes.
+REPLY carries it, else ERROR tells why not."
+  (drover-with-reporting "clone"
+    (when-let* ((state (gethash xid drover-remote--clones))
+                ((= index (plist-get state :index))))
+      (let ((bytes (and (null error) (stringp (plist-get reply :d))
+                        (ignore-errors (base64-decode-string (plist-get reply :d))))))
+        (cond
+         (error (drover-remote--clone-fail xid error))
+         ((not (and bytes (= (length bytes) count)))
+          (drover-remote--clone-fail xid "a piece did not arrive whole"))
+         (t
+          (plist-put state :flight (1- (plist-get state :flight)))
+          (puthash offset bytes (plist-get state :pending))
+          (drover-remote--clone-write state)
+          (drover-remote--clone-pump xid)))))))
+
+(defun drover-remote--clone-write (state)
+  "Write the pieces of STATE's current part that follow what it wrote, in order."
+  (let* ((pending (plist-get state :pending))
+         (part (aref (plist-get state :parts) (plist-get state :index)))
+         (rewrite (and (plist-get state :pairs) (string-suffix-p ".jsonl" (car part))))
+         (file (drover-remote--clone-staged state))
+         (coding-system-for-write 'no-conversion)
+         (write-region-inhibit-fsync t))
+    (while-let ((bytes (gethash (plist-get state :written) pending)))
+      (remhash (plist-get state :written) pending)
+      (plist-put state :written (+ (plist-get state :written) (length bytes)))
+      (plist-put state :received (+ (plist-get state :received) (length bytes)))
+      (let ((out (if rewrite
+                     (let ((cut (drover-remote--clone-rewrite (plist-get state :carry) bytes
+                                                              (plist-get state :pairs)
+                                                              (= (plist-get state :written) (cadr part)))))
+                       (plist-put state :carry (cdr cut))
+                       (car cut))
+                   bytes)))
+        (unless (string-empty-p out)
+          (write-region out nil file t 'silent))))))
+
+(defun drover-remote--clone-next (xid)
+  "Go on with the next part of the clone XID, its current one staged whole."
+  (when-let* ((state (gethash xid drover-remote--clones)))
+    (let ((part (aref (plist-get state :parts) (plist-get state :index))))
+      (plist-put state :files (cons (cons (car part) (drover-remote--clone-staged state))
+                                    (plist-get state :files)))
+      (plist-put state :index (1+ (plist-get state :index)))
+      (plist-put state :next 0)
+      (plist-put state :written 0)
+      (plist-put state :carry "")
+      (drover-remote--clone-pump xid))))
+
+(defun drover-remote--clone-end (xid)
+  "Forget the clone XID: its staged files, its timer; its peer drops its export."
+  (when-let* ((state (gethash xid drover-remote--clones)))
+    (remhash xid drover-remote--clones)
+    (when (timerp (plist-get state :timer))
+      (cancel-timer (plist-get state :timer)))
+    (ignore-errors (delete-directory (plist-get state :staging) t))
+    (when-let* ((peer (drover-remote--peer (plist-get state :peer)))
+                (connection (drover-remote--peer-connection peer))
+                ((spyglass-connection-live-p connection)))
+      (drover-remote--send connection (list :t "clone-end" :x xid)))
+    state))
+
+(defun drover-remote--clone-fail (xid why)
+  "End the clone XID, which failed because of WHY."
+  (drover-with-reporting "clone"
+    (when-let* ((state (drover-remote--clone-end xid)))
+      (when-let* ((peer (drover-remote--peer (plist-get state :peer))))
+        (drover-remote--event peer 'clone "the clone of %s failed: %s"
+                              (drover-bound-line (plist-get (plist-get state :description) :title) 60) why))
+      (funcall (plist-get state :callback) nil (drover-bound-line (format "%s" why))))))
+
+(defun drover-remote--clone-import (xid)
+  "Have the engine of the clone XID, all of it staged, make it this host's."
+  (when-let* ((state (gethash xid drover-remote--clones)))
+    (let* ((description (plist-get state :description))
+           (engine (plist-get description :engine))
+           (import (drover-remote--clone-engine engine :import)))
+      (if (not (functionp import))
+          (drover-remote--clone-fail xid (format "this host clones no %s conversation"
+                                                 (drover-remote--engine-label engine)))
+        (let ((done nil))
+          (condition-case err
+              (funcall import (plist-get description :id) (reverse (plist-get state :files))
+                       description (plist-get state :directory)
+                       (lambda (id)
+                         (unless done
+                           (setq done t)
+                           (drover-with-reporting "clone"
+                             (when-let* ((state (drover-remote--clone-end xid)))
+                               (drover-remote--clone-note engine id (plist-get description :origin)
+                                                          (plist-get description :title))
+                               (when-let* ((peer (drover-remote--peer (plist-get state :peer))))
+                                 (drover-remote--event peer 'clone "cloned %s here, %s in %.1fs"
+                                                       (drover-bound-line (plist-get description :title) 60)
+                                                       (file-size-human-readable (plist-get state :received))
+                                                       (- (float-time) (plist-get state :start))))
+                               (funcall (plist-get state :callback) id nil)))))
+                       (lambda (why)
+                         (unless done
+                           (setq done t)
+                           (drover-remote--clone-fail xid why))))
+            (error (drover-remote--clone-fail xid (drover-error-message err)))))))))
+
+(defun drover-remote--clone-drop (connection)
+  "Fail the clones received from the peer of CONNECTION, whose stream ended."
+  (let ((ended nil))
+    (maphash (lambda (xid state)
+               (when-let* ((peer (drover-remote--peer (plist-get state :peer))))
+                 (when (memq (drover-remote--peer-connection peer) (list nil connection))
+                   (push xid ended))))
+             drover-remote--clones)
+    (dolist (xid ended)
+      (drover-remote--clone-fail xid "the link ended"))))
+
+;;;;; Where clones come from
+
+(defun drover-remote--clone-origins-file ()
+  "Return the file keeping where the clones this host received come from."
+  (expand-file-name "clones.eld" drover-state-directory))
+
+(defun drover-remote--clone-origins ()
+  "Return where the clones this host received come from, newest first.
+A list of (ENGINE ID ORIGIN TIME TITLE), ORIGIN a link; nil when the
+file does not read."
+  (let ((file (drover-remote--clone-origins-file)))
+    (when (file-readable-p file)
+      (let ((value (ignore-errors
+                     (with-temp-buffer
+                       (insert-file-contents file)
+                       (read (current-buffer))))))
+        (and (listp value)
+             (seq-filter (lambda (entry)
+                           (and (consp entry) (symbolp (nth 0 entry)) (stringp (nth 1 entry))
+                                (stringp (nth 2 entry))))
+                         value))))))
+
+(defun drover-remote--clone-note (engine id origin title)
+  "Note that conversation ID of ENGINE here is a clone of ORIGIN, a link.
+TITLE is the original's.  The newest `drover-remote-clone-origins' are kept."
+  (when (stringp origin)
+    (let ((entries (cons (list engine id origin (float-time) title)
+                         (seq-remove (lambda (entry) (and (eq (nth 0 entry) engine) (equal (nth 1 entry) id)))
+                                     (drover-remote--clone-origins))))
+          (file (drover-remote--clone-origins-file)))
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file
+        (let ((print-length nil) (print-level nil))
+          (insert ";; Where the clones this host received come from, newest first.\n")
+          (prin1 (seq-take entries drover-remote-clone-origins) (current-buffer))
+          (insert "\n"))))))
+
+(defun drover-remote-clone-origin (session)
+  "Return the link to the conversation SESSION's was cloned from, or nil.
+For a session of this host cloned from another host."
+  (when-let* (((null (drover-session-host session)))
+              (engine (drover-session-engine session))
+              (id (drover-session-engine-id session)))
+    (nth 2 (seq-find (lambda (entry) (and (eq (nth 0 entry) engine) (equal (nth 1 entry) id)))
+                     (drover-remote--clone-origins)))))
+
+;;;###autoload
+(defun drover-remote-open-origin (session)
+  "Open the conversation SESSION, a clone this host received, was cloned from.
+Interactively, SESSION is the session at point."
+  (interactive (list (drover-session-at-point)))
+  (require 'drover-links)
+  (let ((origin (or (drover-remote-clone-origin session)
+                    (user-error "%s is not a clone this host received"
+                                (drover-session-display-title session)))))
+    (drover-links-open (or (drover-links-parse (string-remove-prefix "agent-session:" origin))
+                           (user-error "Not a link: %s" origin)))))
+
+;;;;; Answering peers
+
+(defun drover-remote--on-clone-where (peer message reply)
+  "Tell PEER, through REPLY, where a clone run in MESSAGE's directory goes here.
+Only for a peer of full access, which may clone here."
+  (if (not (eq (drover-remote--access peer) 'full))
+      (funcall reply nil (drover-remote--refuse-action peer "clone" (format "%s has %s access, not full"
+                                                                            (drover-remote--label peer)
+                                                                            (drover-remote--access peer))))
+    (pcase-let ((`(,directory . ,exists)
+                 (drover-remote--clone-map peer (drover-remote--line (plist-get message :directory) 1024)
+                                           (drover-remote--line (plist-get message :home) 1024))))
+      (funcall reply (list :directory (or directory :false) :exists (if exists t :false))))))
+
+(defun drover-remote--on-clone (peer message reply)
+  "Receive from PEER a clone of the conversation MESSAGE describes, run here.
+REPLY answers once it is a conversation of this host, with its
+identifier, or tells why not.  Only for a peer of full access: a clone
+writes this host's files and makes a conversation of its."
+  (let ((description (drover-remote--clone-description message))
+        (directory (drover-remote--line (plist-get message :target) 1024)))
+    (cond
+     ((not (eq (drover-remote--access peer) 'full))
+      (funcall reply nil (drover-remote--refuse-action peer "clone" (format "%s has %s access, not full"
+                                                                            (drover-remote--label peer)
+                                                                            (drover-remote--access peer)))))
+     ((stringp description) (funcall reply nil description))
+     ((not (and directory (file-name-absolute-p directory) (file-directory-p directory)))
+      (funcall reply nil (format "no directory %s here" (or directory "named"))))
+     ((gethash (plist-get description :x) drover-remote--clones)
+      (funcall reply nil "it is being cloned here already"))
+     (t
+      (drover-remote--clone-receive peer description (file-name-as-directory directory)
+                                    (lambda (id why)
+                                      (if id
+                                          (funcall reply (list :id id))
+                                        (funcall reply nil why))))))))
+
+;;;;; The command
+
+(defun drover-remote--clone-targets (session)
+  "Return the hosts the conversation of SESSION may be cloned to now.
+An alist (NAME . PEER), PEER nil for this host: this host for another
+host's session, whose engine clones here; for this host's, the peers
+connected, cloning, that grant this host full access."
+  (let ((engine (drover-session-engine session))
+        (id (drover-session-engine-id session)))
+    (when (and (memq engine drover-remote--clone-engines) (stringp id) (not (drover-session-parent session)))
+      (if-let* ((host (drover-session-host session)))
+          (when-let* ((peer (drover-remote--peer host))
+                      ((eq (drover-remote--peer-state peer) 'open))
+                      ((drover-remote--capable-p peer "clone"))
+                      ((drover-remote--clone-engine engine :import t)))
+            (list (cons drover-host nil)))
+        (when (drover-remote--clone-engine engine :export t)
+          (delq nil (mapcar (lambda (peer)
+                              (and (eq (drover-remote--peer-state peer) 'open)
+                                   (drover-remote--capable-p peer "clone")
+                                   (eq (drover-remote--peer-granted peer) 'full)
+                                   (cons (drover-remote--peer-name peer) peer)))
+                            (drover-remote--peers))))))))
+
+(defun drover-remote--clone-why-not (session)
+  "Return why the conversation of SESSION is cloned nowhere now, a line."
+  (let ((engine (drover-session-engine session))
+        (host (drover-session-host session)))
+    (cond
+     ((not (memq engine drover-remote--clone-engines))
+      (format "%s conversations are not cloned" (drover-remote--engine-label engine)))
+     ((not (stringp (drover-session-engine-id session))) "Its conversation is not known yet")
+     ((drover-session-parent session) "A subagent is not cloned alone")
+     (host
+      (let ((peer (drover-remote--peer host)))
+        (cond ((not (and peer (eq (drover-remote--peer-state peer) 'open))) (format "%s is not connected" host))
+              ((not (drover-remote--capable-p peer "clone"))
+               (format "%s runs an older drover, which clones nothing: update it" (drover-remote--label peer)))
+              (t (format "This host clones no %s conversation" (drover-remote--engine-label engine))))))
+     ((not (drover-remote--peers)) "No other host is configured")
+     (t "No connected host clones here, granting this host full access"))))
+
+(defun drover-remote--clone-wait (done progress)
+  "Wait in the command until DONE, a cons, holds its value in its car.
+PROGRESS returns a line telling how far it went, shown every second.
+Return non-nil once done, nil when \\[keyboard-quit] stopped waiting."
+  (let ((shown 0))
+    (condition-case nil
+        (progn
+          (while (not (car done))
+            (when (> (- (float-time) shown) 1)
+              (setq shown (float-time))
+              (drover-message "%s" (funcall progress)))
+            (accept-process-output nil 0.02))
+          t)
+      (quit nil))))
+
+(defun drover-remote--clone-progress (title host bytes size)
+  "Return how a clone of TITLE to HOST goes, BYTES of SIZE sent."
+  (format "Cloning %s to %s... %s of %s (C-g: go on in the background)"
+          (drover-bound-line title 40) host
+          (file-size-human-readable (or bytes 0)) (file-size-human-readable (or size 0))))
+
+(defun drover-remote--clone-here (session)
+  "Clone SESSION, of another host, here, asking in which directory.
+Its host exports the conversation, this host takes it in pieces and its
+engine makes it a conversation of this host, which opens once done; a
+wait stopped with \\[keyboard-quit] goes on in the background."
+  (let* ((peer (drover-remote--peer (drover-session-host session)))
+         (label (drover-remote--label peer))
+         (title (drover-session-display-title session)))
+    (drover-message "Asking %s for %s..." label (drover-bound-line title 40))
+    (pcase-let* ((`(,reply ,error)
+                  (drover-remote--wait peer (list :op "clone-export" :key (drover-remote--wire-key session))
+                                       drover-remote-clone-timeout))
+                 (description (if error
+                                  (user-error "%s did not export %s: %s" label (drover-bound-line title 40) error)
+                                (drover-remote--clone-description reply))))
+      (when (stringp description)
+        (user-error "%s exported %s, which this host cannot take: %s" label (drover-bound-line title 40)
+                    description))
+      (let* ((xid (plist-get description :x))
+             (mapped (drover-remote--clone-map peer (plist-get description :directory)
+                                               (plist-get description :home)))
+             (directory (condition-case quit
+                            (read-directory-name (format "Clone %s into: " (drover-bound-line title 40))
+                                                 (and (cdr mapped) (car mapped)) nil t)
+                          (quit (when-let* ((connection (drover-remote--peer-connection peer)))
+                                  (drover-remote--send connection (list :t "clone-end" :x xid)))
+                                (signal (car quit) (cdr quit)))))
+             (done (list nil)))
+        (unless (file-directory-p directory)
+          (user-error "No directory %s" directory))
+        (drover-remote--clone-receive peer description (file-name-as-directory (expand-file-name directory))
+                                      (lambda (id why) (setcar done (if id (list :id id) (list :failure why)))))
+        (drover-remote--clone-finish
+         done (lambda () (drover-remote--clone-progress
+                          title drover-host (plist-get (gethash xid drover-remote--clones) :received)
+                          (plist-get description :size)))
+         (lambda (id)
+           (drover-message "Cloned %s here, from %s" (drover-bound-line title 40) label)
+           (require 'drover-links)
+           (drover-links-open (list :engine (plist-get description :engine) :id id :host nil)))
+         (lambda (why) (format "Could not clone %s here: %s" (drover-bound-line title 40) why)))))))
+
+(defun drover-remote--clone-finish (done progress then else)
+  "Wait for DONE, telling PROGRESS; then call THEN with the clone's identifier.
+On failure, warn with what ELSE returns of why.  A wait stopped with
+\\[keyboard-quit] reports the outcome once it comes, without opening."
+  (if (drover-remote--clone-wait done progress)
+      (pcase (car done)
+        (`(:id ,id) (funcall then id))
+        (`(:failure ,why) (drover-message "%s" (funcall else why))))
+    (drover-message "The clone goes on in the background")
+    (let ((timer nil))
+      (setq timer (run-at-time 1 1 (lambda ()
+                                     (drover-with-reporting "clone"
+                                       (when (car done)
+                                         (cancel-timer timer)
+                                         (pcase (car done)
+                                           (`(:id ,_) (drover-message "%s" (funcall progress)))
+                                           (`(:failure ,why) (drover-warn "%s" (funcall else why))))))))))))
+
+(defun drover-remote--clone-there (session peer)
+  "Clone SESSION, of this host, to PEER, asking in which of its directories.
+PEER suggests one; this host exports the conversation, PEER takes it in
+pieces and its engine makes it a conversation of PEER's, which opens
+here once done, through PEER, as opening any of its sessions does."
+  (let* ((label (drover-remote--label peer))
+         (title (drover-session-display-title session))
+         (directory (drover-session-directory session)))
+    (pcase-let* ((`(,where ,error)
+                  (drover-remote--wait peer (list :op "clone-where" :directory (or directory :false)
+                                                  :home (or (drover-remote--clone-home-relative directory) :false))
+                                       drover-remote-open-timeout))
+                 (suggested (and (null error) (stringp (plist-get where :directory))
+                                 (drover-remote--line (plist-get where :directory) 1024))))
+      (when error
+        (user-error "%s takes no clone: %s" label error))
+      (let* ((target (string-trim (read-string (format "Clone %s into, on %s: " (drover-bound-line title 40) label)
+                                               suggested)))
+             (described (list nil))
+             (done (list nil)))
+        (when (string-empty-p target)
+          (user-error "A clone needs a directory"))
+        (drover-remote--export session (drover-remote--peer-name peer)
+                               (lambda (description why) (setcar described (or description why))))
+        (unless (drover-remote--clone-wait described (lambda () (format "Exporting %s..." (drover-bound-line title 40))))
+          (user-error "Stopped exporting %s" (drover-bound-line title 40)))
+        (when (stringp (car described))
+          (user-error "Could not export %s: %s" (drover-bound-line title 40) (car described)))
+        (let ((description (car described)))
+          (drover-remote--request
+           peer (append (list :op "clone" :target target) description)
+           (lambda (reply error)
+             (setcar done (if error
+                              (list :failure error)
+                            (list :id (drover-remote--line (plist-get reply :id) 128)))))
+           (+ (float-time) drover-remote-clone-timeout) t)
+          (drover-remote--clone-finish
+           done (lambda () (drover-remote--clone-progress
+                            title label (plist-get (gethash (plist-get description :x) drover-remote--exports) :served)
+                            (plist-get description :size)))
+           (lambda (id)
+             (drover-remote--clone-open-there peer (drover-session-engine session) id title))
+           (lambda (why) (format "Could not clone %s to %s: %s" (drover-bound-line title 40) label why))))))))
+
+(defun drover-remote--clone-open-there (peer engine id title)
+  "Open PEER's conversation ID of ENGINE, a clone of TITLE, once PEER lists it.
+Waited for in the command, `drover-remote-open-timeout' seconds."
+  (let ((label (drover-remote--label peer))
+        (deadline (+ (float-time) drover-remote-open-timeout))
+        (found nil))
+    (while (and (not (setq found (seq-find (lambda (record)
+                                             (and (eq (drover-session-engine record) engine)
+                                                  (equal (drover-session-engine-id record) id)))
+                                           (hash-table-values (drover-remote--peer-records peer)))))
+                (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (if found
+        (progn (drover-message "Cloned %s to %s" (drover-bound-line title 40) label)
+               (drover-open found))
+      (drover-message "Cloned %s to %s: %s" (drover-bound-line title 40) label
+                      (drover-remote--clone-link (drover-remote--peer-name peer) engine id)))))
+
+(defun drover-remote--clone (session check)
+  "Clone the conversation of SESSION to another host, asking which.
+With CHECK, return non-nil when there is a host to clone it to now.
+For `drover-clone-function'."
+  (let ((targets (drover-remote--clone-targets session)))
+    (cond
+     (check targets)
+     ((null targets) (user-error "%s" (drover-remote--clone-why-not session)))
+     (t
+      (let* ((name (completing-read (format-prompt "Clone %s to host" (caar targets)
+                                                   (drover-bound-line (drover-session-display-title session) 40))
+                                    (mapcar #'car targets) nil t nil nil (caar targets)))
+             (target (assoc name targets)))
+        (unless target
+          (user-error "No host %s to clone to" name))
+        (if (cdr target)
+            (drover-remote--clone-there session (cdr target))
+          (drover-remote--clone-here session)))))))
+
 ;;;; Messages
 
 (defun drover-remote--handle (connection message)
@@ -3298,7 +4114,13 @@ WHY, a symbol's name or nil, is noted in the peer's measures."
    ((equal type "occ") (drover-remote--on-oc-cancel connection message))
    ((equal type "srm") (drover-remote--on-search-matches peer message))
    ((equal type "sre") (drover-remote--on-search-end peer message))
-   ((equal type "src") (drover-remote--on-search-stop connection message))))
+   ((equal type "src") (drover-remote--on-search-stop connection message))
+   ((equal type "clone-end")
+    (let ((xid (plist-get message :x)))
+      (when-let* (((stringp xid))
+                  (entry (gethash xid drover-remote--exports))
+                  ((equal (plist-get entry :peer) (drover-remote--peer-name peer))))
+        (drover-remote--export-drop xid))))))
 
 (defun drover-remote--on-bye (peer connection message)
   "Take PEER's farewell MESSAGE on CONNECTION.
@@ -3347,6 +4169,10 @@ as an older drover's farewells do."
         ("oc" (drover-remote--on-oc peer message reply))
         ("ocs" (drover-remote--on-oc-stream peer connection message reply))
         ("search" (drover-remote--on-search peer connection message reply))
+        ("clone-export" (drover-remote--on-clone-export peer key reply))
+        ("clone-piece" (drover-remote--on-clone-piece peer message reply))
+        ("clone-where" (drover-remote--on-clone-where peer message reply))
+        ("clone" (drover-remote--on-clone peer message reply))
         ("recap"
          (if (not served)
              (funcall reply nil "no such session here")
@@ -4817,6 +5643,123 @@ then its end."
     (remhash connection drover-remote--oc-relayed)
     (maphash (lambda (_id exchange) (opencode-transport-cancel (drover-linked exchange))) table)))
 
+;;;;; Clones of OpenCode sessions, through this host's service
+
+(defconst drover-remote-oc-clone-timeout 300
+  "Seconds this host's service may take to export or import a session to clone.")
+
+(defun drover-remote--oc-failure-message (failure)
+  "Return the message the service's body of FAILURE tells, a line, or nil."
+  (when-let* ((body (opencode-transport-failure-body failure))
+              ((stringp body))
+              (data (ignore-errors (json-parse-string body :object-type 'plist :null-object nil
+                                                      :false-object nil)))
+              ((plistp data)))
+    (drover-bound-line (format "%s" (or (plist-get data :message) (plist-get data :_tag) "")))))
+
+(defun drover-remote--oc-clone-request (method path body then else)
+  "Ask this host's service METHOD of PATH with BODY, JSON bytes or nil.
+THEN gets the answer's body, as bytes; ELSE the failure's status, nil
+when the service did not answer, and a line."
+  (if (not (drover-remote--serves-opencode-p))
+      (funcall else nil "this host's opencode.el reaches no service through sockets: update it")
+    (opencode-call-with-service
+     nil #'opencode-service-ensure
+     (lambda (connection)
+       (drover-with-reporting "OpenCode clone"
+         (opencode-transport-request
+          method (concat (plist-get connection :url) path)
+          :headers (append (list (cons "Authorization" (opencode-service-authorization connection)))
+                           (and body (list (cons "Content-Type" "application/json"))))
+          :body body
+          :timeout drover-remote-oc-clone-timeout
+          :as (lambda ()
+                (let ((text (buffer-substring-no-properties (point) (point-max))))
+                  (if (multibyte-string-p text) (encode-coding-string text 'utf-8) text)))
+          :then (lambda (bytes)
+                  (drover-with-reporting "OpenCode clone"
+                    (funcall then bytes)))
+          :else (lambda (failure)
+                  (drover-with-reporting "OpenCode clone"
+                    (funcall else
+                             (and (eq (opencode-transport-failure-reason failure) 'http)
+                                  (opencode-transport-failure-status failure))
+                             (or (drover-remote--oc-failure-message failure)
+                                 (drover-bound-line (opencode-transport-failure-describe failure)))))))))
+     (lambda (why)
+       (drover-with-reporting "OpenCode clone"
+         (funcall else nil (drover-bound-line (format "%s" why))))))))
+
+(defun drover-remote--oc-export (id callback)
+  "Call CALLBACK with what another host needs to clone OpenCode session ID.
+This host's service's export of it, through the route of the fork: the
+session and its settled messages, their attachments inline; not the
+sessions of its subagents, nor the snapshots of the files its turns
+changed.  For the engine's :export (see `drover-remote--clone-engine')."
+  (drover-remote--oc-clone-request
+   'get (format "/api/experimental/session/%s/export" (url-hexify-string id)) nil
+   (lambda (bytes)
+     (funcall callback (list :parts (list (list "export.json" :bytes bytes)))))
+   (lambda (status message)
+     (funcall callback
+              (list :failure (if (eql status 404)
+                                 (format "%s (a service of the fork exports sessions)" message)
+                               message))))))
+
+(defun drover-remote--oc-import-body (bytes directory)
+  "Return the request importing the export BYTES as a session run in DIRECTORY.
+The export's info and messages, as they are, and the location; parsed
+and serialized again only when the export is not shaped as the fork
+writes it, its info first."
+  (let ((location (json-serialize `((directory . ,directory)))))
+    (if (and (string-prefix-p "{\"data\":{\"info\":" bytes)
+             (string-match "}}[ \t\r\n]*\\'" bytes))
+        (concat "{" (substring bytes (length "{\"data\":{") (match-beginning 0))
+                ",\"location\":" location "}")
+      (let ((data (alist-get 'data (json-parse-string (decode-coding-string bytes 'utf-8)
+                                                      :object-type 'alist
+                                                      :null-object :null :false-object :false))))
+        (json-serialize `((info . ,(alist-get 'info data))
+                          (messages . ,(or (alist-get 'messages data) []))
+                          (location (directory . ,directory))))))))
+
+(defun drover-remote--oc-clone-directory (directory)
+  "Return DIRECTORY as a service takes a location: absolute, its drive upcased."
+  (let ((name (directory-file-name (expand-file-name directory))))
+    (if (string-match "\\`\\([a-z]\\):" name)
+        (concat (upcase (match-string 1 name)) (substring name 1))
+      name)))
+
+(defun drover-remote--oc-import (id parts _data directory then else)
+  "Make OpenCode session ID, of PARTS received, a session of this host's service.
+The service imports the export, run in DIRECTORY, under its identifier:
+a session of that identifier here already is not replaced.  THEN gets
+ID, ELSE why it could not.  For the engine's :import (see
+`drover-remote--clone-engine')."
+  (let ((file (cdr (assoc "export.json" parts))))
+    (if (not (and file (= (length parts) 1)))
+        (funcall else "no export of an OpenCode session")
+      (pcase-let ((`(,body . ,error)
+                   (condition-case err
+                       (cons (drover-remote--oc-import-body
+                              (with-temp-buffer
+                                (set-buffer-multibyte nil)
+                                (insert-file-contents-literally file)
+                                (buffer-string))
+                              (drover-remote--oc-clone-directory directory))
+                             nil)
+                     (error (cons nil (drover-error-message err))))))
+        (if error
+            (funcall else error)
+          (drover-remote--oc-clone-request
+           'post "/api/experimental/session/import" body
+           (lambda (_bytes) (funcall then id))
+           (lambda (status message)
+             (funcall else (pcase status
+                             (409 "this host's OpenCode service has this session already")
+                             (404 (format "%s (a service of the fork imports sessions)" message))
+                             (_ message))))))))))
+
 ;;;; The mode
 
 (defun drover-remote--start ()
@@ -4845,7 +5788,8 @@ then its end."
     (setq drover-hosts-function #'drover-remote--host-names
           drover-host-label-function #'drover-remote--host-label
           drover-host-state-function #'drover-remote--host-state
-          drover-links-remote-function #'drover-remote--open-conversation)
+          drover-links-remote-function #'drover-remote--open-conversation
+          drover-clone-function #'drover-remote--clone)
     (drover-remote-reconfigure)
     ;; Connections made before, by a remote layer of this Emacs gone
     ;; since: their peers are told it restarted, as they still serve it
@@ -4892,6 +5836,9 @@ starts again at once: its peers keep this host's sessions meanwhile."
     (drover-remote--search-unserve connection))
   (dolist (id (hash-table-keys drover-remote--searches))
     (drover-remote--search-end id (list :failure "the remote layer stopped")))
+  (dolist (xid (hash-table-keys drover-remote--clones))
+    (drover-remote--clone-fail xid "the remote layer stopped"))
+  (mapc #'drover-remote--export-drop (hash-table-keys drover-remote--exports))
   (remove-hook 'opencode-state-updated-functions #'drover-remote--oc-updated)
   (when (fboundp 'spyglass-unregister-channel)
     (spyglass-unregister-channel drover-remote-channel))
@@ -4906,6 +5853,7 @@ starts again at once: its peers keep this host's sessions meanwhile."
         drover-host-label-function nil
         drover-host-state-function nil
         drover-links-remote-function nil
+        drover-clone-function nil
         drover-remote--state nil))
 
 ;;;###autoload

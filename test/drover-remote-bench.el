@@ -33,6 +33,10 @@
 ;;
 ;;   make bench-remote REMOTE=core SSH=myssh REMOTE_EMACS=/ucrt64/bin/emacs SEARCH=error,capybara
 ;;
+;; With CLONE=MEGABYTES, it measures instead a Claude Code conversation
+;; of a transcript that large cloned to the agent, in a throwaway home
+;; there, and back here.
+;;
 ;; With BACK=PROGRAM, the agent also dials this host back through SSH
 ;; run as PROGRAM there, with BACK_ARGS (comma-separated), so that both
 ;; directions are checked and the connection both keep is reported.
@@ -204,7 +208,9 @@ With BACK, the agent will be told to dial this host back."
            :command (list (drover-remote-bench--ssh) "-o" "BatchMode=yes" drover-remote-bench--remote
                           (format "cd %s && DROVER_AGENT_OPENCODE=1 DROVER_AGENT_ACCESS=full DROVER_AGENT_HOST=%s DROVER_AGENT_PEERS=%s%s exec timeout 300 %s -Q --batch -L . -l drover-remote-agent -f drover-remote-agent-main"
                                   dir drover-remote-test-agent-name (if back drover-host "")
-                                  (if (drover-remote-bench--search-words) " DROVER_AGENT_CLAUDE=1" "")
+                                  (cond ((drover-remote-bench--search-words) " DROVER_AGENT_CLAUDE=1")
+                                        ((drover-remote-bench--clone-size) " DROVER_AGENT_CLAUDE=here")
+                                        (t ""))
                                   emacs))
            :filter #'drover-remote-test--agent-filter))
     (drover-remote-test-wait (lambda () (or (seq-some (lambda (line) (string-prefix-p "DROVER-AGENT READY" line))
@@ -543,6 +549,99 @@ at most `drover-search-text-limit'."
         (drover-remote-bench--row (format "search \"%s\": all matches (slowest of 5)" word) (car (last ends))
                                   count)))))
 
+;;;; Cloning a conversation
+
+(defun drover-remote-bench--clone-size ()
+  "Return the megabytes of the transcript to clone, or nil.
+DROVER_BENCH_CLONE: then the bench measures clones alone, of a
+transcript of fixtures that large, to the agent and back."
+  (when-let* ((size (drover-remote-bench--getenv "DROVER_BENCH_CLONE")))
+    (string-to-number size)))
+
+(defun drover-remote-bench--md5 (bytes)
+  "Return the MD5 of BYTES."
+  (secure-hash 'md5 bytes))
+
+(defun drover-remote-bench--clone (megabytes)
+  "Measure a Claude Code conversation of MEGABYTES cloned to the agent and back, adding rows.
+The transcript is written in a throwaway home here; the agent takes it
+in its own directory, then this host clones the agent's clone back.
+Each time: from the command to the clone made, the rate, this Emacs's
+longest block, and the bytes there checked against those here, the
+records' directory rewritten."
+  (drover-test-with-homes
+    (let* ((peer (drover-remote--peer drover-remote-test-agent-name))
+           (id "33333333-3333-4333-8333-333333333333")
+           (here (expand-file-name "work/large" home))
+           (source (drover-fixture-claude id here :prompt "Clone me" :reply "Cloned"
+                                          :filler (* megabytes 1024 1024)))
+           (size (file-attribute-size (file-attributes source)))
+           (record (drover-session-create :backend 'fake :id "large" :title "A large conversation"
+                                          :directory (file-name-as-directory here)
+                                          :engine 'claude-code :engine-id id))
+           (target (plist-get (drover-remote-test-command "mkdir" :name "target") :directory))
+           (there (drover-remote-test-command "claude-file" :id id :directory target))
+           (opened nil))
+      (drover-remote-test-wait (lambda () (and (eq (drover-remote--peer-granted peer) 'full)
+                                               (drover-remote--capable-p peer "clone")))
+                               20)
+      ;; To the agent.
+      (drover-remote-bench--reset)
+      (let ((start (float-time)))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) drover-remote-test-agent-name))
+                  ((symbol-function 'read-string) (lambda (&rest _) target))
+                  ((symbol-function 'drover-open) (lambda (session &rest _) (setq opened session))))
+          (drover-clone record))
+        (let ((elapsed (- (float-time) start))
+              (info (drover-remote-test-command "file-info" :file (plist-get there :file))))
+          (drover-remote-bench--row (format "%.0f MB cloned there, %.1f MB/s" (/ size 1048576.0)
+                                            (/ size 1048576.0 elapsed))
+                                    elapsed)
+          (push (list "the clone there is the conversation, its directory rewritten"
+                      (if (equal (plist-get info :md5)
+                                 (drover-remote-bench--md5
+                                  (drover-remote-test-rewritten source here (plist-get there :spelled))))
+                          "yes" "NO")
+                      (format "%s" (plist-get info :size)) "-" "-" "-")
+                drover-remote-bench--rows)
+          (push (list "opened there once listed" (if opened "yes" "NO") "-" "-" "-" "-")
+                drover-remote-bench--rows)))
+      ;; And back.
+      (let* ((session (drover-remote-test-wait
+                       (lambda ()
+                         (seq-find (lambda (session) (and (eq (drover-session-engine session) 'claude-code)
+                                                          (equal (drover-session-engine-id session) id)))
+                                   (drover-remote-bench--records-here)))
+                       60))
+             (back (file-name-as-directory (expand-file-name "work/back" home)))
+             (start (float-time)))
+        (unless session (error "The clone there is not listed here"))
+        (make-directory back t)
+        (drover-remote-bench--reset)
+        ;; This host has the conversation already, under its identifier:
+        ;; the clone back goes to another home.
+        (let ((drover-claude-code-home (expand-file-name "claude-back" home)))
+          (make-directory (drover-claude-code-projects-directory) t)
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) drover-host))
+                    ((symbol-function 'read-directory-name) (lambda (&rest _) back))
+                    ((symbol-function 'drover-links-open) #'ignore))
+            (drover-clone session))
+          (let ((elapsed (- (float-time) start))
+                (file (drover-fixture-claude-file id back)))
+            (drover-remote-bench--row (format "%.0f MB cloned back here, %.1f MB/s" (/ size 1048576.0)
+                                              (/ size 1048576.0 elapsed))
+                                      elapsed)
+            (push (list "the clone back is the conversation, its directory rewritten"
+                        (if (and (file-exists-p file)
+                                 (equal (drover-remote-bench--md5 (drover-remote-test-bytes file))
+                                        (drover-remote-bench--md5
+                                         (drover-remote-test-rewritten source here
+                                                                       (drover-claude-code--record-directory back)))))
+                            "yes" "NO")
+                        (format "%s" (and (file-exists-p file) (file-attribute-size (file-attributes file))))
+                        "-" "-" "-")
+                  drover-remote-bench--rows)))))))
+
 ;;;; Main
 
 (defun drover-remote-bench--print ()
@@ -561,6 +660,7 @@ at most `drover-search-text-limit'."
   (setq drover-remote-bench--remote (drover-remote-bench--getenv "DROVER_BENCH_REMOTE"))
   (let* ((back (drover-remote-bench--getenv "DROVER_BENCH_BACK"))
          (search-words (drover-remote-bench--search-words))
+         (clone-size (drover-remote-bench--clone-size))
          (back-args (and (drover-remote-bench--getenv "DROVER_BENCH_BACK_ARGS")
                          (split-string (getenv "DROVER_BENCH_BACK_ARGS") "," t)))
          (dir (file-name-as-directory (make-temp-file "drover-remote-bench" t)))
@@ -593,6 +693,7 @@ at most `drover-search-text-limit'."
                                      (let ((process-environment (append '("DROVER_AGENT_ACCESS=full"
                                                                           "DROVER_AGENT_OPENCODE=1")
                                                                         (and search-words '("DROVER_AGENT_CLAUDE=1"))
+                                                                        (and clone-size '("DROVER_AGENT_CLAUDE=here"))
                                                                         process-environment)))
                                        (drover-remote-test-start-agent dir drover-remote-test-agent-name
                                                                        (and back drover-host))))))
@@ -613,8 +714,10 @@ at most `drover-search-text-limit'."
                                                         'open))
                                          60)
                 (message "bench: connected")
-                (if search-words
-                    (drover-remote-bench--search search-words)
+                (cond
+                 (search-words (drover-remote-bench--search search-words))
+                 (clone-size (drover-remote-bench--clone clone-size))
+                 (t
                   (progn
                     ;; 2511 sessions appear: an update of all of them.
                     (drover-remote-bench--reset)
@@ -732,7 +835,7 @@ at most `drover-search-text-limit'."
                                     (format "%d" (length (plist-get (drover-remote-test-command "hosts")
                                                                     :remote)))
                                     "-" "-" "-")
-                              drover-remote-bench--rows)))))
+                              drover-remote-bench--rows))))))
                 ;; What the agent holds, this host holds.
                 (let* ((titles (plist-get (drover-remote-test-command "titles") :titles))
                        (fake (seq-filter (lambda (session) (eq (car (drover-session-id session)) 'fake))

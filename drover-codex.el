@@ -371,6 +371,61 @@ The engine's :directory (see `drover-register-engine')."
     (funcall else (format "No rollout of Codex conversation %s tells its directory"
                           (drover-bound-line id)))))
 
+;;;; Cloning to another host
+
+(defconst drover-codex--rollout-name-regexp
+  "\\`rollout-\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)T[^/\\\\]*\\.jsonl\\'"
+  "What the name of a rollout is: the day it began, in its name.")
+
+(defun drover-codex--export (id callback)
+  "Call CALLBACK with what another host needs to clone conversation ID.
+Its rollout, archived or not, to its last whole record, and how its
+records spell the directory it ran in.  What Codex keeps elsewhere of
+it, its state database's row and its shell snapshots, stays here; Codex
+finds a rollout its database does not know by its name, and records
+it then.  The engine's :export."
+  (funcall callback
+           (if-let* ((file (drover-codex-rollout-file id)))
+               (list :parts (list (list (file-name-nondirectory file) file (drover-lines-size file)))
+                     :cwd (drover-recorded-cwd file))
+             (list :failure (format "No rollout of Codex conversation %s" (drover-bound-line id))))))
+
+(defun drover-codex--record-directory (directory)
+  "Return DIRECTORY as Codex's records spell the directory it runs in.
+Without its trailing slash; on Windows with backslashes and an upper
+case drive letter.  The engine's :record-directory."
+  (let ((name (directory-file-name (expand-file-name directory))))
+    (if (string-match "\\`\\([a-zA-Z]\\):\\(.*\\)\\'" name)
+        (concat (upcase (match-string 1 name)) ":"
+                (replace-regexp-in-string "/" "\\\\" (match-string 2 name)))
+      name)))
+
+(defun drover-codex--import (id parts _data _directory then else)
+  "Make conversation ID, of PARTS received, one of this host's.
+Its rollout goes among the sessions of the day it began, under its
+name, unarchived; one of that conversation here already is not
+replaced.  Its records name the directory it runs in, rewritten as it
+arrived.  THEN gets ID, ELSE why it could not.  The engine's :import."
+  (let* ((name (car (car parts)))
+         (day (and (= (length parts) 1) (stringp id) (stringp name)
+                   (string-match drover-codex--rollout-name-regexp name)
+                   (string-suffix-p (concat "-" id ".jsonl") name)
+                   (format "sessions/%s/%s/%s"
+                           (match-string 1 name) (match-string 2 name) (match-string 3 name)))))
+    (cond
+     ((not day)
+      (funcall else "not a rollout of that conversation"))
+     ((drover-codex-rollout-file id)
+      (funcall else "Codex recorded this conversation here already"))
+     (t
+      (condition-case err
+          (let ((target (expand-file-name name (expand-file-name day drover-codex-home))))
+            (make-directory (file-name-directory target) t)
+            (rename-file (cdr (car parts)) target)
+            (drover-run-hook-reporting 'drover-recorded-functions 'codex target)
+            (funcall then id))
+        (error (funcall else (drover-error-message err))))))))
+
 ;;;; Registration
 
 (defun drover-codex--register ()
@@ -381,7 +436,10 @@ The engine's :directory (see `drover-register-engine')."
                           :volatile t
                           :resolve #'drover-codex--resolve
                           :last-used #'drover-codex--last-used
-                          :directory #'drover-codex--directory))
+                          :directory #'drover-codex--directory
+                          :export #'drover-codex--export
+                          :import #'drover-codex--import
+                          :record-directory #'drover-codex--record-directory))
 
 (drover-codex--register)
 

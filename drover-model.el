@@ -312,6 +312,23 @@ NAME is the agent program sessions run, such as `opencode',
              conversations of the engines that have it (see
              `drover-links'), since front ends resume a conversation in
              its directory.
+ :export     Function of a conversation's ID and a CALLBACK gathering
+             what another host needs to clone the conversation (see
+             `drover-clone'): CALLBACK gets, once, a plist of :parts, a
+             list of (NAME FILE SIZE), the first SIZE bytes of this
+             host's FILE, or (NAME :bytes BYTES), NAME a relative file
+             name, and :cwd, how its records spell the directory it ran
+             in (see `drover-recorded-cwd'); or (:failure MESSAGE).
+ :import     Function of a conversation's ID, the PARTS of its :export
+             received, an alist (NAME . FILE) of files of this host,
+             that plist, a DIRECTORY of this host, THEN and ELSE: it
+             makes the conversation one of this host's, run in
+             DIRECTORY, taking the files, then calls THEN with its
+             identifier here, or ELSE with a message, once.
+ :record-directory
+             Function of a directory of this host returning how the
+             engine's records spell it, to which the :cwd of the parts
+             of a clone is rewritten as they arrive.
 
 Every property is optional.  Registering NAME again replaces its
 properties and keeps its place."

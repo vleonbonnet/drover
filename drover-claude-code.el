@@ -907,6 +907,82 @@ those of every conversation recorded, which only grow when run."
     (when-let* ((times (delq nil times)))
       (apply #'max times))))
 
+;;;; Cloning to another host
+
+(defconst drover-claude-code--clone-files 10000
+  "Files at most of a conversation's directory a clone carries.")
+
+(defun drover-claude-code--recorded-p (id)
+  "Return non-nil when a transcript of conversation ID is here, in any project."
+  (let ((root (drover-claude-code-projects-directory))
+        (name (concat id ".jsonl")))
+    (and (file-directory-p root)
+         (seq-some (lambda (bucket) (file-exists-p (expand-file-name name bucket)))
+                   (seq-filter #'file-directory-p (directory-files root t "\\`[^.]"))))))
+
+(defun drover-claude-code--export (id callback)
+  "Call CALLBACK with what another host needs to clone conversation ID.
+Its transcript, to its last whole record, and the directory beside it,
+its subagents' transcripts and the tool results it kept, as the CLI's
+SDK names a session's files (see `drover-claude-code-session-files'),
+links not followed; and how its records spell the directory it ran in.
+What else Claude Code keeps of a session, its checkpoints of files, its
+to-do lists and shell snapshots, stays here.  The engine's :export."
+  (let ((result
+         (condition-case err
+             (pcase-let ((`(,transcript . ,directory) (drover-claude-code-session-files id)))
+               (let ((parts (list (list (concat id ".jsonl") transcript (drover-lines-size transcript)))))
+                 (when directory
+                   (let ((files (directory-files-recursively directory "" nil nil nil)))
+                     (when (> (length files) drover-claude-code--clone-files)
+                       (user-error "Its directory holds more than %d files" drover-claude-code--clone-files))
+                     (dolist (file files)
+                       (unless (file-symlink-p file)
+                         (push (list (concat id "/" (file-relative-name file directory)) file
+                                     (if (string-suffix-p ".jsonl" file)
+                                         (drover-lines-size file)
+                                       (file-attribute-size (file-attributes file))))
+                               parts)))))
+                 (list :parts (nreverse parts) :cwd (drover-recorded-cwd transcript))))
+           (error (list :failure (drover-error-message err))))))
+    (funcall callback result)))
+
+(defun drover-claude-code--record-directory (directory)
+  "Return DIRECTORY as Claude Code's records spell the directory it runs in.
+The engine's :record-directory."
+  (drover-claude-code-native-directory (file-truename (expand-file-name directory))))
+
+(defun drover-claude-code--import (id parts _data directory then else)
+  "Make conversation ID, of PARTS received, one of this host's, run in DIRECTORY.
+Its transcript and its directory go to the subdirectory of transcripts
+of DIRECTORY, where the CLI resumes it, under its identifier: a
+conversation of that identifier recorded here already is not replaced.
+THEN gets ID, ELSE why it could not.  The engine's :import."
+  (cond
+   ((not (and (stringp id) (string-match-p drover-claude-code--uuid-regexp id)))
+    (funcall else "not a Claude Code session"))
+   ((drover-claude-code--recorded-p id)
+    (funcall else "Claude Code recorded this conversation here already"))
+   ((not (seq-every-p (lambda (part)
+                        (or (equal (car part) (concat id ".jsonl"))
+                            (string-prefix-p (concat id "/") (car part))))
+                      parts))
+    (funcall else "a file that is not of the conversation"))
+   ((not (assoc (concat id ".jsonl") parts))
+    (funcall else "no transcript"))
+   (t
+    (condition-case err
+        (let ((bucket (expand-file-name (drover-claude-code-encode-directory directory)
+                                        (drover-claude-code-projects-directory))))
+          (pcase-dolist (`(,name . ,file) parts)
+            (let ((target (expand-file-name name bucket)))
+              (make-directory (file-name-directory target) t)
+              (rename-file file target)))
+          (drover-run-hook-reporting 'drover-recorded-functions 'claude-code
+                                     (expand-file-name (concat id ".jsonl") bucket))
+          (funcall then id))
+      (error (funcall else (drover-error-message err)))))))
+
 ;;;; Registration
 
 (defun drover-claude-code--register ()
@@ -918,7 +994,10 @@ those of every conversation recorded, which only grow when run."
                           :resolve #'drover-claude-code--resolve
                           :agents #'drover-claude-code--agents
                           :last-used #'drover-claude-code--last-used
-                          :directory #'drover-claude-code--directory))
+                          :directory #'drover-claude-code--directory
+                          :export #'drover-claude-code--export
+                          :import #'drover-claude-code--import
+                          :record-directory #'drover-claude-code--record-directory))
 
 (drover-claude-code--register)
 

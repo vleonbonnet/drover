@@ -43,7 +43,8 @@
 ;; remote layer relays to peers, whose search of what was said is a
 ;; stand-in of the backend's, as it answers through `opencode-search'.
 ;; With DROVER_AGENT_CLAUDE set, it lists the conversations Claude Code
-;; recorded, read only, in the home it names, or in the user's for 1.
+;; recorded in the home it names, its directory's for "here", or the
+;; user's for 1, read only; DROVER_AGENT_CODEX likewise for Codex.
 ;; It says READY on
 ;; standard error once it listens, kills itself past 2 GB of resident
 ;; memory, and after ten minutes without a command.  It loads neither
@@ -66,12 +67,17 @@
 (defvar drover-claude-code-home)
 (defvar drover-claude-code-history-days)
 (defvar drover-claude-code-agents-interval)
+(defvar drover-codex-home)
+(defvar drover-codex-history-days)
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
 (declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
 (declare-function drover-fake-opencode-requests "drover-fake-opencode" (&optional method))
 (declare-function drover-fake-opencode-port "drover-fake-opencode" ())
 (declare-function drover-fake-opencode-archive "drover-fake-opencode" (id))
+(declare-function drover-claude-code-encode-directory "drover-claude-code" (dir))
+(declare-function drover-claude-code-projects-directory "drover-claude-code" ())
+(declare-function drover-claude-code-native-directory "drover-claude-code" (dir))
 
 (defvar drover-remote-agent--sessions (make-hash-table :test #'equal)
   "The fake backend's sessions, by identifier.")
@@ -468,10 +474,47 @@ noted, and their cancellations."
        (setq drover-remote-agent--search-delay (or (plist-get args :delay) 0.01)
              drover-remote-agent--search-failure (plist-get args :failure))
        (funcall reply (list :ok t)))
+      ("clone-state"
+       ;; The conversations it exported for peers to clone, and the clones
+       ;; it receives.
+       (funcall reply (list :exports (hash-table-count drover-remote--exports)
+                            :clones (hash-table-count drover-remote--clones))))
+      ("file-info"
+       ;; The size and MD5 of FILE, its bytes as they are, or nothing.
+       (let ((file (plist-get args :file)))
+         (funcall reply
+                  (if (and (stringp file) (file-regular-p file))
+                      (list :size (file-attribute-size (file-attributes file))
+                            :md5 (with-temp-buffer
+                                   (set-buffer-multibyte nil)
+                                   (insert-file-contents-literally file)
+                                   (secure-hash 'md5 (current-buffer))))
+                    (list :size :false)))))
+      ("mkdir"
+       ;; A directory NAME of its own directory, made; its name.
+       (let ((directory (file-name-as-directory
+                         (expand-file-name (plist-get args :name)
+                                           (or (getenv "DROVER_AGENT_DIR") default-directory)))))
+         (make-directory directory t)
+         (funcall reply (list :directory directory))))
+      ("claude-file"
+       ;; Where Claude Code records conversation ID run in DIRECTORY,
+       ;; and how its records spell DIRECTORY.
+       (let ((directory (plist-get args :directory)))
+         (funcall reply (list :file (expand-file-name (concat (plist-get args :id) ".jsonl")
+                                                      (expand-file-name (drover-claude-code-encode-directory directory)
+                                                                        (drover-claude-code-projects-directory)))
+                              :spelled (drover-claude-code-native-directory
+                                        (file-truename (expand-file-name directory)))))))
+      ("claude-home"
+       (funcall reply (list :home (expand-file-name drover-claude-code-home)
+                            :dir (expand-file-name (or (getenv "DROVER_AGENT_DIR") default-directory)))))
       ("recorded"
        ;; How many conversations engines recorded the index lists, by engine.
        (funcall reply (list :claude (seq-count (lambda (session) (eq (drover-session-backend session) 'claude-code))
-                                               (drover-index-sessions)))))
+                                               (drover-index-sessions))
+                            :codex (seq-count (lambda (session) (eq (drover-session-backend session) 'codex))
+                                              (drover-index-sessions)))))
       ("oc-add"
        ;; Sessions of the fake OpenCode service, as (ID TITLE).
        (seq-doseq (pair (plist-get args :sessions))
@@ -697,7 +740,8 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
           drover-state-directory (expand-file-name "state/" dir)
           ;; The fake backend's sessions alone, not those this host's
           ;; engines recorded, unless asked for Claude Code's.
-          drover-transcript-engines (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
+          drover-transcript-engines (append (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
+                                            (and (getenv "DROVER_AGENT_CODEX") '(codex)))
           drover-refresh-delay 0.02
           spyglass-registration-file (expand-file-name "server.json" dir)
           drover-remote-standby-delay 1
@@ -722,13 +766,22 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
     (when (getenv "DROVER_AGENT_OPENCODE")
       (drover-remote-agent--opencode))
     (when-let* ((claude (getenv "DROVER_AGENT_CLAUDE")))
-      ;; Its conversations listed, as drover starts, read only: every one
-      ;; live, none asked of the CLI.
+      ;; Its conversations listed, as drover starts: every one live,
+      ;; none asked of the CLI.
       (require 'drover-claude-code)
-      (unless (member claude '("" "1"))
-        (setq drover-claude-code-home claude))
+      (pcase claude
+        ((or "" "1"))
+        ("here"
+         ;; Recorded, so that drover lists what lands there.
+         (setq drover-claude-code-home (expand-file-name "claude" dir))
+         (make-directory (expand-file-name "projects" drover-claude-code-home) t))
+        (_ (setq drover-claude-code-home claude)))
       (setq drover-claude-code-history-days nil
             drover-claude-code-agents-interval nil))
+    (when-let* ((codex (getenv "DROVER_AGENT_CODEX")))
+      (require 'drover-codex)
+      (setq drover-codex-home (if (equal codex "here") (expand-file-name "codex" dir) codex)
+            drover-codex-history-days nil))
     (spyglass-register-channel "drover-test" #'ignore :request #'drover-remote-agent--command)
     (drover-remote-mode 1)
     (drover-remote-agent--say "READY %s %s" drover-host spyglass-registration-file)

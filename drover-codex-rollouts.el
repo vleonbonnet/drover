@@ -891,7 +891,15 @@ registered anew, so that its registration has this file's properties."
     (setq drover-codex-rollouts--index (drover-codex-rollouts--make-index)))
   (drover-codex-rollouts--register)
   (cl-pushnew front-end drover-codex-rollouts--users)
-  (add-hook 'kill-emacs-hook #'drover-codex-rollouts--save))
+  (add-hook 'kill-emacs-hook #'drover-codex-rollouts--save)
+  (add-hook 'drover-recorded-functions #'drover-codex-rollouts--recorded))
+
+(defun drover-codex-rollouts--recorded (engine file)
+  "Look at FILE at once, placed where Codex records, when ENGINE is its.
+For `drover-recorded-functions'."
+  (when-let* (((eq engine 'codex))
+              (index (drover-codex-rollouts--current-index)))
+    (drover-transcript-check index file)))
 
 (defun drover-codex-rollouts-uninstall (front-end)
   "Stop listing Codex's conversations for FRONT-END.
@@ -901,12 +909,14 @@ The backend goes once no front end needs it."
     (when (drover-codex-rollouts--current-index)
       (drover-transcript-stop (drover-codex-rollouts--current-index)))
     (remove-hook 'kill-emacs-hook #'drover-codex-rollouts--save)
+    (remove-hook 'drover-recorded-functions #'drover-codex-rollouts--recorded)
     (drover-unregister-backend 'codex)))
 
 ;; Loaded anew, as reloading drover does, the backend a front end
 ;; installed takes this file's properties.
 (when (eq (drover-backend-property 'codex :sessions) #'drover-codex-rollouts--sessions)
   (drover-codex-rollouts--register)
+  (add-hook 'drover-recorded-functions #'drover-codex-rollouts--recorded)
   ;; What the reader before read is read again.
   (drover-codex-rollouts--current-index))
 

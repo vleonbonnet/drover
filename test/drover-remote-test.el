@@ -2296,5 +2296,358 @@ too, are listed here once it is connected."
       (should-not (plist-get result :failed))
       (should-not (drover-remote-test-calls "search")))))
 
+;;;; Cloning a conversation to another host
+
+(ert-deftest drover-remote-test-clone-rewrite ()
+  "The records' spelling of a directory is rewritten as pieces arrive, one cut between two pieces found whole."
+  (let* ((pairs (list (cons "\"cwd\":\"/a/b\"" "\"cwd\":\"C:\\\\x\"")))
+         (text "{\"cwd\":\"/a/b\",\"x\":1}\n{\"cwd\":\"/a/bc\"}\n{\"cwd\":\"/a/b\"}\n")
+         (expected (string-replace "\"cwd\":\"/a/b\"" "\"cwd\":\"C:\\\\x\"" text)))
+    (dotimes (cut (1+ (length text)))
+      (let* ((first (drover-remote--clone-rewrite "" (substring text 0 cut) pairs nil))
+             (second (drover-remote--clone-rewrite (cdr first) (substring text cut) pairs t)))
+        (should (equal (concat (car first) (car second)) expected))))
+    ;; A byte a piece.
+    (let ((carry "") (out nil))
+      (dotimes (i (length text))
+        (let ((cut (drover-remote--clone-rewrite carry (substring text i (1+ i)) pairs (= i (1- (length text))))))
+          (push (car cut) out)
+          (setq carry (cdr cut))))
+      (should (equal (apply #'concat (nreverse out)) expected)))))
+
+(ert-deftest drover-remote-test-clone-directories ()
+  "A clone goes under the directory a peer's table maps, else under this host's home, as it was under the peer's."
+  (let* ((root (file-name-as-directory (make-temp-file "drover-clone-dirs" t)))
+         (peer (drover-remote--peer-make
+                :name "core"
+                :properties (list :directories (list (cons "C:/Users/val/local/" (expand-file-name "mine/" root)))))))
+    (unwind-protect
+        (progn
+          (should (equal (drover-remote--clone-map peer "C:/Users/val/local/source/x/" "local/source/x/")
+                         (cons (expand-file-name "mine/source/x/" root) nil)))
+          (make-directory (expand-file-name "mine/source/x/" root) t)
+          ;; Drive letters and case as Windows has them, backslashes too.
+          (should (equal (drover-remote--clone-map peer "c:\\users\\VAL\\local\\source\\x" nil)
+                         (cons (expand-file-name "mine/source/x/" root) t)))
+          ;; Not mapped: under this host's home, as it was under the peer's.
+          (should (equal (car (drover-remote--clone-map peer "/home/val/work/y/" "work/y/"))
+                         (file-name-as-directory (expand-file-name "work/y/" "~"))))
+          (should-not (drover-remote--clone-map peer "/home/val/../../etc/" "../../etc/"))
+          (should-not (drover-remote--clone-map peer "/srv/x/" "/srv/x/"))
+          (should-not (drover-remote--clone-map peer "/srv/x/" nil))
+          (should (equal (drover-remote--clone-home-relative (expand-file-name "~/local/x")) "local/x/"))
+          (should-not (drover-remote--clone-home-relative "/nowhere/x/")))
+      (delete-directory root t))))
+
+(ert-deftest drover-remote-test-clone-description ()
+  "What a peer describes of a clone is checked: names of files under the clone alone, sizes, engines, a bound."
+  (let ((good (list :x "viewer-1-2" :engine "claude-code" :id drover-remote-test--capybara :title "T"
+                    :directory "/a/" :home "a/" :cwd "/a" :origin "agent-session://viewer/claude-code/x"
+                    :size 3 :parts [["x.jsonl" 3]])))
+    (should (equal (plist-get (drover-remote--clone-description good) :parts) '(("x.jsonl" 3))))
+    (should (eq (plist-get (drover-remote--clone-description good) :engine) 'claude-code))
+    (dolist (name '("../x" "/etc/passwd" "a\\b" "C:x" "a//b" "~/x" "" "a/./b"))
+      (should (stringp (drover-remote--clone-description (plist-put (copy-sequence good) :parts (vector (vector name 1)))))))
+    (should (stringp (drover-remote--clone-description (plist-put (copy-sequence good) :parts [["x" -1]]))))
+    (should (stringp (drover-remote--clone-description (plist-put (copy-sequence good) :engine "rm"))))
+    (should (stringp (drover-remote--clone-description (plist-put (copy-sequence good) :id "a b/../c"))))
+    (should (stringp (drover-remote--clone-description (plist-put (copy-sequence good) :x "a b"))))
+    (let ((drover-remote-clone-limit 10))
+      (should (stringp (drover-remote--clone-description (plist-put (copy-sequence good) :parts [["a" 6] ["b" 6]])))))
+    (should (<= (length (plist-get (drover-remote--clone-description
+                                    (plist-put (copy-sequence good) :title (make-string 500000 ?t)))
+                                   :title))
+                (1+ drover-line-limit)))))
+
+(ert-deftest drover-remote-test-clone-needs-the-remote-layer ()
+  "Without the remote layer, nothing is cloned, and the command says what it needs."
+  (let ((drover-clone-function nil)
+        (session (drover-session-create :backend 'fake :id "x" :engine 'claude-code :engine-id "x")))
+    (should-not (drover-clone-p session))
+    (should-error (drover-clone session) :type 'user-error)))
+
+(ert-deftest drover-remote-test-clone-records ()
+  "A file of records is copied to its last whole record; its working directory is read as written."
+  (let ((file (make-temp-file "drover-records")))
+    (unwind-protect
+        (progn
+          (let ((coding-system-for-write 'utf-8-unix))
+            (write-region "{\"cwd\":\"C:\\\\Users\\\\vål\",\"a\":1}\n{\"b\":2}\n{\"partial" nil file nil 'silent))
+          (should (= (drover-lines-size file) (string-bytes "{\"cwd\":\"C:\\\\Users\\\\vål\",\"a\":1}\n{\"b\":2}\n")))
+          (should (equal (drover-recorded-cwd file) "C:\\\\Users\\\\vål")))
+      (delete-file file))))
+
+(ert-deftest drover-remote-test-clone-opencode-body ()
+  "An OpenCode export becomes an import as it is, its location added; one shaped otherwise is parsed."
+  (let ((export "{\"data\":{\"info\":{\"id\":\"ses_a\",\"title\":\"vå\"},\"messages\":[{\"id\":\"m1\"}]}}\n"))
+    (should (equal (drover-remote--oc-import-body (encode-coding-string export 'utf-8) "/w/x")
+                   (encode-coding-string
+                    "{\"info\":{\"id\":\"ses_a\",\"title\":\"vå\"},\"messages\":[{\"id\":\"m1\"}],\"location\":{\"directory\":\"/w/x\"}}"
+                    'utf-8))))
+  (let ((body (drover-remote--oc-import-body
+               (encode-coding-string "{\"data\":{\"messages\":[],\"info\":{\"id\":\"ses_b\",\"x\":null}}}" 'utf-8)
+               "/w/y")))
+    (should (equal (json-parse-string (decode-coding-string body 'utf-8) :object-type 'plist :null-object :null)
+                   '(:info (:id "ses_b" :x :null) :messages [] :location (:directory "/w/y")))))
+  (should (equal (drover-remote--oc-clone-directory "/w/x/") "/w/x"))
+  (when (memq system-type '(windows-nt ms-dos))
+    (should (equal (drover-remote--oc-clone-directory "c:/Users/x/") "C:/Users/x"))))
+
+(defmacro drover-remote-test-cloning (&rest body)
+  "Run BODY as the host `viewer', its engines' homes throwaway under `home'."
+  (declare (indent 0) (debug t))
+  `(drover-remote-test-with nil
+     (drover-test-with-homes
+       ,@body)))
+
+(defun drover-remote-test-clone-start (dir access &rest environment)
+  "Start the agent in DIR granting ACCESS, with ENVIRONMENT more, and connect."
+  (let ((process-environment (append (cons (concat "DROVER_AGENT_ACCESS=" access) environment)
+                                     process-environment)))
+    (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+  (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted (drover-remote--peer "agent")) (intern access))))
+  (drover-remote-test-wait (lambda () (drover-remote--capable-p (drover-remote--peer "agent") "clone"))))
+
+(defun drover-remote-test-engine-session (engine id)
+  "Return this host's record of the agent's conversation ID of ENGINE, once listed."
+  (drover-remote-test-wait
+   (lambda ()
+     (drover-changed-now)
+     (seq-find (lambda (session) (and (eq (drover-session-engine session) engine)
+                                      (equal (drover-session-engine-id session) id)))
+               (drover-remote-test-remote)))))
+
+(defun drover-remote-test-rewritten (file from to)
+  "Return FILE's bytes, the records' working directory FROM written TO."
+  (string-replace (encode-coding-string (concat "\"cwd\":" (json-serialize from)) 'utf-8)
+                  (encode-coding-string (concat "\"cwd\":" (json-serialize to)) 'utf-8)
+                  (with-temp-buffer
+                    (set-buffer-multibyte nil)
+                    (insert-file-contents-literally file)
+                    (buffer-string))))
+
+(defun drover-remote-test-bytes (file)
+  "Return FILE's bytes."
+  (with-temp-buffer
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
+    (buffer-string)))
+
+(ert-deftest drover-remote-test-clone-claude-here ()
+  "A Claude Code conversation of another host is cloned here, in a directory of this host, its origin noted, then resumed."
+  (drover-remote-test-cloning
+    (let* ((agent-claude (expand-file-name "agent-claude" dir))
+           (there (expand-file-name "work/alpha" dir))
+           (id drover-remote-test--capybara)
+           (source (let ((drover-claude-code-home agent-claude))
+                     (drover-fixture-claude id there :prompt "Teach the capybara to swim"
+                                            :reply "The capybara swims now" :filler 700000
+                                            :subagents '(("agent-a1" "Look around" "Explore")))))
+           (here (file-name-as-directory (expand-file-name "clones/alpha" home)))
+           (opened nil))
+      (make-directory here t)
+      (drover-remote-test-clone-start dir "read" (concat "DROVER_AGENT_CLAUDE=" agent-claude))
+      (let ((session (drover-remote-test-engine-session 'claude-code id)))
+        (should session)
+        (should (drover-clone-p session))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "viewer"))
+                  ((symbol-function 'read-directory-name) (lambda (&rest _) here))
+                  ((symbol-function 'drover-links-open) (lambda (conversation &rest _) (setq opened conversation))))
+          (drover-clone session))
+        (should (equal opened (list :engine 'claude-code :id id :host nil)))
+        ;; Its transcript where Claude Code resumes it here, its records
+        ;; naming this host's directory, nothing else changed; its
+        ;; subagents beside it.
+        (let ((file (drover-fixture-claude-file id here)))
+          (should (file-exists-p file))
+          (should (equal (drover-remote-test-bytes file)
+                         (drover-remote-test-rewritten source there (drover-claude-code--record-directory here))))
+          (should (file-exists-p (expand-file-name (concat id "/subagents/agent-a1.jsonl") (file-name-directory file))))
+          (should (file-exists-p (expand-file-name (concat id "/subagents/agent-a1.meta.json") (file-name-directory file)))))
+        (should (equal (drover-remote-clone-origin (drover-session-create :engine 'claude-code :engine-id id))
+                       (concat "agent-session://agent/claude-code/" id)))
+        ;; Its owner forgot what it exported.
+        (drover-remote-test-wait (lambda () (zerop (plist-get (drover-remote-test-command "clone-state") :exports))))
+        (should (zerop (plist-get (drover-remote-test-command "clone-state") :exports)))
+        (should (zerop (hash-table-count drover-remote--clones)))
+        ;; Once only: a conversation recorded here is not replaced.
+        (setq opened nil)
+        (let ((said nil))
+          (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "viewer"))
+                    ((symbol-function 'read-directory-name) (lambda (&rest _) here))
+                    ((symbol-function 'drover-links-open) (lambda (conversation &rest _) (setq opened conversation)))
+                    ((symbol-function 'drover-message) (lambda (format &rest args) (push (apply #'format format args) said))))
+            (drover-clone session))
+          (should-not opened)
+          (should (seq-find (lambda (line) (string-match-p "recorded this conversation here already" line)) said)))))))
+
+(ert-deftest drover-remote-test-clone-claude-there ()
+  "A Claude Code conversation of this host is cloned to a peer granting full access, in its directory, then opened there."
+  (drover-remote-test-cloning
+    (let* ((id drover-remote-test--build)
+           (here (expand-file-name "work/beta" home))
+           (source (drover-fixture-claude id here :prompt "Fix the build" :reply "It builds"))
+           (target (file-name-as-directory (expand-file-name "agent-target" dir)))
+           (record (drover-session-create :backend 'fake :id "local-1" :title "Fix the build"
+                                          :directory (file-name-as-directory here)
+                                          :engine 'claude-code :engine-id id))
+           (opened nil))
+      (make-directory target t)
+      (drover-remote-test-clone-start dir "full" "DROVER_AGENT_CLAUDE=here")
+      (should (equal (mapcar #'car (drover-remote--clone-targets record)) '("agent")))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "agent"))
+                ((symbol-function 'read-string) (lambda (&rest _) target))
+                ((symbol-function 'drover-open) (lambda (session &rest _) (setq opened session))))
+        (drover-clone record))
+      ;; There, where Claude Code resumes it, listed there, opened here through it.
+      (let* ((agent-home (plist-get (drover-remote-test-command "claude-home") :home))
+             (file (let ((drover-claude-code-home agent-home)) (drover-fixture-claude-file id target))))
+        (should (file-exists-p file))
+        (should (equal (drover-remote-test-bytes file)
+                       (drover-remote-test-rewritten source here (drover-claude-code--record-directory target)))))
+      (should opened)
+      (should (equal (drover-session-host opened) "agent"))
+      (should (equal (drover-session-engine-id opened) id))
+      ;; There, its origin is this host's conversation.
+      (should (string-search (concat "agent-session://viewer/claude-code/" id)
+                             (with-temp-buffer
+                               (insert-file-contents (expand-file-name "agent/state/clones.eld" dir))
+                               (buffer-string))))
+      (should (zerop (hash-table-count drover-remote--exports))))))
+
+(ert-deftest drover-remote-test-clone-needs-full-access ()
+  "Cloning to a peer needs full access there, whatever this host asks."
+  (drover-remote-test-cloning
+    (let* ((id drover-remote-test--build)
+           (here (expand-file-name "work/beta" home))
+           (record (progn (drover-fixture-claude id here)
+                          (drover-session-create :backend 'fake :id "local-1" :title "Fix the build"
+                                                 :directory (file-name-as-directory here)
+                                                 :engine 'claude-code :engine-id id))))
+      (drover-remote-test-clone-start dir "act" "DROVER_AGENT_CLAUDE=here")
+      (should-not (drover-remote--clone-targets record))
+      (should-not (drover-clone-p record))
+      (should (string-match-p "full access" (drover-remote--clone-why-not record)))
+      (should-error (drover-clone record) :type 'user-error)
+      ;; Asked all the same, it refuses.
+      (pcase-let ((`(,_reply ,error) (drover-remote--wait (drover-remote--peer "agent")
+                                                          (list :op "clone-where" :directory here) 10)))
+        (should (string-match-p "not full" error)))
+      (pcase-let ((`(,_reply ,error)
+                   (drover-remote--wait (drover-remote--peer "agent")
+                                        (list :op "clone" :target dir :x "viewer-x-1" :engine "claude-code"
+                                              :id id :parts (vector (vector (concat id ".jsonl") 10)))
+                                        10)))
+        (should (string-match-p "not full" error)))
+      (should (zerop (plist-get (drover-remote-test-command "clone-state") :clones))))))
+
+(ert-deftest drover-remote-test-clone-codex-here ()
+  "A Codex conversation of another host is cloned here: its rollout among this host's, its directory rewritten."
+  (drover-remote-test-cloning
+    (let* ((agent-codex (expand-file-name "agent-codex" dir))
+           (there (expand-file-name "work/gamma" dir))
+           (id "019a0000-0000-7000-8000-000000000001")
+           (source (let ((drover-codex-home agent-codex))
+                     (drover-fixture-codex id there :prompt "Find the axolotl")))
+           (here (file-name-as-directory (expand-file-name "clones/gamma" home)))
+           (opened nil))
+      (make-directory here t)
+      (drover-remote-test-clone-start dir "read" (concat "DROVER_AGENT_CODEX=" agent-codex))
+      (let ((session (drover-remote-test-engine-session 'codex id)))
+        (should session)
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "viewer"))
+                  ((symbol-function 'read-directory-name) (lambda (&rest _) here))
+                  ((symbol-function 'drover-links-open) (lambda (conversation &rest _) (setq opened conversation))))
+          (drover-clone session))
+        (should (equal opened (list :engine 'codex :id id :host nil)))
+        (let ((file (drover-fixture-codex-file id 1790000000.0)))
+          (should (file-exists-p file))
+          (should (equal (drover-codex-rollout-file id) file))
+          (should (equal (drover-remote-test-bytes file)
+                         (drover-remote-test-rewritten source there (drover-codex--record-directory here))))
+          (should (equal (drover-codex-session-directory id)
+                         (file-name-as-directory (drover-codex--record-directory here)))))))))
+
+(ert-deftest drover-remote-test-clone-opencode-here ()
+  "An OpenCode session of another host is cloned into this host's service, under the directory the peer's table maps."
+  (drover-remote-test-cloning
+    (require 'drover-fake-opencode)
+    (require 'opencode)
+    (skip-unless (fboundp 'opencode-service-register))
+    (let* ((mine (file-name-as-directory (expand-file-name "mine" home)))
+           (service-dir (file-name-as-directory (expand-file-name "viewer-service" dir)))
+           (opened nil))
+      (make-directory (expand-file-name "project" mine) t)
+      (make-directory service-dir t)
+      (let ((opencode-service-registration-file (drover-fake-opencode-start service-dir))
+            (opencode-command "drover-test-no-opencode")
+            (opencode-notification-os-filter nil))
+        (unwind-protect
+            (progn
+              (let ((process-environment (append '("DROVER_AGENT_OPENCODE=1" "DROVER_AGENT_ACCESS=read")
+                                                 process-environment)))
+                (drover-remote-test-connect (drover-remote-test-start-agent dir)
+                                            :directories `(("C:/Users/agent/" . ,mine))))
+              (drover-remote-test-command "oc-add" :sessions [["ses_a" "Agent work"]])
+              (drover-remote-test-command "oc-turn" :id "ses_a" :text "the capybara dives")
+              (let ((session (drover-remote-test-wait (lambda () (drover-remote-test-oc-session "ses_a")))))
+                (should session)
+                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "viewer"))
+                          ((symbol-function 'read-directory-name) (lambda (_prompt default &rest _) default))
+                          ((symbol-function 'drover-links-open) (lambda (conversation &rest _) (setq opened conversation))))
+                  (drover-clone session))
+                (should (equal opened (list :engine 'opencode :id "ses_a" :host nil)))
+                ;; In this host's service, its messages all, run where the table maps.
+                (let ((info (gethash "ses_a" drover-fake-opencode--sessions)))
+                  (should info)
+                  (should (equal (alist-get 'directory (alist-get 'location info))
+                                 (directory-file-name (expand-file-name "project" mine))))
+                  (should (equal (alist-get 'title info) "Agent work"))
+                  (should (seq-find (lambda (message) (equal (alist-get 'text message) "the capybara dives"))
+                                    (gethash "ses_a" drover-fake-opencode--messages))))
+                ;; Not twice.
+                (setq opened nil)
+                (let ((said nil))
+                  (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "viewer"))
+                            ((symbol-function 'read-directory-name) (lambda (_prompt default &rest _) default))
+                            ((symbol-function 'drover-links-open) (lambda (conversation &rest _) (setq opened conversation)))
+                            ((symbol-function 'drover-message) (lambda (format &rest args) (push (apply #'format format args) said))))
+                    (drover-clone session))
+                  (should-not opened)
+                  (should (seq-find (lambda (line) (string-match-p "has this session already" line)) said)))))
+          (when (process-live-p drover-fake-opencode--server)
+            (delete-process drover-fake-opencode--server))
+          (when (fboundp 'opencode--service-reset)
+            (ignore-errors (opencode--service-reset (opencode-service-get nil)))))))))
+
+(ert-deftest drover-remote-test-clone-link-drops ()
+  "A clone whose link drops fails, saying so, its staged files removed; its owner forgets the export later."
+  (drover-remote-test-cloning
+    (let* ((agent-claude (expand-file-name "agent-claude" dir))
+           (id drover-remote-test--capybara)
+           (here (file-name-as-directory (expand-file-name "clones/alpha" home)))
+           (outcome nil))
+      (let ((drover-claude-code-home agent-claude))
+        (drover-fixture-claude id (expand-file-name "work/alpha" dir) :filler (* 8 1024 1024)))
+      (make-directory here t)
+      (drover-remote-test-clone-start dir "read" (concat "DROVER_AGENT_CLAUDE=" agent-claude))
+      (let* ((peer (drover-remote--peer "agent"))
+             (session (drover-remote-test-engine-session 'claude-code id))
+             (description (drover-remote--clone-description
+                           (car (drover-remote--wait peer (list :op "clone-export"
+                                                                :key (drover-remote--wire-key session))
+                                                     20))))
+             (xid (drover-remote--clone-receive peer description here
+                                                (lambda (id why) (setq outcome (or id why)))))
+             (staging (plist-get (gethash xid drover-remote--clones) :staging)))
+        (should (file-directory-p staging))
+        (drover-remote-test-wait (lambda () (> (plist-get (gethash xid drover-remote--clones) :received) 0)))
+        (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+        (drover-remote-test-wait (lambda () outcome))
+        (should (string-match-p "ended" outcome))
+        (should-not (file-exists-p staging))
+        (should (zerop (hash-table-count drover-remote--clones)))
+        (should-not (file-exists-p (drover-fixture-claude-file id here)))))))
+
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

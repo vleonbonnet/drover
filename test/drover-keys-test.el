@@ -662,7 +662,7 @@ B applies while a quiet session has a buffer."
     ("Prompt" ("\"" "n" "'" "#"))
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))
-    ("Conversation" ("t" "T" "C" "f" "." "O"))
+    ("Conversation" ("t" "T" "C" "f" "H" "." "O"))
     ("Session" ("o" "u" "c" "v" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z"))
     ("View" ("= o" "= r" "= g" "- f"))
     ("Filter" ("= u" "= O" "= z" "= p" "= s" "= a" "= m") ("= v" "= H" "= d" "= f" "= c"))

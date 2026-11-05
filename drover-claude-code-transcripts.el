@@ -1193,7 +1193,15 @@ so that its registration has this file's properties."
     (setq drover-claude-code-transcripts--index (drover-claude-code-transcripts--make-index)))
   (drover-claude-code-transcripts--register)
   (cl-pushnew front-end drover-claude-code-transcripts--users)
-  (add-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save))
+  (add-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save)
+  (add-hook 'drover-recorded-functions #'drover-claude-code-transcripts--recorded))
+
+(defun drover-claude-code-transcripts--recorded (engine file)
+  "Look at FILE at once, placed where Claude Code records, when ENGINE is its.
+For `drover-recorded-functions'."
+  (when-let* (((eq engine 'claude-code))
+              (index (drover-claude-code-transcripts--current-index)))
+    (drover-transcript-check index file)))
 
 (defun drover-claude-code-transcripts--save ()
   "Keep what was read of the transcripts, as Emacs exits.
@@ -1212,12 +1220,14 @@ The backend goes once no front end needs it."
       (drover-transcript-stop (drover-claude-code-transcripts--current-index)))
     (drover-command-cancel drover-claude-code-transcripts--agents-job)
     (remove-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save)
+    (remove-hook 'drover-recorded-functions #'drover-claude-code-transcripts--recorded)
     (drover-unregister-backend 'claude-code)))
 
 ;; Loaded anew, as reloading drover does, the backend a front end
 ;; installed takes this file's properties.
 (when (eq (drover-backend-property 'claude-code :sessions) #'drover-claude-code-transcripts--sessions)
   (drover-claude-code-transcripts--register)
+  (add-hook 'drover-recorded-functions #'drover-claude-code-transcripts--recorded)
   ;; What the reader before read is read again.
   (drover-claude-code-transcripts--current-index))
 

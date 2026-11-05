@@ -2047,6 +2047,9 @@ session chosen for it, else to one asked for, unshown."
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert-cancel)))
     ("C" "Compact" drover-compact :inapt-if-not (lambda () (drover-dispatch-prompt-p 'compact)))
     ("f" "Fork" drover-fork :inapt-if-not (lambda () (drover-dispatch-prompt-p 'fork)))
+    ("H" "Clone to host" drover-clone
+     :advice* drover--dispatch-in-list
+     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-clone-p)))
     ("." "Last answer" drover-prompt-last-answer
      :inapt-if-not (lambda () (drover-dispatch-prompt-p 'last-answer)))
     ("O" "Open link" drover-prompt-open-link
