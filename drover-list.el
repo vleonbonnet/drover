@@ -123,7 +123,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -286,10 +286,25 @@ only when needed."
      (created :priority 12 :min 3 :align right :label "Created")
      (age :priority 1 :min 3 :align right :narrow line :label "Age")
      (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+    ((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+     (location :priority 9 :min 10 :max 30 :label "Project")
+     (branch :priority 10 :min 6 :max 24 :label "Branch")
+     (agent :priority 11 :min 5 :max 14 :label "Agent")
+     (model :priority 6 :min 8 :max 22 :label "Model")
+     (provider :priority 8 :min 2 :max 12 :label "Provider")
+     (context :priority 7 :min 9 :narrow icon :label "Context")
+     (created :priority 12 :min 3 :align right :label "Created")
+     (cost :priority 13 :min 4 :align right :label "Cost")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
      (summary :priority 4 :min 12 :narrow below :label "Summary")))
   "The former standard values of `drover-list-fields'.
 Before the harness's field, then before the context's pie in two lines,
-then before the cost.")
+then before the cost, then before the pill of a task's project in two
+lines.")
 
 ;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the list takes the new one.
@@ -300,7 +315,7 @@ then before the cost.")
   '((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
-    (location :priority 9 :min 10 :max 30 :label "Project")
+    (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
     (branch :priority 10 :min 6 :max 24 :label "Branch")
     (agent :priority 11 :min 5 :max 14 :label "Agent")
     (model :priority 6 :min 8 :max 22 :label "Model")
@@ -323,7 +338,10 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
            has no such column.
  harness   What runs the session (see `drover-harnesses'): its icon and
            name, its icon alone where room is short, as in two lines.
- location  The project.
+ location  The project, as views show it (see
+           `drover-session-view-project'): that of the task the
+           session serves in its colour, after its pill, which alone
+           shows in two lines, in a cell, and nothing for another.
  branch    The Git branch, unless it is the default branch of its
            repository (see `drover-session-default-branch-p').
  agent     The agent, as @name, in the agent's colour.
@@ -1409,8 +1427,37 @@ harness, its icon (see `drover-list--compact'); any other its text."
                         (drover-list--host-icon (drover-session-host session)
                                                 (drover-session-stale session)))))
           ('context (drover-list--context-pie (drover-list--row-session row)))
+          ('location (if-let* ((head (drover-list--kept-head text)))
+                         (substring text 0 head)
+                       ""))
           (_ (drover-list--compact text)))
         "")))
+
+(defun drover-list--location-text (session project)
+  "Return PROJECT, that of SESSION, as its column shows it, or nil without one.
+The project of the task SESSION serves is in its colour, after the
+pill of `drover-project-icon', in a cell of its own, which two lines
+and the sidebar show alone (see `drover-list--field-icon'); another
+project is dimmed.  The texts of a project and its face are made once
+as widths are measured (see `drover-list--memo')."
+  (when project
+    (let* ((task (drover-session-task session))
+           (face (and (equal (plist-get task :project) project) (plist-get task :face))))
+      (if face
+          (drover-list--memo (list 'project drover-project-icon project face)
+                             #'drover-list--make-project-text (cons project face))
+        (drover-face (drover-list--one-line project) 'drover-dim)))))
+
+(defun drover-list--make-project-text (project)
+  "Return PROJECT, (NAME . FACE), as its column shows it, made anew.
+See `drover-list--location-text'."
+  (let ((name (drover-list--one-line (car project)))
+        (face (cdr project)))
+    (propertize (concat (propertize (drover-list--icon (drover-face drover-project-icon face))
+                                    'drover-list-keep t)
+                        " "
+                        (drover-face name face))
+                'help-echo (concat "Project: " name))))
 
 (defun drover-list--text (field session group metrics)
   "Return the text of FIELD for SESSION, or \"\" when it has none.
@@ -1425,8 +1472,9 @@ text: it is drawn apart."
                    (drover-list--host-text session now)))
           ('harness (unless (eq (car group) 'harness)
                       (drover-list--harness-text session)))
-          ('location (unless (equal group (cons 'project (drover-session-project session)))
-                       (drover-face (drover-list--one-line (drover-session-project session)) 'drover-dim)))
+          ('location (let ((project (drover-session-view-project session)))
+                       (unless (equal group (cons 'project project))
+                         (drover-list--location-text session project))))
           ('branch (unless (equal group (cons 'branch (drover-session-branch session)))
                      (drover-list--branch-text session)))
           ('agent (drover-list--one-line (drover-agent-label session)))
@@ -1520,8 +1568,9 @@ That is SESSION itself, the record, its DEPTH, INDENT and GROUP, its
 active subagents and STATE, what changes with time, its ages, whether
 its prompt cache is live, the frame of its animated glyph, the age of
 its archiving and since when its host is not connected, the stamp of
-METRICS (see `drover-list--metrics-stamp'), and its usage, which its
-cost shows (see `drover-list-usage-function')."
+METRICS (see `drover-list--metrics-stamp'), its usage, which its
+cost shows (see `drover-list-usage-function'), and the task it serves,
+whose project its project shows (see `drover-session-task')."
   (let* ((now (plist-get metrics :now))
          (status (drover-session-status session))
          (archived (drover-session-archived session))
@@ -1538,7 +1587,8 @@ cost shows (see `drover-list-usage-function')."
             (and (numberp archived) (opencode-format-age archived now))
             (drover-list--host-age session now)
             (plist-get metrics :stamp)
-            (drover-list--usage session 'value))))
+            (drover-list--usage session 'value)
+            (drover-session-task session))))
 
 (defun drover-list--same-inputs-p (a b &optional any-stamp)
   "Return non-nil when row inputs A and B are the same.
@@ -1810,9 +1860,10 @@ That is the harness, its icon without its name (see
 
 (defun drover-list--iconic-fields ()
   "Return the fields that show in two lines as an icon other than their head.
-The host, as `drover-host-icon', and the context, as its pie: see
-`drover-list--field-icon'."
-  '(host context))
+The host, as `drover-host-icon', the context, as its pie, and the
+project, as the pill of a task's project alone, nothing for another:
+see `drover-list--field-icon'."
+  '(host context location))
 
 (defun drover-list--icon-alone-p (field metrics)
   "Return non-nil when FIELD shows as its icon alone in the list of METRICS.
@@ -1915,7 +1966,13 @@ cache, its subagents at work."
                     chosen (cons entry chosen))
             (throw 'full nil)))))
     (let ((narrow (seq-filter (lambda (entry)
-                                (or (eq (car entry) 'title) (plist-get (cdr entry) :narrow)))
+                                (pcase (plist-get (cdr entry) :narrow)
+                                  ((guard (eq (car entry) 'title)) t)
+                                  ;; An icon alone shows only for the rows showing one.
+                                  ('icon (> (drover-list--tally-max
+                                             (aref summary (drover-list--kept-index (car entry))))
+                                            0))
+                                  (place place)))
                               present)))
       (if (seq-every-p (lambda (entry)
                          (or (memq entry chosen) (eq (plist-get (cdr entry) :narrow) 'icon)))
@@ -2834,7 +2891,8 @@ icon alone shows."
       ;; Its line shows its icon alone in two lines.
       (fact (if (eq (plist-get layout :layout) 'narrow) 'harness-icon 'harness)
             "Harness" (drover-session-harness-description session))
-      (fact 'location "Project" (drover-session-project session))
+      (fact 'location "Project" (drover-session-view-project session))
+      (fact 'task "Task" (plist-get (drover-session-task session) :title))
       ;; Its column leaves out the default branch, which details tell.
       (fact (if (drover-session-default-branch-p session) 'default-branch 'branch)
             "Branch" (drover-session-branch session))

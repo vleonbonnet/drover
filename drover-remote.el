@@ -314,7 +314,7 @@ told in the greeting's capabilities (`drover-remote-capabilities'), so
 that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
-  '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage"
+  '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
     "push" "opts" "dirs" "conv" "jobs")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
@@ -348,7 +348,10 @@ pages from the end (request `cv') and lines appended as they come
 it tells its queue of scheduled prompts as it changes (request and
 message `jobs'), the events a prompt may wait for (`triggers'), and
 schedules, cancels and retries prompts for its peers (`schedule',
-`unschedule', `retry'), delivering them out of every window.")
+`unschedule', `retry'), delivering them out of every window;
+\"task\": it starts
+tasks in its own repositories for its peers of act or full access, and
+finishes them for those of full access (see `drover-task').")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -5866,6 +5869,7 @@ as an older drover's farewells do."
         ("ls" (drover-remote--on-ls peer message reply))
         ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
+        ("task" (drover-remote--on-task peer message reply))
         ("opts" (drover-remote--on-opts peer key reply))
         ("jobs" (drover-remote--on-jobs connection message reply))
         ("triggers" (drover-remote--on-triggers reply))
@@ -5905,6 +5909,43 @@ as an older drover's farewells do."
                                  (funcall reply (list :text (or (drover-remote--plain text) :false)))))
              (error (funcall reply nil (drover-error-message err))))))
         (_ (funcall reply nil "unknown request")))))))
+
+;;;; Tasks
+
+(declare-function drover-task-remote-answer "drover-task" (peer access message reply))
+
+(defun drover-remote--on-task (peer message reply)
+  "Answer PEER's MESSAGE about a task of this host, through REPLY.
+This host starts and finishes its own tasks (see
+`drover-task-remote-answer'), as PEER's access allows."
+  (if (not (locate-library "drover-task"))
+      (funcall reply nil "this host has no tasks")
+    (require 'drover-task)
+    (condition-case err
+        (drover-task-remote-answer (drover-remote--peer-name peer) (drover-remote--access peer) message
+                                   (lambda (value &optional why)
+                                     (drover-with-reporting "remote task"
+                                       (when why
+                                         (drover-remote--refuse-action peer "act on a task" why))
+                                       (funcall reply value why))))
+      (error (funcall reply nil (drover-error-message err))))))
+
+(defun drover-remote-ask-task (name request callback &optional seconds)
+  "Ask the peer NAME REQUEST about one of its tasks, for CALLBACK.
+REQUEST is a plist, its :kind \"start\" or \"finish\" (see
+`drover-task-remote-answer'); CALLBACK gets (REPLY ERROR) once, within
+SECONDS, by default `drover-remote-request-timeout'.  It is asked once,
+not again after a stream dropped: a task is not started twice."
+  (let ((peer (drover-remote--peer name)))
+    (cond
+     ((not peer) (funcall callback nil (format "%s is not a peer" name)))
+     ((not (eq (drover-remote--peer-state peer) 'open))
+      (funcall callback nil (format "%s is not connected" (drover-remote--label peer))))
+     ((not (drover-remote--capable-p peer "task"))
+      (funcall callback nil (format "%s runs an older drover, which has no tasks: update it there"
+                                    (drover-remote--label peer))))
+     (t (drover-remote--request peer (append (list :op "task") request) callback
+                                (+ (float-time) (or seconds drover-remote-request-timeout)) t)))))
 
 ;;;; Usage
 

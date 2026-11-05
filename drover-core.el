@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 19
+(defconst drover-core-generation 20
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -810,6 +810,30 @@ a copy of it keeps its identifier: its key is (HOST ENGINE . ENGINE-ID)."
              (cons host (cons engine id))
            (cons engine id)))))
 
+(defvar drover-session-task-function nil
+  "Function of a session returning the task it serves, or nil.
+`drover-task-mode' sets it.  A task is a plist: :id, the identifier of
+its Org heading; :title, the heading's; :project, the project views
+show the session in, in place of its backend's (see
+`drover-session-view-project'), or nil; :face, the face of that
+project, or nil.  Views call it as they draw, for every session they
+show: it answers at once, from what it holds.")
+
+(defun drover-session-task (session)
+  "Return the task SESSION serves, a plist, or nil.
+See `drover-session-task-function'.  A function failing is reported
+once in a while, and the session has no task."
+  (and drover-session-task-function
+       (drover-with-reporting "session task"
+         (funcall drover-session-task-function session))))
+
+(defun drover-session-view-project (session)
+  "Return the project views show SESSION in, or nil.
+That is the project of the task it serves (see `drover-session-task'),
+else the one its backend tells (`drover-session-project')."
+  (or (plist-get (drover-session-task session) :project)
+      (drover-session-project session)))
+
 (defun drover-session-stale-p (session)
   "Return non-nil when SESSION is of a host not connected now.
 Its record is as that host last told it; see `drover-session-stale'."
@@ -1350,10 +1374,21 @@ group.  Groups come in the order their first tree has in NODES."
 
 (defun drover-group-trees-by-project (nodes)
   "Return trees NODES grouped as an alist (PROJECT . NODES).
-A tree goes with the project of its root session; PROJECT is nil for
-sessions without one.  A project comes before another when its most
-urgent tree does."
-  (drover--group-trees-by nodes (lambda (node) (drover-session-project (drover-node-session node)))))
+A tree goes with the project of its root session, as views show it
+\(see `drover-session-view-project'); PROJECT is nil for sessions
+without one.  A project comes before another when its most urgent tree
+does."
+  (drover--group-trees-by nodes (lambda (node) (drover-session-view-project (drover-node-session node)))))
+
+(defun drover-group-trees-by-task (nodes)
+  "Return trees NODES grouped as an alist (TASK . NODES).
+A tree goes with the task its root session serves (see
+`drover-session-task'), TASK being (ID . TITLE), nil for sessions
+serving none.  A task comes before another when its most urgent tree
+does."
+  (drover--group-trees-by nodes (lambda (node)
+                                  (when-let* ((task (drover-session-task (drover-node-session node))))
+                                    (cons (plist-get task :id) (plist-get task :title))))))
 
 (defun drover--start-of-day (&optional time)
   "Return the float time at which the day of TIME began, today by default."
@@ -1387,7 +1422,7 @@ that groups of last activity follow the order of that sort."
         'today
       (drover-activity-bucket (cdr activity) now))))
 
-(defconst drover-groupings '(status project branch agent model provider harness host updated nil)
+(defconst drover-groupings '(status project task branch agent model provider harness host updated nil)
   "The values `drover-group-by' may take.")
 
 (defun drover-group-trees (nodes grouping &optional now)
@@ -1397,9 +1432,13 @@ GROUPING is one of `drover-groupings':
  status   VALUE is the most urgent status of the tree, or `archived'
           for a tree whose root is archived, in the order of
           `drover-group-trees-by-status'.
- project, branch, agent, model
-          VALUE is that of the root session, or nil; a group comes
-          before another when its most urgent tree does.
+ project  VALUE is the project of the root session as views show
+          it (see `drover-session-view-project'), or nil; a group
+          comes before another when its most urgent tree does.
+ task     VALUE is the task of the root session, (ID . TITLE), or
+          nil (see `drover-session-task'), likewise.
+ branch, agent, model
+          VALUE is that of the root session, or nil, likewise.
  provider VALUE is the provider name of the root session (see
           `drover-session-provider-name'), or nil, likewise.
  harness  VALUE is the harness of the root session (see
@@ -1416,6 +1455,7 @@ Within a group, trees keep their order in NODES."
   (pcase grouping
     ('status (drover-group-trees-by-status nodes))
     ('project (drover-group-trees-by-project nodes))
+    ('task (drover-group-trees-by-task nodes))
     ((or 'branch 'agent 'model 'provider 'harness)
      (let ((field (pcase grouping
                     ('branch #'drover-session-branch)
@@ -1488,7 +1528,7 @@ compared ignoring case; times are those of the root session, but for
       ('created (drover-session-created session))
       (_ (when-let* ((value (pcase field
                               ('title (drover-session-display-title session))
-                              ('project (drover-session-project session))
+                              ('project (drover-session-view-project session))
                               ('branch (drover-session-branch session))
                               ('agent (drover-session-agent session))
                               ('model (drover-session-model session))
@@ -3240,7 +3280,8 @@ something changed."
 (defcustom drover-group-by nil
   "How session views group sessions.
 The value is one of `drover-groupings': `status', the most urgent
-first; `project', `branch', `agent', `model', `provider', the
+first; `project' (see `drover-session-view-project'), `task' (see
+`drover-session-task'), `branch', `agent', `model', `provider', the
 provider's name, or `harness' (see `drover-session-harness'), of the
 session at the top of each tree; `host', this
 host's sessions first, then each other host's; `updated', the last
@@ -3248,6 +3289,7 @@ activity, as today, yesterday, this week and older; or nil for no
 groups, the default.  See `drover-group-trees'."
   :type '(choice (const :tag "By status" status)
                  (const :tag "By project" project)
+                 (const :tag "By task" task)
                  (const :tag "By branch" branch)
                  (const :tag "By agent" agent)
                  (const :tag "By model" model)
@@ -3262,7 +3304,7 @@ groups, the default.  See `drover-group-trees'."
   "Which sessions every view lists, as a plist; nil lists them all.
 Its members are:
 
- :project   A project name, as `drover-session-project' returns it.
+ :project   A project name, as `drover-session-view-project' returns it.
  :statuses  A list of statuses: sessions with one of them.
  :agent     An agent name, as `drover-session-agent' returns it.
  :model     A model name, as `drover-session-model' returns it.
@@ -3309,7 +3351,7 @@ SESSION must satisfy every member of FILTER that is set."
          (since (drover--filter-value filter :since))
          (search (drover--filter-value filter :search))
          (hosts (drover--filter-value filter :host)))
-    (and (or (null project) (equal (drover-session-project session) project))
+    (and (or (null project) (equal (drover-session-view-project session) project))
          (or (null statuses) (memq (drover-session-status session) statuses))
          (or (null agent) (equal (drover-session-agent session) agent))
          (or (null model) (equal (drover-session-model session) model))
@@ -3328,7 +3370,7 @@ SESSION must satisfy every member of FILTER that is set."
                (seq-some (lambda (text) (and text (string-match-p regexp text)))
                          (list (drover-session-title session)
                                (drover-session-summary session)
-                               (drover-session-project session)
+                               (drover-session-view-project session)
                                (drover-session-branch session))))))))
 
 (defun drover--filter-trees (nodes filter)
@@ -4648,6 +4690,17 @@ a missing directory."
 
 (defvar drover--default-branches (make-hash-table :test #'equal)
   "Directories mapped to (BRANCH . TIME), as `drover-git-default-branch' read them.")
+
+(defun drover-git-directory-cached (directory)
+  "Return the Git directory of the worktree of DIRECTORY, or nil outside Git.
+As `drover-git-branch' found it, read again as it reads branches again:
+asked for every session, each directory is looked for once in a while,
+which a directory on a network share makes slow."
+  (when (and directory (drover-git-branch directory))
+    (when-let* ((entry (or (gethash directory drover--git-heads)
+                           (gethash (file-name-as-directory (expand-file-name directory)) drover--git-heads)))
+                (head (aref entry 1)))
+      (file-name-directory head))))
 
 (defun drover-git-default-branch (directory)
   "Return the default branch of the repository of DIRECTORY, or nil when unknown.
