@@ -67,7 +67,7 @@
 (require 'drover-ui)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 16))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -636,6 +636,10 @@ identifier cannot travel."
         (put :context-estimated (and (drover-session-context-estimated record) t))
         (put :archived (let ((archived (drover-session-archived record)))
                          (if (eq archived t) t (drover-remote--number archived))))
+        ;; Written here, by this host's model: peers never summarize
+        ;; another host's sessions.
+        (put :brief (drover-remote--plain (drover-session-brief record)))
+        (put :brief-recap (drover-remote--plain (drover-session-brief-recap record)))
         (put :ops (drover-remote--record-ops record)))
       (nreverse out))))
 
@@ -780,7 +784,10 @@ minus this host's.  Nil when DATA names no session."
         :agent-display (drover-remote--faced-value (plist-get data :agent-display))
         :context-estimated (eq (plist-get data :context-estimated) t)
         :archived (let ((archived (plist-get data :archived)))
-                    (if (eq archived t) t (drover-remote--time archived offset))))))))
+                    (if (eq archived t) t (drover-remote--time archived offset)))
+        :brief (drover-remote--line (plist-get data :brief))
+        :brief-recap (let ((recap (plist-get data :brief-recap)))
+                       (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines))))))))
 
 ;;;; Serving this host's sessions
 

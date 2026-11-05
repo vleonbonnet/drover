@@ -69,6 +69,10 @@
 (defvar drover-claude-code-agents-interval)
 (defvar drover-codex-home)
 (defvar drover-codex-history-days)
+(defvar drover-summary-delay)
+(defvar drover-summary-catch-up)
+(defvar drover-summary-generate-function)
+(declare-function drover-summary-mode "drover-summary" (&optional arg))
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
 (declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
@@ -468,6 +472,17 @@ noted, and their cancellations."
        (funcall reply (list :ok t)))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("summaries"
+       ;; Summaries written as turns end, by a stand-in model.
+       (require 'drover-summary)
+       (setq drover-summary-delay 0
+             drover-summary-catch-up nil
+             drover-summary-generate-function
+             (lambda (_prompt callback)
+               (funcall callback (list :text "Done: summarized on the agent\nIts recap"))))
+       (drover-summary-mode 1)
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
       ("search-set"
        ;; How the stand-in of OpenCode's search answers: after DELAY
        ;; seconds, failing with FAILURE when given.

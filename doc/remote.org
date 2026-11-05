@@ -137,6 +137,8 @@ Nothing a peer asks prompts on the owner, nor takes the owner's windows: actions
 
 The proxy's =:history= and =:archived= ask the owner, which fetches from its backends as =drover-set-show-history= does and answers in chunks; =:recap= and =:preview= ask for one session's, bounded on both ends; =:prefetch= sends the keys a list shows, at most once a second, so that the owner fetches their context sizes and the updates bring them.  Every request carries the generation the viewer asked under, and an answer of a stale generation is dropped, as for local fetches.
 
+A record carries the summary its owner's model wrote of the session's last turn, =brief= and =brief-recap= (see =drover-summary.el=): a viewer never summarizes a peer's session, whose text so leaves its host only through its owner's model.
+
 ** Lifecycle
 
 | State          | Seen here                                                                           | Leaves for                                                                             |
