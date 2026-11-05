@@ -203,6 +203,10 @@ NAME is the host's name, its `drover-host' there.  PROPERTIES is a plist:
  :resume        Seconds a connection it made waits for it to come back
                 once its stream ended, its mirrors resuming, instead of
                 spyglass's `spyglass-heartbeat-timeout'.
+ :push-hold     Seconds of input in this Emacs during which pushes of
+                what is new to it wait, instead of
+                `drover-remote-push-hold'; a hold its phone asks for
+                when it registers takes precedence.
 
 A host connecting under a name not here is refused, unless
 `drover-remote-accept-unknown' says otherwise.  Change it, then call
