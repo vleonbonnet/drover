@@ -37,7 +37,8 @@
 ;; channel and always idle.
 ;;
 ;; The prompt starts sessions with the flags its options stand for,
-;; switches a running session's model by typing /model, and pastes
+;; switches a running session's permission mode with Shift+Tab, reading
+;; the mode its footer shows, and its model by typing /model, and pastes
 ;; prompts once the interface reads input.  The backend also tells the
 ;; `claude-code' engine the start flags and directory claude-code-ide
 ;; uses (`drover-claude-code-start-flags-function',
@@ -107,6 +108,7 @@
 (declare-function vterm-send-string "ext:vterm" (string &optional paste-p))
 (declare-function vterm-send-return "ext:vterm" ())
 (declare-function vterm-send-escape "ext:vterm" ())
+(declare-function vterm-send-key "ext:vterm" (key &optional shift meta ctrl accept-proc-output))
 (declare-function vterm-copy-mode "ext:vterm" (&optional arg))
 (declare-function eat-term-send-string "ext:eat" (terminal string))
 (declare-function ghostel-cursor-point "ext:ghostel" ())
@@ -157,6 +159,31 @@ The interface takes a return arriving with the paste as part of it.")
 
 (defconst drover-claude-code-ide--model-delay 0.3
   "Seconds the interface is given to switch models before the prompt follows.")
+
+(defconst drover-claude-code-ide--mode-indicators
+  '(("plan mode" . "plan") ("accept edits" . "acceptEdits") ("auto mode" . "auto")
+    ("bypass permissions" . "bypassPermissions") ("don't ask" . "dontAsk")
+    ("manual mode" . "default"))
+  "Claude Code's permission modes, by the words its footer shows for them.
+The footer shows \"⏸ plan mode on\", or \"⏵⏵\" and the words of another
+mode, below the input box; in the default mode nothing, or \"⏸ manual
+mode on\".  Modes are named as --permission-mode takes them.")
+
+(defconst drover-claude-code-ide--mode-regexp
+  (concat "\\(?:\\`\\|[^[:alnum:]]\\)\\("
+          (regexp-opt (mapcar #'car drover-claude-code-ide--mode-indicators))
+          "\\) on\\(?:[^[:alnum:]]\\|\\'\\)")
+  "Regexp matching the permission mode Claude Code's footer shows.
+Group 1 is the words of the mode.")
+
+(defconst drover-claude-code-ide--footer-lines 4
+  "Lines below its input box in which Claude Code shows its permission mode.")
+
+(defconst drover-claude-code-ide--mode-interval 0.1
+  "Seconds between two looks at the footer after Shift+Tab was pressed.")
+
+(defconst drover-claude-code-ide--mode-timeout 1.5
+  "Seconds the footer is given to show another permission mode after Shift+Tab.")
 
 (defconst drover-claude-code-ide--capture-interval 2
   "Seconds between two looks for the conversation of a new terminal.")
@@ -665,12 +692,19 @@ what was read.  Nil without a turn."
         (t (error "%s is not a terminal drover knows" (buffer-name)))))
 
 (defun drover-claude-code-ide--press (key)
-  "Press KEY, `return' or `escape', in the current terminal."
-  (cond ((derived-mode-p 'ghostel-mode) (ghostel-send-key (symbol-name key)))
+  "Press KEY, `return', `escape' or `backtab' (Shift+Tab), in the current terminal."
+  (cond ((derived-mode-p 'ghostel-mode)
+         (if (eq key 'backtab) (ghostel-send-key "tab" "shift") (ghostel-send-key (symbol-name key))))
         ((derived-mode-p 'vterm-mode)
          (drover-claude-code-ide--leave-copy-mode)
-         (if (eq key 'return) (vterm-send-return) (vterm-send-escape)))
-        (t (drover-claude-code-ide--type (if (eq key 'return) "\r" "\e")))))
+         (pcase key
+           ('return (vterm-send-return))
+           ('backtab (vterm-send-key "<backtab>"))
+           (_ (vterm-send-escape))))
+        (t (drover-claude-code-ide--type (pcase key
+                                           ('return "\r")
+                                           ('backtab "\e[Z")
+                                           (_ "\e"))))))
 
 (defun drover-claude-code-ide--paste (text)
   "Paste TEXT in the current terminal, bracketed, so newlines do not submit it."
@@ -1005,45 +1039,165 @@ exits before the return that submits it.  The backend's :submit."
                    (error (setq failure (drover-error-message err)))))
                (if failure (funcall else failure) (funcall then))))))))))
 
+;;;; Permission modes
+
+(defun drover-claude-code-ide--mode (buffer)
+  "Return the permission mode the footer of terminal BUFFER shows, or nil.
+The mode is named as --permission-mode takes it, \"default\" when the
+footer shows none (see `drover-claude-code-ide--mode-indicators'): the
+footer is the few lines below the last input box.  Nil when no input
+box shows, as while the CLI starts, or a dialog stands in its place."
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-max))
+      (when (re-search-backward drover-claude-code-ide-input-regexp nil t)
+        (let ((lines 0)
+              (closed nil)
+              (case-fold-search nil))
+          (forward-line 1)
+          (while (and (not closed) (not (eobp)) (< lines drover-claude-code-ide--draft-lines))
+            (if (drover-claude-code-ide--rule-p)
+                (setq closed t)
+              (forward-line 1)
+              (cl-incf lines)))
+          (when closed
+            (forward-line 1)
+            (let ((end (save-excursion (forward-line drover-claude-code-ide--footer-lines) (point))))
+              (if (re-search-forward drover-claude-code-ide--mode-regexp end t)
+                  (cdr (assoc (match-string 1) drover-claude-code-ide--mode-indicators))
+                "default"))))))))
+
+(defun drover-claude-code-ide--switch-mode (buffer mode next)
+  "Switch the session of terminal BUFFER to permission MODE, then call NEXT once.
+MODE is named as --permission-mode takes it.  Shift+Tab cycles Claude
+Code's permission modes, as its footer shows them (see
+`drover-claude-code-ide--mode'): it is pressed until the footer shows
+MODE, each time once the footer shows the mode the press before led to.
+A footer showing no mode, the first mode again after a whole cycle, as
+when MODE is not one this session offers, or no other mode
+`drover-claude-code-ide--mode-timeout' seconds after a press, is
+reported, and the session keeps the mode it then runs.  Prompts wait
+meanwhile, as while /model switches the model."
+  (let* ((name (buffer-name buffer))
+         (first (drover-claude-code-ide--mode buffer))
+         (shown first)
+         (presses 0)
+         (deadline nil)
+         (timer nil)
+         (finished nil))
+    (cl-labels
+        ((finish (&optional format-string &rest arguments)
+           (unless finished
+             (setq finished t)
+             (when timer (cancel-timer timer))
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (setq-local drover-claude-code-ide--submitting nil)))
+             (when format-string
+               (apply #'drover-warn format-string arguments))
+             (funcall next)))
+         (press ()
+           (cl-incf presses)
+           (setq deadline (+ (float-time) drover-claude-code-ide--mode-timeout))
+           (with-current-buffer buffer
+             (drover-claude-code-ide--press 'backtab)))
+         (failed (err)
+           (finish "Could not switch %s to %s mode: %s" name mode (drover-error-message err)))
+         (look ()
+           (drover-with-reporting "Claude terminal mode"
+             (unless finished
+               (let* ((failure nil)
+                      (now (and (buffer-live-p buffer)
+                                (condition-case err
+                                    (drover-claude-code-ide--mode buffer)
+                                  (error (setq failure err) nil)))))
+                 (cond
+                  ;; Its prompt reports that it died.
+                  ((not (buffer-live-p buffer)) (finish))
+                  (failure (failed failure))
+                  ((equal now mode) (finish))
+                  ((and now (not (equal now shown)))
+                   (setq shown now)
+                   (if (or (equal now first)
+                           (>= presses (length drover-claude-code-ide--mode-indicators)))
+                       (finish "%s offers no %s mode; it runs %s mode" name mode now)
+                     (condition-case err (press) (error (failed err)))))
+                  ((> (float-time) deadline)
+                   (finish "%s showed no other mode after Shift+Tab; it runs %s mode, not %s"
+                           name shown mode))))))))
+      (cond
+       ((null first) (finish "%s shows no permission mode; keeping its current mode" name))
+       ((equal first mode) (finish))
+       (t
+        (with-current-buffer buffer
+          ;; The prompt must not reach the interface before it switched.
+          (setq-local drover-claude-code-ide--submitting t))
+        (condition-case err
+            (progn
+              (press)
+              (setq timer (run-at-time drover-claude-code-ide--mode-interval
+                                       drover-claude-code-ide--mode-interval #'look)))
+          (error (failed err))))))))
+
+;;;; Options of a running session
+
 (defun drover-claude-code-ide--apply-options (session options then)
-  "Apply explicit OPTIONS to the running SESSION, then call THEN.
-A model is switched by typing /model once the interface reads input;
-an agent, which Claude Code takes at start only, and an effort without
-a model are reported instead."
+  "Apply explicit OPTIONS to the running SESSION, then call THEN once.
+An agent `drover-claude-code-agent-modes' runs as a permission mode
+switches the session to that mode with Shift+Tab (see
+`drover-claude-code-ide--switch-mode'), then a model is switched by
+typing /model, each once the interface reads input.  Any other agent,
+which Claude Code takes at start only, and an effort without a model
+are reported instead."
   (let* ((buffer (drover-claude-code-ide--buffer session))
          (name (if buffer (buffer-name buffer) (drover-session-display-title session)))
          (agent (plist-get options :agent))
          (model (plist-get options :model))
          (variant (plist-get options :variant))
-         (pending nil))
+         (mode (and agent (drover-claude-code-agent-mode agent))))
+    (when (and agent (not mode))
+      (drover-warn "%s takes its agent at session start; keeping its current agent instead of %s"
+                   name agent))
+    (when (and variant (not model))
+      (drover-warn "Variant selection requires an explicit model for Claude Code"))
+    (drover-claude-code-ide--mode-step
+     buffer name mode
+     (lambda () (drover-claude-code-ide--model-step buffer name model then)))))
+
+(defun drover-claude-code-ide--mode-step (buffer name mode next)
+  "Switch terminal BUFFER, named NAME, to permission MODE, then call NEXT once.
+Without MODE, NEXT is called at once; a terminal not reading input
+keeps its mode, which is reported."
+  (cond
+   ((null mode) (funcall next))
+   ((not (and buffer (drover-claude-code-ide--takes-input-p buffer)))
+    (drover-warn "%s is not ready for Shift+Tab; keeping its current mode" name)
+    (funcall next))
+   (t (drover-claude-code-ide--switch-mode buffer mode next))))
+
+(defun drover-claude-code-ide--model-step (buffer name model then)
+  "Switch terminal BUFFER, named NAME, to MODEL by typing /model, then call THEN.
+Without MODEL, THEN is called at once; a model Claude Code cannot run,
+or a terminal not reading input, keeps its model, which is reported."
+  (let ((pending nil))
     (condition-case err
-        (progn
-          (when agent
-            (if-let* ((mode (drover-claude-code-agent-mode agent)))
-                (drover-warn "%s enters %s mode only from its own prompt; keeping its current mode"
-                             name mode)
-              (drover-warn "%s takes its agent at session start; keeping its current agent instead of %s"
-                           name agent)))
-          (cond
-           (model
-            (let ((id (drover-model-id-for model 'claude-code 'claude-code-ide)))
-              (cond
-               ((null id)
-                (drover-warn "%s cannot run %s; keeping its current model"
-                             name (drover-model-label model)))
-               ((not (and buffer (drover-claude-code-ide--takes-input-p buffer)))
-                (drover-warn "%s is not ready for /model; keeping its current model" name))
-               (t
-                (with-current-buffer buffer
-                  (drover-claude-code-ide--type (concat "/model " id))
-                  (drover-claude-code-ide--press 'return)
-                  ;; The prompt must not reach the interface before it switched.
-                  (setq-local drover-claude-code-ide--submitting t))
-                (setq pending t)
-                (run-at-time drover-claude-code-ide--model-delay nil
-                             #'drover-claude-code-ide--model-switched buffer then)))))
-           (variant
-            (drover-warn "Variant selection requires an explicit model for Claude Code"))))
+        (when model
+          (let ((id (drover-model-id-for model 'claude-code 'claude-code-ide)))
+            (cond
+             ((null id)
+              (drover-warn "%s cannot run %s; keeping its current model"
+                           name (drover-model-label model)))
+             ((not (and buffer (drover-claude-code-ide--takes-input-p buffer)))
+              (drover-warn "%s is not ready for /model; keeping its current model" name))
+             (t
+              (with-current-buffer buffer
+                (drover-claude-code-ide--type (concat "/model " id))
+                (drover-claude-code-ide--press 'return)
+                ;; The prompt must not reach the interface before it switched.
+                (setq-local drover-claude-code-ide--submitting t))
+              (setq pending t)
+              (run-at-time drover-claude-code-ide--model-delay nil
+                           #'drover-claude-code-ide--model-switched buffer then)))))
       (error
        (drover-warn "Could not set the model of %s: %s; sending the prompt anyway"
                     name (drover-error-message err))))
@@ -1077,8 +1231,11 @@ changed since shows from the next answer."
             :variant (cdr turn)))))
 
 (defun drover-claude-code-ide--settable (_session)
-  "Return what a running session can change: only its model."
-  '(:model))
+  "Return what a running session can change: its agent and its model.
+Its agent only among those `drover-claude-code-agent-modes' runs as
+permission modes, which Shift+Tab switches; its effort only with a
+model, which /model sets."
+  '(:agent :model))
 
 ;;;; Models
 

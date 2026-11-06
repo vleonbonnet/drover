@@ -180,18 +180,40 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                     (if (eq mode 'drover-list-sidebar-mode) #'ignore #'magit-section-toggle)))))))
 
 (ert-deftest drover-keys-test-build-and-go-availability ()
-  "Build applies to OpenCode sessions whose backend can switch agents and send."
-  (drover-keys-test-with (list (drover-test-session "s" :engine 'opencode :agent "plan")
-                               (drover-test-session "other" :engine 'claude-code)
-                               (drover-test-session "fixed" :engine 'opencode))
-    (setq drover-test-settable '(("fixed" :model)))
-    (drover-keys-test-in 'view "s"
-      (should (member "<tab>" (drover-keys-test-apt 'drover-dispatch))))
-    (dolist (id '("other" "fixed" nil))
-      (drover-keys-test-in 'view id
-        (should-not (member "<tab>" (drover-keys-test-apt 'drover-dispatch)))
-        (should-error (call-interactively #'drover-build-and-go) :type 'user-error)))
-    (should-not drover-test-calls)))
+  "Build applies where the engine names a build agent its backend switches to."
+  (drover-test-with-engines
+    (drover-test-register-engine 'opencode :build-agent "build")
+    (drover-test-register-engine 'claude-code :build-agent (lambda () "build"))
+    (drover-test-register-engine 'codex)
+    (drover-test-register-engine 'gemini-cli :build-agent (lambda () nil))
+    (drover-keys-test-with (list (drover-test-session "s" :engine 'opencode :agent "plan")
+                                 (drover-test-session "claude" :engine 'claude-code :agent "plan")
+                                 (drover-test-session "codex" :engine 'codex)
+                                 (drover-test-session "gemini" :engine 'gemini-cli)
+                                 (drover-test-session "none")
+                                 (drover-test-session "fixed" :engine 'opencode))
+      (setq drover-test-settable '(("fixed" :model)))
+      (dolist (id '("s" "claude"))
+        (drover-keys-test-in 'view id
+          (should (member "<tab>" (drover-keys-test-apt 'drover-dispatch)))))
+      (dolist (id '("codex" "gemini" "none" "fixed" nil))
+        (drover-keys-test-in 'view id
+          (should-not (member "<tab>" (drover-keys-test-apt 'drover-dispatch)))
+          (should-error (call-interactively #'drover-build-and-go) :type 'user-error)))
+      (should-not drover-test-calls))))
+
+(ert-deftest drover-keys-test-build-and-go-engine-agent ()
+  "Build switches to the agent the session's engine names, then sends Go ahead."
+  (drover-test-with-engines
+    (drover-test-register-engine 'claude-code :build-agent (lambda () "build"))
+    (drover-keys-test-with (list (drover-test-session "claude" :engine 'claude-code :agent "plan"))
+      (drover-keys-test-in 'view "claude"
+        (call-interactively #'drover-build-and-go))
+      (should (equal (reverse (seq-filter (lambda (call) (memq (car call) '(:check :apply-options :send)))
+                                          drover-test-calls))
+                     '((:check "claude" "Go ahead" (:agent "build" :model nil :variant nil))
+                       (:apply-options "claude" (:agent "build" :model nil :variant nil))
+                       (:send "claude" "Go ahead" fake-token)))))))
 
 ;;;; Opening sessions
 

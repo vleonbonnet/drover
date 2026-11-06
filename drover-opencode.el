@@ -477,6 +477,7 @@ notes.  The engine's :changes."
                 :resolve #'drover-opencode--resolve
                 :agents #'drover-opencode--agents
                 :last-used #'drover-opencode--last-used
+                :build-agent "build"
                 :model-resets-variant t
                 :directory #'drover-opencode--directory
                 :changes #'drover-opencode--changes)))
@@ -487,10 +488,10 @@ notes.  The engine's :changes."
 (defun drover-opencode--unregister-engine ()
   "Undo `drover-opencode--register-engine'.
 Other front ends may run the engine too, such as agent-shell, whose
-model sources then stay, with the engine's label alone."
+model sources then stay, with the engine's label and build agent alone."
   (drover-unregister-model-source 'opencode #'drover-opencode--catalog-source)
   (if (drover-engine-model-sources 'opencode)
-      (drover-register-engine 'opencode :label "OpenCode")
+      (drover-register-engine 'opencode :label "OpenCode" :build-agent "build")
     (drover-unregister-engine 'opencode)))
 
 ;;;; Conversations by identifier

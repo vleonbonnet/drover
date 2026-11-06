@@ -301,6 +301,11 @@ NAME is the agent program sessions run, such as `opencode',
              engine offers there, possibly after a bounded wait, or nil.
  :last-used  Function of no argument returning when the engine last
              took a prompt, as a float time, or nil.
+ :build-agent
+             The agent a session switches to, to carry out what it
+             planned: a string, or a function of no argument returning
+             one, or nil when the engine has none (see
+             `drover-engine-build-agent').
  :model-resets-variant
              Non-nil when a session switched to a model without naming
              a variant runs that model's default variant, rather than
@@ -373,6 +378,19 @@ others in the order they registered."
 (defun drover-engine-property (engine property)
   "Return PROPERTY of ENGINE, nil when ENGINE is not registered."
   (plist-get (alist-get engine drover--engines) property))
+
+(defun drover-engine-build-agent (engine)
+  "Return the agent a session of ENGINE switches to, to carry out its plan, or nil.
+It is the engine's :build-agent (see `drover-register-engine'), such as
+OpenCode's build agent; nil for an engine without one, or not
+registered."
+  (let ((agent (drover-engine-property engine :build-agent)))
+    (when-let* ((agent (if (functionp agent)
+                           (drover-with-reporting "engine build agent" (funcall agent))
+                         agent))
+                ((stringp agent))
+                ((not (string-empty-p agent))))
+      agent)))
 
 (defun drover-engine-label (engine)
   "Return the display name of ENGINE: its :label, else its name."

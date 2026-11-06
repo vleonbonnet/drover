@@ -78,6 +78,7 @@
 (require 'subr-x)
 (require 'transient)
 (require 'drover-core)
+(require 'drover-model)
 (require 'drover-ui)
 (require 'opencode-look)
 
@@ -596,24 +597,33 @@ lists show."
 ;;;; Building
 
 (defun drover-build-and-go-p (session)
-  "Return non-nil when SESSION can switch to the build agent and take a prompt."
-  (and (eq (drover-session-engine session) 'opencode)
+  "Return non-nil when SESSION can switch to its build agent and take a prompt.
+Its engine names the agent (see `drover-engine-build-agent'), and its
+backend must apply an agent to the running session before sending."
+  (and session
+       (drover-session-engine session)
+       (drover-engine-build-agent (drover-session-engine session))
        (drover-supports-p session :send)
        (drover-supports-p session :apply-options)
        (or (not (drover-supports-p session :settable))
-           (memq :agent (drover-backend-call session :settable)))))
+           (memq :agent (drover-backend-call session :settable)))
+       t))
 
 (defun drover-build-and-go (session)
-  "Switch SESSION to the build agent and send the prompt \"Go ahead\".
-Interactively, SESSION is the session at point.  Its backend applies
-the agent before sending, as for options chosen in the prompt; any
-draft stays as it is.  This applies to OpenCode sessions whose backend
-can change their agent."
+  "Switch SESSION to its build agent and send the prompt \"Go ahead\".
+Interactively, SESSION is the session at point.  The agent is its
+engine's (see `drover-engine-build-agent'): OpenCode's build agent, and
+for Claude Code the permission mode `drover-claude-code-agent-modes'
+gives \"build\".  Its backend applies the agent before sending, as for
+options chosen in the prompt; any draft stays as it is.  This applies
+to sessions whose backend can change their agent, of this host or
+another."
   (interactive (list (drover-session-at-point)))
   (unless (drover-build-and-go-p session)
-    (user-error "%s cannot switch to the build agent"
-                (drover-session-display-title session)))
-  (drover-prompt-send-to session "Go ahead" '(:agent "build")))
+    (user-error "%s cannot switch to a build agent"
+                (if session (drover-session-display-title session) "No session")))
+  (drover-prompt-send-to session "Go ahead"
+                         (list :agent (drover-engine-build-agent (drover-session-engine session)))))
 
 ;;;; Session keys
 

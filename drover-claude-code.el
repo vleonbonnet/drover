@@ -139,6 +139,12 @@ itself.  `drover-claude-code-ide' sets it.")
 See `drover-claude-code-agent-modes'."
   (cdr (assoc agent drover-claude-code-agent-modes)))
 
+(defun drover-claude-code--build-agent ()
+  "Return \"build\" while Claude Code runs it as a permission mode, else nil.
+The engine's :build-agent: `drover-build-and-go' switches to the mode
+`drover-claude-code-agent-modes' gives the agent \"build\"."
+  (and (drover-claude-code-agent-mode "build") "build"))
+
 ;;;; Sessions on disk
 
 (defconst drover-claude-code--uuid-regexp
@@ -1088,6 +1094,7 @@ THEN gets ID, ELSE why it could not.  The engine's :import."
                           :resolve #'drover-claude-code--resolve
                           :agents #'drover-claude-code--agents
                           :last-used #'drover-claude-code--last-used
+                          :build-agent #'drover-claude-code--build-agent
                           :directory #'drover-claude-code--directory
                           :changes #'drover-claude-code-changes
                           :export #'drover-claude-code--export
