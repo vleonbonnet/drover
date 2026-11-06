@@ -368,12 +368,29 @@ only when needed."
      (cost :priority 13 :min 4 :align right :label "Cost")
      (age :priority 1 :min 3 :align right :narrow line :label "Age")
      (cache :priority 3 :min 9 :narrow background :label "Cache")
+     (summary :priority 4 :min 12 :narrow below :label "Summary"))
+    ((title :priority 0 :min 12 :max 40 :narrow line :label "Session")
+     (goal :priority 2 :min 3 :max 16 :narrow line :label "Goal")
+     (attempt :priority 2 :min 2 :max 20 :narrow line :label "Attempt")
+     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
+     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
+     (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
+     (branch :priority 10 :min 6 :max 24 :label "Branch")
+     (agent :priority 11 :min 5 :max 14 :label "Agent")
+     (model :priority 6 :min 8 :max 22 :label "Model")
+     (provider :priority 8 :min 2 :max 12 :label "Provider")
+     (context :priority 7 :min 9 :narrow icon :label "Context")
+     (changes :priority 8 :min 4 :align right :label "Changes")
+     (created :priority 12 :min 3 :align right :label "Created")
+     (cost :priority 13 :min 4 :align right :label "Cost")
+     (age :priority 1 :min 3 :align right :narrow line :label "Age")
+     (cache :priority 3 :min 9 :narrow background :label "Cache")
      (summary :priority 4 :min 12 :narrow below :label "Summary")))
   "The former standard values of `drover-list-fields'.
 Before the harness's field, then before the context's pie in two lines,
 then before the cost, then before the pill of a task's project in two
 lines, then before the goal, then before the attempt, then before the
-changes.")
+changes, then before the branch's narrower column.")
 
 ;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the list takes the new one.
@@ -387,7 +404,7 @@ changes.")
     (host :priority 2 :min 4 :max 16 :narrow line :label "Host")
     (harness :priority 5 :min 2 :max 14 :narrow line :label "Harness")
     (location :priority 9 :min 10 :max 30 :narrow icon :label "Project")
-    (branch :priority 10 :min 6 :max 24 :label "Branch")
+    (branch :priority 10 :min 6 :max 10 :label "Branch")
     (agent :priority 11 :min 5 :max 14 :label "Agent")
     (model :priority 6 :min 8 :max 22 :label "Model")
     (provider :priority 8 :min 2 :max 12 :label "Provider")

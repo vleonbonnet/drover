@@ -7549,6 +7549,14 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
     (drover-list-test-refresh)
     (should (memq 'branch drover-list--fields))
     (should (string-search "Branch" header-line-format))
+    ;; A long branch is cut to its column, ten characters, and told
+    ;; whole once its session expands.
+    (setf (drover-session-branch (drover-list-test-find "f")) "feature/a-long-branch")
+    (drover-list-test-refresh)
+    (should (string-match-p "Session f +p +feature/a… +20s\\'" (drover-list-test-heading "f")))
+    (drover-list-test-goto "f")
+    (magit-section-show (magit-current-section))
+    (should (string-match-p "^    Branch +feature/a-long-branch$" (drover-list-test-visible-text)))
     ;; Grouped by branch, the group names it.
     (setf (drover-session-branch (drover-list-test-find "f")) "feature/x")
     (drover-list-test-shown
