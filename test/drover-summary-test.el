@@ -556,6 +556,20 @@ SLOTS is a plist of slot names as keywords and values."
   (should (equal (car (drover-summary-parse "Done: scrcpy flags committed; phone untested\nRecap."))
                  "Done: scrcpy flags committed")))
 
+(ert-deftest drover-summary-test-fit-session ()
+  "A paragraph on the session much longer than asked loses sentences from its middle."
+  (let* ((drover-summary-session-length 45)
+         (first "We are fixing the build of v1.2.")
+         (last "Next, the tests.")
+         (short (concat first " " last)))
+    (should (equal (drover-summary--fit-session short) short))
+    (should (equal (drover-summary--fit-session
+                    (concat first " The linker flags were wrong. We fixed them in the Makefile. " last))
+                   short))
+    ;; Two sentences stay whatever their length.
+    (let ((long (concat first " " (make-string 200 ?x) ".")))
+      (should (equal (drover-summary--fit-session long) long)))))
+
 (ert-deftest drover-summary-test-parse-session ()
   "After a line of dashes, the model writes of the whole session: one paragraph."
   (should (equal (drover-summary-parse
