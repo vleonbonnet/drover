@@ -358,7 +358,9 @@ PROJECTS defaults to `drover-opencode-test-projects'."
           (opencode-session-summary-update)
           ;; After a blank line, as the transcript ends with a line.
           (should (equal (opencode-session-summary-string) "\n※ Done: first …\n\n"))
-          (should (= (overlay-start opencode--recap-overlay) (marker-position opencode--prompt-start)))
+          ;; After the idle prompt, at the process mark, where redisplay
+          ;; draws it: an overlay hiding the prompt starts at the prompt.
+          (should (= (overlay-start opencode--recap-overlay) (opencode-pmark)))
           ;; A new brief shows in place, without the buffer asking.
           (setq brief "Done: second")
           (drover-backend-changed 'opencode "ses_1")
