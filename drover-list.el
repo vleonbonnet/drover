@@ -420,8 +420,8 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
            `drover-session-view-project'): that of the task the
            session serves in its colour, after its pill, which alone
            shows in two lines, in a cell, and nothing for another.
- branch    The Git branch, unless it is the default branch of its
-           repository (see `drover-session-default-branch-p').
+ branch    The Git branch, greyed out when it is the default branch
+           of its repository (see `drover-session-default-branch-p').
  agent     The agent, as @name, in the agent's colour.
  model     The model, compact, and the effort it runs, dimmed when it
            is the model's default.
@@ -527,7 +527,7 @@ changes it for the session, with one switch per field."
     (host . "The host the session runs on, if another; and since when it is not connected")
     (harness . "What runs the session: its front end, or the CLI that recorded it")
     (location . "The project the session works in")
-    (branch . "The branch the session works on, unless its repository's default one")
+    (branch . "The branch the session works on, greyed out when its repository's default one")
     (agent . "The agent the session runs")
     (model . "The model the session runs, and its effort: dimmed when the model's default")
     (provider . "The provider serving the model")
@@ -1418,12 +1418,17 @@ context shows as a pie alone (see `drover-list--context-pie')."
 
 (defun drover-list--branch-text (session)
   "Return the branch of SESSION as its column shows it, or nil.
-Nil for the default branch of its repository, which a column of
-\"main\" on every line would only repeat (see
-`drover-session-default-branch-p')."
-  (when-let* ((branch (drover-session-branch session))
-              ((not (drover-session-default-branch-p session))))
-    (drover-face (drover-list--one-line branch) 'drover-dim)))
+The default branch of its repository (see
+`drover-session-default-branch-p') is greyed out, in the face of a
+default (`opencode-setting-inherited'), as the model's default effort
+is: a column of \"main\" on most lines reads past it, and an empty
+cell would not tell which branch it stands for.  Another branch shows
+plain, the session working away from it."
+  (when-let* ((branch (drover-session-branch session)))
+    (let ((line (drover-list--one-line branch)))
+      (if (drover-session-default-branch-p session)
+          (drover-face line 'opencode-setting-inherited)
+        line))))
 
 (defun drover-list--changes-line (additions deletions files)
   "Return ADDITIONS, DELETIONS and FILES, what a session changed, as a line.
@@ -3112,8 +3117,8 @@ Those are the fields of `drover-list-fields' its line, in LAYOUT,
 leaves out, or shows cut or as an icon alone: those but WHOLE, the
 fields it shows whole (see `drover-list--heading'), such as the model
 in two lines; and what its line cannot tell: the directory of a session
-without a project, the default branch, which the branch's column leaves
-out, the task it serves, and why its host is not connected."
+without a project, the task it serves, and why its host is not
+connected."
   (let ((now (plist-get layout :now))
         (facts nil))
     (cl-flet ((fact (field label value &optional face)
@@ -3135,9 +3140,7 @@ out, the task it serves, and why its host is not connected."
       (fact 'harness "Harness" (drover-session-harness-description session))
       (fact 'location "Project" (drover-session-view-project session))
       (fact 'task "Task" (plist-get (drover-session-task session) :title))
-      ;; Its column leaves out the default branch, which details tell.
-      (fact (if (drover-session-default-branch-p session) 'default-branch 'branch)
-            "Branch" (drover-session-branch session))
+      (fact 'branch "Branch" (drover-session-branch session))
       (fact 'agent "Agent" (drover-agent-label session))
       (fact 'model "Model" (let ((text (drover-list--model-text session)))
                              (unless (string-empty-p text) text)))

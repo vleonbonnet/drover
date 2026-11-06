@@ -414,8 +414,8 @@ current buffer again afterwards."
       (should (equal (drover-list-test-line) "No project (1)  ✓1"))
       (should (string-prefix-p "  ! Session wait2" (drover-list-test-heading "wait2")))
       (should (string-prefix-p "  · Session idle" (drover-list-test-heading "idle")))
-      ;; The heading names the project, and main is the default branch.
-      (should (string-match-p "Session fail +5s\\'" (drover-list-test-heading "fail")))
+      ;; The heading names the project; main, the default branch, greyed out.
+      (should (string-match-p "Session fail +main +5s\\'" (drover-list-test-heading "fail")))
       (drover-set-group-by 'status)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(waiting failed done working idle))))))
 
@@ -802,8 +802,8 @@ The View menu of the list holds it, in its View group."
     (should (equal (drover-list-test-groups) '(("p" "root" "elsewhere" "here"))))
     (drover-list-test-goto-group "p")
     (should (equal (drover-list-test-line) "p (3)  !2"))
-    ;; The group names the project, and main is the default branch.
-    (should (string-match-p "Session root\\'" (drover-list-test-heading "root")))
+    ;; The group names the project; main, the default branch, greyed out.
+    (should (string-match-p "Session root +main\\'" (drover-list-test-heading "root")))
     (should (string-match-p "Session here +feat +10s\\'" (drover-list-test-heading "here")))
     ;; Another project than the group's is named.
     (should (string-match-p "Session elsewhere +q +dev +20s\\'" (drover-list-test-heading "elsewhere")))))
@@ -815,8 +815,8 @@ The View menu of the list holds it, in its View group."
       (list (drover-test-session "s" :status 'waiting :since (drover-list-test-ago 300)
                                  :project "drover" :branch "main"
                                  :requests '((:kind permission :summary "bash: make"))))
-    ;; On the default branch, which no column repeats.
-    (should (equal (drover-list-test-heading "s") "  ! Session s  drover    5m  permit: bash: make"))
+    ;; On the default branch, greyed out.
+    (should (equal (drover-list-test-heading "s") "  ! Session s  drover   main     5m  permit: bash: make"))
     (drover-list-test-goto "s")
     ;; Past the invisible character beginning the line, and its aligned space.
     (let ((glyph (+ 2 (point))))
@@ -1046,12 +1046,15 @@ title; Magit's ellipsis takes 7 more."
     (drover-list-test-with-font
       ;; Title 109, age 144, cache 223 (its bar, a space and 59m, 65
       ;; pixels, past its 9 characters), summary 321, model 391, context
-      ;; 468, provider 496, location 580, agent 629, created 664.
+      ;; 468, provider 496, location 580, branch 636, agent 685, created
+      ;; 720.
+      (should (equal (drover-list-test-layout-at 730)
+                     '(columns title location branch agent model provider context created age cache summary)))
+      (should (equal (drover-list-test-layout-at 720)
+                     '(columns title location branch agent model provider context age cache summary)))
       (should (equal (drover-list-test-layout-at 680)
-                     '(columns title location agent model provider context created age cache summary)))
-      (should (equal (drover-list-test-layout-at 670)
-                     '(columns title location agent model provider context age cache summary)))
-      (should (equal (drover-list-test-layout-at 600)
+                     '(columns title location branch model provider context age cache summary)))
+      (should (equal (drover-list-test-layout-at 640)
                      '(columns title location model provider context age cache summary)))
       (should (equal (drover-list-test-layout-at 580)
                      '(columns title model provider context age cache summary)))
@@ -1061,11 +1064,14 @@ title; Magit's ellipsis takes 7 more."
                      '(columns title model age cache summary)))
       (should (equal (drover-list-test-layout-at 330)
                      '(columns title age cache summary)))
-      ;; Windows of 75 and 100 columns as wide as an x, as the README says.
+      ;; Windows of 75, 100 and 105 columns as wide as an x, as the
+      ;; README says.
       (should (equal (drover-list-test-layout-at (* 75 7))
                      '(columns title model provider context age cache summary)))
       (should (equal (drover-list-test-layout-at (* 100 7))
-                     '(columns title location agent model provider context created age cache summary)))
+                     '(columns title location branch agent model provider context age cache summary)))
+      (should (equal (drover-list-test-layout-at (* 105 7))
+                     '(columns title location branch agent model provider context created age cache summary)))
       ;; Too narrow for the summary in a column: two lines, where
       ;; neither the model nor its provider shows, the context as a
       ;; pie alone; columns need not show it.
@@ -1075,7 +1081,7 @@ title; Magit's ellipsis takes 7 more."
 (ert-deftest drover-list-test-fields-by-width-with-the-harness ()
   "The harness's column, after the summary's, needs the room of its icon.
 As by default, every field let show: windows of 80 columns as wide as
-an x and of 100 show what the README says."
+an x, of 100 and of 108 show what the README says."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-showing
       (drover-list-test-with-font
@@ -1084,7 +1090,9 @@ an x and of 100 show what the README says."
         (should (equal (drover-list-test-layout-at (* 80 7))
                        '(columns title harness model provider context age cache summary)))
         (should (equal (drover-list-test-layout-at (* 100 7))
-                       '(columns title harness location agent model provider context created age cache summary)))
+                       '(columns title harness location branch model provider context age cache summary)))
+        (should (equal (drover-list-test-layout-at (* 108 7))
+                       '(columns title harness location branch agent model provider context created age cache summary)))
         ;; Two lines: its icon on the title's line.
         (should (equal (drover-list-test-layout-at 320) '(narrow title harness context age cache summary)))))))
 
@@ -1489,19 +1497,20 @@ context to show, the cell goes."
     (drover-list-test-with-font
       (drover-list-test-layout-at 1000)
       (should (equal drover-list--fields
-                     '(title location agent model provider context created age cache summary)))
+                     '(title location branch agent model provider context created age cache summary)))
       (let ((names (drover-list-test-header-cells))
             (right (lambda (text)
                      (let ((x (drover-list-test-cell-at "a" text)))
                        (+ x (drover-list-test-fake-width text))))))
         (should (equal (mapcar #'cdr names)
-                       '("Session" "Project" "Agent" "Model" "Provider" "Context" "Created" "Age"
-                         "Cache" "Summary")))
+                       '("Session" "Project" "Branch" "Agent" "Model" "Provider" "Context" "Created"
+                         "Age" "Cache" "Summary")))
         (cl-flet ((at (name) (car (rassoc name names)))
                   (end (name) (+ (car (rassoc name names)) (drover-list-test-fake-width name))))
           ;; Names begin where their columns do...
           (should (= (at "Session") (car (car (drover-list-test-cells "a")))))
           (should (= (at "Project") (drover-list-test-cell-at "a" "drover")))
+          (should (= (at "Branch") (drover-list-test-cell-at "a" "main")))
           (should (= (at "Agent") (drover-list-test-cell-at "a" "@build")))
           (should (= (at "Model") (drover-list-test-cell-at "a" "opus high")))
           (should (= (at "Provider") (drover-list-test-cell-at "a" "P")))
@@ -2076,12 +2085,11 @@ START and END bound its overlay."
                       "    Question    Which branch?"
                       "    Prompt      Prompt of s"
                       "    Reply       Reply of s"
-                      "    Directory   ~/src/drover"
-                      ;; The line leaves out the default branch.
-                      "    Branch      main"))
+                      "    Directory   ~/src/drover"))
         (should (string-match-p (concat "^" (regexp-quote line) "$") text)))
       ;; Not what the line shows already.
-      (dolist (label '("Status" "Agent" "Model" "Created" "Backend" "Detail"))
+      ;; Its line shows the default branch, greyed out.
+      (dolist (label '("Status" "Agent" "Model" "Created" "Backend" "Detail" "Branch"))
         (should-not (string-match-p (concat "^ +" label " ") text))))
     (search-forward "Permission")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim))
@@ -2122,7 +2130,7 @@ START and END bound its overlay."
       (should-not (string-match-p "^ +\\(Model\\|Provider\\|Context\\|Project\\|Directory\\) " text))
       (should (string-match-p "^    Agent    @build$" text))
       (should (string-match-p "^    Created  2h ago$" text)))
-    (setq drover-list-hidden-fields '(location agent model provider context created))
+    (setq drover-list-hidden-fields '(location branch agent model provider context created))
     (revert-buffer)
     (let ((text (drover-list-test-visible-text)))
       (dolist (line '("    Prompt    Prompt of s"
@@ -7313,7 +7321,7 @@ goes to the session opened."
   "The width chooses among the fields the user lets show; the title always shows."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-with-font
-      (setq drover-list-hidden-fields '(location model harness))
+      (setq drover-list-hidden-fields '(location branch model harness))
       (should (equal (drover-list-test-layout-at 600)
                      '(columns title agent provider context created age cache summary)))
       ;; Room freed for the fields of lower rank: context 396, provider
@@ -7475,30 +7483,43 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
 
 ;;;; The branch column
 
+(defun drover-list-test-face-in-heading (id text)
+  "Return the face of TEXT in the heading of session ID, or `none' without it."
+  (save-excursion
+    (drover-list-test-goto id)
+    (if (search-forward text (line-end-position) t)
+        (get-text-property (match-beginning 0) 'font-lock-face)
+      'none)))
+
 (ert-deftest drover-list-test-branch-column ()
-  "The branch has a column of its own, for the branches that are not the default one."
+  "The branch has a column of its own, the default one greyed out."
   (drover-list-test-with
       (list (drover-test-session "m" :status 'working :project "p" :branch "main"
                                  :updated (drover-list-test-ago 10))
             (drover-test-session "f" :status 'working :project "p" :branch "feature/x"
                                  :updated (drover-list-test-ago 20))
             (drover-test-session "o" :status 'working :project "q" :branch "master"
-                                 :updated (drover-list-test-ago 30)))
+                                 :updated (drover-list-test-ago 30))
+            (drover-test-session "n" :status 'working :project "q"
+                                 :updated (drover-list-test-ago 40)))
     (should (memq 'branch drover-list--fields))
-    (should (string-match-p "Session m +p +10s\\'" (drover-list-test-heading "m")))
+    (should (string-match-p "Session m +p +main +10s\\'" (drover-list-test-heading "m")))
     (should (string-match-p "Session f +p +feature/x +20s\\'" (drover-list-test-heading "f")))
-    (should (string-match-p "Session o +q +30s\\'" (drover-list-test-heading "o")))
+    (should (string-match-p "Session o +q +master +30s\\'" (drover-list-test-heading "o")))
+    ;; Without a branch, the cell is empty.
+    (should (string-match-p "Session n +q +40s\\'" (drover-list-test-heading "n")))
     (should (= (drover-list-test-cell-at "f" "feature/x")
                (car (rassoc "Branch" (drover-list-test-header-cells)))))
-    (save-excursion
-      (drover-list-test-goto "f")
-      (search-forward "feature/x")
-      (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-dim)))
-    ;; On default branches alone, the column takes no room.
+    ;; The default branch reads as a default, as the model's default
+    ;; effort does; another plain.
+    (should (eq (drover-list-test-face-in-heading "m" "main") 'opencode-setting-inherited))
+    (should (eq (drover-list-test-face-in-heading "o" "master") 'opencode-setting-inherited))
+    (should-not (drover-list-test-face-in-heading "f" "feature/x"))
+    ;; On default branches alone, the column still tells them.
     (setf (drover-session-branch (drover-list-test-find "f")) "main")
     (drover-list-test-refresh)
-    (should-not (memq 'branch drover-list--fields))
-    (should-not (string-search "Branch" header-line-format))
+    (should (memq 'branch drover-list--fields))
+    (should (string-search "Branch" header-line-format))
     ;; Grouped by branch, the group names it.
     (setf (drover-session-branch (drover-list-test-find "f")) "feature/x")
     (drover-list-test-shown
@@ -7506,7 +7527,7 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
       (should (string-match-p "Session f +p +20s\\'" (drover-list-test-heading "f"))))))
 
 (ert-deftest drover-list-test-branch-default-from-the-repository ()
-  "A repository naming its default branch shows main when it is not that one."
+  "A repository naming its default branch greys that one out, not main."
   (let* ((root (make-temp-file "drover-repo" t))
          (remote (expand-file-name ".git/refs/remotes/origin" root)))
     (unwind-protect
@@ -7521,11 +7542,13 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
                       (drover-test-session "d" :status 'working :project "p" :branch "develop"
                                            :directory root :updated (drover-list-test-ago 20)))
               (should (string-match-p "Session m +p +main +10s\\'" (drover-list-test-heading "m")))
-              (should (string-match-p "Session d +p +20s\\'" (drover-list-test-heading "d"))))))
+              (should (string-match-p "Session d +p +develop +20s\\'" (drover-list-test-heading "d")))
+              (should-not (drover-list-test-face-in-heading "m" "main"))
+              (should (eq (drover-list-test-face-in-heading "d" "develop") 'opencode-setting-inherited)))))
       (delete-directory root t))))
 
 (ert-deftest drover-list-test-branch-default-of-another-host ()
-  "Another host's session hides the branch its owner read as the default; this host reads nothing."
+  "Another host's session greys out the branch its owner read as the default; this host reads nothing."
   (let* ((root (make-temp-file "drover-repo" t))
          (remote (expand-file-name ".git/refs/remotes/origin" root))
          (looked nil))
@@ -7547,10 +7570,10 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
                                            :updated (drover-list-test-ago 20))
                       (drover-test-session "u" :status 'working :project "p" :branch "master" :host "core"
                                            :directory root :updated (drover-list-test-ago 30)))
-              (should-not (string-search "main" (drover-list-test-heading "m")))
-              (should (string-search "develop" (drover-list-test-heading "d")))
+              (should (eq (drover-list-test-face-in-heading "m" "main") 'opencode-setting-inherited))
+              (should-not (drover-list-test-face-in-heading "d" "develop"))
               ;; The owner knowing none, main and master stand for it.
-              (should-not (string-search "master" (drover-list-test-heading "u")))
+              (should (eq (drover-list-test-face-in-heading "u" "master") 'opencode-setting-inherited))
               (should-not looked))))
       (advice-remove 'drover--read-git-default-branch 'drover-list-test-looked)
       (delete-directory root t))))
@@ -8185,7 +8208,7 @@ tree within a bound whatever the sessions."
              (opencode-session-status-animation-interval 0.15))
         (drover-test-register-simple 'remote:core (lambda () records) :remote "core")
         (should (equal (cdr (drover-list-test-layout-at 1000))
-                       '(title host location agent model provider context created age cache summary)))
+                       '(title host location branch agent model provider context created age cache summary)))
         (should (string-match-p "Remote +core " (drover-list-test-remote-line key)))
         ;; Animated while its host is connected.
         (should (drover-list-test-remote-animated-p key))
