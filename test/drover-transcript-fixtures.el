@@ -130,7 +130,9 @@ As the API requests Claude Code records."
 It starts at START with the records the CLI writes first, a command
 note, then PROMPT, REPLY by MODEL at EFFORT, FILLER bytes of request
 blobs, then AI-TITLE, CUSTOM-TITLE and the last prompt the CLI appends.
-SUBAGENTS is a list of (NAME DESCRIPTION TYPE) written beside it."
+SUBAGENTS is a list of (NAME DESCRIPTION TYPE . REPLY) written beside
+it, REPLY the keyword arguments of `drover-fixture-claude-assistant'
+for its reply, such as :model, :effort and :usage."
   (make-directory directory t)
   (let ((file (drover-fixture-claude-file id directory)))
     (drover-fixture-write
@@ -152,11 +154,11 @@ SUBAGENTS is a list of (NAME DESCRIPTION TYPE) written beside it."
       (and ai-title (list (drover-fixture-claude-meta id "ai-title" :aiTitle ai-title)))
       (and custom-title (list (drover-fixture-claude-meta id "custom-title" :customTitle custom-title)))
       (list (drover-fixture-claude-meta id "last-prompt" :lastPrompt prompt))))
-    (pcase-dolist (`(,name ,description ,type) subagents)
+    (pcase-dolist (`(,name ,description ,type . ,reply) subagents)
       (let ((base (expand-file-name (concat id "/subagents/" name) (file-name-directory file))))
         (drover-fixture-write (concat base ".jsonl")
-                              (list (drover-fixture-claude-assistant id directory (+ start 3) "Found it."
-                                                                     :sidechain t)))
+                              (list (apply #'drover-fixture-claude-assistant id directory (+ start 3) "Found it."
+                                           :sidechain t reply)))
         (drover-fixture-write (concat base ".meta.json")
                               (list (json-serialize `((agentType . ,type) (description . ,description)))))))
     (set-file-times file (seconds-to-time (+ start 3)))

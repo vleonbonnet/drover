@@ -283,6 +283,44 @@ may follow it, read whole or appended."
         (should-not (drover-archivable-p subagent))
         (drover-recap subagent (lambda (recap) (should (equal (plist-get recap :reply) "Found it."))))))))
 
+(ert-deftest drover-claude-code-transcripts-test-subagent-run ()
+  "A subagent runs the model, effort and context its own transcript tells.
+Its replies, all of a side chain, are read in its transcript, before
+its tail when the tail holds none; in the conversation's transcript
+they tell nothing of the conversation's model.  Excluding its provider
+leaves out the conversation with its subagents."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "p1" project :effort "xhigh"
+                                        :subagents `(("agent-a1" "Audit the parser" "Explore"
+                                                      :model "claude-haiku-4-5-20251001" :effort "low"
+                                                      :usage ,(drover-fixture-claude-usage :input 5 :read 1000))
+                                                     ("agent-a2" "Plan the fix" "Plan"))))
+           (transcript (expand-file-name "p1/subagents/agent-a1.jsonl" (file-name-directory file))))
+      (apply #'drover-fixture-claude-append transcript
+             (drover-fixture-claude-blob "p1" (* 4 drover-transcript-window)))
+      (drover-fixture-claude-append file (drover-fixture-claude-assistant
+                                          "p1" project 1790000004.0 "Sub" :sidechain t
+                                          :model "claude-sonnet-5-5"))
+      (drover-claude-code-transcripts-test-scan)
+      (let ((explore (drover-find 'claude-code "p1/agent-a1"))
+            (plan (drover-find 'claude-code "p1/agent-a2")))
+        (should (equal (list (drover-session-model explore) (drover-session-effort explore)
+                             (drover-session-provider-name explore) (drover-session-context-tokens explore)
+                             (drover-session-context-limit explore))
+                       '("Haiku 4.5" "low" "Anthropic" 1005 200000)))
+        (should (equal (drover-session-provider explore)
+                       (cdr (assoc "\\`anthropic\\'" opencode-provider-icons))))
+        (should (equal (list (drover-session-model plan) (drover-session-provider-name plan)
+                             (drover-session-context-tokens plan))
+                       '("Opus 5.5" "Anthropic" nil))))
+      (should (equal (drover-session-model (drover-find 'claude-code "p1")) "Opus 5.5"))
+      (should-not (drover-filter-trees (drover-tree (drover-sessions)) '(:provider (:exclude "Anthropic"))))
+      (should (= (length (drover-tree-sessions (drover-filter-trees (drover-tree (drover-sessions))
+                                                                    '(:provider (:include "Anthropic")))))
+                 3)))))
+
 (ert-deftest drover-claude-code-transcripts-test-gone ()
   "A transcript deleted leaves the list, its backend told."
   (drover-claude-code-transcripts-test-with

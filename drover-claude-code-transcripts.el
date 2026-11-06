@@ -40,7 +40,8 @@
 ;; mode of its newest turn; its last activity, the time of its newest
 ;; message, not of the records the CLI appends of its own as the
 ;; conversation is opened again.  Its subagents' transcripts beside it,
-;; under ID/subagents/, are its subagents.
+;; under ID/subagents/, are its subagents, each running the model and
+;; effort its own transcript tells.
 ;;
 ;; It shows as an OpenCode session does: a turn that ended in a reply,
 ;; or an error of the API, the user did not see is done, or failed (see
@@ -106,7 +107,7 @@ list of drover's shows."
 
 ;;;; State
 
-(defconst drover-claude-code-transcripts--reader-version 3
+(defconst drover-claude-code-transcripts--reader-version 4
   "Version of `drover-claude-code-transcripts--read'.
 Raised when it reads anew what it read before, so that what an older
 one read and kept between Emacs sessions is read again.")
@@ -199,23 +200,27 @@ prompt of the user, on one line, or nil."
   (when-let* ((record (drover-transcript-last marker nil beg end)))
     (drover-transcript-text (alist-get key record))))
 
-(defun drover-claude-code-transcripts--turn-record (beg end)
+(defun drover-claude-code-transcripts--turn-record (beg end &optional sidechain)
   "Return the newest record of a reply of a main turn from BEG to END, or nil.
 That is an assistant's record of the conversation, not of a subagent,
-of a model the API ran, not one the CLI made up (\"<synthetic>\")."
+of a model the API ran, not one the CLI made up (\"<synthetic>\").
+With SIDECHAIN, a subagent's reply counts too, as in the subagent's
+own transcript, whose records are all its own."
   (drover-transcript-last
    "\"type\":\"assistant\""
    (lambda (record)
      (and (equal (alist-get 'type record) "assistant")
-          (not (alist-get 'isSidechain record))
+          (or sidechain (not (alist-get 'isSidechain record)))
           (let ((model (or (alist-get 'requestedModel record)
                            (alist-get 'model (alist-get 'message record)))))
             (and (stringp model) (not (string-prefix-p "<" model))))))
    beg end))
 
-(defun drover-claude-code-transcripts--turn (beg end)
-  "Return (MODEL EFFORT TIME) of the newest main turn from BEG to END, or nil."
-  (when-let* ((record (drover-claude-code-transcripts--turn-record beg end)))
+(defun drover-claude-code-transcripts--turn (beg end &optional sidechain)
+  "Return (MODEL EFFORT TIME) of the newest main turn from BEG to END, or nil.
+With SIDECHAIN, of a subagent's turn too (see
+`drover-claude-code-transcripts--turn-record')."
+  (when-let* ((record (drover-claude-code-transcripts--turn-record beg end sidechain)))
     (list (or (alist-get 'requestedModel record) (alist-get 'model (alist-get 'message record)))
           (and (stringp (alist-get 'effort record)) (alist-get 'effort record))
           (drover-transcript-time (alist-get 'timestamp record)))))
@@ -237,10 +242,12 @@ else nil, for a request that wrote nothing."
                (> (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens) 0))
            300))))
 
-(defun drover-claude-code-transcripts--usage-record-p (record)
-  "Return non-nil when RECORD is the reply of a main turn telling its usage."
+(defun drover-claude-code-transcripts--usage-record-p (record &optional sidechain)
+  "Return non-nil when RECORD is the reply of a main turn telling its usage.
+With SIDECHAIN, a subagent's reply counts too (see
+`drover-claude-code-transcripts--turn-record')."
   (and (equal (alist-get 'type record) "assistant")
-       (not (alist-get 'isSidechain record))
+       (or sidechain (not (alist-get 'isSidechain record)))
        (let ((message (alist-get 'message record)))
          (and (drover-json-object-p message)
               (not (equal (alist-get 'model message) "<synthetic>"))
@@ -270,6 +277,14 @@ END."
 Looking for it, rather than for every reply, parses no line of a reply
 without usage, nor of a prompt.")
 
+(defun drover-claude-code-transcripts--prompt-tokens (usage)
+  "Return the tokens of the prompt USAGE, a reply's usage, counts.
+Those uncached, written into the cache and read from it, as the API
+counts what the next request sends again."
+  (+ (drover-claude-code-transcripts--tokens usage 'input_tokens)
+     (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens)
+     (drover-claude-code-transcripts--tokens usage 'cache_read_input_tokens)))
+
 (defun drover-claude-code-transcripts--usage (beg end)
   "Return what the newest reply of a main turn from BEG to END tells it ran on.
 A plist of :context, the tokens of its prompt, uncached, written into
@@ -286,9 +301,9 @@ with.  Nil without such a reply."
                                               #'drover-claude-code-transcripts--usage-record-p
                                               beg end)))
     (let* ((usage (alist-get 'usage (alist-get 'message record)))
-           (input (drover-claude-code-transcripts--tokens usage 'input_tokens))
            (written (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens))
            (read (drover-claude-code-transcripts--tokens usage 'cache_read_input_tokens))
+           (prompt (drover-claude-code-transcripts--prompt-tokens usage))
            (ttl (or (drover-claude-code-transcripts--write-ttl usage)
                     (when-let* ((writer (drover-transcript-last
                                          drover-claude-code-transcripts--usage-marker
@@ -299,9 +314,9 @@ with.  Nil without such a reply."
                                          beg end)))
                       (drover-claude-code-transcripts--write-ttl
                        (alist-get 'usage (alist-get 'message writer)))))))
-      (append (list :context (+ input written read)
+      (append (list :context prompt
                     :cache-tokens (+ written read)
-                    :cache-prompt-tokens (+ input written read)
+                    :cache-prompt-tokens prompt
                     :requested (drover-claude-code-transcripts--requested record beg end))
               (and ttl (list :cache-ttl ttl))))))
 
@@ -470,25 +485,66 @@ head."
       (and (not old-size) (> tail (point-min))
            (drover-claude-code-transcripts--activity (point-min) tail))))
 
-(defun drover-claude-code-transcripts--subagent-times (transcript size)
-  "Return (CREATED . UPDATED) of the subagent whose TRANSCRIPT is SIZE bytes long.
-CREATED is the time of its first record, UPDATED that of its newest
-message, or CREATED without one."
+(defun drover-claude-code-transcripts--subagent-turn (beg end)
+  "Return the model and effort of a subagent's newest turn from BEG to END, or nil.
+A plist of :model and :effort, read in the subagent's own transcript."
+  (when-let* ((turn (drover-claude-code-transcripts--turn beg end t)))
+    (list :model (nth 0 turn) :effort (nth 1 turn))))
+
+(defun drover-claude-code-transcripts--subagent-context (beg end)
+  "Return the context of a subagent's newest reply from BEG to END, or nil.
+A plist of :context, the tokens of its prompt (see
+`drover-claude-code-transcripts--prompt-tokens'), read in the
+subagent's own transcript."
+  (when-let* ((record (drover-transcript-last drover-claude-code-transcripts--usage-marker
+                                              (lambda (record)
+                                                (drover-claude-code-transcripts--usage-record-p record t))
+                                              beg end)))
+    (list :context (drover-claude-code-transcripts--prompt-tokens
+                    (alist-get 'usage (alist-get 'message record))))))
+
+(defconst drover-claude-code-transcripts--subagent-readers
+  '((:model . drover-claude-code-transcripts--subagent-turn)
+    (:context . drover-claude-code-transcripts--subagent-context))
+  "What is read of a subagent's run, each member by the reader that tells it.")
+
+(defun drover-claude-code-transcripts--subagent-read (transcript size)
+  "Return what the transcript of a subagent, TRANSCRIPT of SIZE bytes, tells.
+A plist of :created, the time of its first record; :updated, that of
+its newest message, or :created without one; and what it ran on, the
+:model and :effort of its newest turn and the :context of its newest
+reply telling its usage, each looked for in the tail, else in the lines
+before it, else in the head, and left out when none tells it."
   (with-temp-buffer
     (let* ((tail (drover-transcript-insert-ends transcript size))
            (created (save-excursion
                       (goto-char (point-min))
-                      (drover-transcript-time (drover-transcript-sniff "timestamp")))))
-      (cons created (or (drover-claude-code-transcripts--last-message transcript size tail nil)
-                        created)))))
+                      (drover-transcript-time (drover-transcript-sniff "timestamp"))))
+           (data (list :created created
+                       :updated (or (drover-claude-code-transcripts--last-message transcript size tail nil)
+                                    created))))
+      (cl-flet ((missing ()
+                  (seq-remove (lambda (reader) (plist-member data (car reader)))
+                              drover-claude-code-transcripts--subagent-readers)))
+        (pcase-dolist (`(,_ . ,reader) drover-claude-code-transcripts--subagent-readers)
+          (setq data (append data (funcall reader tail (point-max)))))
+        (when-let* ((left (missing)))
+          (setq data (append data (drover-transcript-look-before-tail-for
+                                   transcript size tail nil (mapcar #'cdr left)))))
+        (when (> tail (point-min))
+          (pcase-dolist (`(,_ . ,reader) (missing))
+            (setq data (append data (funcall reader (point-min) tail))))))
+      data)))
 
 (defun drover-claude-code-transcripts--subagents (file &optional old)
   "Return the subagents of the conversation transcript FILE records.
 Their transcripts are beside it, under ID/subagents/, each with a
 description in a .meta.json; each is a plist of :agent, its name, :title,
-:type, :created and :updated, and the :size and :mtime of its transcript
-when read.  OLD are the subagents read before: one whose transcript did
-not change since is not read again."
+:type, the :size and :mtime of its transcript when read, and what
+`drover-claude-code-transcripts--subagent-read' read of it: :created,
+:updated, and the :model, :effort and :context it ran.  OLD are the
+subagents read before: one whose transcript did not change since is
+not read again."
   (let ((directory (expand-file-name "subagents" (file-name-sans-extension file))))
     (when (file-directory-p directory)
       (delq nil
@@ -504,17 +560,16 @@ not change since is not read again."
                                  (eql (plist-get before :mtime) mtime))
                             before
                           (let ((meta (drover-read-json (concat (file-name-sans-extension transcript)
-                                                                ".meta.json")))
-                                (times (drover-claude-code-transcripts--subagent-times transcript size)))
-                            (list :agent agent
-                                  :title (drover-transcript-text
-                                          (alist-get 'description (and (drover-json-object-p meta) meta)))
-                                  :type (drover-transcript-text
-                                         (alist-get 'agentType (and (drover-json-object-p meta) meta)))
-                                  :created (car times)
-                                  :updated (cdr times)
-                                  :size size
-                                  :mtime mtime)))))
+                                                                ".meta.json"))))
+                            (append
+                             (list :agent agent
+                                   :title (drover-transcript-text
+                                           (alist-get 'description (and (drover-json-object-p meta) meta)))
+                                   :type (drover-transcript-text
+                                          (alist-get 'agentType (and (drover-json-object-p meta) meta)))
+                                   :size size
+                                   :mtime mtime)
+                             (drover-claude-code-transcripts--subagent-read transcript size))))))
                     (ignore-errors
                       (directory-files-and-attributes directory t "\\`agent-.*\\.jsonl\\'" t)))))))
 
@@ -760,23 +815,36 @@ it once."
   "Return the identifier of the subagent AGENT of conversation ID."
   (concat id "/" agent))
 
-(defun drover-claude-code-transcripts--subagent-records (data)
-  "Return the records of the subagents of the conversation of DATA."
+(defun drover-claude-code-transcripts--subagent-records (data &optional catalog)
+  "Return the records of the subagents of the conversation of DATA.
+Each runs the model and effort its own transcript tells, on Anthropic.
+CATALOG names its model, as for `drover-claude-code-transcripts--record'."
   (when (drover-claude-code-transcripts--listed-p data)
-    (let ((id (plist-get data :id)))
+    (let ((id (plist-get data :id))
+          (catalog (drover-claude-code-transcripts--catalog catalog)))
       (mapcar (lambda (subagent)
-                (drover-session-create
-                 :backend 'claude-code
-                 :id (drover-claude-code-transcripts--subagent-id id (plist-get subagent :agent))
-                 :parent id
-                 :engine 'claude-code
-                 :title (or (plist-get subagent :title) (plist-get subagent :agent))
-                 :directory (plist-get data :directory)
-                 :project (plist-get data :project)
-                 :status 'idle
-                 :updated (plist-get subagent :updated)
-                 :created (plist-get subagent :created)
-                 :agent (plist-get subagent :type)))
+                (let* ((model (plist-get subagent :model))
+                       (run (drover-claude-code-transcripts--ran-on
+                             (list :model model :context (plist-get subagent :context))
+                             catalog)))
+                  (drover-session-create
+                   :backend 'claude-code
+                   :id (drover-claude-code-transcripts--subagent-id id (plist-get subagent :agent))
+                   :parent id
+                   :engine 'claude-code
+                   :title (or (plist-get subagent :title) (plist-get subagent :agent))
+                   :directory (plist-get data :directory)
+                   :project (plist-get data :project)
+                   :status 'idle
+                   :updated (plist-get subagent :updated)
+                   :created (plist-get subagent :created)
+                   :agent (plist-get subagent :type)
+                   :model (and model (drover-claude-code-transcripts--model-name model catalog))
+                   :effort (plist-get subagent :effort)
+                   :provider (plist-get run :provider)
+                   :provider-name (plist-get run :provider-name)
+                   :context-tokens (plist-get run :context-tokens)
+                   :context-limit (plist-get run :context-limit))))
               (plist-get data :subagents)))))
 
 (defun drover-claude-code-transcripts--records (predicate)
@@ -790,7 +858,7 @@ PREDICATE is a function of what was read of a conversation."
          (when (funcall predicate data)
            (when-let* ((record (drover-claude-code-transcripts--record data catalog)))
              (push record records)
-             (setq records (append (drover-claude-code-transcripts--subagent-records data) records)))))
+             (setq records (append (drover-claude-code-transcripts--subagent-records data catalog) records)))))
        (drover-claude-code-transcripts--current-index)))
     records))
 
