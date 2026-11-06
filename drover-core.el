@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 21
+(defconst drover-core-generation 22
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -694,7 +694,11 @@ summary while it describes the session's last turn as it stands (see
 `drover-brief-function'); a session of another host carries its
 owner's.")
   (brief-recap nil :documentation "A recap of the session's last turn in a few lines, or nil.
-Written with BRIEF, which an expanded session shows above its last turn."))
+Written with BRIEF, which an expanded session shows above its last turn.")
+  (brief-session nil :documentation "A few sentences on where the whole session stands, or nil.
+Written with BRIEF: what the session set out to do, what is done and
+what comes next, which its buffer shows above its input, so that the
+last turn reads in its context (see `drover-brief-of-buffer')."))
 
 (drover-note-layout 'drover-session)
 
@@ -705,14 +709,19 @@ Written with BRIEF, which an expanded session shows above its last turn."))
   "Lines at most of the recap written with a session's brief.
 See `drover-session-brief-recap'.")
 
+(defconst drover-brief-session-limit 1200
+  "Characters at most of what is written with a brief on the whole session.
+See `drover-session-brief-session'.")
+
 (defvar drover-brief-function nil
   "Function giving a record of this host its brief, or nil.
 Called with each record drover takes in from a backend of this host,
 it returns the record itself, or a copy with the slots `brief' and
-`brief-recap' set to describe its last turn, as `drover-summary-mode'
-writes them.  It is called for every record listed, thousands at
-once: it must cost a lookup, and return the same copy for the same
-record and brief, so that records compare alike.")
+`brief-recap' set to describe its last turn, and `brief-session' the
+whole session, as `drover-summary-mode' writes them.  It is called for
+every record listed, thousands at once: it must cost a lookup, and
+return the same copy for the same record and brief, so that records
+compare alike.")
 
 (defun drover--briefed (record)
   "Return RECORD as `drover-brief-function' gives it its brief.
@@ -743,11 +752,12 @@ signal reading past its end."
 Its title and the other fields shown on a line are cut to their first
 line and `drover-line-limit' characters (see `drover-bound-line'), its
 detail and the summaries of its requests to `drover-text-lines' lines
-and `drover-text-limit' characters, its brief to a line and its recap to
-`drover-brief-recap-lines' lines.  RECORD itself when within those, and
-of all the slots of a `drover-session' now (see
-`drover--whole-record'), unless `drover-brief-function' gives it a
-brief (see `drover--briefed')."
+and `drover-text-limit' characters, its brief to a line, its recap to
+`drover-brief-recap-lines' lines and what it tells of the whole session
+to as many lines and `drover-brief-session-limit' characters.  RECORD
+itself when within those, and of all the slots of a `drover-session'
+now (see `drover--whole-record'), unless `drover-brief-function' gives
+it a brief (see `drover--briefed')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -778,6 +788,12 @@ brief (see `drover--briefed')."
                    (not (eq (drover-bound-text recap drover-brief-recap-lines) recap)))
           (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-brief-recap copy) (drover-bound-text recap drover-brief-recap-lines))))
+      (let ((story (drover-session-brief-session whole)))
+        (when (and (stringp story)
+                   (not (eq (drover-bound-text story drover-brief-recap-lines drover-brief-session-limit) story)))
+          (unless copy (setq copy (copy-sequence whole)))
+          (setf (drover-session-brief-session copy)
+                (drover-bound-text story drover-brief-recap-lines drover-brief-session-limit))))
       (let ((requests (drover-session-requests whole)))
         (when (seq-some (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))

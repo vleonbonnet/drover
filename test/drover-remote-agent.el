@@ -622,7 +622,7 @@ noted, and their cancellations."
              drover-summary-catch-up nil
              drover-summary-generate-function
              (lambda (_prompt callback)
-               (funcall callback (list :text "Done: summarized on the agent\nIts recap"))))
+               (funcall callback (list :text "Done: summarized on the agent\nIts recap\n---\nIts story on the agent."))))
        (drover-summary-mode 1)
        (drover-changed-now)
        (funcall reply (list :ok t)))

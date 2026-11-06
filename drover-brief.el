@@ -20,16 +20,18 @@
 
 ;;; Commentary:
 
-;; A session's buffer shows its brief, the line a model wrote on where
-;; it stands (see `drover-session-brief'), just above its input while
-;; it is idle, as Claude Code shows its recap above its prompt: this
-;; host's sessions as `drover-summary-mode' writes their briefs,
-;; another host's as their owner wrote them.  OpenCode's buffers, of
-;; this host's service or another's, show it through
-;; `opencode-session-summary-function', agent-shell's through an
-;; overlay above their prompt; Claude Code's terminal shows its own
-;; recap, and the mirror of another host's shell the overlay its owner
-;; drew.
+;; A session's buffer shows its brief just above its input while it is
+;; idle, as Claude Code shows its recap above its prompt: a few
+;; sentences a model wrote on where the whole session stands (see
+;; `drover-session-brief-session'), so that the last turn, right above,
+;; reads in its context, else the line it wrote on the last turn and its
+;; recap; lists show the line alone.  This host's sessions show them as
+;; `drover-summary-mode' writes them, another host's as their owner
+;; wrote them.  OpenCode's buffers, of this host's service or another's,
+;; show it through `opencode-session-summary-function', as text,
+;; agent-shell's through an overlay above their prompt; Claude Code's
+;; terminal shows its own recap, and the mirror of another host's shell
+;; the overlay its owner drew.
 ;;
 ;; A buffer asks for the brief of its session with
 ;; `drover-brief-of-buffer', giving the function that shows it anew,
@@ -41,15 +43,15 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 22))
   (load "drover-core" nil t))
 
 (defcustom drover-brief-in-buffers t
   "Whether the buffers of sessions show their briefs above their input.
-A brief is the line a model wrote on where a session stands (see
-`drover-session-brief' and `drover-summary-mode'): OpenCode's and
-agent-shell's buffers show it while the session is idle, its recap on
-a click.  Claude Code's terminal shows a recap of its own."
+A brief is what a model wrote on where a session stands (see
+`drover-session-brief-session' and `drover-summary-mode'): OpenCode's
+and agent-shell's buffers show it while the session is idle.  Claude
+Code's terminal shows a recap of its own."
   :type 'boolean
   :group 'drover
   :set (lambda (symbol value)
@@ -63,14 +65,19 @@ KEY is the key of the session the buffer showed last, or nil; REFRESH,
 a symbol, the function showing it anew, called in the buffer.")
 
 (defun drover-brief--of (session)
-  "Return the brief of SESSION as (LINE . RECAP), or nil.
-The record drover lists, whose brief it took in, else SESSION's own."
+  "Return the brief of SESSION for its buffer, or nil.
+That is what was written of the whole session, a string, else the line
+on its last turn and its recap, (LINE . RECAP).  The record drover
+lists, whose brief it took in, else SESSION's own."
   (when-let* ((record (or (drover-index-session (drover-session-key session)) session))
               (line (drover-session-brief record)))
-    (cons line (drover-session-brief-recap record))))
+    (or (drover-session-brief-session record)
+        (cons line (drover-session-brief-recap record)))))
 
 (defun drover-brief-of-buffer (refresh &optional buffer)
-  "Return the brief of the session of BUFFER as (LINE . RECAP), or nil.
+  "Return the brief of the session of BUFFER for it to show, or nil.
+It is a few sentences on where the whole session stands, a string, else
+the line on its last turn and its recap, (LINE . RECAP).
 BUFFER defaults to the current buffer, whose session is the one at
 point there (see `drover-buffer-session').  REFRESH, a function called
 in BUFFER without argument, shows it anew: drover calls it whenever

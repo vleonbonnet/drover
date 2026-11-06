@@ -246,6 +246,78 @@ SLOTS is a plist of slot names as keywords and values."
     (drover-summary-test-settle)
     (should (= (length drover-summary-test-prompts) 2))))
 
+(ert-deftest drover-summary-test-session-story ()
+  "The model writes of the whole session too, from its title, first prompt and summary so far."
+  (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'idle :title "Search for the app"))
+    (setq drover-test-recaps (list (cons "s1" (list :prompt "Index the notes" :reply drover-summary-test-reply
+                                                    :first-prompt "Add search to the app"))))
+    (setq drover-summary-test-answer
+          '(:text "Done: wrote the index, tests pass\nAdded the index.\n---\nAdding search to the app: the index is done, ranking next."))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (let ((prompt (car drover-summary-test-prompts)))
+      (should (string-search "<session>\nTitle: Search for the app\n\nFirst prompt:\nAdd search to the app\n</session>"
+                             prompt))
+      (should (string-search "<turn>\n" prompt))
+      (should-not (string-search "Summary so far" prompt)))
+    (let ((session (drover-summary-test-of "s1")))
+      ;; Lists show the turn's line, its buffer the session's.
+      (should (equal (drover-session-brief session) "Done: wrote the index, tests pass"))
+      (should (equal (drover-session-brief-session session)
+                     "Adding search to the app: the index is done, ranking next."))
+      (drover-summary-test-with-buffers '("s1")
+        (should (equal (drover-brief-of-buffer #'ignore (car buffers))
+                       "Adding search to the app: the index is done, ranking next."))))
+    ;; Renamed, the same turn is not summarized again.
+    (drover-summary-test-turn "s1" :status 'done :title "Renamed")
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 1))
+    ;; The next turn builds on what was written of the session.
+    (drover-summary-test-turn "s1" :status 'working)
+    (drover-summary-test-settle)
+    (setq drover-test-recaps (list (cons "s1" (list :prompt "Rank the results"
+                                                    :reply (concat drover-summary-test-reply " Ranked.")
+                                                    :first-prompt "Add search to the app")))
+          drover-summary-test-answer
+          '(:text "Done: ranked the results\n---\nAdding search to the app: the index and ranking are done."))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 2))
+    (should (string-search "Summary so far:\nAdding search to the app: the index is done, ranking next."
+                           (car drover-summary-test-prompts)))
+    (should (equal (drover-session-brief-session (drover-summary-test-of "s1"))
+                   "Adding search to the app: the index and ranking are done."))
+    ;; A turn needing no model keeps what was written of the session.
+    (drover-summary-test-turn "s1" :status 'working)
+    (drover-summary-test-settle)
+    (setq drover-test-recaps (list (cons "s1" (list :prompt "Thanks" :reply "You are welcome."))))
+    (drover-summary-test-turn "s1" :status 'done)
+    (drover-summary-test-settle)
+    (should (= (length drover-summary-test-prompts) 2))
+    (should (equal (drover-session-brief (drover-summary-test-of "s1")) "You are welcome."))
+    (should (equal (drover-session-brief-session (drover-summary-test-of "s1"))
+                   "Adding search to the app: the index and ranking are done."))
+    ;; Kept in the file, read by the next Emacs.
+    (drover-summary-mode -1)
+    (setq drover-summary--store nil)
+    (drover-summary-mode 1)
+    (drover-summary-test-settle)
+    (should (equal (drover-session-brief-session (drover-summary-test-of "s1"))
+                   "Adding search to the app: the index and ranking are done."))))
+
+(ert-deftest drover-summary-test-first-prompt ()
+  "The first prompt is its backend's, else what the engines recording the conversation tell first."
+  (drover-summary-test-with nil
+    (let ((session (drover-summary-test-session "s1")))
+      (should (equal (drover-summary--first-prompt session '(:first-prompt "Told by the backend")) "Told by the backend"))
+      (cl-letf (((symbol-function 'drover--recording-backends) (lambda (_) '(recorder)))
+                ((symbol-function 'drover-backend-property)
+                 (lambda (backend property)
+                   (and (eq backend 'recorder) (eq property :search-text)
+                        (lambda (_) (list "The first prompt" "The last prompt"))))))
+        (should (equal (drover-summary--first-prompt session nil) "The first prompt")))
+      (should-not (drover-summary--first-prompt session nil)))))
+
 (ert-deftest drover-summary-test-works-again ()
   "A summary goes as its session works, and the next turn gets its own."
   (drover-summary-test-with (list (drover-summary-test-session "s1" :status 'idle))
@@ -452,16 +524,33 @@ SLOTS is a plist of slot names as keywords and values."
       (let ((prompt (car drover-summary-test-prompts)))
         (should prompt)
         (should-not (string-search "AKIAABCDEFGHIJKLMNOP" prompt))
-        (should (<= (length prompt) (+ drover-summary-input-limit (length drover-summary-instructions) 40)))))))
+        ;; The turn, and the session: its title, first prompt and summary so far.
+        (should (<= (length prompt) (+ drover-summary-input-limit (/ drover-summary-input-limit 2) 200
+                                       (length drover-summary-instructions) 120)))))))
 
 (ert-deftest drover-summary-test-bounded ()
   "What the model writes is bounded, its marks of lists and emphasis dropped."
   (should (equal (drover-summary-parse "\n- **Done: added FTS search**\n\n* first\n2. second\n")
-                 '("Done: added FTS search" . "first\nsecond")))
+                 '("Done: added FTS search" "first\nsecond" nil)))
   (should-not (drover-summary-parse "  \n \n"))
-  (let ((parsed (drover-summary-parse (concat (make-string 500000 ?a) "\n" (make-string 500000 ?b)))))
-    (should (<= (length (car parsed)) 101))
-    (should (<= (length (cdr parsed)) 201))))
+  (let ((parsed (drover-summary-parse (concat (make-string 500000 ?a) "\n" (make-string 500000 ?b)
+                                              "\n---\n" (make-string 500000 ?c)))))
+    (should (<= (length (nth 0 parsed)) 101))
+    (should (<= (length (nth 1 parsed)) 201))
+    (should (<= (length (nth 2 parsed)) (1+ drover-brief-session-limit)))))
+
+(ert-deftest drover-summary-test-parse-session ()
+  "After a line of dashes, the model writes of the whole session: one paragraph."
+  (should (equal (drover-summary-parse
+                  "Done: added search\nThe index is built.\n\n---\nSummary: Adding search to the app.\nThe index is done;\n\nnext, ranking.\n")
+                 '("Done: added search" "The index is built."
+                   "Adding search to the app. The index is done; next, ranking.")))
+  ;; Without a recap, and dashes the model spaced.
+  (should (equal (drover-summary-parse "Done: added search\n  ----  \nAdding search.")
+                 '("Done: added search" nil "Adding search.")))
+  ;; Nothing after them is no summary of the session.
+  (should (equal (drover-summary-parse "Done: added search\n---\n  \n")
+                 '("Done: added search" nil nil))))
 
 (ert-deftest drover-summary-test-opted-out ()
   "Sessions of a harness left out are neither sent nor briefed."

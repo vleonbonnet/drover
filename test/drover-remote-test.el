@@ -909,13 +909,13 @@ restart of the host's remote layer, its counters rising."
                                   "Done: summarized on the agent")))
             (let ((session (drover-index-session '(remote:agent fake . "s0"))))
               (should (equal (drover-session-brief-recap session) "Its recap"))
+              (should (equal (drover-session-brief-session session) "Its story on the agent."))
               (should (equal (drover-session-summary session) "Done: summarized on the agent"))
-              ;; Its buffers here show its owner's brief above their input.
+              ;; Its buffers here show its owner's brief on the session above their input.
               (let ((drover-brief--buffers (make-hash-table :test #'eq :weakness 'key)))
                 (with-temp-buffer
                   (setq-local drover-session-at-point-function (lambda () session))
-                  (should (equal (drover-brief-of-buffer #'ignore)
-                                 '("Done: summarized on the agent" . "Its recap"))))))
+                  (should (equal (drover-brief-of-buffer #'ignore) "Its story on the agent.")))))
             ;; Its turns, recent as they are, are never sent from here.
             (drover-remote-test-settle 0.3)
             (should-not asked)

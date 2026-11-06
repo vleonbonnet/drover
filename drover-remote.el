@@ -68,7 +68,7 @@
 (require 'drover-model)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 22))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -756,6 +756,7 @@ identifier cannot travel."
         ;; another host's sessions.
         (put :brief (drover-remote--plain (drover-session-brief record)))
         (put :brief-recap (drover-remote--plain (drover-session-brief-recap record)))
+        (put :brief-session (drover-remote--plain (drover-session-brief-session record)))
         (put :ops (drover-remote--record-ops record)))
       (nreverse out))))
 
@@ -910,7 +911,10 @@ minus this host's.  Nil when DATA names no session."
                     (if (eq archived t) t (drover-remote--time archived offset)))
         :brief (drover-remote--line (plist-get data :brief))
         :brief-recap (let ((recap (plist-get data :brief-recap)))
-                       (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines))))))))
+                       (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines)))
+        :brief-session (let ((story (plist-get data :brief-session)))
+                         (and (stringp story)
+                              (drover-bound-text story drover-brief-recap-lines drover-brief-session-limit))))))))
 
 ;;;; Serving this host's sessions
 

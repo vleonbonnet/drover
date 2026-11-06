@@ -1485,8 +1485,10 @@ ANEW draws it again even when it is the brief shown, as unfolding does."
   (drover-agent-shell--brief-place))
 
 (defun drover-agent-shell--brief-refresh ()
-  "Ask anew the brief of the current shell's session, and show it above its prompt."
-  (drover-agent-shell--brief-show (drover-brief-of-buffer #'drover-agent-shell--brief-refresh)))
+  "Ask anew the brief of the current shell's session, and show it above its prompt.
+A brief on the whole session shows whole, without a recap to unfold."
+  (let ((brief (drover-brief-of-buffer #'drover-agent-shell--brief-refresh)))
+    (drover-agent-shell--brief-show (if (stringp brief) (cons brief nil) brief))))
 
 (defun drover-agent-shell-toggle-brief-recap ()
   "Show or hide the recap below the brief above this shell's prompt."
