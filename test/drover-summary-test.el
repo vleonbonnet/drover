@@ -535,9 +535,26 @@ SLOTS is a plist of slot names as keywords and values."
   (should-not (drover-summary-parse "  \n \n"))
   (let ((parsed (drover-summary-parse (concat (make-string 500000 ?a) "\n" (make-string 500000 ?b)
                                               "\n---\n" (make-string 500000 ?c)))))
-    (should (<= (length (nth 0 parsed)) 101))
+    (should (<= (length (nth 0 parsed)) (+ drover-summary-line-length 21)))
     (should (<= (length (nth 1 parsed)) 201))
     (should (<= (length (nth 2 parsed)) (1+ drover-brief-session-limit)))))
+
+(ert-deftest drover-summary-test-fit ()
+  "A line too long for the sidebar keeps the leading clauses that fit."
+  (should (equal (drover-summary--fit "Done: FTS search, tests pass") "Done: FTS search, tests pass"))
+  (should (equal (drover-summary--fit "Done: scrcpy flags committed; phone untested")
+                 "Done: scrcpy flags committed"))
+  (should (equal (drover-summary--fit "Done: fresh-keymap skips bare defvars, pushed")
+                 "Done: fresh-keymap skips bare defvars"))
+  (should (equal (drover-summary--fit "Waiting: approval to push — the tests pass on both hosts")
+                 "Waiting: approval to push"))
+  ;; Nowhere to cut, or a first clause too short to tell anything: whole.
+  (should (equal (drover-summary--fit "Done: rewrote the whole parser of Markdown tables")
+                 "Done: rewrote the whole parser of Markdown tables"))
+  (should (equal (drover-summary--fit "Done, everything else is waiting on the maintainers")
+                 "Done, everything else is waiting on the maintainers"))
+  (should (equal (car (drover-summary-parse "Done: scrcpy flags committed; phone untested\nRecap."))
+                 "Done: scrcpy flags committed")))
 
 (ert-deftest drover-summary-test-parse-session ()
   "After a line of dashes, the model writes of the whole session: one paragraph."
