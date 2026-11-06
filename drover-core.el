@@ -246,6 +246,9 @@ As `error-message-string', but on one line of at most
                                 (drover--brief object 2)))
                             (if (proper-list-p data) data (list data))
                             ": "))
+                ;; Said so by `drover-quietly': nobody here to answer.
+                ((eq symbol 'inhibited-interaction)
+                 "it asked a question, which nobody is there to answer")
                 (t
                  (concat (if (stringp message) message (format "%s" symbol))
                          (and data ": ")
@@ -318,6 +321,20 @@ One function failing stops neither the others nor the caller (see
                                                (format "%s" hook))
                         (apply function arguments))
                       nil)))
+
+(defmacro drover-quietly (&rest body)
+  "Run BODY showing no buffer and asking nothing, for a user not at this Emacs.
+For what drover does for another host or an agent: buffers BODY shows
+show in no window, and a question BODY asks signals
+`inhibited-interaction' rather than wait for an answer nobody gives.
+Nor is a dialog box used, which `inhibit-interaction' does not stop,
+and which on Windows stops Emacs whole, timers and processes too, as
+long as it shows."
+  (declare (indent 0) (debug t))
+  `(let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t)))
+         (inhibit-interaction t)
+         (use-dialog-box nil))
+     ,@body))
 
 ;;;; Text from outside
 

@@ -444,16 +444,6 @@ An action that cannot be logged is not taken."
     (drover-anvil--refuse "The action could not be logged in %s, so it is not taken"
                           (abbreviate-file-name (drover-anvil--log-file)))))
 
-;;;; Acting without showing nor asking
-
-(defmacro drover-anvil--quietly (&rest body)
-  "Run BODY showing no buffer and asking nothing.
-Buffers BODY shows show in no window; a question BODY asks signals."
-  (declare (indent 0) (debug t))
-  `(let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t)))
-         (inhibit-interaction t))
-     ,@body))
-
 ;;;; Jobs
 
 ;; A job is a plist: :tool, :caller and :key, as logged; :state,
@@ -546,7 +536,7 @@ Its outcome is logged, and its :finally run."
   (when (eq (drover-anvil--job-get id :state) 'pending)
     (when-let* ((poll (drover-anvil--job-get id :poll)))
       (condition-case err
-          (drover-anvil--quietly
+          (drover-quietly
             (funcall poll id))
         (error (drover-anvil--fail id (drover-error-message err)))))
     (when (and (eq (drover-anvil--job-get id :state) 'pending)
@@ -592,7 +582,7 @@ deferral answering once the job did; otherwise the job, for
 (defun drover-anvil--call (id function &rest arguments)
   "Call FUNCTION with ARGUMENTS for the job ID, failing it on an error."
   (condition-case err
-      (drover-anvil--quietly
+      (drover-quietly
         (apply function arguments))
     (error (drover-anvil--fail id (drover-error-message err)))))
 
@@ -1002,7 +992,7 @@ MCP Parameters:
     (drover-anvil--log-or-refuse "drover-session-send" caller key (drover-anvil--prompt-note prompt))
     (let ((id (drover-anvil--job "drover-session-send" caller key :seconds 60)))
       (condition-case err
-          (drover-anvil--quietly
+          (drover-quietly
             (drover-unarchive-to-send session))
         (error (drover-anvil--fail id (drover-error-message err))))
       (when (eq (drover-anvil--job-get id :state) 'pending)
@@ -1127,7 +1117,7 @@ MCP Parameters:
                (when caller
                  (puthash key caller drover-anvil--started))
                (when prompt
-                 (drover-anvil--quietly
+                 (drover-quietly
                    (drover-backend-call session :send prompt nil))
                  (puthash key (float-time) drover-anvil--sent))
                (drover-anvil--done id `((outcome . "started")
@@ -1229,7 +1219,7 @@ MCP Parameters:
        id #'drover-backend-call session :requests
        (lambda (requests)
          (drover-with-reporting "Anvil answer"
-           (drover-anvil--quietly
+           (drover-quietly
              (drover-anvil--answer-requests id key caller requests request decision answers dismiss)))))
       (drover-anvil--answer id))))
 
@@ -1279,7 +1269,7 @@ MCP Parameters:
                             (drover-with-reporting "Anvil archive"
                               (if (not ok)
                                   (drover-anvil--fail id value)
-                                (drover-anvil--quietly
+                                (drover-quietly
                                   (drover--archive-finish session value))
                                 (drover-anvil--done id `((outcome . "archived")
                                                          (key . ,(drover-anvil--key-of key))))))))

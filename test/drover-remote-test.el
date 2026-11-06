@@ -913,6 +913,7 @@ restart of the host's remote layer, its counters rising."
       ;; Opening it shows what its host tells.
       (save-window-excursion
         (drover-open session)
+        (set-buffer (drover-remote-test-opened))
         (should (derived-mode-p 'drover-remote-session-mode))
         (should (equal (drover-session-id (drover-session-at-point)) '(fake . "s1")))
         (drover-remote-test-wait (lambda () (save-excursion (goto-char (point-min))
@@ -2022,10 +2023,18 @@ leading back to what holds it would print it again from each."
   "Return the agent's shares, as (ID VIEWERS)."
   (mapcar (lambda (share) (append share nil)) (plist-get (drover-remote-test-command "shares") :shares)))
 
-(defun drover-remote-test-open (id)
-  "Open the agent's session ID here, as RET does, and return the buffer shown."
-  (drover-open (drover-remote-test-session id))
+(defun drover-remote-test-opened ()
+  "Return the buffer of the selected window once it waits for no terminal.
+Opening a session of the agent waits for nothing: a buffer waiting for
+its terminal shows meanwhile, which the agent's answer replaces."
+  (drover-remote-test-wait (lambda () (not (buffer-local-value 'drover-remote--opening (window-buffer)))))
   (window-buffer (selected-window)))
+
+(defun drover-remote-test-open (id)
+  "Open the agent's session ID here, as RET does, and return the buffer shown.
+See `drover-remote-test-opened'."
+  (drover-open (drover-remote-test-session id))
+  (drover-remote-test-opened))
 
 (defun drover-remote-test-live (mirror)
   "Wait until MIRROR, a buffer, is live, and check it is."
@@ -2409,6 +2418,62 @@ leading back to what holds it would print it again from each."
     (should-not (assoc "TAB" spyglass-key-commands))
     ;; The arrows recall the history, whatever M-p is bound to there.
     (should-not (assoc "<up>" spyglass-key-commands))))
+
+(ert-deftest drover-remote-test-share-input-asks-nothing ()
+  "A peer's input runs asking nothing here: a command it runs that would ask fails instead."
+  (skip-unless (drover-remote-test--available-p))
+  (with-temp-buffer
+    (let ((use-dialog-box t))
+      (setq-local spyglass-input-function
+                  (lambda (_kind _value)
+                    (should-not use-dialog-box)
+                    (y-or-n-p "Shell is pending user action.  Steer anyway? ")))
+      (should-error (drover-remote--share-input "key" "RET") :type 'inhibited-interaction))))
+
+(ert-deftest drover-remote-test-frozen-peer-holds-no-command ()
+  "A peer frozen, as by a question in a dialog box, holds no command here.
+Opening its session shows at once a buffer waiting for its terminal; a
+command waiting for its answer gives up as it falls silent; the
+connection dropped, the waiting buffer gives way to the session as last
+told, saying why."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-synced 2)
+    (let* ((peer (drover-remote--peer "agent"))
+           (label (drover-remote--label peer))
+           (top (process-id drover-remote-test--agent))
+           (emacs (seq-find (lambda (pid) (eql (alist-get 'ppid (process-attributes pid)) top))
+                            (list-system-processes))))
+      (should emacs)
+      (save-window-excursion
+        (delete-other-windows)
+        (signal-process emacs 'SIGSTOP)
+        (unwind-protect
+            (let ((start (float-time)))
+              (drover-open (drover-remote-test-session "s1"))
+              (should (< (- (float-time) start) 0.5))
+              (let ((waiting (window-buffer)))
+                (should (equal (buffer-local-value 'drover-remote--opening waiting) '("agent" fake . "s1")))
+                (should (string-match-p (format "Waiting for %s to share the terminal" label)
+                                        (with-current-buffer waiting (buffer-string))))
+                ;; Opened again meanwhile, the same buffer waits.
+                (switch-to-buffer "*scratch*")
+                (drover-open (drover-remote-test-session "s1"))
+                (should (eq (window-buffer) waiting))
+                (setq start (float-time))
+                (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "ls" :directory dir) 30)))
+                  (should-not reply)
+                  (should (string-match-p (format "%s has not been heard from" label) error)))
+                ;; Silent twice its heartbeat interval, 1 s here.
+                (should (< (- (float-time) start) 3))
+                (drover-remote-test-wait (lambda () (not (buffer-live-p waiting))) 15)
+                (should-not (buffer-live-p waiting))
+                (with-current-buffer (window-buffer)
+                  (should (derived-mode-p 'drover-remote-session-mode))
+                  (should (string-match-p "Its terminal did not open" (buffer-string))))))
+          (signal-process emacs 'SIGCONT))))
+    (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)) 30)))
 
 (ert-deftest drover-remote-test-mirror-resumes-conversation ()
   "A conversation without a terminal is resumed there, out of its windows, then mirrored here; once."
@@ -3560,7 +3625,7 @@ too, are listed here once it is connected."
                                   (plist-get (drover-remote-test-command "windows") :windows)))
             ;; Opened here once listed: its terminal mirrored.
             (should (drover-remote-open-started "agent" result))
-            (let ((mirror (window-buffer (selected-window))))
+            (let ((mirror (drover-remote-test-opened)))
               (should (equal (buffer-local-value 'drover-remote--mirror-kind mirror) "terminal"))
               (drover-remote-test-live mirror)
               (kill-buffer mirror))))

@@ -119,6 +119,16 @@ came after: the accessors of today read past its end."
                          (drover-report-failure "timer" '(error "Again"))))
                2))))
 
+(ert-deftest drover-robustness-test-quietly ()
+  "Work for a user not at this Emacs shows no window and asks nothing, in no dialog box either."
+  (let ((use-dialog-box t))
+    (drover-quietly
+     (should inhibit-interaction)
+     (should-not use-dialog-box)
+     (should (eq (car display-buffer-overriding-action) 'display-buffer-no-window))))
+  (let ((err (should-error (drover-quietly (y-or-n-p "Send it? ")) :type 'inhibited-interaction)))
+    (should (equal (drover-error-message err) "it asked a question, which nobody is there to answer"))))
+
 (ert-deftest drover-robustness-test-changes-keep-going ()
   "A function of the change hook failing is reported once; the others and the next changes run."
   (drover-test-with-backend (list (drover-test-session "a"))
