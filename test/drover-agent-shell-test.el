@@ -203,6 +203,7 @@ effort for a model without effort."
                       agent-shell--current-mode-id agent-shell--current-thought-level-id
                       agent-shell--get-available-models agent-shell--get-available-thought-levels
                       agent-shell--project-name agent-shell--stop-reason-description
+                      agent-shell--format-buffer-name
                       agent-shell-viewport--buffer agent-shell-viewport--shell-buffer
                       shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output
                       agent-shell-fork acp-send-request acp-make-session-delete-request
@@ -1785,6 +1786,97 @@ One of OpenCode keeps the provider it names, and has nothing recorded."
       (let ((renamed (drover-agent-shell-test-session shell)))
         (should (equal (drover-session-id renamed) (drover-session-id session)))
         (should (equal (drover-session-title renamed) "Fix the build"))))))
+
+(defun drover-agent-shell-test-title (buffer title)
+  "Title the session of the shell of BUFFER TITLE, as agent-shell does.
+That is with the first prompt, then with what the agent tells."
+  (with-current-buffer buffer
+    (agent-shell--set-session-title title)))
+
+(ert-deftest drover-agent-shell-test-named-after-title ()
+  "A shell and its viewport are named after its session's title as it changes."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'codex "Codex Agent @ drover"))
+           (viewport (generate-new-buffer "Codex Agent @ drover [viewport]"))
+           (session (drover-agent-shell-test-session shell)))
+      (push viewport drover-agent-shell-test--buffers)
+      (drover-agent-shell-test-title shell "Fix the build")
+      (should (equal (buffer-name shell) "Fix the build"))
+      (should (equal (buffer-name viewport) "Fix the build [viewport]"))
+      (should (eq (agent-shell-viewport--shell-buffer viewport) shell))
+      (let ((renamed (drover-agent-shell-test-session shell)))
+        (should (equal (drover-session-id renamed) (drover-session-id session)))
+        (should (equal (drover-session-title renamed) "Fix the build")))
+      ;; The agent's title replaces the first prompt's.
+      (drover-agent-shell-test-title shell "Make the build pass")
+      (should (equal (buffer-name shell) "Make the build pass"))
+      (should (equal (buffer-name viewport) "Make the build pass [viewport]"))
+      ;; A name another buffer has is made unique, and stays so.
+      (push (generate-new-buffer "Release") drover-agent-shell-test--buffers)
+      (drover-agent-shell-test-title shell "Release")
+      (should (equal (buffer-name shell) "Release<2>"))
+      (should (equal (buffer-name viewport) "Release<2> [viewport]"))
+      (should (eq (agent-shell-viewport--shell-buffer viewport) shell))
+      (cl-letf (((symbol-function 'shell-maker-set-buffer-name)
+                 (drover-agent-shell-test--recorder 'shell-maker-set-buffer-name)))
+        (drover-agent-shell-test-emit shell 'session-title-changed :title "Release"))
+      (should-not (drover-agent-shell-test--calls-of 'shell-maker-set-buffer-name))
+      (should (equal (buffer-name shell) "Release<2>")))))
+
+(ert-deftest drover-agent-shell-test-named-after-long-title ()
+  "A shell named after a title takes it on one line, cut to the limit.
+A blank title leaves its name."
+  (drover-agent-shell-test-with
+    (let ((drover-agent-shell-name-limit 20)
+          (shell (drover-agent-shell-test-followed 'codex "Codex Agent @ drover")))
+      (drover-agent-shell-test-title shell "Look at\n  the failing tests of the list and fix them")
+      (should (equal (buffer-name shell) "Look at the failing…"))
+      (drover-agent-shell-test-title shell " \n ")
+      (should (equal (buffer-name shell) "Look at the failing…")))))
+
+(ert-deftest drover-agent-shell-test-named-by-user ()
+  "A name the user gives the session or the buffer stays as the title changes."
+  (drover-agent-shell-test-with
+    (let ((renamed (drover-agent-shell-test-followed 'codex "Codex Agent @ drover"))
+          (by-hand (drover-agent-shell-test-followed 'codex "Codex Agent @ drover<2>")))
+      (drover-rename (drover-agent-shell-test-session renamed) "Release")
+      (drover-agent-shell-test-title renamed "The agent's title")
+      (should (equal (buffer-name renamed) "Release"))
+      (should (equal (drover-session-title (drover-agent-shell-test-session renamed)) "Release"))
+      (drover-agent-shell-test-title by-hand "First title")
+      (should (equal (buffer-name by-hand) "First title"))
+      (shell-maker-set-buffer-name by-hand "Mine")
+      (drover-agent-shell-test-title by-hand "Second title")
+      (should (equal (buffer-name by-hand) "Mine"))
+      (should (equal (drover-session-title (drover-agent-shell-test-session by-hand)) "Second title")))))
+
+(ert-deftest drover-agent-shell-test-not-named-after-title ()
+  "With `drover-agent-shell-name-after-title' nil, a shell keeps agent-shell's name."
+  (drover-agent-shell-test-with
+    (let ((drover-agent-shell-name-after-title nil)
+          (shell (drover-agent-shell-test-followed 'codex "Codex Agent @ drover")))
+      (drover-agent-shell-test-title shell "Fix the build")
+      (should (equal (buffer-name shell) "Codex Agent @ drover"))
+      (should (equal (drover-session-title (drover-agent-shell-test-session shell)) "Fix the build")))))
+
+(ert-deftest drover-agent-shell-test-named-after-title-late ()
+  "A shell drover follows late is named after its title if agent-shell named it.
+One the user named keeps its name."
+  (drover-agent-shell-test-with
+    (cl-letf (((symbol-function 'agent-shell--project-name) (lambda () "drover")))
+      (let ((default (drover-agent-shell-test-shell 'codex "Codex Agent @ drover<2>"))
+            (mine (drover-agent-shell-test-shell 'codex "Mine")))
+        (dolist (shell (list default mine))
+          (with-current-buffer shell
+            (map-put! agent-shell--state :agent-config '((:identifier . codex) (:buffer-name . "Codex")))
+            (map-put! (map-elt agent-shell--state :session) :title "Fix the build")
+            (drover-agent-shell--setup t)))
+        (should (equal (buffer-name default) "Fix the build"))
+        (should (equal (buffer-name mine) "Mine"))
+        (drover-agent-shell-test-title mine "Release")
+        (should (equal (buffer-name mine) "Mine"))
+        (drover-agent-shell-test-title default "Release")
+        (should (equal (buffer-name default) "Release"))))))
 
 ;;;; The brief above the prompt
 

@@ -29,6 +29,11 @@
 ;; showing an OpenCode session the OpenCode backend lists too is listed
 ;; once.
 ;;
+;; A shell's buffer is named after its session's title as the title
+;; changes, the agent's or, until the agent gives one, the first prompt
+;; agent-shell titles a session with, until the user names the session
+;; or the buffer (`drover-agent-shell-name-after-title').
+;;
 ;; Statuses come from the shell and its events: a shell still starting
 ;; works, one whose agent waits for a permission or an answer waits, a
 ;; busy one works, and a turn that ended or failed while the shell was
@@ -108,6 +113,7 @@
 (declare-function agent-shell--current-model-id "ext:agent-shell-config" (state))
 (declare-function agent-shell--current-thought-level-id "ext:agent-shell-config" (state))
 (declare-function agent-shell--display-buffer "ext:agent-shell" (shell-buffer))
+(declare-function agent-shell--format-buffer-name "ext:agent-shell" (agent-name project-name))
 (declare-function agent-shell--get-available-models "ext:agent-shell-config" (state))
 (declare-function agent-shell--get-available-thought-levels "ext:agent-shell-config" (state))
 (declare-function agent-shell--project-name "ext:agent-shell-project" ())
@@ -157,6 +163,24 @@ when there are several."
   :type '(repeat symbol)
   :group 'drover)
 
+(defcustom drover-agent-shell-name-after-title t
+  "Whether a shell's buffer is named after its session's title.
+Non-nil names it after the title drover lists the session under as the
+title changes, cut to `drover-agent-shell-name-limit' characters: the
+agent's, or until the agent gives one the first prompt, which
+agent-shell titles a session with.  It does until the user names the
+session (`drover-rename') or the buffer.  Nil leaves the name
+agent-shell gives a shell, such as \"Claude Agent @ PROJECT\"."
+  :type 'boolean
+  :group 'drover)
+
+(defcustom drover-agent-shell-name-limit 60
+  "Characters at most of a shell's buffer name taken from its session's title.
+A longer title, such as a first prompt, is cut, ending in an ellipsis
+\(see `drover-agent-shell-name-after-title')."
+  :type 'natnum
+  :group 'drover)
+
 (defconst drover-agent-shell--preview-limit 4000
   "Characters of a shell's last output a preview shows at most.")
 
@@ -170,6 +194,11 @@ when there are several."
 
 (defvar-local drover-agent-shell--title nil
   "Title the user gave this shell's session, or nil.")
+
+(defvar-local drover-agent-shell--given-name nil
+  "Name agent-shell or drover last gave this shell's buffer, or nil.
+The buffer is named after its session's title while it keeps that name;
+nil for a shell drover followed late under a name of the user's.")
 
 (defvar-local drover-agent-shell--project nil
   "Project of this shell, as (DIRECTORY . NAME), once looked up.")
@@ -1040,6 +1069,8 @@ success."
          (setq drover-agent-shell--activity (float-time))
          (when request
            (setf (alist-get request drover-agent-shell--request-times nil t #'equal) nil)))
+        ('session-title-changed
+         (drover-agent-shell--follow-title))
         ('session-selected
          ;; Another conversation, whose activity is its own.
          (setq drover-agent-shell--outcome nil
@@ -1154,18 +1185,54 @@ it wrote, their lines uncounted, and why the turn failed.  The backend's
                                     drover-agent-shell--start-error))))
              (list :failure "The shell is gone"))))
 
-(defun drover-agent-shell--set-title (buffer title)
-  "Name the shell of BUFFER and its session TITLE.
-Its viewport follows, as agent-shell finds a viewport by the shell's
-name."
+(defun drover-agent-shell--name-buffer (buffer name)
+  "Name the shell of BUFFER NAME, made unique, and its viewport after it.
+The viewport follows, as agent-shell finds a viewport by the shell's
+name.  The name the shell takes is noted as the one drover gave it."
   (let ((viewport (agent-shell-viewport--buffer :shell-buffer buffer :existing-only t)))
-    (shell-maker-set-buffer-name buffer title)
+    (shell-maker-set-buffer-name buffer name)
     (when (buffer-live-p viewport)
       (with-current-buffer viewport
         (rename-buffer (concat (buffer-name buffer) agent-shell-viewport--suffix) t))))
   (with-current-buffer buffer
+    (setq drover-agent-shell--given-name (buffer-name))))
+
+(defun drover-agent-shell--set-title (buffer title)
+  "Name the shell of BUFFER and its session TITLE.
+The buffer no longer follows the agent's title."
+  (drover-agent-shell--name-buffer buffer title)
+  (with-current-buffer buffer
     (setq drover-agent-shell--title title))
   (drover-backend-changed 'agent-shell (buffer-local-value 'drover-agent-shell--id buffer)))
+
+(defun drover-agent-shell--default-name-p ()
+  "Return non-nil when the current shell has the name agent-shell gives shells.
+That is the name `agent-shell--format-buffer-name' makes of its agent
+and its project, made unique as Emacs makes buffer names unique."
+  (when-let* ((agent (map-nested-elt agent-shell--state '(:agent-config :buffer-name)))
+              (project (drover-agent-shell--project-name))
+              (name (ignore-errors (agent-shell--format-buffer-name agent project)))
+              ((stringp name)))
+    (string-match-p (concat "\\`" (regexp-quote name) "\\(?:<[0-9]+>\\)?\\'") (buffer-name))))
+
+(defun drover-agent-shell--follow-title ()
+  "Name the current shell after its session's title, unless the user named it.
+It is named so while `drover-agent-shell-name-after-title' is non-nil,
+the user gave the session no title and the buffer keeps the name
+agent-shell or drover gave it: a name the user gave it stays.  The
+title is the one drover lists the session under, cut to
+`drover-agent-shell-name-limit' characters."
+  (when-let* (((and drover-agent-shell-name-after-title
+                    (not drover-agent-shell--title)
+                    drover-agent-shell--given-name
+                    (equal (buffer-name) drover-agent-shell--given-name)))
+              (title (map-nested-elt agent-shell--state '(:session :title)))
+              ((and (stringp title) (not (string-blank-p title))))
+              (name (drover-bound-line (drover-agent-shell--display-title agent-shell--state)
+                                       drover-agent-shell-name-limit))
+              ;; Unique already, as when another buffer has the name.
+              ((not (equal (generate-new-buffer-name name (buffer-name)) (buffer-name)))))
+    (drover-agent-shell--name-buffer (current-buffer) (substring-no-properties name))))
 
 (defun drover-agent-shell--rename (session title)
   "Rename the shell of SESSION to TITLE."
@@ -1295,11 +1362,18 @@ live."
 (defun drover-agent-shell--setup (&optional existing)
   "Follow the current shell and tell drover its session.
 EXISTING is non-nil for a shell that ran before drover followed it,
-whose creation time is unknown."
+whose creation time is unknown, and whose name may be the user's: its
+buffer is named after its session's title only when it has the name
+agent-shell gives shells (see `drover-agent-shell--follow-title')."
   (drover-with-reporting "agent-shell"
     (when (and (derived-mode-p 'agent-shell-mode) agent-shell--state)
       (unless (or existing drover-agent-shell--created)
         (setq drover-agent-shell--created (float-time)))
+      (unless drover-agent-shell--given-name
+        (setq drover-agent-shell--given-name
+              (and (or (not existing) (drover-agent-shell--default-name-p))
+                   (buffer-name))))
+      (drover-agent-shell--follow-title)
       (when drover-agent-shell--subscription
         (ignore-errors (agent-shell-unsubscribe :subscription drover-agent-shell--subscription)))
       (setq drover-agent-shell--subscription
