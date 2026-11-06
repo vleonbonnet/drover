@@ -665,6 +665,37 @@ restart of the host's remote layer, its counters rising."
       (should (stringp (drover-remote--check-args "options" bad)))))
   (should (stringp (drover-remote--check-args "send" '(:text "go" :model "x")))))
 
+(ert-deftest drover-remote-test-settable-travels ()
+  "Records tell which options their owner can change; the peer notes them beside the record."
+  (drover-test-with-backend (list (drover-test-session "a" :engine 'fake)
+                                  (drover-test-session "b" :engine 'fake))
+    (setq drover-test-settable '(("a" :model)))
+    (should (equal (plist-get (drover-remote-encode-record '(fake . "a") (drover-test-session "a" :engine 'fake)) :set)
+                   ["model"]))
+    (should (equal (plist-get (drover-remote-encode-record '(fake . "b") (drover-test-session "b" :engine 'fake)) :set)
+                   ["agent" "model" "variant"]))
+    ;; A backend applying no options tells none.
+    (setf (plist-get (alist-get 'fake drover--backends) :apply-options) nil)
+    (should-not (plist-member (drover-remote-encode-record '(fake . "a") (drover-test-session "a" :engine 'fake))
+                              :set)))
+  (let ((peer (drover-remote--peer-make :ops (make-hash-table :test #'equal)
+                                        :settable (make-hash-table :test #'equal)))
+        (key '(fake . "a")))
+    (drover-remote--note-ops peer key '(:ops ["send" "options"] :set ["model"]))
+    (should (equal (gethash key (drover-remote--peer-settable peer)) '(:model)))
+    ;; Hostile names are dropped, duplicates told once.
+    (drover-remote--note-ops peer key (list :ops ["options"] :set (vector "agent" "rm -rf" 3 "agent" :false)))
+    (should (equal (gethash key (drover-remote--peer-settable peer)) '(:agent)))
+    (drover-remote--note-ops peer key '(:ops ["options"] :set []))
+    (should (equal (gethash key (drover-remote--peer-settable peer) 'untold) nil))
+    ;; An older drover tells nothing: nothing is noted.
+    (drover-remote--note-ops peer key '(:ops ["options"]))
+    (should (eq (gethash key (drover-remote--peer-settable peer) 'untold) 'untold))
+    (drover-remote--note-ops peer key '(:ops ["options"] :set ["variant"]))
+    (drover-remote--forget-ops peer key)
+    (should (eq (gethash key (drover-remote--peer-settable peer) 'untold) 'untold))
+    (should (eq (gethash key (drover-remote--peer-ops peer) 'untold) 'untold))))
+
 (ert-deftest drover-remote-test-options-performed ()
   "Options are applied through the backend, a model its engine cannot run dropped."
   (drover-test-with-engines
@@ -1587,6 +1618,52 @@ leading back to what holds it would print it again from each."
                              (should (equal (nth 2 (car (drover-remote-test-calls "send"))) "Hello there"))
                              ;; Sessions of the agent are offered to the prompt, without buffers.
                              (should (assoc (drover-remote-test-session "s0") (drover-prompt--target-sessions))))))
+
+(ert-deftest drover-remote-test-build-and-go-there ()
+  "Build switches another host's session to its build agent there, then sends Go ahead."
+  (drover-remote-test-with nil
+    (drover-test-with-engines
+      (drover-test-register-engine 'fake :build-agent "review")
+      (drover-remote-test-start-full dir)
+      (drover-remote-test-command "sessions" :n 2)
+      (drover-remote-test-synced 2)
+      (let ((session (drover-remote-test-session "s0")))
+        ;; What the owner can change travels with the record.
+        (should (drover-supports-p session :apply-options))
+        (should (equal (drover-backend-call session :settable) '(:agent :variant)))
+        (should (drover-build-and-go-p session))
+        (drover-build-and-go session)
+        (drover-remote-test-wait (lambda () (drover-remote-test-calls "send")))
+        (should (equal (seq-filter (lambda (call) (equal (cadr call) "s0")) (drover-remote-test-calls))
+                       '(("options" "s0" "review" :false :false) ("send" "s0" "Go ahead"))))
+        (drover-remote-test-wait (lambda () (equal (drover-session-agent (drover-remote-test-session "s0"))
+                                                   "review")))
+        (should (equal (drover-session-agent (drover-remote-test-session "s0")) "review"))))))
+
+(ert-deftest drover-remote-test-options-refused-there ()
+  "Options the owner refuses are reported, and the prompt goes out anyway."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 1)
+    (drover-remote-test-synced 1)
+    (let ((session (drover-remote-test-session "s0"))
+          (warnings nil)
+          (applied nil))
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (format-string &rest arguments)
+                   (push (apply #'format-message format-string arguments) warnings))))
+        ;; Nothing chosen: nothing asked of the owner.
+        (drover-backend-call session :apply-options '(:agent nil :model nil :variant nil)
+                             (lambda () (setq applied 'nothing)))
+        (should (eq applied 'nothing))
+        (drover-backend-call session :apply-options
+                             (list :model (drover-test-model "unknown" :provider-id "p"))
+                             (lambda () (setq applied t)))
+        (drover-remote-test-wait (lambda () (eq applied t))))
+      (should (eq applied t))
+      (should (equal (length warnings) 1))
+      (should (string-match-p "did not apply the options: .*cannot run unknown; sending the prompt anyway"
+                              (car warnings))))))
 
 (ert-deftest drover-remote-test-answer-request ()
   "A request of another host's session is answered here, what it asks coming from its owner."

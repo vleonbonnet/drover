@@ -1741,6 +1741,7 @@ of a frame stays."
   "Build checks its target agent, waits for the switch and sends once, preserving drafts."
   (require 'drover-keys)
   (drover-prompt-test-with
+    (drover-test-register-engine 'opencode :build-agent "build")
     (let* ((session (drover-prompt-test--session "a" :engine 'opencode :agent "plan"))
            (prompt (drover-prompt-test--prompt "unfinished draft"))
            (pending nil))
@@ -1773,6 +1774,7 @@ of a frame stays."
   "A cancelled send neither switches the agent nor sends Go ahead."
   (require 'drover-keys)
   (drover-prompt-test-with
+    (drover-test-register-engine 'opencode :build-agent "build")
     (let ((session (drover-prompt-test--session "a" :engine 'opencode :agent "plan")))
       (setq drover-test-check-result 'cancel)
       (should-not (drover-build-and-go session))

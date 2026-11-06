@@ -194,6 +194,30 @@ table's metadata."
     (drover-unregister-model-source 'zeta #'identity)
     (should-not drover--model-sources)))
 
+(ert-deftest drover-model-test-build-agent ()
+  "An engine's build agent is a string, or a function's answer; nil otherwise."
+  (drover-test-with-engines
+    (drover-test-register-engine 'opencode :build-agent "build")
+    (drover-test-register-engine 'claude-code :build-agent (lambda () "build"))
+    (drover-test-register-engine 'codex)
+    (drover-test-register-engine 'zeta :build-agent (lambda () ""))
+    (drover-test-register-engine 'alpha :build-agent (lambda () (error "Broken")))
+    (should (equal (drover-engine-build-agent 'opencode) "build"))
+    (should (equal (drover-engine-build-agent 'claude-code) "build"))
+    (should-not (drover-engine-build-agent 'codex))
+    (should-not (drover-engine-build-agent 'zeta))
+    (should-not (drover-engine-build-agent 'unknown))
+    (cl-letf (((symbol-function 'drover-report-failure) #'ignore))
+      (should-not (drover-engine-build-agent 'alpha)))))
+
+(ert-deftest drover-model-test-claude-code-build-agent ()
+  "Claude Code builds while `drover-claude-code-agent-modes' runs build as a mode."
+  (require 'drover-claude-code)
+  (let ((drover-claude-code-agent-modes '(("plan" . "plan") ("build" . "auto"))))
+    (should (equal (drover-engine-build-agent 'claude-code) "build")))
+  (let ((drover-claude-code-agent-modes '(("plan" . "plan"))))
+    (should-not (drover-engine-build-agent 'claude-code))))
+
 (ert-deftest drover-model-test-fake-engine ()
   "Fake engines deliver their defaults and record the calls, as tests expect."
   (drover-test-with-engines

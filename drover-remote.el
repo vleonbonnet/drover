@@ -458,6 +458,9 @@ Each is (MESSAGE CALLBACK DEADLINE), oldest first.")
   (outbox nil :documentation "Actions to send, newest first, as (ACTION KEY ARGS THEN ELSE).")
   (flusher nil :documentation "Timer sending the actions of OUTBOX.")
   (ops nil :documentation "What the owner allows of each session, a list of strings, by its key.")
+  (settable nil :documentation "Which of its options the owner can change of each session, by its key.
+Each a list of :agent, :model and :variant; a key absent when the owner
+told nothing of it.")
   (serial 0 :documentation "The number of the last action sent.")
   (mirrors nil :documentation "The buffers mirroring its sessions' terminals here, by the owner's key."))
 
@@ -763,7 +766,8 @@ identifier cannot travel."
         (put :brief-session (drover-remote--plain (drover-session-brief-session record)))
         ;; Read here, from this host's engines (see `drover-changes').
         (put :changes (drover-remote--encode-totals (drover-session-changes record)))
-        (put :ops (drover-remote--record-ops record)))
+        (put :ops (drover-remote--record-ops record))
+        (put :set (drover-remote--record-settable record)))
       (nreverse out))))
 
 (defun drover-remote--encode-totals (changes)
@@ -800,6 +804,30 @@ greys out what its access forbids, and this host checks it again."
                  (and (drover-supports-p record :requests) (drover-supports-p record :answer) "answer")
                  (and (drover-supports-p record :submit) "send")
                  (and (drover-supports-p record :apply-options) "options"))))))
+
+(defconst drover-remote--options
+  '(("agent" . :agent) ("model" . :model) ("variant" . :variant))
+  "The options of a session a record tells its owner can change, as named there.")
+
+(defun drover-remote--settable (record)
+  "Return which of :agent, :model and :variant RECORD's backend can change now.
+Nil when its backend applies no options; all three when it applies them
+and tells nothing more (see `drover-register-backend', :settable)."
+  (cond ((not (drover-supports-p record :apply-options)) nil)
+        ((drover-supports-p record :settable)
+         (drover-with-reporting "remote options" (drover-backend-call record :settable)))
+        (t '(:agent :model :variant))))
+
+(defun drover-remote--record-settable (record)
+  "Return which of its options this host can change of RECORD for a peer, or nil.
+A vector of names among \"agent\", \"model\" and \"variant\", possibly
+empty; nil when RECORD's backend applies no options, which its record's
+`ops' tell already."
+  (when (drover-supports-p record :apply-options)
+    (let ((settable (drover-remote--settable record)))
+      (vconcat (delq nil (mapcar (lambda (option)
+                                   (and (memq (cdr option) settable) (car option)))
+                                 drover-remote--options))))))
 
 (defun drover-remote--symbol (value)
   "Return the symbol VALUE, a string received, names, or nil when it may not.
@@ -1858,7 +1886,7 @@ last drops the sessions it did not list."
                 (when-let* ((key (drover-remote--key gone))
                             ((gethash key records)))
                   (remhash key records)
-                  (remhash key (drover-remote--peer-ops peer))
+                  (drover-remote--forget-ops peer key)
                   (push key changed))))
             (drover-remote--stat peer :messages)
             (drover-remote--send connection (list :t "ack" :n (plist-get message :n)))
@@ -1869,7 +1897,7 @@ last drops the sessions it did not list."
                   (maphash (lambda (key _) (unless (gethash key listed) (push key gone))) records)
                   (dolist (key gone)
                     (remhash key records)
-                    (remhash key (drover-remote--peer-ops peer))
+                    (drover-remote--forget-ops peer key)
                     (push key changed))
                   (setf (drover-remote--peer-snapshot peer) nil)
                   (drover-remote--stat peer :snapshots)
@@ -1900,13 +1928,30 @@ last drops the sessions it did not list."
 
 (defun drover-remote--note-ops (peer key data)
   "Note what the owner allows of its session KEY, as DATA, its record, tells.
-PEER keeps it beside the record; nil when DATA tells nothing, as an
-older drover's records."
-  (let ((ops (plist-get data :ops)))
+That is the actions it performs on it, and which of its options it can
+change.  PEER keeps them beside the record; each nil when DATA tells
+nothing of it, as an older drover's records."
+  (let ((ops (plist-get data :ops))
+        (set (plist-get data :set))
+        (settable (drover-remote--peer-settable peer)))
     (if (vectorp ops)
         (puthash key (seq-filter (lambda (op) (member op drover-remote--actions)) (seq-take ops 16))
                  (drover-remote--peer-ops peer))
-      (remhash key (drover-remote--peer-ops peer)))))
+      (remhash key (drover-remote--peer-ops peer)))
+    (when settable
+      (if (vectorp set)
+          (puthash key (delete-dups (delq nil (mapcar (lambda (name)
+                                                        (and (stringp name)
+                                                             (cdr (assoc name drover-remote--options))))
+                                                      (seq-take set 8))))
+                   settable)
+        (remhash key settable)))))
+
+(defun drover-remote--forget-ops (peer key)
+  "Forget what the owner allows of its session KEY, gone from PEER's records."
+  (remhash key (drover-remote--peer-ops peer))
+  (when-let* ((settable (drover-remote--peer-settable peer)))
+    (remhash key settable)))
 
 (defun drover-remote--peer-session (peer key)
   "Return PEER's session of the owner's KEY, or nil."
@@ -2214,7 +2259,7 @@ PENDING maps the owner's keys to the kinds asked, as
   '((:interrupt . "interrupt") (:mark-seen . "mark-seen") (:archive . "archive")
     (:unarchive . "unarchive") (:delete . "delete") (:rename . "rename")
     (:respond . "answer") (:send . "send") (:submit . "send")
-    (:requests . "answer") (:answer . "answer"))
+    (:requests . "answer") (:answer . "answer") (:apply-options . "options"))
   "The operations of a peer's proxy forwarded to the owner, by action.")
 
 (defun drover-remote--refusal (peer &optional session action)
@@ -2226,6 +2271,9 @@ Without SESSION and ACTION, why it takes no action at all."
             (drover-remote--label peer)))
    ((not (eq (drover-remote--peer-state peer) 'open))
     (format "%s is not connected" (drover-remote--label peer)))
+   ((and (equal action "options") (not (drover-remote--capable-p peer "opts")))
+    (format "%s runs an older drover, which sets no options for other hosts: update it"
+            (drover-remote--label peer)))
    ((and action (not (drover-remote--allows-p (or (drover-remote--peer-granted peer) 'read) action)))
     (format "%s grants this host %s access" (drover-remote--label peer)
             (or (drover-remote--peer-granted peer) "read")))
@@ -2378,6 +2426,42 @@ a line once it refused or failed."
       (funcall else (format "the prompt is longer than %d characters, which go to another host at most"
                             drover-remote-prompt-limit))
     (drover-remote--act name "send" session (list :text (substring-no-properties text)) then else)))
+
+(defun drover-remote--apply-options-there (name session options then)
+  "Have the peer NAME apply OPTIONS to SESSION, then call THEN once.
+For the proxy's :apply-options: OPTIONS, explicit and filtered for
+SESSION already, go as the action `options', a model as the peer named
+it, [PROVIDER, ID].  What the owner refused, or applied otherwise, is
+warned about, and THEN called whichever way, as a prompt goes out once
+its options were applied."
+  (let* ((agent (plist-get options :agent))
+         (model (plist-get options :model))
+         (variant (plist-get options :variant))
+         (args (append
+                (and (stringp agent) (not (string-empty-p agent))
+                     (list :agent (substring-no-properties (drover-bound-line agent 200))))
+                (and (drover-model-p model) (drover-model-id model)
+                     (list :model (vector (or (drover-model-provider-id model) :false)
+                                          (substring-no-properties (drover-model-id model)))))
+                (and variant (symbolp variant) (list :variant (symbol-name variant))))))
+    (if (null args)
+        (funcall then)
+      (drover-remote--act name "options" session args
+                          (lambda (&rest _) (funcall then))
+                          (lambda (message)
+                            (drover-warn "%s did not apply the options: %s; sending the prompt anyway"
+                                         (drover-session-display-title session) message)
+                            (funcall then))))))
+
+(defun drover-remote--settable-there (name session)
+  "Return which of :agent, :model and :variant the peer NAME can change of SESSION.
+For the proxy's :settable, as the owner's record told; all three when
+it told nothing, as an older drover's records."
+  (let ((settable (when-let* ((peer (drover-remote--peer name)))
+                    (drover-remote--peer-settable peer))))
+    (if settable
+        (gethash (drover-session-id session) settable '(:agent :model :variant))
+      '(:agent :model :variant))))
 
 (defun drover-remote--fetch-requests (name session callback)
   "Fetch from the peer NAME what the pending requests of SESSION ask.
@@ -2937,10 +3021,7 @@ tells them."
              (directory (or (drover-session-directory record) (expand-file-name "~/")))
              (now (and (drover-supports-p record :options)
                        (drover-with-reporting "remote options" (drover-backend-call record :options))))
-             (settable (cond ((not (drover-supports-p record :apply-options)) nil)
-                             ((drover-supports-p record :settable)
-                              (drover-with-reporting "remote options" (drover-backend-call record :settable)))
-                             (t '(:agent :model :variant))))
+             (settable (drover-remote--settable record))
              (model (plist-get now :model))
              (variant (plist-get now :variant)))
         (drover-remote--engine-defaults
@@ -6315,6 +6396,10 @@ CALLBACK gets (REPLY ERROR) once."
      :respond (lambda (session) (drover-remote--respond name session))
      :send (lambda (session text token &optional attachments)
              (drover-remote--send-prompt name session text token attachments))
+     ;; Options the owner applies, before a prompt.
+     :apply-options (lambda (session options then)
+                      (drover-remote--apply-options-there name session options then))
+     :settable (lambda (session) (drover-remote--settable-there name session))
      ;; Without asking, as agents act (see `drover-anvil').
      :submit (lambda (session text then else) (drover-remote--submit name session text then else))
      :requests (lambda (session callback) (drover-remote--fetch-requests name session callback))
@@ -6328,6 +6413,7 @@ EPHEMERAL non-nil for one accepted without configuration."
                                         :backend (drover-remote--backend-name name)
                                         :records (make-hash-table :test #'equal)
                                         :ops (make-hash-table :test #'equal)
+                                        :settable (make-hash-table :test #'equal)
                                         :mirrors (make-hash-table :test #'equal))))
     (puthash name peer (drover-remote--state-peers state))
     (setf (drover-remote--state-order state)
@@ -6351,6 +6437,8 @@ EPHEMERAL non-nil for one accepted without configuration."
         (drover-remote--peer-epoch peer) nil
         (drover-remote--peer-rev peer) nil)
   (clrhash (drover-remote--peer-ops peer))
+  (when (drover-remote--peer-settable peer)
+    (clrhash (drover-remote--peer-settable peer)))
   (drover-remote--catalog-forget (drover-remote--peer-name peer))
   (drover-remote--fail-outbox peer (format "%s closed: %s" (drover-remote--label peer) why))
   (drover-remote--oc-close peer)

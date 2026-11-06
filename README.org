@@ -140,7 +140,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 |-----+----------------------------+----------------------------------------------------------------|
 | =o= | =drover-open-other-window= | open it in another window than =RET= would                     |
 | =A= | =drover-respond=           | answer its question or permission request, else its subagents' |
-| =<tab>= | =drover-build-and-go= | switch to the build agent and send "Go ahead" |
+| =<tab>= | =drover-build-and-go= | switch to its engine's build agent (OpenCode's =build=, Claude Code's mode for =build=) and send "Go ahead" |
 | =E= | =drover-edit-pending-prompt= | withdraw a prompt it has not taken yet, to edit it          |
 | =K= | =drover-interrupt=         | interrupt its turn, after confirmation                         |
 | =s= | =drover-mark-seen=         | mark its ended turn seen                                       |

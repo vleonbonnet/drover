@@ -1068,6 +1068,7 @@ conversation's, or an OpenCode session's."
              ((symbol-function 'vterm-send-string) (drover-claude-code-ide-test--recorder 'vterm-send-string))
              ((symbol-function 'vterm-send-return) (drover-claude-code-ide-test--recorder 'vterm-send-return))
              ((symbol-function 'vterm-send-escape) (drover-claude-code-ide-test--recorder 'vterm-send-escape))
+             ((symbol-function 'vterm-send-key) (drover-claude-code-ide-test--recorder 'vterm-send-key))
              ((symbol-function 'vterm-copy-mode)
               (lambda (arg)
                 (push (list 'vterm-copy-mode arg) drover-claude-code-ide-test-calls)
@@ -1208,13 +1209,13 @@ conversation's, or an OpenCode session's."
     (lambda () then)))
 
 (ert-deftest drover-claude-code-ide-test-agents-reported ()
-  "A running terminal cannot change its agent nor enter plan mode, and says so."
+  "A terminal not reading input keeps its mode; agents not modes are start options."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* agents"))
           (drover-claude-code-agent-modes '(("plan" . "plan"))))
       (should (= (funcall (drover-claude-code-ide-test-apply terminal '(:agent "plan"))) 1))
       (should (equal drover-claude-code-ide-test-warnings
-                     '("*claude* agents enters plan mode only from its own prompt; keeping its current mode")))
+                     '("*claude* agents is not ready for Shift+Tab; keeping its current mode")))
       (setq drover-claude-code-ide-test-warnings nil)
       (should (= (funcall (drover-claude-code-ide-test-apply terminal '(:agent "reviewer"))) 1))
       (should (equal drover-claude-code-ide-test-warnings
@@ -1277,6 +1278,179 @@ conversation's, or an OpenCode session's."
                        '("Could not set the model of *claude* busy: Gone; sending the prompt anyway")))
         (should-not (drover-claude-code-ide-test-pending))))))
 
+;;;; Permission modes
+
+(defun drover-claude-code-ide-test-footer (buffer footer &optional draft)
+  "Show in terminal BUFFER an input box holding DRAFT, then FOOTER below it.
+FOOTER is a line, or nil for none, as in the default mode."
+  (with-current-buffer buffer
+    (erase-buffer)
+    (insert "Earlier: plan mode on\n────\n>" (string #xa0) (or draft "") "\n────\n")
+    (when footer
+      (insert "  " footer "\n"))))
+
+(defmacro drover-claude-code-ide-test-cycling (buffer footers &rest body)
+  "Run BODY with Shift+Tab in terminal BUFFER showing the next of FOOTERS.
+FOOTERS is a ring: each press shows the footer after the one shown,
+the first showing first; `presses' counts them.  Other keys and strings
+are recorded, as `drover-claude-code-ide-test-typing' does."
+  (declare (indent 2) (debug t))
+  `(let ((presses 0)
+         (ring ,footers))
+     (drover-claude-code-ide-test-footer ,buffer (car ring))
+     (drover-claude-code-ide-test-typing
+       (cl-letf (((symbol-function 'ghostel-send-key)
+                  (lambda (key &optional mods)
+                    (push (list 'ghostel-send-key key mods) drover-claude-code-ide-test-calls)
+                    (when (equal (list key mods) '("tab" "shift"))
+                      (setq presses (1+ presses))
+                      (drover-claude-code-ide-test-footer
+                       ,buffer (nth (% presses (length ring)) ring))))))
+         ,@body))))
+
+(defconst drover-claude-code-ide-test-cycle
+  '(nil "⏵⏵ accept edits on (shift+tab to cycle)" "⏸ plan mode on (shift+tab to cycle)"
+        "⏵⏵ auto mode on (shift+tab to cycle)")
+  "Footers of Claude Code's permission modes, in the order Shift+Tab cycles them.")
+
+(ert-deftest drover-claude-code-ide-test-mode-read ()
+  "The mode is the one the footer below the last input box shows, default without one."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* mode")))
+      (should-not (drover-claude-code-ide--mode terminal))
+      (drover-claude-code-ide-test-footer terminal nil)
+      (should (equal (drover-claude-code-ide--mode terminal) "default"))
+      (pcase-dolist (`(,footer . ,mode)
+                     '(("⏸ plan mode on (shift+tab to cycle)" . "plan")
+                       ("⏵⏵ accept edits on" . "acceptEdits")
+                       ("⏵⏵ auto mode on · ? for shortcuts" . "auto")
+                       ("⏵⏵ bypass permissions on (shift+tab to cycle)" . "bypassPermissions")
+                       ("⏵⏵ don't ask on" . "dontAsk")
+                       ("⏸ manual mode on" . "default")
+                       ("? for shortcuts" . "default")
+                       ("⏸ plan mode once" . "default")))
+        (drover-claude-code-ide-test-footer terminal footer)
+        (should (equal (drover-claude-code-ide--mode terminal) mode)))
+      ;; What the box holds, or a line far below it, is no footer.
+      (drover-claude-code-ide-test-footer terminal nil "turn plan mode on")
+      (should (equal (drover-claude-code-ide--mode terminal) "default"))
+      (with-current-buffer terminal
+        (insert "\n\n\n\n⏸ plan mode on\n"))
+      (should (equal (drover-claude-code-ide--mode terminal) "default")))))
+
+(ert-deftest drover-claude-code-ide-test-mode-switched ()
+  "Shift+Tab is pressed until the footer shows the mode; prompts wait meanwhile."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* switch"))
+          (drover-claude-code-agent-modes '(("plan" . "plan") ("build" . "auto")))
+          (drover-claude-code-ide-test-clock 100.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) drover-claude-code-ide-test-clock)))
+        (drover-claude-code-ide-test-cycling terminal drover-claude-code-ide-test-cycle
+          (let ((then (drover-claude-code-ide-test-apply terminal '(:agent "build"))))
+            (should (= presses 1))
+            (should (= (funcall then) 0))
+            (should-not (drover-claude-code-ide--takes-input-p terminal))
+            (should (equal (mapcar #'car (drover-claude-code-ide-test-pending))
+                           (list drover-claude-code-ide--mode-interval)))
+            (drover-claude-code-ide-test-fire)
+            (should (= presses 2))
+            (drover-claude-code-ide-test-fire)
+            (should (= presses 3))
+            (should (= (funcall then) 0))
+            (drover-claude-code-ide-test-fire)
+            (should (= presses 3))
+            (should (= (funcall then) 1))
+            (should (equal (drover-claude-code-ide--mode terminal) "auto"))
+            (should (drover-claude-code-ide--takes-input-p terminal))
+            (should-not (drover-claude-code-ide-test-pending))
+            (should-not drover-claude-code-ide-test-warnings)
+            (should (equal (drover-claude-code-ide-test-called 'ghostel-send-key)
+                           '(("tab" "shift") ("tab" "shift") ("tab" "shift")))))
+          ;; A session in the mode already is left as it is.
+          (should (= (funcall (drover-claude-code-ide-test-apply terminal '(:agent "build"))) 1))
+          (should (= presses 3))
+          (should-not drover-claude-code-ide-test-warnings))))))
+
+(ert-deftest drover-claude-code-ide-test-mode-not-offered ()
+  "A mode the cycle never shows is reported once the first mode shows again."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* cycle"))
+          (drover-claude-code-agent-modes '(("build" . "auto"))))
+      (drover-claude-code-ide-test-cycling terminal (butlast drover-claude-code-ide-test-cycle)
+        (let ((then (drover-claude-code-ide-test-apply terminal '(:agent "build"))))
+          (dotimes (_ 5) (drover-claude-code-ide-test-fire))
+          (should (= presses 3))
+          (should (= (funcall then) 1))
+          (should (equal (drover-claude-code-ide--mode terminal) "default"))
+          (should (drover-claude-code-ide--takes-input-p terminal))
+          (should (equal drover-claude-code-ide-test-warnings
+                         '("*claude* cycle offers no auto mode; it runs default mode"))))))))
+
+(ert-deftest drover-claude-code-ide-test-mode-stuck ()
+  "A footer showing no other mode after Shift+Tab is reported once its time is up."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* stuck"))
+          (drover-claude-code-agent-modes '(("plan" . "plan")))
+          (drover-claude-code-ide-test-clock 100.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) drover-claude-code-ide-test-clock)))
+        (drover-claude-code-ide-test-cycling terminal '(nil)
+          (let ((then (drover-claude-code-ide-test-apply terminal '(:agent "plan"))))
+            (drover-claude-code-ide-test-fire)
+            (should (= (funcall then) 0))
+            (setq drover-claude-code-ide-test-clock (+ 100.1 drover-claude-code-ide--mode-timeout))
+            (drover-claude-code-ide-test-fire)
+            (should (= presses 1))
+            (should (= (funcall then) 1))
+            (should (drover-claude-code-ide--takes-input-p terminal))
+            (should-not (drover-claude-code-ide-test-pending))
+            (should (equal drover-claude-code-ide-test-warnings
+                           '("*claude* stuck showed no other mode after Shift+Tab; it runs default mode, not plan")))))))))
+
+(ert-deftest drover-claude-code-ide-test-mode-then-model ()
+  "The mode switches first, then /model is typed, then the prompt may follow."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* both"))
+          (drover-claude-code-agent-modes '(("plan" . "plan"))))
+      (drover-claude-code-ide-test-cycling terminal drover-claude-code-ide-test-cycle
+        (let ((then (drover-claude-code-ide-test-apply
+                     terminal (list :agent "plan" :model (drover-claude-code-ide-test-model "opus")))))
+          (should-not (drover-claude-code-ide-test-called 'ghostel-send-string))
+          (drover-claude-code-ide-test-fire)
+          (drover-claude-code-ide-test-fire)
+          (should (= presses 2))
+          (should (equal (drover-claude-code-ide-test-called 'ghostel-send-string) '(("/model opus"))))
+          (should (= (funcall then) 0))
+          (should-not (drover-claude-code-ide--takes-input-p terminal))
+          (drover-claude-code-ide-test-fire)
+          (should (= (funcall then) 1))
+          (should (drover-claude-code-ide--takes-input-p terminal))
+          (should-not drover-claude-code-ide-test-warnings))))))
+
+(ert-deftest drover-claude-code-ide-test-mode-terminal-died ()
+  "A terminal dying while it switches lets the prompt go on, which reports it."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* dying"))
+          (drover-claude-code-agent-modes '(("plan" . "plan"))))
+      (drover-claude-code-ide-test-cycling terminal drover-claude-code-ide-test-cycle
+        (let ((then (drover-claude-code-ide-test-apply terminal '(:agent "plan"))))
+          (kill-buffer terminal)
+          (drover-claude-code-ide-test-fire)
+          (should (= (funcall then) 1))
+          (should-not (drover-claude-code-ide-test-pending))
+          (should-not drover-claude-code-ide-test-warnings))))))
+
+(ert-deftest drover-claude-code-ide-test-press-backtab ()
+  "Shift+Tab reaches each terminal as it takes it."
+  (drover-claude-code-ide-test-with
+    (drover-claude-code-ide-test-typing
+      (dolist (mode '(ghostel-mode vterm-mode eat-mode))
+        (with-current-buffer (drover-claude-code-ide-test-terminal "*claude* keys" :mode mode)
+          (setq-local eat-terminal 'eat-terminal)
+          (drover-claude-code-ide--press 'backtab)))
+      (should (equal (drover-claude-code-ide-test-called 'ghostel-send-key) '(("tab" "shift"))))
+      (should (equal (drover-claude-code-ide-test-called 'vterm-send-key) '(("<backtab>"))))
+      (should (equal (drover-claude-code-ide-test-called 'eat-term-send-string) '((eat-terminal "\e[Z")))))))
+
 (ert-deftest drover-claude-code-ide-test-current-options ()
   "What a session runs is what the newest turn of its transcript ran."
   (drover-claude-code-ide-test-with
@@ -1306,7 +1480,7 @@ conversation's, or an OpenCode session's."
               (should (member '(transcript "known" "/work/drover/") drover-claude-code-ide-test-calls))
               (setq turn nil)
               (should-not (drover-claude-code-ide--options session))
-              (should (equal (drover-claude-code-ide--settable session) '(:model)))))
+              (should (equal (drover-claude-code-ide--settable session) '(:agent :model)))))
         (delete-file transcript)))))
 
 (ert-deftest drover-claude-code-ide-test-recap ()
