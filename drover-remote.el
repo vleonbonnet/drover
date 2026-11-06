@@ -372,6 +372,11 @@ of it.")
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
 
+(defconst drover-remote-capabilities-limit 64
+  "Capabilities at most taken of a peer's greeting.
+Above the number `drover-remote-capabilities' holds: a peer's greeting
+was once cut to 16, and the capabilities told last went unseen.")
+
 (defconst drover-remote-history-size 64
   "Events of its link each peer keeps, the oldest going first.")
 
@@ -1320,7 +1325,7 @@ Its capabilities, short strings, and this host's access, granted it."
     (setf (drover-remote--peer-caps peer)
           (and (vectorp caps)
                (seq-filter (lambda (cap) (and (stringp cap) (< (length cap) 32)))
-                           (seq-take caps 16)))))
+                           (seq-take caps drover-remote-capabilities-limit)))))
   (when (drover-remote--peer-grace peer)
     (cancel-timer (drover-remote--peer-grace peer))
     (setf (drover-remote--peer-grace peer) nil))

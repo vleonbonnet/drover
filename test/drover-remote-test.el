@@ -1717,6 +1717,21 @@ leading back to what holds it would print it again from each."
     (should (string-match-p "excessive-lisp-nesting" (drover-remote--peer-error peer)))
     (should (drover-remote--peer-error-time peer))))
 
+(ert-deftest drover-remote-test-greeting-keeps-every-capability ()
+  "A greeting telling every capability of this drover keeps them all, the last too; strange ones go, bounded."
+  (skip-unless (drover-remote-test--available-p))
+  (let ((peer (drover-remote--peer-make :name "core"))
+        (sent nil))
+    (cl-letf (((symbol-function 'drover-remote--send) (lambda (_connection message) (push message sent))))
+      (drover-remote--greeted peer nil (list :caps (vconcat drover-remote-capabilities)))
+      (should (equal (drover-remote--peer-caps peer) drover-remote-capabilities))
+      (should (drover-remote--capable-p peer "queued"))
+      (drover-remote--greeted peer nil (list :caps (vconcat (list 1 (make-string 500000 ?x) "actions")
+                                                            (make-list 1000 "more"))))
+      (should (equal (car (drover-remote--peer-caps peer)) "actions"))
+      (should (= (length (drover-remote--peer-caps peer)) (- drover-remote-capabilities-limit 2))))
+    (should (equal (plist-get (car sent) :t) "grant"))))
+
 (ert-deftest drover-remote-test-restart-keeps-rows ()
   "A peer restarting its remote layer says so: its rows stay, it greets again, and a snapshot of its new epoch comes."
   (drover-remote-test-with nil
