@@ -147,6 +147,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (equal (sort bindings (lambda (a b) (string< (car a) (car b))))
                    (sort (copy-sequence
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
+                            ("<tab>" . drover-build-and-go)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
@@ -165,6 +166,32 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (eq (key-binding (kbd "K")) #'drover-interrupt))
     (drover-session-keys-mode -1)
     (should-not (eq (key-binding (kbd "r")) #'drover-rename))))
+
+(ert-deftest drover-keys-test-build-tab-is-not-control-i ()
+  "The physical Tab builds in both lists; C-i keeps their folding behavior."
+  (require 'drover-list)
+  (drover-keys-test-with nil
+    (dolist (mode '(drover-list-mode drover-list-sidebar-mode))
+      (with-temp-buffer
+        (funcall mode)
+        (should (eq (key-binding (kbd "<tab>")) #'drover-build-and-go))
+        (should (eq (key-binding (kbd "TAB")) (key-binding (kbd "C-i"))))
+        (should (eq (key-binding (kbd "C-i"))
+                    (if (eq mode 'drover-list-sidebar-mode) #'ignore #'magit-section-toggle)))))))
+
+(ert-deftest drover-keys-test-build-and-go-availability ()
+  "Build applies to OpenCode sessions whose backend can switch agents and send."
+  (drover-keys-test-with (list (drover-test-session "s" :engine 'opencode :agent "plan")
+                               (drover-test-session "other" :engine 'claude-code)
+                               (drover-test-session "fixed" :engine 'opencode))
+    (setq drover-test-settable '(("fixed" :model)))
+    (drover-keys-test-in 'view "s"
+      (should (member "<tab>" (drover-keys-test-apt 'drover-dispatch))))
+    (dolist (id '("other" "fixed" nil))
+      (drover-keys-test-in 'view id
+        (should-not (member "<tab>" (drover-keys-test-apt 'drover-dispatch)))
+        (should-error (call-interactively #'drover-build-and-go) :type 'user-error)))
+    (should-not drover-test-calls)))
 
 ;;;; Opening sessions
 
@@ -679,7 +706,7 @@ B applies while a quiet session has a buffer."
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET"))
     ("Conversation" ("C" "f" "H" "."))
-    ("Session" ("o" "u" "c" "v" "R" "A" "K" "s") ("E" "+" "g" "r" "x" "z" "Z" "G")))
+    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("E" "+" "g" "r" "x" "z" "Z" "G")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.
 Neither the view settings, which apply while a list is in sight, nor the
 prompt keys editing or reading a prompt buffer show there.")
@@ -1533,8 +1560,8 @@ The columns, the sort, the grouping and follow mode do not scope a search."
           (should-not (seq-find (lambda (line) (string-search "Column" line)) lines)))))))
 
 (defconst drover-keys-test-menu-heights
-  '((view 160 15) (view 240 12) (prompt-list 160 15) (prompt-list 240 12)
-    (elsewhere 160 9) (elsewhere 240 9) (view-menu 160 8) (search 160 7))
+  '((view 160 16) (view 240 13) (prompt-list 160 16) (prompt-list 240 13)
+    (elsewhere 160 10) (elsewhere 240 10) (view-menu 160 8) (search 160 7))
   "The most lines each menu takes, where, as wide: (WHERE WIDTH LINES).
 In one of drover's lists, in a prompt buffer with a list in sight, in
 another buffer, and the View and search menus, a session at point

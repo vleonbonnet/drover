@@ -1701,6 +1701,48 @@ of a frame stays."
     (insert text)
     (current-buffer)))
 
+(ert-deftest drover-prompt-test-build-and-go-waits-for-agent ()
+  "Build checks its target agent, waits for the switch and sends once, preserving drafts."
+  (require 'drover-keys)
+  (drover-prompt-test-with
+    (let* ((session (drover-prompt-test--session "a" :engine 'opencode :agent "plan"))
+           (prompt (drover-prompt-test--prompt "unfinished draft"))
+           (pending nil))
+      (with-current-buffer prompt
+        (setq drover-prompt-picked-agent "plan"))
+      (with-current-buffer (drover-prompt-test--buffer-of "a")
+        (insert "session draft")
+        (setq-local drover-session-at-point-function (lambda () session)))
+      (setf (plist-get (alist-get 'fake drover--backends) :apply-options)
+            (lambda (target options then)
+              (push (list :apply-options (drover-session-id target) options) drover-test-calls)
+              (setq pending then)))
+      (with-current-buffer (drover-prompt-test--buffer-of "a")
+        (call-interactively #'drover-build-and-go))
+      (should (equal (reverse drover-test-calls)
+                     '((:check "a" "Go ahead" (:agent "build" :model nil :variant nil))
+                       (:apply-options "a" (:agent "build" :model nil :variant nil)))))
+      (should pending)
+      (funcall pending)
+      (funcall pending)
+      (should (equal (seq-filter (lambda (call) (eq (car call) :send)) drover-test-calls)
+                     '((:send "a" "Go ahead" fake-token))))
+      (with-current-buffer prompt
+        (should (equal (buffer-string) "unfinished draft"))
+        (should (equal drover-prompt-picked-agent "plan")))
+      (with-current-buffer (drover-prompt-test--buffer-of "a")
+        (should (equal (buffer-string) "session draft"))))))
+
+(ert-deftest drover-prompt-test-build-and-go-cancelled ()
+  "A cancelled send neither switches the agent nor sends Go ahead."
+  (require 'drover-keys)
+  (drover-prompt-test-with
+    (let ((session (drover-prompt-test--session "a" :engine 'opencode :agent "plan")))
+      (setq drover-test-check-result 'cancel)
+      (should-not (drover-build-and-go session))
+      (should (equal drover-test-calls
+                     '((:check "a" "Go ahead" (:agent "build" :model nil :variant nil))))))))
+
 (ert-deftest drover-prompt-test-send-region ()
   "A region goes to a running session as Markdown, after its checks and options; the rest stays."
   (drover-prompt-test-with

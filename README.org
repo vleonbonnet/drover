@@ -140,6 +140,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 |-----+----------------------------+----------------------------------------------------------------|
 | =o= | =drover-open-other-window= | open it in another window than =RET= would                     |
 | =A= | =drover-respond=           | answer its question or permission request, else its subagents' |
+| =<tab>= | =drover-build-and-go= | switch to the build agent and send "Go ahead" |
 | =E= | =drover-edit-pending-prompt= | withdraw a prompt it has not taken yet, to edit it          |
 | =K= | =drover-interrupt=         | interrupt its turn, after confirmation                         |
 | =s= | =drover-mark-seen=         | mark its ended turn seen                                       |
@@ -155,6 +156,8 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =R= | =drover-review=            | review the changes it made, and comment on them                |
 | =G= | =drover-goal=              | set a goal on it, or pause, resume or stop the one it has      |
 | =V= | =drover-view=              | the View menu: the view keys alone (drover's list)             |
+
+=<tab>=, the physical Tab key in graphical Emacs, switches an OpenCode session to the =build= agent and sends exactly "Go ahead", after the switch settles, leaving any draft intact. It works in the lists and through the dispatch menu. =TAB= (=C-i=) still expands or collapses sections; a terminal must report Tab separately from =C-i= to distinguish these bindings.
 
 =RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds (but in the sidebar, which folds nothing), =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or either list. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 

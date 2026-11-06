@@ -97,6 +97,7 @@
 (autoload 'drover-list-last-session "drover-list" nil t)
 (autoload 'drover-prompt-dwim "drover-prompt" nil t)
 (autoload 'drover-prompt-org-task "drover-prompt" nil t)
+(autoload 'drover-prompt-send-to "drover-prompt")
 (autoload 'drover-task-start "drover-task" nil t)
 (autoload 'drover-task-finish "drover-task" nil t)
 (autoload 'drover-task-link-session "drover-task" nil t)
@@ -589,6 +590,28 @@ lists show."
   (interactive)
   (drover-prompt-run 'open-link))
 
+;;;; Building
+
+(defun drover-build-and-go-p (session)
+  "Return non-nil when SESSION can switch to the build agent and take a prompt."
+  (and (eq (drover-session-engine session) 'opencode)
+       (drover-supports-p session :send)
+       (drover-supports-p session :apply-options)
+       (or (not (drover-supports-p session :settable))
+           (memq :agent (drover-backend-call session :settable)))))
+
+(defun drover-build-and-go (session)
+  "Switch SESSION to the build agent and send the prompt \"Go ahead\".
+Interactively, SESSION is the session at point.  Its backend applies
+the agent before sending, as for options chosen in the prompt; any
+draft stays as it is.  This applies to OpenCode sessions whose backend
+can change their agent."
+  (interactive (list (drover-session-at-point)))
+  (unless (drover-build-and-go-p session)
+    (user-error "%s cannot switch to the build agent"
+                (drover-session-display-title session)))
+  (drover-prompt-send-to session "Go ahead" '(:agent "build")))
+
 ;;;; Session keys
 
 (defvar-keymap drover-session-map
@@ -597,6 +620,7 @@ Drover's views inherit it; `drover-session-keys-mode' binds it in
 other lists."
   "o" #'drover-open-other-window
   "A" #'drover-respond
+  "<tab>" #'drover-build-and-go
   "E" #'drover-edit-pending-prompt
   "K" #'drover-interrupt
   "s" #'drover-mark-seen
@@ -2238,126 +2262,128 @@ session chosen for it, else to one asked for, unshown."
   :class 'drover--menu-prefix
   :refresh-suffixes t
   [:class drover--menu-flow
-   ["Sessions"
-    ("j" "Next" drover-next)
-    ("B" "Bury quiet" drover-bury-quiet-sessions :inapt-if-not drover-dispatch-quiet-p)
-    ("b" "Select" drover-select)
-    ("l" "List" drover-list)
-    ("L" "Side list" drover-list-side)
-    ("p" "Project" drover-select-project)
-    ("S" "Search" drover-search)
-    ("$" "Usage" drover-usage)
-    ;; Only while an action on several sessions runs.
-    ("X" drover--dispatch-stop-description drover-stop-actions :if drover-actions-progress)]
-   ["Prompt"
-    ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
-    ("N" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
-    ("'" "Show prompt" drover-prompt-toggle)
-    ("#" "Scheduled" drover-schedule-list)]
-   ["Task"
-    ("n" "Start or continue" drover-task-start :inapt-if-not drover-dispatch-task-p)
-    ("F" "Finish" drover-task-finish :inapt-if-not drover-dispatch-task-p)
-    ("I" "Link session" drover-task-link-session :inapt-if-not drover-dispatch-task-link-p)
-    ("&" "Attempts" drover-fanout :inapt-if-not drover-dispatch-task-p)
-    ("W" "Worktrees" drover-task-sweep)]
-   [:description drover--dispatch-options-description
-    ("a" "Agent" drover-prompt-agent :class drover--prompt-option :action agent
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))
-    ("m" "Model" drover-prompt-model :class drover--prompt-option :action model
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'model)))
-    ("e" "Effort" drover-prompt-effort :class drover--prompt-option :action effort
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'effort)))
-    ("d" "Directory" drover-prompt-directory :class drover--prompt-option :action directory
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'directory)))]
-   ["Input"
-    ("RET" drover--dispatch-send-description drover-prompt-send
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
-     :if-not drover-dispatch-list-return-p)
-    ;; Where RET opens, Send has a key of its own.
-    ("M-RET" drover--dispatch-send-description drover-prompt-send
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
-     :if drover-dispatch-list-return-p)
-    ;; These edit or read what a prompt buffer shows: only there.
-    ("S-<return>" "Schedule" drover-prompt-schedule :if drover-dispatch-prompt-buffer-p
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'schedule)))
-    ("i" "Attach" drover-prompt-attach :if drover-dispatch-prompt-buffer-p
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))
-    ("k" "Clear" drover-prompt-clear :if drover-dispatch-prompt-buffer-p
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'clear)))]
-   [:if drover-dispatch-prompt-buffer-p
-    ("/" "Slash command" drover-prompt-slash :inapt-if-not (lambda () (drover-dispatch-prompt-p 'slash)))
-    ("@" "Mention" drover-prompt-mention :inapt-if-not (lambda () (drover-dispatch-prompt-p 'mention)))
-    ("y" "Copy block" drover-prompt-copy-block
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'copy-block)))]
-   ["Conversation"
-    ("t" "Revert here" drover-prompt-revert :if drover-dispatch-prompt-buffer-p
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert)))
-    ("T" "Cancel revert" drover-prompt-revert-cancel :if drover-dispatch-prompt-buffer-p
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert-cancel)))
-    ("C" "Compact" drover-compact :inapt-if-not (lambda () (drover-dispatch-prompt-p 'compact)))
-    ("f" "Fork" drover-fork :inapt-if-not (lambda () (drover-dispatch-prompt-p 'fork)))
-    ("H" "Clone" drover-clone
-     :advice* drover--dispatch-in-list
-     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-clone-p)))
-    ("." "Last answer" drover-prompt-last-answer
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'last-answer)))
-    ("O" "Open link" drover-prompt-open-link :if drover-dispatch-prompt-buffer-p
-     :inapt-if-not (lambda () (drover-dispatch-prompt-p 'open-link)))]
-   ["Session"
-    :advice* drover--dispatch-in-list
-    ("o" "Other window" drover-open-other-window
-     :inapt-if-not (lambda () (drover-dispatch-session :open)))
-    ("u" "Parent" drover-open-parent
-     :inapt-if-not (lambda () (drover-dispatch-session :open #'drover-session-parent)))
-    ("c" "Subagent" drover-open-subagent
-     :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
-    ("v" "Peek" drover-peek
-     :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
-    ("R" "Review" drover-review
-     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
-    ("A" "Answer" drover-respond
-     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
-    ("K" "Interrupt" drover-interrupt
-     :inapt-if-not (lambda () (drover-dispatch-selection :interrupt #'drover--running-p)))
-    ("s" "Mark seen" drover-mark-seen
-     :inapt-if-not (lambda () (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p)))]
-   [:advice* drover--dispatch-in-list
-    ("E" drover--dispatch-pending-description drover-edit-pending-prompt
-     :inapt-if-not drover--dispatch-pending-p)
-    ("+" "New session" drover-new-session
-     :inapt-if-not (lambda () (and (or (drover-dispatch-list-p) (drover-dispatch-session))
-                                   (drover--can-start-p))))
-    ("g" "Refresh" drover-refresh
-     :inapt-if-not (lambda () (or (drover-dispatch-list-p) (drover-dispatch-session))))
-    ("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
-    ("x" "Delete" drover-delete :inapt-if-not (lambda () (drover-dispatch-selection :delete)))
-    ("z" "Archive" drover-archive
-     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-archivable-p)))
-    ("Z" "Unarchive" drover-unarchive
-     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-unarchivable-p)))
-    ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)]
-   drover--view-columns
-   ;; Only while the menu acts on one of drover's lists, here or in
-   ;; another window.  Moving stays in the menu, which follows the new
-   ;; session at point.
-   [:description drover--dispatch-list-description
-    :if drover-dispatch-view-p
-    ("C-n" "Next session" drover-list-next-session :transient t :advice drover--dispatch-navigate)
-    ("C-p" "Previous session" drover-list-previous-session :transient t :advice drover--dispatch-navigate)
-    ("M-n" "Next group" drover-list-next-group :transient t :advice drover--dispatch-navigate
-     :inapt-if-not drover--dispatch-grouped-p)
-    ("M-p" "Previous group" drover-list-previous-group :transient t :advice drover--dispatch-navigate
-     :inapt-if-not drover--dispatch-grouped-p)
-    ("M-<" "First session" drover-list-first-session :transient t :advice drover--dispatch-navigate)
-    ("M->" "Last session" drover-list-last-session :transient t :advice drover--dispatch-navigate)
-    ("RET" "Open" drover-open-at-point
-     :advice* drover--dispatch-in-list
-     :if drover-dispatch-list-return-p
-     :inapt-if-not (lambda () (drover-dispatch-session :open)))]]
+          ["Sessions"
+           ("j" "Next" drover-next)
+           ("B" "Bury quiet" drover-bury-quiet-sessions :inapt-if-not drover-dispatch-quiet-p)
+           ("b" "Select" drover-select)
+           ("l" "List" drover-list)
+           ("L" "Side list" drover-list-side)
+           ("p" "Project" drover-select-project)
+           ("S" "Search" drover-search)
+           ("$" "Usage" drover-usage)
+           ;; Only while an action on several sessions runs.
+           ("X" drover--dispatch-stop-description drover-stop-actions :if drover-actions-progress)]
+          ["Prompt"
+           ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
+           ("N" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
+           ("'" "Show prompt" drover-prompt-toggle)
+           ("#" "Scheduled" drover-schedule-list)]
+          ["Task"
+           ("n" "Start or continue" drover-task-start :inapt-if-not drover-dispatch-task-p)
+           ("F" "Finish" drover-task-finish :inapt-if-not drover-dispatch-task-p)
+           ("I" "Link session" drover-task-link-session :inapt-if-not drover-dispatch-task-link-p)
+           ("&" "Attempts" drover-fanout :inapt-if-not drover-dispatch-task-p)
+           ("W" "Worktrees" drover-task-sweep)]
+          [:description drover--dispatch-options-description
+                        ("a" "Agent" drover-prompt-agent :class drover--prompt-option :action agent
+                         :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))
+                        ("m" "Model" drover-prompt-model :class drover--prompt-option :action model
+                         :inapt-if-not (lambda () (drover-dispatch-prompt-p 'model)))
+                        ("e" "Effort" drover-prompt-effort :class drover--prompt-option :action effort
+                         :inapt-if-not (lambda () (drover-dispatch-prompt-p 'effort)))
+                        ("d" "Directory" drover-prompt-directory :class drover--prompt-option :action directory
+                         :inapt-if-not (lambda () (drover-dispatch-prompt-p 'directory)))]
+          ["Input"
+           ("RET" drover--dispatch-send-description drover-prompt-send
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
+            :if-not drover-dispatch-list-return-p)
+           ;; Where RET opens, Send has a key of its own.
+           ("M-RET" drover--dispatch-send-description drover-prompt-send
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'send))
+            :if drover-dispatch-list-return-p)
+           ;; These edit or read what a prompt buffer shows: only there.
+           ("S-<return>" "Schedule" drover-prompt-schedule :if drover-dispatch-prompt-buffer-p
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'schedule)))
+           ("i" "Attach" drover-prompt-attach :if drover-dispatch-prompt-buffer-p
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'attach)))
+           ("k" "Clear" drover-prompt-clear :if drover-dispatch-prompt-buffer-p
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'clear)))]
+          [:if drover-dispatch-prompt-buffer-p
+               ("/" "Slash command" drover-prompt-slash :inapt-if-not (lambda () (drover-dispatch-prompt-p 'slash)))
+               ("@" "Mention" drover-prompt-mention :inapt-if-not (lambda () (drover-dispatch-prompt-p 'mention)))
+               ("y" "Copy block" drover-prompt-copy-block
+                :inapt-if-not (lambda () (drover-dispatch-prompt-p 'copy-block)))]
+          ["Conversation"
+           ("t" "Revert here" drover-prompt-revert :if drover-dispatch-prompt-buffer-p
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert)))
+           ("T" "Cancel revert" drover-prompt-revert-cancel :if drover-dispatch-prompt-buffer-p
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'revert-cancel)))
+           ("C" "Compact" drover-compact :inapt-if-not (lambda () (drover-dispatch-prompt-p 'compact)))
+           ("f" "Fork" drover-fork :inapt-if-not (lambda () (drover-dispatch-prompt-p 'fork)))
+           ("H" "Clone" drover-clone
+            :advice* drover--dispatch-in-list
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-clone-p)))
+           ("." "Last answer" drover-prompt-last-answer
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'last-answer)))
+           ("O" "Open link" drover-prompt-open-link :if drover-dispatch-prompt-buffer-p
+            :inapt-if-not (lambda () (drover-dispatch-prompt-p 'open-link)))]
+          ["Session"
+           :advice* drover--dispatch-in-list
+           ("o" "Other window" drover-open-other-window
+            :inapt-if-not (lambda () (drover-dispatch-session :open)))
+           ("u" "Parent" drover-open-parent
+            :inapt-if-not (lambda () (drover-dispatch-session :open #'drover-session-parent)))
+           ("c" "Subagent" drover-open-subagent
+            :inapt-if-not (lambda () (drover-dispatch-session :open #'drover--has-subagents-p)))
+           ("v" "Peek" drover-peek
+            :inapt-if-not (lambda () (and (drover-dispatch-list-p) (drover-dispatch-session :preview))))
+           ("R" "Review" drover-review
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
+           ("A" "Answer" drover-respond
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
+           ("<tab>" "Build + go" drover-build-and-go
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-build-and-go-p)))
+           ("K" "Interrupt" drover-interrupt
+            :inapt-if-not (lambda () (drover-dispatch-selection :interrupt #'drover--running-p)))
+           ("s" "Mark seen" drover-mark-seen
+            :inapt-if-not (lambda () (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p)))]
+          [:advice* drover--dispatch-in-list
+                    ("E" drover--dispatch-pending-description drover-edit-pending-prompt
+                     :inapt-if-not drover--dispatch-pending-p)
+                    ("+" "New session" drover-new-session
+                     :inapt-if-not (lambda () (and (or (drover-dispatch-list-p) (drover-dispatch-session))
+                                                   (drover--can-start-p))))
+                    ("g" "Refresh" drover-refresh
+                     :inapt-if-not (lambda () (or (drover-dispatch-list-p) (drover-dispatch-session))))
+                    ("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
+                    ("x" "Delete" drover-delete :inapt-if-not (lambda () (drover-dispatch-selection :delete)))
+                    ("z" "Archive" drover-archive
+                     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-archivable-p)))
+                    ("Z" "Unarchive" drover-unarchive
+                     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-unarchivable-p)))
+                    ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)]
+          drover--view-columns
+          ;; Only while the menu acts on one of drover's lists, here or in
+          ;; another window.  Moving stays in the menu, which follows the new
+          ;; session at point.
+          [:description drover--dispatch-list-description
+                        :if drover-dispatch-view-p
+                        ("C-n" "Next session" drover-list-next-session :transient t :advice drover--dispatch-navigate)
+                        ("C-p" "Previous session" drover-list-previous-session :transient t :advice drover--dispatch-navigate)
+                        ("M-n" "Next group" drover-list-next-group :transient t :advice drover--dispatch-navigate
+                         :inapt-if-not drover--dispatch-grouped-p)
+                        ("M-p" "Previous group" drover-list-previous-group :transient t :advice drover--dispatch-navigate
+                         :inapt-if-not drover--dispatch-grouped-p)
+                        ("M-<" "First session" drover-list-first-session :transient t :advice drover--dispatch-navigate)
+                        ("M->" "Last session" drover-list-last-session :transient t :advice drover--dispatch-navigate)
+                        ("RET" "Open" drover-open-at-point
+                         :advice* drover--dispatch-in-list
+                         :if drover-dispatch-list-return-p
+                         :inapt-if-not (lambda () (drover-dispatch-session :open)))]]
   ;; The keys opening the menu close it, as users bind it globally.
   [:class transient-column
-   :hide always
-   :setup-children drover--dispatch-close-entries]
+          :hide always
+          :setup-children drover--dispatch-close-entries]
   drover--menu-close
   (interactive)
   (setq drover--dispatch-close-keys (drover--dispatch-own-keys))

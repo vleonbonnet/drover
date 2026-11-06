@@ -2480,7 +2480,7 @@ Of their keys, only g is a session key, and it refreshes either way."
                           (should (eq theirs #'revert-buffer))
                         (should-not (commandp theirs)))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "<tab>" "E" "K" "s" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.
@@ -6832,7 +6832,7 @@ at 100 and 44 at 60."
     ;; The table of fields shows in two halves side by side, or one under
     ;; the other, as room asks; the view settings show, the list being in
     ;; sight, the prompt keys editing a prompt buffer do not.
-    (pcase-dolist (`(,width . ,bound) '((240 . 9) (160 . 15) (100 . 25) (60 . 38)))
+    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 39)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))
@@ -6858,8 +6858,8 @@ at 100 and 44 at 60."
           (oset transient--prefix plan wide)
           (execute-kbd-macro (kbd "= u"))
           (should (equal (oref transient--prefix plan) wide))
-          ;; As high as the highest group: a title and eight entries.
-          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 9))
+          ;; As high as the highest group: a title and nine entries.
+          (should (= (length (split-string (string-trim-right (drover-list-test-menu-text)) "\n")) 10))
           ;; Narrower than it, the menu is laid out anew.
           (setq width 160)
           (execute-kbd-macro (kbd "= u"))
