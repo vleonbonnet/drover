@@ -1137,8 +1137,9 @@ What the resume calls back with stays scoped to RUN."
                                           (drover-schedule--guard job run 'failed
                                             (drover-schedule--finish job run 'failed message)))))))
         (if (plist-get job :hidden)
-            ;; Scheduled by another host: resumed out of every window.
-            (save-window-excursion (resume))
+            ;; Scheduled by another host, or a goal: resumed out of
+            ;; every window, asking nobody.
+            (save-window-excursion (drover-quietly (resume)))
           (with-selected-window (if (window-live-p window) window (selected-window))
             (resume)))))))
 

@@ -192,29 +192,30 @@ effort for a model without effort."
 (ert-deftest drover-agent-shell-test-upstream-api ()
   "What the backend uses of agent-shell, private parts included, exists."
   (dolist (function '(agent-shell-buffers agent-shell-get-config agent-shell-initialized-p
-                      agent-shell-status agent-shell-last-activity-time agent-shell-subscribe-to
-                      agent-shell-unsubscribe agent-shell-insert agent-shell-prompt-queue
-                      agent-shell-interrupt agent-shell-get-model-name
-                      agent-shell-jump-to-latest-permission-button-row
-                      agent-shell--start agent-shell--display-buffer agent-shell--state
-                      agent-shell--config-option-set-mode-id agent-shell--config-option-set-model-id
-                      agent-shell--config-option-set-thought-level-id
-                      agent-shell--config-option-by-category agent-shell--current-model-id
-                      agent-shell--current-mode-id agent-shell--current-thought-level-id
-                      agent-shell--get-available-models agent-shell--get-available-thought-levels
-                      agent-shell--project-name agent-shell--stop-reason-description
-                      agent-shell--format-buffer-name
-                      agent-shell-viewport--buffer agent-shell-viewport--shell-buffer
-                      shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output
-                      agent-shell-fork acp-send-request acp-make-session-delete-request
-                      agent-shell-viewport-edit-mode))
+                                          agent-shell-status agent-shell-last-activity-time agent-shell-subscribe-to
+                                          agent-shell-unsubscribe agent-shell-insert agent-shell-prompt-queue
+                                          agent-shell-interrupt agent-shell-get-model-name
+                                          agent-shell-jump-to-latest-permission-button-row
+                                          agent-shell--start agent-shell--display-buffer agent-shell--state
+                                          agent-shell--config-option-set-mode-id agent-shell--config-option-set-model-id
+                                          agent-shell--config-option-set-thought-level-id
+                                          agent-shell--config-option-by-category agent-shell--current-model-id
+                                          agent-shell--current-mode-id agent-shell--current-thought-level-id
+                                          agent-shell--get-available-models agent-shell--get-available-thought-levels
+                                          agent-shell--project-name agent-shell--stop-reason-description
+                                          agent-shell--format-buffer-name
+                                          agent-shell-viewport--buffer agent-shell-viewport--shell-buffer
+                                          shell-maker-busy shell-maker-set-buffer-name shell-maker-last-output
+                                          agent-shell-fork acp-send-request acp-make-session-delete-request
+                                          agent-shell-viewport-edit-mode
+                                          agent-shell--prompt-queue-display agent-shell--prompt-queue-process-next))
     (should (fboundp function)))
   ;; What its state tells of a session drover reads.
   (let ((state (agent-shell--make-state :agent-config nil :buffer nil)))
     (dolist (key '(:client :supports-session-fork :available-commands :pending-prompts))
       (should (assq key state))))
   (dolist (variable '(agent-shell--state agent-shell-viewport--suffix agent-shell-mode-hook
-                      agent-shell-viewport--compose-snapshot))
+                                         agent-shell-viewport--compose-snapshot))
     (should (boundp variable)))
   (let ((usage (car (help-split-fundoc (documentation 'agent-shell--start t) 'agent-shell--start))))
     ;; Resuming starts a shell loading a session, in a directory.
@@ -1560,6 +1561,143 @@ One of OpenCode keeps the provider it names, and has nothing recorded."
         (kill-buffer shell)
         (should-error (drover-open session) :type 'user-error)
         (drover-preview session (lambda (text) (should-not text)))))))
+
+(defun drover-agent-shell-test--until (predicate)
+  "Run timers and processes until PREDICATE returns non-nil, a second at most."
+  (let ((deadline (+ (float-time) 1)))
+    (while (and (not (funcall predicate)) (< (float-time) deadline))
+      (accept-process-output nil 0.01))))
+
+(defmacro drover-agent-shell-test-with-interrupt (shell &rest body)
+  "Run BODY with SHELL busy and agent-shell's queue, interrupt and questions stubbed.
+Interrupting is recorded; showing or sending the queue is recorded, as
+`queue-display' and `queue-sent' with the queue then; any question
+fails the test."
+  (declare (indent 1) (debug t))
+  `(cl-letf (((symbol-function 'agent-shell-interrupt)
+              (lambda (&optional force)
+                (push (list 'interrupt (current-buffer) force) drover-agent-shell-test--calls)))
+             ((symbol-function 'agent-shell--prompt-queue-display)
+              (lambda (&rest _)
+                (push (list 'queue-display (map-elt agent-shell--state :pending-prompts))
+                      drover-agent-shell-test--calls)))
+             ((symbol-function 'agent-shell--prompt-queue-process-next)
+              (lambda ()
+                (push (list 'queue-sent (map-elt agent-shell--state :pending-prompts))
+                      drover-agent-shell-test--calls)
+                (map-put! agent-shell--state :pending-prompts nil)))
+             ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked")))
+             ((symbol-function 'yes-or-no-p) (lambda (&rest _) (error "Asked"))))
+     (with-current-buffer ,shell
+       (setq-local shell-maker--busy t))
+     ,@body))
+
+(defun drover-agent-shell-test--queue (shell &optional prompts)
+  "Return the prompts SHELL queued, after setting them to PROMPTS when given."
+  (with-current-buffer shell
+    (when prompts
+      (map-put! agent-shell--state :pending-prompts prompts))
+    (map-elt agent-shell--state :pending-prompts)))
+
+(defun drover-agent-shell-test--turn-ends (shell reason)
+  "End the turn of SHELL for REASON, as agent-shell does, asking nothing.
+The event is emitted first, then agent-shell decides about its queue,
+which drover set aside: it would ask with prompts queued, after a
+cancelled turn."
+  (drover-agent-shell-test-emit shell 'turn-complete :stop-reason reason)
+  (with-current-buffer shell
+    (setq-local shell-maker--busy nil)
+    (when (and (equal reason "cancelled") (map-elt agent-shell--state :pending-prompts))
+      (y-or-n-p "Pending prompts: continue? "))))
+
+(ert-deftest drover-agent-shell-test-interrupt-asks-nothing-later ()
+  "Interrupting a shell with prompts queued asks nothing once its turn ends: they wait, shown."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "interrupted"))
+           (session (drover-agent-shell-test-session shell)))
+      (drover-agent-shell-test-with-interrupt shell
+        (drover-agent-shell-test--queue shell '("what's the status?"))
+        (drover-backend-call session :interrupt)
+        (should (equal (drover-agent-shell-test--calls-of 'interrupt) `((,shell t))))
+        ;; Set aside, so that agent-shell finds nothing to ask about.
+        (should-not (drover-agent-shell-test--queue shell))
+        ;; Typed while the cancel goes, as in a mirror from another host.
+        (drover-agent-shell-test--queue shell '("and then?"))
+        ;; Kept if the shell closes before the turn ends.
+        (should (member "what's the status?" (drover-agent-shell--unsent shell)))
+        (drover-agent-shell-test--turn-ends shell "cancelled")
+        (drover-agent-shell-test--until (lambda () (drover-agent-shell-test--queue shell)))
+        (should (equal (drover-agent-shell-test--queue shell) '("what's the status?" "and then?")))
+        (should (equal (drover-agent-shell-test--calls-of 'queue-display)
+                       '((("what's the status?" "and then?")))))
+        (should-not (drover-agent-shell-test--calls-of 'queue-sent))
+        (with-current-buffer shell
+          (should-not drover-agent-shell--held)
+          (should-not drover-agent-shell--holding))))))
+
+(ert-deftest drover-agent-shell-test-interrupt-too-late ()
+  "A turn its agent ended before the interrupt took sends the prompts queued, as agent-shell would."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "finished"))
+           (session (drover-agent-shell-test-session shell)))
+      (drover-agent-shell-test-with-interrupt shell
+        (drover-agent-shell-test--queue shell '("next"))
+        (drover-backend-call session :interrupt)
+        (drover-agent-shell-test--turn-ends shell "end_turn")
+        (drover-agent-shell-test--until (lambda () (drover-agent-shell-test--calls-of 'queue-sent)))
+        (should (equal (drover-agent-shell-test--calls-of 'queue-sent) '((("next")))))
+        (should-not (drover-agent-shell-test--calls-of 'queue-display))))))
+
+(ert-deftest drover-agent-shell-test-interrupt-failed ()
+  "Prompts set aside come back as the turn's request fails, but not while a turn runs on."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "failing"))
+           (session (drover-agent-shell-test-session shell)))
+      (drover-agent-shell-test-with-interrupt shell
+        (drover-agent-shell-test--queue shell '("later"))
+        (drover-backend-call session :interrupt)
+        ;; Another request failed: the turn runs on, the prompts stay aside.
+        (drover-agent-shell-test-emit shell 'error :message "Setting the mode failed")
+        (drover-agent-shell-test--until (lambda () nil))
+        (should-not (drover-agent-shell-test--queue shell))
+        (with-current-buffer shell
+          (should drover-agent-shell--holding))
+        ;; The turn's own request failed: it runs no more.
+        (with-current-buffer shell
+          (setq-local shell-maker--busy nil))
+        (drover-agent-shell-test-emit shell 'error :message "Overloaded")
+        (drover-agent-shell-test--until (lambda () (drover-agent-shell-test--queue shell)))
+        (should (equal (drover-agent-shell-test--queue shell) '("later")))
+        (should (equal (drover-agent-shell-test--calls-of 'queue-display) '((("later")))))))))
+
+(ert-deftest drover-agent-shell-test-interrupt-then-closed ()
+  "A shell closed while its interrupted turn ends keeps the prompts set aside in the kill ring."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "closing"))
+           (session (drover-agent-shell-test-session shell))
+           (kill-ring nil)
+           (interprogram-cut-function nil))
+      (drover-agent-shell-test-with-interrupt shell
+        (drover-agent-shell-test--queue shell '("never sent"))
+        (drover-backend-call session :interrupt)
+        (drover-agent-shell-test-emit shell 'clean-up)
+        (should (equal (car kill-ring) "never sent"))
+        (with-current-buffer shell
+          (should-not drover-agent-shell--held))))))
+
+(ert-deftest drover-agent-shell-test-interrupt-idle ()
+  "Interrupting a shell running no turn sets nothing aside."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'claude-code "idle"))
+           (session (drover-agent-shell-test-session shell)))
+      (drover-agent-shell-test-with-interrupt shell
+        (with-current-buffer shell
+          (setq-local shell-maker--busy nil))
+        (drover-agent-shell-test--queue shell '("queued"))
+        (drover-backend-call session :interrupt)
+        (should (equal (drover-agent-shell-test--queue shell) '("queued")))
+        (with-current-buffer shell
+          (should-not drover-agent-shell--holding))))))
 
 (ert-deftest drover-agent-shell-test-fork ()
   "A shell whose agent forks is forked by agent-shell, in its own buffer."

@@ -2489,17 +2489,61 @@ is called once the owner answered, ELSE with a line."
                                                  (plist-get answer :answer))))))))
     (drover-remote--act name "answer" session args then else)))
 
+(defun drover-remote--silence (peer)
+  "Return how long PEER has been silent, in seconds, when it seems frozen.
+Nil while it is not.  A peer answers the pings spyglass sends once it
+has been silent its heartbeat interval (see `drover-remote--heartbeat'),
+looked at every half interval: silent twice the interval, it is
+stopped, busy for long, or frozen in a question, though its connection
+is dropped only past the heartbeat's timeout."
+  (when-let* ((connection (drover-remote--peer-connection peer))
+              ((spyglass-connection-live-p connection))
+              (heard (ignore-errors (spyglass-connection-last-recv connection))))
+    (let ((silent (- (float-time) heard)))
+      (and (> silent (* 2 (car (drover-remote--heartbeat peer)))) silent))))
+
+(defun drover-remote--await (peer done timeout)
+  "Wait in a command until DONE, a function of no argument, returns non-nil.
+Emacs reads processes and runs timers meanwhile.  Return t once DONE
+did, else why the wait stopped, a line: TIMEOUT seconds passed; PEER,
+which DONE waits for, fell silent (see `drover-remote--silence'), as a
+peer frozen in a question stays until its connection is dropped; or a
+key was typed, which stops the wait without quitting, the key read
+next.  Past a second, the echo area tells what it waits for."
+  (let* ((start (float-time))
+         (deadline (+ start timeout))
+         (label (drover-remote--label peer))
+         (told nil)
+         (why nil)
+         (done-p nil))
+    (while (not (or (setq done-p (funcall done)) why))
+      (setq why (cond ((>= (float-time) deadline)
+                       (format "%s did not answer in %ss" label timeout))
+                      ((when-let* ((silent (drover-remote--silence peer)))
+                         (format "%s has not been heard from for %ds" label (round silent))))
+                      ((input-pending-p) (format "stopped waiting for %s" label))))
+      (unless why
+        (when (and (not told) (> (- (float-time) start) 1))
+          (setq told t)
+          (let ((message-log-max nil))
+            (message "Waiting for %s... (any key stops waiting)" label)))
+        (accept-process-output nil 0.02)))
+    (when told
+      (let ((message-log-max nil))
+        (message nil)))
+    (if done-p t why)))
+
 (defun drover-remote--wait (peer message timeout)
   "Ask PEER MESSAGE and wait for its answer, TIMEOUT seconds at most.
 Return (REPLY ERROR).  Only for a command that must answer from it:
-Emacs reads processes and runs timers meanwhile, and \\[keyboard-quit] stops it."
-  (let ((answer nil)
-        (deadline (+ (float-time) timeout)))
+Emacs reads processes and runs timers meanwhile, and the wait stops
+early when PEER falls silent or a key is typed (see
+`drover-remote--await')."
+  (let ((answer nil))
     (drover-remote--request peer message (lambda (reply error) (setq answer (list reply error)))
-                            deadline t)
-    (while (and (not answer) (< (float-time) deadline))
-      (accept-process-output nil 0.02))
-    (or answer (list nil (format "%s did not answer in %ss" (drover-remote--label peer) timeout)))))
+                            (+ (float-time) timeout) t)
+    (let ((outcome (drover-remote--await peer (lambda () answer) timeout)))
+      (or answer (list nil outcome)))))
 
 (defun drover-remote--decode-requests (data)
   "Return the requests DATA, received, tells, checked and bounded, oldest first."
@@ -2782,7 +2826,7 @@ now, or drover-schedule is not there."
           (let ((target (drover-remote--schedule-target record conversation args peer))
                 (instruction (format "sent from %s" (drover-remote--label peer)))
                 (text (plist-get args :text)))
-            (let ((inhibit-interaction t))
+            (drover-quietly
               (if running
                   (drover-schedule-add-after-turn target text instruction)
                 (drover-schedule-deliver target text :origin instruction)))
@@ -2903,7 +2947,6 @@ Operations whose backends answer later are `drover-bulk-requests' in
 flight at most, the next sent as answers come; a task is answered once
 all its sessions settled, or failed past its deadline."
   (let ((deadline (+ (float-time) drover-remote-send-slice))
-        (display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t)))
         (link (drover-link state)))
     (catch 'done
       (dolist (task (copy-sequence (drover-remote--state-tasks state)))
@@ -2943,7 +2986,8 @@ all its sessions settled, or failed past its deadline."
                   (funcall settle nil "no such session here")
                 (condition-case err
                     (let ((drover-remote--acting-peer (plist-get task :peer)))
-                      (drover-remote--perform (plist-get task :action) (plist-get task :args) record settle))
+                      (drover-quietly
+                        (drover-remote--perform (plist-get task :action) (plist-get task :args) record settle)))
                   (error (funcall settle nil (drover-error-message err))))))))
         (when (<= (plist-get task :left) 0)
           (drover-remote--finish-task state task))))
@@ -2991,7 +3035,7 @@ once its backend applied them; nothing shows a window nor asks."
           (settle nil "its options are set on its host")
         (condition-case err
             (save-window-excursion
-              (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+              (drover-quietly
                 (drover-backend-call
                  record :apply-options options
                  (lambda ()
@@ -3311,10 +3355,10 @@ gets the prompt scheduled, or why it was not."
           (let* ((target (drover-remote--schedule-target record conversation options peer))
                  (instruction (format "scheduled from %s" (drover-remote--label peer)))
                  (answer (condition-case err
-                             (let* ((inhibit-interaction t)
-                                    (job (cond (at (drover-schedule-add target (seconds-to-time at) text instruction))
-                                               (turn (drover-schedule-add-after-turn target text instruction))
-                                               (t (drover-schedule-add-after-trigger target trigger text instruction)))))
+                             (let* ((job (drover-quietly
+                                          (cond (at (drover-schedule-add target (seconds-to-time at) text instruction))
+                                                (turn (drover-schedule-add-after-turn target text instruction))
+                                                (t (drover-schedule-add-after-trigger target trigger text instruction))))))
                                (drover-remote--event peer 'schedule "scheduled a prompt for %s" (plist-get job :title))
                                (list :job (drover-remote--wire-job job)))
                            (error (list :failure (or (drover-bound-line (drover-error-message err)) "failed"))))))
@@ -3366,7 +3410,7 @@ One cancelled already is answered done."
     (condition-case err
         (progn
           (unless (eq (plist-get job :status) 'cancelled)
-            (let ((inhibit-interaction t))
+            (drover-quietly
               (drover-schedule-cancel job)))
           (funcall reply (list :ok t)))
       (error (funcall reply nil (drover-error-message err))))))
@@ -3377,7 +3421,7 @@ With MESSAGE's :now, one waiting for an event or a turn is sent now."
   (when-let* ((job (drover-remote--peer-job peer message reply "retry a scheduled prompt")))
     (condition-case err
         (progn
-          (let ((inhibit-interaction t))
+          (drover-quietly
             (drover-schedule-retry-job job (eq (plist-get message :now) t)))
           (funcall reply (list :ok t)))
       (error (funcall reply nil (drover-error-message err))))))
@@ -3670,7 +3714,7 @@ through the shell's own command interrupting, comint's by default."
   "Apply a peer's input of KIND and VALUE in the current buffer, shared with it.
 As the buffer's input function, or spyglass's default, applies it, no
 window of this host's taken meanwhile."
-  (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+  (drover-quietly
     (funcall (or spyglass-input-function #'spyglass-default-input) kind value)))
 
 (defun drover-remote--unsent (buffer text)
@@ -3864,8 +3908,7 @@ needing one for its peer goes to spyglass's parking frame."
                        (condition-case err
                            (save-window-excursion
                              (save-current-buffer
-                               (let ((display-buffer-overriding-action
-                                      '(display-buffer-no-window (allow-no-window . t))))
+                               (drover-quietly
                                  (drover-backend-call record :open nil))))
                          (error (finish (list :none (drover-error-message err) :resumable :false))))
                        (poll)))))))
@@ -5123,16 +5166,17 @@ here once done, through PEER, as opening any of its sessions does."
 
 (defun drover-remote--clone-open-there (peer engine id title)
   "Open PEER's conversation ID of ENGINE, a clone of TITLE, once PEER lists it.
-Waited for in the command, `drover-remote-open-timeout' seconds."
+Waited for in the command, `drover-remote-open-timeout' seconds at most
+\(see `drover-remote--await')."
   (let ((label (drover-remote--label peer))
-        (deadline (+ (float-time) drover-remote-open-timeout))
         (found nil))
-    (while (and (not (setq found (seq-find (lambda (record)
-                                             (and (eq (drover-session-engine record) engine)
-                                                  (equal (drover-session-engine-id record) id)))
-                                           (hash-table-values (drover-remote--peer-records peer)))))
-                (< (float-time) deadline))
-      (accept-process-output nil 0.05))
+    (drover-remote--await peer
+                          (lambda ()
+                            (setq found (seq-find (lambda (record)
+                                                    (and (eq (drover-session-engine record) engine)
+                                                         (equal (drover-session-engine-id record) id)))
+                                                  (hash-table-values (drover-remote--peer-records peer)))))
+                          drover-remote-open-timeout)
     (if found
         (progn (drover-message "Cloned %s to %s" (drover-bound-line title 40) label)
                (drover-open found))
@@ -5539,7 +5583,7 @@ it, a line, or nil."
       (condition-case err
           (save-window-excursion
             (save-current-buffer
-              (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+              (drover-quietly
                 (funcall send session text nil)
                 nil)))
         (error (drover-error-message err))))))
@@ -5597,8 +5641,7 @@ engine's identifier, or why it did not start, within
                     (condition-case err
                         (save-window-excursion
                           (save-current-buffer
-                            (let ((display-buffer-overriding-action
-                                   '(display-buffer-no-window (allow-no-window . t))))
+                            (drover-quietly
                               (funcall (drover-backend-property backend :create)
                                        directory engine
                                        (list :agent (plist-get args :agent) :model (plist-get args :model)
@@ -5780,10 +5823,8 @@ else nil.  Nil for a peer starting no session for this host."
       (unless (or fresh (plist-get entry :waiting))
         (drover-remote--catalog-ask peer local directory #'ignore))
       (when (and wait (not (plist-get entry :data)) (not fresh))
-        (let ((deadline (+ (float-time) wait)))
-          (while (and (plist-get (gethash key drover-remote--catalogs) :waiting)
-                      (< (float-time) deadline))
-            (accept-process-output nil 0.02))))
+        (drover-remote--await peer (lambda () (not (plist-get (gethash key drover-remote--catalogs) :waiting)))
+                              wait))
       (plist-get (gethash key drover-remote--catalogs) :data))))
 
 (defun drover-remote--there (peer local)
@@ -5963,15 +6004,14 @@ LATER being called, from a timer, with the answer once it comes, or
 (defun drover-remote-open-started (name result)
   "Open the session the peer NAME started, as RESULT, its answer, names it.
 Once NAME's records list it, waited for in the command,
-`drover-remote-open-timeout' seconds at most: an OpenCode session in a
+`drover-remote-open-timeout' seconds at most (see
+`drover-remote--await'): an OpenCode session in a
 full buffer through NAME, a terminal or a shell mirrored.  Return its
 record, or nil when not listed in time, which the echo area tells."
   (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
-         (deadline (+ (float-time) drover-remote-open-timeout))
          (record nil))
-    (while (and (not (setq record (drover-remote--started-record peer result)))
-                (< (float-time) deadline))
-      (accept-process-output nil 0.02))
+    (drover-remote--await peer (lambda () (setq record (drover-remote--started-record peer result)))
+                          drover-remote-open-timeout)
     (when-let* ((why (plist-get result :unsent)))
       (drover-warn "%s started %s, which did not take the prompt: %s; it is in the kill ring"
                    (drover-remote--label peer) (or (plist-get result :title) "a session") why))
@@ -6896,6 +6936,15 @@ through its host.  Its turn ended unseen is marked seen there, as
 viewing it there would.  AGAIN non-nil shows it anew in the current
 window, without taking another.  NOTE, a line, tells why its terminal
 is not mirrored instead; shown anew, the note stays."
+  (let ((buffer (drover-remote--show-buffer session again note)))
+    (unless again
+      (pop-to-buffer-same-window buffer))
+    buffer))
+
+(defun drover-remote--show-buffer (session &optional again note)
+  "Return the buffer showing SESSION, of another host, as its host tells it.
+Made or shown anew, its details fetched through its host, but displayed
+in no window: see `drover-remote-show' for AGAIN and NOTE."
   (let* ((host (drover-session-host session))
          (peer (or (drover-remote--peer host) (user-error "No peer %s" host)))
          (buffer (get-buffer-create (format "*drover %s: %s*" (drover-remote--label peer)
@@ -6933,8 +6982,6 @@ is not mirrored instead; shown anew, the note stays."
         (set-buffer-modified-p nil)
         (goto-char (point-min))))
     (drover-remote--seen-here peer session)
-    (unless again
-      (pop-to-buffer-same-window buffer))
     buffer))
 
 (defun drover-remote--seen-here (peer session)
@@ -7047,47 +7094,120 @@ session running there."
 (defun drover-remote--open-other (peer session buffer)
   "Open SESSION of PEER, not opened in opencode.el: mirrored, else its view.
 BUFFER is its mirror, if any.  See `drover-remote-open'."
-  (if (and buffer (not (eq (spyglass-mirror-state buffer) 'closed)))
-      (progn (pop-to-buffer-same-window buffer)
-             (drover-remote--seen-here peer session)
-             buffer)
-    (if-let* ((why (drover-remote--why-no-mirror peer session)))
-        (drover-remote-show session nil why)
-      (drover-remote--open-mirror peer session buffer))))
+  (cond
+   ((and buffer (not (eq (spyglass-mirror-state buffer) 'closed)))
+    (pop-to-buffer-same-window buffer)
+    (drover-remote--seen-here peer session)
+    buffer)
+   ((when-let* ((waiting (drover-remote--opening-buffer (drover-remote--peer-name peer)
+                                                        (drover-session-id session))))
+      (pop-to-buffer-same-window waiting)
+      waiting))
+   ((when-let* ((why (drover-remote--why-no-mirror peer session)))
+      (drover-remote-show session nil why)))
+   (t (drover-remote--open-mirror peer session buffer))))
+
+(defvar-local drover-remote--opening nil
+  "In a buffer waiting for a peer to share a session's terminal, (NAME . KEY).
+NAME is the peer's, KEY its key of the session.")
+
+(define-derived-mode drover-remote-opening-mode special-mode "Drover remote"
+  "A terminal of another host being opened.
+Its mirror takes the windows of this buffer once its host shares it;
+killing the buffer gives up opening it.  The keys of drover's sessions
+act on its session through its host."
+  (setq-local drover-session-at-point-function #'drover-remote--shown-session))
+
+(defun drover-remote--opening-buffer (name key)
+  "Return the buffer waiting for the peer NAME to share session KEY's terminal."
+  (seq-find (lambda (buffer)
+              (equal (buffer-local-value 'drover-remote--opening buffer) (cons name key)))
+            (buffer-list)))
 
 (defun drover-remote--open-mirror (peer session buffer)
   "Ask PEER for SESSION's terminal and mirror it, in BUFFER if one closed.
-Waited for in the command, `drover-remote-open-timeout' seconds, or
-`drover-remote-resume-timeout' when PEER may resume it first;
-\[keyboard-quit] stops waiting.  Shown as its host tells it when there
-is none."
-  (let* ((label (drover-remote--label peer))
+The command waits for nothing: BUFFER, else a buffer named as the
+mirror is, shows at once what is awaited, and is returned.  PEER's
+answer, given within `drover-remote-open-timeout' seconds, or
+`drover-remote-resume-timeout' when PEER may resume the session first,
+puts the mirror in the windows showing it, else the session as its host
+tells it, saying why it has no terminal (see `drover-remote-show').
+Killing the waiting buffer meanwhile gives up opening it, PEER
+unsharing it later as for any mirror closed."
+  (let* ((name (drover-remote--peer-name peer))
+         (key (drover-session-id session))
+         (label (drover-remote--label peer))
          (title (drover-bound-line (drover-session-display-title session) 60))
-         (resume (drover-remote--allows-p (or (drover-remote--peer-granted peer) 'read) "resume")))
-    (drover-message "Opening %s's terminal of %s..." label title)
-    (pcase-let ((`(,reply ,error)
-                 (drover-remote--wait peer (list :op "mirror" :key (drover-remote--wire-key session)
-                                                 :resume (if resume t :false)
-                                                 :id (drover-remote--action-id peer))
-                                      (if resume drover-remote-resume-timeout drover-remote-open-timeout))))
-      (cond
-       (error
-        (drover-remote-show session nil (format "Its terminal did not open: %s" error)))
-       ((stringp (plist-get reply :share))
-        (let ((mirror (drover-remote--attach-mirror peer session reply buffer)))
-          (drover-message "")
-          (pop-to-buffer-same-window mirror)
-          (drover-remote--seen-here peer session)
-          mirror))
-       (t
-        (drover-remote-show
-         session nil
-         (format "%s: %s%s" label
-                 (or (drover-remote--line (plist-get reply :none) 200) "it has no terminal")
-                 (if (and (not resume) (eq (plist-get reply :resumable) t))
-                     (format "; %s grants this host %s access, which resumes nothing" label
-                             (or (drover-remote--peer-granted peer) "read"))
-                   ""))))))))
+         (resume (drover-remote--allows-p (or (drover-remote--peer-granted peer) 'read) "resume"))
+         (reuse (and buffer (buffer-live-p buffer) buffer))
+         (waiting (or reuse (generate-new-buffer (format "*%s@%s*" title label))))
+         (link (drover-link peer))
+         (asked (format "Waiting for %s to share the terminal of %s%s..." label title
+                        (if resume ", which it resumes first if none runs it" ""))))
+    (if reuse
+        (drover-remote--mirror-closed-why reuse asked)
+      (with-current-buffer waiting
+        (drover-remote-opening-mode)
+        (setq drover-remote--shown (cons name key))
+        (let ((inhibit-read-only t))
+          (insert (drover-face asked 'drover-dim) "\n"))
+        (set-buffer-modified-p nil)))
+    (with-current-buffer waiting
+      (setq drover-remote--opening (cons name key)))
+    (drover-remote--event peer 'mirror "asking for the terminal of %s" title)
+    ;; Shown first: an answer coming at once, as a stream found gone
+    ;; gives, takes the windows it shows in.
+    (pop-to-buffer-same-window waiting)
+    (drover-remote--request
+     peer (list :op "mirror" :key (drover-remote--wire-key session)
+                :resume (if resume t :false)
+                :id (drover-remote--action-id peer))
+     (lambda (reply error)
+       (drover-with-reporting "remote mirror"
+         (when (buffer-live-p waiting)
+           (with-current-buffer waiting
+             (setq drover-remote--opening nil))
+           (when-let* ((peer (drover-linked link)))
+             (drover-remote--opened
+              peer (or (drover-remote--peer-session peer key) session) waiting reuse
+              (cond
+               (error (format "Its terminal did not open: %s" error))
+               ((stringp (plist-get reply :share)) reply)
+               (t (format "%s: %s%s" label
+                          (or (drover-remote--line (plist-get reply :none) 200) "it has no terminal")
+                          (if (and (not resume) (eq (plist-get reply :resumable) t))
+                              (format "; %s grants this host %s access, which resumes nothing" label
+                                      (or (drover-remote--peer-granted peer) "read"))
+                            "")))))))))
+     (+ (float-time) (if resume drover-remote-resume-timeout drover-remote-open-timeout))
+     t)
+    (window-buffer (selected-window))))
+
+(defun drover-remote--opened (peer session waiting reuse answer)
+  "Show in the windows of WAITING what opening SESSION's terminal gave.
+PEER is SESSION's host; ANSWER its answer telling the share to mirror,
+a plist, else why there is none, a line, shown with the session as its
+host tells it.  WAITING is the buffer that waited: REUSE, a mirror that
+closed, opened anew in place, else a buffer that goes once replaced."
+  (let* ((windows (get-buffer-window-list waiting nil t))
+         (shown (if (stringp answer)
+                    (drover-remote--show-buffer session nil answer)
+                  (unless reuse
+                    ;; The mirror takes the name the waiting buffer had.
+                    (with-current-buffer waiting
+                      (rename-buffer (generate-new-buffer-name " *drover opening*"))))
+                  (drover-remote--attach-mirror peer session answer reuse))))
+    (unless (eq shown waiting)
+      (dolist (window windows)
+        (set-window-buffer window shown))
+      (if reuse
+          (when (stringp answer)
+            (drover-remote--mirror-closed-why reuse answer))
+        (drover-kill-buffer waiting)))
+    ;; The session as its host tells it was marked seen as it was made.
+    (when (and windows (not (stringp answer)))
+      (drover-remote--seen-here peer session))
+    shown))
 
 (defun drover-remote--attach-mirror (peer session reply &optional buffer)
   "Mirror the terminal of SESSION, of PEER, as REPLY, its owner's answer, tells.

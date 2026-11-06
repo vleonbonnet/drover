@@ -119,6 +119,8 @@
 (declare-function agent-shell--project-name "ext:agent-shell-project" ())
 (declare-function agent-shell--live-input-prompt-p "ext:agent-shell-prompt" (prompt))
 (declare-function agent-shell--prompt-input-start "ext:agent-shell-prompt" ())
+(declare-function agent-shell--prompt-queue-display "ext:agent-shell-prompt-queue" t)
+(declare-function agent-shell--prompt-queue-process-next "ext:agent-shell-prompt-queue" ())
 (declare-function agent-shell--start "ext:agent-shell" t)
 (declare-function agent-shell--state "ext:agent-shell" ())
 (declare-function agent-shell--stop-reason-description "ext:agent-shell" (stop-reason))
@@ -246,6 +248,15 @@ user, a chunk begins a new message.")
 
 (defvar-local drover-agent-shell--written nil
   "Files the agent wrote since the last prompt, newest first.")
+
+(defvar-local drover-agent-shell--holding nil
+  "Non-nil from drover interrupting this shell's turn until that turn ends.
+The prompts the shell queues meanwhile are set aside as the turn ends
+\(see `drover-agent-shell--hold').")
+
+(defvar-local drover-agent-shell--held nil
+  "The prompts this shell queued, set aside as drover interrupted its turn.
+Oldest first; they are queued again once the turn ended.")
 
 ;;;; Shells
 
@@ -1050,6 +1061,7 @@ success."
          (setq drover-agent-shell--request-times nil)
          (drover-agent-shell--end-activity)
          (let ((reason (map-elt data :stop-reason)))
+           (drover-agent-shell--held-turn-end reason)
            (pcase reason
              ("end_turn" (drover-agent-shell--end-turn 'done nil))
              ("cancelled" (setq drover-agent-shell--outcome nil))
@@ -1060,6 +1072,7 @@ success."
              (setq drover-agent-shell--start-error message))
            (when drover-agent-shell--in-turn
              (drover-agent-shell--end-activity))
+           (drover-agent-shell--held-failure)
            (drover-agent-shell--end-turn 'failed message)))
         ((or 'permission-request 'elicitation-request)
          (setq drover-agent-shell--activity (float-time))
@@ -1078,6 +1091,12 @@ success."
                drover-agent-shell--in-turn nil
                drover-agent-shell--activity nil))
         ('clean-up
+         ;; Prompts set aside, which agent-shell did not count as queued
+         ;; before its shell went.
+         (when (drover-keep-unsent drover-agent-shell--held (current-buffer))
+           (drover-message "%s closed with prompts it never sent, now in the kill ring" (buffer-name)))
+         (setq drover-agent-shell--held nil
+               drover-agent-shell--holding nil)
          (setq drover-agent-shell--outcome nil
                drover-agent-shell--request-times nil
                drover-agent-shell--in-turn nil)))
@@ -1145,9 +1164,90 @@ the window where the user works."
     (agent-shell-jump-to-latest-permission-button-row)))
 
 (defun drover-agent-shell--interrupt (session)
-  "Stop the running turn of SESSION, without asking: drover asked already."
+  "Stop the running turn of SESSION, without asking: drover asked already.
+Nor is anything asked once the turn ends: the prompts its shell queued
+are set aside until then, then queued again and shown, unsent (see
+`drover-agent-shell--hold')."
   (with-current-buffer (drover-agent-shell--live-buffer session)
-    (agent-shell-interrupt t)))
+    (let ((running (shell-maker-busy)))
+      (when running
+        (drover-agent-shell--hold))
+      (condition-case err
+          (agent-shell-interrupt t)
+        (error (when running
+                 (setq drover-agent-shell--holding nil)
+                 (drover-agent-shell--requeue))
+               (signal (car err) (cdr err)))))))
+
+;; A turn cancelled while prompts wait in its shell's queue has
+;; agent-shell ask whether to send them, from the process filter reading
+;; the agent's answer: of whoever looks at this Emacs then, or of nobody,
+;; when another host interrupted it.  On Windows the question is a dialog
+;; box, which stops Emacs whole, its connections to other hosts included,
+;; until answered.  The prompts are set aside before agent-shell sees the
+;; turn end, then queued again and shown, as answering no leaves them.
+
+(defun drover-agent-shell--hold ()
+  "Set aside the prompts the current shell queued, until its turn ends.
+They go after those set aside already; agent-shell, finding its queue
+empty as the turn ends, asks nothing about it."
+  (setq drover-agent-shell--held (append drover-agent-shell--held
+                                         (map-elt agent-shell--state :pending-prompts))
+        drover-agent-shell--holding t)
+  (setf (map-elt agent-shell--state :pending-prompts) nil))
+
+(defun drover-agent-shell--requeue ()
+  "Queue again in the current shell the prompts set aside, before any queued since.
+Return non-nil when there were some."
+  (when drover-agent-shell--held
+    (setf (map-elt agent-shell--state :pending-prompts)
+          (append drover-agent-shell--held (map-elt agent-shell--state :pending-prompts)))
+    (setq drover-agent-shell--held nil)
+    t))
+
+(defun drover-agent-shell--held-turn-end (reason)
+  "Note that the current shell's interrupted turn ended, for REASON.
+REASON is the stop reason ACP told, or nil when its request failed.  On
+the turn's end, before agent-shell decides about its queue: what it
+holds is set aside too, and all of it queued again once agent-shell is
+done with the turn (see `drover-agent-shell--release')."
+  (when drover-agent-shell--holding
+    (drover-agent-shell--hold)
+    (setq drover-agent-shell--holding nil)
+    (when drover-agent-shell--held
+      (let ((buffer (current-buffer)))
+        (run-at-time 0 nil (lambda ()
+                             (drover-with-reporting "agent-shell queued prompts"
+                               (drover-agent-shell--release buffer reason))))))))
+
+(defun drover-agent-shell--held-failure ()
+  "Note that a request of the current shell failed while its turn was interrupted.
+Its turn may run on, the failure another request's: once agent-shell
+reported it, from a timer, the prompts set aside are released only if
+no turn runs any more."
+  (when drover-agent-shell--holding
+    (let ((buffer (current-buffer)))
+      (run-at-time 0 nil (lambda ()
+                           (drover-with-reporting "agent-shell queued prompts"
+                             (when (buffer-live-p buffer)
+                               (with-current-buffer buffer
+                                 (when (and drover-agent-shell--holding (not (shell-maker-busy)))
+                                   (setq drover-agent-shell--holding nil)
+                                   (drover-agent-shell--release buffer nil))))))))))
+
+(defun drover-agent-shell--release (buffer reason)
+  "Queue again in shell BUFFER the prompts set aside, its turn ended for REASON.
+A turn its agent ended (\"end_turn\") before the interrupt took sends
+them, as agent-shell would; otherwise they wait in the queue, shown with
+how to send or remove them, as agent-shell leaves them when told not to
+send them.  A turn running again meanwhile takes them as it ends; one
+interrupted again meanwhile keeps them aside until it ends."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (and (not drover-agent-shell--holding) (drover-agent-shell--requeue))
+        (cond ((shell-maker-busy))
+              ((equal reason "end_turn") (agent-shell--prompt-queue-process-next))
+              (t (agent-shell--prompt-queue-display)))))))
 
 (defun drover-agent-shell--mark-seen (session)
   "Mark the ended turn of SESSION seen."
@@ -1282,13 +1382,15 @@ agent-shell shuts its agent down as the buffer goes."
 (defun drover-agent-shell--unsent (buffer)
   "Return what the shell of BUFFER holds that its agent never got, as strings.
 That is the input typed at its prompt, the prompts it queued, which a
-turn ending sends but a failed or cancelled one leaves, and a prompt
-composed in its viewport, or kept there while it shows an answer."
+turn ending sends but a failed or cancelled one leaves, those set aside
+while its turn is interrupted, and a prompt composed in its viewport, or
+kept there while it shows an answer."
   (with-current-buffer buffer
     (let ((process (get-buffer-process buffer))
           (viewport (ignore-errors
                       (agent-shell-viewport--buffer :shell-buffer buffer :existing-only t))))
       (append (list (and process (buffer-substring-no-properties (process-mark process) (point-max))))
+              drover-agent-shell--held
               (seq-filter #'stringp (map-elt agent-shell--state :pending-prompts))
               (list (and (buffer-live-p viewport)
                          (with-current-buffer viewport
@@ -1305,6 +1407,8 @@ some.  Its queued prompts kept, agent-shell has nothing to ask before
 the shell goes.  The backend's :close."
   (when-let* ((buffer (drover-agent-shell--buffer session)))
     (prog1 (drover-keep-unsent (drover-agent-shell--unsent buffer) buffer)
+      (with-current-buffer buffer
+        (setq drover-agent-shell--held nil))
       (drover-agent-shell--close buffer))))
 
 (defun drover-agent-shell--delete (session)
