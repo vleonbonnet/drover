@@ -159,7 +159,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 
 =<tab>=, the physical Tab key in graphical Emacs, switches an OpenCode session to the =build= agent and sends exactly "Go ahead", after the switch settles, leaving any draft intact. It works in the lists and through the dispatch menu. =TAB= (=C-i=) still expands or collapses sections; a terminal must report Tab separately from =C-i= to distinguish these bindings.
 
-=RET= opens the session at point, and the usual keys of each list stay: =n= and =p= move, =TAB= folds (but in the sidebar, which folds nothing), =q= quits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or either list. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
+=RET= opens the session at point, and =1= to =9= the sessions of those numbers, =0= the last, counting the sessions at the top of their trees as the list shows them, but subagents and the sessions of collapsed groups (see [[*The List group][The List group]]). The usual keys of each list stay: =n= and =p= move, =TAB= folds (but in the sidebar, which folds nothing), =q= quits; Magit's =1= to =4=, which show sections down to a level, give way to the digits. =RET= opens it where the list sends sessions: from a side window, in the window where you work; from an ordinary window, in the list's own window. =o= opens it in another window than that one: the window already showing the session, else the one used last, else a window split from it; never in a side window, a window dedicated to its buffer or either list. Drover chooses the window and selects it before the backend shows the session, so sessions of every backend open alike. In lists drover does not draw, =drover-session-keys-mode= adds these keys. opencode.el lists no sessions of its own: drover's list shows them.
 
 =E= takes back a prompt sent to the session that it has not taken yet, such as one sent while a turn runs, which waits pending for the next step or the turn's end: the front end withdraws it, and its text goes into =*drover*=, set to go to that session (see [[*The prompt][The prompt]]), its attachments with it, to be edited and sent again. With several pending, which one is read. The menu shows how many are pending beside it, and greys it out when none is; for OpenCode, the session's buffer keeps its pending prompts, shown or not, and a session without a buffer has none to take back. A pending prompt withdrawn from the session's buffer, by a click, goes into =*drover*= too (=opencode-withdrawn-prompt-function=, which drover sets to =drover-opencode-edit-withdrawn= unless you set it yourself; set it to =opencode-put-old-input= to edit it in the session's input).
 
@@ -193,20 +193,23 @@ While the menu acts on drover's list, here or beside, it shows a group more, nam
    M-p Previous group
    M-< First session
    M-> Last session
+   1…9 0 Open by number
    RET Open
 #+end_example
 
-| Key   | Command                        | Action                                          |
-|-------+--------------------------------+-------------------------------------------------|
-| =C-n= | =drover-list-next-session=     | the next session, over group headings           |
-| =C-p= | =drover-list-previous-session= | the previous session                            |
-| =M-n= | =drover-list-next-group=       | the first session of the next group             |
-| =M-p= | =drover-list-previous-group=   | the first session of the previous group         |
-| =M-<= | =drover-list-first-session=    | the first session                               |
-| =M->= | =drover-list-last-session=     | the last session in sight                       |
-| =RET= | =drover-open-at-point=         | open the session at point, as =RET= in the list |
+| Key       | Command                        | Action                                          |
+|-----------+--------------------------------+-------------------------------------------------|
+| =C-n=     | =drover-list-next-session=     | the next session, over group headings           |
+| =C-p=     | =drover-list-previous-session= | the previous session                            |
+| =M-n=     | =drover-list-next-group=       | the first session of the next group             |
+| =M-p=     | =drover-list-previous-group=   | the first session of the previous group         |
+| =M-<=     | =drover-list-first-session=    | the first session                               |
+| =M->=     | =drover-list-last-session=     | the last session in sight                       |
+| =1=…=9=   | =drover-list-open-numbered=    | open the session of that number, as =RET= would |
+| =0=       | =drover-list-open-numbered=    | open the last session in sight                  |
+| =RET=     | =drover-open-at-point=         | open the session at point, as =RET= in the list |
 
-Sessions of collapsed groups are passed over. =RET= opens the session as =RET= in the list would: from a side window, in the window where you work; from an ordinary window, in that window, or with =C-u=, the menu's prefix argument, in another one. In a buffer sending prompts, such as =*drover*=, =RET= stays Send: a prompt lost to a slip of the finger costs more than reaching for =o=, which opens the list's session in another window. So does it from any other buffer, a file you edit beside the sidebar, while =*drover*= holds a prompt to send, more than blanks: =C-' RET= sends it, hidden or not. Only in the list itself does =RET= open the session while a prompt waits, as =RET= does there; =C-' M-RET= sends the prompt from the list. The menu never shows the two =RET=. These keys bind nothing in the list itself, where Magit's =n=, =p=, =M-n= and =M-p= move.
+Sessions of collapsed groups are passed over. The digits count the sessions at the top of their trees, in the order the list shows them: subagents are not numbered, so that a number stays with its session as subagents come and go. Opened by number, a session opens as =RET= at its row would, the list's point moving to it: =C-' 3=, in a file beside the sidebar, opens the sidebar's third session in the window where you work. =RET= opens the session as =RET= in the list would: from a side window, in the window where you work; from an ordinary window, in that window, or with =C-u=, the menu's prefix argument, in another one. In a buffer sending prompts, such as =*drover*=, =RET= stays Send: a prompt lost to a slip of the finger costs more than reaching for =o=, which opens the list's session in another window. So does it from any other buffer, a file you edit beside the sidebar, while =*drover*= holds a prompt to send, more than blanks: =C-' RET= sends it, hidden or not. Only in the list itself does =RET= open the session while a prompt waits, as =RET= does there; =C-' M-RET= sends the prompt from the list. The menu never shows the two =RET=. The moving keys bind nothing in the list itself, where Magit's =n=, =p=, =M-n= and =M-p= move; the digits do, in both lists.
 
 ** Prompt keys
 

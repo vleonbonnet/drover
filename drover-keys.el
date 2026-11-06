@@ -53,7 +53,9 @@
 ;; in a buffer sending prompts, where it stays the prompt key Send, and
 ;; from another buffer while drover's prompt holds a prompt to send,
 ;; where RET sends it.  In the list itself, RET opens, and M-RET sends
-;; the prompt: the menu never shows both RET.
+;; the prompt: the menu never shows both RET.  The digits open the
+;; sessions at the top of their trees by number, 0 the last, as in the
+;; list: one entry shows them all.
 ;;
 ;; Bind `drover-dispatch' globally, for instance to C-'; drover binds no
 ;; global key.  Other packages add their own global commands to the menu
@@ -95,6 +97,7 @@
 (autoload 'drover-list-previous-group "drover-list" nil t)
 (autoload 'drover-list-first-session "drover-list" nil t)
 (autoload 'drover-list-last-session "drover-list" nil t)
+(autoload 'drover-list-open-numbered "drover-list" nil t)
 (autoload 'drover-prompt-dwim "drover-prompt" nil t)
 (autoload 'drover-prompt-org-task "drover-prompt" nil t)
 (autoload 'drover-prompt-send-to "drover-prompt")
@@ -2195,6 +2198,17 @@ when inherited from the defaults or when the entry does not apply.")
 (defvar drover--dispatch-close-keys nil
   "The keys of `drover-dispatch' where it last opened, which close it.")
 
+(defclass drover--menu-digits (transient-suffix) ()
+  "The entry of the dispatch menu standing for the digits that open sessions.
+Its key is 1, and it shows the keys 1 to 9 and 0 together: the other
+nine are entries of a hidden group of the menu, running the same
+command, so that ten keys take one line.")
+
+(cl-defmethod transient-format-key ((obj drover--menu-digits))
+  "Return the keys OBJ stands for, 1 to 9 and 0, in the face of its own."
+  (let ((key (cl-call-next-method obj)))
+    (concat key (propertize "…9 0" 'face (get-text-property 0 'face key)))))
+
 (defun drover--dispatch-own-keys ()
   "Return the keys running `drover-dispatch' in the current buffer.
 Those of the menu's own entries, which keep their command there, and
@@ -2255,7 +2269,9 @@ List group moves that point, the menu staying open and following the
 new session at point, and RET opens the session, but in a buffer that
 sends prompts, where RET stays Send, and from another buffer while
 drover's prompt holds a prompt to send, which RET sends.  In the list
-itself, RET opens the session and M-RET sends that prompt.
+itself, RET opens the session and M-RET sends that prompt.  The digits
+1 to 9 open the sessions at the top of their trees by number, 0 the
+last, as in the list (see `drover-list-open-numbered').
 
 Send sends drover's prompt from any buffer, as from the prompt, to the
 session chosen for it, else to one asked for, unshown."
@@ -2376,6 +2392,8 @@ session chosen for it, else to one asked for, unshown."
                          :inapt-if-not drover--dispatch-grouped-p)
                         ("M-<" "First session" drover-list-first-session :transient t :advice drover--dispatch-navigate)
                         ("M->" "Last session" drover-list-last-session :transient t :advice drover--dispatch-navigate)
+                        ("1" "Open by number" drover-list-open-numbered :class drover--menu-digits
+                         :advice* drover--dispatch-in-list)
                         ("RET" "Open" drover-open-at-point
                          :advice* drover--dispatch-in-list
                          :if drover-dispatch-list-return-p
@@ -2384,6 +2402,20 @@ session chosen for it, else to one asked for, unshown."
   [:class transient-column
           :hide always
           :setup-children drover--dispatch-close-entries]
+  ;; The other digits of the List group's entry, which shows them all.
+  [:class transient-column
+          :hide always
+          :if drover-dispatch-view-p
+          :advice* drover--dispatch-in-list
+          ("2" "Open 2" drover-list-open-numbered)
+          ("3" "Open 3" drover-list-open-numbered)
+          ("4" "Open 4" drover-list-open-numbered)
+          ("5" "Open 5" drover-list-open-numbered)
+          ("6" "Open 6" drover-list-open-numbered)
+          ("7" "Open 7" drover-list-open-numbered)
+          ("8" "Open 8" drover-list-open-numbered)
+          ("9" "Open 9" drover-list-open-numbered)
+          ("0" "Open last" drover-list-open-numbered)]
   drover--menu-close
   (interactive)
   (setq drover--dispatch-close-keys (drover--dispatch-own-keys))

@@ -2453,14 +2453,17 @@ body beginning with an aligned space would push the next line right."
     (let ((parent (keymap-parent drover-list-mode-map)))
       (should (eq (nth 1 parent) drover-session-map))
       (should (eq (nth 2 parent) magit-section-mode-map)))
-    ;; RET, C-o and q are the only keys of the list's own, and copying
-    ;; copies sessions, wherever the user binds it.
+    ;; RET, C-o, q and the digits are the only keys of the list's own,
+    ;; and copying copies sessions, wherever the user binds it.
     (let ((own nil))
       (map-keymap (lambda (event _) (push (key-description (vector event)) own))
                   (let ((map (copy-keymap drover-list-mode-map)))
                     (set-keymap-parent map nil)
                     map))
-      (should (seq-set-equal-p own '("RET" "C-o" "q" "<remap>"))))
+      (should (seq-set-equal-p own '("RET" "C-o" "q" "<remap>" "1" "2" "3" "4" "5" "6" "7" "8" "9" "0"))))
+    ;; The digits open sessions, rather than show Magit's levels.
+    (dolist (key '("1" "4" "9" "0"))
+      (should (eq (key-binding (kbd key)) #'drover-list-open-numbered)))
     (should (eq (key-binding (kbd "M-w")) #'drover-list-copy))
     (drover-list-test-goto-group 'working)
     (should (eq (key-binding (kbd "RET")) #'magit-section-toggle))))
@@ -6832,7 +6835,7 @@ at 100 and 44 at 60."
     ;; The table of fields shows in two halves side by side, or one under
     ;; the other, as room asks; the view settings show, the list being in
     ;; sight, the prompt keys editing a prompt buffer do not.
-    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 39)))
+    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 40)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))
@@ -7073,7 +7076,7 @@ at 100 and 44 at 60."
 
 (ert-deftest drover-list-test-dispatch-list-keys ()
   "The List group's keys are its own: transient binds none of them."
-  (dolist (key '("C-n" "C-p" "M-n" "M-p" "M-<" "M->"))
+  (dolist (key '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "1" "9" "0"))
     (dolist (map (list transient-map transient-base-map transient-popup-navigation-map
                        transient-predicate-map))
       (should-not (commandp (keymap-lookup map key)))))
@@ -7086,12 +7089,112 @@ at 100 and 44 at 60."
                                         ("M-<" . drover-list-first-session)
                                         ("M->" . drover-list-last-session)
                                         ("RET" . drover-open-at-point)
+                                        ("1" . drover-list-open-numbered)
+                                        ("5" . drover-list-open-numbered)
+                                        ("0" . drover-list-open-numbered)
                                         ("C-u" . universal-argument)))
       (should (eq (keymap-lookup transient--transient-map key) command)))
     ;; One key, one entry of the menu.
     (let ((keys (mapcar (lambda (suffix) (oref suffix key))
                         (seq-remove (lambda (suffix) (oref suffix inactive)) transient--suffixes))))
       (should (equal keys (delete-dups (copy-sequence keys)))))))
+
+(ert-deftest drover-list-test-dispatch-opens-numbered-elsewhere ()
+  "From a buffer beside the sidebar, the menu's digits open the sidebar's sessions by number."
+  (drover-list-test-elsewhere
+    (execute-kbd-macro (kbd "C-' 3"))
+    (should-not transient--prefix)
+    ;; In the window where you work, as RET at the sidebar's row opens it.
+    (should (equal (car drover-test-calls) (list :open "done" nil first)))
+    (should (eq (selected-window) first))
+    (should (equal (buffer-name (window-buffer first)) "*session done*"))
+    (should (equal (drover-list-test-at-side side) "done"))
+    ;; The sidebar collapses no group: idle is the last.
+    (set-window-buffer first code)
+    (set-buffer code)
+    (execute-kbd-macro (kbd "C-' 0"))
+    (should (equal (car drover-test-calls) (list :open "idle" nil first)))
+    (should (equal (drover-list-test-at-side side) "idle"))))
+
+(ert-deftest drover-list-test-open-numbered ()
+  "The digits open the sessions at the top of their trees by number, 0 the last.
+Subagents are not numbered, nor the sessions of collapsed groups; point
+goes to the session opened."
+  (drover-list-test-with (cons (drover-test-session "sub" :status 'working :parent "fail"
+                                                    :since (drover-list-test-ago 20))
+                               (drover-list-test-side-sample))
+    (drover-list-test--register-buffers)
+    (pcase-let ((`(,first ,second) (drover-list-test--main)))
+      (ignore second)
+      (drover-list)
+      (should (eq (window-buffer first) buffer))
+      ;; The subagent shows, under its parent.
+      (should (drover-list-test-section "sub"))
+      (cl-flet ((press (key)
+                  (setq drover-test-calls nil)
+                  (set-window-buffer first buffer)
+                  (select-window first)
+                  (with-current-buffer buffer
+                    (goto-char (point-min))
+                    (execute-kbd-macro (kbd key)))
+                  (cadr (car drover-test-calls))))
+        (pcase-dolist (`(,key . ,id) '(("1" . "ask") ("2" . "fail") ("3" . "done") ("4" . "work")
+                                       ;; The idle group is collapsed: work is the last.
+                                       ("0" . "work")))
+          (ert-info (key)
+            (should (equal (press key) id))
+            ;; Opened as RET opens it, in the list's own window.
+            (should (equal (car drover-test-calls) (list :open id nil first)))
+            (should (equal (buffer-name (window-buffer first)) (format "*session %s*" id)))
+            (with-current-buffer buffer
+              (should (equal (drover-list-test-id-at-point) id)))))
+        (with-current-buffer buffer
+          (setq drover-test-calls nil)
+          (should-error (drover-list-open-numbered 5) :type 'user-error)
+          (should-not drover-test-calls)
+          ;; Expanded, the idle group numbers its session too.
+          (drover-list-test-goto-group 'idle)
+          (magit-section-show (magit-current-section)))
+        (should (equal (press "5") "idle"))
+        (should (equal (press "0") "idle"))
+        ;; Run otherwise than by a digit, the number is read.
+        (setq drover-test-calls nil)
+        (set-window-buffer first buffer)
+        (with-current-buffer buffer
+          (cl-letf (((symbol-function 'read-number) (lambda (&rest _) 2)))
+            (let ((last-command-event 'f5))
+              (call-interactively #'drover-list-open-numbered))))
+        (should (equal (cadr (car drover-test-calls)) "fail"))
+        ;; Elsewhere than in drover's list, nothing to number.
+        (with-temp-buffer
+          (should-error (drover-list-open-numbered 1) :type 'user-error))))))
+
+(ert-deftest drover-list-test-open-numbered-draws-later-rows ()
+  "A number among the rows the list left for later draws them, and opens its session."
+  (dolist (grouping '(nil status))
+    (drover-list-test-with (drover-list-test-random-sessions 60)
+      (drover-list-test-shown
+        (let ((drover-group-by grouping)
+              (drover-show-subagents 'all)
+              (drover-list-collapsed-groups nil))
+          (cl-letf (((symbol-function 'drover-list--first-rows) (lambda () 10)))
+            (let ((tops (progn (revert-buffer)
+                               (drover-list--draw-undrawn)
+                               (seq-filter (lambda (section)
+                                             (zerop (drover-list--row-depth
+                                                     (gethash (oref section value)
+                                                              (drover-list--model-rows drover-list--model)))))
+                                           (drover-list--reachable-sessions)))))
+              (should (> (length tops) 9))
+              (revert-buffer)
+              (should drover-list--undrawn)
+              (dolist (number '(9 0))
+                (ert-info ((format "%s %d" grouping number))
+                  (let ((section (drover-list--numbered-section number)))
+                    (should section)
+                    (should (equal (oref section value)
+                                   (oref (if (zerop number) (car (last tops)) (nth (1- number) tops))
+                                         value)))))))))))))
 
 ;;;; Columns
 
@@ -8511,8 +8614,11 @@ The list beside it folds its own."
           ;; No folding command does anything, on a session or a group.
           (with-selected-window side
             (drover-list-test-goto "ask")
-            (dolist (key '("TAB" "C-<tab>" "M-<tab>" "<backtab>" "1" "4" "M-1"))
+            (dolist (key '("TAB" "C-<tab>" "M-<tab>" "<backtab>" "M-1" "M-4"))
               (should (eq (key-binding (kbd key)) 'ignore)))
+            ;; The digits open sessions by number, as in the list.
+            (dolist (key '("1" "4" "0"))
+              (should (eq (key-binding (kbd key)) 'drover-list-open-numbered)))
             (drover-list-test-press "TAB")
             (should-not (string-match-p "Prompt" (drover-list-test-visible-text)))
             (drover-list-test-goto-group 'idle)

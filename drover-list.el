@@ -35,7 +35,9 @@
 ;; error that ended it, the prompt, the agent's reply and the files it
 ;; changed, as its backend tells them (`drover-recap'), fetched as it
 ;; expands, and what its line leaves out.  The keys of
-;; `drover-session-map' act on the session at point.  The buffer shows
+;; `drover-session-map' act on the session at point; the digits open the
+;; sessions at the top of their trees by number, 0 the last
+;; (`drover-list-open-numbered').  The buffer shows
 ;; sessions, and how many each group holds; settings and keys are the
 ;; View menu's to show, how many sessions need you the mode line's
 ;; (`drover-attention-mode').
@@ -5900,6 +5902,74 @@ Sessions in collapsed groups are passed over."
       (goto-char (oref section start))
     (message "No session")))
 
+;;;; Opening sessions by number
+
+;; The digits open the sessions at the top of their trees, counted as
+;; the list shows them, 0 the last: the list binds them, and so does
+;; the dispatch menu's List group.  Subagents are not counted, so that
+;; a number stays with its session as subagents come and go.
+
+(defun drover-list--numbered-tree (number)
+  "Return the tree whose top session is numbered NUMBER in the current list.
+The top sessions of the trees are numbered from 1 in the order the list
+shows them, but those of collapsed groups; NUMBER 0 is the last of them.
+The value is (TREE . GROUP), GROUP the `drover-list--group' showing
+TREE, or nil when no tree has that number."
+  (when-let* ((model drover-list--model))
+    (let ((left number)
+          (last nil))
+      (catch 'found
+        (dolist (group (drover-list--model-groups model))
+          (when-let* ((container (drover-list--group-container group))
+                      ((or (eq container magit-root-section) (not (oref container hidden))))
+                      (trees (drover-list--group-trees group))
+                      (count (length trees))
+                      ((> count 0)))
+            (cond ((zerop number)
+                   (setq last (cons (aref trees (1- count)) group)))
+                  ((<= left count)
+                   (throw 'found (cons (aref trees (1- left)) group)))
+                  (t (setq left (- left count))))))
+        last))))
+
+(defun drover-list--numbered-section (number)
+  "Return the section of the session numbered NUMBER in the current list, or nil.
+See `drover-list--numbered-tree'.  Its group is drawn first when the
+list left its rows for later."
+  (when (and drover-list--model (drover-list--current-p))
+    (pcase (drover-list--numbered-tree number)
+      (`(,tree . ,group)
+       (let ((row (car (drover-list--tree-shown tree))))
+         (or (drover-list--row-section row)
+             (progn (drover-list--draw-group group)
+                    (drover-list--row-section row))))))))
+
+(defun drover-list--typed-number ()
+  "Return the digit of the key that ran the current command, as a number.
+For a command not run by a digit, such as through \\[execute-extended-command]
+or a click on its entry in a menu, read the number instead."
+  (let ((event last-command-event))
+    (if (and (characterp event) (<= ?0 event ?9))
+        (- event ?0)
+      (read-number "Open session number (0 for the last): "))))
+
+(defun drover-list-open-numbered (number)
+  "Open the session numbered NUMBER in the list, as RET there opens it.
+The sessions at the top of their trees are numbered from 1, in the order
+the list shows them; their subagents are not numbered, nor the sessions
+of collapsed groups.  NUMBER 0 is the last of them.  Point goes to the
+session's row, then the session opens: from a side window, in the
+window where you work.  Interactively, NUMBER is the digit typed: the
+list binds 1 to 9 and 0, as does the List group of `drover-dispatch'."
+  (interactive (list (drover-list--typed-number)) drover-list-mode)
+  (drover-list--check)
+  (let ((section (or (drover-list--numbered-section number)
+                     (if (zerop number)
+                         (user-error "No session")
+                       (user-error "No session numbered %d" number)))))
+    (goto-char (oref section start))
+    (drover-open-at-point)))
+
 ;;;; Reordering for display
 
 ;; Emacs lays out every line of a window showing a buffer that changed,
@@ -5960,12 +6030,24 @@ show, and whether a filter leaves sessions out."
 ;; reverts the buffer, as `revert-buffer' would.  RET on a group heading
 ;; toggles it, through the group sections' own keymap.  Copying, M-w
 ;; wherever the user binds it, copies sessions rather than their lines.
+;; The digits open sessions by number, rather than show Magit's levels
+;; of sections, which mean little in a list two levels deep.
 (defvar-keymap drover-list-mode-map
   :doc "Keymap of `drover-list-mode'."
   :parent (make-composed-keymap (list drover-session-map magit-section-mode-map))
   "RET" #'drover-open-at-point
   "C-o" #'drover-list-display
   "q" #'drover-list-quit
+  "1" #'drover-list-open-numbered
+  "2" #'drover-list-open-numbered
+  "3" #'drover-list-open-numbered
+  "4" #'drover-list-open-numbered
+  "5" #'drover-list-open-numbered
+  "6" #'drover-list-open-numbered
+  "7" #'drover-list-open-numbered
+  "8" #'drover-list-open-numbered
+  "9" #'drover-list-open-numbered
+  "0" #'drover-list-open-numbered
   "<remap> <kill-ring-save>" #'drover-list-copy)
 
 (define-derived-mode drover-list-mode magit-section-mode "Drover"
@@ -5975,7 +6057,10 @@ The list shows the sessions the filter keeps, each subagent under its
 parent, grouped and sorted as the View menu, \\[drover-view], says.
 \\[magit-section-toggle] collapses a group or shows the recap of a
 session's last turn, \\[drover-open-at-point] opens the session at point and
-\\[drover-list-display] shows it, the list staying selected.
+\\[drover-list-display] shows it, the list staying selected.  The digits 1
+to 9 open the first nine sessions at the top of their trees, 0 the last
+one, subagents and collapsed groups not counted: see
+`drover-list-open-numbered'.
 
 What a line shows depends on the window's width: see
 `drover-list-fields'.  In columns, the header line names them; hover

@@ -1062,13 +1062,13 @@ a list in a window.")
                      (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "C" "f"
                                "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "G")
                              drover-keys-test-view-keys
-                             '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "RET")))))
+                             '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "1" "RET")))))
     ;; Off a session, only what needs none.
     (drover-keys-test-in 'view nil
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "+" "g")
                              drover-keys-test-view-keys
-                             '("C-n" "C-p" "M-n" "M-p" "M-<" "M->"))))
+                             '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "1"))))
       ;; Moving between groups needs groups.
       (setq drover-group-by nil)
       (should-not (member "M-n" (drover-keys-test-apt 'drover-dispatch))))))
@@ -1398,7 +1398,9 @@ The value is (PLAN . LINES)."
               ;; In a list, RET opens the session rather than send.
               (should (member " RET Open" dispatch))
               (should-not (member " RET Send" dispatch))
-              (should (member " C-n Next session" dispatch)))
+              (should (member " C-n Next session" dispatch))
+              ;; One entry shows the ten digits opening sessions by number.
+              (should (member " 1…9 0 Open by number" dispatch)))
             (drover-keys-test-in 'prompt "s"
               (let ((dispatch (drover-keys-test-render 'drover-dispatch)))
                 (should (member " k Clear" dispatch))

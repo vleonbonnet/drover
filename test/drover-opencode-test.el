@@ -1934,9 +1934,11 @@ A refusal is told on one line, as a warning, the session staying archived."
   (should-not (ignore-errors (transient-get-suffix 'drover-dispatch 'opencode-consult-sessions)))
   (should (eq (drover-opencode-test-target (drover-backend-property 'opencode :search))
               #'drover-opencode--search))
-  ;; The keys opencode.el's lists had are gone.
+  ;; The keys opencode.el's lists had are gone: the digits are drover's
+  ;; own, opening the sessions of drover's list by number.
   (dolist (key '("1" "2" "3"))
-    (should-not (ignore-errors (transient-get-suffix 'drover-dispatch key)))))
+    (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch key)) :command)
+                'drover-list-open-numbered))))
 
 ;;;; Searching what was said
 
