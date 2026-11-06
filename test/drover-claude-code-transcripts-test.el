@@ -252,6 +252,33 @@ may follow it, read whole or appended."
         (should (< read 200000)))
       (should (eql (drover-session-updated (drover-find 'claude-code "l1")) (+ start 101))))))
 
+(ert-deftest drover-claude-code-transcripts-test-turn-before-tail ()
+  "A transcript read anew tells the model of its newest turn, wherever it lies.
+Records the readers skip after it, API requests Claude Code recorded,
+push the turn out of the tail: it is looked for before, else in the
+head."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (let* ((project (expand-file-name "work/" home))
+           (near (drover-fixture-claude "near" project :filler (* 4 drover-transcript-window))))
+      (apply #'drover-fixture-claude-append near
+             (drover-fixture-claude-user "near" project 1790000010.0 "Go on")
+             (drover-fixture-claude-assistant "near" project 1790000011.0 "Done." :model "claude-sonnet-5-5"
+                                              :effort "low"
+                                              :usage (drover-fixture-claude-usage :input 10 :read 5000))
+             (drover-fixture-claude-blob "near" (* 4 drover-transcript-window)))
+      (drover-fixture-claude "far" project :filler (* 2 drover-transcript-look-back) :effort "xhigh")
+      (drover-claude-code-transcripts-test-scan)
+      (let ((near (drover-find 'claude-code "near"))
+            (far (drover-find 'claude-code "far")))
+        (should (equal (list (drover-session-model near) (drover-session-effort near)
+                             (drover-session-provider-name near) (drover-session-context-tokens near))
+                       '("Sonnet 5.5" "low" "Anthropic" 5010)))
+        ;; Beyond the look back: the head's.
+        (should (equal (list (drover-session-model far) (drover-session-effort far)
+                             (drover-session-provider-name far))
+                       '("Opus 5.5" "xhigh" "Anthropic")))))))
+
 (ert-deftest drover-claude-code-transcripts-test-short-head-read-again ()
   "A transcript read before its first prompt was written is read whole once it grew."
   (drover-claude-code-transcripts-test-with

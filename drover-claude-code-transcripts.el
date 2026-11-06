@@ -107,7 +107,7 @@ list of drover's shows."
 
 ;;;; State
 
-(defconst drover-claude-code-transcripts--reader-version 4
+(defconst drover-claude-code-transcripts--reader-version 5
   "Version of `drover-claude-code-transcripts--read'.
 Raised when it reads anew what it read before, so that what an older
 one read and kept between Emacs sessions is read again.")
@@ -404,6 +404,13 @@ A turn running starts there."
                        beg end)))
     (drover-transcript-time (alist-get 'timestamp record))))
 
+(defun drover-claude-code-transcripts--turn-told (beg end)
+  "Return the model and effort of the newest main turn from BEG to END, or nil.
+A plist of :model and :effort, for the lines before a transcript's tail
+when the tail holds no reply (see `drover-transcript-look-before-tail-for')."
+  (when-let* ((turn (drover-claude-code-transcripts--turn beg end)))
+    (list :model (nth 0 turn) :effort (nth 1 turn))))
+
 (defun drover-claude-code-transcripts--read-tail (beg end)
   "Return what the records between BEG and END tell of the conversation's end.
 A plist: the newest title, summary, last prompt, permission mode, model,
@@ -449,8 +456,9 @@ not outlive a reply that ends the next one."
 (defun drover-claude-code-transcripts--read-head (beg end)
   "Return what the records between BEG and END tell of the conversation's start.
 A plist of its directory, creation time, entry point, branch, first
-prompt, the titles there and its newest message's time; members not
-told are left out."
+prompt, the titles there, and its newest message's time, reply's usage
+and turn's model and effort, which a tail telling none leaves; members
+not told are left out."
   (let ((data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value))))
               (sniff (key) (save-excursion (goto-char beg) (drover-transcript-sniff key nil end))))
@@ -470,7 +478,8 @@ told are left out."
     ;; last activity, and how it left the conversation.
     (drover-claude-code-transcripts--merge
      data (append (drover-claude-code-transcripts--end beg end)
-                  (drover-claude-code-transcripts--usage beg end)))))
+                  (drover-claude-code-transcripts--usage beg end)
+                  (drover-claude-code-transcripts--turn-told beg end)))))
 
 (defun drover-claude-code-transcripts--last-message (file size tail old-size)
   "Return the time of the newest message of transcript FILE, of SIZE bytes, or nil.
@@ -580,7 +589,8 @@ since, the same file grown, is read from where it ended, what its new
 records tell replacing what the old ones told.  Otherwise its head and
 tail are read.  Its last activity is its newest message's (see
 `drover-claude-code-transcripts--message-p'), looked for further back
-than the tail when the tail holds none, never the file's modification
+than the tail when the tail holds none, as its newest turn's model and
+reply's usage are, never the file's modification
 time, which the CLI's records of its own move as it opens the
 conversation again.  For the index of `drover-transcript'."
   (let* ((size (file-attribute-size attributes))
@@ -603,7 +613,8 @@ conversation again.  For the index of `drover-transcript'."
                                (drover-transcript-look-before-tail-for
                                 file size tail grown
                                 (append (unless (plist-get recent :updated) (list #'drover-claude-code-transcripts--end))
-                                        (unless (plist-get recent :context) (list #'drover-claude-code-transcripts--usage))))))
+                                        (unless (plist-get recent :context) (list #'drover-claude-code-transcripts--usage))
+                                        (unless (plist-get recent :model) (list #'drover-claude-code-transcripts--turn-told))))))
           (setq data (drover-claude-code-transcripts--merge data recent)))
         (setq data (plist-put data :id (drover-claude-code-transcripts--id file)))
         (let ((directory (or (plist-get data :cwd)
