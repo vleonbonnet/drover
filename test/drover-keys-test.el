@@ -1584,14 +1584,16 @@ The columns, the sort, the grouping and follow mode do not scope a search."
           (should-not (seq-find (lambda (line) (string-search "Column" line)) lines)))))))
 
 (defconst drover-keys-test-menu-heights
-  '((view 160 16) (view 240 13) (prompt-list 160 16) (prompt-list 240 13)
+  '((view 160 16) (view 240 13) (prompt-list 160 17) (prompt-list 240 13)
     (elsewhere 160 10) (elsewhere 240 10) (view-menu 160 8) (search 160 7))
   "The most lines each menu takes, where, as wide: (WHERE WIDTH LINES).
 In one of drover's lists, in a prompt buffer with a list in sight, in
 another buffer, and the View and search menus, a session at point
 with a long title.  The menus took 18 and 14 lines in a list at 160 and
 240 columns, 17 and 13 in a prompt buffer and in another buffer, the
-View menu 8, the search's 8.")
+View menu 8, the search's 8.  A prompt buffer with a list in sight
+shows the List group's entry opening sessions by number, a line more
+at 160 columns.")
 
 (ert-deftest drover-keys-test-menu-heights ()
   "The menus take few lines: the settings of a field share a row."

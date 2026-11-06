@@ -6828,9 +6828,11 @@ buffer."
     (should-not (plist-get (drover--context) :window))
     (execute-kbd-macro (kbd "C-' A"))
     (should (equal (car drover-test-calls) '(:respond "ask")))
-    ;; No List group: C-n is not the menu's.
+    ;; The List group opens the list's sessions by number alone: C-n is
+    ;; not the menu's.
     (execute-kbd-macro (kbd "C-'"))
-    (should-not (seq-find (lambda (suffix) (eq (oref suffix command) 'drover-list-next-session))
+    (should-not (seq-find (lambda (suffix) (and (eq (oref suffix command) 'drover-list-next-session)
+                                                (not (oref suffix inactive))))
                           transient--suffixes))
     (execute-kbd-macro (kbd "C-g"))
     (should (equal (drover-list-test-at-side side) "fail"))))
@@ -6916,9 +6918,14 @@ set is that of the list in sight."
         (should (apt key)))
       ;; Peeking needs a list: it would peek at the buffer's own session.
       (should-not (apt "v")))
-    ;; No List group: the menu acts on the session buffer.
-    (should-not (seq-find (lambda (suffix) (eq (oref suffix command) 'drover-list-next-session))
+    ;; The menu acts on the session buffer: the List group opens the
+    ;; list's sessions by number alone, moving in it is not the menu's.
+    (should-not (seq-find (lambda (suffix) (and (eq (oref suffix command) 'drover-list-next-session)
+                                                (not (oref suffix inactive))))
                           transient--suffixes))
+    (should (seq-find (lambda (suffix) (and (eq (oref suffix command) 'drover-list-open-numbered)
+                                            (not (oref suffix inactive))))
+                      transient--suffixes))
     (execute-kbd-macro (kbd "- f"))
     (should (buffer-local-value 'drover-follow-mode buffer))
     (execute-kbd-macro (kbd "- f"))
@@ -7233,7 +7240,29 @@ sessions by number took one more each at 60."
     (set-buffer code)
     (execute-kbd-macro (kbd "C-' 0"))
     (should (equal (car drover-test-calls) (list :open "idle" nil first)))
-    (should (equal (drover-list-test-at-side side) "idle"))))
+    (should (equal (drover-list-test-at-side side) "idle"))
+    ;; From a session's own buffer too, though the menu acts on its session
+    ;; there and shows no List group: the digits open the sidebar's.
+    (set-window-buffer first code)
+    (set-buffer code)
+    (setq-local drover-session-at-point-function (lambda () (drover-find 'fake "work")))
+    (should-not (plist-get (drover--context) :window))
+    (execute-kbd-macro (kbd "C-'"))
+    (should (string-search "1…9 0 Open by number" (drover-list-test-menu-text)))
+    (execute-kbd-macro (kbd "2"))
+    (should-not transient--prefix)
+    (should (equal (car drover-test-calls) (list :open "fail" nil first)))
+    (should (eq (selected-window) first))
+    (should (equal (drover-list-test-at-side side) "fail"))
+    ;; Without a list in sight, the digits are not the menu's.
+    (set-window-buffer first code)
+    (set-buffer code)
+    (delete-window side)
+    (execute-kbd-macro (kbd "C-'"))
+    (should-not (seq-find (lambda (suffix) (and (eq (oref suffix command) 'drover-list-open-numbered)
+                                                (not (oref suffix inactive))))
+                          transient--suffixes))
+    (execute-kbd-macro (kbd "C-g"))))
 
 (ert-deftest drover-list-test-open-numbered ()
   "The digits open the sessions at the top of their trees by number, 0 the last.

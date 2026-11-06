@@ -53,9 +53,14 @@
 ;; in a buffer sending prompts, where it stays the prompt key Send, and
 ;; from another buffer while drover's prompt holds a prompt to send,
 ;; where RET sends it.  In the list itself, RET opens, and M-RET sends
-;; the prompt: the menu never shows both RET.  The digits open the
-;; sessions at the top of their trees by number, 0 the last, as in the
-;; list: one entry shows them all.
+;; the prompt: the menu never shows both RET.
+;;
+;; The digits open the sessions at the top of their trees by number, 0
+;; the last, as in the list, from wherever one of drover's lists shows
+;; on the frame: the list the menu acts on, else the one in sight, so
+;; that from a session's buffer beside the sidebar, they open the
+;; sidebar's sessions.  One entry of the List group shows them all: the
+;; group shows it alone while the menu acts on another buffer.
 ;;
 ;; Bind `drover-dispatch' globally, for instance to C-'; drover binds no
 ;; global key.  Other packages add their own global commands to the menu
@@ -995,6 +1000,30 @@ of that window, as typed there."
       (drover--call-in-window window (lambda () (apply function arguments)))
     (apply function arguments)))
 
+(defun drover--dispatch-numbers-window ()
+  "Return the window of the list beside that the menu's digits number, or nil.
+It is the list the menu acts on in another window, else the list shown
+on the selected frame, the one used last of several: from a session's
+buffer beside the sidebar, the menu acts on that session, and its
+digits open the sidebar's sessions."
+  (or (drover--dispatch-window)
+      (drover--shown-list-window)))
+
+(defun drover-dispatch-numbers-p ()
+  "Return non-nil when the dispatch menu's digits have a list to number.
+That is in one of drover's lists, or while one shows on the selected frame."
+  (or drover-view-p (drover--dispatch-numbers-window)))
+
+(defun drover--dispatch-in-numbered-list (function &rest arguments)
+  "Apply FUNCTION to ARGUMENTS in the list the menu's digits number.
+That list is the current buffer, else the list of
+`drover--dispatch-numbers-window', in its window, so that a session
+opens from there as RET there opens it."
+  (if-let* (((not drover-view-p))
+            (window (drover--dispatch-numbers-window)))
+      (drover--call-in-window window (lambda () (apply function arguments)))
+    (apply function arguments)))
+
 (defun drover--dispatch-goal (function &rest arguments)
   "Apply FUNCTION to ARGUMENTS on an Org heading, else as a session command.
 In Org, on the heading at point; elsewhere, on the session at point, of
@@ -1032,11 +1061,15 @@ stays, then acts on the new session at point."
 (defun drover--dispatch-list-description ()
   "Return the title of the dispatch menu's List group, naming the session acted on.
 That is the session a region selects alone, else the session at point.
-With several sessions selected, it tells how many instead."
+With several sessions selected, it tells how many instead.  While the
+menu acts on another buffer than a list, a list being in sight, the
+title names no session: the group then opens the list's sessions by
+number alone."
   (let* ((scope (drover--scope))
          (selection (plist-get scope :selection))
          (session (if selection (car selection) (plist-get scope :session))))
-    (cond ((cdr selection)
+    (cond ((not (plist-get scope :view)) "List")
+          ((cdr selection)
            (format "List: %d sessions selected" (length selection)))
           (session
            (concat "List: " (drover--menu-value
@@ -2282,9 +2315,12 @@ List group moves that point, the menu staying open and following the
 new session at point, and RET opens the session, but in a buffer that
 sends prompts, where RET stays Send, and from another buffer while
 drover's prompt holds a prompt to send, which RET sends.  In the list
-itself, RET opens the session and M-RET sends that prompt.  The digits
-1 to 9 open the sessions at the top of their trees by number, 0 the
-last, as in the list (see `drover-list-open-numbered').
+itself, RET opens the session and M-RET sends that prompt.
+
+The digits 1 to 9 open the sessions at the top of their trees by
+number, 0 the last, as in the list (see `drover-list-open-numbered'):
+those of the list the menu acts on, else of the list shown on the
+frame, such as the sidebar beside a session's buffer.
 
 Send sends drover's prompt from any buffer, as from the prompt, to the
 session chosen for it, else to one asked for, unshown."
@@ -2395,18 +2431,24 @@ session chosen for it, else to one asked for, unshown."
           ;; Only while the menu acts on one of drover's lists, here or in
           ;; another window.  Moving stays in the menu, which follows the new
           ;; session at point.
+          ;; While the menu acts on another buffer, a list in sight still
+          ;; has its sessions opened by number: the group shows them alone.
           [:description drover--dispatch-list-description
-                        :if drover-dispatch-view-p
-                        ("C-n" "Next session" drover-list-next-session :transient t :advice drover--dispatch-navigate)
-                        ("C-p" "Previous session" drover-list-previous-session :transient t :advice drover--dispatch-navigate)
+                        :if drover-dispatch-numbers-p
+                        ("C-n" "Next session" drover-list-next-session :transient t :advice drover--dispatch-navigate
+                         :if drover-dispatch-view-p)
+                        ("C-p" "Previous session" drover-list-previous-session :transient t :advice drover--dispatch-navigate
+                         :if drover-dispatch-view-p)
                         ("M-n" "Next group" drover-list-next-group :transient t :advice drover--dispatch-navigate
-                         :inapt-if-not drover--dispatch-grouped-p)
+                         :if drover-dispatch-view-p :inapt-if-not drover--dispatch-grouped-p)
                         ("M-p" "Previous group" drover-list-previous-group :transient t :advice drover--dispatch-navigate
-                         :inapt-if-not drover--dispatch-grouped-p)
-                        ("M-<" "First session" drover-list-first-session :transient t :advice drover--dispatch-navigate)
-                        ("M->" "Last session" drover-list-last-session :transient t :advice drover--dispatch-navigate)
+                         :if drover-dispatch-view-p :inapt-if-not drover--dispatch-grouped-p)
+                        ("M-<" "First session" drover-list-first-session :transient t :advice drover--dispatch-navigate
+                         :if drover-dispatch-view-p)
+                        ("M->" "Last session" drover-list-last-session :transient t :advice drover--dispatch-navigate
+                         :if drover-dispatch-view-p)
                         ("1" "Open by number" drover-list-open-numbered :class drover--menu-digits
-                         :advice* drover--dispatch-in-list)
+                         :advice* drover--dispatch-in-numbered-list)
                         ("RET" "Open" drover-open-at-point
                          :advice* drover--dispatch-in-list
                          :if drover-dispatch-list-return-p
@@ -2418,8 +2460,8 @@ session chosen for it, else to one asked for, unshown."
   ;; The other digits of the List group's entry, which shows them all.
   [:class transient-column
           :hide always
-          :if drover-dispatch-view-p
-          :advice* drover--dispatch-in-list
+          :if drover-dispatch-numbers-p
+          :advice* drover--dispatch-in-numbered-list
           ("2" "Open 2" drover-list-open-numbered)
           ("3" "Open 3" drover-list-open-numbered)
           ("4" "Open 4" drover-list-open-numbered)

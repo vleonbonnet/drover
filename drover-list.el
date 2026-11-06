@@ -6116,7 +6116,7 @@ Sessions in collapsed groups are passed over."
 
 ;; The digits open the sessions at the top of their trees, counted as
 ;; the list shows them, 0 the last: the list binds them, and so does
-;; the dispatch menu's List group.  Subagents are not counted, so that
+;; the dispatch menu, from any buffer while a list shows on the frame.  Subagents are not counted, so that
 ;; a number stays with its session as subagents come and go.
 
 (defun drover-list--numbered-tree (number)
@@ -6170,7 +6170,7 @@ the list shows them; their subagents are not numbered, nor the sessions
 of collapsed groups.  NUMBER 0 is the last of them.  Point goes to the
 session's row, then the session opens: from a side window, in the
 window where you work.  Interactively, NUMBER is the digit typed: the
-list binds 1 to 9 and 0, as does the List group of `drover-dispatch'."
+list binds 1 to 9 and 0, as does `drover-dispatch' while a list shows."
   (interactive (list (drover-list--typed-number)) drover-list-mode)
   (drover-list--check)
   (let ((section (or (drover-list--numbered-section number)
