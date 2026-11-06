@@ -950,6 +950,42 @@ another front end, its session keys on: neither quotes a session."
           (drover-prompt-add-context))
         (should (equal recaps '("s")))))))
 
+(ert-deftest drover-prompt-test-session-own-buffer-names-session ()
+  "The line of a session's own buffer is quoted from the session, by its link, else its title.
+The buffer's name, which reads as a subject, made agents title the new
+conversation after the one quoted; and its line numbers are those of a
+rendering the agent cannot open."
+  (drover-prompt-test-with
+    (require 'ol)
+    (let* ((session (drover-prompt-test--session "s" :title "Quoted\nsubject"))
+           (buffer (drover-prompt-test--buffer-of "s"))
+           (org-link-parameters (copy-tree org-link-parameters))
+           (linked nil))
+      (org-link-set-parameters
+       "test-session"
+       :store (lambda (&optional _interactive)
+                (when-let* ((linked)
+                            (at-point (drover-session-at-point t)))
+                  (org-link-store-props :type "test-session"
+                                        :link (concat "test-session:" (drover-session-id at-point))))))
+      (with-current-buffer buffer
+        (setq default-directory "/")
+        (setq-local drover-session-at-point-function (lambda () session))
+        (insert "first line\nthe line at point\n")
+        (goto-char (point-min))
+        (forward-line 1)
+        (cl-letf (((symbol-function 'org-store-link-functions)
+                   (lambda ()
+                     (list (org-link-get-parameter "test-session" :store)))))
+          (drover-prompt-add-context)
+          (should (equal (with-current-buffer (drover-prompt-buffer)
+                           (prog1 (buffer-string) (erase-buffer)))
+                         "From agent session \"Quoted subject\":\n#+begin_src fundamental\nthe line at point\n#+end_src\n\n"))
+          (setq linked t)
+          (drover-prompt-add-context)
+          (should (equal (with-current-buffer (drover-prompt-buffer) (buffer-string))
+                         "From agent session [[test-session:s][Quoted subject]]:\n#+begin_src fundamental\nthe line at point\n#+end_src\n\n")))))))
+
 (defun drover-prompt-test--quoted-from (positions)
   "Return what the context at each of POSITIONS quotes, as (POSITION . TEXT).
 TEXT is the content of the code block the prompt got, unescaped, or

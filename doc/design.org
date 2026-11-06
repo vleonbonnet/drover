@@ -901,6 +901,8 @@ Engines read their local state with the helpers of =drover-model=: =drover-read-
 
 The prompt knows no backend and no engine by name.  It sends through optional backend operations and resolves what a new session runs through the engines.
 
+Context quoted from a session's own buffer, the session at point whose buffer it is (not a list of another front end, whose row tells a session too), names the session by its Org link (=drover-session-link=), else its title, instead of =From buffer NAME line N=.  The buffer of a session is named after its title, which read as the subject of the prompt: OpenCode titled new sessions after the session quoted rather than after what was asked.  Its line numbers belonged to a rendering the agent cannot open, where the link opens the conversation.
+
 ** Backend operations
 
 | Operation        | Arguments                                  | Contract                                                                                                                         |

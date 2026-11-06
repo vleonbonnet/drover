@@ -859,7 +859,8 @@ those setting `drover-view-p', it is the sessions selected, or the one
 at point, quoted with their last replies by
 `drover-prompt-quote-sessions'; a buffer telling a session at point,
 such as a session buffer, or a list of another front end, gives its
-line or region as any buffer does.  It goes at point in the prompt's
+line or region as any buffer does, a session's own buffer linked to the
+session rather than to a line.  It goes at point in the prompt's
 window, or while the prompt is hidden where the user left point."
   (if-let* ((drover-view-p)
             (sessions (drover-selected-sessions t)))
@@ -1192,16 +1193,27 @@ Markdown block, which a sent prompt turns into a fence, cut by
 
 (defun drover-prompt-format-context (buffer region language)
   "Return the Org context of BUFFER at point: a link, then REGION quoted.
-The link names the file and line at point, or the buffer and line.
-REGION, a string or nil, goes in a code block of LANGUAGE, escaped so
-that no line of it ends the block or opens a heading, without the blank
-lines around it, and from a terminal without trailing spaces."
+The link names the file and line at point; in the buffer of a session,
+the session, by its link (see `drover-session-link'), else its title;
+otherwise the buffer and line.  REGION, a string or nil, goes in a code
+block of LANGUAGE, escaped so that no line of it ends the block or opens
+a heading, without the blank lines around it, and from a terminal
+without trailing spaces."
   (with-current-buffer buffer
     (let* ((file (buffer-file-name))
            (line (line-number-at-pos))
-           (header (if file
-                       (format "From [[file:%s::%d][%s:%d]]" file line (buffer-name) line)
-                     (format "From buffer %s line %d" (buffer-name) line)))
+           (session (and (not file) (drover-prompt--buffer-own-session buffer)))
+           (header (cond
+                    (file (format "From [[file:%s::%d][%s:%d]]" file line (buffer-name) line))
+                    (session
+                     ;; Its lines are those of a rendering, which the
+                     ;; agent cannot open: the session itself can be.
+                     (format "From agent session %s"
+                             (or (drover-session-link session)
+                                 (format "\"%s\"" (replace-regexp-in-string
+                                                   "[\n\r\t]+" " "
+                                                   (format "%s" (drover-session-display-title session)))))))
+                    (t (format "From buffer %s line %d" (buffer-name) line))))
            (terminal (derived-mode-p 'vterm-mode 'term-mode 'eat-mode 'ghostel-mode 'comint-mode))
            ;; Whitespace after the last newline goes too, as when a
            ;; selection runs into the next line's indentation.
@@ -1216,6 +1228,14 @@ lines around it, and from a terminal without trailing spaces."
                   (format ":\n#+begin_src %s\n%s\n#+end_src\n\n"
                           language (org-escape-code-in-string region))
                 "\n\n")))))
+
+(defun drover-prompt--buffer-own-session (buffer)
+  "Return the session whose own buffer BUFFER is, or nil.
+A list of another front end tells the session of the row at point too,
+but its lines are not that session's conversation."
+  (when-let* ((session (drover-buffer-session buffer))
+              ((eq (drover-session-buffer session) buffer)))
+    session))
 
 (defun drover-prompt-language (mode)
   "Return the language of code blocks quoting a buffer in major MODE.
