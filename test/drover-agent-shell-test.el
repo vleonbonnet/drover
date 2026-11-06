@@ -1904,12 +1904,14 @@ One the user named keeps its name."
   "An idle shell shows its session's brief just above its prompt, never while it works."
   (drover-agent-shell-test-with
     (let* ((brief "Done: fixed the build")
+           (story nil)
            (drover-brief-function
             (lambda (record)
               (if (and brief (eq (drover-session-backend record) 'agent-shell))
                   (let ((copy (copy-sequence record)))
                     (setf (drover-session-brief copy) brief
-                          (drover-session-brief-recap copy) "Fixed it.\nTests pass.")
+                          (drover-session-brief-recap copy) "Fixed it.\nTests pass."
+                          (drover-session-brief-session copy) story)
                     copy)
                 record)))
            (drover-brief--buffers (make-hash-table :test #'eq :weakness 'key))
@@ -1943,6 +1945,15 @@ One the user named keeps its name."
           (drover-agent-shell-toggle-brief-recap)
           (should (equal (drover-agent-shell-test-brief-string shell)
                          "※ Done: fixed the build\n  Fixed it.\n  Tests pass.\n\n"))))
+      ;; What was written of the whole session shows whole instead.
+      (setq story "Fixing the build: the flags are fixed; next, the tests.")
+      (with-current-buffer shell (drover-agent-shell--changed))
+      (drover-changed-now)
+      (should (equal (drover-agent-shell-test-brief-string shell)
+                     "※ Fixing the build: the flags are fixed; next, the tests.\n\n"))
+      (setq story nil)
+      (with-current-buffer shell (drover-agent-shell--changed))
+      (drover-changed-now)
       ;; At work, it goes at once, whatever drover knows yet.
       (with-current-buffer shell
         (setq-local shell-maker--busy t)

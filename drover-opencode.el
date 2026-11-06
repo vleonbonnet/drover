@@ -1984,12 +1984,12 @@ option to `opencode-put-old-input' to edit it in the session's input."
 
 (defun drover-opencode-brief ()
   "Return the brief of the session of the current OpenCode buffer, or nil.
-As (LINE . RECAP), what a model wrote of its last turn (see
-`drover-session-brief'): of this host's session as `drover-summary-mode'
-writes it, of another host's as its owner did.  For
-`opencode-session-summary-function', which drover sets to it when nil,
-so that session buffers show it just above their input while idle,
-and anew as it changes (see `drover-brief-of-buffer')."
+What a model wrote of where the whole session stands, a string, else of
+its last turn, (LINE . RECAP) (see `drover-brief-of-buffer'): of this
+host's session as `drover-summary-mode' writes it, of another host's as
+its owner did.  For `opencode-session-summary-function', which drover
+sets to it when nil, so that session buffers show it just above their
+input while idle, and anew as it changes."
   (drover-with-reporting "OpenCode brief"
     (drover-brief-of-buffer #'opencode-session-summary-update)))
 

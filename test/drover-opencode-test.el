@@ -338,12 +338,14 @@ PROJECTS defaults to `drover-opencode-test-projects'."
   "An idle session buffer shows its session's brief just above its input, anew as it changes."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
     (let* ((brief "Done: first")
+           (story nil)
            (drover-brief-function
             (lambda (record)
               (if (and brief (equal (drover-session-id record) "ses_1"))
                   (let ((copy (copy-sequence record)))
                     (setf (drover-session-brief copy) brief
-                          (drover-session-brief-recap copy) "A recap.")
+                          (drover-session-brief-recap copy) "A recap."
+                          (drover-session-brief-session copy) story)
                     copy)
                 record)))
            (drover-brief--buffers (make-hash-table :test #'eq :weakness 'key))
@@ -356,16 +358,16 @@ PROJECTS defaults to `drover-opencode-test-projects'."
           (drover-changed-now)
           (opencode-show-prompt)
           (opencode-session-summary-update)
-          ;; After a blank line, as the transcript ends with a line.
-          (should (equal (opencode-session-summary-string) "\n※ Done: first …\n\n"))
-          ;; After the idle prompt, at the process mark, where redisplay
-          ;; draws it: an overlay hiding the prompt starts at the prompt.
-          (should (= (overlay-start opencode--recap-overlay) (opencode-pmark)))
-          ;; A new brief shows in place, without the buffer asking.
-          (setq brief "Done: second")
+          ;; Text just before the idle prompt: the line on the turn and its recap.
+          (should (equal (opencode-session-summary-string) "※ Done: first\n  A recap.\n\n"))
+          (should (= (+ (opencode-idle-start) (length (opencode-session-summary-string)))
+                     (marker-position opencode--prompt-start)))
+          ;; What was written of the whole session shows instead, without the buffer asking.
+          (setq story "Fixing the build: the linker flags are fixed; next, the tests.")
           (drover-backend-changed 'opencode "ses_1")
           (drover-changed-now)
-          (should (equal (opencode-session-summary-string) "\n※ Done: second …\n\n"))
+          (should (equal (opencode-session-summary-string)
+                         "※ Fixing the build: the linker flags are fixed; next, the tests.\n\n"))
           ;; Gone as the session works again.
           (setq brief nil)
           (drover-backend-changed 'opencode "ses_1")
