@@ -2152,7 +2152,10 @@ START and END bound its overlay."
             (should (eq drover-list--layout 'narrow))
             (drover-list-test-goto "s")
             (magit-section-show (magit-current-section))
+            ;; How it stands, which its line, two lines for the
+            ;; sessions that need you, leaves out.
             (should (string-match-p (concat "  ◐ Session s +1m\n"
+                                            "    Status\n    Thinking hard about it\n"
                                             "    Prompt\n    Fix the build\n"
                                             "    Reply\n    Fixed it\n"
                                             "    Harness\n    Fake\n"
@@ -2213,7 +2216,8 @@ START and END bound its overlay."
     (nreverse cells)))
 
 (ert-deftest drover-list-test-recap-changes-and-errors ()
-  "A failed turn shows its error in full, and the files it changed."
+  "A failed turn shows its error in full, and the files it changed.
+An error the line shows whole already is not repeated."
   (drover-list-test-with
       (list (drover-test-session "f" :status 'failed :since (drover-list-test-ago 60)
                                  :directory "/work/" :project "p" :detail "Short")
@@ -2232,13 +2236,26 @@ START and END bound its overlay."
       (magit-section-show (magit-current-section)))
     (let ((text (drover-list-test-visible-text)))
       (should (string-match-p "^    Error +The provider refused the request: quota exceeded$" text))
-      (should (string-match-p "^    Changes +\\+12 −3 in 3 files: a\\.el, sub/b\\.el, /elsewhere/c\\.el$" text))
-      (should (string-match-p "^    Retrying +retry 2: overloaded$" text))
+      ;; Without what the session changed in all its turns, its last
+      ;; turn's files, a line each.
+      (should (string-match-p (concat "^    Changes  \\+12 −3 · 3 files in the last turn\n"
+                                      " +a\\.el  \\+10 −2\n"
+                                      " +sub/b\\.el  \\+2 −1\n"
+                                      " +/elsewhere/c\\.el\n")
+                              text))
+      ;; Its line shows the retry whole.
+      (should-not (string-match-p "^    Retrying" text))
       ;; A recap with neither prompt nor reply says so.
       (should (string-match-p "^    Last turn +nothing to recap$" text)))
     (drover-list-test-goto "f")
     (search-forward "The provider")
-    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'opencode-session-status-failed))))
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'opencode-session-status-failed))
+    (search-forward "+10")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'drover-added))
+    ;; Cut short, the retry shows in full under its line.
+    (setq drover-list-hidden-fields '(summary harness))
+    (revert-buffer)
+    (should (string-match-p "^    Retrying +retry 2: overloaded$" (drover-list-test-visible-text)))))
 
 (ert-deftest drover-list-test-recap-fetched-once-per-change ()
   "A recap is fetched as its session expands, kept until the session changes."
@@ -2299,13 +2316,101 @@ START and END bound its overlay."
   "A backend telling no recap shows what the session tells, and asks nothing."
   (drover-list-test-with nil
     (drover-test-register-simple 'plain (list (drover-session-create :backend 'plain :id "p" :title "Plain"
-                                                                     :status 'failed :detail "Boom")))
+                                                                     :status 'failed :detail "Boom\nAt startup")))
     (revert-buffer)
     (goto-char (oref (drover-list-test-section "p" 'plain) start))
     (magit-section-show (magit-current-section))
     (let ((text (drover-list-test-visible-text)))
       (should (string-match-p "^    Error +Boom$" text))
+      (should (string-match-p "^ +At startup$" text))
       (should-not (string-match-p "Last turn" text)))))
+
+(ert-deftest drover-list-test-changes-column-and-files ()
+  "What a session changed in all its turns shows in a column, its files under it once expanded."
+  (drover-list-test-with
+      (list (drover-test-session "c" :status 'done :since (drover-list-test-ago 60) :directory "/work/"
+                                 :changes '(12 3 150))
+            (drover-test-session "n" :status 'done :since (drover-list-test-ago 90)))
+    (setq drover-test-recaps
+          '(("c" :prompt "Go" :changes (("/work/a.el" 1 0))
+             :files (("/work/a.el" 10 2) ("/work/sub/b.el" 2 1)))
+            ("n" :prompt "Go" :changes (("/work/c.el" 1 0)))))
+    (revert-buffer)
+    (should (memq 'changes drover-list--fields))
+    (should (string-match-p "\\+12 −3 · 150 files +1m$" (drover-list-test-heading "c")))
+    (should (seq-find (lambda (cell) (equal (cdr cell) "Changes")) (drover-list-test-header-cells)))
+    (dolist (id '("c" "n"))
+      (drover-list-test-goto id)
+      (magit-section-show (magit-current-section)))
+    (let ((text (drover-list-test-visible-text)))
+      ;; Its line tells the counts: the files alone follow, a line each,
+      ;; then how many more there are.
+      (should (string-match-p (concat "^    Changes +a\\.el  \\+10 −2\n"
+                                      " +sub/b\\.el  \\+2 −1\n"
+                                      " +and 148 more files\n")
+                              text))
+      ;; Without what all its turns changed, its last turn's.
+      (should (string-match-p "^    Changes +\\+1 −0 · 1 file in the last turn\n +/work/c\\.el  \\+1 −0\n" text)))
+    ;; Without its column, the counts come first.
+    (setq drover-list-hidden-fields '(harness changes))
+    (revert-buffer)
+    (should-not (memq 'changes drover-list--fields))
+    (should (string-match-p (concat "^    Changes +\\+12 −3 · 150 files\n"
+                                    " +a\\.el  \\+10 −2\n")
+                            (drover-list-test-visible-text)))
+    ;; The files take the lines their part is given, the last telling the others.
+    (let ((drover-list-recap-lines '((changes . 2))))
+      (revert-buffer)
+      (should (string-match-p (concat "^    Changes +\\+12 −3 · 150 files\n"
+                                      " +and 150 more files\n    Directory")
+                              (drover-list-test-visible-text))))))
+
+(ert-deftest drover-list-test-changes-asked-for-the-sessions-in-sight ()
+  "The list asks what the sessions it shows changed, those it expands too."
+  (drover-list-test-with (list (drover-test-session "a" :status 'done :since (drover-list-test-ago 60))
+                               (drover-test-session "b" :status 'idle))
+    (let* ((asked nil)
+           (drover-changes-prefetch-function
+            (lambda (sessions) (push (mapcar #'drover-session-id sessions) asked))))
+      (revert-buffer)
+      (should (memq 'changes drover-list--prefetch-kinds))
+      ;; The collapsed group of idle sessions is not in sight.
+      (should (equal asked '(("a"))))
+      (drover-list-test-goto-group 'idle)
+      (magit-section-show (magit-current-section))
+      (drover-list--prefetch)
+      (should (equal asked '(("b") ("a"))))
+      ;; Its column hidden, a session expanded is asked for alone.
+      (setq asked nil
+            drover-list-hidden-fields '(harness changes))
+      (revert-buffer)
+      (should-not (memq 'changes drover-list--prefetch-kinds))
+      (should-not asked)
+      (drover-list-test-goto "a")
+      (magit-section-show (magit-current-section))
+      (should (equal asked '(("a")))))))
+
+(ert-deftest drover-list-test-details-tell-what-the-line-cuts ()
+  "What a line shows cut, or as an icon alone, its details tell whole; not what its group names."
+  (drover-list-test-with
+      (list (drover-test-session "s" :status 'working :updated (drover-list-test-ago 60)
+                                 :title "A title far too long for its column, of sixty characters"
+                                 :project "drover"))
+    (setq drover-list-hidden-fields nil)
+    (revert-buffer)
+    (drover-list-test-goto "s")
+    (magit-section-show (magit-current-section))
+    (let ((text (drover-list-test-visible-text)))
+      (should (string-match-p "^    Title +A title far too long for its column, of sixty characters$" text))
+      ;; The project its column shows whole, not again.
+      (should-not (string-match-p "^ +Project" text)))
+    ;; Grouped by project, which its group names, not in its details either.
+    (let ((drover-group-by 'project)
+          (drover-list-hidden-fields '(location)))
+      (revert-buffer)
+      (drover-list-test-goto "s")
+      (magit-section-show (magit-current-section))
+      (should-not (string-match-p "^ +Project" (drover-list-test-visible-text))))))
 
 (defun drover-list-test-x (position)
   "Return how far from its window's left edge POSITION is drawn, in pixels.
@@ -5182,7 +5287,12 @@ place, each as a drawing anew draws it."
       (should (< drover-list--width (buffer-local-value 'drover-list--width buffer))))
     ;; Each list its point; the list its sessions expanded and its
     ;; groups collapsed, the sidebar none, Idle shown whatever
-    ;; `drover-list-collapsed-groups' says.
+    ;; `drover-list-collapsed-groups' says.  Its error, longer than its
+    ;; line, gives the failed session details.
+    (setf (drover-session-detail (drover-list-test-find "fail"))
+          "Rate limited\nThe provider asks to wait a minute before the next request")
+    (drover-backend-changed 'fake "fail")
+    (drover-changed-now)
     (with-selected-window side
       (drover-list-test-goto "work")
       (magit-section-show (drover-list-test-section "ask")))
@@ -6830,7 +6940,7 @@ set is that of the list in sight."
   "The menu lays its groups out in rows as wide as its window, in few lines.
 The old menu took 24 lines at any width, its View menu apart; before
 the settings of a field shared a row, 14 at 240 columns, 18 at 160, 28
-at 100 and 44 at 60."
+at 100 and 44 at 60.  The column of the changes took one more at 60."
   (drover-list-test-elsewhere
     ;; The table of fields shows in two halves side by side, or one under
     ;; the other, as room asks; the view settings show, the list being in
@@ -7449,15 +7559,16 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
   (let* ((home (expand-file-name "~/src/x/"))
          (layout (list :fields nil :now drover-test-now))
          (fact (lambda (session)
-                 (nth 1 (assoc "Directory" (drover-list--hidden-facts session layout))))))
+                 (nth 1 (assoc "Directory" (drover-list--hidden-facts session layout nil))))))
     (should (equal (funcall fact (drover-session-create :directory home)) "~/src/x/"))
     (should (equal (funcall fact (drover-session-create :directory home :host "core")) home))
-    (should (equal (drover-list--changes-text (list (list (concat home "a.el") 1 2)) home)
-                   "+1 −2 in 1 file: a.el"))
-    (should (equal (drover-list--changes-text (list (list (concat home "a.el") 1 2))
-                                              (drover-session-local-directory
-                                               (drover-session-create :directory home :host "core")))
-                   (concat "+1 −2 in 1 file: " home "a.el")))))
+    (should (equal (substring-no-properties (drover-list--file-line (list (concat home "a.el") 1 2) home))
+                   "a.el  +1 −2"))
+    (should (equal (substring-no-properties
+                    (drover-list--file-line (list (concat home "a.el") 1 2)
+                                            (drover-session-local-directory
+                                             (drover-session-create :directory home :host "core"))))
+                   (concat home "a.el  +1 −2")))))
 
 (ert-deftest drover-list-test-branch-in-view-menu ()
   "The View menu's Columns switch the branch's column."

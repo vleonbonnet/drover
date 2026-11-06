@@ -135,7 +135,7 @@ Nothing a peer asks prompts on the owner, nor takes the owner's windows: actions
 
 ** Older and archived sessions, recaps, previews
 
-The proxy's =:history= and =:archived= ask the owner, which fetches from its backends as =drover-set-show-history= does and answers in chunks; =:recap= and =:preview= ask for one session's, bounded on both ends; =:prefetch= sends the keys a list shows, at most once a second, so that the owner fetches their context sizes and the updates bring them.  Every request carries the generation the viewer asked under, and an answer of a stale generation is dropped, as for local fetches.
+The proxy's =:history= and =:archived= ask the owner, which fetches from its backends as =drover-set-show-history= does and answers in chunks; =:recap= and =:preview= ask for one session's, bounded on both ends; =:prefetch= sends the keys a list shows, at most once a second, so that the owner fetches their context sizes and the updates bring them; =:prefetch-changes= sends them alike, as =chg=, so that the owner reads what they changed (see [[*What sessions changed][What sessions changed]]).  Every request carries the generation the viewer asked under, and an answer of a stale generation is dropped, as for local fetches.
 
 A record carries the summary its owner's model wrote of the session's last turn, =brief= and =brief-recap= (see =drover-summary.el=): a viewer never summarizes a peer's session, whose text so leaves its host only through its owner's model.
 
@@ -811,6 +811,19 @@ Each host totals the usage its own engines record (=drover-usage=, see =doc/desi
 A row is a vector: the engine, the session's identifier and its parent's, the day, the provider, the model, the project, the four counts of tokens, the cost or false, the billing, =priced= or =included=, where the cost came from, and the session's title.  Each is checked as it comes (=drover-usage-decode-row=): an engine of a short name, strings bounded to 200 characters, counts natural numbers, a cost finite, a billing one of the two; a row that does not fit is left out.  The report asks each peer connected for the period it shows, at most once a minute, every 5 s while the peer still reads, and a session of a peer asks it for every session's totals ever; what was received is kept in memory, by host and request, as last received, a host not connected showing as of then.  An older drover, without the capability, is not asked.
 
 The test of the remote layer starts the agent with a Claude Code home of a conversation of three replies, two records of one, and checks the period's totals and the session's, its tokens and its cost as the agent priced it, through 127.0.0.1.
+
+* What sessions changed
+
+Each host reads what its own sessions changed in all their turns (=drover-changes=, see =doc/design.org=), from its own engines, for the sessions its lists show and those its peers' lists show: a peer never reads another host's transcripts, nor asks another host's service.
+
+| Protocol             | Meaning                                                                                                                                                                                                 |
+|----------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| capability =changes= | told by a host reading what its sessions changed for its peers                                                                                                                                          |
+| message =chg=        | the keys of the sessions a peer's lists show, 500 at most, sent with those to prefetch (=pre=), at most once a second, again once connected anew; only to a host telling the capability, from any access |
+| record =:changes=    | =[ADDITIONS DELETIONS FILES]=, the lines added and removed, false when the engine counted none, and the files; left out while unknown or nothing                                                        |
+| recap =:files=       | the files all the session's turns changed, as =:changes= tells its last turn's: =[FILE ADDITIONS DELETIONS]=, a hundred at most, named relative to the session's directory there                         |
+
+The owner takes =chg= as its own lists' asking (=drover-prefetch= of the kind =changes=), for the sessions it serves alone: it reads them once settled, and again as their turns end; the counts change its records, which its updates bring, and its recaps tell the files, as =drover-recap= tells them there.  What a peer sends is checked as it comes (=drover-remote--decode-totals=, =drover-remote--decode-files=): counts natural numbers, files a positive one, names lines.  An older owner, without the capability, is sent no =chg=, and its sessions show no changes but those of their last turns, as before.  The test of the remote layer has the agent's fake engine tell what its sessions changed, a peer ask for three of them, and checks the counts its records bring, the files its recap tells, and a session at work read once its turn ends.
 
 * Tasks of other hosts, as built
 

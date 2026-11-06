@@ -69,6 +69,14 @@ Of the weight of the icon of a host connected, dimmed, so that the
 icon keeps its width as the host comes and goes."
   :group 'drover-faces)
 
+(defface drover-added '((t :inherit success :weight normal))
+  "Face of the lines a session added, as its changes count them."
+  :group 'drover-faces)
+
+(defface drover-removed '((t :inherit error :weight normal))
+  "Face of the lines a session removed, as its changes count them."
+  :group 'drover-faces)
+
 (defcustom drover-attention-glyph "\U0001F916" ; robot face
   "Glyph before the count of sessions needing you, in the mode line.
 `drover-attention-mode' shows it, a space and the count, in the face of

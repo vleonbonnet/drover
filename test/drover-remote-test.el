@@ -242,7 +242,8 @@ registration; the agent, if BODY starts one, is stopped after."
                   :provider-name "Prov" :context-tokens 5000 :context-limit 200000
                   :context-tier '(near 200000 "2×") :detail "Busy\nreally" :engine 'opencode
                   :engine-id "ses_1" :cache-expires 400.0 :cache-ttl 300 :cache-tokens 10
-                  :cache-prompt-tokens 20 :agent-display agent :context-estimated t :archived 300.0))
+                  :cache-prompt-tokens 20 :agent-display agent :context-estimated t :archived 300.0
+                  :changes '(12 nil 3)))
          (decoded (drover-remote-test--roundtrip record nil '(opencode . "ses_0") 10)))
     (should (equal (drover-session-id decoded) '(opencode . "ses_1")))
     (should (eq (drover-session-backend decoded) 'remote:core))
@@ -253,7 +254,7 @@ registration; the agent, if BODY starts one, is stopped after."
     (should (equal (drover-session-engine-key decoded) '("core" opencode . "ses_1")))
     (dolist (slot '(title directory project branch status requests agent model effort effort-default
                           provider-name context-tokens context-limit context-tier detail engine
-                          engine-id cache-ttl cache-tokens cache-prompt-tokens context-estimated))
+                          engine-id cache-ttl cache-tokens cache-prompt-tokens context-estimated changes))
       (should (equal (cl-struct-slot-value 'drover-session slot decoded)
                      (cl-struct-slot-value 'drover-session slot record))))
     ;; The owner's clock is 10 s ahead of this host's.
@@ -316,7 +317,11 @@ registration; the agent, if BODY starts one, is stopped after."
   (should (equal (plist-get (drover-remote--encode-recap
                              '(:changes (("/work/p/a.el" 1 2) ("/elsewhere/b.el" nil nil))) "/work/p/")
                             :changes)
-                 [["a.el" 1 2] ["/elsewhere/b.el" :false :false]])))
+                 [["a.el" 1 2] ["/elsewhere/b.el" :false :false]]))
+  ;; Those of all its turns too.
+  (should (equal (plist-get (drover-remote--encode-recap '(:files (("/work/p/a.el" 1 2))) "/work/p/")
+                            :files)
+                 [["a.el" 1 2]])))
 
 (ert-deftest drover-remote-test-hostile-records ()
   "Records received are checked and bounded, whatever they hold, and never read."
@@ -344,6 +349,13 @@ registration; the agent, if BODY starts one, is stopped after."
         (should-not (drover-session-engine record))
         (should-not (drover-session-requests record))
         (should-not (drover-session-context-tier record)))
+      ;; What a session changed: three counts, files counted, a wrong
+      ;; count unknown.
+      (dolist (changes (list [1 2] [1 2 0] [1 2 -3] [1 2 "3"] "1 2 3" (list 1 2 3)))
+        (should-not (drover-session-changes (decode (list :k ["opencode" "s"] :changes changes)))))
+      (dolist (changes (list [:false 2 3] [1.5 2 3] [-1 2 3] ["1" 2 3]))
+        (should (equal (drover-session-changes (decode (list :k ["opencode" "s"] :changes changes)))
+                       '(nil 2 3))))
       ;; No key, or one naming no backend, is no record; nothing is interned
       ;; from a name that is not a short symbol.
       (should-not (decode (list :title "x")))
@@ -922,6 +934,35 @@ restart of the host's remote layer, its counters rising."
             (should-not (seq-some (lambda (key) (drover-session-host (drover-index-session key)))
                                   (hash-table-keys drover-summary--seen))))
         (drover-summary-mode -1)))))
+
+(ert-deftest drover-remote-test-changes-by-their-owner ()
+  "A host reads what its sessions changed for the peers showing them.
+Their records tell the counts, their recaps the files; a session at
+work is read once its turn ends."
+  (drover-remote-test-with nil
+    (drover-remote-test-connect (drover-remote-test-start-agent dir))
+    (drover-remote-test-command "sessions" :n 3)
+    (drover-remote-test-synced 3)
+    (drover-remote-test-command "review-set" :lines 4)
+    (drover-remote-test-command "changes")
+    (cl-flet ((of (id) (drover-index-session (cons 'remote:agent (cons 'fake id)))))
+      ;; Asked by a list showing them, here as its prefetch does.
+      (drover-prefetch (mapcar #'of '("s0" "s1" "s2")) '(changes))
+      (drover-remote-test-wait (lambda () (and (drover-session-changes (of "s0"))
+                                               (drover-session-changes (of "s2")))))
+      (should (equal (drover-session-changes (of "s0")) '(4 1 2)))
+      (should (equal (drover-session-changes (of "s2")) '(4 1 2)))
+      ;; At work: read once its turn ends.
+      (should-not (drover-session-changes (of "s1")))
+      (let ((recap nil))
+        (drover-recap (of "s0") (lambda (value) (setq recap value)))
+        (drover-remote-test-wait (lambda () recap))
+        (should (equal (plist-get recap :files) '(("src/a.el" 4 1) ("gone.el" nil nil))))
+        ;; Its last turn's, as before.
+        (should (equal (plist-get recap :changes) '(("a.el" 3 1)))))
+      (drover-remote-test-command "change" :ids ["s1"] :status "idle" :now t)
+      (drover-remote-test-wait (lambda () (drover-session-changes (of "s1"))))
+      (should (equal (drover-session-changes (of "s1")) '(4 1 2))))))
 
 (ert-deftest drover-remote-test-review ()
   "The changes of another host's session come from it, bounded; an older one says it tells none."

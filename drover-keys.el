@@ -1476,7 +1476,8 @@ column of entries does.")
 
 (defconst drover-list-field-labels
   '((goal . "goal") (attempt . "attempt") (host . "host") (harness . "harness") (location . "location") (branch . "branch") (agent . "agent")
-    (model . "model") (provider . "provider") (context . "context") (created . "created") (cost . "cost")
+    (model . "model") (provider . "provider") (context . "context") (changes . "changes")
+    (created . "created") (cost . "cost")
     (age . "age") (cache . "cache") (summary . "summary"))
   "Display name of each field of `drover-list-fields' the user may hide.")
 
@@ -1552,6 +1553,7 @@ It shows where the list has FIELD, but in the menu of the search."
 (drover--define-column-switch model)
 (drover--define-column-switch provider)
 (drover--define-column-switch context)
+(drover--define-column-switch changes)
 (drover--define-column-switch created)
 (drover--define-column-switch cost)
 (drover--define-column-switch age)
@@ -2144,56 +2146,57 @@ when inherited from the defaults or when the entry does not apply.")
   ;; The subagents, older and archived sessions shown come first, as
   ;; they keep sessions out as the filter does, on the filter's keys.
   [:class drover--menu-table
-   :description "Field"
-   :headings ("Filter" "Column")
-   :if drover--dispatch-subagents-p
-   ["subagents" :class drover--menu-table-row
-    ("=u" "subagents" drover-toggle-subagents
-     :class drover--setting
-     :format " %k %v"
-     :getter (lambda () (unless (drover--dispatch-foreign-subagents-p)
-                          (default-value 'drover-show-subagents)))
-     :setter drover-set-show-subagents
-     :chooser drover-next-subagent-mode
-     :options ,drover-subagent-mode-labels
-     :inapt-if-not drover--dispatch-subagents-p)]
-   ["older" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=O" drover-view--history :inapt-if-not drover--dispatch-history-p :format " %k %v")]
-   ["archived" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=z" drover-view--archived :inapt-if-not drover--dispatch-archived-p :format " %k %v")]
-   ["project" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=p" drover-view--filter-project) ("-p" drover-view--column-location)]
-   ["status" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=s" drover-view--filter-statuses)]
-   ["agent" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=a" drover-view--filter-agent) ("-a" drover-view--column-agent)]
-   ["model" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=m" drover-view--filter-model) ("-m" drover-view--column-model)]
-   ["provider" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=v" drover-view--filter-provider) ("-v" drover-view--column-provider)]
-   ["harness" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=H" drover-view--filter-harness) ("-H" drover-view--column-harness)]
-   ["host" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=h" drover-view--filter-host) ("-h" drover-view--column-host)]
-   ["updated" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=d" drover-view--filter-since) ("-d" drover-view--column-age)]
-   ["text" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=f" drover-view--filter-search)]
-   ;; Under the filters, which it clears.
-   ["" :class drover--menu-table-row :if drover-dispatch-view-shown-p
-    ("=c" "clear" drover-filter-clear :transient t)]]
+          :description "Field"
+          :headings ("Filter" "Column")
+          :if drover--dispatch-subagents-p
+          ["subagents" :class drover--menu-table-row
+           ("=u" "subagents" drover-toggle-subagents
+            :class drover--setting
+            :format " %k %v"
+            :getter (lambda () (unless (drover--dispatch-foreign-subagents-p)
+                                 (default-value 'drover-show-subagents)))
+            :setter drover-set-show-subagents
+            :chooser drover-next-subagent-mode
+            :options ,drover-subagent-mode-labels
+            :inapt-if-not drover--dispatch-subagents-p)]
+          ["older" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=O" drover-view--history :inapt-if-not drover--dispatch-history-p :format " %k %v")]
+          ["archived" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=z" drover-view--archived :inapt-if-not drover--dispatch-archived-p :format " %k %v")]
+          ["project" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=p" drover-view--filter-project) ("-p" drover-view--column-location)]
+          ["status" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=s" drover-view--filter-statuses)]
+          ["agent" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=a" drover-view--filter-agent) ("-a" drover-view--column-agent)]
+          ["model" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=m" drover-view--filter-model) ("-m" drover-view--column-model)]
+          ["provider" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=v" drover-view--filter-provider) ("-v" drover-view--column-provider)]
+          ["harness" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=H" drover-view--filter-harness) ("-H" drover-view--column-harness)]
+          ["host" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=h" drover-view--filter-host) ("-h" drover-view--column-host)]
+          ["updated" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=d" drover-view--filter-since) ("-d" drover-view--column-age)]
+          ["text" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=f" drover-view--filter-search)]
+          ;; Under the filters, which it clears.
+          ["" :class drover--menu-table-row :if drover-dispatch-view-shown-p
+           ("=c" "clear" drover-filter-clear :transient t)]]
   ;; The fields no filter takes.
   ["Columns"
    :if drover--dispatch-layout-p
    ("-b" drover-view--column-branch)
    ("-x" drover-view--column-context)
+   ("-+" drover-view--column-changes)
    ("-c" drover-view--column-created)
    ("-k" drover-view--column-cache)]
   [:if drover--dispatch-layout-p
-   ("-s" drover-view--column-summary)
-   ("-$" drover-view--column-cost)
-   ("-g" drover-view--column-goal)
-   ("-#" drover-view--column-attempt)])
+       ("-s" drover-view--column-summary)
+       ("-$" drover-view--column-cost)
+       ("-g" drover-view--column-goal)
+       ("-#" drover-view--column-attempt)])
 
 (defvar drover--dispatch-close-keys nil
   "The keys of `drover-dispatch' where it last opened, which close it.")

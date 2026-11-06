@@ -110,13 +110,13 @@ The menu has no fixed shape: its groups fill columns of balanced height as wide 
   Sessions        Task                       Input                 Session                             Field       Filter     Column     Columns
    j Next          n Start or continue        RET Send              o Other window   E Edit pending 1   subagents  =u [all|active|none]   -b branch
    B Bury quiet    F Finish                   S-<return> Schedule   u Parent         + New session      older      =O [hidden|shown]      -x context
-   b Select        I Link session             i Attach              c Subagent       g Refresh          archived   =z [hidden|shown]      -c created
-   l List          & Attempts                 k Clear               v Peek           r Rename           project    =p drover  -p shown    -k cache
-   L Side list     W Worktrees                / Slash command       R Review         x Delete           status     =s any                 -s summary
-   p Project                                  @ Mention             A Answer         z Archive          agent      =a any     -a shown    -$ cost
-   S Search       Prompt runs                 y Copy block          K Interrupt      Z Unarchive        model      =m any     -m shown    -g goal
-   $ Usage         a Agent plan                                     s Mark seen      G Goal             provider   =v any     -v shown    -# attempt
-                   m Model Opus 5.5          Conversation                                               harness    =H any     -H shown
+   b Select        I Link session             i Attach              c Subagent       g Refresh          archived   =z [hidden|shown]      -+ changes
+   l List          & Attempts                 k Clear               v Peek           r Rename           project    =p drover  -p shown    -c created
+   L Side list     W Worktrees                / Slash command       R Review         x Delete           status     =s any                 -k cache
+   p Project                                  @ Mention             A Answer         z Archive          agent      =a any     -a shown    -s summary
+   S Search       Prompt runs                 y Copy block          K Interrupt      Z Unarchive        model      =m any     -m shown    -$ cost
+   $ Usage         a Agent plan                                     s Mark seen      G Goal             provider   =v any     -v shown    -g goal
+                   m Model Opus 5.5          Conversation                                               harness    =H any     -H shown    -# attempt
   Prompt           e Effort max               t Revert here        View                                 host                  -h shown
    " Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
    N Task prompt                              C Compact             =r order [asc|desc]                 text       =f any
@@ -294,8 +294,9 @@ Wherever one of drover's lists is in sight (see [[*The menu beside the list][The
 | =-p= | =drover-view--column-location=  | the column of the project, and so on for each field: |
 |      |                                 | =-a= agent, =-m= model, =-v= provider, =-H= harness,  |
 |      |                                 | =-h= host, =-d= age, beside their filters; =-b=       |
-|      |                                 | branch, =-x= context, =-c= created, =-k= cache, =-s=  |
-|      |                                 | summary, =-$= cost, =-g= goal, =-#= attempt           |
+|      |                                 | branch, =-x= context, =-+= changes, =-c= created,     |
+|      |                                 | =-k= cache, =-s= summary, =-$= cost, =-g= goal, =-#=  |
+|      |                                 | attempt                                               |
 
 Earlier versions reached these through =V= only, on keys of its own: =o=, =r= and =g= are now ~=o~, ~=r~ and ~=g~; the filters =p=, =s=, =a=, =m=, =v=, =h=, =d=, =f= and =c= are ~=p~ … ~=c~; =F= is =-f=; the columns keep their keys.  The subagents, older and archived sessions shown keep sessions out as the filter does: they moved from the View group to the Filter group, and from =U=, =-o= and =-z= to ~=u~, ~=O~ and ~=z~ (~=o~ sorts); the list no longer binds =U= of its own.  The columns of the fields a filter takes then took their filter's letter, in its row: the project's =-l= is =-p=, the provider's =-r= =-v=, the age's =-t= =-d=, and the cache, whose =-p= the project took, is =-k=.
 
@@ -343,6 +344,7 @@ The list is drawn in a proportional font (the face =drover-list=), laid out in p
 | harness  | Harness  | what runs it, its icon and name (see [[*Harnesses][Harnesses]])                          |    4 | first line, its icon  |
 | model    | Model    | the model, compact, such as =Opus 5.5=, then its effort, dim when a default |    5 |                       |
 | context  | Context  | the context's size, such as =182k=, after a short bar of how full it is     |    6 | first line, a pie     |
+| changes  | Changes  | what all its turns changed, such as =+42 −7 · 3 files= (see [[*What sessions changed][What sessions changed]]) |    7 |                       |
 | provider | Provider | the provider serving the model, as an icon                                  |    7 |                       |
 | location | Project  | the project                                                                 |    8 |                       |
 | branch   | Branch   | the Git branch, unless the repository's default one                         |    9 |                       |
@@ -394,23 +396,34 @@ As you select windows and show buffers in them, only the titles whose session ch
 
 ** The last turn
 
-Expanded, a session recaps its last turn under its title, in the list's font:
+Expanded, a session recaps its last turn under its title, in the list's font, then the files all its turns changed:
 
-#+begin_example
-  ✓  Fix the login redirect          plan  Opus 5.5 high   1h
-     Prompt   The login page sends users back to /home after they sign
-              in; keep the page they came from.
-     Reply    The redirect now keeps the page users came from, in a
-              signed parameter, …
-     Changes  +42 −7 in 3 files: auth/login.go, auth/redirect.go, …
-#+end_example
+         #+begin_example
+         ✓  Fix the login redirect          plan  Opus 5.5 high  +42 −7 · 3 files   1h
+            Prompt   The login page sends users back to /home after they sign
+                     in; keep the page they came from.
+            Reply    The redirect now keeps the page users came from, in a
+                     signed parameter, …
+            Changes  auth/login.go  +30 −5
+                     auth/redirect.go  +10 −2
+                     auth/redirect_test.go  +2
+         #+end_example
 
-- what the session waits for, every question or permission request in full, and the error that ended its turn or that it retries after;
-- the prompt it was given last, and the agent's newest reply since, a few lines each, wrapped to the window (=drover-list-recap-lines=): =v= previews the whole reply, =RET= opens the session;
-- the files the turn changed, with the lines added and removed when the backend knows them;
-- what the session's line leaves out at this width, such as the model, provider and context in a side window, and the directory of a session without a project.
+         - its title, when its line cuts it;
+         - what the session waits for, every question or permission request in full, and the error that ended its turn or that it retries after, but an error its line shows whole already; when its line leaves out its summary, how it stands, such as the step it is at;
+         - the prompt it was given last, and the agent's newest reply since, a few lines each, wrapped to the window (=drover-list-recap-lines=): =v= previews the whole reply, =RET= opens the session;
+         - the files all its turns changed, a line each, with the lines added and removed when the engine counts them, after their counts when its line does not show them (see [[*What sessions changed][What sessions changed]]); without them, the files its last turn changed, as its backend tells them;
+         - what the session's line leaves out at this width, or shows cut or as an icon alone, such as the model, provider and context in a side window, the harness's name where its column shows its icon, the context's size where its pie shows, and the directory of a session without a project; not what the group it is in names, such as its project.
+
+         A session whose line shows everything it would tell has no details to expand.
 
 The recap is fetched as the session expands, without waiting: =loading…= shows meanwhile. It is kept until the session changes, fetched again then at most every two seconds while the session stays expanded, and anew by =g=. OpenCode sessions ask the service (=opencode-session-last-turn=), Claude Code conversations, in a terminal or closed, read their transcript, closed Codex ones their rollout, and agent-shell's shells tell what their events said since drover followed them.
+
+** What sessions changed
+
+The column =changes= tells what a session changed in all its turns, as its engine recorded them: the lines added and removed, and the files, such as =+42 −7 · 3 files=, the counts in =drover-added= and =drover-removed=; its expanded session lists the files (see [[*The last turn][The last turn]]). They are what a review of the whole session shows (see [[*Reviewing a session's changes][Reviewing a session's changes]]): OpenCode's service diffs the snapshots it took of the working tree, Claude Code's and Codex's edits are read from their transcripts and rollouts; no model is asked. An engine telling none, such as Gemini CLI's, shows none.
+
+Reading them costs a request to the service or a whole transcript read, so drover reads them only for the sessions a list shows, those of its expanded groups and those you expand, once their turns end, never while they work: =drover-changes-delay= seconds after a session settled, two at once at most (=drover-changes-concurrency=), the most recently active first. What it read it keeps in =drover-state-directory=, =changes.eld=, the newest 1000 conversations, each with the time of its session's last activity it describes, so that an Emacs starting reads again only the sessions that changed since. A session that could not be read is read again once it changes. Another host's sessions carry what their owner read, which it reads for the sessions your lists show.
 
 ** Summaries
 
@@ -450,9 +463,9 @@ The view settings are the View group, the Field table and the Columns group of =
   View                    Field       Filter     Column                                      Columns
    =o sort last activity   subagents  =u [all|active|none]   provider   =v any     -v shown   -b branch    -s summary
    =r order [asc|desc]     older      =O [hidden|shown]      harness    =H any     -H shown   -x context   -$ cost
-   =g group nothing        archived   =z [hidden|shown]      host                  -h shown   -c created   -g goal
-   -f follow [off|on]      project    =p drover  -p shown    updated    =d any     -d shown   -k cache     -# attempt
-                           status     =s any                 text       =f any
+   =g group nothing        archived   =z [hidden|shown]      host                  -h shown   -+ changes   -g goal
+   -f follow [off|on]      project    =p drover  -p shown    updated    =d any     -d shown   -c created   -# attempt
+                           status     =s any                 text       =f any                -k cache
                            agent      =a any     -a shown               =c clear
                            model      =m any     -m shown
 #+end_example
@@ -580,7 +593,7 @@ Sent, its blocks are Markdown fences, as every prompt's.
 
 * Usage
 
-=C-' $= (=drover-usage=) shows in =*drover usage*= what agents cost: the tokens they used, input, output, read from and written into prompt caches, and what those cost, today, this week, this month or ever, grouped by session (its subagents' usage with it), project, harness, provider, model, host or day, each group broken down by another, then where each cost comes from. =V= there opens its menu, on the families of keys of the list's: ~=d~ the period, ~=g~ the grouping, ~=b~ what each group is broken down by, ~=o~ the order, ~=p~, ~=H~, ~=h~, ~=m~ and ~=v~ total one project, harness, host, model or provider, ~=c~ all of them again; =g= reads anew what changed, =RET= on a session opens it. The list shows each session's totals, its subagents' included, in its details, and in the column =cost=, hidden by default (=-$= in the View menu). =drover-usage-mode-line-mode= shows today's cost in the mode line, its tooltip by harness.
+=C-' $= (=drover-usage=) shows in =*drover usage*= what agents cost: the tokens they used, input, output, read from and written into prompt caches, and what those cost, today, this week, this month or ever, grouped by session (its subagents' usage with it), project, harness, provider, model, host or day, each group broken down by another, then where each cost comes from. =V= there opens its menu, on the families of keys of the list's: ~=d~ the period, ~=g~ the grouping, ~=b~ what each group is broken down by, ~=o~ the order, ~=p~, ~=H~, ~=h~, ~=m~ and ~=v~ total one project, harness, host, model or provider, ~=c~ all of them again; =g= reads anew what changed, =RET= on a session opens it. The list shows each session's cost, its subagents' included, in the column =cost= (=-$= in the View menu hides it); this report tells its tokens. =drover-usage-mode-line-mode= shows today's cost in the mode line, its tooltip by harness.
 
 Each engine's usage comes from what it records:
 

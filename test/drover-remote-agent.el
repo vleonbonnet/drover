@@ -80,6 +80,7 @@
 (defvar drover-summary-delay)
 (defvar drover-summary-catch-up)
 (defvar drover-summary-generate-function)
+(defvar drover-changes-delay)
 (declare-function drover-summary-mode "drover-summary" (&optional arg))
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
@@ -626,6 +627,12 @@ noted, and their cancellations."
        (drover-summary-mode 1)
        (drover-changed-now)
        (funcall reply (list :ok t)))
+      ("changes"
+       ;; What sessions changed, read from the fake engine as peers ask.
+       (require 'drover-changes)
+       (setq drover-changes-delay 0
+             drover-changes-prefetch-function #'drover-changes-prefetch)
+       (funcall reply (list :ok t)))
       ("search-set"
        ;; How the stand-in of OpenCode's search answers: after DELAY
        ;; seconds, failing with FAILURE when given.
@@ -875,7 +882,7 @@ noted, and their cancellations."
                                   (with-current-buffer buffer
                                     (buffer-substring-no-properties (max (point-min) (- (point-max) 2000))
                                                                     (point-max)))
-                                  "")
+                                "")
                         :submitted (if (buffer-live-p buffer)
                                        (vconcat (reverse (buffer-local-value 'drover-remote-agent--submitted buffer)))
                                      [])
@@ -946,6 +953,8 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
           drover-transcript-engines (append (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
                                             (and (getenv "DROVER_AGENT_CODEX") '(codex)))
           drover-refresh-delay 0.02
+          ;; What sessions changed is read once a test asks for it.
+          drover-changes-prefetch-function nil
           spyglass-registration-file (expand-file-name "server.json" dir)
           drover-remote-standby-delay 1
           drover-remote-accept-unknown (unless (getenv "DROVER_AGENT_STRICT")

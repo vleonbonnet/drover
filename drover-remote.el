@@ -68,7 +68,7 @@
 (require 'drover-model)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 18))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 22))
   (load "drover-core" nil t))
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
@@ -327,7 +327,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs" "queued")
+    "push" "opts" "dirs" "conv" "jobs" "queued" "changes")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -367,7 +367,11 @@ finishes them for those of full access (see `drover-task'); \"queued\":
 the answer to an action `send' tells, by session, why a prompt its
 session could not take now waits in its queue of prompts (:queued),
 rather than say it went in, and it sends such a peer no message `note'
-of it.")
+of it; \"changes\": it reads what its sessions changed in all their
+turns from its engines (see `drover-changes'), for those a peer shows
+\(message `chg', the keys of the sessions), and tells them in their
+records (:changes, the lines added and removed and the files) and the
+files in their recaps (:files).")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -756,8 +760,28 @@ identifier cannot travel."
         ;; another host's sessions.
         (put :brief (drover-remote--plain (drover-session-brief record)))
         (put :brief-recap (drover-remote--plain (drover-session-brief-recap record)))
+        ;; Read here, from this host's engines (see `drover-changes').
+        (put :changes (drover-remote--encode-totals (drover-session-changes record)))
         (put :ops (drover-remote--record-ops record)))
       (nreverse out))))
+
+(defun drover-remote--encode-totals (changes)
+  "Return CHANGES, a record's slot `changes', as it travels, or nil.
+A vector [ADDITIONS DELETIONS FILES], an unknown count false."
+  (pcase changes
+    (`(,additions ,deletions ,(and (pred natnump) files))
+     (vector (or (drover-remote--number additions) :false)
+             (or (drover-remote--number deletions) :false)
+             files))))
+
+(defun drover-remote--decode-totals (value)
+  "Return VALUE, a record's changes as received, as its slot `changes', or nil.
+See `drover-remote--encode-totals'."
+  (when-let* (((vectorp value))
+              ((= (length value) 3))
+              (files (drover-remote--count (aref value 2)))
+              ((> files 0)))
+    (list (drover-remote--count (aref value 0)) (drover-remote--count (aref value 1)) files)))
 
 (defun drover-remote--record-ops (record)
   "Return the actions this host performs on RECORD for a peer, a vector of strings.
@@ -910,7 +934,8 @@ minus this host's.  Nil when DATA names no session."
                     (if (eq archived t) t (drover-remote--time archived offset)))
         :brief (drover-remote--line (plist-get data :brief))
         :brief-recap (let ((recap (plist-get data :brief-recap)))
-                       (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines))))))))
+                       (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines)))
+        :changes (drover-remote--decode-totals (plist-get data :changes)))))))
 
 ;;;; Serving this host's sessions
 
@@ -1950,6 +1975,31 @@ fails: a stream dropped and resumed loses no answer."
                       (drover-remote--decode-recap recap)
                     (list :failure (or error (format "%s told no recap" label))))))))))
 
+(defun drover-remote--decode-files (value)
+  "Return VALUE, files a session changed as received, as `drover-recap' tells them.
+A list of (FILE ADDITIONS DELETIONS), a hundred at most, each checked."
+  (and (vectorp value)
+       (delq nil (mapcar (lambda (change)
+                           (and (vectorp change) (= (length change) 3)
+                                (stringp (aref change 0))
+                                (list (drover-remote--line (aref change 0) 1024)
+                                      (drover-remote--count (aref change 1))
+                                      (drover-remote--count (aref change 2)))))
+                         (seq-take value 100)))))
+
+(defun drover-remote--encode-files (files directory)
+  "Return FILES, files a session changed, as they travel.
+FILES are (FILE ADDITIONS DELETIONS), as `drover-recap' tells them; those
+under DIRECTORY, the session's, are named relative to it, here, where
+they are: the peer names them as received."
+  (vconcat (delq nil (mapcar (lambda (change)
+                               (and (consp change) (stringp (car change))
+                                    (vector (substring-no-properties
+                                             (drover-relative-file-name (car change) directory))
+                                            (or (drover-remote--number (nth 1 change)) :false)
+                                            (or (drover-remote--number (nth 2 change)) :false))))
+                             (and (listp files) (seq-take files 100))))))
+
 (defun drover-remote--decode-recap (recap)
   "Return RECAP, as received, as `drover-recap' tells one."
   (let ((out nil))
@@ -1958,16 +2008,9 @@ fails: a stream dropped and resumed loses no answer."
         (setq out (plist-put out key text))))
     (when-let* ((failure (drover-remote--line (plist-get recap :failure))))
       (setq out (plist-put out :failure failure)))
-    (when-let* ((changes (plist-get recap :changes))
-                ((vectorp changes)))
-      (setq out (plist-put out :changes
-                           (delq nil (mapcar (lambda (change)
-                                               (and (vectorp change) (= (length change) 3)
-                                                    (stringp (aref change 0))
-                                                    (list (drover-remote--line (aref change 0) 1024)
-                                                          (drover-remote--count (aref change 1))
-                                                          (drover-remote--count (aref change 2)))))
-                                             (seq-take changes 100))))))
+    (dolist (key '(:changes :files))
+      (when-let* ((files (drover-remote--decode-files (plist-get recap key))))
+        (setq out (plist-put out key files))))
     out))
 
 (defun drover-remote--encode-recap (recap &optional directory)
@@ -1978,15 +2021,9 @@ it, here, where they are: the peer names them as received."
     (dolist (key '(:prompt :reply :error :failure))
       (when-let* ((text (drover-remote--plain (plist-get recap key))))
         (setq out (plist-put out key text))))
-    (when-let* ((changes (plist-get recap :changes)))
-      (setq out (plist-put out :changes
-                           (vconcat (delq nil (mapcar (lambda (change)
-                                                        (and (consp change) (stringp (car change))
-                                                             (vector (substring-no-properties
-                                                                      (drover-relative-file-name (car change) directory))
-                                                                     (or (drover-remote--number (nth 1 change)) :false)
-                                                                     (or (drover-remote--number (nth 2 change)) :false))))
-                                                      (and (listp changes) (seq-take changes 100))))))))
+    (dolist (key '(:changes :files))
+      (when-let* ((files (plist-get recap key)))
+        (setq out (plist-put out key (drover-remote--encode-files files directory)))))
     out))
 
 ;;;; Reviews
@@ -2113,11 +2150,19 @@ commits in number."
                              (format "%s: %s" label error)
                            (drover-remote--text (plist-get reply :text))))))))
 
-(defun drover-remote--prefetch (peer sessions)
-  "Ask PEER to fetch what the records of SESSIONS lack, at most once a second."
-  (let ((pending (or (car (drover-remote--peer-prefetch peer)) (make-hash-table :test #'equal))))
+(defun drover-remote--prefetch (peer sessions &optional kind)
+  "Ask PEER to fetch what the records of SESSIONS lack, at most once a second.
+KIND is `details', the default, for what its backends fetch, such as
+the size of a context, or `changes', for what the sessions changed,
+which a peer telling the capability \"changes\" reads (message `chg').
+The keys pending are sent together once the second passed."
+  (let ((pending (or (car (drover-remote--peer-prefetch peer)) (make-hash-table :test #'equal)))
+        (kind (or kind 'details)))
     (dolist (session sessions)
-      (puthash (drover-session-id session) t pending))
+      (let ((kinds (gethash (drover-session-id session) pending)))
+        ;; An older drover's pending keys hold t: what it fetches.
+        (puthash (drover-session-id session) (cl-adjoin kind (if (listp kinds) kinds '(details)))
+                 pending)))
     (unless (cdr (drover-remote--peer-prefetch peer))
       (setf (drover-remote--peer-prefetch peer)
             (cons pending
@@ -2132,14 +2177,32 @@ commits in number."
                                            ;; Asked once connected anew.
                                            (setf (drover-remote--peer-prefetch peer) (cons pending nil))
                                          (setf (drover-remote--peer-prefetch peer) nil)
-                                         (drover-remote--send
-                                          connection
-                                          (list :t "pre"
-                                                :keys (vconcat (mapcar (lambda (key)
-                                                                         (vector (symbol-name (car key)) (cdr key)))
-                                                                       (seq-take (hash-table-keys pending)
-                                                                                 500))))))))))))))
+                                         (drover-remote--send-prefetch peer connection pending))))))))))
     (setcar (drover-remote--peer-prefetch peer) pending)))
+
+(defun drover-remote--send-prefetch (peer connection pending)
+  "Send PEER, on CONNECTION, the keys of PENDING to fetch, by kind.
+PENDING maps the owner's keys to the kinds asked, as
+`drover-remote--prefetch' notes them: message `pre' for the details,
+`chg' for the changes, which only a peer telling the capability
+\"changes\" is sent; 500 keys at most each."
+  (let ((details nil)
+        (changes nil))
+    (maphash (lambda (key kinds)
+               (let ((kinds (if (listp kinds) kinds '(details))))
+                 (when (memq 'details kinds) (push key details))
+                 (when (memq 'changes kinds) (push key changes))))
+             pending)
+    (cl-flet ((send (type keys)
+                (when keys
+                  (drover-remote--send
+                   connection
+                   (list :t type
+                         :keys (vconcat (mapcar (lambda (key) (vector (symbol-name (car key)) (cdr key)))
+                                                (seq-take keys 500))))))))
+      (send "pre" details)
+      (when (drover-remote--capable-p peer "changes")
+        (send "chg" changes)))))
 
 ;;;; Acting on a peer's sessions
 
@@ -5952,6 +6015,7 @@ when of that peer, opened here once started.  For
    ((equal type "sub") (drover-remote--subscribe state connection peer message))
    ((equal type "ack") (drover-remote--acked state connection message))
    ((equal type "pre") (drover-remote--on-prefetch message))
+   ((equal type "chg") (drover-remote--on-prefetch message '(changes)))
    ((equal type "fetched")
     (when (eq connection (drover-remote--peer-connection peer))
       (drover-remote--fetched peer message)))
@@ -6011,15 +6075,18 @@ as an older drover's farewells do."
          (setf (drover-remote--peer-bye peer) (list kind why (float-time))))
         (_ (drover-remote--close peer why))))))
 
-(defun drover-remote--on-prefetch (message)
-  "Fetch what the records of the sessions MESSAGE names lack, for a peer."
+(defun drover-remote--on-prefetch (message &optional kinds)
+  "Fetch what the records of the sessions MESSAGE names lack, for a peer.
+KINDS are what to fetch, as `drover-prefetch' takes them: the details
+their backends fetch, for a message `pre', what they changed for a
+message `chg'."
   (let ((sessions nil))
     (seq-doseq (wire (seq-take (or (plist-get message :keys) []) 500))
       (when-let* ((key (drover-remote--key wire))
                   (served (drover-remote--served key)))
         (push (car served) sessions)))
     (when sessions
-      (drover-prefetch (nreverse sessions)))))
+      (drover-prefetch (nreverse sessions) (or kinds '(details))))))
 
 (defun drover-remote--answer (connection message reply)
   "Answer MESSAGE, a request of CONNECTION's peer, through REPLY."
@@ -6220,6 +6287,10 @@ CALLBACK gets (REPLY ERROR) once."
      :prefetch (lambda (sessions)
                  (when-let* ((peer (drover-remote--peer name)))
                    (drover-remote--prefetch peer sessions)))
+     ;; What they changed, read by their owner, which their records tell.
+     :prefetch-changes (lambda (sessions)
+                         (when-let* ((peer (drover-remote--peer name)))
+                           (drover-remote--prefetch peer sessions 'changes)))
      ;; What was said, searched there by its own backends.
      :search (lambda (query scope callback) (drover-remote--search name query scope callback))
      ;; Actions, which the owner performs and confirms.

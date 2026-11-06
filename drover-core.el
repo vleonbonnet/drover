@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 21
+(defconst drover-core-generation 22
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -694,7 +694,12 @@ summary while it describes the session's last turn as it stands (see
 `drover-brief-function'); a session of another host carries its
 owner's.")
   (brief-recap nil :documentation "A recap of the session's last turn in a few lines, or nil.
-Written with BRIEF, which an expanded session shows above its last turn."))
+Written with BRIEF, which an expanded session shows above its last turn.")
+  (changes nil :documentation "What the session changed in all its turns, or nil while unknown or nothing.
+A list (ADDITIONS DELETIONS FILES): the lines added and removed, each
+nil when its engine does not count them, and how many files, as its
+engine recorded them (see `drover-changes-function'); a session of
+another host carries its owner's."))
 
 (drover-note-layout 'drover-session)
 
@@ -726,6 +731,27 @@ whose brief its owner wrote, or when the function fails."
                (and (drover-session-p briefed) briefed))))
       record))
 
+(defvar drover-changes-function nil
+  "Function giving a record of this host what its session changed, or nil.
+Called with each record drover takes in from a backend of this host, it
+returns the record itself, or a copy with the slot `changes' set, as
+`drover-changes' reads them from the session's engine.  It is called
+for every record listed, thousands at once: it must cost a lookup, and
+return the same copy for the same record and changes, so that records
+compare alike.")
+
+(defun drover--with-changes (record)
+  "Return RECORD as `drover-changes-function' gives it what it changed.
+RECORD itself without the function, for a session of another host,
+whose changes its owner read, or when the function fails."
+  (or (and drover-changes-function
+           (drover-session-p record)
+           (null (drover-session-host record))
+           (drover-with-reporting "session changes"
+             (let ((changed (funcall drover-changes-function record)))
+               (and (drover-session-p changed) changed))))
+      record))
+
 (defun drover--whole-record (record)
   "Return RECORD, or a copy of it with the slots it lacks, nil.
 A record a backend made with an older drover, still running as this one
@@ -747,7 +773,8 @@ and `drover-text-limit' characters, its brief to a line and its recap to
 `drover-brief-recap-lines' lines.  RECORD itself when within those, and
 of all the slots of a `drover-session' now (see
 `drover--whole-record'), unless `drover-brief-function' gives it a
-brief (see `drover--briefed')."
+brief (see `drover--briefed') or `drover-changes-function' what it
+changed (see `drover--with-changes')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -791,7 +818,7 @@ brief (see `drover--briefed')."
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (drover--briefed (or copy record)))))
+      (drover--with-changes (drover--briefed (or copy record))))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -1725,6 +1752,12 @@ PROPERTIES is a plist of:
              draw, so it must cost nothing for sessions whose details
              are known, being fetched, or cannot be fetched.  See
              `drover-prefetch'.
+ :prefetch-changes
+             Function of a list of SESSIONS a view shows, for a backend
+             whose sessions run elsewhere, as another host's: it asks
+             where they run to read what they changed, which their
+             records then tell (the slot `changes').  Drover reads
+             those of the others itself (see `drover-prefetch').
  :caches     Non-nil when the backend may report the prompt caches of
              its sessions (the `cache-expires' of their records), or a
              function of no argument telling whether it may now: lists
@@ -2309,21 +2342,50 @@ kept is that of the backend whose buffer for it the user selected last,
 else that of the backend registered first."
   (drover--merge-duplicates (drover--unarchived (drover--live-sessions))))
 
-(defun drover-prefetch (sessions)
-  "Ask the backends of SESSIONS to fetch what their records lack.
-Each backend with a :prefetch function is given its own SESSIONS, in
-their order, once; what arrives it reports as a change.  Views call it
-for the sessions they show, whenever they draw, so that a detail
-costing a request is fetched for those sessions alone.  A backend whose
-:prefetch fails is reported, the others asked all the same."
-  (let ((by-backend nil))
+(autoload 'drover-changes-prefetch "drover-changes")
+
+(defvar drover-changes-prefetch-function #'drover-changes-prefetch
+  "Function of a list of sessions of this host whose changes to read, or nil.
+`drover-prefetch' calls it with the sessions a view shows, those it may
+read the changes of once their turns end (see `drover-changes').  It
+must cost nothing for sessions whose changes are known or being read.")
+
+(defun drover-prefetch (sessions &optional kinds)
+  "Ask for what the records of SESSIONS lack, as KINDS say.
+KINDS is a list of `details', what their backends fetch, such as the
+size of a context, and `changes', what the sessions changed in all
+their turns; nil asks for both.  Each backend with a :prefetch function
+is given its own SESSIONS, in their order, once, for `details'; what
+arrives it reports as a change.  For `changes', the sessions of this
+host go to `drover-changes-prefetch-function', the others to their
+backend's :prefetch-changes.  Views call it for the sessions they show,
+whenever they draw, so that a detail costing a request is fetched for
+those sessions alone.  A backend whose function fails is reported, the
+others asked all the same."
+  (let ((kinds (or kinds '(details changes)))
+        (by-backend nil))
     (dolist (session sessions)
       (push session (alist-get (drover-session-backend session) by-backend)))
-    (pcase-dolist (`(,backend . ,records) (nreverse by-backend))
-      (when-let* ((function (drover-backend-property backend :prefetch))
-                  ((functionp function)))
-        (drover-with-reporting "backend prefetch"
-          (funcall function (nreverse records)))))))
+    (setq by-backend (nreverse by-backend))
+    (when (memq 'details kinds)
+      (pcase-dolist (`(,backend . ,records) by-backend)
+        (when-let* ((function (drover-backend-property backend :prefetch))
+                    ((functionp function)))
+          (drover-with-reporting "backend prefetch"
+            (funcall function (reverse records))))))
+    (when (memq 'changes kinds)
+      (let ((local nil))
+        (pcase-dolist (`(,backend . ,records) by-backend)
+          (if-let* ((function (drover-backend-property backend :prefetch-changes))
+                    ((functionp function)))
+              (drover-with-reporting "backend changes"
+                (funcall function (reverse records)))
+            (dolist (record (reverse records))
+              (unless (drover-session-host record)
+                (push record local)))))
+        (when (and local drover-changes-prefetch-function)
+          (drover-with-reporting "session changes"
+            (funcall drover-changes-prefetch-function (nreverse local))))))))
 
 (defvar drover-show-history nil
   "Non-nil when session lists show older sessions too.
@@ -3669,6 +3731,36 @@ sessions arrive."
                         fetched)))
       (setq drover--history (forget drover--history)
             drover--archived (forget drover--archived)))))
+
+(defun drover-take-in-again (keys)
+  "Take in anew the records of the sessions KEYS, as drover takes records in.
+For what `drover-brief-function' and `drover-changes-function' give
+records, which changed though the sessions did not: the live sessions
+are asked of their backends again, each its :session alone, and the
+older and archived sessions fetched are taken in again from the records
+kept, their backends' views drawn anew."
+  (let ((wanted (make-hash-table :test #'equal))
+        (refetched nil))
+    (dolist (key keys)
+      (puthash key t wanted))
+    (cl-flet ((again (fetched)
+                (mapcar (lambda (entry)
+                          (cons (car entry)
+                                (mapcar (lambda (record)
+                                          (if (and (drover-session-p record)
+                                                   (gethash (drover-session-key record) wanted))
+                                              (progn (cl-pushnew (car entry) refetched)
+                                                     (drover--bound-record record))
+                                            record))
+                                        (cdr entry))))
+                        fetched)))
+      (setq drover--history (again drover--history)
+            drover--archived (again drover--archived)))
+    (dolist (key keys)
+      (when (drover-index-session key)
+        (drover-backend-changed (car key) (cdr key))))
+    (dolist (backend refetched)
+      (drover-backend-changed backend))))
 
 ;;;; State files
 
@@ -5830,6 +5922,16 @@ called back out of a command."
                              (drover-with-reporting "preview"
                                (funcall callback (drover-bound-text text nil nil t))))))))
 
+(defun drover--bound-changes (changes)
+  "Return CHANGES, files a session changed, bounded.
+A list of (FILE ADDITIONS DELETIONS), cut to a hundred, each name to a
+line (see `drover-bound-line')."
+  (mapcar (lambda (change)
+            (if (consp change)
+                (cons (drover-bound-line (car change)) (cdr change))
+              change))
+          (seq-take (and (listp changes) changes) 100)))
+
 (defun drover--bound-recap (recap)
   "Return RECAP, as `drover-recap' tells it, its texts bounded.
 Its prompt, reply and error to `drover-text-lines' lines and
@@ -5845,14 +5947,29 @@ line (see `drover-bound-text', `drover-bound-line')."
           (push (pcase key
                   ((or :prompt :reply :error) (drover-bound-text value))
                   (:failure (drover-bound-line value))
-                  (:changes (mapcar (lambda (change)
-                                      (if (consp change)
-                                          (cons (drover-bound-line (car change)) (cdr change))
-                                        change))
-                                    (seq-take (and (listp value) value) 100)))
+                  ((or :changes :files) (drover--bound-changes value))
                   (_ value))
                 bounded)))
       (nreverse bounded))))
+
+(defvar drover-changes-files-function nil
+  "Function of a session of this host returning the files it changed, or nil.
+The files all its turns changed, as `drover-changes' read them, a list
+of (FILE ADDITIONS DELETIONS) as `drover-recap' tells them; nil while
+unknown, or when it changed none.  It must cost a lookup.")
+
+(defun drover--recap-files (session recap)
+  "Return RECAP, the recap of SESSION, with the files all its turns changed.
+Those `drover-changes-files-function' knows of a session of this host,
+as :files; RECAP itself when it knows none.  Another host's recaps come
+with the files their owner knows."
+  (if-let* (((and drover-changes-files-function (listp recap)))
+            ((null (drover-session-host session)))
+            (files (drover-with-reporting "session changes"
+                     (funcall drover-changes-files-function session)))
+            ((consp files)))
+      (append recap (list :files files))
+    recap))
 
 (defun drover-recap (session callback)
   "Fetch a recap of the last turn of SESSION, and call CALLBACK with it.
@@ -5865,20 +5982,22 @@ The recap is a plist; each member is nil when unknown or empty:
            session's directory, ADDITIONS and DELETIONS counts of lines,
            or nil when the backend does not know them.
  :error    The error that ended the turn, in full.
+ :files    The files all the session's turns changed, as :changes,
+           when known (see `drover-changes-files-function').
 
-When nothing could be fetched, the recap is (:failure MESSAGE).  Its
-texts are bounded (see `drover--bound-recap').  The backend's :recap
-fetches it in the background; CALLBACK is called once, possibly before
-this returns, an error it signals reported briefly.  A backend without
-:recap, or failing from the start, calls CALLBACK with a failure at
-once."
+When nothing could be fetched, the recap is (:failure MESSAGE), with
+:files all the same when known.  Its texts are bounded (see
+`drover--bound-recap').  The backend's :recap fetches it in the
+background; CALLBACK is called once, possibly before this returns, an
+error it signals reported briefly.  A backend without :recap, or
+failing from the start, calls CALLBACK with a failure at once."
   (let ((called nil))
     (cl-flet ((deliver (recap)
                 (unless called
                   (setq called t)
                   ;; Often called back from a process or a timer.
                   (drover-with-reporting "recap"
-                    (funcall callback (drover--bound-recap recap))))))
+                    (funcall callback (drover--bound-recap (drover--recap-files session recap)))))))
       (if-let* ((function (drover-backend-property session :recap))
                 ((functionp function)))
           (condition-case err

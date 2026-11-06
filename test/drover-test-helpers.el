@@ -54,6 +54,9 @@
 (defvar drover-list-usage-function)
 (setq-default drover-list-usage-function nil)
 
+;; Nor read what sessions changed, but in the tests of `drover-changes'.
+(setq drover-changes-prefetch-function nil)
+
 ;; No test may touch the user's state.  Models are not remembered unless
 ;; a test asks for it, so that tests of sources see their answers alone,
 ;; and the state directory is a temporary one.

@@ -188,13 +188,13 @@ SLOTS is a plist of slot names as keywords and values."
       (should (equal (drover-session-brief-recap session) "Added the parser.\nTests pass."))
       (should (equal (drover-session-summary session) "Done: wrote the feature, tests pass"))
       ;; Expanded, it shows the recap above the turn as it was said.
-      (let ((details (drover-list--details session (list :fields '(title summary)))))
+      (let ((details (drover-list--details session (list :fields '(title summary)) '(title summary))))
         (should (equal (car (car details)) "Summary"))
         (should (equal (nth 1 (car details)) "Added the parser.\nTests pass."))
         (should (assoc "Reply" details)))
       ;; Without the summary's column, the line goes there too.
       (should (string-prefix-p "Done: wrote the feature"
-                               (nth 1 (car (drover-list--details session (list :fields '(title))))))))
+                               (nth 1 (car (drover-list--details session (list :fields '(title)) '(title)))))))
     ;; The other session, unchanged, was not summarized.
     (should-not (drover-session-brief (drover-summary-test-of "s2")))
     ;; Counted, for usage totals.

@@ -715,7 +715,7 @@ prompt keys editing or reading a prompt buffer show there.")
   '(("View" ("= o" "= r" "= g" "- f"))
     ("Field" ("= u") ("= O") ("= z") ("= p" "- p") ("= s") ("= a" "- a") ("= m" "- m") ("= v" "- v")
      ("= H" "- H") ("- h") ("= d" "- d") ("= f") ("= c"))
-    ("Columns" ("- b" "- x" "- c" "- k") ("- s" "- $" "- g" "- #")))
+    ("Columns" ("- b" "- x" "- +" "- c" "- k") ("- s" "- $" "- g" "- #")))
   "The groups of the view settings, and the keys of their columns or rows.
 The Field group is a table, a row a field: its filter, then its column;
 the subagents, older and archived sessions shown first, as filters.")
@@ -857,7 +857,7 @@ the prefix of the other's, which would hide it."
                    ("-p" . drover-view--column-location) ("-a" . drover-view--column-agent)
                    ("-m" . drover-view--column-model) ("-v" . drover-view--column-provider)
                    ("-b" . drover-view--column-branch) ("-x" . drover-view--column-context)
-                   ("-c" . drover-view--column-created) ("-k" . drover-view--column-cache)
+                   ("-+" . drover-view--column-changes) ("-c" . drover-view--column-created) ("-k" . drover-view--column-cache)
                    ("-s" . drover-view--column-summary)
                    ("-$" . drover-view--column-cost) ("-g" . drover-view--column-goal) ("-#" . drover-view--column-attempt) ("$" . drover-usage)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
@@ -1047,7 +1047,7 @@ It applies only while the session has some, in lists and in its buffer."
 (defconst drover-keys-test-view-keys
   '("= o" "= r" "= g" "= u"
     "= p" "- p" "= s" "= a" "- a" "= m" "- m" "= v" "- v" "= H" "- H" "- h" "= d" "- d" "= f" "= c"
-    "- b" "- x" "- c" "- k" "- s" "- $" "- g" "- #")
+    "- b" "- x" "- +" "- c" "- k" "- s" "- $" "- g" "- #")
   "The keys of the view settings that apply in one of drover's views.
 Older and archived sessions need a backend keeping them, and follow mode
 a list in a window.")
@@ -1415,7 +1415,7 @@ The value is (PLAN . LINES)."
                                        " =p any" " -p shown" " =s any" " =a any" " -a shown"
                                        " =m any" " -m shown" " =v any" " -v shown" " =H any" " -H shown"
                                        " -h shown" " =d any" " -d shown" " =f any" " =c clear"
-                                       " -b branch" " -x context" " -c created" " -k cache"
+                                       " -b branch" " -x context" " -+ changes" " -c created" " -k cache"
                                        " -s summary" " -$ cost" " -g goal" " -# attempt")))
             (setq drover-filter (list :project "drover" :statuses '(waiting done) :agent "build"
                                       :provider "Anthropic" :harness 'fake :since (- (float-time) 7200))
@@ -1642,7 +1642,7 @@ MENU is `drover-view' by default."
                      '(("View" "= o" "= r" "= g" "- f")
                        ("Field" "= u" "= O" "= z" "= p" "- p" "= s" "= a" "- a" "= m" "- m" "= v" "- v"
                         "= H" "- H" "- h" "= d" "- d" "= f" "= c")
-                       ("Columns" "- b" "- x" "- c" "- k" "- s" "- $" "- g" "- #"))))
+                       ("Columns" "- b" "- x" "- +" "- c" "- k" "- s" "- $" "- g" "- #"))))
       ;; Hosts are filtered once there are others, in the row of the host.
       (let ((drover-hosts-function (lambda () '("core"))))
         (should (member '("= h" "- h")
@@ -2013,7 +2013,7 @@ host standing for none."
   (with-temp-buffer
     (setq-local drover-view-p t)
     (let ((suffixes (seq-filter #'drover-keys-test--own-p (cdr (drover-keys-test-suffixes 'drover-view)))))
-      (should (= (length suffixes) 32))
+      (should (= (length suffixes) 33))
       (dolist (suffix suffixes)
         (should (oref suffix transient))))))
 
