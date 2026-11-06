@@ -776,25 +776,6 @@ kill ring."
         ((and (derived-mode-p 'vterm-mode) (fboundp 'vterm--get-cursor-point))
          (vterm--get-cursor-point))))
 
-(defun drover-claude-code-ide-input-empty-p (buffer)
-  "Return non-nil when the cursor of terminal BUFFER sits in an empty input box.
-The box is one line, between two rules, starting with the input caret
-\(see `drover-claude-code-ide-input-regexp').  The live cursor tells,
-not the caret of an older screen still in the scrollback.  The context
-Claude Code attaches to the next prompt, the file or lines selected in
-Emacs, shows as a pill, [⧉ In NAME], at the start of the box: it is not
-a draft, though what follows it is."
-  (with-current-buffer buffer
-    (let ((cursor (drover-claude-code-ide--cursor)))
-      (and cursor (<= cursor (point-max))
-           (save-excursion
-             (goto-char cursor)
-             (beginning-of-line)
-             (and (looking-at (concat drover-claude-code-ide-input-regexp
-                                      "\\(?:\\[⧉ [^]\n]+\\]\\)?[ \t]*$"))
-                  (progn (forward-line -1) (looking-at "[─━-]\\{3,\\}"))
-                  (progn (forward-line 2) (looking-at "[─━-]\\{3,\\}"))))))))
-
 (defconst drover-claude-code-ide--pill-regexp "\\[⧉ [^]\n]+\\][ \t]*"
   "Regexp matching the pill of the context Claude Code attaches to the next prompt.")
 
@@ -831,75 +812,167 @@ a face."
              (get-text-property from 'font-lock-face))
          t)))
 
-(defun drover-claude-code-ide-unsent-input (buffer)
-  "Return what the input box of terminal BUFFER holds, unsent, or nil.
+(defun drover-claude-code-ide--dimmed-p (from to)
+  "Return non-nil when the text from FROM to TO has characters, each in a face.
+Spaces need none: Claude Code dims its placeholder and suggestions,
+whereas text typed shows in the terminal's default colours."
+  (let ((position from)
+        (seen nil)
+        (faced t))
+    (while (and faced (< position to))
+      (unless (memq (char-after position) '(?\s ?\u00a0))
+        (setq seen t)
+        (unless (or (get-text-property position 'face)
+                    (get-text-property position 'font-lock-face))
+          (setq faced nil)))
+      (setq position (1+ position)))
+    (and seen faced)))
+
+(defun drover-claude-code-ide--box-at (cursor)
+  "Return what the input box CURSOR sits in holds, in the current terminal.
+The plist `drover-claude-code-ide--input-box' returns, from :box on;
+nil when CURSOR sits in no box."
+  (save-excursion
+    (goto-char cursor)
+    (beginning-of-line)
+    (let ((lines 0)
+          (caret nil))
+      ;; Up to the caret's line, through no rule.
+      (while (and (not caret) (< lines drover-claude-code-ide--draft-lines)
+                  (not (drover-claude-code-ide--rule-p)))
+        (if (looking-at drover-claude-code-ide-input-regexp)
+            (setq caret (point))
+          (setq lines (if (zerop (forward-line -1)) (1+ lines) drover-claude-code-ide--draft-lines))))
+      (when (and caret
+                 (save-excursion (and (zerop (forward-line -1)) (drover-claude-code-ide--rule-p))))
+        (goto-char caret)
+        (looking-at (concat drover-claude-code-ide-input-regexp
+                            "\\(?:" drover-claude-code-ide--pill-regexp "\\)?"))
+        (let* ((start (match-end 0))
+               (limit drover-claude-code-ide--draft-limit)
+               (first-end (min (line-end-position) (+ start limit)))
+               (first (string-trim-right (buffer-substring-no-properties start first-end)))
+               (texts (list first))
+               (spanned 1)
+               (closed nil))
+          (setq limit (- limit (length first)))
+          (forward-line 1)
+          (while (and (not closed) (not (eobp))
+                      (< (cl-incf lines) drover-claude-code-ide--draft-lines))
+            (if (drover-claude-code-ide--rule-p)
+                (setq closed (point))
+              (setq spanned (1+ spanned))
+              (when (> limit 0)
+                (let ((line (drover-claude-code-ide--draft-line (point) limit)))
+                  (push line texts)
+                  (setq limit (- limit (length line) 1))))
+              (forward-line 1)))
+          (when (and closed (< cursor closed))
+            (setq texts (nreverse texts))
+            (let ((text (string-trim (string-join texts "\n"))))
+              (list :box t :text text :lines spanned
+                    :placeholder (and (not (string-empty-p text))
+                                      (= cursor start)
+                                      (seq-every-p #'string-empty-p (cdr texts))
+                                      (drover-claude-code-ide--placeholder-p start first-end))
+                    :dimmed (drover-claude-code-ide--dimmed-p start first-end)))))))))
+
+(defun drover-claude-code-ide--input-box (buffer)
+  "Return what the input box around the live cursor of terminal BUFFER holds.
 The box is the one the live cursor sits in, between two rules, its
 first line starting with the input caret (see
 `drover-claude-code-ide-input-regexp'); an older screen's still in the
-scrollback is not.  Its text is read as the screen shows it, a line of
-the terminal per line, without the caret, the box's indentation and the
-pill of the context Claude Code attaches to the next prompt (see
-`drover-claude-code-ide-input-empty-p'); nil when it is empty, or holds
-the placeholder Claude Code shows in an empty box (see
-`drover-claude-code-ide--placeholder-p').  A box of more than
-`drover-claude-code-ide--draft-lines' lines is not read, and the text
+scrollback is not.  The value is a plist: :cursor, the cursor's
+position, nil when the terminal tells none; :line, the start of the
+line the cursor sits on, trimmed; :box, non-nil when the cursor sits in
+such a box, and then :text, what the box holds as the screen shows it, a
+line of the terminal per line, without the caret, the box's indentation
+and the pill of the context Claude Code attaches to the next prompt, an
+empty string when it holds nothing; :lines, how many lines of the
+terminal the box's text spans; :placeholder, non-nil when :text is what
+Claude Code shows, dimmed, in an empty box, its placeholder or its
+suggestion of a next prompt (see
+`drover-claude-code-ide--placeholder-p'); and :dimmed, non-nil when its
+first line is all in faces.  A box of more than
+`drover-claude-code-ide--draft-lines' lines is not read, and its text
 is cut to `drover-claude-code-ide--draft-limit' characters."
   (with-current-buffer buffer
-    (when-let* ((cursor (drover-claude-code-ide--cursor))
-                ((<= (point-min) cursor (point-max))))
-      (save-excursion
-        (goto-char cursor)
-        (beginning-of-line)
-        (let ((lines 0)
-              (caret nil))
-          ;; Up to the caret's line, through no rule.
-          (while (and (not caret) (< lines drover-claude-code-ide--draft-lines)
-                      (not (drover-claude-code-ide--rule-p)))
-            (if (looking-at drover-claude-code-ide-input-regexp)
-                (setq caret (point))
-              (setq lines (if (zerop (forward-line -1)) (1+ lines) drover-claude-code-ide--draft-lines))))
-          (when (and caret
-                     (save-excursion (and (zerop (forward-line -1)) (drover-claude-code-ide--rule-p))))
-            (goto-char caret)
-            (looking-at (concat drover-claude-code-ide-input-regexp
-                                "\\(?:" drover-claude-code-ide--pill-regexp "\\)?"))
-            (let* ((start (match-end 0))
-                   (limit drover-claude-code-ide--draft-limit)
-                   (first (string-trim-right
-                           (buffer-substring-no-properties start (min (line-end-position) (+ start limit)))))
-                   (texts (list first))
-                   (closed nil))
-              (setq limit (- limit (length first)))
-              (forward-line 1)
-              (while (and (not closed) (not (eobp))
-                          (< (cl-incf lines) drover-claude-code-ide--draft-lines))
-                (if (drover-claude-code-ide--rule-p)
-                    (setq closed (point))
-                  (when (> limit 0)
-                    (let ((line (drover-claude-code-ide--draft-line (point) limit)))
-                      (push line texts)
-                      (setq limit (- limit (length line) 1))))
-                  (forward-line 1)))
-              (when (and closed (< cursor closed))
-                (setq texts (nreverse texts))
-                (let ((text (string-trim (string-join texts "\n"))))
-                  (unless (or (string-empty-p text)
-                              (and (= cursor start)
-                                   (seq-every-p #'string-empty-p (cdr texts))
-                                   (drover-claude-code-ide--placeholder-p
-                                    start (save-excursion (goto-char start) (line-end-position)))))
-                    (drover-bound-text text most-positive-fixnum drover-claude-code-ide--draft-limit)))))))))))
+    (let ((cursor (drover-claude-code-ide--cursor)))
+      (if (not (and cursor (<= (point-min) cursor (point-max))))
+          (list :cursor nil)
+        (append (list :cursor cursor
+                      :line (save-excursion
+                              (goto-char cursor)
+                              (drover-bound-line
+                               (buffer-substring-no-properties
+                                (line-beginning-position)
+                                (min (line-end-position) (+ (line-beginning-position) 200)))
+                               60)))
+                (drover-claude-code-ide--box-at cursor))))))
+
+(defun drover-claude-code-ide--box-empty-p (box)
+  "Return non-nil when BOX, an input box, takes a prompt without touching a draft.
+BOX is what `drover-claude-code-ide--input-box' returns: one line,
+empty, or holding only what Claude Code shows in an empty box, dimmed,
+which a paste replaces."
+  (and (plist-get box :box)
+       (= (plist-get box :lines) 1)
+       (or (string-empty-p (plist-get box :text))
+           (plist-get box :placeholder))
+       t))
+
+(defun drover-claude-code-ide-input-empty-p (buffer)
+  "Return non-nil when the cursor of terminal BUFFER sits in an empty input box.
+The box is one line, between two rules, starting with the input caret
+\(see `drover-claude-code-ide-input-regexp').  The live cursor tells,
+not the caret of an older screen still in the scrollback.  The context
+Claude Code attaches to the next prompt, the file or lines selected in
+Emacs, shows as a pill, [⧉ In NAME], at the start of the box: it is not
+a draft, though what follows it is.  Nor are the placeholder and the
+suggestion of a next prompt Claude Code shows, dimmed, in an empty box
+\(see `drover-claude-code-ide-unsent-input')."
+  (drover-claude-code-ide--box-empty-p (drover-claude-code-ide--input-box buffer)))
+
+(defun drover-claude-code-ide-unsent-input (buffer)
+  "Return what the input box of terminal BUFFER holds, unsent, or nil.
+The box is the one the live cursor sits in (see
+`drover-claude-code-ide--input-box'), its text read as the screen
+shows it, without the caret, the box's indentation and the pill of the
+context Claude Code attaches to the next prompt; nil when it is empty,
+or holds the placeholder or the suggestion Claude Code shows in an
+empty box (see `drover-claude-code-ide--placeholder-p')."
+  (let ((box (drover-claude-code-ide--input-box buffer)))
+    (when-let* (((plist-get box :box))
+                (text (plist-get box :text))
+                ((not (string-empty-p text)))
+                ((not (plist-get box :placeholder))))
+      (drover-bound-text text most-positive-fixnum drover-claude-code-ide--draft-limit))))
+
+(defun drover-claude-code-ide--box-blocker (box)
+  "Say why the input box BOX cannot take a prompt now, or nil when it can.
+BOX is what `drover-claude-code-ide--input-box' returns.  The start of
+the cursor's line or of what the box holds is told, so that a refusal
+names its cause."
+  (cond
+   ((not (plist-get box :cursor)) "the terminal tells no cursor")
+   ((not (plist-get box :box))
+    (format "the cursor is not in the input box, but on %S" (or (plist-get box :line) "a blank line")))
+   ((drover-claude-code-ide--box-empty-p box) nil)
+   (t (format "the input box holds %s%s: %S"
+              (if (plist-get box :dimmed) "dimmed text" "a draft")
+              (if (> (plist-get box :lines) 1) (format " of %d lines" (plist-get box :lines)) "")
+              (or (drover-bound-line (plist-get box :text) 40) "")))))
 
 (defun drover-claude-code-ide--blocker (session)
   "Say why the terminal of SESSION cannot take a prompt now, or nil once it can.
 It can once its cursor sits in an empty input box, so that no draft is
-touched.  The backend's :blocker."
+touched (see `drover-claude-code-ide-input-empty-p').  The backend's
+:blocker."
   (let ((buffer (drover-claude-code-ide--buffer session)))
     (cond ((not buffer) "the terminal is gone")
           ((buffer-local-value 'drover-claude-code-ide--submitting buffer)
            "another prompt is being submitted")
-          ((not (drover-claude-code-ide-input-empty-p buffer))
-           "the cursor is not in an empty input box"))))
+          (t (drover-claude-code-ide--box-blocker (drover-claude-code-ide--input-box buffer))))))
 
 (defun drover-claude-code-ide--deliver (session text then else)
   "Paste TEXT in the terminal of SESSION, submit it, then call THEN.

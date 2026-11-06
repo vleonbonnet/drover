@@ -1705,6 +1705,59 @@ read as nothing; a draft whose cursor is at its start, typed, reads."
           (should (<= (length draft) (1+ drover-claude-code-ide--draft-limit)))
           (should (string-prefix-p "xxxx" draft)))))))
 
+(ert-deftest drover-claude-code-ide-test-suggestion-takes-prompt ()
+  "The suggestion of a next prompt, dimmed in an empty box, takes a prompt; a draft does not.
+A refusal tells what the box or the cursor's line holds, bounded."
+  (drover-claude-code-ide-test-isolated
+    (let* ((terminal (drover-claude-code-ide-test-terminal "*claude* suggestion"))
+           (cursor nil))
+      (cl-flet ((blocker () (drover-claude-code-ide--box-blocker (drover-claude-code-ide--input-box terminal))))
+        (cl-letf (((symbol-function 'ghostel-cursor-point) (lambda () cursor)))
+          ;; After a turn, Claude Code suggests the next prompt, dimmed, the cursor on its first character.
+          (setq cursor (drover-claude-code-ide-test-screen
+                        terminal (concat (propertize "a" 'face '(:inverse-video t))
+                                         (propertize "dd the percentage next to the pie"
+                                                     'face '(:foreground "gray50")))
+                        "a"))
+          (should (drover-claude-code-ide-input-empty-p terminal))
+          (should-not (drover-claude-code-ide-unsent-input terminal))
+          (should-not (blocker))
+          ;; The suggestion after the pill of the context attached.
+          (setq cursor (drover-claude-code-ide-test-screen
+                        terminal (concat "[⧉ In Emacs buffer 'notes.org'] "
+                                         (propertize "c" 'face '(:inverse-video t))
+                                         (propertize "ommit and push" 'face '(:foreground "gray50")))
+                        "commit"))
+          (should (drover-claude-code-ide-input-empty-p terminal))
+          ;; Text typed is a draft, the cursor at its end or back at its start.
+          (setq cursor (drover-claude-code-ide-test-screen terminal "a draft"))
+          (should-not (drover-claude-code-ide-input-empty-p terminal))
+          (should (equal (blocker) "the input box holds a draft: \"a draft\""))
+          (setq cursor (drover-claude-code-ide-test-screen terminal "a draft" "a draft"))
+          (should-not (drover-claude-code-ide-input-empty-p terminal))
+          (setq cursor (drover-claude-code-ide-test-screen terminal "first\n  second"))
+          (should (equal (blocker) "the input box holds a draft of 2 lines: \"first\""))
+          ;; Dimmed text the cursor does not start is told as such.
+          (setq cursor (drover-claude-code-ide-test-screen
+                        terminal (propertize "a dimmed line" 'face '(:foreground "gray50"))))
+          (should-not (drover-claude-code-ide-input-empty-p terminal))
+          (should (equal (blocker) "the input box holds dimmed text: \"a dimmed line\""))
+          ;; The cursor out of the box, or unknown.
+          (setq cursor (with-current-buffer terminal
+                         (goto-char (point-min)) (search-forward "old answer") (point)))
+          (should (equal (blocker) "the cursor is not in the input box, but on \"an old answer\""))
+          (setq cursor nil)
+          (should (equal (blocker) "the terminal tells no cursor"))
+          ;; Lines of 500 kB are told bounded.
+          (setq cursor (drover-claude-code-ide-test-screen terminal (make-string 500000 ?x)))
+          (should (<= (length (blocker)) 100))
+          (setq cursor (drover-claude-code-ide-test-screen terminal "a draft"))
+          (with-current-buffer terminal
+            (goto-char (point-max))
+            (insert (make-string 500000 ?y))
+            (setq cursor (1- (point-max))))
+          (should (<= (length (blocker)) 120)))))))
+
 (ert-deftest drover-claude-code-ide-test-archive-keeps-draft ()
   "Archiving a terminal puts what its input box holds unsent in the kill ring, and says so."
   (drover-test-with-homes
@@ -1746,8 +1799,11 @@ read as nothing; a draft whose cursor is at its start, typed, reads."
              (ready nil) (outcome nil))
         (should (eq (drover-backend-property 'claude-code-ide :blocker) #'drover-claude-code-ide--blocker))
         (should (eq (drover-backend-property 'claude-code-ide :submit) #'drover-claude-code-ide--deliver))
-        (cl-letf (((symbol-function 'drover-claude-code-ide-input-empty-p) (lambda (_) ready)))
-          (should (equal (drover-claude-code-ide--blocker session) "the cursor is not in an empty input box"))
+        (cl-letf (((symbol-function 'drover-claude-code-ide--input-box)
+                   (lambda (_) (if ready '(:cursor 1 :line "● Done" :box t :text "" :lines 1)
+                                 '(:cursor 1 :line "● Done")))))
+          (should (equal (drover-claude-code-ide--blocker session)
+                         "the cursor is not in the input box, but on \"● Done\""))
           (setq ready t)
           (should-not (drover-claude-code-ide--blocker session))
           (drover-claude-code-ide--deliver session "Line 1\nLine 2"
