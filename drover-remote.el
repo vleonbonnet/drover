@@ -2900,8 +2900,8 @@ prompt sent waits, queued.  Nothing shows a window nor asks."
 (defun drover-remote--run (state)
   "Perform for a slice the actions of STATE's tasks, and come back for the rest.
 Operations whose backends answer later are `drover-bulk-requests' in
-flight at most; a task is answered once all its sessions settled, or
-failed past its deadline."
+flight at most, the next sent as answers come; a task is answered once
+all its sessions settled, or failed past its deadline."
   (let ((deadline (+ (float-time) drover-remote-send-slice))
         (display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t)))
         (link (drover-link state)))
@@ -2947,8 +2947,13 @@ failed past its deadline."
                   (error (funcall settle nil (drover-error-message err))))))))
         (when (<= (plist-get task :left) 0)
           (drover-remote--finish-task state task))))
-    (when (seq-some (lambda (task) (< (plist-get task :next) (length (plist-get task :keys))))
-                    (drover-remote--state-tasks state))
+    ;; Back at once only when the slice ran out, a request free to go:
+    ;; with all in flight, each answer brings the runner back.  A timer
+    ;; due again and again keeps Emacs from reading any process, the
+    ;; very answers awaited among them (see `wait_reading_process_output').
+    (when (and (< (drover-remote--state-flight state) (max 1 drover-bulk-requests))
+               (seq-some (lambda (task) (< (plist-get task :next) (length (plist-get task :keys))))
+                         (drover-remote--state-tasks state)))
       (drover-remote--run-soon state))
     ;; Answers late fail at their deadline.
     (when (and (drover-remote--state-tasks state) (not (drover-remote--state-watch state)))

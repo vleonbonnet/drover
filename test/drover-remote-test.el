@@ -1795,6 +1795,59 @@ leading back to what holds it would print it again from each."
                              (should (string-match-p "\\`Agent: \\|did not come back" outcome))
                              (should-not (string-search "\n" outcome)))))
 
+(ert-deftest drover-remote-test-act-idle-while-in-flight ()
+  "Asked to act on more sessions than may be in flight, the owner waits idle for answers.
+Its runner came back at once while all its requests awaited answers,
+again and again: a timer always due keeps an interactive Emacs from
+reading any process, so the answers never came, and 32 of 33 sessions
+marked seen from another host failed, their connections never seen
+open.  Batch Emacs reads processes anyway, so the test counts the runs."
+  (skip-unless (drover-remote-test--available-p))
+  (drover-test-with-backend nil
+                            (let* ((drover-remote--state (drover-remote--state-make :epoch "e1"))
+                                   (state drover-remote--state)
+                                   (peer (drover-remote-test--peer state "core"))
+                                   (drover-bulk-requests 3)
+                                   (settles nil)
+                                   (runs 0)
+                                   (answers nil))
+                              (setf (drover-remote--peer-properties peer) '(:access full))
+                              (cl-letf (((symbol-function 'drover-remote--owner-record)
+                                         (lambda (key _action) (drover-test-session (cdr key))))
+                                        ((symbol-function 'drover-remote--perform)
+                                         (lambda (_action _args record settle)
+                                           (setq settles (append settles (list (cons (drover-session-id record) settle)))))))
+                                (advice-add 'drover-remote--run :before (lambda (&rest _) (cl-incf runs))
+                                            '((name . drover-remote-test-runs)))
+                                (unwind-protect
+                                    (progn
+                                      (drover-remote--on-act state peer
+                                                             (list :id "core-1" :action "mark-seen"
+                                                                   :keys (vconcat (mapcar (lambda (n) (vector "fake" (format "s%d" n)))
+                                                                                          (number-sequence 1 7))))
+                                                             (lambda (answer &rest _) (push answer answers)))
+                                      (drover-remote-test-settle 0.1)
+                                      (should (equal (mapcar #'car settles) '("s1" "s2" "s3")))
+                                      (should-not (drover-remote--state-runner state))
+                                      (let ((idle runs))
+                                        (drover-remote-test-settle 0.2)
+                                        (should (= runs idle)))
+                                      ;; Each answer sends the next, and no more.
+                                      (funcall (cdr (nth 1 settles)) t)
+                                      (drover-remote-test-settle 0.05)
+                                      (should (equal (mapcar #'car settles) '("s1" "s2" "s3" "s4")))
+                                      (should-not (drover-remote--state-runner state))
+                                      (drover-remote-test-wait
+                                       (lambda ()
+                                         (dolist (pending settles) (funcall (cdr pending) t))
+                                         answers)
+                                       5)
+                                      (should (equal (mapcar #'car settles) '("s1" "s2" "s3" "s4" "s5" "s6" "s7")))
+                                      (should (equal answers (list (list :out (make-vector 7 t)))))
+                                      (should (zerop (drover-remote--state-flight state))))
+                                  (advice-remove 'drover-remote--run 'drover-remote-test-runs)
+                                  (dolist (timer (list (drover-remote--state-runner state) (drover-remote--state-watch state)))
+                                    (when (timerp timer) (cancel-timer timer))))))))
 (ert-deftest drover-remote-test-bulk-batched ()
   "Archiving hundreds of another host's sessions goes in a few requests, reported once."
   (drover-remote-test-with nil
