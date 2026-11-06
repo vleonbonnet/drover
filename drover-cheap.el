@@ -51,6 +51,10 @@
 ;; signed in to each provider comes from its integrations
 ;; (/api/integration), read again as they change.  Each host resolves
 ;; its own: its catalogs, and its kind, which its configuration sets.
+;;
+;; `drover-cheap-title-mode' has the local OpenCode service title its
+;; sessions with the cheap model, naming it for the title agent in a
+;; configuration file of the service's own (`drover-cheap-title-file').
 
 ;;; Code:
 
@@ -224,6 +228,17 @@ Such as low, the least effort.  A model without it runs its default."
 (defcustom drover-cheap-timeout 10
   "Seconds `drover-model-cheap' waits for the catalogs, called interactively."
   :type 'number
+  :group 'drover-cheap)
+
+(defcustom drover-cheap-title-file nil
+  "File where `drover-cheap-title-mode' names the model of OpenCode's titles.
+Nil for opencode.json in the global configuration directory of this
+host's OpenCode service, as the service finds it: $OPENCODE_CONFIG_DIR,
+else opencode under $XDG_CONFIG_HOME or ~/.config.  The service reads
+that file with opencode.jsonc, whose settings win, and reloads it as it
+changes.  The mode writes the file, and deletes it, only while it holds
+nothing but what the mode writes."
+  :type '(choice (const :tag "The service's global opencode.json" nil) file)
   :group 'drover-cheap)
 
 ;;;; How the service is signed in to providers
@@ -594,7 +609,9 @@ Nothing here ever starts it."
 For opencode.el's events and `opencode-catalog-changed-functions'."
   (drover-with-reporting "cheap model"
     (unless (drover-cheap--remote-p)
-      (cl-incf drover-cheap--epoch))))
+      (cl-incf drover-cheap--epoch)
+      (when (bound-and-true-p drover-cheap-title-mode)
+        (drover-cheap--title-schedule)))))
 
 (defun drover-cheap--follow ()
   "Follow the changes of the local service's integrations, once."
@@ -899,8 +916,147 @@ waits, nor starts the service."
             (t (ask (seq-take (cons answer (plist-get answer :fallbacks)) (max 1 attempts)))))))))
       (lambda () (setq done t)))))
 
+;;;; OpenCode's titles
+
+(defconst drover-cheap--title-schema "https://opencode.ai/config.json"
+  "The schema the file of `drover-cheap-title-mode' names.")
+
+(defvar drover-cheap--title-timer nil
+  "Timer of the next update of the model of OpenCode's titles, or nil.")
+
+(defvar drover-cheap--title-foreign nil
+  "The file of `drover-cheap-title-mode' found holding more, once told.")
+
+(defun drover-cheap--env (name)
+  "Return the environment variable NAME, nil when unset or empty."
+  (let ((value (getenv name)))
+    (and value (not (string-empty-p value)) value)))
+
+(defun drover-cheap-title-file ()
+  "Return the file naming the model of OpenCode's titles.
+See the option `drover-cheap-title-file'."
+  (expand-file-name
+   (or drover-cheap-title-file
+       (expand-file-name "opencode.json"
+                         (or (drover-cheap--env "OPENCODE_CONFIG_DIR")
+                             (expand-file-name "opencode" (or (drover-cheap--env "XDG_CONFIG_HOME")
+                                                              "~/.config")))))))
+
+(defun drover-cheap-title-config (model)
+  "Return the configuration having OpenCode title sessions with MODEL.
+MODEL is a plist of `drover-cheap-resolve', run at `drover-cheap-variant'
+when it offers it.  The configuration, an alist for `json-serialize',
+sets the model of the title agent alone, by provider and identifier,
+since an identifier may hold a slash."
+  (let ((ref (drover-cheap--ref model drover-cheap-variant)))
+    `((,(intern "$schema") . ,drover-cheap--title-schema)
+      (agents (title (model (providerID . ,(alist-get 'providerID ref))
+                            (model . ,(alist-get 'id ref))
+                            ,@(and (alist-get 'variant ref)
+                                   `((variant . ,(alist-get 'variant ref))))))))))
+
+(defun drover-cheap--title-own-p (text)
+  "Return non-nil when TEXT holds only what `drover-cheap-title-mode' writes.
+That is the schema and the model of the title agent, or nothing."
+  (or (string-blank-p text)
+      (condition-case nil
+          (let ((data (json-parse-string text :object-type 'alist)))
+            (and (consp data)
+                 (null (seq-difference (mapcar #'car data) (list (intern "$schema") 'agents)))
+                 (let ((agents (alist-get 'agents data)))
+                   (and (consp agents)
+                        (equal (mapcar #'car agents) '(title))
+                        (let ((title (alist-get 'title agents)))
+                          (and (consp title) (equal (mapcar #'car title) '(model))))))))
+        (json-parse-error nil))))
+
+(defun drover-cheap--title-write (file text)
+  "Replace FILE with TEXT at once, OpenCode never reading half of it."
+  (make-directory (file-name-directory file) t)
+  (let* ((coding-system-for-write 'utf-8-unix)
+         ;; Not opencode.json: OpenCode reads the name alone.
+         (temporary (make-temp-file (expand-file-name ".drover-title-" (file-name-directory file))
+                                    nil ".tmp" text)))
+    (condition-case err
+        (progn
+          ;; As a file written in place would be, not private.
+          (set-file-modes temporary (logand #o666 (default-file-modes)))
+          (rename-file temporary file t))
+      (error (delete-file temporary)
+             (signal (car err) (cdr err))))))
+
+(defun drover-cheap-title-apply (answer)
+  "Have OpenCode title sessions with ANSWER, of `drover-model-cheap-fetch'.
+A model is written to the file of `drover-cheap-title-file', when it
+changed; no model deletes the file, OpenCode then titling sessions as
+it does by default.  A failure to read the catalogs leaves the file as
+it is, as does a file holding more than what is written here, which is
+said once."
+  (unless (plist-get answer :failure)
+    (let* ((file (drover-cheap-title-file))
+           (text (and (not (plist-get answer :none))
+                      (concat (json-serialize (drover-cheap-title-config answer)) "\n")))
+           (current (and (file-readable-p file)
+                         (with-temp-buffer
+                           (let ((coding-system-for-read 'utf-8))
+                             (insert-file-contents file))
+                           (buffer-string)))))
+      (cond
+       ((equal text current))
+       ((and current (not (drover-cheap--title-own-p current)))
+        (unless (equal drover-cheap--title-foreign file)
+          (setq drover-cheap--title-foreign file)
+          (drover-warn "%s holds more than the model of OpenCode's titles: left as it is"
+                       (abbreviate-file-name file))))
+       (text (drover-cheap--title-write file text))
+       (current (delete-file file))))))
+
+(defun drover-cheap--title-update ()
+  "Name this host's cheap model for OpenCode's titles, reading what it needs."
+  (setq drover-cheap--title-timer nil)
+  (drover-with-reporting "OpenCode's title model"
+    (when (bound-and-true-p drover-cheap-title-mode)
+      (drover-model-cheap-fetch
+       (lambda (answer)
+         (drover-with-reporting "OpenCode's title model"
+           (when drover-cheap-title-mode
+             (drover-cheap-title-apply answer))))))))
+
+(defun drover-cheap--title-schedule ()
+  "Update the model of OpenCode's titles soon, once for changes coming together."
+  (when (timerp drover-cheap--title-timer)
+    (cancel-timer drover-cheap--title-timer))
+  (setq drover-cheap--title-timer (run-with-timer 1 nil #'drover-cheap--title-update)))
+
+;;;###autoload
+(define-minor-mode drover-cheap-title-mode
+  "Have OpenCode title sessions with this host's cheap model.
+OpenCode names a session with its title agent, from its first prompt
+and as asked later from the conversation, on a small model of the
+session's provider it picks, or the free one GitHub Copilot offers for
+it.  This mode names the model of the title agent instead, in the file
+of `drover-cheap-title-file': this host's cheap model (see
+`drover-model-cheap'), at `drover-cheap-variant', named again as the
+service's catalogs and integrations change it.  When it fails,
+OpenCode asks the session's own model.  Turning the mode off deletes
+the file, OpenCode then titling sessions as it does by default.
+
+Only the local service reads the file; each host names its own."
+  :global t
+  :group 'drover-cheap
+  (when (timerp drover-cheap--title-timer)
+    (cancel-timer drover-cheap--title-timer)
+    (setq drover-cheap--title-timer nil))
+  (if drover-cheap-title-mode
+      (progn
+        (drover-cheap--follow)
+        (drover-cheap--title-schedule))
+    (drover-cheap-title-apply (list :none "off"))))
+
 (defun drover-cheap-unload-function ()
   "Stop following the integrations of the local service."
+  (when (timerp drover-cheap--title-timer)
+    (cancel-timer drover-cheap--title-timer))
   (when drover-cheap--following
     (opencode-events-unregister "integration.updated" #'drover-cheap--integrations-changed)
     (opencode-events-unregister "server.connected" #'drover-cheap--integrations-changed)

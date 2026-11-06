@@ -870,5 +870,128 @@ no answer yet.  The cheap model is Reaver's, its chain behind it."
         (should-not drover-cheap-test-asked)
         (should (equal results (cdr case)))))))
 
+;;;; OpenCode's titles
+
+(defmacro drover-cheap-test-with-title-file (&rest body)
+  "Run BODY with `drover-cheap-title-file' a file of a new temporary directory, `file'."
+  (declare (indent 0) (debug t))
+  `(let* ((directory (make-temp-file "drover-cheap-title-" t))
+          (file (expand-file-name "opencode.json" directory))
+          (drover-cheap-title-file file)
+          (drover-cheap--title-foreign nil)
+          (drover-cheap-variant "low"))
+     (unwind-protect
+         (progn ,@body)
+       (delete-directory directory t))))
+
+(defun drover-cheap-test-title-model (file)
+  "Return the model FILE names for OpenCode's title agent, an alist."
+  (let ((data (json-parse-string (with-temp-buffer (insert-file-contents file) (buffer-string))
+                                 :object-type 'alist)))
+    (should (equal (alist-get (intern "$schema") data) "https://opencode.ai/config.json"))
+    (alist-get 'model (alist-get 'title (alist-get 'agents data)))))
+
+(ert-deftest drover-cheap-test-title-file ()
+  "The file is opencode.json where the service finds its global configuration, unless set."
+  (let ((drover-cheap-title-file nil)
+        (process-environment (copy-sequence process-environment)))
+    (setenv "OPENCODE_CONFIG_DIR" nil)
+    (setenv "XDG_CONFIG_HOME" nil)
+    (should (equal (drover-cheap-title-file) (expand-file-name "~/.config/opencode/opencode.json")))
+    ;; An empty variable counts as unset, as the service has it.
+    (setenv "XDG_CONFIG_HOME" "")
+    (should (equal (drover-cheap-title-file) (expand-file-name "~/.config/opencode/opencode.json")))
+    (setenv "XDG_CONFIG_HOME" "/xdg")
+    (should (equal (drover-cheap-title-file) (expand-file-name "/xdg/opencode/opencode.json")))
+    (setenv "OPENCODE_CONFIG_DIR" "/oc")
+    (should (equal (drover-cheap-title-file) (expand-file-name "/oc/opencode.json")))
+    (let ((drover-cheap-title-file "/elsewhere/title.json"))
+      (should (equal (drover-cheap-title-file) "/elsewhere/title.json")))))
+
+(ert-deftest drover-cheap-test-title-apply ()
+  "The model is written as it changes, by provider and identifier; no model deletes the file."
+  (drover-cheap-test-with-title-file
+    (let ((writes 0)
+          (write (symbol-function 'drover-cheap--title-write)))
+      (cl-letf (((symbol-function 'drover-cheap--title-write)
+                 (lambda (&rest arguments) (cl-incf writes) (apply write arguments))))
+        ;; The variant when the model offers it; an identifier holding slashes stays whole.
+        (drover-cheap-title-apply '(:model "fireworks-ai/accounts/fireworks/models/deepseek"
+                                           :provider-id "fireworks-ai" :id "accounts/fireworks/models/deepseek"
+                                           :variants ("low" "high")))
+        (should (equal (drover-cheap-test-title-model file)
+                       '((providerID . "fireworks-ai") (model . "accounts/fireworks/models/deepseek")
+                         (variant . "low"))))
+        (should-not (directory-files (file-name-directory file) nil "\\.tmp\\'"))
+        ;; The same model again: not written again.
+        (drover-cheap-title-apply '(:model "fireworks-ai/accounts/fireworks/models/deepseek"
+                                           :provider-id "fireworks-ai" :id "accounts/fireworks/models/deepseek"
+                                           :variants ("low" "high")))
+        (should (= writes 1))
+        ;; Without the variant, the model's default.
+        (drover-cheap-title-apply '(:model "a/haiku" :provider-id "a" :id "haiku" :variants nil))
+        (should (equal (drover-cheap-test-title-model file) '((providerID . "a") (model . "haiku"))))
+        (should (= writes 2))
+        ;; The catalogs unread: left as it is.
+        (drover-cheap-title-apply '(:failure "OpenCode's service does not run"))
+        (should (equal (drover-cheap-test-title-model file) '((providerID . "a") (model . "haiku"))))
+        ;; No cheap model: OpenCode titles as it does by default.
+        (drover-cheap-title-apply '(:none "no provider offers one"))
+        (should-not (file-exists-p file))
+        (drover-cheap-title-apply '(:none "no provider offers one"))
+        (should-not (file-exists-p file))
+        (should (= writes 2))))))
+
+(ert-deftest drover-cheap-test-title-foreign-file ()
+  "A file holding more than the title's model is never written nor deleted, which is said once."
+  (drover-cheap-test-with-title-file
+    (let ((warnings nil)
+          (foreign "{\"agents\": {\"title\": {\"model\": \"a/b\", \"system\": \"Mine\"}}}\n"))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (dolist (text (list foreign "{\"model\": \"a/b\"}" "not JSON"))
+          (with-temp-file file (insert text))
+          (drover-cheap-title-apply '(:model "a/haiku" :provider-id "a" :id "haiku" :variants nil))
+          (drover-cheap-title-apply '(:none "no provider offers one"))
+          (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string)) text)))
+        (should (= (length warnings) 1))
+        (should (string-search "holds more than the model of OpenCode" (car warnings)))
+        ;; A blank file is the mode's to write.
+        (with-temp-file file (insert "\n"))
+        (drover-cheap-title-apply '(:model "a/haiku" :provider-id "a" :id "haiku" :variants nil))
+        (should (equal (drover-cheap-test-title-model file) '((providerID . "a") (model . "haiku"))))))))
+
+(ert-deftest drover-cheap-test-title-mode ()
+  "The mode names this host's cheap model, again as the service changes it, and deletes it once off."
+  (let ((catalogs `((model . ,drover-cheap-test-reaver-models) (provider . ,drover-cheap-test-reaver-providers)))
+        (integrations drover-cheap-test-reaver-integrations))
+    (drover-cheap-test-with-service catalogs integrations
+      (drover-cheap-test-with-title-file
+        (let ((drover-cheap--title-timer nil))
+          (unwind-protect
+              (progn
+                (drover-cheap-title-mode 1)
+                (should (timerp drover-cheap--title-timer))
+                (cancel-timer drover-cheap--title-timer)
+                (drover-cheap--title-update)
+                (should-not drover-cheap--title-timer)
+                (should (equal (drover-cheap-test-title-model file)
+                               '((providerID . "github-copilot") (model . "claude-haiku-5.5") (variant . "low"))))
+                ;; Copilot signed out: the next model, once the change settles.
+                (setq integrations (drover-cheap-test-signed-out "github-copilot"))
+                (drover-cheap--integrations-changed)
+                (should (timerp drover-cheap--title-timer))
+                (cancel-timer drover-cheap--title-timer)
+                (drover-cheap--title-update)
+                (should (equal (alist-get 'providerID (drover-cheap-test-title-model file)) "ai-gateway-openai"))
+                (drover-cheap-title-mode -1)
+                (should-not (file-exists-p file))
+                ;; Off, changes leave the file alone.
+                (drover-cheap--integrations-changed)
+                (should-not drover-cheap--title-timer))
+            (drover-cheap-title-mode -1)
+            (when (timerp drover-cheap--title-timer)
+              (cancel-timer drover-cheap--title-timer))))))))
+
 (provide 'drover-cheap-test)
 ;;; drover-cheap-test.el ends here
