@@ -2197,15 +2197,41 @@ leading back to what holds it would print it again from each."
                  (lambda (format-string &rest args)
                    (when format-string (push (apply #'format format-string args) messages)))))
         (funcall (drover-backend-property 'remote:agent :send) session "after the turn, please" nil)
-        (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "runs a turn on agent" text)) messages)))
-        (should (seq-some (lambda (text) (string-match-p "the prompt goes once it ends, queued there" text)) messages))
-        ;; Not sent over the turn.
+        (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "queued the prompt" text)) messages)))
+        (should (seq-some (lambda (text)
+                            (string-match-p "on agent queued the prompt: its turn runs: the prompt goes once it ends"
+                                            text))
+                          messages))
+        ;; Said once: neither taken, nor told again in a note.
         (drover-remote-test-settle 0.5)
+        (should-not (seq-some (lambda (text) (string-match-p "took the prompt\\|queued there" text)) messages))
+        ;; Not sent over the turn.
         (should-not (drover-remote-test-calls "send"))
         ;; Its turn over there: delivered from that host's queue.
         (drover-remote-test-command "change" :ids ["s1"] :status "idle" :now t)
         (drover-remote-test-wait (lambda () (drover-remote-test-calls "send")) 20)
         (should (equal (nth 2 (car (drover-remote-test-calls "send"))) "after the turn, please"))))))
+
+(ert-deftest drover-remote-test-send-to-a-turn-older-viewer ()
+  "A viewer of an older drover, told nothing queued in the answer, gets a note saying the prompt waits."
+  (skip-unless (drover-remote-test--ptys-p))
+  (let ((drover-remote-capabilities (remove "queued" drover-remote-capabilities)))
+    (drover-remote-test-with nil
+      (drover-remote-test-start-full dir "DROVER_AGENT_LINKABLE=1")
+      (drover-remote-test-command "sessions" :n 2)
+      (drover-remote-test-command "terminal" :id "s1")
+      (drover-remote-test-synced 2)
+      (let ((session (drover-remote-test-session "s1"))
+            (messages nil))
+        (should (eq (drover-session-status session) 'working))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (format-string &rest args)
+                     (when format-string (push (apply #'format format-string args) messages)))))
+          (funcall (drover-backend-property 'remote:agent :send) session "after the turn, please" nil)
+          (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "runs a turn on agent" text)) messages)))
+          (should (seq-some (lambda (text) (string-match-p "the prompt goes once it ends, queued there" text)) messages))
+          (drover-remote-test-settle 0.5)
+          (should-not (drover-remote-test-calls "send")))))))
 
 (ert-deftest drover-remote-test-send-to-a-turn-unlinked ()
   "A prompt for another host's session whose turn runs, its conversation not known yet, is refused there, saying why, and kept here."

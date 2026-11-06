@@ -978,7 +978,9 @@ MCP Parameters:
   "Send PROMPT to the session KEY, as its front end delivers prompts.
 OpenCode queues it or steers the running turn with it, as it delivers
 prompts sent while a turn runs; a terminal or a shell takes it only
-with no draft typed and no turn running, and the tool says why not.
+with no draft typed and no turn running, and the tool says why not,
+but another host's queues it until it can, which the outcome
+\"queued\" tells, with why.
 
 MCP Parameters:
   key - The session's key, as drover-sessions tells it
@@ -1006,13 +1008,16 @@ MCP Parameters:
       (when (eq (drover-anvil--job-get id :state) 'pending)
         (drover-anvil--call
          id #'drover-backend-call session :submit prompt
-         (lambda (&rest _)
+         (lambda (&optional queued &rest _)
            (drover-with-reporting "Anvil prompt"
              (let ((now (float-time)))
                (puthash key now drover-anvil--sent)
-               (drover-anvil--done id `((outcome . "sent") (key . ,(drover-anvil--key-of key))
+               (drover-anvil--done id `((outcome . ,(if (stringp queued) "queued" "sent"))
+                                        (key . ,(drover-anvil--key-of key))
                                         (sent_at . ,now)
-                                        (note . "Wait for its turn with drover-session-wait"))))))
+                                        (note . ,(if (stringp queued)
+                                                     (format "Its host queued it: %s" queued)
+                                                   "Wait for its turn with drover-session-wait")))))))
          (drover-anvil--else id)))
       (drover-anvil--answer id))))
 

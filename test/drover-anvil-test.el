@@ -38,6 +38,9 @@
 (defvar drover-anvil-test-blocker nil
   "What the fake :blocker answers, nil to take prompts.")
 
+(defvar drover-anvil-test-queued nil
+  "Why the fake :submit queues prompts rather than takes them, nil to take them.")
+
 (defun drover-anvil-test-caller (meta)
   "Return the fake session META names in fake.session, for `drover-anvil-callers'."
   (when-let* ((id (alist-get 'fake.session meta)))
@@ -49,7 +52,7 @@
          (append
           (list :submit (lambda (session text then _else)
                           (push (list :submit (drover-session-id session) text) drover-test-calls)
-                          (funcall then))
+                          (if drover-anvil-test-queued (funcall then drover-anvil-test-queued) (funcall then)))
                 :blocker (lambda (_session) drover-anvil-test-blocker)
                 :buffer (lambda (session)
                           (and (equal (drover-session-id session) "busy") (get-buffer-create " *fake busy*")))
@@ -78,7 +81,8 @@ CALLER is the identifier of a fake session, or nil for none named."
              (drover-anvil--waits (make-hash-table :test #'equal))
              (drover-anvil--sent (make-hash-table :test #'equal))
              (drover-anvil-test-requests nil)
-             (drover-anvil-test-blocker nil))
+             (drover-anvil-test-blocker nil)
+             (drover-anvil-test-queued nil))
          (drover-anvil-test--register-agent-operations)
          ,@body))))
 
@@ -233,6 +237,15 @@ CALLER is the identifier of a fake session, or nil for none named."
       (setq drover-anvil-test-blocker nil)
       (should (drover-anvil--tool-send "fake/busy" "hi"))
       (should (assq :submit drover-test-calls)))))
+
+(ert-deftest drover-anvil-test-send-queued ()
+  "A prompt the session's host queued rather than took is told queued, with why."
+  (drover-anvil-test-with (list (drover-test-session "far" :status 'working)) nil
+    (let ((drover-anvil-permissions '((send . any)))
+          (drover-anvil-test-queued "its turn runs: the prompt goes once it ends"))
+      (let ((answer (drover-anvil-test-json (drover-anvil--tool-send "fake/far" "later"))))
+        (should (equal (alist-get 'outcome answer) "queued"))
+        (should (string-match-p "its turn runs" (alist-get 'note answer)))))))
 
 (ert-deftest drover-anvil-test-actions-logged-or-refused ()
   "Every call is logged; an action that cannot be is not taken."

@@ -1904,11 +1904,14 @@ no scheduled prompt.
              can: a draft, a turn running, a session still loading.
  :submit     Function of a SESSION, a TEXT, THEN and ELSE, submitting
              TEXT as a prompt now, :blocker having allowed it: THEN with
-             no argument once the front end took it, ELSE with a message
-             otherwise, at most one of them once.  ELSE gets a second
-             argument, non-nil, when nothing was sent for sure, as when
-             the session could not be restored from its archive: the
-             prompt then failed rather than was interrupted.
+             no argument once the front end took it, or with a line
+             telling why it waits when it was queued instead, to go once
+             the session can take it, as another host's session may,
+             ELSE with a message otherwise, at most one of them once.
+             ELSE gets a second argument, non-nil, when nothing was sent
+             for sure, as when the session could not be restored from
+             its archive: the prompt then failed rather than was
+             interrupted.
  :ready      Function of no argument returning non-nil once :sessions
              lists every session the backend runs, as a service's
              registry does once loaded: a session it then no longer

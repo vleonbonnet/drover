@@ -327,7 +327,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs")
+    "push" "opts" "dirs" "conv" "jobs" "queued")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -363,7 +363,11 @@ schedules, cancels and retries prompts for its peers (`schedule',
 `unschedule', `retry'), delivering them out of every window;
 \"task\": it starts
 tasks in its own repositories for its peers of act or full access, and
-finishes them for those of full access (see `drover-task').")
+finishes them for those of full access (see `drover-task'); \"queued\":
+the answer to an action `send' tells, by session, why a prompt its
+session could not take now waits in its queue of prompts (:queued),
+rather than say it went in, and it sends such a peer no message `note'
+of it.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -2178,7 +2182,9 @@ owner's leave for SESSION; the others, recaps and previews, apply."
 (defun drover-remote--act (name action session args then else)
   "Have the peer NAME perform ACTION on SESSION, with ARGS, a plist.
 THEN is called with no argument once the owner did, ELSE with a line
-once it refused or failed, at most one of them once.  Actions asked
+once it refused or failed, at most one of them once; for ACTION `send',
+THEN gets a line instead when the owner queued the prompt, telling why
+it waits.  Actions asked
 together go in few requests, the next time Emacs is idle: acting on
 thousands of sessions costs a few requests."
   (let ((peer (drover-remote--peer name)))
@@ -2240,12 +2246,16 @@ request is asked again after its stream ended."
                                                entries)))
                   (and args (list :args args)))
      (lambda (reply error)
-       (let ((out (and (null error) (plist-get reply :out))))
+       (let ((out (and (null error) (plist-get reply :out)))
+             (queued (and (null error) (equal action "send") (plist-get reply :queued))))
          (seq-do-indexed
           (lambda (entry index)
-            (let ((outcome (and (vectorp out) (< index (length out)) (aref out index))))
+            (let ((outcome (and (vectorp out) (< index (length out)) (aref out index)))
+                  (why (and (vectorp queued) (< index (length queued))
+                            (drover-remote--line (aref queued index) 300))))
               (drover-with-reporting "remote actions"
-                (cond ((eq outcome t) (funcall (nth 3 entry)))
+                (cond ((and (eq outcome t) why) (funcall (nth 3 entry) why))
+                      ((eq outcome t) (funcall (nth 3 entry)))
                       (error (funcall (nth 4 entry) (format "%s: %s" label error)))
                       ((stringp outcome) (funcall (nth 4 entry) (drover-bound-line outcome)))
                       (t (funcall (nth 4 entry) (format "%s told no outcome" label)))))))
@@ -2270,13 +2280,18 @@ It takes a session, THEN and ELSE, as the operations that confirm do."
 (defun drover-remote--send-prompt (name session text _token &optional _attachments)
   "Have the peer NAME submit TEXT as a prompt of SESSION, for the proxy's :send.
 The owner submits it through its backend, as it delivers a scheduled
-prompt; attachments, files of this host, do not travel."
-  (let ((title (drover-session-display-title session)))
+prompt, or queues it while the session cannot take it, which is told;
+attachments, files of this host, do not travel."
+  (let ((title (drover-session-display-title session))
+        (label (drover-host-label name)))
     (if (> (length text) drover-remote-prompt-limit)
         (drover-warn "The prompt for %s is longer than %d characters, which go to another host at most; it is in the kill ring"
                      title drover-remote-prompt-limit)
       (drover-remote--act name "send" session (list :text (substring-no-properties text))
-                          (lambda () (drover-message "%s took the prompt" title))
+                          (lambda (&optional queued)
+                            (if queued
+                                (drover-message "%s on %s queued the prompt: %s" title label queued)
+                              (drover-message "%s took the prompt" title)))
                           (lambda (message)
                             (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
                                          title message))))))
@@ -2284,8 +2299,9 @@ prompt; attachments, files of this host, do not travel."
 (defun drover-remote--submit (name session text then else)
   "Have the peer NAME submit TEXT as a prompt of SESSION, then call THEN, or ELSE.
 For the proxy's :submit: the owner submits it through its backend, as it
-delivers a scheduled prompt, and THEN is called once it did, ELSE with a
-line once it refused or failed."
+delivers a scheduled prompt, and THEN is called once it did, with a line
+telling why the prompt waits when the owner queued it instead, ELSE with
+a line once it refused or failed."
   (if (> (length text) drover-remote-prompt-limit)
       (funcall else (format "the prompt is longer than %d characters, which go to another host at most"
                             drover-remote-prompt-limit))
@@ -2518,7 +2534,8 @@ A string tells why they do not fit."
 
 (defun drover-remote--on-act (state peer message reply)
   "Perform the action MESSAGE asks for PEER, answering through REPLY, in STATE.
-The answer is (:out OUTCOMES), one per session asked, t or a line.  An
+The answer is (:out OUTCOMES), one per session asked, t or a line, and
+:queued for prompts queued (see `drover-remote--finish-task').  An
 action whose identifier this host performs or performed already is
 answered with its outcome rather than performed twice."
   (let* ((id (plist-get message :id))
@@ -2540,7 +2557,9 @@ answered with its outcome rather than performed twice."
                           peer action (format "%s has %s access" (drover-remote--label peer)
                                               (drover-remote--access peer)))))
      ((stringp args) (funcall reply nil (drover-remote--refuse-action peer action args)))
-     ((and known (car known)) (funcall reply (list :out (cdr known))))
+     ((and known (car known))
+      ;; An outcome kept by an older drover is its vector alone.
+      (funcall reply (if (vectorp (cdr known)) (list :out (cdr known)) (cdr known))))
      (known (setcdr known (cons reply (cdr known))))
      (t
       (drover-remote--begin-outcome state id reply)
@@ -2553,6 +2572,7 @@ answered with its outcome rather than performed twice."
                                 :peer (drover-remote--peer-name peer)
                                 :keys (vconcat (mapcar #'drover-remote--key keys))
                                 :out (make-vector (length keys) nil)
+                                :queued (make-vector (length keys) nil)
                                 :pending (make-vector (length keys) nil)
                                 :next 0 :left (length keys)
                                 :deadline (+ (float-time) drover-remote-action-timeout)))))
@@ -2581,9 +2601,11 @@ runs, or whose buffer cannot take a prompt now without touching what its
 input holds (its backend's :blocker), gets it from this host's queue of
 prompts (`drover-schedule'), saved there: after its turn, as a prompt
 scheduled \"when turn ends\" here is, else once it can take it.  Never
-typed over a turn, nor lost; the peer is told so (message \"note\").
-Return t when queued; a string saying why when it must wait but cannot
-be queued, its conversation not known yet; nil when the session takes it
+typed over a turn, nor lost.  Return (queued . WHY) when queued, WHY a
+line telling why it waits and until when, which the answer to the peer
+carries (capability \"queued\"), and a peer of an older drover is told in
+a message \"note\"; a string saying why when it must wait but cannot be
+queued, its conversation not known yet; nil when the session takes it
 now, or drover-schedule is not there."
   (let* ((buffer (drover-session-buffer record))
          (running (and (drover-backend-property record :runs-in-buffer)
@@ -2596,6 +2618,7 @@ now, or drover-schedule is not there."
       (require 'drover-links)
       (let* ((peer (and peer-name (drover-remote--peer peer-name)))
              (title (drover-session-display-title record))
+             (blocker (and (stringp blocker) (or (drover-bound-line blocker 200) "it is busy")))
              (why (if running "its turn runs" blocker))
              (conversation (drover-links-conversation record)))
         (if (not (and peer conversation))
@@ -2608,7 +2631,8 @@ now, or drover-schedule is not there."
                   (drover-schedule-add-after-turn target text instruction)
                 (drover-schedule-deliver target text :origin instruction)))
             (drover-remote--event peer 'act "queued its prompt for %s: %s" title why)
-            (when-let* ((connection (drover-remote--peer-connection peer)))
+            (when-let* (((not (drover-remote--capable-p peer "queued")))
+                        (connection (drover-remote--peer-connection peer)))
               (drover-remote--send connection
                                    (list :t "note"
                                          :text (if running
@@ -2616,7 +2640,10 @@ now, or drover-schedule is not there."
                                                            title drover-host)
                                                  (format "%s on %s cannot take a prompt now (%s): it goes once it can, queued there"
                                                          title drover-host blocker)))))
-            t))))))
+            (cons 'queued
+                  (if running
+                      "its turn runs: the prompt goes once it ends"
+                    (format "it cannot take a prompt now (%s): the prompt goes once it can" blocker)))))))))
 
 (defun drover-remote--run-soon (state)
   "Perform the actions of STATE's tasks from a timer."
@@ -2651,7 +2678,8 @@ identifier."
 
 (defun drover-remote--perform (action args record settle)
   "Perform ACTION with ARGS on RECORD, this host's, then call SETTLE.
-SETTLE takes t, or nil and a line.  Nothing shows a window nor asks."
+SETTLE takes t, or nil and a line, or `queued' and a line telling why a
+prompt sent waits, queued.  Nothing shows a window nor asks."
   (cl-flet ((then () (funcall settle t))
             (else (message) (funcall settle nil (or (drover-bound-line (format "%s" message)) "refused"))))
     (pcase action
@@ -2684,7 +2712,7 @@ SETTLE takes t, or nil and a line.  Nothing shows a window nor asks."
           ((not (drover-supports-p record :submit))
            (else "it takes no prompt from another host"))
           ((stringp queued) (else queued))
-          (queued (then))
+          (queued (funcall settle 'queued (cdr queued)))
           ((not options)
            (drover-unarchive-to-send record)
            (drover-backend-call record :submit (plist-get args :text) #'then
@@ -2749,6 +2777,9 @@ failed past its deadline."
                                 (cl-decf (drover-remote--state-flight state))
                                 (unless (aref (plist-get task :out) index)
                                   (aset (plist-get task :out) index (if ok t (or message "failed")))
+                                  (when-let* (((eq ok 'queued))
+                                              (queued (plist-get task :queued)))
+                                    (aset queued index (or message "queued")))
                                   (plist-put task :left (1- (plist-get task :left))))
                                 (when (eq state (drover-remote--current))
                                   (drover-remote--run-soon state)))))))
@@ -3241,15 +3272,21 @@ knows.  No file names, nothing of what they hold."
                                         limit))))))))
 
 (defun drover-remote--finish-task (state task)
-  "Answer TASK, done, to whoever asked it, and keep its outcome in STATE."
+  "Answer TASK, done, to whoever asked it, and keep its outcome in STATE.
+The answer is (:out OUTCOMES), and :queued, a line or false by session,
+when a prompt sent waits in this host's queue rather than went in."
   (setf (drover-remote--state-tasks state) (delq task (drover-remote--state-tasks state)))
   (let* ((out (vconcat (mapcar (lambda (outcome) (or outcome "failed")) (plist-get task :out))))
+         (queued (plist-get task :queued))
+         (answer (append (list :out out)
+                         (and (vectorp queued) (seq-some #'identity queued)
+                              (list :queued (vconcat (mapcar (lambda (why) (or why :false)) queued))))))
          (entry (gethash (plist-get task :id) (drover-remote--state-outcomes state)))
          (replies (cdr entry)))
-    (puthash (plist-get task :id) (cons t out) (drover-remote--state-outcomes state))
+    (puthash (plist-get task :id) (cons t answer) (drover-remote--state-outcomes state))
     (dolist (reply replies)
       (drover-with-reporting "remote actions"
-        (funcall reply (list :out out))))))
+        (funcall reply answer)))))
 
 (defun drover-remote--on-requests (peer key reply)
   "Answer through REPLY what the pending requests of session KEY ask, for PEER."

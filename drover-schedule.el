@@ -1150,7 +1150,7 @@ What the resume calls back with stays scoped to RUN."
     (unless (functionp submit)
       (error "%s takes no scheduled prompt" (drover-backend-label session)))
     (funcall submit session (plist-get job :prompt)
-             (lambda ()
+             (lambda (&optional _queued)
                (drover-schedule--guard job run 'interrupted
                  (drover-schedule--finish job run 'sent)))
              (lambda (message &optional not-sent)
