@@ -16,7 +16,7 @@ CLAUDE_CODE_IDE_EL ?= $(HOME)/.emacs.d/elpaca/sources/claude-code-ide
 # Spyglass, which the remote layer loads as it starts: its checkout,
 # with channels and spyglass-reconnect.  Without it, the tests of the
 # remote layer are skipped.
-SPYGLASS_EL ?= $(HOME)/local/projects/spyglass
+SPYGLASS_EL ?= $(HOME)/.emacs.d/elpaca/sources/spyglass
 # Anvil, whose MCP server drover-anvil's tools register with: its
 # checkout.  Without it, the tests calling them through Anvil's
 # dispatcher are skipped.
