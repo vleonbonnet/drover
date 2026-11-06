@@ -37,7 +37,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 11))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 21))
   (load "drover-core" nil t))
 
 (defgroup drover-faces nil
@@ -488,12 +488,26 @@ default, and otherwise the age of SINCE, such as \"2d\"."
   (mapconcat (lambda (status) (downcase (opencode-session-status-label status)))
              statuses " or "))
 
+(defun drover-filter-selection-label (key selection)
+  "Return a readable label for categorical filter SELECTION of KEY."
+  (if (equal selection '(:include))
+      "none"
+    (concat
+     (and (eq (car-safe selection) :exclude) "except ")
+     (mapconcat
+      (lambda (value)
+        (cond
+         ((null value) "(unknown)")
+         ((eq key :statuses) (downcase (opencode-session-status-label value)))
+         ((eq key :harness) (drover-harness-name value))
+         ((eq key :host) (drover-host-label (unless (eq value 'local) value)))
+         (t (format "%s" value))))
+      (drover-filter-selection-values selection) " or "))))
+
 (defun drover-filter-hosts-label (hosts)
   "Return HOSTS, a value of the filter member :host, as one string.
 Such as \"on reaver or core\": `local' names this host."
-  (concat "on " (mapconcat (lambda (host) (drover-host-label (if (eq host 'local) nil host)))
-                           (if (listp hosts) hosts (list hosts))
-                           " or ")))
+  (concat "on " (drover-filter-selection-label :host hosts)))
 
 (defun drover-filter-description (&optional filter now)
   "Return FILTER, `drover-filter' by default, described for headers, or nil.
@@ -513,12 +527,12 @@ default.  Return nil when FILTER lists every session."
             (search (drover--filter-value filter :search))
             (hosts (drover--filter-value filter :host)))
         (mapconcat #'identity
-                   (delq nil (list (and project (concat "project " project))
-                                   (and statuses (drover-filter-statuses-label statuses))
-                                   (and agent (concat "agent " agent))
-                                   (and model (concat "model " model))
-                                   (and provider (concat "provider " provider))
-                                   (and harness (concat "harness " (drover-harness-name harness)))
+                   (delq nil (list (and project (concat "project " (drover-filter-selection-label :project project)))
+                                   (and statuses (drover-filter-selection-label :statuses statuses))
+                                   (and agent (concat "agent " (drover-filter-selection-label :agent agent)))
+                                   (and model (concat "model " (drover-filter-selection-label :model model)))
+                                   (and provider (concat "provider " (drover-filter-selection-label :provider provider)))
+                                   (and harness (concat "harness " (drover-filter-selection-label :harness harness)))
                                    (and since (drover-filter-since-label since now))
                                    (and search (format "\"%s\"" search))
                                    (and hosts (drover-filter-hosts-label hosts))))

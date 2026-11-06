@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 20
+(defconst drover-core-generation 21
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -3336,6 +3336,9 @@ Its members are:
  :host      A list of hosts: the sessions of one of them, each a name
             of another host, or `local' for this host's.
 
+A categorical member also accepts (:include VALUE...) or
+\(:exclude VALUE...): keep only those values, or everything except
+them, including values encountered later.  (:include) matches none.
 A nil or missing member, or an empty search string, matches every
 session.  Change it with `drover-set-filter' so that views follow.")
 
@@ -3357,6 +3360,20 @@ Those follow `drover-filter', `drover-group-by' and `drover-sort-by'.")
   (let ((filter (or filter drover-filter)))
     (seq-some (lambda (key) (drover--filter-value filter key)) drover--filter-keys)))
 
+(defun drover-filter-selection-values (selection)
+  "Return the values named by categorical filter SELECTION.
+Accept both tagged selections and the older single values or lists."
+  (if (consp selection)
+      (if (memq (car selection) '(:include :exclude)) (cdr selection) selection)
+    (and selection (list selection))))
+
+(defun drover-filter-selection-match-p (value selection)
+  "Return non-nil when VALUE is kept by categorical filter SELECTION."
+  (let ((found (member value (drover-filter-selection-values selection))))
+    (if (or (null selection) (eq (car-safe selection) :exclude))
+        (not found)
+      (and found t))))
+
 (defun drover-filter-match-p (session &optional filter)
   "Return non-nil when SESSION satisfies FILTER, `drover-filter' by default.
 SESSION must satisfy every member of FILTER that is set."
@@ -3370,16 +3387,13 @@ SESSION must satisfy every member of FILTER that is set."
          (since (drover--filter-value filter :since))
          (search (drover--filter-value filter :search))
          (hosts (drover--filter-value filter :host)))
-    (and (or (null project) (equal (drover-session-view-project session) project))
-         (or (null statuses) (memq (drover-session-status session) statuses))
-         (or (null agent) (equal (drover-session-agent session) agent))
-         (or (null model) (equal (drover-session-model session) model))
-         (or (null provider) (equal (drover-session-provider-name session) provider))
-         (or (null harness) (eq (drover-session-harness session) harness))
-         (or (null hosts)
-             (let ((host (drover-session-host session)))
-               (seq-some (lambda (wanted) (if (eq wanted 'local) (null host) (equal wanted host)))
-                         (if (listp hosts) hosts (list hosts)))))
+    (and (drover-filter-selection-match-p (drover-session-view-project session) project)
+         (drover-filter-selection-match-p (drover-session-status session) statuses)
+         (drover-filter-selection-match-p (drover-session-agent session) agent)
+         (drover-filter-selection-match-p (drover-session-model session) model)
+         (drover-filter-selection-match-p (drover-session-provider-name session) provider)
+         (drover-filter-selection-match-p (drover-session-harness session) harness)
+         (drover-filter-selection-match-p (or (drover-session-host session) 'local) hosts)
          (or (null since)
              (let ((updated (drover-session-updated session)))
                (and updated (>= updated since))))

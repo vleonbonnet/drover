@@ -79,10 +79,11 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 21))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
+(autoload 'drover-filter-read "drover-filter")
 (autoload 'drover-select "drover-attention" nil t)
 (autoload 'drover-list "drover-list" nil t)
 (autoload 'drover-usage "drover-usage-report" nil t)
@@ -1076,63 +1077,49 @@ candidate in some, clears the filter as it does in the others."
           '(metadata (display-sort-function . identity) (cycle-sort-function . identity))
         (complete-with-action action candidates string predicate)))))
 
-(defun drover--read-filter (prompt names current &optional multiple)
-  "Read the new value of a filter member with PROMPT, or nil to clear it.
-NAMES is an alist (NAME . VALUE) of the values offered, in order;
-CURRENT is the value now, a value of NAMES, or with MULTIPLE a list of
-them read with `completing-read-multiple', or nil when unset.  The
-input starts with the names of CURRENT, offered first: RET keeps them,
-editing changes them, deleting one drops it.  An empty answer, or one
-choosing `drover-filter-any', offered first, clears the filter."
-  (let* ((current (if multiple current (and current (list current))))
-         (chosen (delq nil (mapcar (lambda (value) (rassoc value names)) current)))
-         (names (append chosen (seq-remove (lambda (entry) (memq entry chosen)) names)))
-         (table (drover--filter-table (mapcar #'car names)))
-         (initial (and chosen (mapconcat #'car chosen ",")))
-         (prompt (format "%s (empty for any): " prompt)))
-    (if multiple
-        (let ((answer (completing-read-multiple prompt table nil t initial)))
-          (unless (member drover-filter-any answer)
-            (delete-dups (delq nil (mapcar (lambda (name) (cdr (assoc name names))) answer)))))
-      (let ((answer (completing-read prompt table nil t initial)))
-        (unless (or (string-empty-p answer) (equal answer drover-filter-any))
-          (cdr (assoc answer names)))))))
+(defun drover--read-filter (prompt names current)
+  "Read a categorical filter with PROMPT, offering NAMES and CURRENT.
+NAMES is an alist (NAME . VALUE); CURRENT is the existing selection.
+Values no longer known are still offered so they can be deselected."
+  (dolist (value (drover-filter-selection-values current))
+    (unless (rassoc value names)
+      (setq names (append names (list (cons (if value (format "%s" value) "(unknown)") value))))))
+  (drover-filter-read prompt names current))
 
 (defun drover--read-known (prompt field current)
-  "Read one of the values of FIELD among known sessions, with PROMPT.
+  "Read a selection of values of FIELD among known sessions, with PROMPT.
 FIELD is a function of a session, such as `drover-session-agent';
 CURRENT is the value now, or nil.  Return nil to clear the filter (see
 `drover--read-filter')."
-  (let ((values (sort (delete-dups (delq nil (mapcar field (drover-known-sessions)))) #'string<)))
+  (let* ((values (delete-dups (mapcar field (drover-known-sessions))))
+         (unknown (memq nil values))
+         (names (mapcar (lambda (value) (cons value value)) (sort (delq nil values) #'string<))))
     (drover--read-filter prompt
-                         (mapcar (lambda (value) (cons value value))
-                                 (if (and current (not (member current values)))
-                                     (cons current values)
-                                   values))
+                         (if unknown (append names '(("(unknown)"))) names)
                          current)))
 
 (defun drover--read-filter-project (current)
-  "Read the project to list, CURRENT being the one listed now, or nil."
+  "Read the projects to list, starting with CURRENT."
   (drover--read-known "Project" #'drover-session-view-project current))
 
 (defun drover--read-filter-agent (current)
-  "Read the agent whose sessions to list, CURRENT being the one now, or nil."
+  "Read the agents whose sessions to list, starting with CURRENT."
   (drover--read-known "Agent" #'drover-session-agent current))
 
 (defun drover--read-filter-model (current)
-  "Read the model whose sessions to list, CURRENT being the one now, or nil."
+  "Read the models whose sessions to list, starting with CURRENT."
   (drover--read-known "Model" #'drover-session-model current))
 
 (defun drover--read-filter-provider (current)
-  "Read the provider whose sessions to list, CURRENT being the one now, or nil."
+  "Read the providers whose sessions to list, starting with CURRENT."
   (drover--read-known "Provider" #'drover-session-provider-name current))
 
 (defun drover--read-filter-harness (current)
-  "Read the harness whose sessions to list, CURRENT being the one now, or nil.
+  "Read the harnesses whose sessions to list, starting with CURRENT.
 Harnesses are read by name, among those of the sessions known."
   (let ((harnesses (delete-dups (mapcar #'drover-session-harness (drover-known-sessions)))))
-    (when (and current (not (memq current harnesses)))
-      (push current harnesses))
+    (dolist (harness (drover-filter-selection-values current))
+      (cl-pushnew harness harnesses))
     (drover--read-filter "Harness"
                          (sort (mapcar (lambda (harness) (cons (drover-harness-name harness) harness))
                                        harnesses)
@@ -1144,7 +1131,7 @@ Harnesses are read by name, among those of the sessions known."
   (drover--read-filter "Statuses"
                        (mapcar (lambda (status) (cons (opencode-session-status-label status) status))
                                drover-status-order)
-                       current t))
+                       current))
 
 (defun drover--read-filter-since (current)
   "Read since when sessions must have been active to be listed.
@@ -1165,24 +1152,20 @@ The input starts with CURRENT; an empty answer clears the filter."
 
 (defun drover--read-filter-host (current)
   "Read the hosts whose sessions to list, CURRENT being those listed now.
-This host is `local'; an empty answer lists every host's sessions."
+This host is `local'; All lists every host's sessions."
   (let ((names (cons (cons (format "%s (this host)" drover-host) 'local)
                      (mapcar (lambda (host) (cons host host)) (drover-hosts)))))
-    (dolist (host current)
+    (dolist (host (drover-filter-selection-values current))
       (unless (rassoc host names)
         (setq names (append names (list (cons (format "%s" host) host))))))
-    (drover--read-filter "Hosts" names current t)))
+    (drover--read-filter "Hosts" names current)))
 
 (defun drover--filter-label (key value)
   "Return VALUE of the filter member KEY as the View menu shows it."
   (pcase key
-    (:statuses (drover-filter-statuses-label value))
-    (:host (mapconcat (lambda (host) (drover-host-label (if (eq host 'local) nil host)))
-                      value ", "))
     (:since (drover-filter-since-label value))
-    (:harness (drover-harness-name value))
     (:search (format "\"%s\"" value))
-    (_ (format "%s" value))))
+    (_ (drover-filter-selection-label key value))))
 
 (defun drover-filter-clear ()
   "List every session in every view."
@@ -1321,7 +1304,7 @@ The value of an entry that does not apply is dimmed."
   :labeler (lambda (grouping) (alist-get grouping drover-grouping-labels)))
 
 (transient-define-infix drover-view--filter-project ()
-  "List the sessions of one project in every view."
+  "List the sessions of selected projects in every view."
   :class 'drover--filter-setting
   :description "project"
   :filter-key :project
@@ -1335,28 +1318,28 @@ The value of an entry that does not apply is dimmed."
   :chooser #'drover--read-filter-statuses)
 
 (transient-define-infix drover-view--filter-agent ()
-  "List the sessions of one agent in every view."
+  "List the sessions of selected agents in every view."
   :class 'drover--filter-setting
   :description "agent"
   :filter-key :agent
   :chooser #'drover--read-filter-agent)
 
 (transient-define-infix drover-view--filter-model ()
-  "List the sessions of one model in every view."
+  "List the sessions of selected models in every view."
   :class 'drover--filter-setting
   :description "model"
   :filter-key :model
   :chooser #'drover--read-filter-model)
 
 (transient-define-infix drover-view--filter-provider ()
-  "List the sessions of one provider in every view."
+  "List the sessions of selected providers in every view."
   :class 'drover--filter-setting
   :description "provider"
   :filter-key :provider
   :chooser #'drover--read-filter-provider)
 
 (transient-define-infix drover-view--filter-harness ()
-  "List the sessions of one harness in every view."
+  "List the sessions of selected harnesses in every view."
   :class 'drover--filter-setting
   :description "harness"
   :filter-key :harness

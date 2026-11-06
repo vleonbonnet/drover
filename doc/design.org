@@ -3,6 +3,8 @@
 
 * Modules
 
+=drover-filter.el= provides the categorical filters' searchable checklists, called by the shared menu in =drover-keys.el=. Their drafts live only in the temporary picker buffer; =drover-core.el= matches inclusion and exclusion selections, and =drover-ui.el= describes them.
+
 | Module                              | Responsibility                                                                                                                                                                                                                                                                                                                                                                                    |
 |-------------------------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | =drover.el=                         | Entry point: loads the core and the interface, and each backend once its front end is loaded; requires opencode.el, not the other front ends                                                                                                                                                                                                                                                      |

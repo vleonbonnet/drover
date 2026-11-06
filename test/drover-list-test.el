@@ -2563,8 +2563,8 @@ Redraws keep point on the session."
                 (should-not drover-filter)
                 (should (equal (drover-list-test-ungrouped) '("root" "s" "kid" "other" "new")))
                 ;; By provider: s's tree, root above it.
-                (should-not (type "V = v Anthropic RET C-g"))
-                (should (equal drover-filter '(:provider "Anthropic")))
+                (should-not (type "V = v M-n Anthropic SPC RET C-g"))
+                (should (equal drover-filter '(:provider (:include "Anthropic"))))
                 (should (equal (drover-list-test-ungrouped) '("root" "s")))
                 (should-not (type "V = c = g provider RET C-g"))
                 (should (eq drover-group-by 'provider))
