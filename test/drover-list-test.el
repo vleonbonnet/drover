@@ -6940,12 +6940,13 @@ set is that of the list in sight."
   "The menu lays its groups out in rows as wide as its window, in few lines.
 The old menu took 24 lines at any width, its View menu apart; before
 the settings of a field shared a row, 14 at 240 columns, 18 at 160, 28
-at 100 and 44 at 60.  The column of the changes took one more at 60."
+at 100 and 44 at 60.  The column of the changes and the digits opening
+sessions by number took one more each at 60."
   (drover-list-test-elsewhere
     ;; The table of fields shows in two halves side by side, or one under
     ;; the other, as room asks; the view settings show, the list being in
     ;; sight, the prompt keys editing a prompt buffer do not.
-    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 40)))
+    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 41)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))
