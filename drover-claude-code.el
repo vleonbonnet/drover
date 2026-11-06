@@ -448,18 +448,20 @@ its patch."
                    (assq 'structuredPatch result))
                (list file additions deletions)))))))
 
-(defun drover-claude-code-recap (file)
+(defun drover-claude-code-recap (file &optional sidechain)
   "Return a recap of the last turn transcript FILE records, as `drover-recap' does.
 The turn begins at the newest prompt of the user; its reply is the
 newest text of the main agent since, its error that of an API error
 the CLI recorded, and its changes the files its tools wrote or edited,
 with the lines they added and deleted.  Subagents' records are left
-out.  Only the end of FILE is read: a turn longer than that has no
-prompt, unless the CLI recorded the last prompt apart."
+out, unless SIDECHAIN: FILE is then a subagent's own transcript, whose
+records are all of its side chain, the prompt the task it was given.
+Only the end of FILE is read: a turn longer than that has no prompt,
+unless the CLI recorded the last prompt apart."
   (let (prompt last-prompt reply reply-id error changes)
     (catch 'turn
       (dolist (record (drover-claude-code--transcript-records file))
-        (unless (alist-get 'isSidechain record)
+        (unless (and (not sidechain) (alist-get 'isSidechain record))
           (pcase (alist-get 'type record)
             ("last-prompt"
              (unless last-prompt

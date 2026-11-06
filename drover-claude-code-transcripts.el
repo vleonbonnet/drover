@@ -1126,7 +1126,7 @@ It is read from the end of its transcript, or of its subagent's (see
     (funcall callback
              (or (and file (file-readable-p file)
                       (drover-with-reporting "Claude Code recap"
-                        (drover-claude-code-recap file)))
+                        (drover-claude-code-recap file (and agent t))))
                  (list :failure "No transcript of this conversation")))))
 
 (defun drover-claude-code-transcripts--preview (session callback)

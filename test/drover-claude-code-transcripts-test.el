@@ -281,7 +281,10 @@ may follow it, read whole or appended."
         (should (drover-supports-p subagent :recap))
         (should-not (drover-supports-p subagent :delete))
         (should-not (drover-archivable-p subagent))
-        (drover-recap subagent (lambda (recap) (should (equal (plist-get recap :reply) "Found it."))))))))
+        (let (recap)
+          (drover-recap subagent (lambda (value) (setq recap value)))
+          (should (equal (plist-get recap :reply) "Found it."))
+          (should (equal (plist-get recap :prompt) "Audit the parser")))))))
 
 (ert-deftest drover-claude-code-transcripts-test-subagent-run ()
   "A subagent runs the model, effort and context its own transcript tells.

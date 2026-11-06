@@ -71,11 +71,13 @@ objects."
                     (expand-file-name (drover-claude-code-encode-directory directory)
                                       (drover-claude-code-projects-directory))))
 
-(cl-defun drover-fixture-claude-user (id directory time text &key (entrypoint "cli") (branch "main") meta)
+(cl-defun drover-fixture-claude-user (id directory time text &key (entrypoint "cli") (branch "main") meta
+                                         sidechain)
   "Return the record of a prompt TEXT of conversation ID in DIRECTORY at TIME.
-ENTRYPOINT and BRANCH are recorded; META marks a note the CLI added."
+ENTRYPOINT and BRANCH are recorded; META marks a note the CLI added,
+SIDECHAIN a subagent's prompt, the task it was given."
   (apply #'drover-fixture-line
-         :parentUuid :null :isSidechain :false :promptId (concat "prompt-" id)
+         :parentUuid :null :isSidechain (if sidechain t :false) :promptId (concat "prompt-" id)
          :type "user" :message (list :role "user" :content text)
          (append (and meta (list :isMeta t))
                  (list :uuid (format "%s-u%d" id (truncate time))
@@ -131,8 +133,9 @@ It starts at START with the records the CLI writes first, a command
 note, then PROMPT, REPLY by MODEL at EFFORT, FILLER bytes of request
 blobs, then AI-TITLE, CUSTOM-TITLE and the last prompt the CLI appends.
 SUBAGENTS is a list of (NAME DESCRIPTION TYPE . REPLY) written beside
-it, REPLY the keyword arguments of `drover-fixture-claude-assistant'
-for its reply, such as :model, :effort and :usage."
+it, each a prompt, DESCRIPTION, and a reply, REPLY the keyword
+arguments of `drover-fixture-claude-assistant' for it, such as :model,
+:effort and :usage."
   (make-directory directory t)
   (let ((file (drover-fixture-claude-file id directory)))
     (drover-fixture-write
@@ -157,7 +160,9 @@ for its reply, such as :model, :effort and :usage."
     (pcase-dolist (`(,name ,description ,type . ,reply) subagents)
       (let ((base (expand-file-name (concat id "/subagents/" name) (file-name-directory file))))
         (drover-fixture-write (concat base ".jsonl")
-                              (list (apply #'drover-fixture-claude-assistant id directory (+ start 3) "Found it."
+                              (list (drover-fixture-claude-user id directory (+ start 3) description
+                                                                :sidechain t)
+                                    (apply #'drover-fixture-claude-assistant id directory (+ start 3) "Found it."
                                            :sidechain t reply)))
         (drover-fixture-write (concat base ".meta.json")
                               (list (json-serialize `((agentType . ,type) (description . ,description)))))))
