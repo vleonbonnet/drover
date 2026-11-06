@@ -28,9 +28,12 @@
 
 (require 'drover-core)
 (require 'drover-ui)
+(require 'transient)
 
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 21))
   (load "drover-core" nil t))
+
+(defvar drover-menu-display-action)
 
 (defvar-local drover-filter--choices nil
   "Alist of display names and values offered by this checklist.")
@@ -173,6 +176,32 @@ Type to search, then toggle choices and apply or cancel the draft.
   (interactive)
   (exit-recursive-edit))
 
+(defun drover-filter--edit (buffer)
+  "Edit the checklist in BUFFER in the existing menu's window.
+Keep that window's size while searching or scrolling a long checklist.
+Without a current menu, open a temporary window using its display action."
+  (let ((menu transient--prefix))
+    (when menu
+      (unless (window-live-p transient--window) (transient--show))
+      (transient--suspend-override t))
+    (unwind-protect
+        (save-window-excursion
+          (let* ((window (if menu transient--window
+                           (display-buffer buffer (if (boundp 'drover-menu-display-action)
+                                                      drover-menu-display-action
+                                                    transient-display-buffer-action))))
+                 (dedicated (window-dedicated-p window)))
+            (unwind-protect
+                (progn
+                  (set-window-dedicated-p window nil)
+                  (set-window-buffer window buffer)
+                  (select-window window 'norecord)
+                  ;; The menu is already suspended, with its window kept.
+                  (let ((transient--prefix nil)) (recursive-edit)))
+              (when (window-live-p window)
+                (set-window-dedicated-p window dedicated)))))
+      (when (and menu transient--prefix) (transient--resume-override)))))
+
 ;;;###autoload
 (defun drover-filter-read (prompt names current)
   "Read a categorical filter with PROMPT from NAMES, starting at CURRENT.
@@ -180,7 +209,7 @@ NAMES is an alist (NAME . VALUE).  Return the draft when applied, or
 CURRENT when cancelled.  The caller applies the returned value."
   (let ((buffer (generate-new-buffer " *drover filter*")))
     (unwind-protect
-        (save-window-excursion
+        (progn
           (with-current-buffer buffer
             (drover-filter-mode)
             (setq drover-filter--title (drover-bound-line prompt)
@@ -188,8 +217,7 @@ CURRENT when cancelled.  The caller applies the returned value."
                   (mapcar (lambda (entry) (cons (drover-bound-line (car entry)) (cdr entry))) names)
                   drover-filter--selection current)
             (drover-filter--draw))
-          (pop-to-buffer buffer '(display-buffer-same-window))
-          (recursive-edit)
+          (drover-filter--edit buffer)
           (with-current-buffer buffer
             (if drover-filter--accepted drover-filter--selection current)))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
