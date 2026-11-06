@@ -480,6 +480,8 @@ The user found a mirror of a shell of Core's looking otherwise than there, its c
 
 The owner's face remapping, buffer-local, comes along too, applied relative to the viewer's own, so that a text scale here keeps.  The mirror Reaver still showed, =Emacs update failure recovery=, was of a session Core had not archived: its terminal ran, its record idle, nothing archived of it; the two Core archived that day, =Org-element cache parser error…= at 11:24:41 and =Caps Lock to Drover prefix= at 11:31:13, had left mirrors closed =killed=, which the user killed by hand.
 
+The owner's mode line later gave way to the viewer's own: rendered on Core it kept Core's look, its colours resolved there and moody's slants, images spyglass leaves out, a bare =|= each, and a mirror no window showed there had drover's line in place of the whole mode line.  A mirror now draws Reaver's =mode-line-format= as any buffer's, moody's tabs and minions included, and drover's line of the session (status, harness, model, effort, context) goes, always, in its =mode-line-process= after the mode name, before spyglass's title, host, state, size and whether it is read only.
+
 ** The protocol, compatible
 
 | What                 | New                                                                                                                                                                                                                                                                                            |

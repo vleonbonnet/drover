@@ -2117,12 +2117,17 @@ leading back to what holds it would print it again from each."
             (kill-ring nil)
             (messages nil))
         (drover-remote-test-live mirror)
-        ;; The mirror's mode line, while no window shows it there: the
-        ;; session's, as its host tells it.
+        ;; What the mirror's mode line tells of the session, as its
+        ;; host tells it.
         (with-current-buffer mirror
           (let ((line (funcall spyglass-mirror-mode-line-function)))
             (should (string-match-p "Opus 5.5 high" line))
-            (should (string-match-p "Idle" line))))
+            (should (string-match-p "Idle" line)))
+          ;; Shown in this Emacs's mode line, after the mode name, before
+          ;; the mirror's state.
+          (should-not (local-variable-p 'mode-line-format))
+          (should (string-match-p "Opus 5.5 high.*@.* \\[live\\]"
+                                  (spyglass--mirror-mode-line-process))))
         (spyglass-mirror-send-string "draft not sent" mirror)
         (drover-remote-test-wait (lambda () (string-search "draft not sent"
                                                            (plist-get (drover-remote-test-terminal "s0") :text))))

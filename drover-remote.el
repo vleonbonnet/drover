@@ -7174,10 +7174,10 @@ See `drover-remote--close-archived-mirror'."
         (drover-remote--close-archived-mirror peer key buffer)))))
 
 (defun drover-remote--mirror-mode-line ()
-  "Return the mode line of a mirror of a peer's session, from its record.
-For `spyglass-mirror-mode-line-function', while the owner sends no mode
-line of its own (no window shows the session there): the session's
-status, harness, model, effort and context, as the peer last told them."
+  "Return what the mode line of a mirror of a peer's session tells of it.
+For `spyglass-mirror-mode-line-function', after the mirror's mode name:
+the session's status, harness, model, effort and context, as the peer
+last told them."
   (when-let* ((session (drover-remote--shown-session)))
     (let ((status (drover-session-status session))
           (tokens (drover-session-context-tokens session))
