@@ -376,7 +376,8 @@ As (VALUE . LABEL)."
     ("=c" "clear" drover-usage-filter-clear :transient t)]
    ["Report"
     ("g" "Refresh" drover-usage-refresh :transient t)
-    ("V" "Close" transient-quit-one)]])
+    ("V" "Close" transient-quit-one)]]
+  drover--menu-close)
 
 ;;;; The mode line
 

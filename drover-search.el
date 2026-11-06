@@ -942,6 +942,7 @@ with the text typed."
   [:class transient-column
    :hide always
    :setup-children drover-search--menu-return-entries]
+  drover--menu-close
   (interactive)
   (setq drover-search--menu-keys (delete-dups (cons (kbd "C-'") (drover--dispatch-own-keys))))
   (transient-setup 'drover-search-menu nil nil :scope (or input "")

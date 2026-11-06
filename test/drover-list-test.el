@@ -6727,6 +6727,39 @@ buffer."
           (should (eq (selected-window) first)))
       (keymap-unset (current-local-map) "<f19>" t))))
 
+(ert-deftest drover-list-test-menus-closed-by-q ()
+  "q closes the menus opened over the list, as C-g does, and the list stays.
+In the list, q quits it: with a menu open, q is the menu's."
+  (drover-list-test-elsewhere
+    (let ((global (current-global-map))
+          (map (make-sparse-keymap)))
+      ;; Bound globally, as users bind it, so that it opens in the list.
+      (keymap-set map "C-'" #'drover-dispatch)
+      (set-keymap-parent map global)
+      (use-global-map map)
+      (unwind-protect
+          (progn
+            (select-window side)
+            (dolist (keys '("C-'" "V"))
+              (ert-info (keys)
+                (execute-kbd-macro (kbd keys))
+                (should transient--prefix)
+                (execute-kbd-macro (kbd "q"))
+                (should-not transient--prefix)
+                (should (window-live-p side))
+                (should (eq (window-buffer side) buffer))
+                (should (eq (selected-window) side))
+                (should (equal (drover-list-test-at-side side) "ask"))))
+            ;; From the code buffer too.
+            (select-window first)
+            (execute-kbd-macro (kbd "C-'"))
+            (should transient--prefix)
+            (execute-kbd-macro (kbd "q"))
+            (should-not transient--prefix)
+            (should (eq (selected-window) first))
+            (should (eq (window-buffer side) buffer)))
+        (use-global-map global)))))
+
 (ert-deftest drover-list-test-dispatch-view-elsewhere ()
   "The dispatch menu opened from a code buffer sets the list's follow mode."
   (drover-list-test-elsewhere

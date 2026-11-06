@@ -63,9 +63,10 @@
 ;; scheduled prompts of "#", or after "b"; more lists of sessions after
 ;; "p"; more prompt commands after "O".
 ;;
-;; Any key opening the menu closes it.  The echo area and hints name the
-;; key Emacs's help names for the menu, or the name `drover-dispatch-key'
-;; gives it, such as Caps Lock for a keyboard sending it as <f19>.
+;; Any key opening the menu closes it, and q, as C-g, closes every menu
+;; of drover's.  The echo area and hints name the key Emacs's help names
+;; for the menu, or the name `drover-dispatch-key' gives it, such as
+;; Caps Lock for a keyboard sending it as <f19>.
 
 ;;; Code:
 
@@ -2188,6 +2189,12 @@ that opened the menu, whichever it was, closes it again."
                                       (list (key-description key) "Close" 'transient-quit-one))
                                     drover--dispatch-close-keys)))
 
+;; Every menu of drover's closes on q, as on C-g: q quits drover's lists
+;; and reports, from which the menus open.
+(transient-define-group drover--menu-close
+  [:hide always
+   ("q" "Close" transient-quit-one)])
+
 ;;;###autoload(autoload 'drover-dispatch "drover-keys" nil t)
 (defcustom drover-menu-display-action
   '(display-buffer-at-bottom (dedicated . t) (inhibit-same-window . t))
@@ -2351,6 +2358,7 @@ session chosen for it, else to one asked for, unshown."
   [:class transient-column
    :hide always
    :setup-children drover--dispatch-close-entries]
+  drover--menu-close
   (interactive)
   (setq drover--dispatch-close-keys (drover--dispatch-own-keys))
   (transient-setup 'drover-dispatch nil nil :scope (drover--context)
@@ -2378,6 +2386,7 @@ takes."
   ;; The key opening the menu closes it.
   [:hide always
    ("V" "Close" transient-quit-one)]
+  drover--menu-close
   (interactive)
   (drover--check-view)
   ;; The list's window, from which the dispatch menu may have opened it.

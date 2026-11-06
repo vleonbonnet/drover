@@ -1203,7 +1203,7 @@ shows, so they apply only there."
         (kill-buffer default)))))
 
 (ert-deftest drover-keys-test-menus-keep-other-windows ()
-  "Menus open in a window of their own, closed by the key that opens them."
+  "Menus open in a window of their own, closed by the key that opens them, and q."
   (let (setups)
     (cl-letf (((symbol-function 'transient-setup)
                (lambda (name &rest arguments) (push (cons name arguments) setups))))
@@ -1216,6 +1216,17 @@ shows, so they apply only there."
       (should (equal (plist-get (nthcdr 3 setup) :display-action) drover-menu-display-action))))
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-view "V")) :command)
               'transient-quit-one))
+  ;; q closes every menu of drover's, as C-g does.
+  (require 'drover-search)
+  (require 'drover-prompt)
+  (require 'drover-usage-report)
+  (dolist (menu '(drover-dispatch drover-view drover-search-menu drover-usage-menu
+                  drover-prompt-options-menu))
+    (ert-info ((symbol-name menu))
+      (should (equal (assoc "q" (mapcar (lambda (entry) (list (car entry) (cadr entry)))
+                                        (drover-keys-test-defined-keys menu)))
+                     '("q" transient-quit-one)))
+      (should (eq (plist-get (cdr (transient-get-suffix menu "q")) :command) 'transient-quit-one))))
   ;; A bottom side window, such as the prompt's, stays shown with the menu.
   (save-window-excursion
     (delete-other-windows)

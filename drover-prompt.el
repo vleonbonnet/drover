@@ -1862,6 +1862,7 @@ among its directories.  This is the prompt action `directory'."
     ("m" "Model" drover-prompt-choose-model)
     ("e" "Effort" drover-prompt-choose-effort)
     ("d" "Directory" drover-prompt-choose-directory)]]
+  drover--menu-close
   (interactive)
   (transient-setup 'drover-prompt-options-menu nil nil
                    :display-action drover-menu-display-action))
