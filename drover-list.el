@@ -5637,6 +5637,7 @@ as a mode applied again, keeps no overlay of the caches it drew.  For
       (remove-hook 'window-selection-change-functions #'drover-list--windows-changed)
       (remove-hook 'window-buffer-change-functions #'drover-list--place-soon)
       (remove-hook 'window-configuration-change-hook #'drover-list--place-soon)
+      (remove-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer)
       (remove-hook 'kill-buffer-hook #'drover-list--buffer-killed)
       (remove-hook 'enable-theme-functions #'drover-list--theme-changed)
       (remove-hook 'disable-theme-functions #'drover-list--theme-changed)
@@ -5853,8 +5854,11 @@ side, where the sidebar steps aside until the list leaves (see
     (pop-to-buffer buffer (if other-window
                               drover-list-other-window-display-action
                             drover-list-display-action))
-    ;; Before drawing, for the width the sidebar leaves.
-    (drover-list--place-sidebar (selected-frame))
+    ;; Before drawing, for the width the sidebar leaves; once the
+    ;; minibuffer exited, from one, which restores the windows.
+    (if (drover-list--windows-provisional-p)
+        (drover-list--place-soon)
+      (drover-list--place-sidebar (selected-frame)))
     (with-current-buffer buffer
       ;; Asked for, so drawn anew whatever its state.
       (setq drover-list--stale t))
@@ -5913,7 +5917,8 @@ While the list of `drover-list' shows beside it, the sidebar steps
 aside, and comes back once the list leaves (see
 `drover-list--place-sidebar'); shown with this command meanwhile, it
 stays beside the list, until the list leaves; hidden with it, it does
-not come back."
+not come back.  A buffer chosen through the minibuffer, as
+`consult-buffer' previews them, is followed once chosen."
   (interactive "P")
   (let ((window (drover-list--side-window))
         (aside (frame-parameter nil 'drover-list-sidebar-aside)))
@@ -5979,7 +5984,11 @@ no window shows the list beside where it was, as the list's window
 shows another buffer, is deleted or moved, or the list is buried, it
 comes back there.  Shown by `drover-list-side' beside the list, it stays
 until the list leaves (`drover-list-sidebar-kept'); hidden by it, it no
-longer comes back."
+longer comes back.  Windows restored, as `winner-undo' restores them,
+are followed as they are: a sidebar they show is no longer aside, and
+one they took away while it showed stays hidden.  So the sidebars are
+not placed while a minibuffer is active, whose windows Emacs restores as
+it exits (see `drover-list--place-sidebars')."
   (let ((side-window (drover-list--side-window frame))
         (aside (frame-parameter frame 'drover-list-sidebar-aside)))
     (cond
@@ -5991,7 +6000,11 @@ longer comes back."
                                        :slot (window-parameter side-window 'window-slot)
                                        :width (window-total-width side-window)))
             (delete-window side-window))
-        (set-frame-parameter frame 'drover-list-sidebar-kept nil)))
+        (set-frame-parameter frame 'drover-list-sidebar-kept nil))
+      ;; Still shown, it is not aside, though windows restored, as
+      ;; `winner-undo' restores them, brought it back as it was.
+      (when (and aside (window-live-p side-window))
+        (set-frame-parameter frame 'drover-list-sidebar-aside nil)))
      (aside
       (unless (drover-list--beside-p frame (plist-get aside :side))
         (set-frame-parameter frame 'drover-list-sidebar-aside nil)
@@ -6002,17 +6015,43 @@ longer comes back."
 (defvar drover-list--place-timer nil
   "Timer placing the sidebars once windows settled, or nil.")
 
+(defun drover-list--windows-provisional-p ()
+  "Return non-nil while the windows are provisional, until the minibuffer exits.
+Emacs restores the windows of the frame a minibuffer was entered from
+as it exits (`read-minibuffer-restore-windows'): a buffer previewed
+meanwhile, as `consult-buffer' previews them, goes, and so would the
+sidebar stepping aside or coming back, while the frame's parameters
+still told that it had."
+  (and read-minibuffer-restore-windows
+       (> (minibuffer-depth) 0)))
+
 (defun drover-list--place-sidebars ()
   "Have the sidebar of each frame step aside next to the list, or come back.
-See `drover-list--place-sidebar'."
+See `drover-list--place-sidebar'.  While the windows are provisional,
+the minibuffer active, the sidebars are placed once it exited (see
+`drover-list--windows-provisional-p')."
   (drover-with-reporting "sidebar place"
     (setq drover-list--place-timer nil)
-    (when (get-buffer drover-list-sidebar-buffer-name)
+    (cond
+     ((drover-list--windows-provisional-p)
+      (add-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer))
+     ((get-buffer drover-list-sidebar-buffer-name)
       (dolist (frame (frame-list))
         (when (and (frame-live-p frame)
                    (or (frame-parameter frame 'drover-list-sidebar-aside)
                        (drover-list--side-window frame)))
-          (drover-list--place-sidebar frame))))))
+          (drover-list--place-sidebar frame)))))))
+
+(defun drover-list--place-after-minibuffer ()
+  "Place the sidebars once the minibuffer exited and the command ended.
+For `minibuffer-exit-hook', once: it runs before the windows are
+restored, and the timer of `drover-list--place-soon' runs after the
+command that read, which may change them again, as `consult-buffer'
+shows the buffer chosen.  The timer finding another minibuffer still
+active waits for it in turn."
+  (drover-with-reporting "sidebar place"
+    (remove-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer)
+    (drover-list--place-soon)))
 
 (defun drover-list--place-soon (&rest _)
   "Place the sidebars once the windows changing now settled.

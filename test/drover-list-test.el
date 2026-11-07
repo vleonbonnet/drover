@@ -33,6 +33,7 @@
 
 ;;; Code:
 
+(require 'ert-x)
 (require 'drover-test-helpers)
 (require 'drover-list)
 ;; Loaded before tests stub its functions, which loading would undo.
@@ -61,6 +62,7 @@
   (drover-list--stop-timer 'drover-list--frame-timer)
   (drover-list--stop-timer 'drover-list--focus-timer)
   (drover-list--stop-timer 'drover-list--place-timer)
+  (remove-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer)
   (set-frame-parameter nil 'drover-list-sidebar-aside nil)
   (set-frame-parameter nil 'drover-list-sidebar-kept nil)
   (setq drover-list--age-due nil
@@ -5193,6 +5195,89 @@ aside, and q brings back the buffer it replaced, and the sidebar."
       (should (eq (window-buffer first) work))
       (should (eq (window-buffer second) buffer))
       (should (eq (selected-window) second)))))
+
+(defun drover-list-test-choose (window target &optional cancel)
+  "Show TARGET in WINDOW as `consult-buffer' chooses it, through the minibuffer.
+While the minibuffer reads, WINDOW previews TARGET and the sidebars are
+placed, as the timer would between keys; as it exits, WINDOW shows its
+buffer again, as consult has it, and the minibuffer restores the windows
+as they were before, if `read-minibuffer-restore-windows' says so.  Then
+WINDOW shows TARGET, unless CANCEL, C-g quitting rather than RET; the
+sidebars are placed once the command ended, as the timer would.  Return
+non-nil when the sidebar showed during the preview."
+  (let ((original (window-buffer window))
+        previewed)
+    (minibuffer-with-setup-hook
+        (lambda ()
+          (add-hook 'minibuffer-exit-hook
+                    (lambda ()
+                      (with-selected-window window
+                        (switch-to-buffer original 'norecord)))
+                    nil t)
+          (with-selected-window window
+            (switch-to-buffer target 'norecord))
+          (drover-list-test-place)
+          (setq previewed (and (drover-list--side-window) t)))
+      (condition-case nil
+          (ert-simulate-keys (kbd (if cancel "C-g" "RET"))
+            (read-from-minibuffer "Switch to buffer: "))
+        (quit nil)))
+    (unless cancel
+      (with-selected-window window
+        (switch-to-buffer target)))
+    (drover-list-test-place)
+    previewed))
+
+(ert-deftest drover-list-test-sidebar-through-the-minibuffer ()
+  "A buffer chosen through the minibuffer has the sidebar placed once chosen.
+As `consult-buffer' does, the minibuffer previews a buffer in the window
+where you work, and Emacs restores the windows as it exits: the
+sidebar waits, then steps aside from the list chosen, and comes back
+once another buffer is chosen; C-g leaves it aside until the list
+leaves.  Without the windows restored, it follows the previews."
+  (drover-list-test-alone-beside
+    (dolist (restore '(t nil))
+      (ert-info ((format "read-minibuffer-restore-windows: %s" restore))
+        (let ((read-minibuffer-restore-windows restore))
+          ;; The list chosen: the sidebar steps aside.
+          (should (eq (drover-list-test-choose first buffer) restore))
+          (should (eq (window-buffer first) buffer))
+          (should-not (drover-list--side-window))
+          (should (frame-parameter nil 'drover-list-sidebar-aside))
+          ;; Another buffer chosen: it comes back.
+          (should (eq (drover-list-test-choose first work) (not restore)))
+          (should (eq (window-buffer first) work))
+          (should (drover-list--side-window))
+          (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+          ;; The list chosen, then another buffer previewed and C-g:
+          ;; the list stays, the sidebar aside, until the list leaves.
+          (drover-list-test-choose first buffer)
+          (drover-list-test-choose first work t)
+          (should (eq (window-buffer first) buffer))
+          (should-not (drover-list--side-window))
+          (should (frame-parameter nil 'drover-list-sidebar-aside))
+          (set-window-buffer first work)
+          (drover-list-test-place)
+          (should (drover-list--side-window))
+          (should-not (memq #'drover-list--place-after-minibuffer
+                            (default-value 'minibuffer-exit-hook))))))))
+
+(ert-deftest drover-list-test-sidebar-shown-is-not-aside ()
+  "A sidebar that windows restored, as `winner-undo' does, is no longer aside.
+Deleted then, it does not come back by itself."
+  (drover-list-test-alone-beside
+    (let ((windows (current-window-configuration)))
+      (drover-list)
+      (should-not (drover-list--side-window))
+      (should (frame-parameter nil 'drover-list-sidebar-aside))
+      (set-window-configuration windows)
+      (should (eq (window-buffer first) work))
+      (should (drover-list--side-window))
+      (drover-list-test-place)
+      (should-not (frame-parameter nil 'drover-list-sidebar-aside))
+      (delete-window (drover-list--side-window))
+      (drover-list-test-place)
+      (should-not (drover-list--side-window)))))
 
 (ert-deftest drover-list-test-where-it-shows ()
   "The list shows in the selected one of two windows, or where it already shows.
