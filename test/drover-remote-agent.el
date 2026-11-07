@@ -73,6 +73,7 @@
 (defvar drover-fake-opencode--password)
 (defvar drover-fake-opencode-directory)
 (defvar opencode-service-registration-file)
+(defvar opencode-command)
 (defvar drover-claude-code-home)
 (defvar drover-claude-code-history-days)
 (defvar drover-claude-code-agents-interval)
@@ -502,7 +503,10 @@ noted, and their cancellations."
   (require 'drover-fake-opencode)
   (require 'opencode-service)
   (setq opencode-service-registration-file
-        (drover-fake-opencode-start (or (getenv "DROVER_AGENT_DIR") default-directory)))
+        (drover-fake-opencode-start (or (getenv "DROVER_AGENT_DIR") default-directory))
+        ;; Never the user's CLI, whose version opencode.el asks as it
+        ;; finds the service, waiting for it, silent meanwhile.
+        opencode-command "drover-agent-no-opencode")
   (drover-register-engine 'opencode :label "OpenCode"
                           :defaults (lambda (_directory callback) (funcall callback nil))
                           :agents (lambda (_directory) (list "build")))
