@@ -4750,6 +4750,15 @@ vector.")
 ;; Read from the file system: views ask as they draw, and must never
 ;; wait for a Git process.
 
+(defun drover--native-file-name (file)
+  "Return FILE as Emacs names it on this system.
+On Windows, MSYS's /c/... is c:/..., as MSYS2's Git writes the files
+naming a linked worktree's Git directory."
+  (if (and (eq system-type 'windows-nt)
+           (string-match "\\`/\\([a-zA-Z]\\)\\(/\\|\\'\\)" file))
+      (concat (match-string 1 file) ":/" (substring file (match-end 0)))
+    file))
+
 (defun drover--git-directory (directory)
   "Return the Git directory of the worktree of DIRECTORY, or nil outside Git."
   (when-let* ((root (locate-dominating-file directory ".git"))
@@ -4760,7 +4769,7 @@ vector.")
       (with-temp-buffer
         (insert-file-contents dotgit)
         (when (re-search-forward "^gitdir: *\\(.+?\\) *$" nil t)
-          (expand-file-name (match-string 1) root))))))
+          (expand-file-name (drover--native-file-name (match-string 1)) root))))))
 
 (defun drover--git-head (directory)
   "Return the file name of the HEAD of the worktree of DIRECTORY, or nil.
