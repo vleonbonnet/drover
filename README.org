@@ -107,23 +107,23 @@ Settings show their value beside the key that changes it, as Magit's menus show 
 The menu has no fixed shape: its groups fill columns of balanced height as wide as its window, one after the other as text fills a newspaper's columns, and in rows of such columns when the window is narrow, so that it takes as few lines as the width allows: across 240 columns, nine to twelve; across 160, fifteen to seventeen; across 100, about twenty-five, in rows. A group may show in two or three columns side by side, or in one, as the room asks. While the menu stays open, its groups keep their place as long as they fit, as values change or you move in the list. In drover's prompt, the list in sight, 160 columns wide, it reads:
 
 #+begin_example
-  Sessions        Task                       Input                 Session                             Field       Filter     Column     Columns
-   j Next          n Start or continue        RET Send              o Other window   E Edit pending 1   subagents  =u [all|active|none]   -b branch
-   B Bury quiet    F Finish                   S-<return> Schedule   u Parent         + New session      older      =O [hidden|shown]      -x context
-   b Select        I Link session             i Attach              c Subagent       g Refresh          archived   =z [hidden|shown]      -+ changes
-   l List          & Attempts                 k Clear               v Peek           r Rename           project    =p drover  -p shown    -c created
-   L Side list     W Worktrees                / Slash command       R Review         x Delete           status     =s any                 -k cache
-   p Project                                  @ Mention             A Answer         z Archive          agent      =a any     -a shown    -s summary
-   S Search       Prompt runs                 y Copy block          K Interrupt      Z Wrap up          model      =m any     -m shown    -$ cost
-   $ Usage         a Agent plan                                     s Mark seen      G Goal             provider   =v any     -v shown    -g goal
-                   m Model Opus 5.5          Conversation                                               harness    =H any     -H shown    -# attempt
-  Prompt           e Effort max               t Revert here        View                                 host                  -h shown
-   " Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
-   N Task prompt                              C Compact             =r order [asc|desc]                 text       =f any
-   ' Show prompt                              f Fork                =g group status                                =c clear
-   # Scheduled                                H Clone               -f follow [off|on]
-                                              . Last answer
-                                              O Open link
+Sessions        Task                       Input                 Session                             Field       Filter     Column     Columns
+ j Next          n Start or continue        RET Send              o Other window   + New session      subagents  =u [all|active|none]   -b branch
+ B Bury quiet    F Finish                   S-<return> Schedule   u Parent         g Refresh          older      =O [hidden|shown]      -x context
+ b Select        I Link session             i Attach              c Subagent       r Rename           archived   =z [hidden|shown]      -+ changes
+ l List          & Attempts                 k Clear               v Peek           x Delete           project    =p drover  -p shown    -c created
+ L Side list     W Worktrees                / Slash command       R Review         z Archive          status     =s any                 -k cache
+ p Project                                  @ Mention             A Answer         Z Wrap up          agent      =a any     -a shown    -s summary
+ S Search       Prompt runs                 y Copy block          K Interrupt      G Goal             model      =m any     -m shown    -$ cost
+ $ Usage         a Agent plan                                     s Mark seen                         provider   =v any     -v shown    -g goal
+                 m Model Opus 5.5          Conversation                                               harness    =H any     -H shown    -# attempt
+Prompt           e Effort max               t Revert here        View                                 host                  -h shown
+ " Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
+ N Task prompt                              C Compact             =r order [asc|desc]                 text       =f any
+ E Edit pending 1                           f Fork                =g group status                                =c clear
+ ' Show prompt                              H Clone               -f follow [off|on]
+ # Scheduled                                . Last answer
+                                            O Open link
 #+end_example
 
 The settings of a field share a row of the Field table, aligned: its filter, an option, then whether the list shows its column, a switch, on the same letter, such as ~=m~ and =-m= for the model, the value beside each key; the subagents, older and archived sessions shown head it, as they keep sessions out as the filter does, and ~=c~ under the filters clears them. Where room is short, the table's two halves stack, aligned alike.

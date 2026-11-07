@@ -2451,6 +2451,9 @@ session chosen for it, else to one asked for, unshown."
           ["Prompt"
            ("\"" "Prompt" drover-prompt-dwim :inapt-if drover-dispatch-in-prompt-p)
            ("N" "Task prompt" drover-prompt-org-task :inapt-if-not drover-dispatch-org-task-p)
+           ("E" drover--dispatch-pending-description drover-edit-pending-prompt
+            :advice* drover--dispatch-in-list
+            :inapt-if-not drover--dispatch-pending-p)
            ("'" "Show prompt" drover-prompt-toggle)
            ("#" "Scheduled" drover-schedule-list)]
           ["Task"
@@ -2523,8 +2526,6 @@ session chosen for it, else to one asked for, unshown."
            ("s" "Mark seen" drover-mark-seen
             :inapt-if-not (lambda () (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p)))]
           [:advice* drover--dispatch-in-list
-                    ("E" drover--dispatch-pending-description drover-edit-pending-prompt
-                     :inapt-if-not drover--dispatch-pending-p)
                     ("+" "New session" drover-new-session
                      :inapt-if-not (lambda () (and (or (drover-dispatch-list-p) (drover-dispatch-session))
                                                    (drover--can-start-p))))

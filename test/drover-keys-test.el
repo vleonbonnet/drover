@@ -748,12 +748,12 @@ which lists show too."
 
 (defconst drover-keys-test-dispatch-layout
   '(("Sessions" ("j" "B" "b" "l" "L" "p" "S" "$"))
-    ("Prompt" ("\"" "N" "'" "#"))
+    ("Prompt" ("\"" "N" "E" "'" "#"))
     ("Task" ("n" "F" "I" "&" "W"))
     ("Prompt runs" ("a" "m" "e" "d"))
     ("Input" ("RET"))
     ("Conversation" ("C" "f" "H" "."))
-    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("E" "+" "g" "r" "x" "z" "Z" "G")))
+    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.
 Neither the view settings, which apply while a list is in sight, nor the
 prompt keys editing or reading a prompt buffer show there.")
@@ -1064,7 +1064,7 @@ It applies only while the session has some, in lists and in its buffer."
 (ert-deftest drover-keys-test-dispatch-prompt-entries ()
   "The prompt's entries open it from anywhere, but from the prompt itself."
   (should (equal (cdr (assoc "Prompt" (drover-keys-test-keys 'drover-dispatch)))
-                 '("\"" "N" "'" "#")))
+                 '("\"" "N" "E" "'" "#")))
   ;; Autoloaded: the menu opens without loading the prompt.
   (dolist (command '(drover-prompt-dwim drover-prompt-org-task drover-prompt-toggle))
     (should (commandp command))
@@ -1343,7 +1343,8 @@ go after p, more prompt commands after O."
                 (should (follows "b" "&"))
                 (should (follows "&" "l"))
                 (should (follows "\"" "N"))
-                (should (follows "N" "'"))
+                (should (follows "N" "E"))
+                (should (follows "E" "'"))
                 (should (follows "'" "%"))
                 (should (follows "%" "#"))
                 (should (follows "p" "!"))
