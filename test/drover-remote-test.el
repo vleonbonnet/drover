@@ -2790,7 +2790,10 @@ told, saying why."
   (nth 2 (seq-find (lambda (event) (eq (nth 1 event) kind)) (drover-remote--peer-history peer))))
 
 (defun drover-remote-test--dead-registration (dir)
-  "Return a registration file in DIR of a server gone: nothing listens on its port."
+  "Return a registration file in DIR of a server gone, and how long reaching it takes to fail.
+Nothing listens on its port.  The value is (FILE . SECONDS): a
+connection there is refused at once on GNU/Linux and macOS, after 2 s
+on Windows, whose TCP sends its request twice more once refused."
   (let* ((listener (make-network-process :name "drover-dead" :server t :host "127.0.0.1" :service t
                                          :noquery t))
          (port (process-contact listener :service))
@@ -2798,19 +2801,29 @@ told, saying why."
     (delete-process listener)
     (with-temp-file file
       (insert (json-serialize (list :proto spyglass-wire-protocol :port port :token (make-string 64 ?a)))))
-    file))
+    (let* ((start (float-time))
+           (probe (make-network-process :name "drover-refused" :host "127.0.0.1" :service port
+                                        :nowait t :noquery t :sentinel #'ignore)))
+      (drover-remote-test-wait (lambda () (not (eq (process-status probe) 'connect))) 10)
+      (delete-process probe)
+      (cons file (- (float-time) start)))))
 
 (ert-deftest drover-remote-test-backoff ()
-  "A peer unreachable is tried less and less often, its failures counted once in its history, tried at once when the user or the network says so."
+  "A peer unreachable is tried less and less often, its failures counted once in its history, tried at once when the user or the network says so.
+The waits for attempts to fail count what a refused connection takes
+on this system: 2 s on Windows."
   (drover-remote-test-with nil
-    (let ((drover-remote-backoff '(0.05 0.1 2.0)))
-      (setq drover-remote-peers `(("agent" :dial t :local ,(drover-remote-test--dead-registration dir))))
+    (let* ((drover-remote-backoff '(0.05 0.1 2.0))
+           (dead (drover-remote-test--dead-registration dir))
+           (refused (cdr dead)))
+      (setq drover-remote-peers `(("agent" :dial t :local ,(car dead))))
       (drover-remote-mode 1)
       (let* ((peer (drover-remote--peer "agent"))
              (connection (drover-remote--peer-dialed peer)))
-        (drover-remote-test-wait (lambda () (>= (spyglass-connection-attempts connection) 3)) 10)
+        (drover-remote-test-wait (lambda () (>= (spyglass-connection-attempts connection) 3))
+                                 (+ 10 (* 3 refused)))
         (should (>= (spyglass-connection-attempts connection) 3))
-        (drover-remote-test-wait (lambda () (spyglass-connection-next-attempt connection)) 2)
+        (drover-remote-test-wait (lambda () (spyglass-connection-next-attempt connection)) (+ 2 refused))
         ;; Backing off: the next attempt in about 2 s, which the state tells.
         (should (> (spyglass-connection-next-attempt connection) 0.5))
         (should (string-match-p "attempt [0-9]+, next in [0-9]s" (drover-remote--state-line peer)))
@@ -2827,14 +2840,14 @@ told, saying why."
         (should (<= (spyglass-connection-attempts connection) 1))
         (drover-remote-test-wait (lambda () (and (spyglass-connection-next-attempt connection)
                                                  (> (spyglass-connection-next-attempt connection) 0.5)))
-                                 5)
+                                 (+ 5 (* 3 refused)))
         ;; Waking from sleep: tried now.
         (setf (car (drover-remote--state-network drover-remote--state)) (- (float-time) 3600))
         (drover-remote--look-out)
         (should (string-match-p "woke" (drover-remote-test--newest peer 'retry)))
         (drover-remote-test-wait (lambda () (and (spyglass-connection-next-attempt connection)
                                                  (> (spyglass-connection-next-attempt connection) 0.5)))
-                                 5)
+                                 (+ 5 (* 3 refused)))
         ;; The network changing: tried now.
         (setf (cdr (drover-remote--state-network drover-remote--state)) '("elsewhere"))
         (drover-remote--look-out)
@@ -2842,7 +2855,7 @@ told, saying why."
         ;; Nothing changing: left to its delays.
         (drover-remote-test-wait (lambda () (and (spyglass-connection-next-attempt connection)
                                                  (> (spyglass-connection-next-attempt connection) 0.5)))
-                                 5)
+                                 (+ 5 (* 3 refused)))
         (let ((retries (seq-count (lambda (event) (eq (nth 1 event) 'retry)) (drover-remote--peer-history peer))))
           (drover-remote--look-out)
           (should (= (seq-count (lambda (event) (eq (nth 1 event) 'retry)) (drover-remote--peer-history peer))
