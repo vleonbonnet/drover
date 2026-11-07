@@ -621,9 +621,11 @@ and a session changes, as its timers follow."
          (root (if (file-exists-p (expand-file-name "drover-core.el" root))
                    root
                  (file-name-directory (locate-library "drover-core")))))
+    ;; ^0 rather than ^{commit}: MSYS2's Git, started by Emacs, would read
+    ;; the braces as a shell's (see `drover-command--expanded-p').
     (skip-unless (and (executable-find "git")
                       (zerop (call-process "git" nil nil nil "-C" root "cat-file" "-e"
-                                           (concat drover-robustness-test-old-commit "^{commit}")))))
+                                           (concat drover-robustness-test-old-commit "^0")))))
     (let* ((old (make-temp-file "drover-old" t))
            (state (make-temp-file "drover-reload-state" t))
            (script (make-temp-file "drover-reload" nil ".el"))
