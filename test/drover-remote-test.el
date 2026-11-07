@@ -161,6 +161,21 @@ With DROVER_REMOTE_TEST_DEBUG set, print what it printed."
       (error "Agent: %s" (plist-get answer :error)))
     (plist-get answer :reply)))
 
+(defmacro drover-remote-test-frozen (dir &rest body)
+  "Run BODY while the agent's Emacs is stuck, then let it go on.
+Stuck as by a question a dialog box asks: it reads nothing and runs no
+timer, its connections open to the system, so that only the heartbeat
+tells, as SIGSTOP stops it, which Windows has not.  DIR is the test's
+directory, where the file letting it go on is written."
+  (declare (indent 1) (debug t))
+  (let ((thaw (make-symbol "thaw")))
+    `(let ((,thaw (expand-file-name "thaw" ,dir)))
+       (delete-file ,thaw)
+       (drover-remote-test-command "freeze" :thaw ,thaw)
+       (unwind-protect
+           (progn ,@body)
+         (write-region "" nil ,thaw nil 'silent)))))
+
 ;;;; This host
 
 (defmacro drover-remote-test-with (sessions &rest body)
@@ -1555,35 +1570,26 @@ one revision."
 
 (ert-deftest drover-remote-test-frozen-peer ()
   "A peer that stops answering goes stale within its heartbeat's timeout, and back after.
-Its Emacs stopped by SIGSTOP, its connection stays open to the system:
-only the heartbeat tells.  Spyglass looked at it every half interval,
-which `drover-remote-heartbeat''s integers halved to whole seconds, 1
-to 0: a timer that never repeated, and the peer stayed open."
+Its Emacs stuck, its connection stays open to the system: only the
+heartbeat tells.  Spyglass looked at it every half interval, which
+`drover-remote-heartbeat''s integers halved to whole seconds, 1 to 0:
+a timer that never repeated, and the peer stayed open."
   (drover-remote-test-with nil
     (drover-remote-test-connect (drover-remote-test-start-agent dir))
     (drover-remote-test-command "sessions" :n 3)
     (drover-remote-test-synced 3)
     (let* ((peer (drover-remote--peer "agent"))
-           (timer (spyglass-connection-timer (drover-remote--peer-connection peer)))
-           (top (process-id drover-remote-test--agent))
-           ;; The agent's Emacs, under `timeout'.
-           (emacs (seq-find (lambda (pid) (eql (alist-get 'ppid (process-attributes pid)) top))
-                            (list-system-processes)))
-           (start nil))
-      (should emacs)
+           (timer (spyglass-connection-timer (drover-remote--peer-connection peer))))
       (should (= (timer--repeat-delay timer) 0.5))
-      (signal-process emacs 'SIGSTOP)
-      (unwind-protect
-          (progn
-            (setq start (float-time))
-            (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 15)
-            ;; The timeout, 4 s, and a look every half second.
-            (should-not (eq (drover-remote--peer-state peer) 'open))
-            (should (< (- (float-time) start) 5.5))
-            (drover-changed-now)
-            (should (= (length (drover-remote-test-remote)) 3))
-            (should (seq-every-p #'drover-session-stale (drover-remote-test-remote))))
-        (signal-process emacs 'SIGCONT))
+      (drover-remote-test-frozen dir
+        (let ((start (float-time)))
+          (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 15)
+          ;; The timeout, 4 s, and a look every half second.
+          (should-not (eq (drover-remote--peer-state peer) 'open))
+          (should (< (- (float-time) start) 5.5)))
+        (drover-changed-now)
+        (should (= (length (drover-remote-test-remote)) 3))
+        (should (seq-every-p #'drover-session-stale (drover-remote-test-remote))))
       (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state peer) 'open)) 30)
       (should (eq (drover-remote--peer-state peer) 'open))
       (drover-remote-test-synced 3 (lambda (session) (not (drover-session-stale session)))))))
@@ -2573,38 +2579,32 @@ told, saying why."
     (drover-remote-test-command "sessions" :n 2)
     (drover-remote-test-synced 2)
     (let* ((peer (drover-remote--peer "agent"))
-           (label (drover-remote--label peer))
-           (top (process-id drover-remote-test--agent))
-           (emacs (seq-find (lambda (pid) (eql (alist-get 'ppid (process-attributes pid)) top))
-                            (list-system-processes))))
-      (should emacs)
+           (label (drover-remote--label peer)))
       (save-window-excursion
         (delete-other-windows)
-        (signal-process emacs 'SIGSTOP)
-        (unwind-protect
-            (let ((start (float-time)))
+        (drover-remote-test-frozen dir
+          (let ((start (float-time)))
+            (drover-open (drover-remote-test-session "s1"))
+            (should (< (- (float-time) start) 0.5))
+            (let ((waiting (window-buffer)))
+              (should (equal (buffer-local-value 'drover-remote--opening waiting) '("agent" fake . "s1")))
+              (should (string-match-p (format "Waiting for %s to share the terminal" label)
+                                      (with-current-buffer waiting (buffer-string))))
+              ;; Opened again meanwhile, the same buffer waits.
+              (switch-to-buffer "*scratch*")
               (drover-open (drover-remote-test-session "s1"))
-              (should (< (- (float-time) start) 0.5))
-              (let ((waiting (window-buffer)))
-                (should (equal (buffer-local-value 'drover-remote--opening waiting) '("agent" fake . "s1")))
-                (should (string-match-p (format "Waiting for %s to share the terminal" label)
-                                        (with-current-buffer waiting (buffer-string))))
-                ;; Opened again meanwhile, the same buffer waits.
-                (switch-to-buffer "*scratch*")
-                (drover-open (drover-remote-test-session "s1"))
-                (should (eq (window-buffer) waiting))
-                (setq start (float-time))
-                (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "ls" :directory dir) 30)))
-                  (should-not reply)
-                  (should (string-match-p (format "%s has not been heard from" label) error)))
-                ;; Silent twice its heartbeat interval, 1 s here.
-                (should (< (- (float-time) start) 3))
-                (drover-remote-test-wait (lambda () (not (buffer-live-p waiting))) 15)
-                (should-not (buffer-live-p waiting))
-                (with-current-buffer (window-buffer)
-                  (should (derived-mode-p 'drover-remote-session-mode))
-                  (should (string-match-p "Its terminal did not open" (buffer-string))))))
-          (signal-process emacs 'SIGCONT))))
+              (should (eq (window-buffer) waiting))
+              (setq start (float-time))
+              (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "ls" :directory dir) 30)))
+                (should-not reply)
+                (should (string-match-p (format "%s has not been heard from" label) error)))
+              ;; Silent twice its heartbeat interval, 1 s here.
+              (should (< (- (float-time) start) 3))
+              (drover-remote-test-wait (lambda () (not (buffer-live-p waiting))) 15)
+              (should-not (buffer-live-p waiting))
+              (with-current-buffer (window-buffer)
+                (should (derived-mode-p 'drover-remote-session-mode))
+                (should (string-match-p "Its terminal did not open" (buffer-string)))))))))
     (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)) 30)))
 
 (ert-deftest drover-remote-test-mirror-resumes-conversation ()

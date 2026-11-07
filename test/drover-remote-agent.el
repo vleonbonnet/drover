@@ -24,7 +24,8 @@
 ;; spyglass server registered in DROVER_AGENT_DIR/server.json, its state
 ;; there too, and takes commands as requests on the channel
 ;; "drover-test" of any connection: make, change and remove sessions,
-;; break streams, dial back, tell what it holds, restart its remote layer.
+;; break streams, stop answering a while, dial back, tell what it holds,
+;; restart its remote layer.
 ;; Its backend performs actions, noting each, its confirmations held on
 ;; command.  With DROVER_AGENT_STRICT set, it refuses hosts it does not
 ;; know; DROVER_AGENT_ACCESS is the access it grants the others, `read' by
@@ -728,6 +729,24 @@ noted, and their cancellations."
          (setq drover-remote-agent--hold nil)
          (mapc #'funcall held)
          (funcall reply (list :released (length held)))))
+      ("freeze"
+       ;; Its Emacs stuck once it answered, as in a question a dialog box
+       ;; asks: it reads nothing, runs no timer, its connections open to
+       ;; the system, until the file THAW exists, or SECONDS passed, 60
+       ;; by default.  As SIGSTOP stops it, which Windows has not.
+       (let ((thaw (plist-get args :thaw))
+             (seconds (or (plist-get args :seconds) 60)))
+         (funcall reply (list :ok t))
+         (run-at-time 0 nil
+                      (lambda ()
+                        (let ((quiet (make-pipe-process :name "drover-agent-frozen" :noquery t))
+                              (end (+ (float-time) seconds)))
+                          (unwind-protect
+                              (while (and (< (float-time) end) (not (file-exists-p thaw)))
+                                ;; Reading QUIET alone, which says nothing,
+                                ;; running no timer.
+                                (accept-process-output quiet 0.05 nil 1))
+                            (delete-process quiet)))))))
       ("history"
        ;; The events of its link with PEER, oldest first, as [KIND TEXT COUNT].
        (let ((peer (drover-remote--peer (plist-get args :peer))))
