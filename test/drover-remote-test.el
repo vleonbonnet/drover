@@ -2367,6 +2367,52 @@ See `drover-remote-test-opened'."
         ;; Closed there too, its share gone.
         (should-not (drover-remote-test-shares))))))
 
+(ert-deftest drover-remote-test-mirror-closes-when-archived-unheard ()
+  "A mirror whose session was archived while the link was down closes once it is back; one whose terminal alone closed stays, saying why."
+  (skip-unless (executable-find "cat"))
+  (drover-remote-test-with nil
+    (let ((drover-remote-backoff '(1.0 1.0)))
+      (drover-remote-test-start-full dir)
+      (drover-remote-test-command "sessions" :n 2)
+      (drover-remote-test-command "terminal" :id "s0" :kind "agent-shell")
+      (drover-remote-test-command "terminal" :id "s1" :kind "agent-shell")
+      (drover-remote-test-synced 2)
+      (save-window-excursion
+        (let ((archived (drover-remote-test-open "s0"))
+              (closed (drover-remote-test-open "s1")))
+          (drover-remote-test-live archived)
+          (drover-remote-test-live closed)
+          ;; Unheard here: both terminals killed there, s0 no longer listed,
+          ;; as archiving a session leaves it.
+          (drover-remote-test-command "drop" :kill ["s0" "s1"] :remove ["s0"])
+          (drover-remote-test-wait (lambda () (not (buffer-live-p archived))) 15)
+          (should-not (buffer-live-p archived))
+          (drover-remote-test-wait (lambda () (equal (spyglass-mirror-closed-reason closed)
+                                                     "the terminal on agent was closed"))
+                                   10)
+          (should (buffer-live-p closed))
+          (should (equal (spyglass-mirror-closed-reason closed) "the terminal on agent was closed"))
+          (kill-buffer closed))))))
+
+(ert-deftest drover-remote-test-mirror-kept-until-sessions-known ()
+  "A closed mirror whose session is not listed stays while its peer's sessions are not known, as after it closed for good."
+  (skip-unless (drover-remote-test--available-p))
+  (let ((peer (drover-remote--peer-make :name "core" :state 'open :records (make-hash-table :test #'equal)))
+        (buffer (generate-new-buffer "*Session s0@core*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (spyglass-mirror-mode)
+            (setq spyglass--mirror (spyglass--make-mirror :state 'closed :reason "no such share")))
+          (drover-remote--close-archived-mirror peer '(fake . "s0") buffer)
+          (should (buffer-live-p buffer))
+          ;; Its sessions told, the session not among them.
+          (setf (drover-remote--peer-epoch peer) "e1")
+          (drover-remote--close-archived-mirror peer '(fake . "s0") buffer)
+          (should-not (buffer-live-p buffer)))
+      (when (buffer-live-p buffer)
+        (kill-buffer buffer)))))
+
 (defun drover-remote-test-mirrors-of (id)
   "Return the buffers here mirroring the agent's session ID."
   (drover-remote--mirror-buffers "agent" (cons 'fake id)))

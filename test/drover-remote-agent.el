@@ -832,8 +832,10 @@ noted, and their cancellations."
        (drover-remote-reconfigure)
        (funcall reply (list :ok t)))
       ("drop"
-       ;; Streams broken, then CHANGE sessions changed while they are;
-       ;; with AWAY, those it dialed connect again AWAY seconds later.
+       ;; Streams broken, then CHANGE sessions changed while they are,
+       ;; the terminals of the sessions KILL killed and the sessions
+       ;; REMOVE gone, as archiving does; with AWAY, those it dialed
+       ;; connect again AWAY seconds later.
        (funcall reply (list :ok t))
        (when (plist-get args :away)
          (setq spyglass-reconnect-delays (list (plist-get args :away) 0.2)
@@ -842,7 +844,9 @@ noted, and their cancellations."
          (dolist (peer (drover-remote--peers))
            (when-let* ((dialed (drover-remote--peer-dialed peer)))
              (drover-remote--back-off dialed))))
-       (let ((change (or (plist-get args :change) 0)))
+       (let ((change (or (plist-get args :change) 0))
+             (kill (plist-get args :kill))
+             (remove (plist-get args :remove)))
          (run-at-time 0.05 nil
                       (lambda ()
                         (dolist (connection (spyglass-connections))
@@ -853,6 +857,10 @@ noted, and their cancellations."
                                  do (let ((copy (copy-sequence (gethash id drover-remote-agent--sessions))))
                                       (setf (drover-session-title copy) (format "Outage %d" i))
                                       (drover-remote-agent--set id copy)))
+                        (seq-doseq (id (or kill []))
+                          (drover-kill-buffer (gethash id drover-remote-agent--terminals)))
+                        (seq-doseq (id (or remove []))
+                          (drover-remote-agent--set id nil))
                         (drover-changed-now)))))
       ("terminal"
        (let ((buffer (drover-remote-agent--terminal (plist-get args :id) (or (plist-get args :kind) "pty"))))

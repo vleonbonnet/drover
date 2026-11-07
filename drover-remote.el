@@ -7384,10 +7384,11 @@ See `drover-remote--reopen'."
 For `spyglass-mirror-state-functions': its history tells it.  A mirror
 its owner stopped sharing, as its remote layer restarted or reloaded,
 or whose connection closed for good, is opened anew (see
-`drover-remote--reopen'); one whose terminal was killed there is killed
-once its session is archived, else says the terminal was closed.  A
-buffer its peer does not hold, made by a remote layer before this one,
-is adopted, unless the peer holds another mirror of the session."
+`drover-remote--reopen'); one whose terminal was killed there says the
+terminal was closed.  Either is killed once its session is archived,
+as `drover-remote--close-archived-mirror' tells.  A buffer its peer
+does not hold, made by a remote layer before this one, is adopted,
+unless the peer holds another mirror of the session."
   (drover-with-reporting "remote mirror"
     (when-let* (((buffer-live-p buffer))
                 ((buffer-local-value 'drover-remote--mirror-kind buffer))
@@ -7410,27 +7411,32 @@ is adopted, unless the peer holds another mirror of the session."
              (drover-remote--mirror-closed-why
               buffer (format "the terminal on %s was closed" (drover-remote--label peer))))
             (t
-             (run-at-time (car drover-remote--reopen-delays) nil
-                          (let ((link (drover-link peer))
-                                (key (cdr shown)))
-                            (lambda ()
-                              (drover-with-reporting "remote mirror"
-                                (drover-remote--reopen (drover-linked link) key buffer)))))))))))))
+             (drover-remote--close-archived-mirror peer (cdr shown) buffer)
+             (when (buffer-live-p buffer)
+               (run-at-time (car drover-remote--reopen-delays) nil
+                            (let ((link (drover-link peer))
+                                  (key (cdr shown)))
+                              (lambda ()
+                                (drover-with-reporting "remote mirror"
+                                  (drover-remote--reopen (drover-linked link) key buffer))))))))))))))
 
 (defun drover-remote--close-archived-mirror (peer key buffer)
   "Kill BUFFER, the mirror of PEER's session KEY, once its owner archived it.
 As archiving a session here closes its buffer: the owner closed its
-own, at once or once its turn ended, which closed the mirror (spyglass's
-reason \"killed\"), and its record says archived, or is gone from the
-sessions it lists, as archived sessions go.  What was typed and not
-sent comes from the owner (see `drover-remote--on-unsent').  A mirror
-the owner closed otherwise, its session still listed, stays readable,
-saying why."
+own, at once or once its turn ended, which closed the mirror, and its
+record says archived, or is gone from the sessions it lists, as
+archived sessions go.  The mirror closed for whatever reason but being
+killed here: told \"killed\", or, its link down meanwhile, asking for a
+share gone there (\"no such share\").  What was typed and not sent comes
+from the owner (see `drover-remote--on-unsent').  A mirror the owner
+closed otherwise, its session still listed, stays readable, saying why;
+so does every mirror of a peer whose sessions are not known yet, as
+after it closed for good, which empties them, until it tells them."
   (when (and (buffer-live-p buffer)
              (eq (spyglass-mirror-state buffer) 'closed)
-             (or (equal (spyglass-mirror-closed-reason buffer) "killed")
-                 (buffer-local-value 'drover-remote--killed-there buffer))
+             (not (equal (spyglass-mirror-closed-reason buffer) "closed here"))
              (eq (drover-remote--peer-state peer) 'open)
+             (drover-remote--peer-epoch peer)
              (let ((record (drover-remote--peer-session peer key)))
                (or (null record) (drover-session-archived-p record))))
     (drover-remote--event peer 'mirror "closed the mirror of %s: its session is gone there" (buffer-name buffer))
