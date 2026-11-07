@@ -450,7 +450,7 @@ here, `drover-review-untracked-limit' of them at most, of
             (lambda (output &optional message &rest _)
               (if (not output)
                   (fail (format "Not in a Git repository: %s" (or message directory)))
-                (setq top (file-name-as-directory (string-trim output)))
+                (setq top (file-name-as-directory (drover--native-file-name (string-trim output))))
                 (if created
                     (started)
                   (forked))))))

@@ -189,7 +189,7 @@ Read from the files, without running Git: a linked worktree's names it."
        (if (file-readable-p file)
            (with-temp-buffer
              (insert-file-contents file)
-             (expand-file-name (string-trim (buffer-string)) gitdir))
+             (expand-file-name (drover--native-file-name (string-trim (buffer-string))) gitdir))
          gitdir)))))
 
 (defun drover-task-git-toplevel (directory)

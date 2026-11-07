@@ -4871,7 +4871,8 @@ common Git directory, which linked worktrees share."
                         (if (file-readable-p file)
                             (with-temp-buffer
                               (insert-file-contents file)
-                              (expand-file-name (string-trim (buffer-string)) gitdir))
+                              (expand-file-name (drover--native-file-name (string-trim (buffer-string)))
+                                                gitdir))
                           gitdir)))
               (remotes (expand-file-name "refs/remotes" common))
               ((file-directory-p remotes)))

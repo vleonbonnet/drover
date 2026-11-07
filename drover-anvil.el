@@ -307,13 +307,14 @@ DOTGIT is the file a linked worktree has in place of a directory."
                       (insert-file-contents dotgit nil 0 4096)
                       (buffer-string)))
               ((string-match "\\`gitdir: *\\(.+?\\)[ \t\r]*$" text))
-              (gitdir (expand-file-name (match-string 1 text) (file-name-directory dotgit)))
+              (gitdir (expand-file-name (drover--native-file-name (match-string 1 text))
+                                        (file-name-directory dotgit)))
               (commondir (expand-file-name "commondir" gitdir))
               ((file-readable-p commondir))
               (common (with-temp-buffer
                         (insert-file-contents commondir nil 0 4096)
                         (string-trim (buffer-string))))
-              (common (directory-file-name (expand-file-name common gitdir))))
+              (common (directory-file-name (expand-file-name (drover--native-file-name common) gitdir))))
     (and (equal (file-name-nondirectory common) ".git")
          (file-name-directory common))))
 
