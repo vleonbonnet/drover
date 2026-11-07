@@ -85,6 +85,32 @@ The runner BODY starts is stopped after it."
           (should (equal (plist-get result :errors) "oops\n"))
           (should-not (plist-get result :truncated)))))))
 
+(ert-deftest drover-command-test-literal-arguments ()
+  "Arguments reach the program as given, never expanded as a shell would.
+On Windows, the programs of MSYS2 and Cygwin, such as its printf, expand
+those Emacs does not quote: Git read HEAD^{commit} as HEAD^commit there."
+  (should (drover-command--expanded-p "HEAD^{commit}"))
+  (should (drover-command--expanded-p "~/x"))
+  (should (drover-command--expanded-p "(a)"))
+  (should-not (drover-command--expanded-p "a b*"))
+  (should-not (drover-command--expanded-p "it's*"))
+  (should-not (drover-command--expanded-p "x~y"))
+  (let ((printf (executable-find "printf")))
+    (skip-unless printf)
+    (drover-command-test-with
+      (drover-test-write (expand-file-name "abc" home) "")
+      (drover-command-test-both
+        (let ((result (drover-command-test-run
+                       (list printf "[%s]" "HEAD^{commit}" "a*" "{x,y}" "~" "[ab]bc"
+                             "x\"y z" "c\\:/p q" "it's" "\\a" "")
+                       home)))
+          (should (equal (plist-get result :exit) 0))
+          (should (equal (plist-get result :output)
+                         "[HEAD^{commit}][a*][{x,y}][~][[ab]bc][x\"y z][c\\:/p q][it's][\\a][]")))
+        ;; None it would expand: started as it is, its quotes intact.
+        (let ((result (drover-command-test-run (list printf "[%s]" "x\"y z" "c\\:/p q" "it's") home)))
+          (should (equal (plist-get result :output) "[x\"y z][c\\:/p q][it's]")))))))
+
 (ert-deftest drover-command-test-newline ()
   "An argument holding a newline, which the runner's lines cannot carry, is run directly."
   (skip-unless (file-executable-p "/bin/sh"))

@@ -327,6 +327,38 @@ With TAIL, the ends of its output and errors are read (see
 
 ;;;; Without a runner
 
+(defun drover-command--expanded-p (argument)
+  "Return non-nil when a program of MSYS2 or Cygwin would expand ARGUMENT.
+Started by Emacs on Windows, such a program expands, as a shell would,
+the arguments holding wildcards, parentheses or braces, or starting with
+~, that are not quoted; Emacs quotes only those holding blanks or quotes."
+  (and (not (string-match-p "[ \t\n\r\f'\"]" argument))
+       (string-match-p "\\`~\\|[?*[(){}]" argument)))
+
+(defun drover-command--literal (command)
+  "Return how to start COMMAND, a list of strings, its arguments taken as given.
+That is (COMMAND . ENVIRONMENT), ENVIRONMENT the variables to start it
+with, nil but on Windows for a program of MSYS2 or Cygwin, such as their
+env or Git, given an argument it would expand: Git read HEAD^{commit} as
+HEAD^commit (see `drover-command--expanded-p').  The shell beside the
+program starts it then, taking the program and its arguments from
+variables, which nothing expands."
+  (or (when-let* (((eq system-type 'windows-nt))
+                  ((fboundp 'w32-application-type))
+                  ((seq-some #'drover-command--expanded-p (cdr command)))
+                  (program (executable-find (car command)))
+                  ((memq (ignore-errors (w32-application-type program)) '(msys cygwin)))
+                  (shell (expand-file-name "sh.exe" (file-name-directory program)))
+                  ((file-executable-p shell)))
+        (let ((index -1))
+          (cons (list shell "-c"
+                      (concat "exec "
+                              (mapconcat (lambda (_) (format "\"$DROVER_ARGUMENT_%d\"" (cl-incf index)))
+                                         command " ")))
+                (seq-map-indexed (lambda (argument index) (format "DROVER_ARGUMENT_%d=%s" index argument))
+                                 (cons program (cdr command))))))
+      (list command)))
+
 (defun drover-command--start-directly (id command directory &optional tail)
   "Start COMMAND in DIRECTORY as the command ID, a process of Emacs's own.
 The command ends once both it and the pipe of its errors ended, so that
@@ -335,6 +367,8 @@ rather than its start (see `drover-command-run')."
   (let* ((output (generate-new-buffer " *drover command*" t))
          (errors (generate-new-buffer " *drover command errors*" t))
          (default-directory (file-name-as-directory directory))
+         (started (drover-command--literal command))
+         (process-environment (append (cdr started) process-environment))
          (limit drover-command-output-limit)
          (process nil)
          (stderr nil)
@@ -376,7 +410,7 @@ rather than its start (see `drover-command-run')."
                                           :noquery t :coding 'utf-8 :filter filter
                                           :sentinel sentinel))
           (setq process (make-process :name "drover-command" :buffer output :stderr stderr
-                                      :command command :connection-type 'pipe :coding 'utf-8
+                                      :command (car started) :connection-type 'pipe :coding 'utf-8
                                       :noquery t :filter filter :sentinel sentinel)))
       (error (when (process-live-p stderr) (delete-process stderr))
              (kill-buffer output)
