@@ -2827,9 +2827,9 @@ Redraws keep point on the session."
           (should (equal (get-text-property (1- (point)) 'help-echo) "Archived 1h ago"))
           (search-forward "Session old")
           (should (memq 'drover-dim (ensure-list (get-text-property (1- (point)) 'font-lock-face)))))
-        ;; Z restores it.
+        ;; z restores it.
         (drover-list-test-goto "old")
-        (drover-list-test-press "Z")
+        (drover-list-test-press "z")
         (should (equal drover-test-calls '((:unarchive "old"))))
         (drover-set-show-archived nil)
         (should (equal (drover-list-test-groups) '((working "live"))))
@@ -2839,7 +2839,7 @@ Redraws keep point on the session."
         (should (= (length fetches) 2))))))
 
 (ert-deftest drover-list-test-archived-by-drover ()
-  "z archives in drover's own archive a session of a backend without one; Z restores it."
+  "z archives in drover's own archive a session of a backend without one, then restores it."
   (drover-list-test-with nil
     (drover-test-with-state
       (let ((shown (list (drover-session-create :backend 'shown :id "t1" :title "Terminal" :status 'idle
@@ -2857,7 +2857,7 @@ Redraws keep point on the session."
           (should (equal (mapcar #'car (drover-list-test-groups)) '(archived)))
           (goto-char (oref (drover-list-test-section "t1" 'shown) start))
           (should (drover-session-archived (drover-session-at-point)))
-          (drover-list-test-press "Z")
+          (drover-list-test-press "z")
           (drover-changed-now)
           (should (equal (mapcar #'car (drover-list-test-groups)) '(idle)))
           (drover-set-show-archived nil))))))

@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 23
+(defconst drover-core-generation 24
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1747,6 +1747,19 @@ PROPERTIES is a plist of:
              `drover-session' records, their ARCHIVED set, as soon as
              they arrive; like :history, it must never wait, and may
              never call CALLBACK.  See `drover-show-archived'.
+ :archived-session
+             Function of an ID returning the record of session ID from
+             what the backend holds already, archived or not, or nil:
+             a backend whose :session leaves out its archived sessions
+             tells this way how one goes on, as a session whose turn
+             runs once archived (see `drover-find-archived').  It must
+             be cheap.
+ :wrap-up    Function of a session, THEN and ELSE having another host
+             wrap it up (see `drover-wrap-up'), for a backend of other
+             hosts' sessions: THEN with no argument once that host
+             took it, ELSE with a message once it refused.  It comes
+             with :wrap-up-confirms set.  Other backends' sessions are
+             wrapped up by drover.
  :mark-seen  Function of a session marking its ended turn seen.
  :preview    Function of a session and a CALLBACK, which it calls with
              a string showing where the session stands, or nil.
@@ -2170,7 +2183,8 @@ looked at: the backends read what was recorded later, in slices."
 
 (defconst drover--kept-modules
   '((drover-goal :file "goals.eld" :restore drover-goal-restore)
-    (drover-fanout :file "fanouts.eld" :restore drover-fanout-restore))
+    (drover-fanout :file "fanouts.eld" :restore drover-fanout-restore)
+    (drover-wrap-up :file "wrap-ups.eld" :restore drover-wrap-up-restore))
   "The modules keeping work across Emacs sessions, by feature, as plists.
 :file is the file of `drover-state-directory' keeping it, and :restore
 the module's function following it again when some is not over.")
@@ -2776,6 +2790,18 @@ its ARCHIVED set."
                                              (progn (drover--fetched-current)
                                                     (cdr (assq backend drover--history)))))))))
       (drover--mark-archived session))))
+
+(defun drover-find-archived (backend id)
+  "Return the session ID of BACKEND, archived or not, or nil.
+As `drover-find', and else, for a session its backend archived itself,
+the record that backend still holds of it (see :archived-session in
+`drover-register-backend'): for following a session once archived, as
+its turn goes on, whether or not lists show archived sessions."
+  (or (drover-find backend id)
+      (when-let* ((function (drover-backend-property backend :archived-session))
+                  ((functionp function)))
+        (drover-with-reporting "archived session"
+          (funcall function id)))))
 
 (defun drover-find-engine-session (engine engine-id)
   "Return a session of ENGINE whose engine identifier is ENGINE-ID, or nil.
@@ -4095,6 +4121,28 @@ session of another host, which its host archives."
   (or (and (drover--archive-entry session) t)
       (and (drover-session-archived session)
            (drover-supports-p session :unarchive))))
+
+(defvar drover--front-end-backends)
+
+(defun drover-wrap-up-p (session)
+  "Return non-nil when SESSION may be wrapped up (see `drover-wrap-up').
+That is a session, not a subagent nor waiting for the user, which may
+be archived, whose conversation is known, and which a prompt may reach:
+its backend takes prompts, or a front end resumes its conversation.  A
+session of another host is wrapped up by its host, when it offers to
+\(:wrap-up).  Cheap: menus and the hosts serving their peers ask."
+  (and (not (drover-session-parent session))
+       (not (eq (drover-session-status session) 'waiting))
+       (not (drover-session-archived-p session))
+       (if (drover-session-host session)
+           (drover-supports-p session :wrap-up)
+         (when-let* ((engine (car (drover-session-engine-key session))))
+           (and (drover-archivable-p session)
+                (or (drover-supports-p session :submit)
+                    (drover-resumer engine)
+                    (seq-some (lambda (entry) (memq engine (cddr entry)))
+                              drover--front-end-backends))
+                t)))))
 
 (defun drover--archive-changed (session)
   "Report that drover archived or restored the conversation of SESSION.
@@ -5972,6 +6020,32 @@ sessions that are archived, or the session at point (see
   (interactive (list (drover--selected-for nil #'drover-unarchivable-p "is archived")))
   (drover--act sessions #'drover-unarchive-session "Unarchived %s"
                :verb "Restoring" :step #'drover--unarchive-step :kind #'drover--unarchive-kind))
+
+(defun drover--toggle-restores-p (sessions)
+  "Return non-nil when toggling the archive of SESSIONS restores them.
+SESSIONS is a session or a list: a session alone is restored when
+archived; of several, all must be, else those not archived are archived."
+  (if (drover-session-p sessions)
+      (drover-session-archived-p sessions)
+    (and sessions (seq-every-p #'drover-unarchivable-p sessions))))
+
+(defun drover-archive-toggle (sessions)
+  "Archive SESSIONS, or restore them when they are archived.
+SESSIONS is a session or a list of sessions.  A session alone is
+restored when archived (see `drover-unarchive'), else archived (see
+`drover-archive').  Of several, the archived ones are restored when
+all are; otherwise those that may be archived are, the archived ones
+left as they are.  Interactively, SESSIONS are the selected sessions,
+or the session at point (see `drover--selected-for')."
+  (interactive (list (let ((sessions (drover-selected-sessions)))
+                       (cond ((null (cdr sessions)) (car sessions))
+                             ((seq-every-p #'drover-unarchivable-p sessions) sessions)
+                             (t (or (seq-filter #'drover-archivable-p sessions)
+                                    (user-error "None of the %d selected sessions can be archived"
+                                                (length sessions))))))))
+  (if (drover--toggle-restores-p sessions)
+      (drover-unarchive sessions)
+    (drover-archive sessions)))
 
 (defun drover-mark-seen (sessions)
   "Mark the ended turns of SESSIONS seen, a session or a list of sessions.

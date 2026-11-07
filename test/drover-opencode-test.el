@@ -1568,7 +1568,7 @@ rendering of a prompt and of output."
         (should (equal (mapcar #'drover-session-id (drover-sessions)) '("ses_live")))
         (should (equal (mapcar #'car (drover-group-trees (drover-view-trees) 'status))
                        '(working archived)))
-        ;; Z restores it on the service.
+        ;; z restores it on the service.
         (drover-unarchive gone)
         (should (equal (assq 'opencode-session-archive drover-opencode-test-calls)
                        '(opencode-session-archive "ses_gone" t))))

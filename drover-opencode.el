@@ -848,6 +848,14 @@ whole on every change."
               ((not (drover-opencode--archived-above entry))))
     (drover-opencode--listed entry)))
 
+(defun drover-opencode--archived-session (id)
+  "Return the record of session ID the registry holds, archived or not, or nil.
+The registry keeps an archived session while events concern it, as
+those of a turn going on once it was archived, which `:session' leaves
+out.  The backend's :archived-session (see `drover-find-archived')."
+  (when-let* ((entry (opencode-state-get id)))
+    (drover-opencode--listed entry)))
+
 (defun drover-opencode--prefetch (sessions)
   "Ask the registry for the context size of SESSIONS, which a view shows.
 The registry knows the size of a session it saw take a step, but not of
@@ -1782,6 +1790,7 @@ Through the plugin's RPC, `opencode.goal' `get'.  The backend's
      :start #'drover-opencode--start
      :sessions #'drover-opencode--sessions
      :session #'drover-opencode--session-by-id
+     :archived-session #'drover-opencode--archived-session
      ;; Registry, buffers, catalogs and projects: all but the branches.
      :reports-changes t
      :open #'drover-opencode--open

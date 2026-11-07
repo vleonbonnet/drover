@@ -2197,7 +2197,7 @@ defines Send, and a function failing tells none."
       (should (= (length drover-test-archived-calls) 2)))))
 
 (ert-deftest drover-test-unarchive ()
-  "Z restores the archived sessions selected, through their backend."
+  "Unarchiving restores the archived sessions selected, through their backend."
   (drover-test-with-backend (list (drover-test-session "live"))
     (let ((drover-test-archived-calls nil))
       (drover-test-register-archived)
