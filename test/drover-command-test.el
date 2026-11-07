@@ -148,6 +148,39 @@ those Emacs does not quote: Git read HEAD^{commit} as HEAD^commit there."
           (should (<= (length (plist-get result :output)) 101))
           (should (plist-get result :truncated)))))))
 
+(ert-deftest drover-command-test-pieces ()
+  "Output read in pieces is kept in order and told cut, whatever the pieces, when started directly.
+As on Windows, which has no runner: a piece may hold more than the
+limit, even all of a short output, which was cut unsaid; with the end
+kept, a piece coming once the start was dropped went before what was
+kept, so that the last lines were lost."
+  (drover-command-test-with
+    (let ((drover-command-shell nil)
+          (drover-command-output-limit 100)
+          ;; Another Emacs, as every system has one, writing nothing: what
+          ;; it writes is given to its filter here, in pieces chosen.
+          (command (list (expand-file-name invocation-name invocation-directory) "-Q" "--batch"))
+          (lines (mapconcat (lambda (i) (format "line %03d\n" i)) (number-sequence 1 30) "")))
+      (cl-flet ((run (tail pieces)
+                  (let* ((result nil)
+                         (id (drover-command-run "test" command (lambda (answer) (setq result answer)) home tail))
+                         (process (plist-get (gethash id drover-command--jobs) :process)))
+                    (dolist (piece pieces)
+                      (funcall (process-filter process) process piece))
+                    (should (drover-test-wait-commands 30))
+                    (should (equal (plist-get result :exit) 0))
+                    result)))
+        (let ((result (run nil (list lines))))
+          (should (plist-get result :truncated))
+          (should (equal (plist-get result :output) (substring lines 0 100))))
+        ;; The second piece passes twice the limit: the start goes, the
+        ;; third comes after what is kept.
+        (let ((result (run t (list (substring lines 0 150) (substring lines 150 250) (substring lines 250)))))
+          (should (plist-get result :truncated))
+          (should (string-prefix-p "line " (plist-get result :output)))
+          (should (string-suffix-p "line 029\nline 030\n" (plist-get result :output)))
+          (should (<= (length (plist-get result :output)) 100)))))))
+
 (ert-deftest drover-command-test-never-waits ()
   "Commands sleeping two seconds never make Emacs wait, and run side by side.
 Not even where starting a process takes a second, as on a managed Mac:

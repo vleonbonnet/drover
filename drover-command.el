@@ -376,16 +376,19 @@ rather than its start (see `drover-command-run')."
                    (drover-with-reporting "commands"
                      (when (buffer-live-p (process-buffer process))
                        (with-current-buffer (process-buffer process)
-                         (cond ((< (buffer-size) limit) (insert text))
-                               (tail
-                                (goto-char (point-max))
-                                (insert text)
-                                (when (> (buffer-size) (* 2 limit))
-                                  (delete-region (point-min) (- (point-max) limit))
-                                  (goto-char (point-min))
-                                  (delete-region (point-min) (min (point-max) (1+ (line-end-position)))))
-                                (process-put process 'drover-command-truncated t))
-                               (t (process-put process 'drover-command-truncated t))))))))
+                         (if (not (or tail (< (buffer-size) limit)))
+                             (process-put process 'drover-command-truncated t)
+                           ;; At the end, wherever dropping the start left point.
+                           (goto-char (point-max))
+                           (insert text)
+                           ;; One piece may hold more than the limit, even
+                           ;; all of a short output: it is cut too.
+                           (when (> (buffer-size) limit)
+                             (process-put process 'drover-command-truncated t))
+                           (when (and tail (> (buffer-size) (* 2 limit)))
+                             (delete-region (point-min) (- (point-max) limit))
+                             (goto-char (point-min))
+                             (delete-region (point-min) (min (point-max) (1+ (line-end-position)))))))))))
          (sentinel
           (lambda (_process _event)
             (drover-with-reporting "commands"
