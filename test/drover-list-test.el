@@ -1079,14 +1079,15 @@ title; Magit's ellipsis takes 7 more."
       (should (equal (drover-list-test-layout-at 120) '(narrow title context age cache summary))))))
 
 (ert-deftest drover-list-test-fields-by-width-with-the-harness ()
-  "The harness's column, after the summary's, needs the room of its icon.
+  "The harness's column, after the summary's, takes the room of its icon.
 As by default, every field let show: windows of 80 columns as wide as
 an x, of 100 and of 108 show what the README says."
   (drover-list-test-with (drover-list-test-rich)
     (drover-list-test-showing
       (drover-list-test-with-font
+        ;; Its icon alone, it leaves the provider room at 75 columns.
         (should (equal (drover-list-test-layout-at (* 75 7))
-                       '(columns title harness model context age cache summary)))
+                       '(columns title harness model provider context age cache summary)))
         (should (equal (drover-list-test-layout-at (* 80 7))
                        '(columns title harness model provider context age cache summary)))
         (should (equal (drover-list-test-layout-at (* 100 7))
@@ -4794,12 +4795,12 @@ an average character."
           (drover-list--on-window-change side)
           (should (= drover-list--width (+ before 6)))
           ;; Now it does: one line, in columns, from the left edge; the
-          ;; harness shows its name, room allowing, after the age, as in
-          ;; two lines.
+          ;; harness its icon alone, after the age, as in two lines.
           (should (eq drover-list--layout 'columns))
-          (should (equal (drover-list-test-entry "a") "! Session a   1m  ▣ Fake   asks: Go?"))
-          ;; Named in the header line, which two lines lack.
-          (should (equal (drover-list-test-displayed header-line-format) "Session      Age  Harness  Summary")))))))
+          (should (equal (drover-list-test-entry "a") "! Session a   1m  ▣  asks: Go?"))
+          ;; Named in the header line, which two lines lack, but the
+          ;; icon's column.
+          (should (equal (drover-list-test-displayed header-line-format) "Session      Age     Summary")))))))
 
 ;;;; The sidebar draws its first screens
 
@@ -8383,10 +8384,11 @@ Their keys are those of `drover-list-test-harness-keys'."
       (prop-match-value match))))
 
 (ert-deftest drover-list-test-harness-column ()
-  "The harness's column tells what runs each session: its icon and name.
+  "The harness's column tells what runs each session: its icon, its tooltip its name.
 A session of another host is of its owner's harness, its host in the
 host's column; the tooltip tells the engine of a harness running
-several."
+several.  The column, as wide as an icon, has no name in the header
+line."
   (drover-list-test-with nil
     (drover-list-test-showing
       (let ((drover-harnesses drover-list-test-harnesses)
@@ -8394,14 +8396,15 @@ several."
         (drover-list-test-register-harnesses)
         (drover-list-test-with-font
           (should (equal (seq-take (cdr (drover-list-test-layout-at 1000)) 3) '(title host harness)))
-          (pcase-dolist (`(,key . ,text) '(((opencode . "o") . "Open +O OpenCode ")
-                                           ((claude-code-ide . "i") . "Terminal +C Claude IDE ")
-                                           ((agent-shell . "s") . "Shell +A agent-shell ")
-                                           ((claude-code . "t") . "Transcript +T Claude Code ")
-                                           ((codex . "x") . "Rollout +X Codex ")
-                                           ((remote:core claude-code-ide . "r") . "Remote +core +C Claude IDE ")))
+          (pcase-dolist (`(,key . ,text) '(((opencode . "o") . "Open +O ")
+                                           ((claude-code-ide . "i") . "Terminal +C ")
+                                           ((agent-shell . "s") . "Shell +A ")
+                                           ((claude-code . "t") . "Transcript +T ")
+                                           ((codex . "x") . "Rollout +X ")
+                                           ((remote:core claude-code-ide . "r") . "Remote +core +C ")))
             (should (string-match-p text (drover-list-test-remote-line key))))
-          (should (string-search "Harness" (drover-list-test-displayed header-line-format)))
+          (should-not (string-search "Claude IDE" (drover-list-test-remote-line '(claude-code-ide . "i"))))
+          (should-not (string-search "Harness" (drover-list-test-displayed header-line-format)))
           (should (equal (drover-list-test-harness-help '(agent-shell . "s"))
                          "Harness: agent-shell: a shell over ACP, running Codex"))
           (should (equal (drover-list-test-harness-help '(claude-code-ide . "i"))
@@ -8412,7 +8415,8 @@ several."
           ;; default icon.
           (let ((drover-harnesses (assq-delete-all 'codex (copy-sequence drover-list-test-harnesses))))
             (revert-buffer)
-            (should (string-match-p "Rollout +▣ Codex " (drover-list-test-remote-line '(codex . "x"))))))))))
+            (should (string-match-p "Rollout +▣ " (drover-list-test-remote-line '(codex . "x"))))
+            (should (string-prefix-p "Harness: " (drover-list-test-harness-help '(codex . "x"))))))))))
 
 (ert-deftest drover-list-test-harness-provider-icon ()
   "A harness drawn with its vendor's logo follows `opencode-provider-icons', drawn anew."
@@ -8422,16 +8426,16 @@ several."
             (opencode-provider-icons '(("\\`openai\\'" . "Ω"))))
         (drover-list-test-register-harnesses)
         (revert-buffer)
-        (should (string-match-p "Rollout +Ω Codex " (drover-list-test-remote-line '(codex . "x"))))
+        (should (string-match-p "Rollout +Ω " (drover-list-test-remote-line '(codex . "x"))))
         (setq opencode-provider-icons '(("\\`openai\\'" . "Ø")))
         (revert-buffer)
-        (should (string-match-p "Rollout +Ø Codex " (drover-list-test-remote-line '(codex . "x"))))))))
+        (should (string-match-p "Rollout +Ø " (drover-list-test-remote-line '(codex . "x"))))))))
 
-(ert-deftest drover-list-test-harness-icon-where-room-is-short ()
-  "A column too narrow for its name shows the harness's icon alone, never a name cut.
-The column is then as wide as the icon; in two lines, the icon alone
-ends the title's line.  A session asks a question: the summary's
-column, which keeps its room, gives none."
+(ert-deftest drover-list-test-harness-icon-alone ()
+  "The harness's column shows its icon alone, at every width, never its name.
+The column is as wide as the icon; in two lines, the icon alone ends
+the title's line.  Its name shows in the icon's tooltip and its
+session's details."
   (drover-list-test-with nil
     (drover-list-test-showing
       (let ((drover-harnesses drover-list-test-harnesses))
@@ -8443,29 +8447,22 @@ column, which keeps its room, gives none."
             (cl-loop for width from 1000 downto 150 by 10
                      do (pcase-let ((`(,layout . ,fields) (drover-list-test-layout-at width)))
                           (when (and (eq layout 'columns) (memq 'harness fields))
-                            (let* ((column (assq 'harness (plist-get (drover-list--model-layout drover-list--model)
-                                                                     :columns)))
-                                   (shown (mapcar
-                                           (lambda (key)
-                                             (let* ((entry (alist-get (car key) drover-harnesses))
-                                                    (icon (plist-get entry :icon))
-                                                    (name (plist-get entry :name))
-                                                    (line (drover-list-test-remote-line key)))
-                                               (cond ((string-search (concat icon " " name) line) 'name)
-                                                     ;; Never a name cut.
-                                                     ((string-search (concat icon " " (substring name 0 2)) line)
-                                                      'cut)
-                                                     (t 'icon))))
-                                           (butlast drover-list-test-harness-keys))))
-                              (should-not (memq 'cut shown))
-                              ;; All names or none.
-                              (should (= (length (delete-dups (copy-sequence shown))) 1))
-                              (push (car shown) seen)
-                              (when (eq (car shown) 'icon)
-                                ;; As wide as the icon, at least its :min of two characters.
-                                (should (= (nth 2 column) 14)))))))
-            (should (memq 'name seen))
-            (should (memq 'icon seen)))
+                            (setq seen t)
+                            (let ((column (assq 'harness (plist-get (drover-list--model-layout drover-list--model)
+                                                                    :columns))))
+                              (dolist (key (butlast drover-list-test-harness-keys))
+                                (let* ((entry (alist-get (car key) drover-harnesses))
+                                       (line (drover-list-test-remote-line key)))
+                                  (should (string-search (plist-get entry :icon) line))
+                                  (should-not (string-search (plist-get entry :name) line))))
+                              ;; As wide as the icon.
+                              (should (= (nth 2 column) 7))))))
+            (should seen))
+          ;; Its name in its details.
+          (drover-list-test-layout-at 1000)
+          (drover-list-test-goto "ask")
+          (magit-section-show (magit-current-section))
+          (should (string-match-p "^ +Harness +Fake$" (drover-list-test-visible-text)))
           ;; In two lines.
           (should (eq (car (drover-list-test-layout-at 150)) 'narrow))
           (should (string-match-p "\\` +· Open +4m +O\\'" (drover-list-test-remote-line '(opencode . "o")))))))))
@@ -8479,13 +8476,12 @@ column, which keeps its room, gives none."
         (drover-list-test-shown
           (revert-buffer)
           (should (memq 'harness drover-list--fields))
-          (should (string-search "O OpenCode" (drover-list-test-remote-line '(opencode . "o"))))
+          (should (string-match-p "Open +O " (drover-list-test-remote-line '(opencode . "o"))))
           (drover-list-test-type "V - H")
           (should (eq (oref transient--prefix command) 'drover-view))
           (should (equal drover-list-hidden-fields '(harness)))
           (should-not (memq 'harness drover-list--fields))
-          (should-not (string-search "OpenCode" (drover-list-test-remote-line '(opencode . "o"))))
-          (should-not (string-search "Harness" header-line-format))
+          (should-not (string-match-p "Open +O " (drover-list-test-remote-line '(opencode . "o"))))
           (drover-list-test-type "- H C-g")
           (should-not drover-list-hidden-fields)
           (should (memq 'harness drover-list--fields)))))))
@@ -8596,7 +8592,7 @@ are the pixels lines align their parts to."
             (drover-list--on-window-change side)
             (should (eq drover-list--layout 'columns))
             (should (equal drover-list--fields '(title age cache host harness summary)))
-            (should (string-match-p "\\`· Remote +6m +@ +C Claude IDE\\'"
+            (should (string-match-p "\\`· Remote +6m +@ +C\\'"
                                     (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
             (let* ((columns (plist-get (drover-list--model-layout drover-list--model) :columns))
                    (cache (assq 'cache columns))

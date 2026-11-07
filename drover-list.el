@@ -2042,12 +2042,16 @@ see `drover-list--field-icon'."
 
 (defun drover-list--icon-alone-p (field metrics)
   "Return non-nil when FIELD shows as its icon alone in the list of METRICS.
-That is the host in the sidebar, which folds nothing (see
-`drover-list--folds') and keeps its lines compact: in columns as in two
-lines, the host's icon, without its name, nor since when it is not
-connected, which its tooltip tells, and its face shows (see
-`drover-list--host-icon'); its column is as wide as the icon."
-  (and (eq field 'host) (not (plist-get metrics :folds))))
+That is the harness, whose icon tells it, its name in the icon's
+tooltip and in its session's details, so that its column does not take
+the room of the longest name; and the host in the sidebar, which folds
+nothing (see `drover-list--folds') and keeps its lines compact: in
+columns as in two lines, the host's icon, without its name, nor since
+when it is not connected, which its tooltip tells, and its face shows
+\(see `drover-list--host-icon').  Its column is as wide as the icon,
+and has no name in the header line."
+  (or (eq field 'harness)
+      (and (eq field 'host) (not (plist-get metrics :folds)))))
 
 (defun drover-list--icon-p (field)
   "Return non-nil when FIELD shows in two lines as an icon alone, in a cell.
