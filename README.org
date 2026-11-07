@@ -344,7 +344,7 @@ The list is drawn in a proportional font (the face =drover-list=), laid out in p
 | harness  |          | what runs it, its icon, its name in the icon's tooltip (see [[*Harnesses][Harnesses]])     |    4 | first line, its icon  |
 | model    | Model    | the model, compact, such as =Opus 5.5=, then its effort, dim when a default |    5 |                       |
 | context  | Context  | the context's size, such as =182k=, after a short bar of how full it is     |    6 | first line, a pie     |
-| changes  | Changes  | what all its turns changed, such as =+42 −7 · 3 files= (see [[*What sessions changed][What sessions changed]]) |    7 |                       |
+| changes  | Changes  | what all its turns changed, such as =+42 −7 · 3f= (see [[*What sessions changed][What sessions changed]]) |    7 |                       |
 | provider | Provider | the provider serving the model, as an icon                                  |    7 |                       |
 | location | Project  | the project                                                                 |    8 |                       |
 | branch   | Branch   | the Git branch, greyed out when the repository's default one                |    9 |                       |
@@ -399,7 +399,7 @@ As you select windows and show buffers in them, only the titles whose session ch
 Expanded, a session recaps its last turn under its title, in the list's font, then the files all its turns changed:
 
          #+begin_example
-         ✓  Fix the login redirect          plan  Opus 5.5 high  +42 −7 · 3 files   1h
+         ✓  Fix the login redirect          plan  Opus 5.5 high  +42 −7 · 3f   1h
             Prompt   The login page sends users back to /home after they sign
                      in; keep the page they came from.
             Reply    The redirect now keeps the page users came from, in a
@@ -421,7 +421,7 @@ The recap is fetched as the session expands, without waiting: =loading…= shows
 
 ** What sessions changed
 
-The column =changes= tells what a session changed in all its turns, as its engine recorded them: the lines added and removed, and the files, such as =+42 −7 · 3 files=, or =+45k −6.1k · 409 files= past a thousand lines, which the details tell whole, the counts in =drover-added= and =drover-removed=; its expanded session lists the files (see [[*The last turn][The last turn]]). They are what a review of the whole session shows (see [[*Reviewing a session's changes][Reviewing a session's changes]]): OpenCode's service diffs the snapshots it took of the working tree, Claude Code's and Codex's edits are read from their transcripts and rollouts; no model is asked. An engine telling none, such as Gemini CLI's, shows none.
+The column =changes= tells what a session changed in all its turns, as its engine recorded them: the lines added and removed, and the files, compact, such as =+42 −7 · 3f= or =+45k −6.1k · 409f=, past a thousand lines in thousands and the files as a count and an f, which the details tell whole, the counts in =drover-added= and =drover-removed=; its expanded session lists the files (see [[*The last turn][The last turn]]). They are what a review of the whole session shows (see [[*Reviewing a session's changes][Reviewing a session's changes]]): OpenCode's service diffs the snapshots it took of the working tree, Claude Code's and Codex's edits are read from their transcripts and rollouts; no model is asked. An engine telling none, such as Gemini CLI's, shows none.
 
 Reading them costs a request to the service or a whole transcript read, so drover reads them only for the sessions a list shows, those of its expanded groups and those you expand, once their turns end, never while they work: =drover-changes-delay= seconds after a session settled, two at once at most (=drover-changes-concurrency=), the most recently active first. What it read it keeps in =drover-state-directory=, =changes.eld=, the newest 1000 conversations, each with the time of its session's last activity it describes, so that an Emacs starting reads again only the sessions that changed since. A session that could not be read is read again once it changes. Another host's sessions carry what their owner read, which it reads for the sessions your lists show.
 

@@ -1451,16 +1451,20 @@ plain, the session working away from it."
   "Return ADDITIONS, DELETIONS and FILES, what a session changed, as a line.
 Such as \"+120 −14 · 3 files\", the counts of lines in the faces
 `drover-added' and `drover-removed', each left out when nil, the files
-dimmed.  With COMPACT, counts of lines past a thousand are told in
-thousands or millions, as sizes of contexts are, such as \"+45k −6.1k ·
-409 files\".  Nil when FILES is not a positive number."
+dimmed.  With COMPACT, as a column shows it, counts of lines past a
+thousand are told in thousands or millions, as sizes of contexts are,
+and the files as a count and an f, such as \"+45k −6.1k · 409f\".  Nil
+when FILES is not a positive number."
   (when (and (natnump files) (> files 0))
     (cl-flet ((count (lines) (if compact (opencode-format-tokens lines) (number-to-string lines))))
       (let ((counts (delq nil (list (and (natnump additions)
                                          (drover-face (concat "+" (count additions)) 'drover-added))
                                     (and (natnump deletions)
                                          (drover-face (concat "−" (count deletions)) 'drover-removed)))))
-            (files (drover-face (format "%d file%s" files (if (= files 1) "" "s")) 'drover-dim)))
+            (files (drover-face (if compact
+                                    (format "%df" files)
+                                  (format "%d file%s" files (if (= files 1) "" "s")))
+                                'drover-dim)))
         (if counts
             (concat (string-join counts " ") (drover-face " · " 'drover-dim) files)
           files)))))
