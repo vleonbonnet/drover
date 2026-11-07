@@ -387,7 +387,8 @@ and a gateway, priced; one of three days ago; one running."
       (drover-test-write (expand-file-name "auth.json" drover-codex-home)
                          "{\"auth_mode\": \"chatgpt\", \"tokens\": {}}")
       (should (eq (drover-usage-billing 'codex "openai") 'included))
-      (should (eq (drover-usage-billing 'opencode "github-copilot") 'included))
+      ;; Copilot bills its tokens, as OpenCode records them.
+      (should (eq (drover-usage-billing 'opencode "github-copilot") 'priced))
       (should (eq (drover-usage-billing 'opencode "prodsec-gateway") 'priced)))))
 
 (ert-deftest drover-usage-test-prices ()

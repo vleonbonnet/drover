@@ -106,9 +106,20 @@ which its service records, are kept."
 Estimates of the list prices of model families, for a model neither
 that option nor OpenCode's catalog prices.")
 
+(defconst drover-usage--former-billing
+  '(((opencode "\\`github-copilot" included)
+     (claude-code nil auto)
+     (codex nil auto)))
+  "The former standard values of `drover-usage-billing'.
+Before GitHub Copilot billed its tokens, from June 2026.")
+
+;; Loaded over a drover of a former standard value, which `defcustom'
+;; would keep, the usage takes the new one.
+(when (and (boundp 'drover-usage-billing) (member drover-usage-billing drover-usage--former-billing))
+  (makunbound 'drover-usage-billing))
+
 (defcustom drover-usage-billing
-  '((opencode "\\`github-copilot" included)
-    (claude-code nil auto)
+  '((claude-code nil auto)
     (codex nil auto))
   "How the usage of each harness and provider is billed.
 Each entry is (HARNESS PROVIDER-REGEXP BILLING), the first match
@@ -119,8 +130,10 @@ identifier, or is nil for any; BILLING is `priced', each token paid,
 and Codex, which tell how their CLI logs in: Claude Code through a
 subscription's account, without an API key nor a gateway of its own
 settings, and Codex through ChatGPT, are included.  Usage matching no
-entry is priced.  An included usage shows its tokens, its cost
-\"included\"."
+entry is priced: GitHub Copilot's too, which bills each token at its
+model's list price since June 2026, drawn from the plan's monthly AI
+credits, and which OpenCode records.  An included usage shows its
+tokens, its cost \"included\"."
   :type '(repeat (list (choice (const :tag "Any harness" nil) symbol)
                        (choice (const :tag "Any provider" nil) regexp)
                        (choice (const priced) (const included) (const auto))))
