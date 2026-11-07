@@ -654,18 +654,23 @@ the shell started with."
     (drover-agent-shell-test-with-submit
       (let ((failing (drover-agent-shell-test-shell 'codex "failing"))
             (closed (drover-agent-shell-test-shell 'codex "closed"))
+            (cancelled (drover-agent-shell-test-shell 'claude-code "cancelled"))
             (dead (drover-agent-shell-test-shell 'codex "dead")))
         (drover-agent-shell-send-text failing "hello")
         (drover-agent-shell-test-emit failing 'error :code -32603 :message "Authentication required")
         (should-not (drover-agent-shell-test-subscriptions failing))
         (drover-agent-shell-send-text closed "hello")
         (drover-agent-shell-test-emit closed 'clean-up)
+        (drover-agent-shell-send-text cancelled "hello")
+        (drover-agent-shell-test-emit cancelled 'session-selection-cancelled)
+        (should-not (drover-agent-shell-test-subscriptions cancelled))
         (kill-buffer dead)
         (drover-agent-shell-send-text dead "hello")
         (should-not drover-agent-shell-test--calls)
         (should (equal (reverse drover-agent-shell-test--warnings)
                        '("failing did not take the prompt (Authentication required); it is in the kill ring"
                          "closed did not take the prompt (it was closed); it is in the kill ring"
+                         "cancelled did not take the prompt (its session choice was cancelled); it is in the kill ring"
                          "The agent shell did not take the prompt (its buffer is gone); it is in the kill ring")))))))
 
 (ert-deftest drover-agent-shell-test-send-after-start-failure ()
@@ -1359,6 +1364,33 @@ One of OpenCode keeps the provider it names, and has nothing recorded."
       ;; Initialization going on means it had not failed for good.
       (drover-agent-shell-test-emit shell 'init-handshake)
       (should (equal (drover-agent-shell-test-status shell) '(working "starting" nil))))))
+
+(ert-deftest drover-agent-shell-test-status-start-cancelled ()
+  "A shell left without a session by a cancelled choice is idle and says why."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let ((shell (drover-agent-shell-test-shell 'claude-code "abandoned"))
+            (running (drover-agent-shell-test-followed 'claude-code "running")))
+        (with-current-buffer shell
+          (drover-agent-shell--setup))
+        (should (equal (drover-agent-shell-test-status shell) '(working "starting" nil)))
+        ;; agent-shell would kill the shell next; this one survives, as when a
+        ;; query to save its transcript was quit.
+        (drover-agent-shell-test-emit shell 'session-selection-cancelled)
+        (should (equal (drover-agent-shell-test-status shell)
+                       '(idle "failed to start: session choice cancelled" nil)))
+        (should-not (drover-session-attention-p (drover-agent-shell-test-session shell)))
+        ;; A prompt sent to it now is refused at once.
+        (drover-agent-shell-send-text shell "hello")
+        (should (equal drover-agent-shell-test--warnings
+                       '("abandoned did not take the prompt (session choice cancelled); it is in the kill ring")))
+        ;; A shell that started is not told it failed to, nor is its recap.
+        (let ((before (drover-agent-shell-test-status running))
+              recap)
+          (drover-agent-shell-test-emit running 'session-selection-cancelled)
+          (should (equal (drover-agent-shell-test-status running) before))
+          (drover-recap (drover-agent-shell-test-session running) (lambda (value) (setq recap value)))
+          (should-not (plist-get recap :error)))))))
 
 (ert-deftest drover-agent-shell-test-status-working ()
   "A busy shell works since its prompt was submitted."

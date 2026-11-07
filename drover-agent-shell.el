@@ -35,7 +35,8 @@
 ;; or the buffer (`drover-agent-shell-name-after-title').
 ;;
 ;; Statuses come from the shell and its events: a shell still starting
-;; works, one whose agent waits for a permission or an answer waits, a
+;; works, one whose start failed or whose session choice was cancelled
+;; says why, one whose agent waits for a permission or an answer waits, a
 ;; busy one works, and a turn that ended or failed while the shell was
 ;; not in front of the user is done or failed until the user looks at
 ;; it, sends another prompt or marks it seen.  Every shell is subscribed
@@ -474,7 +475,8 @@ As (ENGINE . FUNCTION) for `drover-register-resumer'."
 (defun drover-agent-shell--when-initialized (buffer then else)
   "Call THEN once the shell of BUFFER is initialized, now or later.
 Call ELSE with a message instead when it cannot be: BUFFER is dead,
-its start failed, or it fails or is killed before it is initialized.
+its start failed, or it fails, its session choice is cancelled or it is
+killed before it is initialized.
 One of them is called, once."
   (cond
    ((not (buffer-live-p buffer)) (funcall else "its buffer is gone"))
@@ -489,13 +491,15 @@ One of them is called, once."
              :on-event (lambda (event)
                          (drover-with-reporting "agent-shell start"
                            (let ((kind (map-elt event :event)))
-                             (when (memq kind '(init-finished error clean-up))
+                             (when (memq kind '(init-finished error session-selection-cancelled clean-up))
                                (with-current-buffer buffer
                                  (agent-shell-unsubscribe :subscription token))
                                (pcase kind
                                  ('init-finished (funcall then))
                                  ('error (funcall else (or (map-nested-elt event '(:data :message))
                                                            "it failed to start")))
+                                 ('session-selection-cancelled
+                                  (funcall else "its session choice was cancelled"))
                                  (_ (funcall else "it was closed")))))))))))))
 
 (defun drover-agent-shell--submit (buffer text)
@@ -1090,6 +1094,11 @@ success."
                drover-agent-shell--request-times nil
                drover-agent-shell--in-turn nil
                drover-agent-shell--activity nil))
+        ('session-selection-cancelled
+         ;; agent-shell kills the shell next, but a kill refused, a query to
+         ;; save its transcript quit, leaves a shell that will never start.
+         (unless (drover-agent-shell--initialized-p (current-buffer))
+           (setq drover-agent-shell--start-error "session choice cancelled")))
         ('clean-up
          ;; Prompts set aside, which agent-shell did not count as queued
          ;; before its shell went.
