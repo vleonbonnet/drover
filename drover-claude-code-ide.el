@@ -413,24 +413,26 @@ the terminal's directory."
 (defvar drover-claude-code-ide--watchers nil
   "Timers looking for the conversations of new terminals.")
 
-(defun drover-claude-code-ide--transcripts (bucket)
-  "Return the names of the transcripts in directory BUCKET."
-  (and (file-directory-p bucket)
-       (directory-files bucket nil "\\.jsonl\\'")))
+(defun drover-claude-code-ide--transcripts (buckets)
+  "Return the names of the transcripts in directories BUCKETS."
+  (seq-uniq (mapcan (lambda (bucket)
+                      (and (file-directory-p bucket)
+                           (directory-files bucket nil "\\.jsonl\\'")))
+                    buckets)))
 
 (defun drover-claude-code-ide--capture-session-id (buffer directory)
   "Learn the conversation of BUFFER, a terminal Claude Code started in DIRECTORY.
 Every `drover-claude-code-ide--capture-interval' seconds, the CLI's
 record of the terminal's process is read (see
 `drover-claude-code-ide-live-session-id'), and the transcripts of
-DIRECTORY are listed: one transcript new since the start is the
-session's, never one of several, which concurrent sessions may have
-created.  The search stops once the session is known, when the
-terminal exits, or after `drover-claude-code-ide--capture-timeout'
-seconds."
-  (let* ((bucket (expand-file-name (drover-claude-code-encode-directory directory)
-                                   (drover-claude-code-projects-directory)))
-         (before (drover-claude-code-ide--transcripts bucket))
+DIRECTORY are listed, in each subdirectory of transcripts of its
+spellings (see `drover-claude-code-buckets'): one transcript new since
+the start is the session's, never one of several, which concurrent
+sessions may have created.  The search stops once the session is
+known, when the terminal exits, or after
+`drover-claude-code-ide--capture-timeout' seconds."
+  (let* ((buckets (drover-claude-code-buckets directory))
+         (before (drover-claude-code-ide--transcripts buckets))
          (deadline (+ (float-time) drover-claude-code-ide--capture-timeout))
          (timer nil))
     (setq timer
@@ -438,7 +440,7 @@ seconds."
            drover-claude-code-ide--capture-interval drover-claude-code-ide--capture-interval
            (lambda ()
              (condition-case err
-                 (when (drover-claude-code-ide--capture-step buffer bucket before deadline)
+                 (when (drover-claude-code-ide--capture-step buffer buckets before deadline)
                    (drover-claude-code-ide--stop-watching timer))
                (error
                 (drover-claude-code-ide--stop-watching timer)
@@ -448,10 +450,10 @@ seconds."
     (push timer drover-claude-code-ide--watchers)
     timer))
 
-(defun drover-claude-code-ide--capture-step (buffer bucket before deadline)
+(defun drover-claude-code-ide--capture-step (buffer buckets before deadline)
   "Look once for the conversation of terminal BUFFER; return non-nil when done.
-BUCKET is the directory of its transcripts, BEFORE the transcripts there
-when it started, DEADLINE the time to give up at."
+BUCKETS are the directories of its transcripts, BEFORE the transcripts
+there when it started, DEADLINE the time to give up at."
   (cond
    ((or (not (buffer-live-p buffer))
         (buffer-local-value 'drover-claude-code-ide-session-id buffer)
@@ -463,7 +465,7 @@ when it started, DEADLINE the time to give up at."
     (drover-models-changed 'claude-code)
     t)
    (t
-    (let ((new (seq-difference (drover-claude-code-ide--transcripts bucket) before)))
+    (let ((new (seq-difference (drover-claude-code-ide--transcripts buckets) before)))
       (when (= (length new) 1)
         (with-current-buffer buffer
           (setq-local drover-claude-code-ide-session-id (file-name-base (car new))))

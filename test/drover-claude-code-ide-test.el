@@ -610,10 +610,11 @@ session of `buffer', a temporary buffer, active."
            (terminal (drover-claude-code-ide-test-terminal "*claude* new")))
       (unwind-protect
           (cl-letf (((symbol-function 'drover-claude-code-projects-directory) (lambda () projects))
-                    ((symbol-function 'drover-claude-code-encode-directory)
+                    ;; The bucket of each spelling of its directory watched.
+                    ((symbol-function 'drover-claude-code-encode-directories)
                      (lambda (directory)
                        (should (equal directory "/work/new/"))
-                       "new-project")))
+                       '("old-spelling" "new-project"))))
             (drover-claude-code-ide--track-terminal
              (lambda (&rest _) (cons terminal 'process)) "*claude* new" "/work/new/")
             (should (equal (mapcar (lambda (entry) (list (car entry) (cadr entry)))
@@ -644,7 +645,7 @@ session of `buffer', a temporary buffer, active."
            (terminal (drover-claude-code-ide-test-terminal "*claude* project")))
       (unwind-protect
           (cl-letf (((symbol-function 'drover-claude-code-projects-directory) (lambda () projects))
-                    ((symbol-function 'drover-claude-code-encode-directory) (lambda (_) "project")))
+                    ((symbol-function 'drover-claude-code-encode-directories) (lambda (_) '("project"))))
             (drover-test-write (expand-file-name "old.jsonl" bucket) "{}\n")
             (drover-claude-code-ide--capture-session-id terminal "/work/project/")
             (drover-test-write (expand-file-name "one.jsonl" bucket) "{}\n")
@@ -664,18 +665,18 @@ session of `buffer', a temporary buffer, active."
   "The search stops when the terminal exits or dies, or past its deadline."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* stop")))
-      (should (drover-claude-code-ide--capture-step terminal "/nowhere/" nil (- (float-time) 1)))
-      (should-not (drover-claude-code-ide--capture-step terminal "/nowhere/" nil (+ (float-time) 60)))
+      (should (drover-claude-code-ide--capture-step terminal '("/nowhere/") nil (- (float-time) 1)))
+      (should-not (drover-claude-code-ide--capture-step terminal '("/nowhere/") nil (+ (float-time) 60)))
       (delete-process (get-buffer-process terminal))
-      (should (drover-claude-code-ide--capture-step terminal "/nowhere/" nil (+ (float-time) 60)))
+      (should (drover-claude-code-ide--capture-step terminal '("/nowhere/") nil (+ (float-time) 60)))
       (kill-buffer terminal)
-      (should (drover-claude-code-ide--capture-step terminal "/nowhere/" nil (+ (float-time) 60))))))
+      (should (drover-claude-code-ide--capture-step terminal '("/nowhere/") nil (+ (float-time) 60))))))
 
 (ert-deftest drover-claude-code-ide-test-track-survives-errors ()
   "A failure to follow a new terminal is reported; the terminal is returned."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* error")))
-      (cl-letf (((symbol-function 'drover-claude-code-encode-directory)
+      (cl-letf (((symbol-function 'drover-claude-code-encode-directories)
                  (lambda (_) (error "Not implemented"))))
         (should (equal (drover-claude-code-ide--track-terminal
                         (lambda (&rest _) (cons terminal 'process)) "*claude* error" "/work/")
@@ -687,7 +688,7 @@ session of `buffer', a temporary buffer, active."
   (drover-claude-code-ide-test-isolated
     (drover-claude-code-ide--install)
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* watched")))
-      (cl-letf (((symbol-function 'drover-claude-code-encode-directory) (lambda (_) "watched"))
+      (cl-letf (((symbol-function 'drover-claude-code-encode-directories) (lambda (_) '("watched")))
                 ((symbol-function 'drover-claude-code-projects-directory) (lambda () "/nowhere/")))
         (drover-claude-code-ide--capture-session-id terminal "/work/"))
       (should (drover-claude-code-ide-test-pending))

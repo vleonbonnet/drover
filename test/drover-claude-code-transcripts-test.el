@@ -901,10 +901,13 @@ for each start (see `drover-command-shell')."
 
 (ert-deftest drover-claude-code-transcripts-test-encode-windows ()
   "Directories encode as the CLI encodes them, Windows ones as Node reports them."
-  (should (equal (drover-claude-code-native-directory "c:/Users/val/my.proj/") "C:\\Users\\val\\my.proj"))
-  (should (equal (drover-claude-code-native-directory "/home/val/proj/") "/home/val/proj"))
+  ;; The drive's letter as Emacs writes it, then as a terminal does.
+  (should (equal (drover-claude-code-native-directories "C:/Users/val/my.proj/")
+                 '("c:\\Users\\val\\my.proj" "C:\\Users\\val\\my.proj")))
+  (should (equal (drover-claude-code-native-directory "C:/Users/val/my.proj/") "c:\\Users\\val\\my.proj"))
+  (should (equal (drover-claude-code-native-directories "/home/val/proj/") '("/home/val/proj")))
   (should (equal (drover-claude-code--encode (drover-claude-code-native-directory "c:/Users/val/my.proj"))
-                 "C--Users-val-my-proj"))
+                 "c--Users-val-my-proj"))
   (should (equal (drover-claude-code--encode "/Users/val/.emacs.d") "-Users-val--emacs-d"))
   ;; A character beyond the Basic Multilingual Plane is two UTF-16 units.
   (should (equal (drover-claude-code--encode "/tmp/a😀b") "-tmp-a--b"))
@@ -915,7 +918,43 @@ for each start (see `drover-command-shell')."
     (should (equal (drover-claude-code--encode long)
                    (concat "-" (make-string 199 ?a) "-feo44x"))))
   (should (equal (drover-claude-code--hash "") "0"))
-  (should (equal (drover-claude-code--hash "C:\\Users\\val") "686f3c")))
+  (should (equal (drover-claude-code--hash "C:\\Users\\val") "686f3c"))
+  ;; Past 200 characters the two spellings of a drive hash apart.
+  (let ((names (mapcar #'drover-claude-code--encode
+                       (drover-claude-code-native-directories (concat "c:/" (make-string 250 ?a))))))
+    (should (equal (mapcar (lambda (name) (substring name 0 201)) names)
+                   (list (concat "c--" (make-string 197 ?a) "-") (concat "C--" (make-string 197 ?a) "-"))))
+    (should-not (string-equal-ignore-case (car names) (cadr names)))))
+
+(ert-deftest drover-claude-code-transcripts-test-drive-spellings ()
+  "A session's transcript is found in the bucket of whichever spelling of its drive started the CLI."
+  (when (eq system-type 'windows-nt)
+    ;; Short, a directory's two spellings are one bucket to Windows.
+    (should (equal (drover-claude-code-encode-directories "C:/work/short/") '("c--work-short")))
+    (should (= (length (drover-claude-code-encode-directories (concat "c:/" (make-string 210 ?p) "/"))) 2)))
+  ;; Long, they are two, under which Emacs cannot open a transcript on
+  ;; Windows, past MAX_PATH: two short names stand for them.
+  (drover-test-with-homes
+    (let ((project (file-name-as-directory (file-truename (expand-file-name "project" home))))
+          (projects (drover-claude-code-projects-directory)))
+      (make-directory project t)
+      (cl-letf (((symbol-function 'drover-claude-code-encode-directories)
+                 (lambda (directory)
+                   (should (equal directory project))
+                   '("from-emacs" "from-terminal"))))
+        (let ((emacs (expand-file-name "from-emacs" projects))
+              (terminal (expand-file-name "from-terminal" projects)))
+          (should (equal (drover-claude-code-buckets project) (list emacs terminal)))
+          (should-not (drover-claude-code-newest-session-id project))
+          ;; Emacs's spelling first, where a new transcript goes.
+          (should (equal (drover-claude-code-transcript "id-a" project) (expand-file-name "id-a.jsonl" emacs)))
+          ;; A session a terminal started, in the other bucket.
+          (drover-test-write (expand-file-name "id-t.jsonl" terminal) "{}\n")
+          (should (equal (drover-claude-code-transcript "id-t" project) (expand-file-name "id-t.jsonl" terminal)))
+          (should (equal (drover-claude-code-newest-session-id project) "id-t"))
+          (drover-test-write (expand-file-name "id-e.jsonl" emacs) "{}\n")
+          (set-file-times (expand-file-name "id-t.jsonl" terminal) (seconds-to-time 1000000))
+          (should (equal (drover-claude-code-newest-session-id project) "id-e")))))))
 
 ;;;; Turns ended, context and cache
 

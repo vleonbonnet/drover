@@ -205,23 +205,41 @@ followed by \"-\" and a hash of NAME."
         encoded
       (concat (substring encoded 0 drover-claude-code--encoded-limit) "-" (drover-claude-code--hash name)))))
 
-(defun drover-claude-code-native-directory (dir)
-  "Return DIR, absolute, as Claude Code's process sees its working directory.
-Without its trailing slash; on Windows with backslashes and an upper
-case drive letter, as Node reports the directory a terminal started it
-in, where Emacs may write \"c:/\"."
+(defun drover-claude-code-native-directories (dir)
+  "Return how Claude Code may spell DIR, absolute, its working directory.
+Without its trailing slash; on Windows with backslashes, and the drive's
+letter as the program starting the CLI wrote it, which the CLI keeps:
+lower case from Emacs, the first spelling, upper case from a terminal,
+the second.  Elsewhere DIR has one spelling."
   (let ((name (directory-file-name dir)))
     (if (string-match "\\`\\([a-zA-Z]\\):\\(.*\\)\\'" name)
-        (concat (upcase (match-string 1 name)) ":"
-                (replace-regexp-in-string "/" "\\\\" (match-string 2 name)))
-      name)))
+        (let ((letter (match-string 1 name))
+              (rest (replace-regexp-in-string "/" "\\\\" (match-string 2 name))))
+          (list (concat (downcase letter) ":" rest) (concat (upcase letter) ":" rest)))
+      (list name))))
+
+(defun drover-claude-code-native-directory (dir)
+  "Return DIR, absolute, as Claude Code started by Emacs spells it.
+See `drover-claude-code-native-directories'."
+  (car (drover-claude-code-native-directories dir)))
+
+(defun drover-claude-code-encode-directories (dir)
+  "Return the names of the subdirectories of transcripts of sessions in DIR.
+Claude Code resolves symbolic links, drops the trailing slash and
+encodes the name as `drover-claude-code--encode' does, one name for
+each of `drover-claude-code-native-directories', the one of a session
+Emacs starts first.  Spellings differing in a drive's letter alone
+encode to names differing in case alone, one directory for Windows,
+until the name is long enough to end with a hash of the spelling: such
+names come once."
+  (seq-uniq (mapcar #'drover-claude-code--encode
+                    (drover-claude-code-native-directories (file-truename (expand-file-name dir))))
+            #'string-equal-ignore-case))
 
 (defun drover-claude-code-encode-directory (dir)
-  "Return the name of the subdirectory of transcripts of sessions in DIR.
-Claude Code resolves symbolic links, drops the trailing slash and
-encodes the name as `drover-claude-code--encode' does."
-  (drover-claude-code--encode
-   (drover-claude-code-native-directory (file-truename (expand-file-name dir)))))
+  "Return the name of the transcripts' directory of sessions Emacs starts in DIR.
+See `drover-claude-code-encode-directories'."
+  (car (drover-claude-code-encode-directories dir)))
 
 (defun drover-claude-code-decode-bucket (encoded)
   "Return the directory ENCODED, a subdirectory name of transcripts, stands for.
@@ -288,23 +306,34 @@ The CLI records it, by PID, under `drover-claude-code-sessions-directory'."
            (string-match-p drover-claude-code--uuid-regexp id)
            id))))
 
-(defun drover-claude-code--bucket (directory)
-  "Return the subdirectory of transcripts of sessions in DIRECTORY."
-  (expand-file-name (drover-claude-code-encode-directory directory)
-                    (drover-claude-code-projects-directory)))
+(defun drover-claude-code-buckets (directory)
+  "Return the subdirectories of transcripts of sessions in DIRECTORY.
+One for each of `drover-claude-code-encode-directories', the one of a
+session Emacs starts first."
+  (let ((projects (drover-claude-code-projects-directory)))
+    (mapcar (lambda (name) (expand-file-name name projects))
+            (drover-claude-code-encode-directories directory))))
 
 (defun drover-claude-code-newest-session-id (directory)
   "Return the identifier of the session last written in DIRECTORY, or nil.
-It is the newest transcript of DIRECTORY's subdirectory of transcripts."
-  (when-let* ((bucket (drover-claude-code--bucket directory))
-              ((file-directory-p bucket))
-              (files (directory-files bucket t "\\.jsonl\\'" t)))
+It is the newest transcript of DIRECTORY's subdirectories of
+transcripts."
+  (when-let* ((files (mapcan (lambda (bucket)
+                               (and (file-directory-p bucket)
+                                    (directory-files bucket t "\\.jsonl\\'" t)))
+                             (drover-claude-code-buckets directory))))
     (file-name-base (car (sort files :key (lambda (file) (or (drover-file-mtime file) 0))
                                :reverse t)))))
 
 (defun drover-claude-code-transcript (id dir)
-  "Return the transcript file of session ID, started in DIR."
-  (expand-file-name (concat id ".jsonl") (drover-claude-code--bucket dir)))
+  "Return the transcript file of session ID, started in DIR.
+It is in the subdirectory of transcripts of DIR holding it, of those
+of `drover-claude-code-buckets', else in the one of a session Emacs
+starts."
+  (let ((files (mapcar (lambda (bucket) (expand-file-name (concat id ".jsonl") bucket))
+                       (drover-claude-code-buckets dir))))
+    (or (and (cdr files) (seq-find #'file-exists-p files))
+        (car files))))
 
 (defun drover-claude-code-session-files (id &optional dir)
   "Return the files of Claude Code session ID, or signal a `user-error'.
