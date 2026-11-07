@@ -141,6 +141,14 @@ Past them, it is given up, the session staying archived."
 (defconst drover-wrap-up--archive-grace 60
   "Seconds a session may take to show archived before it counts as restored.")
 
+(defconst drover-wrap-up--recap-attempts 4
+  "Times a session's last reply is asked for before it counts as unread.")
+
+(defvar drover-wrap-up--recap-delay 3
+  "Seconds between two asks of a session's last reply that failed.
+A service answering its event stream may not take a request yet, as
+OpenCode's once refused one the moment a turn ended.")
+
 ;;;; The wrap-ups
 
 (cl-defstruct (drover-wrap-up--table (:constructor drover-wrap-up--table-make)
@@ -839,14 +847,26 @@ not blank, or the keyword alone."
               ((string-match-p "?[*_)\"'»”]*\\'" last-line)))
     (drover-bound-line last-line 200)))
 
-(defun drover-wrap-up--judge (entry record)
-  "Read the last reply of ENTRY's session, RECORD, and keep it open or close it."
-  (drover-wrap-up--set entry :state 'judging)
-  (drover-recap record
-                (lambda (recap)
-                  (drover-with-reporting "wrap-up"
-                    (when (and (drover-wrap-up--current-p entry) (eq (plist-get entry :state) 'judging))
-                      (drover-wrap-up--verdict entry (or (drover-wrap-up--record entry) record) recap))))))
+(defun drover-wrap-up--judge (entry record &optional attempt)
+  "Read the last reply of ENTRY's session, RECORD, and keep it open or close it.
+A reply that could not be read is asked for again, ATTEMPT counting the
+asks, `drover-wrap-up--recap-attempts' at most."
+  (let ((attempt (or attempt 1)))
+    (cl-flet ((judging-p ()
+                (and (drover-wrap-up--current-p entry) (eq (plist-get entry :state) 'judging))))
+      (drover-wrap-up--set entry :state 'judging)
+      (drover-recap record
+                    (lambda (recap)
+                      (drover-with-reporting "wrap-up"
+                        (when (judging-p)
+                          (if (and (plist-get recap :failure) (< attempt drover-wrap-up--recap-attempts))
+                              (run-at-time drover-wrap-up--recap-delay nil
+                                           (lambda ()
+                                             (drover-with-reporting "wrap-up"
+                                               (when (judging-p)
+                                                 (drover-wrap-up--judge entry (or (drover-wrap-up--record entry) record)
+                                                                        (1+ attempt))))))
+                            (drover-wrap-up--verdict entry (or (drover-wrap-up--record entry) record) recap)))))))))
 
 (defun drover-wrap-up--verdict (entry record recap)
   "Keep ENTRY's session, RECORD, open or close it, as RECAP, its last turn, tells."

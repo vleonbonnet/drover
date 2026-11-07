@@ -294,6 +294,45 @@ PROPERTIES are those of its record as the turn ends."
     (should-not (drover-session-archived-p (drover-find 'fake "s1")))
     (should (equal drover-wrap-up-test-warnings '("Session s1 stays open: its cleanup failed: Request aborted")))))
 
+(ert-deftest drover-wrap-up-test-reply-read-again ()
+  "A last reply that cannot be read is asked for again; one never read keeps the session open."
+  (drover-wrap-up-test-with 'terminal
+    (let ((asks 0)
+          (failures 2)
+          (drover-wrap-up--recap-delay 0.05))
+      (cl-letf (((symbol-function 'drover-test--recap)
+                 (lambda (_session callback)
+                   (setq asks (1+ asks))
+                   (funcall callback (if (<= asks failures)
+                                         '(:failure "no connection to 127.0.0.1:28894 within 5 s")
+                                       '(:reply "Removed ~/notes."))))))
+        (drover-wrap-up (drover-wrap-up-test-record))
+        (drover-wrap-up-test-take)
+        (should (drover-wrap-up-test-state 'watching))
+        (drover-wrap-up-test-turn)
+        (should (drover-wrap-up-test-ended))
+        (should (= asks 3))
+        (should (member "Wrapped up Session s1" drover-wrap-up-test-messages))
+        (should-not drover-wrap-up-test-warnings)
+        ;; Never read, it stays open.
+        (setq asks 0
+              failures 99)
+        (drover-unarchive-session (drover-find 'fake "s1"))
+        (setq drover-wrap-up-test-buffer (generate-new-buffer " *wrap-up session*"))
+        (with-current-buffer drover-wrap-up-test-buffer
+          (make-pipe-process :name "wrap-up-session" :buffer drover-wrap-up-test-buffer :noquery t)
+          (setq-local drover-session-at-point-function (lambda () (drover-find-archived 'fake "s1"))))
+        (drover-wrap-up-test-session :status 'idle :since 1.0 :updated 1.0)
+        (drover-wrap-up (drover-wrap-up-test-record))
+        (drover-wrap-up-test-take)
+        (should (drover-wrap-up-test-state 'watching))
+        (drover-wrap-up-test-turn)
+        (should (drover-wrap-up-test-ended))
+        (should (= asks drover-wrap-up--recap-attempts))
+        (should (buffer-live-p drover-wrap-up-test-buffer))
+        (should (equal drover-wrap-up-test-warnings
+                       '("Session s1 stays open: its last reply could not be read: no connection to 127.0.0.1:28894 within 5 s")))))))
+
 (ert-deftest drover-wrap-up-test-question-at-the-end-keeps-open ()
   "A last message ending in a question keeps the session open, without the keyword."
   (drover-wrap-up-test-with 'terminal
