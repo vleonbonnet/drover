@@ -717,6 +717,47 @@ CALLBACK may be called before this returns."
            (drover-cheap--fetch-auths #'done)))))))
 
 ;;;###autoload
+(defvar drover-cheap--signed-in-waiters nil
+  "Callbacks of `drover-cheap-signed-in' waiting for a read, newest first.
+t alone while a read is under way that none waits for.")
+
+(defun drover-cheap-signed-in (provider-id &optional then)
+  "Return how this host's OpenCode service is signed in to PROVIDER-ID.
+`subscription' for a login, such as ChatGPT's or Claude's, `api' for a
+key, `plugin' for a provider of no integration, as
+`drover-cheap-provider-auth' tells it, nil for a provider the service
+does not know or cannot use.  `unknown' while the provider catalog and
+the integrations are not read, as of their last change: they are read
+in the background, the local service running, and THEN, if any, is
+called without argument once they are, so that what depended on the
+answer is made anew.  A read under way is not started again."
+  (if (and (drover-cheap--ready-p) (eql (car drover-cheap--auths) drover-cheap--epoch))
+      (when-let* ((provider (seq-find (lambda (provider)
+                                        (and (consp provider) (equal (alist-get 'id provider) provider-id)))
+                                      (drover-cheap--local #'opencode-catalog 'provider
+                                                           (drover-cheap--directory)))))
+        (drover-cheap-provider-auth provider (cdr drover-cheap--auths)))
+    (if drover-cheap--signed-in-waiters
+        (when then
+          (setq drover-cheap--signed-in-waiters
+                (cons then (and (listp drover-cheap--signed-in-waiters) drover-cheap--signed-in-waiters))))
+      (when (drover-cheap-service-running-p)
+        (setq drover-cheap--signed-in-waiters (if then (list then) t))
+        (condition-case err
+            (drover-model-cheap-fetch
+             (lambda (result)
+               (let ((waiters (and (listp drover-cheap--signed-in-waiters)
+                                   (reverse drover-cheap--signed-in-waiters))))
+                 (setq drover-cheap--signed-in-waiters nil)
+                 (unless (plist-get result :failure)
+                   (dolist (waiter waiters)
+                     (drover-with-reporting "OpenCode's logins"
+                       (funcall waiter)))))))
+          (error (setq drover-cheap--signed-in-waiters nil)
+                 (signal (car err) (cdr err))))))
+    'unknown))
+
+;;;###autoload
 (defun drover-model-cheap (&optional interactive)
   "Return the cheap model of this host, or nil when none resolves or is known.
 The model is the plist of `drover-cheap-resolve', as the local OpenCode

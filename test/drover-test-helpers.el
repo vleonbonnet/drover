@@ -501,10 +501,12 @@ runs within BODY."
 The directory is bound to `home' in BODY, and deleted afterwards.
 `drover-claude-code-home' is its \"claude\", the managed settings
 `managed', `drover-codex-home' \"codex\", `drover-opencode-database'
-\"opencode/opencode.db\" and `drover-state-directory' \"state\";
-Claude Code gets no start flags, and starts in the directory asked
-for.  Environment variables overriding them are cleared, the Windows
-registry reads nothing, and cached JSON is forgotten."
+\"opencode/opencode.db\", the registration of OpenCode's service
+\"opencode/service.json\", which names none, and
+`drover-state-directory' \"state\"; Claude Code gets no start flags, and
+starts in the directory asked for.  Environment variables overriding
+them are cleared, the Windows registry reads nothing, and cached JSON
+is forgotten."
   (declare (indent 0) (debug t))
   `(let ((home (file-name-as-directory (make-temp-file "drover-homes" t))))
      ;; `dlet': `drover-opencode-database' may not be defined yet.
@@ -513,6 +515,7 @@ registry reads nothing, and cached JSON is forgotten."
             (drover-state-directory (expand-file-name "state" home))
             (drover-codex-home (expand-file-name "codex" home))
             (drover-opencode-database (expand-file-name "opencode/opencode.db" home))
+            (opencode-service-registration-file (expand-file-name "opencode/service.json" home))
             (drover-claude-code-start-flags-function (lambda () ""))
             (drover-claude-code-project-directory-function nil)
             (drover--json-cache (make-hash-table :test #'equal))

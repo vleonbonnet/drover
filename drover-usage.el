@@ -58,6 +58,7 @@
 (require 'drover-transcript)
 (require 'drover-claude-code)
 (require 'drover-codex)
+(require 'drover-cheap)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 19))
@@ -109,9 +110,12 @@ that option nor OpenCode's catalog prices.")
 (defconst drover-usage--former-billing
   '(((opencode "\\`github-copilot" included)
      (claude-code nil auto)
+     (codex nil auto))
+    ((claude-code nil auto)
      (codex nil auto)))
   "The former standard values of `drover-usage-billing'.
-Before GitHub Copilot billed its tokens, from June 2026.")
+Before GitHub Copilot billed its tokens, from June 2026, then before
+OpenCode's logins to subscriptions were told.")
 
 ;; Loaded over a drover of a former standard value, which `defcustom'
 ;; would keep, the usage takes the new one.
@@ -119,21 +123,25 @@ Before GitHub Copilot billed its tokens, from June 2026.")
   (makunbound 'drover-usage-billing))
 
 (defcustom drover-usage-billing
-  '((claude-code nil auto)
+  '((opencode "\\`github-copilot" priced)
+    (opencode nil auto)
+    (claude-code nil auto)
     (codex nil auto))
   "How the usage of each harness and provider is billed.
 Each entry is (HARNESS PROVIDER-REGEXP BILLING), the first match
 winning: HARNESS is an engine, such as `opencode', `claude-code' or
 `codex', or nil for any; PROVIDER-REGEXP matches the provider's
 identifier, or is nil for any; BILLING is `priced', each token paid,
-`included', a subscription paying for it, or `auto', for Claude Code
-and Codex, which tell how their CLI logs in: Claude Code through a
-subscription's account, without an API key nor a gateway of its own
-settings, and Codex through ChatGPT, are included.  Usage matching no
-entry is priced: GitHub Copilot's too, which bills each token at its
-model's list price since June 2026, drawn from the plan's monthly AI
-credits, and which OpenCode records.  An included usage shows its
-tokens, its cost \"included\"."
+`included', a subscription paying for it, or `auto', as the harness
+is signed in: Claude Code through a subscription's account, without an
+API key nor a gateway of its own settings, Codex through ChatGPT, and
+OpenCode to a provider through a login, such as ChatGPT's or Claude's
+\(see `drover-cheap-signed-in'), are included.  GitHub Copilot is
+priced, though OpenCode logs in to it: since June 2026 it bills each
+token at its model's list price, drawn from the plan's monthly AI
+credits, and OpenCode records that cost.  Usage matching no entry is
+priced.  An included usage shows its tokens, and what it would have
+cost at list prices, in the face `drover-usage-included'."
   :type '(repeat (list (choice (const :tag "Any harness" nil) symbol)
                        (choice (const :tag "Any provider" nil) regexp)
                        (choice (const priced) (const included) (const auto))))
@@ -1279,8 +1287,34 @@ through ChatGPT.  Of the files read, only that is kept."
                         drover-usage-billing)))
     (pcase (nth 2 rule)
       ('included 'included)
-      ('auto (if (drover-usage--login-included-p harness) 'included 'priced))
+      ('auto (if (if (eq harness 'opencode)
+                     (drover-usage--opencode-login-p provider)
+                   (drover-usage--login-included-p harness))
+                 'included
+               'priced))
       (_ 'priced))))
+
+(defun drover-usage--opencode-login-p (provider)
+  "Return non-nil when this host's OpenCode logs in to PROVIDER's subscription.
+As `drover-cheap-signed-in' tells it.  While that is not known, nil:
+once it is read, the usage is priced anew (see
+`drover-usage--signed-in-read')."
+  (and (stringp provider)
+       (eq (drover-cheap-signed-in provider #'drover-usage--signed-in-read) 'subscription)))
+
+(defun drover-usage--signed-in-read ()
+  "Price the usage anew, now that how OpenCode is signed in is read.
+The sessions of OpenCode listed are drawn again, and the change hook
+runs, as for any change of the usage."
+  (cl-incf drover-usage--generation)
+  (when (and (fboundp 'drover-views-changed) drover--index)
+    (let ((keys nil))
+      (dolist (session (drover-index-sessions))
+        (when (and (not (drover-session-host session))
+                   (eq (car (drover-usage--session-key session)) 'opencode))
+          (push (drover-session-key session) keys)))
+      (drover-views-changed keys)))
+  (drover-run-hook-reporting 'drover-usage-changed-hook))
 
 (defun drover-usage--normal-model (model)
   "Return MODEL's identifier compared with catalogs': downcased, dots as dashes.

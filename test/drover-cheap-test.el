@@ -554,6 +554,7 @@ without the route."
   `(let ((drover-cheap--auths nil)
          (drover-cheap--epoch 0)
          (drover-cheap--waiters nil)
+         (drover-cheap--signed-in-waiters nil)
          (drover-cheap--resolved nil)
          (drover-cheap--following t)
          (drover-cheap-host-kind 'mongodb)
@@ -640,6 +641,57 @@ without the route."
         (drover-cheap--integrations-changed)
         (drover-model-cheap-fetch (lambda (result) (push result results)))
         (should (string-search "Boom" (plist-get (car results) :failure)))))))
+
+(ert-deftest drover-cheap-test-signed-in ()
+  "How the service is signed in to a provider is unknown until read, then told."
+  (let ((catalogs `((model . ,drover-cheap-test-core-models) (provider . ,drover-cheap-test-core-providers)))
+        (integrations drover-cheap-test-core-integrations)
+        (called 0))
+    (drover-cheap-test-with-service catalogs integrations
+      (cl-flet ((then () (cl-incf called)))
+        ;; Not read yet: unknown, read, and told once read.
+        (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+        (should (= called 1))
+        (should (member '(get "/api/integration" nil) drover-cheap-test-requests))
+        ;; ChatGPT's login, a key, a provider of no integration, none.
+        (setq drover-cheap-test-requests nil)
+        (should (eq (drover-cheap-signed-in "openai" #'then) 'subscription))
+        (should (eq (drover-cheap-signed-in "ai-gateway-openai") 'api))
+        (should-not (drover-cheap-signed-in "nowhere"))
+        (should-not drover-cheap-test-requests)
+        (should (= called 1))
+        ;; The integrations changed: unknown until read again.
+        (setq integrations '(((id . "openai") (connections))))
+        (drover-cheap--integrations-changed)
+        (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+        (should (= called 2))
+        (should-not (eq (drover-cheap-signed-in "openai") 'subscription))
+        ;; A read under way is not started again; all waiting are told once.
+        (let ((pending nil))
+          (cl-letf (((symbol-function 'drover-model-cheap-fetch) (lambda (callback) (push callback pending))))
+            (drover-cheap--integrations-changed)
+            (should (eq (drover-cheap-signed-in "openai") 'unknown))
+            (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+            (should (eq (drover-cheap-signed-in "anthropic" #'then) 'unknown))
+            (should (= (length pending) 1))
+            (funcall (car pending) '(:none "none"))
+            (should (= called 4))
+            (should-not drover-cheap--signed-in-waiters)
+            ;; A failure tells none, and a next question reads again.
+            (setq pending nil)
+            (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+            (funcall (car pending) '(:failure "Boom"))
+            (should (= called 4))
+            (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+            (should (= (length pending) 2))))
+        ;; A service not running is never asked.
+        (cl-letf (((symbol-function 'opencode-service-read-registration) (lambda () nil)))
+          (setq drover-cheap--signed-in-waiters nil
+                drover-cheap-test-requests nil)
+          (drover-cheap--integrations-changed)
+          (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+          (should-not drover-cheap-test-requests)
+          (should-not drover-cheap--signed-in-waiters))))))
 
 ;;;; Asking it
 

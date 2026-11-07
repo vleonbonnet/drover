@@ -440,6 +440,46 @@ and a gateway, priced; one of three days ago; one running."
       (should (eq (drover-usage-billing 'opencode "github-copilot") 'priced))
       (should (eq (drover-usage-billing 'opencode "prodsec-gateway") 'priced)))))
 
+(ert-deftest drover-usage-test-billing-opencode ()
+  "OpenCode's usage through a login is included, as the service tells; Copilot's is priced.
+While the service's logins are not read, its usage is priced; once
+they are, it is priced anew, and views told."
+  (drover-usage-test-with
+    (let* ((drover-usage-billing (eval (car (get 'drover-usage-billing 'standard-value)) t))
+           (auths '(("openai" . subscription) ("github-copilot" . subscription) ("gateway" . api)))
+           (asked nil)
+           (waiting nil)
+           (hooked 0)
+           (drover-usage-changed-hook (list (lambda () (cl-incf hooked))))
+           (drover-usage-prices '(("gpt-6" :input 2 :output 10 :cache-read 0.2 :cache-write 0))))
+      (cl-letf (((symbol-function 'drover-cheap-signed-in)
+                 (lambda (provider &optional then)
+                   (push provider asked)
+                   (if auths
+                       (alist-get provider auths nil nil #'equal)
+                     (when then (push then waiting))
+                     'unknown))))
+        (should (eq (drover-usage-billing 'opencode "openai") 'included))
+        (should (eq (drover-usage-billing 'opencode "gateway") 'priced))
+        (should (eq (drover-usage-billing 'opencode "nowhere") 'priced))
+        ;; Copilot, though logged in, bills its tokens: not even asked.
+        (should (eq (drover-usage-billing 'opencode "github-copilot") 'priced))
+        (should-not (member "github-copilot" asked))
+        ;; What OpenCode's ChatGPT login used would have cost, at list prices.
+        (let ((fact (drover-usage--fact-make :harness 'opencode :provider "openai" :model "gpt-6" :id "ses_x"
+                                             :input 1000000 :output 100000 :cost 0)))
+          (should (equal (funcall (drover-usage--pricer) fact) '(included nil "included" 3.0))))
+        ;; Not read yet: priced, then anew once read.
+        (setq auths nil)
+        (should (eq (drover-usage-billing 'opencode "openai") 'priced))
+        (should (= (length waiting) 1))
+        (let ((generation drover-usage--generation))
+          (setq auths '(("openai" . subscription)))
+          (funcall (car waiting))
+          (should (> drover-usage--generation generation))
+          (should (= hooked 1))
+          (should (eq (drover-usage-billing 'opencode "openai") 'included)))))))
+
 (ert-deftest drover-usage-test-prices ()
   "Prices come from the user's table, then OpenCode's catalog, then drover's own."
   (drover-usage-test-with
