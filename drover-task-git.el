@@ -260,19 +260,38 @@ from others by it."
       (insert id "\n")
       (when setup (insert (format "setup: %s\n" setup))))))
 
+(defun drover-task-git--misread-p (worktree spelled)
+  "Return non-nil when Git listed WORKTREE prunable for misreading its path.
+SPELLED is its path as Git listed it.  On Windows, MSYS2's Git writes
+the worktrees it adds as /c/..., which Git for Windows reads as a
+directory under the drive's root: it lists such a worktree prunable,
+its gitdir file pointing to a location that does not exist, though its
+directory, c:/..., holds its .git file."
+  (and (plist-get worktree :prunable)
+       (memq system-type '(windows-nt cygwin))
+       (string-match-p "\\`/[a-zA-Z]/" spelled)
+       (file-exists-p (expand-file-name ".git" (plist-get worktree :path)))))
+
 (defun drover-task-git-parse-worktrees (output)
   "Return the worktrees `git worktree list --porcelain' OUTPUT lists, as plists.
 Each has :path, :head, :branch, :locked (its reason, or t), :prunable,
-:bare and :detached."
+:bare and :detached.  A worktree MSYS2's Git added on Windows, which
+Git for Windows lists prunable though it is not, is not prunable (see
+`drover-task-git--misread-p')."
   (let ((worktrees nil)
-        (current nil))
+        (current nil)
+        (spelled nil))
     (dolist (line (append (split-string (or output "") "\n") '("")))
       (cond
        ((string-empty-p line)
-        (when current (push current worktrees))
+        (when current
+          (when (drover-task-git--misread-p current spelled)
+            (setq current (plist-put current :prunable nil)))
+          (push current worktrees))
         (setq current nil))
        ((string-match "\\`worktree \\(.+\\)\\'" line)
-        (setq current (list :path (file-name-as-directory (drover-task-canonical (match-string 1 line))))))
+        (setq spelled (match-string 1 line)
+              current (list :path (file-name-as-directory (drover-task-canonical spelled)))))
        ((string-match "\\`HEAD \\([0-9a-f]+\\)\\'" line)
         (setq current (plist-put current :head (match-string 1 line))))
        ((string-match "\\`branch refs/heads/\\(.+\\)\\'" line)

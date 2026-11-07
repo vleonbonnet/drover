@@ -152,6 +152,37 @@ the test's own, not the user's: its home and current directory are root."
     (should (equal (drover-task-slug "Supercalifragilisticexpialidocious and more") "supercalifragilistic"))
     (should (equal (drover-task-slug "!!!") "task"))))
 
+(ert-deftest drover-task-test-parse-worktrees-prunable ()
+  "A worktree Git lists prunable is, unless Git for Windows misread MSYS2's path.
+MSYS2's Git writes the worktrees it adds as /c/..., which Git for
+Windows reads as a directory under the drive's root."
+  (let ((root (file-name-as-directory (file-truename (make-temp-file "drover-task-prunable" t)))))
+    (cl-flet ((listing (&rest paths)
+                (mapconcat (lambda (path)
+                             (concat "worktree " (directory-file-name path) "\nHEAD 0123abcd\nbranch refs/heads/x\n"
+                                     "prunable gitdir file points to non-existent location\n"))
+                           paths "\n"))
+              (msys (directory)
+                (if (string-match "\\`\\([a-zA-Z]\\):/" directory)
+                    (concat "/" (downcase (match-string 1 directory)) "/" (substring directory (match-end 0)))
+                  directory)))
+      (unwind-protect
+          (let ((live (expand-file-name "live/" root))
+                (gone (expand-file-name "gone/" root)))
+            (make-directory live t)
+            (write-region "gitdir: elsewhere\n" nil (expand-file-name ".git" live) nil 'silent)
+            ;; Spelled as this host spells it, Git's verdict holds.
+            (should (seq-every-p (lambda (worktree) (plist-get worktree :prunable))
+                                 (drover-task-git-parse-worktrees (listing live gone))))
+            (when (eq system-type 'windows-nt)
+              (pcase-let ((`(,kept ,pruned) (drover-task-git-parse-worktrees (listing (msys live) (msys gone)))))
+                (should (drover-task-same-file-p (plist-get kept :path) live))
+                (should (equal (plist-get kept :branch) "x"))
+                (should-not (plist-get kept :prunable))
+                (should (drover-task-same-file-p (plist-get pruned :path) gone))
+                (should (plist-get pruned :prunable)))))
+        (delete-directory root t)))))
+
 (ert-deftest drover-task-test-canonical ()
   "One directory, however spelt: aliases, MSYS's /c/, a drive's letter."
   (let ((drover-task-path-aliases '(("/Users/val/Documents/" . "/Users/val/local/"))))
