@@ -2114,6 +2114,15 @@ See `drover-fanout'."
   (unless drover-fanout-mode
     (drover-fanout-mode 1)))
 
+(defun drover-fanout-restore ()
+  "Turn `drover-fanout-mode' on when a fan-out is not over, no attempt kept.
+As drover first starts, when the file of fan-outs exists (see
+`drover--kept-modules'): attempts may still run, their checks to run as
+their turns end, and lists label them."
+  (when (seq-some (lambda (fanout) (not (eq (plist-get fanout :state) 'kept)))
+                  (drover-fanout--fanouts))
+    (drover-fanout-mode-ensure)))
+
 (defun drover-fanout-attempt-label (task number)
   "Return the label of the attempt NUMBER of the fan-out of TASK, or nil.
 The value of `drover-task-attempt-label-function'."

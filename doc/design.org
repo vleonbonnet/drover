@@ -157,7 +157,7 @@ Drover requires opencode.el (its =Package-Requires=), and neither agent-shell no
 
 * Starting backends
 
-=drover-start= runs each backend's =:start= once, and from then on starts every backend as it registers: a front end loaded after drover started, such as opencode.el loaded lazily, joins without another call.  Views and the attention mode call it when they open, so the first view opened starts everything.
+=drover-start= runs each backend's =:start= once, and from then on starts every backend as it registers: a front end loaded after drover started, such as opencode.el loaded lazily, joins without another call.  Views and the attention mode call it when they open, so the first view opened starts everything.  The first start also loads the modules keeping work across Emacs sessions, goals and fan-outs (=drover--kept-modules=), when their files exist, each turning its mode on while some of its work is not over, then runs =drover-start-hook=, for what follows the sessions, such as =drover-summary-mode=, to come up with drover rather than with Emacs: a module never used is never loaded as Emacs starts, nor its file read.
 
 * Subagents under their parents
 

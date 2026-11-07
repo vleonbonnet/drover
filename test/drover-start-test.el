@@ -26,6 +26,8 @@
 
 (require 'drover-test-helpers)
 (require 'drover-transcript-fixtures)
+(require 'drover-goal)
+(require 'drover-fanout)
 
 (defconst drover-start-test-codex "019f0000-0000-7000-8000-0000000000c1"
   "The identifier of the Codex conversation of the fixtures.")
@@ -234,48 +236,132 @@ is forgotten after."
 
 ;;;; An Emacs restarted
 
+(defun drover-start-test-new-emacs (home form)
+  "Run FORM in a batch Emacs of its own, and return what it printed, read.
+The Emacs loads drover as a user's init does, over the homes and the
+state of `drover-test-with-homes' under HOME; FORM prints one form."
+  (let* ((emacs (expand-file-name invocation-name invocation-directory))
+         (errors (expand-file-name "stderr" home))
+         (program
+          `(progn
+             (setq load-path ',load-path
+                   load-prefer-newer t)
+             (setq drover-claude-code-home ,drover-claude-code-home
+                   drover-codex-home ,drover-codex-home
+                   drover-state-directory ,(expand-file-name "state/" home)
+                   drover-claude-code-agents-interval nil
+                   drover-codex-program ,(expand-file-name "no-codex" home))
+             ;; As the package's autoloads would have it.
+             (require 'drover)
+             (require 'drover-attention)
+             ,form
+             (terpri))))
+    (with-temp-buffer
+      (let ((status (call-process emacs nil (list t errors) nil "-Q" "--batch"
+                                  "--eval" (prin1-to-string program))))
+        (unless (eql status 0)
+          (ert-fail (list status (string-limit (buffer-string) 2000 t)
+                          (with-temp-buffer
+                            (insert-file-contents errors)
+                            (string-limit (buffer-string) 2000 t))))))
+      (goto-char (point-max))
+      (forward-line -1)
+      (read (current-buffer)))))
+
 (ert-deftest drover-start-test-restart ()
   "An Emacs started anew lists the recorded conversations before any front end.
 A batch Emacs of its own loads drover, as a user's init does, and turns
 on `drover-attention-mode'; no front end loads."
   (drover-test-with-homes
     (drover-start-test-write-fixtures home)
-    (let* ((emacs (expand-file-name invocation-name invocation-directory))
-           (form
-            `(progn
-               (setq load-path ',load-path
-                     load-prefer-newer t)
-               (setq drover-claude-code-home ,drover-claude-code-home
-                     drover-codex-home ,drover-codex-home
-                     drover-state-directory ,(expand-file-name "state/" home)
-                     drover-claude-code-agents-interval nil
-                     drover-codex-program ,(expand-file-name "no-codex" home))
-               ;; As the package's autoloads would have it.
-               (require 'drover)
-               (require 'drover-attention)
-               (drover-attention-mode 1)
-               (let ((end (+ (float-time) 20)))
-                 (while (and (< (float-time) end)
-                             (not (and (drover-find 'claude-code "a1")
-                                       (drover-find 'codex ,drover-start-test-codex))))
-                   (sleep-for 0.05)))
-               (prin1 (list :claude (and (drover-find 'claude-code "a1") t)
-                            :codex (and (drover-find 'codex ,drover-start-test-codex) t)
-                            :front-ends (seq-filter #'featurep '(claude-code-ide agent-shell
-                                                                 drover-claude-code-ide
-                                                                 drover-agent-shell))
-                            :users (list drover-claude-code-transcripts--users
-                                         drover-codex-rollouts--users)))
-               (terpri)))
-           (output (with-temp-buffer
-                     (let ((status (call-process emacs nil t nil "-Q" "--batch"
-                                                 "--eval" (prin1-to-string form))))
-                       (unless (eql status 0)
-                         (ert-fail (list status (string-limit (buffer-string) 2000 t)))))
-                     (goto-char (point-max))
-                     (forward-line -1)
-                     (read (current-buffer)))))
-      (should (equal output '(:claude t :codex t :front-ends nil :users ((drover) (drover))))))))
+    (should (equal (drover-start-test-new-emacs
+                    home
+                    `(progn
+                       (drover-attention-mode 1)
+                       (let ((end (+ (float-time) 20)))
+                         (while (and (< (float-time) end)
+                                     (not (and (drover-find 'claude-code "a1")
+                                               (drover-find 'codex ,drover-start-test-codex))))
+                           (sleep-for 0.05)))
+                       (prin1 (list :claude (and (drover-find 'claude-code "a1") t)
+                                    :codex (and (drover-find 'codex ,drover-start-test-codex) t)
+                                    :front-ends (seq-filter #'featurep '(claude-code-ide agent-shell
+                                                                         drover-claude-code-ide
+                                                                         drover-agent-shell))
+                                    :users (list drover-claude-code-transcripts--users
+                                                 drover-codex-rollouts--users)))))
+                   '(:claude t :codex t :front-ends nil :users ((drover) (drover)))))))
+
+;;;; Work kept from an earlier Emacs
+
+(defun drover-start-test-goal (state)
+  "Return a goal in STATE, as the file of goals keeps them."
+  (list :id (format "g-%s" state) :link (concat drover-links-type ":fake/s1") :backend 'fake
+        :directory "/work/" :title "Fix" :kind 'check :commands '("make check") :state state
+        :iteration 1 :iterations 5 :minutes 60 :started 1.0))
+
+(defun drover-start-test-fanout (state)
+  "Return a fan-out in STATE, as the file of fan-outs keeps them."
+  (list :id (format "f-%s" state) :task "T1" :title "Fix" :mode 'parallel :state state :place nil
+        :checks '("make") :goal nil :created 1.0
+        :attempts (list (drover-fanout--new-attempt 1 (list :backend 'fake :engine 'fake :label "Fake")))))
+
+(defun drover-start-test-kept (home goals fanouts)
+  "Start an Emacs anew over GOALS and FANOUTS kept, and return what it did.
+No file is written for nil.  A plist: :loaded, the modules of goals and
+fan-outs loaded; :modes, their modes on; :hook, what the functions of
+`drover-start-hook' recorded, in order, drover started twice and the
+first of the two functions failing."
+  (let ((drover-state-directory (expand-file-name "state/" home)))
+    (when goals
+      (should (seq-every-p #'drover-goal-valid-p goals))
+      (drover-write-data (drover-goal-file) "Goals" drover-goal--version :goals goals))
+    (when fanouts
+      (should (seq-every-p #'drover-fanout-valid-p fanouts))
+      (drover-write-data (drover-fanout-file) "Fan-outs" drover-fanout--version :fanouts fanouts)))
+  (drover-start-test-new-emacs
+   home
+   '(let ((ran nil))
+      (add-hook 'drover-start-hook (lambda () (push 'broken ran) (error "Broken")))
+      (add-hook 'drover-start-hook (lambda () (push 'after ran)) 90)
+      (drover-attention-mode 1)
+      (drover-start)
+      (prin1 (list :loaded (seq-filter #'featurep '(drover-goal drover-fanout))
+                   :modes (seq-filter (lambda (mode) (and (boundp mode) (symbol-value mode)))
+                                      '(drover-goal-mode drover-fanout-mode))
+                   :hook (reverse ran))))))
+
+(ert-deftest drover-start-test-kept-work ()
+  "Starting, drover loads the modules of work kept, their modes on while some is not over.
+Without their files, neither loads.  `drover-start-hook' runs after
+them, once, a function failing stopping none after it."
+  (drover-test-with-homes
+    (should (equal (drover-start-test-kept home nil nil)
+                   '(:loaded nil :modes nil :hook (broken after)))))
+  (drover-test-with-homes
+    (should (equal (drover-start-test-kept home
+                                           (list (drover-start-test-goal 'met) (drover-start-test-goal 'waiting))
+                                           (list (drover-start-test-fanout 'kept) (drover-start-test-fanout 'settled)))
+                   '(:loaded (drover-goal drover-fanout) :modes (drover-goal-mode drover-fanout-mode)
+                     :hook (broken after)))))
+  (drover-test-with-homes
+    (should (equal (drover-start-test-kept home
+                                           (list (drover-start-test-goal 'paused))
+                                           nil)
+                   '(:loaded (drover-goal) :modes (drover-goal-mode) :hook (broken after)))))
+  (drover-test-with-homes
+    (should (equal (drover-start-test-kept home
+                                           (list (drover-start-test-goal 'met) (drover-start-test-goal 'stopped))
+                                           (list (drover-start-test-fanout 'kept)))
+                   '(:loaded (drover-goal drover-fanout) :modes nil :hook (broken after))))))
+
+(ert-deftest drover-start-test-kept-files ()
+  "Drover looks for the files the modules keep their work in."
+  (drover-test-with-state
+    (dolist (module '((drover-goal . drover-goal-file) (drover-fanout . drover-fanout-file)))
+      (should (equal (expand-file-name (plist-get (alist-get (car module) drover--kept-modules) :file)
+                                       drover-state-directory)
+                     (funcall (cdr module)))))))
 
 (provide 'drover-start-test)
 ;;; drover-start-test.el ends here

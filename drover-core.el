@@ -2168,17 +2168,47 @@ looked at: the backends read what was recorded later, in slices."
         (when (and (featurep (plist-get spec :file)) (drover--transcript-user-p spec))
           (funcall (plist-get spec :uninstall) 'drover))))))
 
+(defconst drover--kept-modules
+  '((drover-goal :file "goals.eld" :restore drover-goal-restore)
+    (drover-fanout :file "fanouts.eld" :restore drover-fanout-restore))
+  "The modules keeping work across Emacs sessions, by feature, as plists.
+:file is the file of `drover-state-directory' keeping it, and :restore
+the module's function following it again when some is not over.")
+
+(defun drover--restore-kept-modules ()
+  "Load and restore the modules whose files keep work, as drover first starts.
+A module without its file stays unloaded, so that a feature never used
+costs nothing at startup (see `drover--kept-modules')."
+  (pcase-dolist (`(,feature . ,spec) drover--kept-modules)
+    (when (file-exists-p (expand-file-name (plist-get spec :file) drover-state-directory))
+      (drover-with-reporting (format "restoring %s" feature)
+        (require feature)
+        (funcall (plist-get spec :restore))))))
+
+(defvar drover-start-hook nil
+  "Hook run once drover started, the first time in an Emacs session.
+For what follows drover's sessions, such as `drover-summary-mode' and
+`drover-task-mode', to come up with drover rather than with Emacs.
+Each function runs on its own: one failing stops neither the others
+nor drover (see `drover-run-hook-reporting').")
+
 (defun drover-start ()
   "Prepare every registered backend, and those registered from now on.
 The backends listing the conversations engines recorded are installed
 first (see `drover-transcript-engines').  The buffers an earlier Emacs
 session was to close once their turns ended are read first, then looked
-at as their backends start (see `drover--closing-restore')."
-  (setq drover--running t)
-  (drover--closing-restore)
-  (drover--install-transcript-backends)
-  (mapc #'drover--start-backend (drover-backends))
-  (drover--closing-resume))
+at as their backends start (see `drover--closing-restore').  The first
+time, the modules keeping work from an earlier Emacs session are
+restored (see `drover--kept-modules'), then `drover-start-hook' runs."
+  (let ((first (not drover--running)))
+    (setq drover--running t)
+    (drover--closing-restore)
+    (drover--install-transcript-backends)
+    (mapc #'drover--start-backend (drover-backends))
+    (drover--closing-resume)
+    (when first
+      (drover--restore-kept-modules)
+      (drover-run-hook-reporting 'drover-start-hook))))
 
 (defun drover--backend-sessions (properties)
   "Return the sessions of the backend of PROPERTIES, or nil when they fail.

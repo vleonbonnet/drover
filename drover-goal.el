@@ -1726,6 +1726,15 @@ The goals are read, those that ran before Emacs restarted paused; see
   (unless drover-goal-mode
     (drover-goal-mode 1)))
 
+(defun drover-goal-restore ()
+  "Turn `drover-goal-mode' on when a goal is not over.
+As drover first starts, when the file of goals exists (see
+`drover--kept-modules'): goals that ran come back paused, and the mode
+shows them."
+  (when (seq-some (lambda (goal) (memq (plist-get goal :state) (cons 'paused drover-goal--active)))
+                  (drover-goal--goals))
+    (drover-goal-mode-ensure)))
+
 (defun drover-goal-unload-function ()
   "Stop what runs for goals; they stay in their file."
   (when drover-goal-mode (drover-goal-mode -1))
