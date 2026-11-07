@@ -1736,7 +1736,7 @@ place, is the same row; see `drover-list--inputs'."
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
         ;; Printed with each row, so a digest of the harnesses, not them.
         (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon
-                                    drover-host drover-host-icon drover-context-pie-icons)))
+                                    drover-host drover-host-labels drover-host-icon drover-context-pie-icons)))
         drover-list--text-fields (plist-get metrics :caching)
         ;; Last: `drover-list--peers-of' compares the others.
         drover-list--measuring))
@@ -3915,6 +3915,7 @@ Asked with the sessions in sight while the list shows its column (see
         (copy-tree drover-filter)
         drover-show-subagents drover-show-history drover-show-archived
         drover-list-hidden-fields (copy-tree drover-list-fields)
+        (copy-tree drover-host-labels)
         drover-status-order drover-attention-statuses
         (drover-list--caching)))
 

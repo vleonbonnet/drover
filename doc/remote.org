@@ -29,16 +29,19 @@ Core's OpenCode service registers in =~/.local/state/opencode/service.json=, as 
 
 Each Emacs names its host with =drover-host=, a short lowercase name, =reaver= or =core=, by default the system's name up to its first dot, downcased; =drover-host-aliases= are other names it answers to in links.  The name travels in the peer protocol's greeting, and a peer announcing the name of this host, or a name another connected peer has, is refused: one Emacs per host serves that host's sessions.  A second Emacs on the same host, a test or a daemon, runs no peer layer unless told to with a name of its own.
 
+=drover-host-labels= maps those identifiers to display labels for local and remote hosts alike, for example =(("reaver" . "Reaver") ("core" . "Core"))= on both machines.  =drover-host-label= resolves every label, including the remote layer's status and messages; a peer's =:label= remains a fallback, then its canonical name.  Nil and this host's aliases resolve to this host's entry, a peer's aliases to its entry.  Labels never change identifiers, session keys or protocol host names, and local labels work without the remote layer enabled.
+
 ** Peers
 
 A peer is a host this Emacs exchanges sessions with, configured once per machine:
 
 #+begin_src elisp
-(setq drover-host "reaver"
-      drover-remote-peers
-      '(("core" :label "Core" :dial t :ssh "core" :program "myssh"
-         :access full :aliases ("core.local" "192.168.4.22")
-         :directories (("C:/Users/val/" . "~/")))))
+  (setq drover-host "reaver"
+        drover-host-labels '(("reaver" . "Reaver") ("core" . "Core"))
+        drover-remote-peers
+        '(("core" :dial t :ssh "core" :program "myssh"
+           :access full :aliases ("core.local" "192.168.4.22")
+           :directories (("C:/Users/val/" . "~/")))))
 #+end_src
 
 =:dial= has this Emacs connect to the peer through =:program= (=myssh= on Reaver; =:ssh= the host as the SSH configuration names it); without it, it waits for the peer to connect.  =:access= is what the peer may do with this host's sessions (see [[*Security][Security]]), =:directories= maps the peer's directories to this host's for clones.  A peer connecting in under a name not configured is refused unless =drover-remote-accept-unknown= says how (nil by default).
@@ -53,7 +56,7 @@ Records of the same conversation merge by =drover-session-engine-key=, which sta
 
 | Where      | What shows                                                                                                                                                                                                                                                |
 |------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| A column   | =host= in =drover-list-fields= names this host in the theme's success colour (=drover-host-local=) and a peer by its =:label=, dimmed; the sidebar shows a peer's icon alone and nothing for local sessions                                                    |
+| A column   | =host= in =drover-list-fields= uses =drover-host-labels= for every host, this host in the theme's success colour (=drover-host-local=), peers dimmed; the sidebar shows a peer's icon alone and nothing for local sessions                                                    |
 | Grouping   | =drover-group-by= gains =host=: this host first, then peers in the order configured; a group's heading tells a peer's state when it is not connected                                                                                                      |
 | Filtering  | =drover-filter= gains =:host=, a list of names, =local= naming this host                                                                                                                                                                                  |
 | Stale rows | the sessions of a peer not connected stay listed as last received, dimmed, their glyphs still; the host's cell reads =core 5m=, the time since it was last heard from, the tooltip the state, =reconnecting, attempt 3=, and the error last seen, bounded |

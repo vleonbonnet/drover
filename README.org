@@ -781,12 +781,15 @@ A front end also fits its buffers into the keys. A list of sessions sets =drover
 
 ** Peers
 
+=drover-host-labels= names local and remote hosts for display, independently of their identifiers. Share the same alist between machines so each keeps its label when viewed locally or remotely. A peer's =:label= remains a fallback, then its canonical name.
+
 #+begin_src emacs-lisp
   ;; On Reaver: dial Core through myssh.
-  (setq drover-remote-peers
-        '(("core" :label "Core" :dial t :program "myssh" :access full)
+  (setq drover-host-labels '(("reaver" . "Reaver") ("core" . "Core") ("adept" . "Pixel"))
+        drover-remote-peers
+        '(("core" :dial t :program "myssh" :access full)
           ;; A phone: it owns no sessions, and comes and goes.
-          ("adept" :label "Pixel" :viewer t :access full
+          ("adept" :viewer t :access full
            :heartbeat (15 . 60) :resume 300)))
   (drover-remote-mode 1)
 #+end_src

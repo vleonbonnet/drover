@@ -23,6 +23,22 @@
   "Return the identifiers of SESSIONS."
   (mapcar #'drover-session-id sessions))
 
+(ert-deftest drover-test-host-labels ()
+  "Display labels follow a host across local and remote roles, without peers."
+  (let ((drover-host-labels '(("core" . "Core") ("reaver" . "Reaver") ("blank" . "")))
+        (drover-host-label-function nil))
+    (dolist (drover-host '("core" "reaver"))
+      (let ((drover-host-aliases (list (concat drover-host ".local"))))
+        (should (equal (drover-host-label nil) (cdr (assoc drover-host drover-host-labels))))
+        (should (equal (drover-host-label (upcase (car drover-host-aliases))) (drover-host-label nil))))
+      (should (equal (drover-host-label "CORE") "Core"))
+      (should (equal (drover-host-label "reaver") "Reaver"))
+      (should (equal (drover-host-label "unknown") "unknown"))
+      (should (equal (drover-host-label "blank") "blank")))
+    (let ((drover-host "unlabelled") (drover-host-aliases '("unlabelled.local")))
+      (should (equal (drover-host-label nil) "unlabelled"))
+      (should (equal (drover-host-label "unlabelled.local") "unlabelled")))))
+
 (ert-deftest drover-test-sort-urgent-first ()
   (let ((sessions (list (drover-test-session "idle" :status 'idle :updated 50.0)
                         (drover-test-session "done-new" :status 'done :since 30.0)

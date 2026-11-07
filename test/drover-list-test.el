@@ -8415,6 +8415,32 @@ A function of `help-echo' is called as Emacs calls it."
     (let ((help (get-text-property (match-beginning 0) 'help-echo)))
       (if (functionp help) (funcall help nil (current-buffer) (match-beginning 0)) help))))
 
+(ert-deftest drover-list-test-host-labels ()
+  "Local and remote labels agree in rows and tooltips, including cached rows."
+  (drover-list-test-with (list (drover-test-session "a"))
+    (let ((drover-host-labels (copy-tree '(("here" . "Here") ("core" . "Core")))))
+      (setq drover-list-hidden-fields '(harness))
+      (drover-test-register-simple
+       'remote:core (list (drover-session-create :backend 'remote:core :id '(fake . "c") :host "core"
+                                                 :title "Remote" :status 'idle))
+       :remote "core")
+      (drover-list-test-with-font
+        (drover-list-test-layout-at 1000)
+        (should (string-search "Here" (drover-list-test-remote-line '(fake . "a"))))
+        (should (string-search "Core" (drover-list-test-remote-line '(remote:core fake . "c"))))
+        (should (equal (drover-list-test-tooltip-at '(fake . "a") "Here") "Host: Here (local)"))
+        (should (equal (drover-list-test-tooltip-at '(remote:core fake . "c") "Core") "Host: Core"))
+        (setcdr (assoc "here" drover-host-labels) "Local workstation")
+        (setcdr (assoc "core" drover-host-labels) "Windows")
+        (drover-list--render)
+        (should (string-search "Local workstation" (drover-list-test-remote-line '(fake . "a"))))
+        (should (string-search "Windows" (drover-list-test-remote-line '(remote:core fake . "c"))))
+        (let ((drover-group-by 'host))
+          (drover-list--render)
+          (should (equal (drover-list-test-groups) '((nil "a") ("core" (fake . "c")))))
+          (should (string-search "Local workstation" (drover-list-test-visible-text)))
+          (should (string-search "Windows" (drover-list-test-visible-text))))))))
+
 (ert-deftest drover-list-test-group-by-host ()
   "Grouped by host, this host comes first, then the others in order, each saying how it stands."
   (drover-list-test-with (list (drover-test-session "a"))

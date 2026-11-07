@@ -482,6 +482,16 @@ name (see `drover-session-host'), and links naming this host or one of
   :type '(repeat string)
   :group 'drover)
 
+(defcustom drover-host-labels nil
+  "Display labels of hosts, an alist (NAME . LABEL).
+NAME is a host's `drover-host', matched ignoring case, whether local
+or remote.  LABEL is a nonempty string, such as \"Core\" for \"core\".
+Without one, a peer's :label is used, else the host's name.
+Labels affect display alone, never session identities or connections."
+  :type '(alist :key-type (string :tag "Host")
+                :value-type (string :tag "Label"))
+  :group 'drover)
+
 (defun drover-host-local-p (host)
   "Return non-nil when HOST, a name, names this host.
 That is `drover-host' or one of `drover-host-aliases', ignoring case."
@@ -497,7 +507,8 @@ this order, after this host's.")
 
 (defvar drover-host-label-function nil
   "Function of a host's name returning how views name it, or nil.
-The remote layer (`drover-remote') sets it, to the label of each peer.")
+The remote layer (`drover-remote') sets it, to the label of each peer.
+`drover-host-labels' takes precedence.")
 
 (defvar drover-host-state-function nil
   "Function of a host's name telling how it stands when not connected, or nil.
@@ -511,12 +522,20 @@ It returns nil while the host is connected, else a line such as
        (drover-with-reporting "hosts"
          (funcall drover-hosts-function))))
 
-(defun drover-host-label (host)
-  "Return how views name HOST, a name, or this host for nil."
-  (or (and drover-host-label-function
-           (drover-with-reporting "host label"
-             (funcall drover-host-label-function host)))
-      (or host drover-host)))
+(defun drover-host-label (host &optional fallback)
+  "Return how views name HOST, a name, or this host for nil.
+This host's aliases use its canonical name's `drover-host-labels'
+entry too.  FALLBACK, when non-nil, is a label already resolved by the
+caller, used instead of `drover-host-label-function' when no entry
+names HOST.  Peers use it for their :label or canonical name."
+  (let* ((name (if (or (null host) (drover-host-local-p host)) drover-host host))
+         (label (cdr (assoc-string name drover-host-labels t))))
+    (or (and (stringp label) (not (string-empty-p label)) label)
+        fallback
+        (and drover-host-label-function
+             (drover-with-reporting "host label"
+               (funcall drover-host-label-function host)))
+        name)))
 
 (defun drover-host-state (host)
   "Return how HOST, a name, stands when it is not connected, a line, else nil.

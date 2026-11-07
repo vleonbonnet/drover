@@ -176,7 +176,8 @@
   "The hosts this Emacs exchanges sessions with, an alist (NAME . PROPERTIES).
 NAME is the host's name, its `drover-host' there.  PROPERTIES is a plist:
 
- :label         How views name it; NAME by default.
+ :label         How views name it unless `drover-host-labels' names it;
+                NAME by default.
  :dial          Non-nil to connect to it; otherwise this Emacs waits for
                 it to connect.
  :ssh           The host as SSH names it; NAME by default.
@@ -592,9 +593,10 @@ anew, and peers greet each other again."
 (defun drover-remote--label (peer)
   "Return how views name PEER."
   (let ((label (plist-get (drover-remote--peer-properties peer) :label)))
-    (if (and (stringp label) (not (string-empty-p label)))
-        label
-      (drover-remote--peer-name peer))))
+    (drover-host-label (drover-remote--peer-name peer)
+                       (if (and (stringp label) (not (string-empty-p label)))
+                           label
+                         (drover-remote--peer-name peer)))))
 
 (defun drover-remote--access (peer)
   "Return what PEER may do with this host's sessions: `read', `act' or `full'."
@@ -6605,9 +6607,8 @@ added is dialed if it says so."
 
 (defun drover-remote--host-label (host)
   "Return how views name HOST, for `drover-host-label-function'."
-  (if-let* ((peer (and host (drover-remote--peer host))))
-      (drover-remote--label peer)
-    (or host drover-host)))
+  (when-let* ((peer (and host (or (drover-remote--peer host) (drover-remote--find-peer host)))))
+    (drover-remote--label peer)))
 
 (defun drover-remote--host-state (host)
   "Return how HOST stands when its sessions are stale, else nil.
