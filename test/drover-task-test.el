@@ -74,6 +74,8 @@
 
 (defun drover-task-test-commit (directory file content message)
   "Write CONTENT to FILE in DIRECTORY and commit it with MESSAGE."
+  (unless (and directory (file-directory-p directory))
+    (error "Test repository directory is missing"))
   (drover-test-write (expand-file-name file directory) content)
   (drover-task-test-git directory "add" "--" file)
   (drover-task-test-git directory "commit" "-q" "-m" message))
@@ -83,11 +85,10 @@
 `root' is the temporary directory holding them, deleted after;
 `drover-task-repositories' names the checkout \"test/repo\", whose
 worktrees go under root's worktrees/.  Git's identity and defaults are
-the test's own, not the user's: its home is root, the current directory
-expanded first, as it may be under the user's home."
+the test's own, not the user's: its home and current directory are root."
   (declare (indent 0) (debug t))
-  `(let* ((default-directory (expand-file-name default-directory))
-          (root (file-name-as-directory (file-truename (make-temp-file "drover-task-test" t))))
+  `(let* ((root (file-name-as-directory (file-truename (make-temp-file "drover-task-test" t))))
+          (default-directory root)
           (origin (expand-file-name "origin.git/" root))
           (checkout (expand-file-name "repo/" root))
           (process-environment (append (list (concat "HOME=" root) "GIT_CONFIG_NOSYSTEM=1"
@@ -131,6 +132,13 @@ expanded first, as it may be under the user's home."
              (drover-task-test-git checkout "worktree" "list" "--porcelain"))))
 
 ;;;; Names and paths
+
+(ert-deftest drover-task-test-fixture-isolated ()
+  "Failed setup cannot make later fixture writes land in the user's checkout."
+  (drover-task-test-with-repo
+    (should (equal default-directory root))
+    (should-error (drover-task-test-commit nil "leaked" "data" "Leak"))
+    (should-not (file-exists-p (expand-file-name "leaked" root)))))
 
 (ert-deftest drover-task-test-slug ()
   "A task's name: its Jira key, then the words of its title, cut between words."
