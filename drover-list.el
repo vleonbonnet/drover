@@ -2015,10 +2015,11 @@ draws it."
 (defun drover-list--whole-p (field)
   "Return non-nil when FIELD is drawn whole or not at all, never cut.
 Those are the fields of a short text: the ages, cut, would read as
-another age, and the context and cache, a bar and a number, and the
-changes, counts, would mislead; the provider is an icon.  Their
-columns may give up only the room of their names."
-  (memq field '(cache context changes created age provider)))
+another age, and the context and cache, a bar and a number, the
+changes, counts, and the cost, an amount, such as $19.76 cut to
+$19.…, would mislead; the provider is an icon.  Their columns may give
+up only the room of their names."
+  (memq field '(cache context changes cost created age provider)))
 
 (defun drover-list--compact-p (field)
   "Return non-nil when FIELD shows its head alone where room is short.

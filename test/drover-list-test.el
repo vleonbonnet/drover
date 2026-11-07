@@ -7451,6 +7451,29 @@ pixel each, so \"11m\", 26 pixels, was cut in a column of 25 or of its
         (should (member "11m" cells))
         (should (seq-find (lambda (cell) (string-match-p "provider…\\|exp…\\|…\\'" cell)) cells))))))
 
+(ert-deftest drover-list-test-cost-never-cut ()
+  "A cost shows whole or not at all: an amount cut reads as another.
+Without a :max, its column gave up room with the summary's, in
+proportion, so that $0.79+ showed as $0.7… while the summary had room."
+  (drover-list-test-with (drover-list-test-ages-sample)
+    (let ((drover-list-usage-function
+           (lambda (session form)
+             (pcase form
+               ((or 'column 'value) (if (equal (drover-session-id session) "a") "$19.76" "$0.79+"))))))
+      (drover-list-test-with-font
+        (let ((shown nil))
+          (dolist (width '(1400 1300 1200 1100 1000 900))
+            (drover-list-test-layout-at width)
+            (when (memq 'cost drover-list--fields)
+              (push width shown)
+              (should (member "$19.76" (mapcar #'cdr (drover-list-test-cells "a"))))
+              (should (member "$0.79+" (mapcar #'cdr (drover-list-test-cells "b"))))
+              ;; The summary gave way instead, within the line.
+              (let ((last (car (last (drover-list-test-cells "b")))))
+                (should (<= (+ (car last) (drover-list-test-fake-width (cdr last)))
+                            (- width 7))))))
+          (should shown))))))
+
 (ert-deftest drover-list-test-columns-give-exactly ()
   "Columns give up the room missing, no more: no column is narrowed while the line has room."
   (drover-list-test-with (drover-list-test-ages-sample)
