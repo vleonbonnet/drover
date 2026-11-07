@@ -692,7 +692,11 @@ after a compaction until the next step measures it:
           :context-tier (plist-get usage :tier))))
 
 (defun drover-opencode--session (entry)
-  "Return the `drover-session' of `opencode-state' registry ENTRY."
+  "Return the `drover-session' of `opencode-state' registry ENTRY.
+Its directory is spelt as Emacs spells one, as the other backends' are:
+the service upcases a drive's letter, which Emacs writes lower case, so
+that one directory is one string; opencode.el spells it as the service
+does again whenever it is sent."
   (let ((directory (plist-get entry :directory))
         (status (opencode-state-status entry))
         (cache (opencode-state-cache (plist-get entry :id))))
@@ -702,7 +706,7 @@ after a compaction until the next step measures it:
            :engine 'opencode
            :engine-id (plist-get entry :id)
            :title (plist-get entry :title)
-           :directory directory
+           :directory (and directory (file-name-as-directory directory))
            :project (drover-opencode--project-name (plist-get entry :project-id) directory)
            :branch (and directory (drover-git-branch directory))
            :parent (plist-get entry :parent-id)

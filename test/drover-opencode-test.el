@@ -1508,7 +1508,10 @@ rendering of a prompt and of output."
           (should (eq (drover-session-backend old) 'opencode))
           (should (equal (drover-session-engine-key old) '(opencode . "ses_old")))
           (should (equal (drover-session-title old) "An old one"))
-          (should (equal (drover-session-directory old) directory))
+          ;; Spelt as Emacs spells it: on Windows, its drive lower case.
+          (should (equal (drover-session-directory old) (file-name-as-directory directory)))
+          (when (eq system-type 'windows-nt)
+            (should (string-match-p "\\`[a-z]:/" (drover-session-directory old))))
           (should (equal (drover-session-project old) "Drover"))
           (should (equal (drover-session-branch old) "main"))
           (should (equal (drover-session-parent old) "ses_parent"))
