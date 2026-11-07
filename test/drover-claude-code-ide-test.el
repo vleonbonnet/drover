@@ -159,6 +159,8 @@ Terminals BODY makes are killed."
          (drover--resumer-properties nil)
          (drover-claude-code-transcripts--users nil)
          (drover-claude-code-transcripts--index nil)
+         (drover-claude-code-transcripts--title-queue nil)
+         (drover-claude-code-transcripts--title-scan nil)
          (drover-codex-rollouts--users nil)
          (drover-codex-rollouts--index nil)
          (window-selection-change-functions window-selection-change-functions)
@@ -1554,22 +1556,111 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
 ;;;; Actions
 
 (ert-deftest drover-claude-code-ide-test-rename ()
-  "A renamed terminal keeps its name against terminal titles."
+  "Renaming types /rename in the terminal, once its turn ended and its input box is empty.
+Claude Code records the title, which the transcript is looked at for
+soon after; the buffer is named after it once read, not before."
   (drover-claude-code-ide-test-with
-    (let ((ghostel (drover-claude-code-ide-test-terminal "*claude* ghostel"))
-          (vterm (drover-claude-code-ide-test-terminal "*claude* vterm" :mode 'vterm-mode)))
-      (with-current-buffer ghostel
-        (setq-local ghostel-buffer-name-function #'ignore))
-      (with-current-buffer vterm
-        (setq-local vterm-buffer-name-string "*claude* %s"))
-      (drover-rename (drover-claude-code-ide-test-session ghostel) "Review")
-      (drover-rename (drover-claude-code-ide-test-session vterm) "Build")
-      (should (equal (buffer-name ghostel) "*claude* Review"))
-      (should (equal (buffer-name vterm) "*claude* Build"))
-      (should-not (buffer-local-value 'ghostel-buffer-name-function ghostel))
-      (should-not (buffer-local-value 'vterm-buffer-name-string vterm))
-      (should (equal (drover-session-title (drover-claude-code-ide-test-session ghostel)) "Review"))
-      (should drover-claude-code-ide-test-changes))))
+    (drover-claude-code-ide-test-typing
+      (let ((terminal (drover-claude-code-ide-test-terminal "*claude* rename"))
+            (box '(:cursor 1 :line "● Done"))
+            (checked nil))
+        (with-current-buffer terminal
+          (setq-local ghostel--pid 7))
+        (setq drover-claude-code-ide-test-pids '((7 . "conv")))
+        (cl-letf (((symbol-function 'drover-claude-code-ide--input-box) (lambda (_) box))
+                  ((symbol-function 'drover-claude-code-transcripts-check) (lambda (id) (push id checked))))
+          (cl-flet ((rename (title) (drover-rename (drover-claude-code-ide-test-session terminal) title)))
+            ;; Not reading input, a draft, a turn.
+            (should-error (rename "Review") :type 'user-error)
+            (setq box '(:cursor 1 :line ">" :box t :text "half a prompt" :lines 1))
+            (should-error (rename "Review") :type 'user-error)
+            (setq box '(:cursor 1 :line ">" :box t :text "" :lines 1))
+            (drover-claude-code-ide-test-status terminal '(("" :state working)))
+            (should-error (rename "Review") :type 'user-error)
+            (should-not (drover-claude-code-ide-test-called 'ghostel-send-string))
+            (drover-claude-code-ide-test-status terminal '(("" :state done)))
+            (should-error (rename " \n ") :type 'user-error)
+            (rename "  Review\nthe   drafts ")
+            (should (equal (drover-claude-code-ide-test-called 'ghostel-send-string) '(("/rename Review the drafts"))))
+            (should (equal (drover-claude-code-ide-test-called 'ghostel-send-key) '(("return"))))
+            (should-not checked)
+            (drover-claude-code-ide-test-fire)
+            (should (equal checked '("conv")))
+            (should (equal (buffer-name terminal) "*claude* rename"))))))))
+
+(ert-deftest drover-claude-code-ide-test-conversation-title ()
+  "A terminal is listed under its conversation's title, and named after it.
+Its buffer's name tells the title until the conversation's transcript
+does; the name of the agent Claude Code gives the session as its plan
+is approved, which the terminal's title shows, is no title.  Named so,
+the terminal's title no longer renames the buffer; a name the user
+gave the buffer stays."
+  (drover-test-with-homes
+    (drover-claude-code-ide-test-with
+      (let* ((project (file-name-as-directory (expand-file-name "work" home)))
+             (file (drover-fixture-claude "c3" project :ai-title "Login redirect"))
+             (terminal (drover-claude-code-ide-test-terminal "*claude* ~/work" :directory project
+                                                             :mcp-session t))
+             (vterm (drover-claude-code-ide-test-terminal "*claude* ~/vterm" :directory project
+                                                          :mode 'vterm-mode)))
+        (with-current-buffer terminal
+          (setq-local ghostel-buffer-name-function #'ignore))
+        (with-current-buffer vterm
+          (setq-local vterm-buffer-name-string "*claude* %s"))
+        (cl-flet ((title () (drover-session-title (drover-claude-code-ide-test-session terminal)))
+                  (follow (changed)
+                    (let ((drover-changed-sessions changed))
+                      (drover-claude-code-ide--follow-titles))))
+          (drover-transcript-scan drover-claude-code-transcripts--index)
+          ;; Its conversation unknown, the buffer's name.
+          (should (equal (title) "~/work"))
+          (follow t)
+          (should (equal (buffer-name terminal) "*claude* ~/work"))
+          (with-current-buffer terminal
+            (setq-local drover-claude-code-ide-session-id "c3"))
+          (should (equal (title) "Login redirect"))
+          ;; Named once drover is told something changed.
+          (follow (list (cons 'claude-code-ide (drover-session-id (drover-claude-code-ide-test-session vterm)))))
+          (should (equal (buffer-name terminal) "*claude* ~/work"))
+          (follow (list (cons 'claude-code "c3")))
+          (should (equal (buffer-name terminal) "*claude* Login redirect"))
+          (should-not (buffer-local-value 'ghostel-buffer-name-function terminal))
+          (should (memq 'claude-code-ide (mapcar #'car drover-claude-code-ide-test-changes)))
+          ;; A plan approved: the agent's name is no title.
+          (drover-fixture-claude-append file
+                                        (drover-fixture-claude-meta "c3" "ai-title" :aiTitle "fix-login-redirect")
+                                        (drover-fixture-claude-meta "c3" "agent-name" :agentName "fix-login-redirect"))
+          (drover-transcript-scan drover-claude-code-transcripts--index)
+          (should (equal (title) "Login redirect"))
+          ;; The title the user gave, as /rename records it.
+          (drover-fixture-claude-append file (drover-fixture-claude-meta "c3" "custom-title" :customTitle "Redirect review"))
+          (drover-transcript-scan drover-claude-code-transcripts--index)
+          (follow t)
+          (should (equal (title) "Redirect review"))
+          (should (equal (buffer-name terminal) "*claude* Redirect review"))
+          ;; A vterm terminal of the conversation too, uniquely.
+          (with-current-buffer vterm
+            (setq-local drover-claude-code-ide-session-id "c3"))
+          (follow t)
+          (should (equal (buffer-name vterm) "*claude* Redirect review<2>"))
+          (should-not (buffer-local-value 'vterm-buffer-name-string vterm))
+          (follow t)
+          (should (equal (buffer-name vterm) "*claude* Redirect review<2>"))
+          ;; A name the user gave the buffer stays.
+          (with-current-buffer terminal
+            (rename-buffer "my notes"))
+          (drover-fixture-claude-append file (drover-fixture-claude-meta "c3" "custom-title" :customTitle "Again"))
+          (drover-transcript-scan drover-claude-code-transcripts--index)
+          (follow t)
+          (should (equal (buffer-name terminal) "my notes"))
+          (should (equal (title) "Again"))
+          (should (equal (buffer-name vterm) "*claude* Again"))
+          ;; Not named after titles at all.
+          (let ((drover-claude-code-ide-name-after-title nil))
+            (drover-fixture-claude-append file (drover-fixture-claude-meta "c3" "custom-title" :customTitle "Third"))
+            (drover-transcript-scan drover-claude-code-transcripts--index)
+            (follow t)
+            (should (equal (buffer-name vterm) "*claude* Again"))))))))
 
 (ert-deftest drover-claude-code-ide-test-interrupt ()
   "Interrupting presses escape in the terminal."
@@ -1725,6 +1816,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
       (should (equal ghostel-program-status-functions
                      '(drover-claude-code-ide--status-changed ghostel-status-mode-line)))
       (should (memq #'drover-claude-code-ide--terminal-exited ghostel-exit-functions))
+      (should (memq #'drover-claude-code-ide--follow-titles drover-changed-hook))
       (should (memq #'drover-claude-code-ide--add-hooks after-load-functions))
       (should (memq #'drover-claude-code-ide--note-focus window-selection-change-functions))
       (should (memq #'drover-claude-code-ide--note-focus window-buffer-change-functions))
@@ -1745,6 +1837,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
       (should-not vterm-mode-hook)
       (should (equal ghostel-program-status-functions '(ghostel-status-mode-line)))
       (should-not ghostel-exit-functions)
+      (should-not (memq #'drover-claude-code-ide--follow-titles drover-changed-hook))
       (should-not (memq #'drover-claude-code-ide--add-hooks after-load-functions))
       (should-not (memq #'drover-claude-code-ide--note-focus window-selection-change-functions))
       (should-not (memq #'drover-claude-code-ide--note-focus window-buffer-change-functions))

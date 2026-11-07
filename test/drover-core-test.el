@@ -633,6 +633,22 @@ holds the identifiers its :session was asked for."
           (should (assoc '(fake . "p") (drover--archive)))
           (should-not (drover-sessions)))))))
 
+(ert-deftest drover-test-recorded-title ()
+  "A front end takes the title of the conversation it follows from the backend recording it."
+  (drover-test-with-backend nil
+    (drover-test-register-simple 'records #'ignore :recorded '(fake)
+                                 :recorded-title (lambda (id)
+                                                   (pcase id
+                                                     ("c1" "Login redirect")
+                                                     ("blank" " ")
+                                                     ("bad" (error "Unreadable")))))
+    (should (equal (drover-recorded-title 'fake "c1") "Login redirect"))
+    (should-not (drover-recorded-title 'fake "blank"))
+    (should-not (drover-recorded-title 'fake "unknown"))
+    (should-not (drover-recorded-title 'fake nil))
+    (should-not (drover-recorded-title 'other "c1"))
+    (should-not (drover-recorded-title 'fake "bad"))))
+
 (ert-deftest drover-test-restore-older-recorded ()
   "A conversation drover archived is restored when a recording backend lists it among older ones."
   (drover-test-with-backend nil

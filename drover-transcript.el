@@ -452,6 +452,23 @@ listed again only once its modification time tells files came or went."
         (setf (drover-transcript-index-dirty index) t)
         (drover-transcript--change index file (and entry (drover-transcript-data entry)) data))))))
 
+(defun drover-transcript-update (index file function)
+  "Replace what INDEX read of FILE with what FUNCTION makes of it.
+FUNCTION is called with the data read of FILE, a plist it must not
+change, and returns the new data, or nil to leave it.  For what a
+backend learns of FILE besides the index's reads, such as by reading it
+whole in the background: the entry keeps the size, time and inode it
+was read at, and the backend is told of the change as of a read.
+Return non-nil when the data changed."
+  (when-let* ((entry (drover-transcript-entry index file))
+              (old (drover-transcript-data entry))
+              (new (funcall function old))
+              ((not (equal old new))))
+    (setf (drover-transcript-data entry) new
+          (drover-transcript-index-dirty index) t)
+    (drover-transcript--change index file old new)
+    t))
+
 (defun drover-transcript--begin (index)
   "Begin a look of INDEX at its files, unless one is under way.
 It checks every file when its turn came (see

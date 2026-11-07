@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 24
+(defconst drover-core-generation 25
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1901,6 +1901,12 @@ PROPERTIES is a plist of:
              nil when it knows none.  It must answer at once.  A front
              end following the conversation takes them from there (see
              `drover-recorded-run').
+ :recorded-title
+             Function of an engine identifier returning the title of
+             that conversation as recorded, a string, or nil when it
+             knows none.  It must answer at once.  A front end
+             following the conversation lists it under that title
+             rather than one of its own (see `drover-recorded-title').
  :recorded-seen
              Function of an engine identifier noting that the user saw
              the conversation as of now: a front end following it
@@ -2397,6 +2403,20 @@ come first and win."
                             (run (drover-with-reporting "recorded run"
                                    (funcall function engine-id))))
                   (and (plistp run) run)))
+              (drover--recording-backends engine))))
+
+(defun drover-recorded-title (engine engine-id)
+  "Return the title of ENGINE's conversation ENGINE-ID, as recorded, or nil.
+It is the title the first backend recording ENGINE tells (see
+:recorded-title in `drover-register-backend'), for a front end's record
+of the conversation, whose own title, such as its buffer's name, it
+stands before."
+  (when (and engine engine-id)
+    (seq-some (lambda (backend)
+                (when-let* ((function (drover-backend-property backend :recorded-title))
+                            (title (drover-with-reporting "recorded title"
+                                     (funcall function engine-id))))
+                  (and (stringp title) (not (string-blank-p title)) title)))
               (drover--recording-backends engine))))
 
 (defun drover--note-followed (record)

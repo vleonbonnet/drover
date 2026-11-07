@@ -39,6 +39,8 @@ empty; `home' is the homes' directory, and `index' the index."
              (drover-claude-code-transcripts--index nil)
              (drover-claude-code-transcripts--agents (make-hash-table :test #'equal))
              (drover-claude-code-transcripts--recent nil)
+             (drover-claude-code-transcripts--title-queue nil)
+             (drover-claude-code-transcripts--title-scan nil)
              (drover-claude-code-agents-interval nil)
              (drover-claude-code-history-days nil)
              (drover--resumers nil)
@@ -135,6 +137,117 @@ killed after."
       (drover-fixture-claude-append file (drover-fixture-claude-meta "t1" "custom-title" :customTitle "Renamed"))
       (drover-claude-code-transcripts-test-scan)
       (should (equal (drover-session-title (drover-find 'claude-code "t1")) "Renamed")))))
+
+(defun drover-claude-code-transcripts-test-approve (file id name)
+  "Append to transcript FILE of conversation ID what the CLI records as a plan is approved.
+NAME is the agent's name it gives the session: an ai-title, then the
+agent's name, as at every turn after."
+  (drover-fixture-claude-append file
+                                (drover-fixture-claude-meta id "ai-title" :aiTitle name)
+                                (drover-fixture-claude-meta id "agent-name" :agentName name)))
+
+(defun drover-claude-code-transcripts-test-title (id)
+  "Look at the transcripts, then return the title drover lists conversation ID under."
+  (drover-claude-code-transcripts-test-scan)
+  (drover-session-title (drover-find 'claude-code id)))
+
+(defun drover-claude-code-transcripts-test-titles-read (&optional seconds)
+  "Wait for the transcripts read whole for their titles, SECONDS at most.
+Then follow the changes reported.  Return non-nil when none is left."
+  (let ((deadline (+ (float-time) (or seconds 10))))
+    (while (and (or drover-claude-code-transcripts--title-scan drover-claude-code-transcripts--title-queue)
+                (< (float-time) deadline))
+      (accept-process-output nil 0.005))
+    (drover-changed-now)
+    (not (or drover-claude-code-transcripts--title-scan drover-claude-code-transcripts--title-queue))))
+
+(ert-deftest drover-claude-code-transcripts-test-plan-names ()
+  "The name the CLI gives a session as its plan is approved is no title.
+It records that name as an ai-title, then as the agent's name, at every
+turn after: the title is the newest ai-title naming no agent, as Claude
+Code's desktop app shows it; else that name, before the first prompt."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "p1" project :ai-title "Login redirect")))
+      (should (equal (drover-claude-code-transcripts-test-title "p1") "Login redirect"))
+      (dotimes (_ 2)
+        (drover-claude-code-transcripts-test-approve file "p1" "fix-login-redirect"))
+      (should (equal (drover-claude-code-transcripts-test-title "p1") "Login redirect"))
+      (should (equal (drover-recorded-title 'claude-code "p1") "Login redirect"))
+      (should (equal (plist-get (drover-claude-code-transcripts--data "p1") :agent-names)
+                     '("fix-login-redirect")))
+      (should-not (plist-get (drover-claude-code-transcripts--data "p1") :title-unread))
+      ;; Another plan approved: neither name is a title.
+      (drover-claude-code-transcripts-test-approve file "p1" "redirect-tests")
+      (should (equal (drover-claude-code-transcripts-test-title "p1") "Login redirect"))
+      ;; The CLI titles the session anew.
+      (drover-fixture-claude-append file (drover-fixture-claude-meta "p1" "ai-title" :aiTitle "Redirect tests"))
+      (drover-claude-code-transcripts-test-approve file "p1" "redirect-tests")
+      (should (equal (drover-claude-code-transcripts-test-title "p1") "Redirect tests"))
+      ;; The title the user gave wins, as --name and /rename record it.
+      (drover-fixture-claude-append file
+                                    (drover-fixture-claude-meta "p1" "custom-title" :customTitle "Mine")
+                                    (drover-fixture-claude-meta "p1" "agent-name" :agentName "Mine"))
+      (should (equal (drover-claude-code-transcripts-test-title "p1") "Mine")))
+    ;; Without a generated title, the agent's name.
+    (let ((file (drover-fixture-claude "p2" (expand-file-name "work/" home) :prompt "Plan the client")))
+      (should (equal (drover-claude-code-transcripts-test-title "p2") "Plan the client"))
+      (drover-claude-code-transcripts-test-approve file "p2" "plan-the-client")
+      (should (equal (drover-claude-code-transcripts-test-title "p2") "plan-the-client")))
+    (should-not (drover-recorded-title 'claude-code "unknown"))))
+
+(ert-deftest drover-claude-code-transcripts-test-plan-name-read-between ()
+  "An ai-title read before the record of its agent's name is no title once that is read.
+The CLI appends the two records apart: a look between them takes the
+name for a generated title, the next one reads the transcript whole for
+the title it hid."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           ;; Long enough to be read from where it ended, not anew.
+           (file (drover-fixture-claude "g1" project :filler (* 3 drover-transcript-window)
+                                        :ai-title "Login redirect")))
+      (should (equal (drover-claude-code-transcripts-test-title "g1") "Login redirect"))
+      (drover-fixture-claude-append file (drover-fixture-claude-meta "g1" "ai-title" :aiTitle "fix-login"))
+      (should (equal (drover-claude-code-transcripts-test-title "g1") "fix-login"))
+      (drover-fixture-claude-append file (drover-fixture-claude-meta "g1" "agent-name" :agentName "fix-login"))
+      (drover-claude-code-transcripts-test-scan)
+      (should (plist-get (drover-claude-code-transcripts--data "g1") :title-unread))
+      (should (drover-claude-code-transcripts-test-titles-read))
+      (should (equal (drover-session-title (drover-find 'claude-code "g1")) "Login redirect"))
+      (should-not (plist-get (drover-claude-code-transcripts--data "g1") :title-unread)))))
+
+(ert-deftest drover-claude-code-transcripts-test-title-far-back ()
+  "A generated title further back than a read looks is found by reading the whole file.
+Read in the background, in slices; until then the agent's name stands
+for it, and the title is reported once found."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "far" project :filler (* 2 drover-transcript-window)
+                                        :ai-title "Session titles")))
+      (drover-claude-code-transcripts-test-approve file "far" "match-titles")
+      (apply #'drover-fixture-claude-append file
+             (drover-fixture-claude-blob "far" (+ drover-transcript-look-back (* 4 drover-transcript-window))))
+      (drover-claude-code-transcripts-test-approve file "far" "match-titles")
+      (let ((drover-claude-code-transcripts--title-scan '(blocked))) ; Held, to look between.
+        (should (equal (drover-claude-code-transcripts-test-title "far") "match-titles"))
+        (should (plist-get (drover-claude-code-transcripts--data "far") :title-unread))
+        (should (equal drover-claude-code-transcripts--title-queue (list file))))
+      (drover-claude-code-transcripts--next-titles)
+      (should (drover-claude-code-transcripts-test-titles-read))
+      (should (equal (drover-session-title (drover-find 'claude-code "far")) "Session titles"))
+      (should (equal (drover-recorded-title 'claude-code "far") "Session titles"))
+      (should-not (plist-get (drover-claude-code-transcripts--data "far") :title-unread))
+      ;; Kept between Emacs sessions, it is read again as the backend starts.
+      (let ((entry (drover-transcript-entry index file)))
+        (setf (drover-transcript-data entry)
+              (plist-put (copy-sequence (drover-transcript-data entry)) :title-unread t)))
+      (let ((drover-claude-code-transcripts--title-scan '(blocked)))
+        (drover-claude-code-transcripts--queue-unread-titles)
+        (should (equal drover-claude-code-transcripts--title-queue (list file)))
+        ;; Stopping forgets them.
+        (drover-claude-code-transcripts--stop-titles)
+        (should-not drover-claude-code-transcripts--title-queue)
+        (should-not drover-claude-code-transcripts--title-scan)))))
 
 (ert-deftest drover-claude-code-transcripts-test-unlisted ()
   "A transcript of no message, as a session that ran a command and left, is not listed."

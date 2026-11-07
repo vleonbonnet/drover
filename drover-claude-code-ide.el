@@ -28,6 +28,15 @@
 ;; buffer, and its engine identifier the conversation the CLI records
 ;; for the terminal's process.
 ;;
+;; A session's title is its conversation's, as its transcript records it
+;; and Claude Code's desktop app shows it (see :recorded-title in
+;; `drover-register-backend'), else its terminal's buffer name; the
+;; terminal is named after that title as it changes (see
+;; `drover-claude-code-ide-name-after-title'), rather than after the
+;; terminal's title, which Claude Code sets to the name of the agent it
+;; gives a session as its plan is approved.  Renaming a session types
+;; /rename in its terminal, so that Claude Code records the title.
+;;
 ;; Statuses come from Ghostel's program status, which Claude Code
 ;; reports through OSC 7501 (or OSC 9;4): a `blocked' record anywhere
 ;; waits for the user, then an `error' one fails, else the root record
@@ -76,7 +85,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 25))
   (load "drover-core" nil t))
 
 ;; Drover does not require claude-code-ide, so this file compiles
@@ -134,8 +143,32 @@ name matches.  A session's title is its buffer name without the match."
   :group 'drover)
 
 (defcustom drover-claude-code-ide-rename-format "*claude* %s"
-  "Format of the buffer name of a renamed session; %s stands for the title."
+  "Format of the buffer name drover gives a terminal; %s stands for its title.
+The title is its conversation's (see
+`drover-claude-code-ide-name-after-title').  A name of this format should
+match `drover-claude-code-ide-buffer-regexp', so that the terminal is
+known as Claude's once claude-code-ide no longer tracks it."
   :type 'string
+  :group 'drover)
+
+(defcustom drover-claude-code-ide-name-after-title t
+  "Whether a terminal's buffer is named after its conversation's title.
+Non-nil names it as `drover-claude-code-ide-rename-format' says, after
+the title drover lists the session under, the one Claude Code's desktop
+app shows, as the title changes, cut to
+`drover-claude-code-ide-name-limit' characters; the terminal's title,
+which Claude Code sets to the name of the agent it gives a session as
+its plan is approved, then no longer renames it.  It does until the
+user names the buffer.  Nil leaves the names claude-code-ide and the
+terminal's title give it."
+  :type 'boolean
+  :group 'drover)
+
+(defcustom drover-claude-code-ide-name-limit 60
+  "Characters at most of a terminal's buffer name taken from its title.
+A longer title, such as a first prompt, is cut, ending in an ellipsis
+\(see `drover-claude-code-ide-name-after-title')."
+  :type 'natnum
   :group 'drover)
 
 (defvar drover-claude-code-ide-input-regexp
@@ -185,6 +218,11 @@ Group 1 is the words of the mode.")
 (defconst drover-claude-code-ide--mode-timeout 1.5
   "Seconds the footer is given to show another permission mode after Shift+Tab.")
 
+(defconst drover-claude-code-ide--rename-delay 1
+  "Seconds after /rename at which the conversation's transcript is looked at.
+The CLI records the title by then, which drover lists at once rather
+than at its next look at the transcripts.")
+
 (defconst drover-claude-code-ide--capture-interval 2
   "Seconds between two looks for the conversation of a new terminal.")
 
@@ -218,6 +256,13 @@ Group 1 is the words of the mode.")
   "Identifier of this terminal's session in drover, given when first listed.")
 ;; A token names a session for as long as its buffer lives.
 (put 'drover-claude-code-ide--token 'permanent-local t)
+
+(defvar-local drover-claude-code-ide--given-name nil
+  "Name drover last gave this terminal's buffer, or nil.
+The buffer is named after its conversation's title while it keeps that
+name, or before drover named it, while its name is a Claude terminal's
+\(see `drover-claude-code-ide-buffer-regexp').")
+(put 'drover-claude-code-ide--given-name 'permanent-local t)
 
 (defvar-local drover-claude-code-ide--created nil
   "Time, as a float, at which claude-code-ide created this terminal, or nil.")
@@ -305,8 +350,9 @@ It is kept in BUFFER: finding a project may walk a slow file system."
           name)))))
 
 (defun drover-claude-code-ide--title (buffer)
-  "Return the title of the session of terminal BUFFER.
-It is the buffer name without `drover-claude-code-ide-buffer-regexp'."
+  "Return the title of the session of terminal BUFFER, as its name tells.
+It is the buffer name without `drover-claude-code-ide-buffer-regexp',
+the title of a session whose conversation records none yet."
   (let* ((name (buffer-name buffer))
          (title (if (string-match drover-claude-code-ide-buffer-regexp name)
                     (string-trim (concat (substring name 0 (match-beginning 0))
@@ -647,7 +693,8 @@ what was read.  Nil without a turn."
         (apply #'drover-session-create
                :backend 'claude-code-ide
                :id drover-claude-code-ide--token
-               :title (drover-claude-code-ide--title buffer)
+               :title (or (drover-recorded-title 'claude-code id)
+                          (drover-claude-code-ide--title buffer))
                :directory directory
                :project (drover-claude-code-ide--project-name buffer directory)
                :branch (drover-git-branch directory)
@@ -1489,13 +1536,81 @@ once Claude Code recorded it.  The backend's :supports."
       (user-error "Could not locate new Claude Code buffer")))
 
 (defun drover-claude-code-ide--rename (session title)
-  "Rename SESSION's terminal after TITLE.
-The terminal's title no longer renames it."
-  (with-current-buffer (drover-claude-code-ide--live-buffer session)
+  "Rename SESSION to TITLE, typing /rename in its terminal.
+Claude Code records TITLE as the title the user gave, which its desktop
+app and its /resume picker show, and drover lists the session under;
+the terminal's buffer follows (see
+`drover-claude-code-ide-name-after-title').  Only once its turn ended,
+as far as its status tells, and its input box is empty, as for a
+prompt: what is typed would join a draft.  TITLE goes on one line.  The
+backend's :rename."
+  (let ((buffer (drover-claude-code-ide--live-buffer session))
+        (name (drover-session-display-title session))
+        (title (string-trim (replace-regexp-in-string "[ \t\n\r\f\v]+" " " title))))
+    (when (string-empty-p title)
+      (user-error "A session needs a title"))
+    (when (drover-session-active-p session)
+      (user-error "%s is in the middle of a turn; rename it once the turn ends" name))
+    (when-let* ((blocker (drover-claude-code-ide--blocker session)))
+      (user-error "%s cannot take /rename now: %s" name blocker))
+    (with-current-buffer buffer
+      (drover-claude-code-ide--type (concat "/rename " title))
+      (drover-claude-code-ide--press 'return))
+    (when-let* ((id (drover-claude-code-ide-live-session-id buffer)))
+      (drover-claude-code-ide--later buffer drover-claude-code-ide--rename-delay
+                                     (lambda () (drover-claude-code-transcripts-check id))))))
+
+(defun drover-claude-code-ide--name-buffer (buffer title)
+  "Name terminal BUFFER after TITLE.
+The name is TITLE as `drover-claude-code-ide-rename-format' says, made
+unique, and noted as the one drover gave the buffer; the terminal's
+title no longer renames it."
+  (with-current-buffer buffer
     (rename-buffer (format drover-claude-code-ide-rename-format title) t)
+    (setq drover-claude-code-ide--given-name (buffer-name))
     (cond ((derived-mode-p 'ghostel-mode) (setq-local ghostel-buffer-name-function nil))
-          ((derived-mode-p 'vterm-mode) (setq-local vterm-buffer-name-string nil))))
-  (drover-backend-changed 'claude-code-ide))
+          ((derived-mode-p 'vterm-mode) (setq-local vterm-buffer-name-string nil)))))
+
+(defun drover-claude-code-ide--follow-title (buffer)
+  "Name terminal BUFFER after its conversation's title, unless the user named it.
+It is named so while `drover-claude-code-ide-name-after-title' is
+non-nil and the conversation records a title (see
+`drover-recorded-title'), as long as the buffer keeps the name drover
+gave it, or, before drover named it, a Claude terminal's name (see
+`drover-claude-code-ide-buffer-regexp'): a name the user gave it stays.
+The title is cut to `drover-claude-code-ide-name-limit' characters."
+  (with-current-buffer buffer
+    (when-let* (((and drover-claude-code-ide-name-after-title
+                      (if drover-claude-code-ide--given-name
+                          (equal (buffer-name) drover-claude-code-ide--given-name)
+                        (string-match-p drover-claude-code-ide-buffer-regexp (buffer-name)))))
+                (recorded (drover-recorded-title 'claude-code (drover-claude-code-ide-live-session-id buffer)))
+                (title (substring-no-properties
+                        (drover-bound-line recorded drover-claude-code-ide-name-limit)))
+                ;; Drover's already, named so or uniquely so.
+                ((not (and drover-claude-code-ide--given-name
+                           (equal (generate-new-buffer-name
+                                   (format drover-claude-code-ide-rename-format title) (buffer-name))
+                                  (buffer-name))))))
+      (drover-claude-code-ide--name-buffer buffer title)
+      (drover-backend-changed 'claude-code-ide))))
+
+(defun drover-claude-code-ide--follow-titles ()
+  "Name the terminals whose conversation's title may have changed.
+For `drover-changed-hook': the terminals of the sessions
+`drover-changed-sessions' tells changed, or of the conversations it
+tells, or all of them when it is t (see
+`drover-claude-code-ide--follow-title')."
+  (when drover-claude-code-ide-name-after-title
+    (let ((changed drover-changed-sessions))
+      (pcase-dolist (`(,buffer . ,_) (drover-claude-code-ide--buffers))
+        (when (or (eq changed t)
+                  (let ((token (buffer-local-value 'drover-claude-code-ide--token buffer))
+                        (id (buffer-local-value 'drover-claude-code-ide-session-id buffer)))
+                    (or (and token (member (cons 'claude-code-ide token) changed))
+                        (and id (member (cons 'claude-code id) changed)))))
+          (drover-with-reporting "naming a Claude terminal"
+            (drover-claude-code-ide--follow-title buffer)))))))
 
 (defun drover-claude-code-ide-buffer-for-directory (dir)
   "Return the live terminal of a Claude Code session for DIR, or nil.
@@ -1581,7 +1696,8 @@ With several, the most recently used."
   (append (mapcar (lambda (mode)
                     (cons (intern (format "%s-hook" mode)) #'drover-claude-code-ide--setup-terminal))
                   drover-claude-code-ide-terminal-modes)
-          '((ghostel-program-status-functions . drover-claude-code-ide--status-changed)
+          '((drover-changed-hook . drover-claude-code-ide--follow-titles)
+            (ghostel-program-status-functions . drover-claude-code-ide--status-changed)
             (ghostel-exit-functions . drover-claude-code-ide--terminal-exited)
             (vterm-exit-functions . drover-claude-code-ide--terminal-exited))))
 

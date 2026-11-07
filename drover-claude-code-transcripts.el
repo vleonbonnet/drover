@@ -35,7 +35,9 @@
 ;; tail, a window of `drover-transcript-window' bytes each, and then
 ;; only what was appended since (see `drover-transcript'): the title
 ;; the user gave (custom-title), else the one the CLI generated
-;; (ai-title), else the first prompt; the directory, branch and
+;; (ai-title), as its desktop app shows it, not the name of the agent
+;; it gives a session as its plan is approved (agent-name), else the
+;; first prompt; the directory, branch and
 ;; creation time of its first records; the model, effort and permission
 ;; mode of its newest turn; its last activity, the time of its newest
 ;; message, not of the records the CLI appends of its own as the
@@ -107,7 +109,7 @@ list of drover's shows."
 
 ;;;; State
 
-(defconst drover-claude-code-transcripts--reader-version 5
+(defconst drover-claude-code-transcripts--reader-version 6
   "Version of `drover-claude-code-transcripts--read'.
 Raised when it reads anew what it read before, so that what an older
 one read and kept between Emacs sessions is read again.")
@@ -413,17 +415,18 @@ when the tail holds no reply (see `drover-transcript-look-before-tail-for')."
 
 (defun drover-claude-code-transcripts--read-tail (beg end)
   "Return what the records between BEG and END tell of the conversation's end.
-A plist: the newest title, summary, last prompt, permission mode, model,
-effort, branch, prompt's time and activity there; how its newest message
-left it (see `drover-claude-code-transcripts--end') and what its newest
-reply ran on (see `drover-claude-code-transcripts--usage'); members not
-told are left out."
+A plist: the newest title the user gave, summary, last prompt,
+permission mode, model, effort, branch, prompt's time and activity
+there; how its newest message left it (see
+`drover-claude-code-transcripts--end') and what its newest reply ran on
+\(see `drover-claude-code-transcripts--usage'); members not told are
+left out.  Its other titles are read apart (see
+`drover-claude-code-transcripts--read-titles')."
   (let ((turn (drover-claude-code-transcripts--turn beg end))
         (ending (drover-claude-code-transcripts--end beg end))
         (data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value)))))
       (add :custom-title (drover-claude-code-transcripts--member "\"type\":\"custom-title\"" 'customTitle beg end))
-      (add :ai-title (drover-claude-code-transcripts--member "\"type\":\"ai-title\"" 'aiTitle beg end))
       (add :summary (drover-claude-code-transcripts--member "\"type\":\"summary\"" 'summary beg end))
       (add :last-prompt (drover-claude-code-transcripts--member "\"type\":\"last-prompt\"" 'lastPrompt beg end))
       (add :mode (drover-claude-code-transcripts--member "\"type\":\"permission-mode\"" 'permissionMode beg end))
@@ -456,9 +459,9 @@ not outlive a reply that ends the next one."
 (defun drover-claude-code-transcripts--read-head (beg end)
   "Return what the records between BEG and END tell of the conversation's start.
 A plist of its directory, creation time, entry point, branch, first
-prompt, the titles there, and its newest message's time, reply's usage
-and turn's model and effort, which a tail telling none leaves; members
-not told are left out."
+prompt, the title the user gave there, and its newest message's time,
+reply's usage and turn's model and effort, which a tail telling none
+leaves; members not told are left out."
   (let ((data nil))
     (cl-flet ((add (key value) (when value (setq data (plist-put data key value))))
               (sniff (key) (save-excursion (goto-char beg) (drover-transcript-sniff key nil end))))
@@ -470,7 +473,6 @@ not told are left out."
                                  (drover-transcript-lines "\"type\":\"user\"" nil beg end))
                        (drover-claude-code-transcripts--cut-prompt beg end)))
       (add :custom-title (drover-claude-code-transcripts--member "\"type\":\"custom-title\"" 'customTitle beg end))
-      (add :ai-title (drover-claude-code-transcripts--member "\"type\":\"ai-title\"" 'aiTitle beg end))
       (add :messages (save-excursion
                        (goto-char beg)
                        (and (re-search-forward "\"type\":\"\\(?:user\\|assistant\\)\"" end t) t))))
@@ -582,6 +584,119 @@ not read again."
                     (ignore-errors
                       (directory-files-and-attributes directory t "\\`agent-.*\\.jsonl\\'" t)))))))
 
+;;;; Titles
+
+;; Claude Code titles a conversation from its first prompts (ai-title),
+;; and its desktop app shows that title.  As a plan is approved, the CLI
+;; also names the session after the plan, in kebab case (agent-name),
+;; which its terminal's title shows, and records that name as an
+;; ai-title too, again at every turn, the ai-title first: read from the
+;; newest back, the agent's name comes before each ai-title naming it.
+;; The title is the newest ai-title naming no agent.  A long session
+;; leaves its generated title megabytes before its tail, further back
+;; than a read looks: the transcript is then read whole in the
+;; background (`drover-claude-code-transcripts--queue-titles').
+
+(defconst drover-claude-code-transcripts--names-limit 16
+  "Agent names kept of a conversation at most, the newest.")
+
+(defconst drover-claude-code-transcripts--title-regexp
+  "\"type\":\"\\(?:ai-title\\|agent-name\\)\""
+  "Regexp matching a record of a generated title or of an agent's name.")
+
+(defconst drover-claude-code-transcripts--title-keys
+  '("\"type\":\"ai-title\"" "\"type\":\"agent-name\"")
+  "What the records of generated titles and of agents' names hold, as strings.")
+
+(defun drover-claude-code-transcripts--title-entry (record)
+  "Return what RECORD tells of the conversation's titles, or nil.
+That is (ai-title . TEXT) for a title the CLI recorded as generated,
+\(agent-name . TEXT) for the name of the session's agent, TEXT on one
+line, trimmed and cut as titles are."
+  (pcase (alist-get 'type record)
+    ("ai-title" (when-let* ((text (drover-transcript-text (alist-get 'aiTitle record))))
+                  (cons 'ai-title text)))
+    ("agent-name" (when-let* ((text (drover-transcript-text (alist-get 'agentName record))))
+                    (cons 'agent-name text)))))
+
+(defun drover-claude-code-transcripts--add-names (names more)
+  "Return the agent names NAMES, then those of MORE not among them.
+At most `drover-claude-code-transcripts--names-limit' of them, the
+first: each list comes newest first, MORE older than NAMES."
+  (take drover-claude-code-transcripts--names-limit (delete-dups (append names more))))
+
+(defun drover-claude-code-transcripts--titles (beg end names)
+  "Return the newest title the CLI generated between BEG and END, and agent names.
+The records are read from END back.  The value is (TITLE . FOUND):
+TITLE, the text of the newest ai-title naming none of the agents NAMES,
+known of newer records, nor of those of the records after it, or nil;
+FOUND, the agent names of the records read, the newest first, up to
+TITLE or BEG."
+  (save-excursion
+    (goto-char end)
+    (let ((title nil)
+          (found nil))
+      (while (and (not title)
+                  (re-search-backward drover-claude-code-transcripts--title-regexp beg t))
+        (pcase (drover-claude-code-transcripts--title-entry (drover-transcript-line))
+          (`(agent-name . ,name)
+           (unless (member name found)
+             (setq found (append found (list name)))))
+          (`(ai-title . ,text)
+           (unless (or (member text names) (member text found))
+             (setq title text))))
+        (beginning-of-line))
+      (cons title found))))
+
+(defun drover-claude-code-transcripts--title-reader (names known)
+  "Return a reader of the lines before a tail looking for a generated title.
+For `drover-transcript-look-before-tail-for': a function of BEG and END
+returning (:ai-title TITLE) once it found a generated title naming none
+of the agents NAMES and KNOWN tell.  NAMES is a cons whose car is the
+list of the names found in newer lines, the newest first, which the
+reader adds those it finds to, as it reads lines older and older; KNOWN
+those read before, of older lines."
+  (lambda (beg end)
+    (pcase-let ((`(,title . ,found) (drover-claude-code-transcripts--titles
+                                     beg end (append (car names) known))))
+      (setcar names (drover-claude-code-transcripts--add-names (car names) found))
+      (and title (list :ai-title title)))))
+
+(defun drover-claude-code-transcripts--settle-titles (title names size tail grown before)
+  "Return what was read of a transcript's titles, a plist.
+TITLE is the newest title the CLI generated found in its tail or in the
+lines read before it, or nil; NAMES the agent names found there, the
+newest first; SIZE the size of the transcript.  The current buffer
+holds what `drover-transcript-insert-ends' inserted of it, the tail
+from TAIL; with GROWN, the size it was read at before, only what was
+appended since, BEFORE being what was read then.  The plist has
+:ai-title, the newest generated title known, or nil; :agent-names, the
+names of the agents known, the newest first; and :title-unread,
+non-nil when a generated title newer than :ai-title may be in lines
+not read.
+
+Read anew, without TITLE, the head tells one, the names found anywhere
+known; with agent names, the lines between the head and those read
+before the tail, if any, are not read.  Grown, TITLE wins, newer than
+any before; else the title known stays, unless it names one of the
+agents, its ai-title read before the record of the agent's name: then
+the lines not read here are to be."
+  (if grown
+      (let ((names (drover-claude-code-transcripts--add-names names (plist-get before :agent-names)))
+            (old (plist-get before :ai-title)))
+        (cond (title (list :ai-title title :agent-names names :title-unread nil))
+              ((and old (member old names)) (list :ai-title nil :agent-names names :title-unread t))
+              (t (list :ai-title old :agent-names names
+                       :title-unread (plist-get before :title-unread)))))
+    (let* ((head (unless (or title (= tail (point-min)))
+                   (drover-claude-code-transcripts--titles (point-min) tail names)))
+           (names (drover-claude-code-transcripts--add-names names (cdr head))))
+      (list :ai-title (or title (car head))
+            :agent-names names
+            :title-unread (and (not title) names
+                               (> (- size (* 2 drover-transcript-window)) drover-transcript-look-back)
+                               t)))))
+
 (defun drover-claude-code-transcripts--read (file attributes old)
   "Return what transcript FILE, of ATTRIBUTES, tells of its conversation.
 OLD is the entry read before, or nil: a transcript only appended to
@@ -592,7 +707,9 @@ tail are read.  Its last activity is its newest message's (see
 than the tail when the tail holds none, as its newest turn's model and
 reply's usage are, never the file's modification
 time, which the CLI's records of its own move as it opens the
-conversation again.  For the index of `drover-transcript'."
+conversation again.  Its titles are read as
+`drover-claude-code-transcripts--settle-titles' tells.  For the index of
+`drover-transcript'."
   (let* ((size (file-attribute-size attributes))
          (before (and old (drover-transcript-data old)))
          ;; A head shorter than its window may lack the first prompt.
@@ -607,15 +724,24 @@ conversation again.  For the index of `drover-transcript'."
                      (drover-claude-code-transcripts--read-head (point-min) (if (= tail (point-min))
                                                                                 (point-max)
                                                                               tail)))))
-        (let ((recent (drover-claude-code-transcripts--read-tail tail (point-max))))
+        (pcase-let* ((recent (drover-claude-code-transcripts--read-tail tail (point-max)))
+                     (`(,title . ,found) (drover-claude-code-transcripts--titles
+                                          tail (point-max) (and grown (plist-get before :agent-names))))
+                     ;; The names the title reader adds to as it reads.
+                     (names (list found)))
           ;; What the tail does not tell, the lines before it may.
           (setq recent (append recent
                                (drover-transcript-look-before-tail-for
                                 file size tail grown
                                 (append (unless (plist-get recent :updated) (list #'drover-claude-code-transcripts--end))
                                         (unless (plist-get recent :context) (list #'drover-claude-code-transcripts--usage))
-                                        (unless (plist-get recent :model) (list #'drover-claude-code-transcripts--turn-told))))))
-          (setq data (drover-claude-code-transcripts--merge data recent)))
+                                        (unless (plist-get recent :model) (list #'drover-claude-code-transcripts--turn-told))
+                                        (unless title (list (drover-claude-code-transcripts--title-reader
+                                                            names (and grown (plist-get before :agent-names)))))))))
+          (setq data (drover-claude-code-transcripts--merge
+                      (drover-claude-code-transcripts--merge data recent)
+                      (drover-claude-code-transcripts--settle-titles
+                       (or title (plist-get recent :ai-title)) (car names) size tail grown before))))
         (setq data (plist-put data :id (drover-claude-code-transcripts--id file)))
         (let ((directory (or (plist-get data :cwd)
                              (drover-claude-code-decode-bucket
@@ -631,9 +757,14 @@ conversation again.  For the index of `drover-transcript'."
 ;;;; Records
 
 (defun drover-claude-code-transcripts--title (data)
-  "Return the title of the conversation of DATA, as the CLI's picker titles it."
+  "Return the title of the conversation of DATA, as Claude Code's desktop app does.
+That is the title the user gave, else the one the CLI generated, not the
+name of the agent it gives the session as its plan is approved (see
+`drover-claude-code-transcripts--settle-titles'), else that name, else
+its summary, first prompt or last prompt."
   (or (plist-get data :custom-title)
       (plist-get data :ai-title)
+      (car (plist-get data :agent-names))
       (plist-get data :summary)
       (plist-get data :prompt)
       (plist-get data :last-prompt)))
@@ -906,6 +1037,21 @@ not read.  The backend's :recorded-times."
   (when-let* ((data (drover-claude-code-transcripts--data id)))
     (cons (plist-get data :created) (plist-get data :updated))))
 
+(defun drover-claude-code-transcripts--recorded-title (id)
+  "Return the title of conversation ID, as its transcript tells, or nil.
+See `drover-claude-code-transcripts--title'.  The backend's
+:recorded-title."
+  (when-let* ((data (drover-claude-code-transcripts--data id)))
+    (drover-claude-code-transcripts--title data)))
+
+(defun drover-claude-code-transcripts-check (id)
+  "Look at the transcript of conversation ID at once, rather than at the next look.
+For a front end that knows the CLI just recorded something of it, such
+as a title.  Return non-nil when the transcript is to be read again."
+  (when-let* ((index (drover-claude-code-transcripts--current-index))
+              (file (drover-claude-code-transcripts--file id)))
+    (drover-transcript-check index file)))
+
 (defun drover-claude-code-transcripts--recorded-run (id)
   "Return what conversation ID ran on, as its transcript tells, or nil.
 Keyword arguments of `drover-session-create' (see
@@ -966,14 +1112,107 @@ read.  The backend's :session."
 
 ;;;; Following the transcripts
 
-(defun drover-claude-code-transcripts--changed (_file old new)
-  "Report that what was read of a transcript went from OLD to NEW."
+(defun drover-claude-code-transcripts--changed (file old new)
+  "Report that what was read of transcript FILE went from OLD to NEW.
+A transcript whose generated title may be in lines not read is read
+whole in the background (see `drover-claude-code-transcripts--queue-titles')."
+  (when (plist-get new :title-unread)
+    (drover-claude-code-transcripts--queue-titles file))
   (let ((id (plist-get (or new old) :id)))
     (drover-backend-changed 'claude-code id)
     (dolist (agent (delete-dups (mapcar (lambda (subagent) (plist-get subagent :agent))
                                         (append (plist-get old :subagents)
                                                 (plist-get new :subagents)))))
       (drover-backend-changed 'claude-code (drover-claude-code-transcripts--subagent-id id agent)))))
+
+;;;; Titles further back
+
+(defvar drover-claude-code-transcripts--title-queue nil
+  "Transcripts to read whole for their generated titles, the first first.")
+
+(defvar drover-claude-code-transcripts--title-scan nil
+  "The transcript read whole for its titles, as (FILE INODE . STOP), or nil.
+INODE is the inode it was read at; STOP the function stopping the read.")
+
+(defun drover-claude-code-transcripts--queue-titles (file)
+  "Read transcript FILE whole in the background for its generated title.
+The titles read of its head and tail were not enough to tell it (see
+`drover-claude-code-transcripts--settle-titles').  Transcripts are read
+one at a time, in slices that give way to input (see
+`drover-transcript-read-lines')."
+  (unless (or (member file drover-claude-code-transcripts--title-queue)
+              (equal file (car drover-claude-code-transcripts--title-scan)))
+    (setq drover-claude-code-transcripts--title-queue
+          (append drover-claude-code-transcripts--title-queue (list file)))
+    (drover-claude-code-transcripts--next-titles)))
+
+(defun drover-claude-code-transcripts--next-titles ()
+  "Begin reading the next transcript queued for its titles, unless one is read."
+  (while (and (not drover-claude-code-transcripts--title-scan)
+              drover-claude-code-transcripts--title-queue)
+    (let* ((file (pop drover-claude-code-transcripts--title-queue))
+           (index (drover-claude-code-transcripts--current-index))
+           (entry (and index (drover-transcript-entry index file)))
+           (entries nil))
+      ;; One read again since it was queued may no longer need it.
+      (when (and entry (plist-get (drover-transcript-data entry) :title-unread))
+        (let ((scan (list file (drover-transcript-inode entry))))
+          (setq drover-claude-code-transcripts--title-scan scan)
+          (setcdr (cdr scan)
+                  (drover-transcript-read-lines
+                   (list (cons file 0)) drover-claude-code-transcripts--title-keys
+                   (lambda (_file record)
+                     (when-let* ((title (drover-claude-code-transcripts--title-entry record)))
+                       (push title entries)))
+                   (lambda (failure)
+                     (when (eq drover-claude-code-transcripts--title-scan scan)
+                       (setq drover-claude-code-transcripts--title-scan nil)
+                       (unless failure
+                         (drover-claude-code-transcripts--titles-read file (cadr scan) entries))
+                       (drover-claude-code-transcripts--next-titles))))))))))
+
+(defun drover-claude-code-transcripts--titles-read (file inode entries)
+  "Note the titles of transcript FILE, read whole at INODE: ENTRIES.
+ENTRIES are what `drover-claude-code-transcripts--title-entry' tells of
+its records, the newest first.  Its title is the newest ai-title naming
+none of its agents, those of the whole file and those read since.  A
+transcript replaced since, or read again since and telling a newer
+title, is left as it is."
+  (when-let* ((index (drover-claude-code-transcripts--current-index))
+              (entry (drover-transcript-entry index file))
+              ((equal (drover-transcript-inode entry) inode)))
+    (drover-transcript-update
+     index file
+     (lambda (data)
+       (when (plist-get data :title-unread)
+         (let* ((names (drover-claude-code-transcripts--add-names
+                        (plist-get data :agent-names)
+                        (delete-dups (mapcan (lambda (entry)
+                                               (and (eq (car entry) 'agent-name) (list (cdr entry))))
+                                             entries))))
+                (title (seq-some (lambda (entry)
+                                   (and (eq (car entry) 'ai-title)
+                                        (not (member (cdr entry) names))
+                                        (cdr entry)))
+                                 entries)))
+           (drover-claude-code-transcripts--merge
+            (copy-sequence data) (list :ai-title title :agent-names names :title-unread nil))))))))
+
+(defun drover-claude-code-transcripts--queue-unread-titles ()
+  "Queue the transcripts kept whose generated titles are still to be read."
+  (when-let* ((index (drover-claude-code-transcripts--current-index)))
+    (drover-transcript-map (lambda (file data)
+                             (when (plist-get data :title-unread)
+                               (drover-claude-code-transcripts--queue-titles file)))
+                           index)))
+
+(defun drover-claude-code-transcripts--stop-titles ()
+  "Stop reading transcripts for their titles, and forget those queued."
+  (when-let* ((scan drover-claude-code-transcripts--title-scan))
+    (setq drover-claude-code-transcripts--title-scan nil)
+    (when (functionp (cddr scan))
+      (funcall (cddr scan))))
+  (setq drover-claude-code-transcripts--title-queue nil))
 
 (defun drover-claude-code-transcripts--looked ()
   "Follow the end of a look at the transcripts.
@@ -1235,7 +1474,8 @@ its engine and identifier.  The backend's :search."
 The first time, note it: replies before count as seen (see
 `drover-transcript-seen-since').  The backend's :start."
   (drover-transcript-seen-since drover-claude-code-transcripts--name)
-  (drover-transcript-start (drover-claude-code-transcripts--current-index)))
+  (drover-transcript-start (drover-claude-code-transcripts--current-index))
+  (drover-claude-code-transcripts--queue-unread-titles))
 
 (defun drover-claude-code-transcripts--register ()
   "Register the `claude-code' backend."
@@ -1245,6 +1485,7 @@ The first time, note it: replies before count as seen (see
    :recorded '(claude-code)
    :recorded-times #'drover-claude-code-transcripts--times
    :recorded-run #'drover-claude-code-transcripts--recorded-run
+   :recorded-title #'drover-claude-code-transcripts--recorded-title
    :recorded-seen #'drover-claude-code-transcripts--recorded-seen
    :caches t
    :start #'drover-claude-code-transcripts--start
@@ -1298,6 +1539,7 @@ The backend goes once no front end needs it."
     (when (drover-claude-code-transcripts--current-index)
       (drover-transcript-stop (drover-claude-code-transcripts--current-index)))
     (drover-command-cancel drover-claude-code-transcripts--agents-job)
+    (drover-claude-code-transcripts--stop-titles)
     (remove-hook 'kill-emacs-hook #'drover-claude-code-transcripts--save)
     (remove-hook 'drover-recorded-functions #'drover-claude-code-transcripts--recorded)
     (drover-unregister-backend 'claude-code)))
