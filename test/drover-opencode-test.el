@@ -249,12 +249,16 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
                 (lambda (callback &optional else)
                   (setq drover-opencode-test-fetches
                         (append drover-opencode-test-fetches (list (cons callback else))))))
+               ;; Both sides normalized, as the real one has them: on Windows
+               ;; a location the service told is C:/..., a project's /...
                ((symbol-function 'opencode-project-for-directory)
                 (lambda (projects directory)
-                  (seq-find (lambda (project)
-                              (seq-some (lambda (root) (string-prefix-p (file-name-as-directory root) directory))
-                                        (cons (alist-get 'canonical project) (alist-get 'sandboxes project))))
-                            projects)))
+                  (let ((directory (opencode-normalize-directory directory)))
+                    (seq-find (lambda (project)
+                                (seq-some (lambda (root)
+                                            (string-prefix-p (opencode-normalize-directory root) directory))
+                                          (cons (alist-get 'canonical project) (alist-get 'sandboxes project))))
+                              projects))))
                ((symbol-function 'opencode-project-name)
                 (lambda (project)
                   (or (alist-get 'name project)
@@ -1479,7 +1483,10 @@ rendering of a prompt and of output."
     (drover-opencode-test-with-history
       (drover-start)
       (drover-opencode-test-answer-projects)
-      (let ((received :none))
+      (let* ((received :none)
+             ;; As opencode.el names a location: on Windows, absolute, its drive upper case.
+             (directory (opencode-normalize-directory "/work/drover/"))
+             (drover-opencode-test-branches (cons (cons directory "main") drover-opencode-test-branches)))
         (funcall (drover-backend-property 'opencode :history)
                  (lambda (sessions) (setq received sessions)))
         ;; Every unarchived session of every project.
@@ -1501,12 +1508,12 @@ rendering of a prompt and of output."
           (should (eq (drover-session-backend old) 'opencode))
           (should (equal (drover-session-engine-key old) '(opencode . "ses_old")))
           (should (equal (drover-session-title old) "An old one"))
-          (should (equal (drover-session-directory old) "/work/drover/"))
+          (should (equal (drover-session-directory old) directory))
           (should (equal (drover-session-project old) "Drover"))
           (should (equal (drover-session-branch old) "main"))
           (should (equal (drover-session-parent old) "ses_parent"))
           (should (equal (drover-session-agent old) "build"))
-          (should (equal (drover-session-model old) "claude in /work/drover/"))
+          (should (equal (drover-session-model old) (concat "claude in " directory)))
           ;; The registry has no context size of a session it does not hold.
           (should-not (drover-session-context-tokens old))
           (should (eql (drover-session-created old) 1000.0))

@@ -3387,9 +3387,12 @@ too, are listed here once it is connected."
                "/w/y")))
     (should (equal (json-parse-string (decode-coding-string body 'utf-8) :object-type 'plist :null-object :null)
                    '(:info (:id "ses_b" :x :null) :messages [] :location (:directory "/w/y")))))
-  (should (equal (drover-remote--oc-clone-directory "/w/x/") "/w/x"))
-  (when (memq system-type '(windows-nt ms-dos))
-    (should (equal (drover-remote--oc-clone-directory "c:/Users/x/") "C:/Users/x"))))
+  (if (memq system-type '(windows-nt ms-dos))
+      (let ((default-directory "d:/work/"))
+        ;; Rooted without a drive, it is on the drive of `default-directory'.
+        (should (equal (drover-remote--oc-clone-directory "/w/x/") "D:/w/x"))
+        (should (equal (drover-remote--oc-clone-directory "c:/Users/x/") "C:/Users/x")))
+    (should (equal (drover-remote--oc-clone-directory "/w/x/") "/w/x"))))
 
 (defmacro drover-remote-test-cloning (&rest body)
   "Run BODY as the host `viewer', its engines' homes throwaway under `home'."
@@ -3649,8 +3652,9 @@ too, are listed here once it is connected."
                 ;; In this host's service, its messages all, run where the table maps.
                 (let ((info (gethash "ses_a" drover-fake-opencode--sessions)))
                   (should info)
+                  ;; Spelt as a service takes a location, its drive upper case on Windows.
                   (should (equal (alist-get 'directory (alist-get 'location info))
-                                 (directory-file-name (expand-file-name "project" mine))))
+                                 (drover-remote--oc-clone-directory (expand-file-name "project" mine))))
                   (should (equal (alist-get 'title info) "Agent work"))
                   (should (seq-find (lambda (message) (equal (alist-get 'text message) "the capybara dives"))
                                     (gethash "ses_a" drover-fake-opencode--messages))))
