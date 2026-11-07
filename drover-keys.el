@@ -303,7 +303,7 @@ buffer."
   (with-current-buffer buffer
     (or drover-view-p (bound-and-true-p drover-prompt-mode))))
 
-(defun drover--quiet-buffers ()
+(defun drover--quiet-buffers (&optional any)
   "Return the buffers of the quiet sessions of this host, in the backends' order.
 A quiet session is one that does not need the user, its status not one
 of `drover-attention-statuses': idle, working or retrying.  Its buffer
@@ -312,28 +312,61 @@ buffer showing a session that needs the user too is left out, and so
 are the buffers of a conversation one backend tells needs the user,
 whatever another backend showing it tells.  Sessions of other hosts
 have no buffer here, and drover's lists and prompt are never among
-them."
-  (let ((busy (make-hash-table :test #'eq))
-        (conversations (make-hash-table :test #'equal))
-        (seen (make-hash-table :test #'eq))
-        (candidates nil)
-        (quiet nil))
-    (dolist (session (drover--live-sessions))
-      (unless (drover-session-host session)
-        (let ((buffer (drover-session-buffer session))
-              (key (drover-session-engine-key session)))
-          (cond ((drover-session-attention-p session)
-                 (when buffer (puthash buffer t busy))
-                 (when key (puthash key t conversations)))
-                (buffer (push (cons buffer key) candidates))))))
-    (pcase-dolist (`(,buffer . ,key) (nreverse candidates))
-      (unless (or (gethash buffer busy)
-                  (and key (gethash key conversations))
-                  (gethash buffer seen)
-                  (drover--own-buffer-p buffer))
-        (puthash buffer t seen)
-        (push buffer quiet)))
-    (nreverse quiet)))
+them.  With ANY non-nil, return non-nil once one is found, without
+looking for the others, as the dispatch menu asks whenever it opens.
+
+The sessions are the records of the index, as backends last reported
+them, those of several backends showing one conversation each (see
+`drover-index'), in the order it first listed them, and those drover
+archived whose buffers close once their turns end (see
+`drover--closing'): listing the sessions of every backend took longer
+than the rest of the menu."
+  (let* ((index (drover-index))
+         (records (drover--index-records index))
+         (closing (mapcan (pcase-lambda (`(,key . ,buffer))
+                            (when-let* (((buffer-live-p buffer))
+                                        ((not (gethash key records)))
+                                        (session (drover-find (car key) (cdr key))))
+                              (list (cons key session))))
+                          drover--closing))
+         (busy (make-hash-table :test #'eq))
+         (conversations (make-hash-table :test #'equal))
+         (candidates nil))
+    ;; Those needing the user first, few: what they show is left out.
+    (cl-flet ((note-busy (_key session)
+                (when (and (drover-session-attention-p session) (not (drover-session-host session)))
+                  (when-let* ((buffer (drover-session-buffer session)))
+                    (puthash buffer t busy))
+                  (when-let* ((key (drover-session-engine-key session)))
+                    (puthash key t conversations)))))
+      (maphash #'note-busy records)
+      (pcase-dolist (`(,key . ,session) closing)
+        (note-busy key session)))
+    (cl-flet ((take-quiet (key session)
+                (when-let* (((not (or (drover-session-attention-p session) (drover-session-host session))))
+                            (buffer (drover-session-buffer session))
+                            ((not (gethash buffer busy)))
+                            ((not (when-let* ((engine (drover-session-engine-key session)))
+                                    (gethash engine conversations))))
+                            ((not (drover--own-buffer-p buffer))))
+                  (if any
+                      (throw 'drover--quiet t)
+                    (push (cons key buffer) candidates)))))
+      (catch 'drover--quiet
+        (maphash #'take-quiet records)
+        (pcase-dolist (`(,key . ,session) closing)
+          (take-quiet key session))
+        (let ((serials (drover--index-serials index))
+              (seen (make-hash-table :test #'eq))
+              (buffers nil))
+          (pcase-dolist (`(,_ . ,buffer)
+                         (sort candidates :key (lambda (candidate)
+                                                 (gethash (car candidate) serials most-positive-fixnum))
+                               :in-place t))
+            (unless (gethash buffer seen)
+              (puthash buffer t seen)
+              (push buffer buffers)))
+          (nreverse buffers))))))
 
 (defun drover--made-for-p (window buffer)
   "Return non-nil when the frame or tab of WINDOW was made to show BUFFER.
@@ -769,7 +802,7 @@ sessions a region selects, or nil."
           :prompt (and prompt t)
           :window window
           :quiet (and (drover-with-reporting "quiet sessions"
-                        (drover--quiet-buffers))
+                        (drover--quiet-buffers t))
                       t))))
 
 (defun drover--context-again (scope)
@@ -1088,8 +1121,20 @@ number alone."
             (drover-backends)))
 
 (defun drover--has-subagents-p (session)
-  "Return non-nil when SESSION has subagent sessions."
-  (drover-subagents session))
+  "Return non-nil when SESSION has subagent sessions.
+The index tells its live subagents at once; the others are looked for
+only while older or archived sessions show, among those lists show (see
+`drover-subagents'): the dispatch menu asks whenever it opens."
+  (let ((backend (drover-session-backend session))
+        (id (drover-session-id session)))
+    (or (seq-some (lambda (key)
+                    ;; Those of its own backend, as `drover-subagents' finds them.
+                    (and (eq (car key) backend)
+                         (equal (drover-session-parent (drover-index-session key)) id)))
+                  (drover-index-children (drover-session-key session)))
+        (and (or drover-show-history drover-show-archived)
+             (drover-subagents session)
+             t))))
 
 ;;;; Reading view settings
 
@@ -1655,32 +1700,47 @@ no entry."
   "Return the width of the widest of LINES, in columns."
   (apply #'max 0 (mapcar #'string-width lines)))
 
-(defun drover--menu-side-by-side (columns)
-  "Return the lines of COLUMNS, lists of lines, side by side.
-Each column starts `drover--menu-gap' columns past the widest line of
-the one before; no line ends in padding."
+(defun drover--menu-pieces (columns)
+  "Return the lines of COLUMNS, lists of lines, side by side, as pieces.
+Each line is the list of its cells, as (STOP . CELL), STOP the column
+CELL begins at, nil for an empty line: each column of COLUMNS starts
+`drover--menu-gap' columns past the widest line of the one before.
+`drover--menu-insert' inserts them so, rather than make strings of
+them first, and no line ends in padding."
   (let ((stops (let ((stop 0))
                  (mapcar (lambda (lines)
                            (prog1 stop
                              (setq stop (+ stop (drover--menu-lines-width lines) drover--menu-gap))))
-                         columns))))
-    (mapcar (lambda (index)
-              (let ((line ""))
-                (cl-mapc (lambda (lines stop)
-                           (when-let* ((cell (nth index lines))
-                                       ((not (equal cell ""))))
-                             (setq line (concat line (make-string (max 0 (- stop (string-width line))) ?\s)
-                                                cell))))
-                         columns stops)
-                line))
-            (number-sequence 0 (1- (apply #'max (mapcar #'length columns)))))))
+                         columns)))
+        (lines nil))
+    (dotimes (index (apply #'max 0 (mapcar #'length columns)))
+      (let ((pieces nil))
+        (cl-mapc (lambda (column stop)
+                   (when-let* ((cell (nth index column))
+                               ((not (equal cell ""))))
+                     (push (cons stop cell) pieces)))
+                 columns stops)
+        (push (nreverse pieces) lines)))
+    (nreverse lines)))
 
 (defun drover--menu-layout (columns)
   "Return COLUMNS, lists of lines, side by side, as a layout.
-A layout is (WIDTH HEIGHT . LINES), its width in columns and its height
-in lines."
-  (let ((lines (drover--menu-side-by-side columns)))
-    (cl-list* (drover--menu-lines-width lines) (length lines) lines)))
+A layout is (WIDTH HEIGHT . COLUMNS), its width in columns and its
+height in lines once COLUMNS are side by side, as
+`drover--menu-pieces' puts them; only the layouts a menu shows are put
+so, by `drover--menu-insert'.  A line ends with its last cell, which
+begins at the stop of its column."
+  (let ((stop 0)
+        (width 0))
+    (dolist (lines columns)
+      (let ((widest nil))
+        (dolist (line lines)
+          (unless (equal line "")
+            (setq widest (max (or widest 0) (string-width line)))))
+        (when widest
+          (setq width (max width (+ stop widest))))
+        (setq stop (+ stop (or widest 0) drover--menu-gap))))
+    (cl-list* width (apply #'max 0 (mapcar #'length columns)) columns)))
 
 (defun drover--menu-block-layouts (block)
   "Return the layouts BLOCK may show in, see `drover--menu-layout'.
@@ -1764,6 +1824,14 @@ is wider."
       (and (or (null (cdr blocks)) (<= (car arrangement) width))
            arrangement))))
 
+(defvar drover--menu-plans nil
+  "The plans made last, newest first, as an alist ((WIDTH . SIZES) . PLAN).
+SIZES lists the width and height of each layout of each block, all a
+plan depends on, as (WIDTH . HEIGHT) (see `drover--menu-plan').")
+
+(defconst drover--menu-plans-kept 16
+  "How many plans `drover--menu-plans' keeps.")
+
 (defun drover--menu-plan (blocks width)
   "Return how to lay BLOCKS out in rows of columns at most WIDTH wide.
 BLOCKS lists the layouts each block may show in, in order.  Each row
@@ -1772,7 +1840,22 @@ balanced height (see `drover--menu-row'), and an empty line parts two
 rows.  The plan takes the fewest lines, then the fewest rows: one row
 of columns, as newspapers fill theirs, as long as it is the lowest.
 The value is the list of its rows, each the list of its columns, each
-the list of the indexes of the layouts its blocks show in."
+the list of the indexes of the layouts its blocks show in.  A plan made
+for blocks of the same sizes, as a menu opened again where it opened
+before has, is not made again (see `drover--menu-plans')."
+  (let* ((key (cons width (mapcar (lambda (layouts)
+                                    (mapcar (lambda (layout) (cons (car layout) (cadr layout))) layouts))
+                                  blocks)))
+         (entry (assoc key drover--menu-plans)))
+    (unless entry
+      (setq entry (cons key (drover--menu-plan-anew blocks width))))
+    (setq drover--menu-plans (take drover--menu-plans-kept
+                                   (cons entry (delq entry drover--menu-plans))))
+    (cdr entry)))
+
+(defun drover--menu-plan-anew (blocks width)
+  "Return how to lay BLOCKS out in rows of columns at most WIDTH wide, made anew.
+See `drover--menu-plan'."
   (let* ((blocks (vconcat blocks))
          (count (length blocks))
          ;; The best plan of the blocks from an index on, as
@@ -1813,24 +1896,42 @@ them lacks.  See `drover--menu-plan' for plans."
                              plan))))))
 
 (defun drover--menu-insert (blocks plan)
-  "Insert BLOCKS laid out after PLAN, see `drover--menu-plan'."
+  "Insert BLOCKS laid out after PLAN, see `drover--menu-plan'.
+The columns of a row start `drover--menu-gap' columns past the widest
+layout of the one before; each line is inserted a cell at a time, its
+padding before each, without a string made of it first."
   (let ((rest blocks)
         (first t))
     (dolist (row plan)
       (unless first
         (insert ?\n))
       (setq first nil)
-      (let ((columns (mapcar (lambda (column)
-                               (let ((lines nil))
-                                 (dolist (index column)
-                                   (when lines
-                                     (push "" lines))
-                                   (dolist (line (cddr (nth index (pop rest))))
-                                     (push line lines)))
-                                 (nreverse lines)))
-                             row)))
-        (dolist (line (drover--menu-side-by-side columns))
-          (insert line ?\n))))))
+      (let* ((start 0)
+             ;; Each column as (START . LINES), its lines' pieces
+             ;; relative to START, its blocks parted by an empty line.
+             (columns (mapcar (lambda (column)
+                                (let ((lines nil)
+                                      (width 0))
+                                  (dolist (index column)
+                                    (let ((layout (nth index (pop rest))))
+                                      (when lines
+                                        (push nil lines))
+                                      (setq width (max width (car layout)))
+                                      (dolist (line (drover--menu-pieces (cddr layout)))
+                                        (push line lines))))
+                                  (prog1 (cons start (nreverse lines))
+                                    (setq start (+ start width drover--menu-gap)))))
+                              row)))
+        (dotimes (index (apply #'max 0 (mapcar (lambda (column) (length (cdr column))) columns)))
+          (let ((width 0))
+            (pcase-dolist (`(,start . ,lines) columns)
+              (pcase-dolist (`(,stop . ,cell) (nth index lines))
+                (let ((at (+ start stop)))
+                  (when (> at width)
+                    (insert-char ?\s (- at width)))
+                  (insert cell)
+                  (setq width (+ (max at width) (string-width cell))))))
+            (insert ?\n)))))))
 
 (defun drover--menu-table-cell (suffix)
   "Return the cell SUFFIX shows in the row of a table, or nil for none.

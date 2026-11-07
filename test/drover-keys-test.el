@@ -575,6 +575,7 @@ B applies while a quiet session has a buffer."
     (drover-test-register-simple 'other (list (drover-session-create :backend 'other :id "o" :status 'waiting
                                                                      :engine 'fake :engine-id "x")))
     (should (equal (drover--quiet-buffers) (list (drover-keys-test-buffer "idle"))))
+    (should (drover--quiet-buffers t))
     (with-temp-buffer
       (should (member "B" (drover-keys-test-apt 'drover-dispatch))))
     (call-interactively #'drover-bury-quiet-sessions)
@@ -582,10 +583,34 @@ B applies while a quiet session has a buffer."
     ;; Nothing quiet left with a buffer: B does not apply.
     (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "idle"))
                                            drover-test-sessions))
+    ;; Gone as its backend reports it: the index holds what was reported.
+    (drover-backend-changed 'fake "idle")
     (should-not (drover--quiet-buffers))
+    (should-not (drover--quiet-buffers t))
     (with-temp-buffer
       (should-not (member "B" (drover-keys-test-apt 'drover-dispatch))))
     (should-error (call-interactively #'drover-bury-quiet-sessions) :type 'user-error)))
+
+(ert-deftest drover-keys-test-has-subagents-from-the-index ()
+  "Whether a session has subagents, its own backend's, is read from the index.
+The sessions are listed only while older or archived sessions show,
+which lists show too."
+  (drover-keys-test-with (list (drover-test-session "p")
+                               (drover-test-session "c" :parent "p")
+                               (drover-test-session "q"))
+    (let ((listed 0)
+          (known (symbol-function 'drover-known-sessions)))
+      (cl-letf (((symbol-function 'drover-known-sessions)
+                 (lambda (&rest arguments)
+                   (cl-incf listed)
+                   (apply known arguments))))
+        (should (drover--has-subagents-p (drover-find 'fake "p")))
+        (should-not (drover--has-subagents-p (drover-find 'fake "q")))
+        (should-not (drover--has-subagents-p (drover-find 'fake "c")))
+        (should (zerop listed))
+        (let ((drover-show-history t))
+          (should-not (drover--has-subagents-p (drover-find 'fake "q")))
+          (should (> listed 0)))))))
 
 (ert-deftest drover-keys-test-new-session ()
   (drover-keys-test-with (list (drover-test-session "s" :directory "/work/s/")
@@ -1386,6 +1411,48 @@ The value is (PLAN . LINES)."
       (should (equal (car (drover-keys-test-laid-out (list small small wide small small) 30))
                      '(((0) (0)) ((0)) ((0) (0))))))
     (should-not (drover--menu-plan nil 80))))
+
+(ert-deftest drover-keys-test-menu-plan-kept ()
+  "A plan made for blocks of the same sizes is not made again."
+  (let ((drover--menu-plans nil)
+        (made 0)
+        (anew (symbol-function 'drover--menu-plan-anew))
+        (blocks (list (drover-keys-test-block '(10 . 5)) (drover-keys-test-block '(12 . 3) '(8 . 4))
+                      (drover-keys-test-block '(20 . 2))))
+        ;; Other texts of the same sizes.
+        (alike (list (drover-keys-test-block '(10 . 5)) (drover-keys-test-block '(12 . 3) '(8 . 4))
+                     (drover-keys-test-block '(20 . 2)))))
+    (cl-letf (((symbol-function 'drover--menu-plan-anew)
+               (lambda (&rest arguments)
+                 (cl-incf made)
+                 (apply anew arguments))))
+      (let ((plan (drover--menu-plan blocks 40)))
+        (should (= made 1))
+        (should (equal plan (funcall anew blocks 40)))
+        (should (equal (drover--menu-plan alike 40) plan))
+        (should (= made 1))
+        (should (equal (drover--menu-plan blocks 100) (funcall anew blocks 100)))
+        (should (= made 2))
+        (dotimes (width (* 2 drover--menu-plans-kept))
+          (drover--menu-plan blocks (+ 200 width)))
+        (should (= (length drover--menu-plans) drover--menu-plans-kept))))))
+
+(ert-deftest drover-keys-test-menu-layout-sizes ()
+  "A layout is as wide and high as its lines once inserted, though not made for it."
+  (random "drover menu layouts")
+  (dotimes (_ 50)
+    (let ((block (mapcar (lambda (index)
+                           (cons (if (zerop index) "Title" "")
+                                 (mapcar (lambda (_) (make-string (1+ (random 14)) ?x))
+                                         (number-sequence 0 (random 6)))))
+                         (number-sequence 0 (random 3)))))
+      (dolist (layout (drover--menu-block-layouts block))
+        (let ((lines (with-temp-buffer
+                       (drover--menu-insert (list (list layout)) '(((0))))
+                       (split-string (string-remove-suffix "\n" (buffer-string)) "\n"))))
+          (should (= (car layout) (apply #'max 0 (mapcar #'string-width lines))))
+          (should (= (cadr layout) (length lines)))
+          (should-not (seq-some (lambda (line) (string-suffix-p " " line)) lines)))))))
 
 (ert-deftest drover-keys-test-menu-insert ()
   "Columns are aligned, titles first, no line padded at its end."

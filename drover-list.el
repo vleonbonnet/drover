@@ -603,6 +603,7 @@ narrow window.")
   (cache nil :documentation "Fraction of the prompt cache's lifetime left, or nil.")
   (caching nil :documentation "Non-nil when it may show a prompt cache, see `drover-list--caching-p'.")
   (inputs nil :documentation "What the row was made of, see `drover-list--row-inputs'.")
+  (due nil :documentation "When a time it shows reads otherwise, see `drover-list--times-due'.")
   (measures nil :documentation "What the layout needs of it, see `drover-list--row-measures'.")
   (heading nil :documentation "Its heading as drawn, see `drover-list--heading', or nil.")
   (tree-link nil :documentation "A link to the `drover-list--tree' showing it, see `drover-list--row-tree'.")
@@ -1871,7 +1872,8 @@ of another list, copied (see `drover-list--peer-rows')."
                          drover-list--text-fields)
           :cache (drover-list--cache-fraction session (plist-get metrics :now))
           :caching (drover-list--caching-p session metrics)
-          :inputs inputs))))))
+          :inputs inputs
+          :due (drover-list--times-due session (plist-get metrics :now))))))))
 
 (defun drover-list--tree-rows (nodes group metrics &optional depth indent)
   "Return the rows of the trees NODES at DEPTH, subagents after their parent.
@@ -4109,17 +4111,23 @@ The model of the drawing goes to `drover-list--model'."
          (indexed (not (or drover-show-history drover-show-archived)))
          (all (drover-list--shared :sessions
                                    (lambda () (if indexed (drover-index-sessions) (drover-known-sessions)))))
-         (model (drover-list--build all now indexed))
-         (layout (drover-list--model-layout model)))
+         (model (drover-list--build all now indexed)))
+    (drover-list--forget-visibility all indexed)
+    (drover-list--forget-recaps all)
+    (drover-list--insert-drawing model all)))
+
+(defun drover-list--insert-drawing (model sessions)
+  "Insert the sections of MODEL at point, SESSIONS being every session known.
+MODEL becomes the model of the current list, `drover-list--model'; its
+first screens are drawn, the other rows left for later."
+  (let ((layout (drover-list--model-layout model)))
     (setq drover-list--model model
           drover-list--layout (plist-get layout :layout)
           drover-list--fields (plist-get layout :fields)
           drover-list--frames (plist-get layout :frames)
           header-line-format (and (> (drover-list--model-size model) 0)
-                                  (drover-list--header-line layout)))
-    (drover-list--forget-visibility all indexed)
-    (drover-list--forget-recaps all)
-    (setq drover-list--undrawn nil)
+                                  (drover-list--header-line layout))
+          drover-list--undrawn nil)
     ;; Sections pushed, not appended to thousands of siblings each.
     (let ((magit-section-inhibit-markers t)
           (magit-section-insert-in-reverse t)
@@ -4127,8 +4135,44 @@ The model of the drawing goes to `drover-list--model'."
           ;; A few screens at once, the other rows later: thousands of
           ;; rows cost hundreds of milliseconds, garbage collected mostly.
           (drover-list--rows-left (drover-list--first-rows)))
-      (drover-list--insert-model model all))
+      (drover-list--insert-model model sessions))
     (drover-list--use-markers)))
+
+(defun drover-list--relayout ()
+  "Draw the current list anew for the width of its window, from what it drew.
+Return non-nil when it did, nil when it must be drawn whole instead.
+Its groups, trees and rows do not depend on the width, nor do the
+widths measured: only its layout, chosen from the summary of its rows
+for the width, and the headings drawn in it.  So a list whose width
+changed, as the sidebar shows or hides beside it, keeps its model,
+rather than list the sessions, make their trees and rows and measure
+them again, which cost most of drawing it whole.  It must have a model
+of the current settings, its rows made with the measures it would make
+them with now (see `drover-list--metrics-stamp'), and not be stale;
+the changes noted while it was hidden stay, to be drawn in place after
+\(see `drover-list--refresh-if-needed')."
+  (when-let* ((model drover-list--model)
+              ((not drover-list--stale))
+              ((drover-layout-current-p model 'drover-list--model))
+              ((> (drover-list--model-size model) 0))
+              ((equal (drover-list--model-settings model) (drover-list--settings)))
+              ((equal (car drover-list--widths) (drover-list--measure-context)))
+              (old (drover-list--model-layout model))
+              (metrics (drover-list--metrics (plist-get old :now) (plist-get old :active)
+                                             (plist-get old :places)))
+              ((equal (plist-get metrics :stamp) (plist-get old :stamp))))
+    (drover-list--redraw
+     (lambda ()
+       (let* ((layout (drover-list--layout-of (drover-list--model-summary model) metrics))
+              (key (drover-list--layout-key layout)))
+         (setf (drover-list--model-layout model)
+               (append (list :key (if (equal key (plist-get old :key)) (plist-get old :key) key)) layout))
+         ;; Their sections went with the text erased.
+         (maphash (lambda (_ row) (setf (drover-list--row-section row) nil))
+                  (drover-list--model-rows model))
+         (drover-list--insert-drawing model nil)))
+     t)
+    t))
 
 (defun drover-list--use-markers (&optional section)
   "Turn the positions of every section into markers, or those under SECTION.
@@ -4275,6 +4319,12 @@ same sessions: a list redraws whenever a session changes, many times a
 second during a turn.  The sidebar's side windows get its settings
 first, which the width depends on, and windows scrolled sideways
 scroll back (see `drover-list--unscroll')."
+  (drover-list--redraw #'drover-list--insert))
+
+(defun drover-list--redraw (insert &optional keep-pending)
+  "Redraw the current list, INSERT, a function, inserting its sections.
+See `drover-list--render'.  The changes noted while it was hidden are
+forgotten, drawn with the rest, unless KEEP-PENDING is non-nil."
   (drover-list--set-up-side-windows)
   (drover-list--unscroll)
   (let* ((windows (get-buffer-window-list nil nil t))
@@ -4303,12 +4353,13 @@ scroll back (see `drover-list--unscroll')."
           drover-list--drawn (make-hash-table :test #'equal)
           drover-list--title-states (make-hash-table :test #'equal)
           drover-list--width (drover-list--line-width)
-          drover-list--stale nil
-          drover-list--pending nil)
+          drover-list--stale nil)
+    (unless keep-pending
+      (setq drover-list--pending nil))
     (drover-list--measure-begin)
     (erase-buffer)
     (save-excursion
-      (drover-list--insert))
+      (funcall insert))
     ;; Sections exist now; showing the root applies their visibility.
     (magit-section-show magit-root-section)
     (goto-char (drover-list--resolve anchor))
@@ -4523,6 +4574,38 @@ their most urgent tree, and the one group of sessions not grouped, t."
           (setq high middle))))
     (vconcat (substring vector 0 low) (vector tree) (substring vector low))))
 
+(defun drover-list--place-all (vector trees)
+  "Return VECTOR, of trees in the order drawn, with TREES in their places.
+They go where `drover-list--place' would place them one after the other,
+in one pass over VECTOR rather than one each: the order is total (see
+`drover-list--before-p'), so that the places of TREES, sorted, follow
+each other."
+  (if (null (cdr trees))
+      (if trees (drover-list--place vector (car trees)) vector)
+    (let ((result (make-vector (+ (length vector) (length trees)) nil))
+          (length (length vector))
+          (from 0)
+          (to 0))
+      (dolist (tree (sort trees :lessp #'drover-list--drawn-before-p))
+        (let ((low from)
+              (high length))
+          (while (< low high)
+            (let ((middle (/ (+ low high) 2)))
+              (if (drover-list--drawn-before-p (aref vector middle) tree)
+                  (setq low (1+ middle))
+                (setq high middle))))
+          (while (< from low)
+            (aset result to (aref vector from))
+            (cl-incf from)
+            (cl-incf to))
+          (aset result to tree)
+          (cl-incf to)))
+      (while (< from length)
+        (aset result to (aref vector from))
+        (cl-incf from)
+        (cl-incf to))
+      result)))
+
 (defun drover-list--follow-1 (model keys bodies)
   "Draw in MODEL the change of the sessions KEYS, or throw `redraw'.
 BODIES are as for `drover-list--follow'.  Each tree a session changed
@@ -4582,12 +4665,16 @@ when the groups would come in another order, or the layout change."
         (trees-table (drover-list--model-trees model))
         (summary (drover-list--model-summary model))
         (layout (drover-list--model-layout model))
-        (removed (mapcar #'car plans))
+        (removed (make-hash-table :test #'eq :size (length plans)))
+        (placed nil)
         (vectors (mapcar (lambda (group) (cons group (drover-list--group-trees group)))
                          (drover-list--model-groups model))))
+    (pcase-dolist (`(,old . ,_) plans)
+      (when old
+        (puthash old t removed)))
     (dolist (group touched)
       (setf (drover-list--group-trees group)
-            (cl-remove-if (lambda (tree) (memq tree removed)) (drover-list--group-trees group))))
+            (cl-remove-if (lambda (tree) (gethash tree removed)) (drover-list--group-trees group))))
     (pcase-dolist (`(,old ,_ ,old-rows ,_) plans)
       (when old
         (remhash (drover-list--tree-root old) trees-table)
@@ -4603,13 +4690,15 @@ when the groups would come in another order, or the layout change."
         (let ((group (if same
                          (drover-list--tree-group new)
                        (let ((value (drover-list--tree-group new)))
-                         (or (seq-find (lambda (group) (equal (drover-list--group-value group) value))
-                                       (drover-list--model-groups model))
-                             (drover-list--group-create :value value :trees []
-                                                        :counts (make-hash-table :test #'eq)))))))
+                         (cl-flet ((valued (group) (equal (drover-list--group-value group) value)))
+                           ;; A group made for a tree before this one holds it too.
+                           (or (seq-find #'valued (drover-list--model-groups model))
+                               (seq-find #'valued touched)
+                               (drover-list--group-create :value value :trees []
+                                                          :counts (make-hash-table :test #'eq))))))))
           (cl-pushnew group touched)
-          (setf (drover-list--tree-group new) group
-                (drover-list--group-trees group) (drover-list--place (drover-list--group-trees group) new))
+          (setf (drover-list--tree-group new) group)
+          (push new (alist-get group placed nil nil #'eq))
           (puthash (drover-list--tree-root new) new trees-table)
           (dolist (row (drover-list--tree-shown new))
             (setf (drover-list--row-tree row) new)
@@ -4618,6 +4707,8 @@ when the groups would come in another order, or the layout change."
             (drover-list--count-row (drover-list--group-counts group) row 1)
             (cl-incf (drover-list--group-size group))
             (cl-incf (drover-list--model-size model))))))
+    (pcase-dolist (`(,group . ,trees) placed)
+      (setf (drover-list--group-trees group) (drover-list--place-all (drover-list--group-trees group) trees)))
     (when (zerop (drover-list--model-size model))
       (throw 'redraw nil))
     (dolist (group touched)
@@ -4629,7 +4720,7 @@ when the groups would come in another order, or the layout change."
       ;; thousands, at every change, cost most of a change.
       (let ((head (drover-list--group-head group)))
         (setf (drover-list--group-head group)
-              (if (and head (not (memq head removed)))
+              (if (and head (not (gethash head removed)))
                   (let ((best head))
                     (pcase-dolist (`(,_ ,new) plans)
                       (when (and new (eq (drover-list--tree-group new) group)
@@ -5127,15 +5218,19 @@ they make are made once for every list (see `drover-list--sharing')."
 
 (defun drover-list--refresh-if-needed ()
   "Bring the current list up to date, now that it shows.
-Redraw it if it is stale or was drawn for another width; otherwise draw
-in place what changed while it was hidden, and bring the faces of
-titles and the timers up to date.  The sidebar's side windows get its
-settings first (see `drover-list--set-up-side-windows'), and windows
-scrolled sideways scroll back (see `drover-list--unscroll')."
+Redraw it if it is stale; drawn for another width, draw it anew for its
+width from what it drew, when it can (see `drover-list--relayout'),
+else redraw it.  Then draw in place what changed while it was hidden,
+and bring the faces of titles and the timers up to date.  The sidebar's
+side windows get its settings first (see
+`drover-list--set-up-side-windows'), and windows scrolled sideways
+scroll back (see `drover-list--unscroll')."
   (when (drover-list--current-p)
     (drover-list--set-up-side-windows)
     (drover-list--unscroll)
-    (if (or drover-list--stale (not (eql drover-list--width (drover-list--line-width))))
+    (if (or drover-list--stale
+            (and (not (eql drover-list--width (drover-list--line-width)))
+                 (not (drover-list--relayout))))
         (drover-list--render)
       (pcase-let ((`(,keys ,bodies ,times) drover-list--pending))
         (setq drover-list--pending nil)
@@ -5158,16 +5253,28 @@ been scrolled before, or by a command."
     (unless (zerop (window-hscroll window))
       (set-window-hscroll window 0))))
 
+(defvar drover-list--awaiting-place nil
+  "Windows showing the list whose refresh waits for the sidebar to step aside.
+The sidebar beside them goes once windows settled (see
+`drover-list--place-sidebars'), and they grow by its width: drawn for the
+width they have before, they would be drawn whole again after.")
+
 (defun drover-list--on-window-change (window)
   "Bring the list WINDOW shows up to date, now that WINDOW shows it.
 For `window-buffer-change-functions' and `window-size-change-functions',
-which run in the list's buffer: the layout follows the width."
+which run in the list's buffer: the layout follows the width.  The list
+the sidebar is about to step aside from is brought up to date once it
+did, for the width it leaves (see `drover-list--awaiting-place')."
   (drover-with-reporting "list windows"
     (let ((buffer (window-buffer window)))
       (when (buffer-live-p buffer)
         (with-current-buffer buffer
           (when (derived-mode-p 'drover-list-mode)
-            (drover-list--refresh-if-needed)))))))
+            (if (drover-list--steps-aside-for-p window)
+                (progn
+                  (cl-pushnew window drover-list--awaiting-place)
+                  (drover-list--place-soon))
+              (drover-list--refresh-if-needed))))))))
 
 (defun drover-list--on-face-change ()
   "Redraw the list, whose text changed size, or mark it stale if hidden.
@@ -5215,6 +5322,41 @@ as drawing, so the list is drawn first, from what was reported."
                                (drover-with-reporting "list refresh"
                                  (drover-index-refresh t)))))))
 
+(defun drover-list--age-due (time now)
+  "Return when the age of TIME at NOW, as `opencode-format-age' tells it, changes.
+That is a float time, or nil for a TIME of nil.  An age reads in
+seconds below a minute, then in minutes, hours and days, rounded down
+\(see `opencode-format-duration'): it reads the same until the next
+second, minute, hour or day of it."
+  (when time
+    (let ((age (max 0 (floor (- now time)))))
+      (+ time (cond ((< age 60) (1+ age))
+                    ((< age 3600) (* 60 (1+ (/ age 60))))
+                    ((< age 86400) (* 3600 (1+ (/ age 3600))))
+                    (t (* 86400 (1+ (/ age 86400)))))))))
+
+(defun drover-list--times-due (session now)
+  "Return when a time the row of SESSION shows at NOW next reads otherwise.
+That is the soonest of when one of its ages changes and when its prompt
+cache, live at NOW, expires, as a float time, or nil when none will:
+those are what `drover-list--refresh-times' draws again as the time
+passes, the session unchanged."
+  (let ((due nil))
+    (cl-flet ((note (time)
+                (when (and time (or (null due) (< time due)))
+                  (setq due time))))
+      (note (drover-list--age-due (drover-list--age-time session) now))
+      (note (drover-list--age-due (drover-session-created session) now))
+      (when (drover-list--cache-fraction session now)
+        (note (drover-session-cache-expires session)))
+      (let ((archived (drover-session-archived session)))
+        (when (numberp archived)
+          (note (drover-list--age-due archived now))))
+      (let ((stale (drover-session-stale session)))
+        (when (numberp stale)
+          (note (drover-list--age-due stale now)))))
+    due))
+
 (defun drover-list--refresh-times (&optional keys bodies)
   "Draw again the rows of the current list whose times read otherwise now.
 Those are their ages, and whether their prompt caches live, and the
@@ -5229,10 +5371,14 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
             (unless (eq (drover-tree-activity-bucket (drover-list--tree-node tree) now)
                         (cdr (drover-list--group-value group)))
               (push (drover-list--tree-root tree) keys)))))
+      ;; Only the rows whose times are due are looked at again, which
+      ;; formatting the ages of thousands of rows cost a minute.
       (maphash (lambda (key row)
                  (let ((inputs (drover-list--row-inputs row))
-                       (session (drover-list--row-session row)))
-                   (unless (and inputs
+                       (due (drover-list--row-due row)))
+                   (when (or (null inputs) (and due (<= due (+ now 0.001))))
+                     (let ((session (drover-list--row-session row)))
+                       (if (and inputs
                                 (equal (aref inputs 6)
                                        (opencode-format-age (drover-list--age-time session) now))
                                 (equal (aref inputs 7)
@@ -5243,7 +5389,8 @@ KEYS and BODIES, as for `drover-list--follow', are drawn with them."
                                        (let ((archived (drover-session-archived session)))
                                          (and (numberp archived) (opencode-format-age archived now))))
                                 (equal (aref inputs 11) (drover-list--host-age session now)))
-                     (push key keys))))
+                           (setf (drover-list--row-due row) (drover-list--times-due session now))
+                         (push key keys))))))
                (drover-list--model-rows model))
       (when (or keys bodies)
         (drover-list--update-sessions (current-buffer) keys bodies)))))
@@ -5535,18 +5682,36 @@ title included."
     (put-text-property start end 'face face)
     (put-text-property start end 'font-lock-face face)))
 
+(defvar-local drover-list--restyled nil
+  "Where buffers were shown as the titles of the list last took their faces.
+A value of `drover-list--places-key', or nil.  Rows drawn since took the
+faces of where buffers were shown as they were drawn, so that while
+windows show the same buffers the titles have their faces already:
+windows changing run `drover-list--restyle-titles' several times a
+redisplay, for each list, and one session buffer killed unseen forgets
+it (see `drover-list--buffer-killed').")
+
+(defun drover-list--places-key (places)
+  "Return what PLACES, a value of `drover-list--places', tells, as a list.
+Two values of the same places are `equal'."
+  (cons (car places) (hash-table-keys (cdr places))))
+
 (defun drover-list--restyle-titles ()
   "Give the titles of the current list the faces of where their sessions are now.
 Only the titles whose session changed place change, in place: the list
 is not drawn anew, but when a face would change the width of a title,
-as a bold one would, whose line was laid out in the other one."
+as a bold one would, whose line was laid out in the other one.  While
+windows show what they showed as titles last took their faces, nothing
+changes (see `drover-list--restyled')."
   (when (drover-list--current-p)
-    (when (and drover-list--drawn drover-list--title-states)
-      (let ((places (drover-list--places))
-            (changed (make-hash-table :test #'equal)))
-        (maphash (lambda (key _)
-                   (let* ((session (gethash key drover-list--drawn))
-                          (state (drover-list--title-state session places)))
+    (when-let* (((and drover-list--drawn drover-list--title-states))
+                (places (drover-list--places))
+                (places-key (drover-list--places-key places))
+                ((not (equal places-key drover-list--restyled))))
+      (setq drover-list--restyled places-key)
+      (let ((changed (make-hash-table :test #'equal)))
+        (maphash (lambda (key session)
+                   (let ((state (drover-list--title-state session places)))
                      (unless (eq state (gethash key drover-list--title-states))
                        (puthash key state changed))
                      (when state
@@ -5599,6 +5764,10 @@ For `kill-buffer-hook', which runs while the buffer still lives."
   (drover-with-reporting "list windows"
     (when (gethash (current-buffer) drover-list--session-buffers)
       (remhash (current-buffer) drover-list--session-buffers)
+      ;; Killed where no window showed it, the places stay the same.
+      (dolist (buffer (drover-list--buffers))
+        (with-current-buffer buffer
+          (setq drover-list--restyled nil)))
       (unless (timerp drover-list--restyle-timer)
         (setq drover-list--restyle-timer (run-at-time 0 nil #'drover-list--windows-changed))))))
 
@@ -5658,7 +5827,8 @@ as a mode applied again, keeps no overlay of the caches it drew.  For
       (remove-hook 'disable-theme-functions #'drover-list--theme-changed)
       (advice-remove 'magit-region-sections #'drover-list--region-advice)
       (remove-function after-focus-change-function #'drover-list--focus-changed)
-      (setq drover-list--windows nil)
+      (setq drover-list--windows nil
+            drover-list--awaiting-place nil)
       (drover-list--stop-timer 'drover-list--focus-timer)
       (drover-list--stop-timer 'drover-list--restyle-timer)
       (drover-list--stop-timer 'drover-list--place-timer)
@@ -5991,6 +6161,28 @@ sidebar, on SIDE, would be next to it."
                      (get-buffer-window-list buffer 'nomini frame))
            t))))
 
+(defun drover-list--steps-aside-p (frame side-window)
+  "Return non-nil when SIDE-WINDOW, the sidebar's on FRAME, is to step aside.
+That is while the list shows beside it, unless `drover-list-side'
+showed it there (`drover-list-sidebar-kept')."
+  (and (not (frame-parameter frame 'drover-list-sidebar-kept))
+       (drover-list--beside-p frame (window-parameter side-window 'window-side))))
+
+(defun drover-list--steps-aside-for-p (window)
+  "Return non-nil when the sidebar is to step aside from the list WINDOW shows.
+WINDOW is an ordinary window showing the list of `drover-list', beside
+the sidebar of its frame, which then goes once windows settled (see
+`drover-list--place-sidebar'), WINDOW growing by its width.  While the
+windows are provisional, the minibuffer active, it stays until the
+minibuffer exited (see `drover-list--windows-provisional-p'): a list
+previewed meanwhile is drawn for the room it has."
+  (and (not (window-parameter window 'window-side))
+       (not (drover-list--windows-provisional-p))
+       (equal (buffer-name (window-buffer window)) drover-list-buffer-name)
+       (when-let* ((frame (window-frame window))
+                   (side-window (drover-list--side-window frame)))
+         (drover-list--steps-aside-p frame side-window))))
+
 (defun drover-list--place-sidebar (frame)
   "Have the sidebar of FRAME step aside next to the list, or come back.
 The sidebar shown, the list beside it, its window goes, its place, side,
@@ -6008,14 +6200,14 @@ it exits (see `drover-list--place-sidebars')."
         (aside (frame-parameter frame 'drover-list-sidebar-aside)))
     (cond
      (side-window
-      (if (drover-list--beside-p frame (window-parameter side-window 'window-side))
-          (unless (frame-parameter frame 'drover-list-sidebar-kept)
-            (set-frame-parameter frame 'drover-list-sidebar-aside
-                                 (list :side (window-parameter side-window 'window-side)
-                                       :slot (window-parameter side-window 'window-slot)
-                                       :width (window-total-width side-window)))
-            (delete-window side-window))
-        (set-frame-parameter frame 'drover-list-sidebar-kept nil))
+      (cond ((drover-list--steps-aside-p frame side-window)
+             (set-frame-parameter frame 'drover-list-sidebar-aside
+                                  (list :side (window-parameter side-window 'window-side)
+                                        :slot (window-parameter side-window 'window-slot)
+                                        :width (window-total-width side-window)))
+             (delete-window side-window))
+            ((not (drover-list--beside-p frame (window-parameter side-window 'window-side)))
+             (set-frame-parameter frame 'drover-list-sidebar-kept nil)))
       ;; Still shown, it is not aside, though windows restored, as
       ;; `winner-undo' restores them, brought it back as it was.
       (when (and aside (window-live-p side-window))
@@ -6044,18 +6236,30 @@ still told that it had."
   "Have the sidebar of each frame step aside next to the list, or come back.
 See `drover-list--place-sidebar'.  While the windows are provisional,
 the minibuffer active, the sidebars are placed once it exited (see
-`drover-list--windows-provisional-p')."
+`drover-list--windows-provisional-p').  Then the lists whose refresh
+waited for the sidebar to step aside are brought up to date, for the
+width it left them, before Emacs displays them (see
+`drover-list--awaiting-place'); while the windows are provisional, for
+the width they have, the sidebar staying until then."
   (drover-with-reporting "sidebar place"
     (setq drover-list--place-timer nil)
-    (cond
-     ((drover-list--windows-provisional-p)
-      (add-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer))
-     ((get-buffer drover-list-sidebar-buffer-name)
-      (dolist (frame (frame-list))
-        (when (and (frame-live-p frame)
-                   (or (frame-parameter frame 'drover-list-sidebar-aside)
-                       (drover-list--side-window frame)))
-          (drover-list--place-sidebar frame)))))))
+    (let ((awaiting drover-list--awaiting-place))
+      (setq drover-list--awaiting-place nil)
+      (cond
+       ((drover-list--windows-provisional-p)
+        (add-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer))
+       ((get-buffer drover-list-sidebar-buffer-name)
+        (dolist (frame (frame-list))
+          (when (and (frame-live-p frame)
+                     (or (frame-parameter frame 'drover-list-sidebar-aside)
+                         (drover-list--side-window frame)))
+            (drover-list--place-sidebar frame)))))
+      (dolist (window awaiting)
+        (when (and (window-live-p window)
+                   (buffer-local-value 'drover-view-p (window-buffer window))
+                   (with-current-buffer (window-buffer window)
+                     (derived-mode-p 'drover-list-mode)))
+          (drover-list--show window))))))
 
 (defun drover-list--place-after-minibuffer ()
   "Place the sidebars once the minibuffer exited and the command ended.

@@ -45,7 +45,7 @@ TESTS = $(wildcard test/*-test.el)
 FILE ?=
 SELECTOR ?=
 
-.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-idle bench-remote bench-review bench-usage real-data
+.PHONY: all compile compile-standalone test-compile test test-alone test-one lint clean bench bench-bulk bench-search bench-toggle bench-idle bench-remote bench-review bench-usage real-data
 
 all: compile test
 
@@ -185,6 +185,15 @@ bench: compile
 bench-bulk:
 	@$(MAKE) --no-print-directory bench \
 	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-bulk-bench.el --eval '(drover-bulk-bench-main)'"
+
+# Times what the user waits for as the sidebar steps aside and comes
+# back, as it is toggled, and as the dispatch menu opens, over thousands
+# of sessions: not part of bench.  DROVER_BENCH_PROFILE=1 profiles each
+# measure, DROVER_BENCH_ONLY=REGEXP takes the measures it matches alone;
+# EMACS_GUI as for bench.  See test/drover-toggle-bench.el.
+bench-toggle:
+	@$(MAKE) --no-print-directory bench \
+	  BENCH_FILES="-l test/drover-test-helpers.el -l test/drover-toggle-bench.el --eval '(drover-toggle-bench-main)'"
 
 # Times the search of sessions over thousands of them, each key typed
 # and its candidates, then ripgrep searching transcripts of fixtures and

@@ -3641,6 +3641,44 @@ further does, in place.  Without a tolerance, every event moves them."
       (should (string-match-p "2h" (drover-list-test-heading "b")))
       (should (equal-including-properties (car (drover-list-test-drawn)) (car (drover-list-test-fresh)))))))
 
+(ert-deftest drover-list-test-age-due ()
+  "An age reads the same until it is due, and otherwise from then on."
+  (let ((time 1000000.0))
+    (dolist (age '(0 0.5 1 59 59.9 60 61 119 3599 3600 3601 86399 86400 90000 200000))
+      (let* ((now (+ time age))
+             (due (drover-list--age-due time now)))
+        (should (> due now))
+        (should (equal (opencode-format-age time (- due 0.01)) (opencode-format-age time now)))
+        (should-not (equal (opencode-format-age time due) (opencode-format-age time now)))))
+    (should-not (drover-list--age-due nil time))))
+
+(ert-deftest drover-list-test-age-timer-looks-at-rows-due ()
+  "The age timer formats the ages of the rows whose times are due alone.
+A row looked at and found the same is due again when its ages change."
+  (drover-list-test-with (list (drover-test-session "a" :status 'working :updated (drover-list-test-ago 30))
+                               (drover-test-session "b" :status 'done :since (drover-list-test-ago 7200)
+                                                    :updated (drover-list-test-ago 7200)))
+    (drover-list-test-shown
+      (let ((formatted nil)
+            (format-age (symbol-function 'opencode-format-age)))
+        (cl-letf (((symbol-function 'opencode-format-age)
+                   (lambda (time &optional now)
+                     (push time formatted)
+                     (funcall format-age time now))))
+          ;; Ten seconds later, "a" is due, "b" not until its next hour.
+          (setq drover-list-test-clock (+ drover-test-now 10))
+          (drover-list--refresh-times)
+          (should formatted)
+          (should-not (memq (drover-session-updated (drover-list-test-find "b")) formatted))
+          (should (string-match-p "40s" (drover-list-test-heading "a")))
+          (should (string-match-p "2h" (drover-list-test-heading "b")))
+          ;; An hour later, "b" reads 3h.
+          (setq drover-list-test-clock (+ drover-test-now 3600))
+          (drover-list--refresh-times)
+          (should (string-match-p "3h" (drover-list-test-heading "b")))
+          (should (equal-including-properties (car (drover-list-test-drawn))
+                                              (car (drover-list-test-fresh)))))))))
+
 (ert-deftest drover-list-test-collapse-state-preserved ()
   (drover-list-test-with (drover-list-test-sample)
     (should (drover-list-test-group-hidden-p 'idle))
@@ -3722,6 +3760,42 @@ further does, in place.  Without a tolerance, every event moves them."
       (drover-changed-now)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(done)))
       (should-not drover-list--stale))))
+
+(ert-deftest drover-list-test-another-width-from-its-model ()
+  "A list drawn for another width keeps its model, and is the list drawn anew.
+It is not drawn whole: its layout alone is chosen anew, in columns or in
+two lines, and what changed while it was hidden is drawn in place after."
+  (random "drover another width")
+  (drover-list-test-with-font
+    (drover-list-test-with (drover-list-test-random-sessions 40)
+      (drover-list-test-shown
+        (let ((model drover-list--model)
+              (layouts nil))
+          (dolist (width '(400 1000 250 700))
+            (setq drover-list-test-width width)
+            (should (zerop (drover-list-test-counting-redraws (drover-list--refresh-if-needed))))
+            (should (eq drover-list--model model))
+            (should (= drover-list--width width))
+            (push drover-list--layout layouts)
+            (drover-list-test-is-fresh))
+          (should (memq 'columns layouts))
+          (should (memq 'narrow layouts)))
+        ;; Changed while hidden, and shown at another width.
+        (let ((other (get-buffer-create " *drover other*"))
+              (session (car drover-test-sessions)))
+          (unwind-protect
+              (progn
+                (set-window-buffer (selected-window) other)
+                (setf (drover-session-title session) "Renamed while hidden")
+                (drover-backend-changed 'fake (drover-session-id session))
+                (drover-changed-now)
+                (should drover-list--pending)
+                (setq drover-list-test-width 900)
+                (set-window-buffer (selected-window) buffer)
+                (should (zerop (drover-list-test-counting-redraws (drover-list--refresh-if-needed))))
+                (should-not drover-list--pending)
+                (drover-list-test-is-fresh))
+            (kill-buffer other)))))))
 
 (ert-deftest drover-list-test-follows-when-shown-again ()
   "A hidden list notes what changed, and draws it in place once shown."
@@ -4599,6 +4673,33 @@ an average character."
                            '(nil opencode-session-open opencode-session-shown
                                  (opencode-session-active drover-dim))))))))))
 
+(ert-deftest drover-list-test-title-places-looked-at-once ()
+  "Titles take the faces of where their sessions are once while windows show the same.
+Windows changing restyle each list several times a redisplay: while
+they show the same buffers, no session is looked at again."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+      (with-current-buffer (window-buffer (drover-list--show-side))
+        (set-window-buffer first (get-buffer-create "*session work*"))
+        (drover-list--windows-changed)
+        (should (eq (drover-list-test-title-face "work") 'opencode-session-active))
+        (let ((looked 0)
+              (state (symbol-function 'drover-list--title-state)))
+          (cl-letf (((symbol-function 'drover-list--title-state)
+                     (lambda (&rest arguments)
+                       (cl-incf looked)
+                       (apply state arguments))))
+            (drover-list--windows-changed)
+            (drover-list--restyle-titles)
+            (should (zerop looked))
+            ;; Another buffer shown: looked at again.
+            (set-window-buffer first (get-buffer-create "*session ask*"))
+            (drover-list--windows-changed)
+            (should (> looked 0))))
+        (should (equal (drover-list-test-places "work" "ask")
+                       '(opencode-session-open opencode-session-active)))))))
+
 (ert-deftest drover-list-test-title-places-in-ordinary-window ()
   "In an ordinary window, the session of the window beside it is the active one."
   (drover-list-test-with (drover-list-test-side-sample)
@@ -5167,6 +5268,69 @@ back the buffer the list replaced."
     (drover-list)
     (should (equal (drover-list-test-ordinary-windows) (list first)))
     (should (eq (window-buffer first) buffer))))
+
+(defmacro drover-list-test-counting-drawings (&rest body)
+  "Run BODY counting the drawings of lists, whole or for another width alone.
+Return the widths, in pixels, the lists were drawn for, in order."
+  (declare (indent 0) (debug t))
+  `(let ((widths nil)
+         (redraw (symbol-function 'drover-list--redraw)))
+     (cl-letf (((symbol-function 'drover-list--redraw)
+                (lambda (&rest arguments)
+                  (prog1 (apply redraw arguments)
+                    (push drover-list--width widths)))))
+       ,@body)
+     (nreverse widths)))
+
+(ert-deftest drover-list-test-drawn-once-as-the-sidebar-steps-aside ()
+  "The list shown beside the sidebar is drawn once, for the room it leaves.
+Shown by another command than `drover-list', as switching buffers shows
+it, the list was drawn for the room it had beside the sidebar as windows
+changed, then again once the sidebar stepped aside.  It waits for the
+sidebar to step aside, and is drawn then; while the sidebar stays beside
+it, as the user asked, it is drawn at once, and so is it when the
+sidebar did not step aside after all."
+  (drover-list-test-alone-beside
+    (with-current-buffer buffer
+      (setq drover-list--stale t))
+    (set-window-buffer first buffer)
+    ;; Its window shows it, then changes size: it waits.
+    (should-not (drover-list-test-counting-drawings
+                  (drover-list--on-window-change first)
+                  (drover-list--on-window-change first)))
+    (should (equal drover-list--awaiting-place (list first)))
+    (should (timerp drover-list--place-timer))
+    (let ((widths (drover-list-test-counting-drawings
+                    (drover-list-test-place))))
+      (should-not (drover-list--side-window))
+      (should-not drover-list--awaiting-place)
+      (should (equal widths (list (with-selected-window first (drover-list--line-width)))))
+      (with-current-buffer buffer
+        (should (= drover-list--width (with-selected-window first (drover-list--line-width))))
+        (drover-list-test-is-fresh)))
+    ;; Shown beside it as asked, the sidebar stays: drawn at once.
+    (drover-list-side)
+    (should (drover-list--side-window))
+    (should (drover-list-test-counting-drawings
+              (drover-list--on-window-change first)))
+    (should-not drover-list--awaiting-place)
+    ;; Waiting while the sidebar was to step aside, which it no longer
+    ;; is: drawn all the same, for the room it has.
+    (set-window-buffer first (get-buffer-create "*other 1*"))
+    (drover-list-test-place)
+    (should (drover-list--side-window))
+    (should-not (frame-parameter nil 'drover-list-sidebar-kept))
+    (set-window-buffer first buffer)
+    (drover-list--on-window-change first)
+    (should (equal drover-list--awaiting-place (list first)))
+    (set-frame-parameter nil 'drover-list-sidebar-kept t)
+    (with-current-buffer buffer
+      (setq drover-list--stale t))
+    (should (drover-list-test-counting-drawings (drover-list-test-place)))
+    (should-not drover-list--awaiting-place)
+    (should (drover-list--side-window))
+    (with-current-buffer buffer
+      (should (= drover-list--width (with-selected-window first (drover-list--line-width)))))))
 
 (ert-deftest drover-list-test-from-the-sidebar ()
   "From the sidebar, the list takes the window where you work, as sessions do.
