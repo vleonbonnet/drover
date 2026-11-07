@@ -442,10 +442,13 @@ their version.")
   "Codex's models cache, models_cache.json, as Codex 0.155 writes it, trimmed.")
 
 (defun drover-test-write (file content)
-  "Write CONTENT to FILE, creating its directory."
+  "Write CONTENT to FILE, creating its directory.
+Its lines end in a line feed alone on every system, as the programs
+writing the files drover reads end them."
   (make-directory (file-name-directory file) t)
-  (with-temp-file file
-    (insert content)))
+  (let ((coding-system-for-write 'utf-8-unix))
+    (with-temp-file file
+      (insert content))))
 
 (defun drover-test-wait-commands (&optional seconds)
   "Wait for the commands of `drover-command-run' to end, SECONDS at most.
