@@ -732,7 +732,8 @@ parameters; CALLER the calling session's key."
   (let ((statuses (drover-anvil--split status))
         (harnesses (drover-anvil--split harness))
         (root (cond ((member project '("here" ".")) 'caller)
-                    ((and (stringp project) (string-match-p "\\`[/~]" project))
+                    ;; Absolute as this host spells it: c:/... on Windows.
+                    ((and (stringp project) (file-name-absolute-p project))
                      (drover-anvil--project-root project))))
         (query (and (stringp query) (not (string-blank-p query)) (downcase query))))
     (when (and (eq root 'caller) (null caller))
