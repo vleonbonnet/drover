@@ -460,10 +460,13 @@ functions, have their setters defined with them."
                 (set-window-buffer (selected-window) buffer)
                 (let ((messages (drover-robustness-test-messages
                                   (revert-buffer)
+                                  ;; Written as Claude Code writes it, before what
+                                  ;; is timed: 9 to 22 ms on Windows, most of the
+                                  ;; time the following took.
+                                  (drover-fixture-claude-append
+                                   (drover-fixture-claude-file "big" project)
+                                   (drover-fixture-claude-user "big" project 1790000100.0 prompt))
                                   (let ((start (float-time)))
-                                    (drover-fixture-claude-append
-                                     (drover-fixture-claude-file "big" project)
-                                     (drover-fixture-claude-user "big" project 1790000100.0 prompt))
                                     (drover-claude-code-transcripts-test-scan)
                                     (should (< (- (float-time) start) 0.1))))))
                   (should (drover-robustness-test-bounded-p messages)))
