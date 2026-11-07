@@ -63,7 +63,10 @@
   "Face of the harness of a session, its icon and name (see `drover-harnesses')."
   :group 'drover-faces)
 
-(defface drover-host-local '((t :inherit success :weight normal))
+(defface drover-host-local
+  '((((class color) (background light)) :inherit success :foreground "green4" :weight normal)
+    (((class color) (background dark)) :inherit success :foreground "green3" :weight normal)
+    (t :inherit success :weight normal))
   "Face of this host's name and icon in the session list."
   :group 'drover-faces)
 
