@@ -4477,8 +4477,15 @@ See `drover-remote--clone-receive'.")
            (substring directory (length home))))))
 
 (defun drover-remote--clone-slashed (directory)
-  "Return DIRECTORY with forward slashes and a trailing one, for comparing."
-  (file-name-as-directory (replace-regexp-in-string "\\\\" "/" directory)))
+  "Return DIRECTORY with forward slashes and a trailing one, for comparing.
+DIRECTORY may be another host's, which keeps its spelling: only its
+separators change, where `file-name-as-directory' would spell it as
+this host does, a drive's letter lower case on Windows.  An empty
+DIRECTORY is the current one, ./, as that function has it."
+  (let ((slashed (replace-regexp-in-string "\\\\" "/" directory)))
+    (cond ((string-empty-p slashed) "./")
+          ((string-suffix-p "/" slashed) slashed)
+          (t (concat slashed "/")))))
 
 (defun drover-remote--clone-map (peer directory home)
   "Return where a conversation of PEER run in DIRECTORY goes here, or nil.
