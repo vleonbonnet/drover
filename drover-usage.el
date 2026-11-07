@@ -1056,7 +1056,9 @@ A subagent of Claude Code's is CONVERSATION/AGENT.")
   (read 0 :documentation "Tokens read from a cache.")
   (write 0 :documentation "Tokens written into a cache.")
   (hour 0 :documentation "Tokens of WRITE written into a cache of an hour.")
-  (cost nil :documentation "What it cost as its engine recorded it, or as its host priced it; nil when not.")
+  (cost nil :documentation "What it cost as its engine recorded it, or as its host priced it; nil when not.
+Of another host's usage a subscription included, what it would have
+cost at list prices, as that host priced it.")
   (billing nil :documentation "How another host found it billed, `priced' or `included', or nil for this one's.")
   (source nil :documentation "Where another host's cost comes from, a line, or nil."))
 
@@ -1064,7 +1066,7 @@ A subagent of Claude Code's is CONVERSATION/AGENT.")
                                    (:copier nil))
   "The facts of the usage known, made for one generation."
   ;; First, whatever the version: see `drover-layout-current-p'.
-  (stamp (drover-layout 'drover-usage--facts 'drover-usage--fact)
+  (stamp (drover-layout 'drover-usage--facts 'drover-usage--fact 'drover-usage-sum)
          :documentation "The layouts of the types it was made of.")
   (generation nil :documentation "The value of `drover-usage--generation' it was made at.")
   (facts nil :documentation "This host's facts.")
@@ -1370,7 +1372,12 @@ it there, or drover's own table."
   (cost 0 :documentation "What the priced usage cost, in dollars.")
   (priced nil :documentation "Non-nil when some of it was priced.")
   (included nil :documentation "Non-nil when a subscription included some of it.")
-  (unpriced nil :documentation "Non-nil when some priced usage had no price."))
+  (unpriced nil :documentation "Non-nil when some priced usage had no price.")
+  (value 0 :documentation "What the included usage would have cost at list prices, in dollars.
+A subscription paying for it, the user pays none of it: views show it
+apart, as what the subscription is worth (see `drover-usage-included')."))
+
+(drover-note-layout 'drover-usage-sum)
 
 (defun drover-usage-sum-tokens (sum)
   "Return the tokens SUM counts, all of them."
@@ -1384,46 +1391,58 @@ it there, or drover's own table."
   (cl-incf (drover-usage-sum-read sum) (drover-usage-sum-read other))
   (cl-incf (drover-usage-sum-write sum) (drover-usage-sum-write other))
   (cl-incf (drover-usage-sum-cost sum) (drover-usage-sum-cost other))
+  (cl-incf (drover-usage-sum-value sum) (drover-usage-sum-value other))
   (when (drover-usage-sum-priced other) (setf (drover-usage-sum-priced sum) t))
   (when (drover-usage-sum-included other) (setf (drover-usage-sum-included sum) t))
   (when (drover-usage-sum-unpriced other) (setf (drover-usage-sum-unpriced sum) t))
   sum)
 
 (defun drover-usage--pricer ()
-  "Return a function of a fact returning (BILLING COST SOURCE).
+  "Return a function of a fact returning (BILLING COST SOURCE VALUE).
 BILLING is `priced' or `included'; COST, in dollars, nil when included
-or without a price; SOURCE tells where the cost comes from.  Prices are
-looked up once per harness, provider and model."
+or without a price; SOURCE tells where the cost comes from; VALUE, of
+included usage, what it would have cost at list prices, as priced
+usage without a recorded cost is priced (see `drover-usage-price'), nil
+without a price or when priced.  Prices are looked up once per
+harness, provider and model."
   (let ((memo (make-hash-table :test #'equal)))
     (lambda (fact)
       (if (drover-usage--fact-billing fact)
-          (list (drover-usage--fact-billing fact) (drover-usage--fact-cost fact)
-                (drover-usage--fact-source fact))
+          (let ((included (eq (drover-usage--fact-billing fact) 'included)))
+            (list (drover-usage--fact-billing fact)
+                  (and (not included) (drover-usage--fact-cost fact))
+                  (drover-usage--fact-source fact)
+                  (and included (drover-usage--fact-cost fact))))
         (let* ((harness (drover-usage--fact-harness fact))
                (key (list harness (drover-usage--fact-provider fact) (drover-usage--fact-model fact)))
                (how (with-memoization (gethash key memo)
                       (let ((billing (drover-usage-billing harness (drover-usage--fact-provider fact))))
-                        (cond ((eq billing 'included) (list 'included nil "included"))
+                        (cond ((eq billing 'included)
+                               (list 'included nil "included"
+                                     (car (drover-usage-price harness (drover-usage--fact-model fact)))))
                               ((drover-usage--fact-cost fact) (list 'priced 'recorded "recorded by OpenCode"))
                               (t (let ((price (drover-usage-price harness (drover-usage--fact-model fact))))
-                                   (list 'priced (car price) (or (cdr price) "no price")))))))))
+                                   (list 'priced (car price) (or (cdr price) "no price"))))))))
+                 (price (lambda (prices)
+                          (drover-usage--priced prices (drover-usage--fact-input fact)
+                                                (drover-usage--fact-output fact)
+                                                (drover-usage--fact-read fact)
+                                                (drover-usage--fact-write fact)
+                                                (drover-usage--fact-hour fact)))))
           (list (nth 0 how)
                 (pcase (nth 1 how)
                   ('nil nil)
                   ('recorded (drover-usage--fact-cost fact))
-                  (prices (drover-usage--priced prices (drover-usage--fact-input fact)
-                                                (drover-usage--fact-output fact)
-                                                (drover-usage--fact-read fact)
-                                                (drover-usage--fact-write fact)
-                                                (drover-usage--fact-hour fact))))
-                (nth 2 how)))))))
+                  (prices (funcall price prices)))
+                (nth 2 how)
+                (and (nth 3 how) (funcall price (nth 3 how)))))))))
 
 (defun drover-usage--fact-sum (fact pricer)
   "Return the totals of FACT, priced by PRICER (see `drover-usage--pricer')."
-  (pcase-let ((`(,billing ,cost ,_source) (funcall pricer fact)))
+  (pcase-let ((`(,billing ,cost ,_source ,value) (funcall pricer fact)))
     (drover-usage-sum-make :input (drover-usage--fact-input fact) :output (drover-usage--fact-output fact)
                            :read (drover-usage--fact-read fact) :write (drover-usage--fact-write fact)
-                           :cost (or cost 0)
+                           :cost (or cost 0) :value (or value 0)
                            :priced (eq billing 'priced)
                            :included (eq billing 'included)
                            :unpriced (and (eq billing 'priced) (null cost)))))
@@ -1535,27 +1554,51 @@ use of PROVIDER is billed now, `included' or `priced' (see
 
 ;;;; Formatting
 
+(defface drover-usage-included '((t :inherit success :weight normal))
+  "Face of what usage a subscription pays for would have cost at list prices.
+Green, as the user pays none of it: what the subscription is worth."
+  :group 'drover-usage)
+
+(defun drover-usage--money-text (cost)
+  "Return COST, in dollars, as it reads, such as \"$1.23\" or \"$240\"."
+  (cond ((>= cost 100) (format "$%d" (round cost)))
+        ((>= cost 0.995) (format "$%.2f" cost))
+        ((> cost 0) (format "$%.2f" (max cost 0.01)))
+        (t "$0")))
+
 (defun drover-usage-format-cost (sum)
-  "Return the cost of SUM as it reads, such as \"$1.23\" or \"included\"."
-  (let ((cost (drover-usage-sum-cost sum))
-        (priced (drover-usage-sum-priced sum))
-        (included (drover-usage-sum-included sum)))
+  "Return the cost of SUM as it reads, such as \"$1.23\" or \"$3.10 included\".
+What a subscription included reads as what it would have cost at list
+prices, in the face `drover-usage-included', else \"included\"."
+  (let ((priced (drover-usage-sum-priced sum))
+        (included (drover-usage-sum-included sum))
+        (value (drover-usage-sum-value sum)))
     (concat
-     (cond ((not priced) nil)
-           ((>= cost 100) (format "$%d" (round cost)))
-           ((>= cost 0.995) (format "$%.2f" cost))
-           ((> cost 0) (format "$%.2f" (max cost 0.01)))
-           (t "$0"))
+     (and priced (drover-usage--money-text (drover-usage-sum-cost sum)))
      (and (drover-usage-sum-unpriced sum) "?")
      (and priced included " + ")
-     (and included "included"))))
+     (and included
+          (opencode-face-string (if (> value 0) (concat (drover-usage--money-text value) " included") "included")
+                                'drover-usage-included)))))
 
 (defun drover-usage-format-short (sum)
-  "Return the cost of SUM in a few characters, for a column."
-  (if (drover-usage-sum-priced sum)
-      (concat (string-remove-suffix " + included" (drover-usage-format-cost sum))
-              (and (drover-usage-sum-included sum) "+"))
-    "incl."))
+  "Return the cost of SUM in a few characters, for a column.
+What a subscription included shows as what it would have cost at list
+prices, in the face `drover-usage-included', after a + beside a priced
+cost, such as \"$12.40+$3.10\"; \"incl.\" without a price."
+  (let ((priced (drover-usage-sum-priced sum))
+        (included (drover-usage-sum-included sum))
+        (value (drover-usage-sum-value sum)))
+    (concat
+     (and priced (concat (drover-usage--money-text (drover-usage-sum-cost sum))
+                         (and (drover-usage-sum-unpriced sum) "?")))
+     (and included
+          (opencode-face-string (concat (and priced "+")
+                                        (cond ((> value 0) (drover-usage--money-text value))
+                                              (priced "")
+                                              (t "incl.")))
+                                'drover-usage-included))
+     (and (not priced) (not included) "$0"))))
 
 (defun drover-usage-format-tokens (tokens)
   "Return TOKENS, a count, compact, such as 12.3k."
@@ -1651,7 +1694,9 @@ That of its directory, else the directory, abbreviated."
   "Return this host's totals of PERIOD by the dimensions BY, as they travel.
 A list of vectors [ENGINE ID PARENT DAY PROVIDER MODEL PROJECT INPUT
 OUTPUT READ WRITE COST BILLING SOURCE TITLE], the dimensions BY leaves
-out empty, COST nil when unknown, and the number of rows left out."
+out empty, COST nil when unknown, of an included row what it would
+have cost at list prices, which an older drover ignores, and the number
+of rows left out."
   (let* ((facts (drover-usage--current-facts))
          (start (drover-usage-period-start period))
          (pricer (drover-usage--pricer))
@@ -1659,7 +1704,7 @@ out empty, COST nil when unknown, and the number of rows left out."
          (titles (drover-usage--titles facts)))
     (dolist (fact (drover-usage--facts-facts facts))
       (when (drover-usage--in-period-p fact start)
-        (pcase-let* ((`(,billing ,cost ,source) (funcall pricer fact))
+        (pcase-let* ((`(,billing ,cost ,source ,value) (funcall pricer fact))
                      (engine (drover-usage--fact-harness fact))
                      (session (member "session" by))
                      (id (and session (drover-usage--fact-id fact)))
@@ -1685,7 +1730,7 @@ out empty, COST nil when unknown, and the number of rows left out."
           (cl-incf (aref row 8) (drover-usage--fact-output fact))
           (cl-incf (aref row 9) (drover-usage--fact-read fact))
           (cl-incf (aref row 10) (drover-usage--fact-write fact))
-          (when cost
+          (when-let* ((cost (or cost value)))
             (aset row 11 (+ (or (aref row 11) 0) cost))))))
     (let ((rows (sort (hash-table-values table)
                       :key (lambda (row) (- (+ (aref row 7) (aref row 8) (aref row 9) (aref row 10))))
@@ -1743,7 +1788,7 @@ Every value is checked: what does not fit is left out, or the row."
          :model (drover-usage--wire-string (aref row 5))
          :project (drover-usage--wire-string (aref row 6))
          :input (nth 0 counts) :output (nth 1 counts) :read (nth 2 counts) :write (nth 3 counts)
-         :cost (and (eq billing 'priced) (drover-usage--money (aref row 11)))
+         :cost (drover-usage--money (aref row 11))
          :billing billing
          :source (or (drover-usage--wire-string (aref row 13)) "its host"))))))
 
@@ -1753,6 +1798,13 @@ ASKED is the period asked, or `sessions' for each session's totals
 ever; each entry a plist of :time, when received, :facts, :parents and
 :titles, by (ENGINE . ID), :more, rows left out, :reading, :error, and
 :pending, while asked.")
+
+;; Totals of peers' sessions made by an older version lack the value
+;; included usage would have cost: they are made anew.
+(maphash (lambda (key entry)
+           (when (plist-get entry :totals)
+             (puthash key (plist-put entry :totals nil) drover-usage--remote)))
+         drover-usage--remote)
 
 (defvar drover-usage--remote-generation 0
   "Count of the totals received from peers.")

@@ -372,6 +372,55 @@ and a gateway, priced; one of three days ago; one running."
 
 ;;;; Billing and prices
 
+(ert-deftest drover-usage-test-included-value ()
+  "What a subscription included shows what it would have cost at list prices, in green."
+  (let ((drover-usage-billing '((claude-code nil included)))
+        (drover-usage-prices '(("opus" :input 5 :output 25 :cache-read 0.5 :cache-write 6.25))))
+    (let* ((pricer (drover-usage--pricer))
+           (local (drover-usage--fact-make :harness 'claude-code :model "claude-opus-5" :id "c"
+                                           :input 1000000 :output 100000))
+           (remote (drover-usage--fact-make :host "core" :harness 'codex :model "gpt-6" :id "x"
+                                            :input 10 :billing 'included :cost 1.25 :source "included"))
+           (priced (drover-usage--fact-make :host "core" :harness 'opencode :id "o"
+                                            :input 10 :billing 'priced :cost 12.4 :source "recorded"))
+           (local-sum (drover-usage--fact-sum local pricer))
+           (both (drover-usage--add (drover-usage--fact-sum priced pricer)
+                                    (drover-usage--fact-sum remote pricer))))
+      ;; $5 a million in, $25 out: none of it paid.
+      (should (equal (funcall pricer local) '(included nil "included" 7.5)))
+      (should (= (drover-usage-sum-cost local-sum) 0))
+      (should (= (drover-usage-sum-value local-sum) 7.5))
+      (should (equal (drover-usage-format-short local-sum) "$7.50"))
+      (should (eq (get-text-property 0 'font-lock-face (drover-usage-format-short local-sum))
+                  'drover-usage-included))
+      (should (equal (drover-usage-format-cost local-sum) "$7.50 included"))
+      ;; Another host's, as it priced it; beside a cost paid.
+      (should (equal (funcall pricer remote) '(included nil "included" 1.25)))
+      (should (= (drover-usage-sum-cost both) 12.4))
+      (let ((short (drover-usage-format-short both)))
+        (should (equal short "$12.40+$1.25"))
+        (should-not (get-text-property 0 'font-lock-face short))
+        (should (eq (get-text-property 6 'font-lock-face short) 'drover-usage-included)))
+      (should (equal (drover-usage-format-cost both) "$12.40 + $1.25 included"))
+      ;; Without a price, it is included all the same.
+      (let ((unknown (drover-usage--fact-sum (drover-usage--fact-make :harness 'claude-code :model "mystery"
+                                                                      :id "m" :input 5)
+                                             pricer)))
+        (should (equal (drover-usage-format-short unknown) "incl."))
+        (should (equal (drover-usage-format-cost unknown) "included"))))))
+
+(ert-deftest drover-usage-test-included-value-travels ()
+  "A host sends what its included usage would have cost; its peer shows it."
+  (let* ((row (vector "claude-code" "c" "" 20261106 "anthropic" "claude-opus-5" "" 10 20 0 0 7.5
+                      "included" "included" "Title"))
+         (fact (drover-usage-decode-row row "core")))
+    (should (eq (drover-usage--fact-billing fact) 'included))
+    (should (= (drover-usage--fact-cost fact) 7.5))
+    (should (equal (nth 3 (funcall (drover-usage--pricer) fact)) 7.5))
+    ;; An older host sends none.
+    (aset row 11 :false)
+    (should-not (nth 3 (funcall (drover-usage--pricer) (drover-usage-decode-row row "core"))))))
+
 (ert-deftest drover-usage-test-billing ()
   "Claude Code logged in to an account, and Codex through ChatGPT, are included; a key or gateway is not."
   (drover-usage-test-with
