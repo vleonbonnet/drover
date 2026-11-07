@@ -137,6 +137,8 @@ A buffer shows the paragraph on the whole session rather than the line on its la
 
 The first three need the user (=drover-attention-statuses=).  Among them, the session waiting longest comes first: =since= is when the status began.  Seen and unseen are the backend's to track: for OpenCode, the service records when a client viewed a session, so a turn read in any client is no longer =done=.
 
+A disconnected Agent Shell stays =failed= even once the user has seen its last turn: seeing an error does not reconnect the adapter. Its =:connection-error= and =:connection-since= describe that connection independently of the turn's outcome. During =:connection-retrying= initialization it shows =working=; only successful initialization clears the connection error. The configuration's ACP lifetime hook supplies these fields even when an adapter exits between requests, which Agent Shell's busy flag alone cannot distinguish from ready.
+
 * Actions go through the backend
 
 Every action takes a session and calls the matching function its backend registered; an action the backend lacks is a =user-error=, and views can test =drover-supports-p= to hide it.  Whether an operation applies may depend on the session, not only on its backend: an agent-shell shell forks only when its agent can, a Claude Code terminal compacts only while it lives.  So a backend may register =:supports=, a function of a session and an operation, which =drover-supports-p= consults and =drover-backend-call= obeys, and the menus grey out what does not apply rather than offer what fails.  A backend may also tell which buffer shows a session (=:buffer=, read through =drover-session-buffer=), so views can mark the session the user is looking at.
