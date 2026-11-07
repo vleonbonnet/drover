@@ -4084,10 +4084,10 @@ Each shows its own buffer."
         (cl-flet ((flush (left right) (concat left (make-string (- 34 (length left) (length right)) ?\s)
                                               right)))
           (should (equal (drover-list-test-entry "ask")
-                         (concat (flush "! Session ask" "3m @ ▣") "\n  asks: Which branch?")))
+                         (concat (flush "! Session ask" "3m ▣") "\n  asks: Which branch?")))
           (should (equal (drover-list-test-entry "fail")
-                         (concat (flush "✗ Session fail" "30s @ ▣") "\n  Rate limited")))
-          (should (equal (drover-list-test-entry "work") (flush "◐ Session work" "1m @ ▣"))))))))
+                         (concat (flush "✗ Session fail" "30s ▣") "\n  Rate limited")))
+          (should (equal (drover-list-test-entry "work") (flush "◐ Session work" "1m ▣"))))))))
 
 ;; Opening a session from the side window, with RET, o or C-o, must not
 ;; replace the list in its dedicated window: `drover-open' opens
@@ -4786,7 +4786,8 @@ an average character."
           ;; Two lines: the summary does not fit in a column.
           (should (eq drover-list--layout 'narrow))
           (should-not header-line-format)
-          (should (string-suffix-p "1m @ ▣" (drover-list-test-heading "a")))
+          (should (string-suffix-p "1m ▣" (drover-list-test-heading "a")))
+          (should-not (memq 'host drover-list--fields))
           ;; Every column of the line: the sidebar leaves no room for
           ;; Magit's ellipsis, as it collapses nothing.
           (should (= (string-width (drover-list-test-heading "a")) before))
@@ -4797,10 +4798,11 @@ an average character."
           ;; Now it does: one line, in columns, from the left edge; the
           ;; harness its icon alone, after the age, as in two lines.
           (should (eq drover-list--layout 'columns))
-          (should (equal (drover-list-test-entry "a") "! Session a   1m  @  ▣  asks: Go?"))
+          (should-not (memq 'host drover-list--fields))
+          (should (equal (drover-list-test-entry "a") "! Session a   1m  ▣  asks: Go?"))
           ;; Named in the header line, which two lines lack, but the
           ;; icon's column.
-          (should (equal (drover-list-test-displayed header-line-format) "Session      Age        Summary")))))))
+          (should (equal (drover-list-test-displayed header-line-format) "Session      Age     Summary")))))))
 
 ;;;; The sidebar draws its first screens
 
@@ -5922,8 +5924,8 @@ The subagent's glyph stands under its parent's title."
       (with-current-buffer (window-buffer (drover-list--show-side))
         (should (eq drover-list--layout 'narrow))
         ;; The sidebar's lines begin with their glyphs.
-        (should (string-match-p "\\`· \\? Session p +1m @ ▣\\'" (drover-list-test-entry "p")))
-        (should (string-match-p "\\`    ! Session a +2m @ ▣\n      asks: Go\\?\\'" (drover-list-test-entry "a")))))))
+        (should (string-match-p "\\`· \\? Session p +1m ▣\\'" (drover-list-test-entry "p")))
+        (should (string-match-p "\\`    ! Session a +2m ▣\n      asks: Go\\?\\'" (drover-list-test-entry "a")))))))
 
 ;;;; Open sessions
 
@@ -8368,8 +8370,8 @@ tree within a bound whatever the sessions."
           (should (memq 'drover-host-local
                         (ensure-list (get-text-property (match-beginning 0) 'font-lock-face)))))
         (drover-list-test-layout-at 300)
-        (should (drover-list-test-icon-face-p key 'drover-host-local))
-        (should (equal (drover-list-test-tooltip-at key "@") "here — local")))
+        (should (string-search "here" (drover-list-test-remote-line key)))
+        (should-not (string-search "@" (drover-list-test-remote-line key))))
       (let* ((remote (drover-session-create :backend 'remote:core :id '(fake . "r1") :host "core"
                                             :origin 'fake :title "Remote" :status 'working
                                             :since (drover-list-test-ago 60)
@@ -8561,7 +8563,7 @@ session's details."
           (should (string-match-p "^ +Harness +Fake$" (drover-list-test-visible-text)))
           ;; In two lines.
           (should (eq (car (drover-list-test-layout-at 150)) 'narrow))
-          (should (string-match-p "\\` +· Open +here +4m +@ +O\\'" (drover-list-test-remote-line '(opencode . "o")))))))))
+          (should (string-match-p "\\` +· Open +here +4m +O\\'" (drover-list-test-remote-line '(opencode . "o")))))))))
 
 (ert-deftest drover-list-test-harness-in-view-menu ()
   "The View menu's Columns switch the harness's column, -H."
@@ -8631,8 +8633,9 @@ cell."
 In two lines, at the end of the title's line, after the age, whatever
 its width, in a cell as wide as the widest icon, the host's icon and the
 context's pie before it, each in a cell of its own, which a line without
-one leaves empty: the pie only on that of a session whose context fills
-a known part.  In columns, the harness in the last column, after the age's and
+one leaves empty: the host's only for another host, the pie only on that
+of a session whose context fills a known part.  In columns, the harness
+in the last column, after the age's and
 the prompt cache's, which a session without a live cache leaves empty;
 the host's icon before the harness's, whose host's name neither layout
 shows.  The positions are the pixels lines align their parts to."
@@ -8660,8 +8663,8 @@ shows.  The positions are the pixels lines align their parts to."
                    (context-x (- host-x space (alist-get 'context edges))))
               (should (equal (mapcar #'car edges) '(harness host context)))
               ;; Ages of two and three characters: 4m, 10m.
-              (should (string-match-p "\\`· Open +4m ▄ +@ O\\'" (drover-list-test-remote-line '(opencode . "o"))))
-              (should (string-match-p "\\`· Transcript +10m +@ T\\'"
+              (should (string-match-p "\\`· Open +4m ▄ +O\\'" (drover-list-test-remote-line '(opencode . "o"))))
+              (should (string-match-p "\\`· Transcript +10m +T\\'"
                                       (drover-list-test-remote-line '(claude-code . "t"))))
               (should (string-match-p "\\`· Remote +6m +@ C\\'"
                                       (drover-list-test-remote-line '(remote:core claude-code-ide . "r"))))
@@ -8675,7 +8678,7 @@ shows.  The positions are the pixels lines align their parts to."
                                    (plist-get (alist-get (if (eq (car key) 'remote:core) 'claude-code-ide (car key))
                                                          drover-harnesses)
                                               :icon)))
-                    (should (equal (funcall text host-x) "@"))
+                    (should (equal (funcall text host-x) (and (eq (car key) 'remote:core) "@")))
                     (should (equal (funcall text context-x) (and (equal key '(opencode . "o")) "▄")))
                     (should (equal (car (last cells)) (assoc harness-x cells)))
                     (should (<= (+ (car age) (string-pixel-width (cdr age))) (- context-x space)))))))
@@ -8696,7 +8699,7 @@ shows.  The positions are the pixels lines align their parts to."
                 (let ((cells (drover-list-test-key-cells key)))
                   ;; Each icon in the harness's column, its own last cell.
                   (should (= (car (car (last cells))) (nth 1 harness)))
-                  (should (assoc (nth 1 host) cells))
+                  (should (eq (and (assoc (nth 1 host) cells) t) (eq (car key) 'remote:core)))
                   ;; The cache only on the line of the session that has one.
                   (should (eq (and (assoc (nth 1 cache) cells) t) (equal key '(opencode . "o")))))))
             (drover-list-test-is-fresh)))))))
@@ -8751,7 +8754,9 @@ ordinary window keeps the host's name and age."
                                   (- (plist-get model :width) (alist-get 'harness edges)
                                      (plist-get model :space) (alist-get 'host edges)))
                               (nth 1 (assq 'host (plist-get model :columns))))))
-                    (dolist (key (list near far '(opencode . "o")))
+                    (should-not (assoc x (drover-list-test-key-cells '(opencode . "o"))))
+                    (should-not (string-match-p "here\\|@" (drover-list-test-remote-line '(opencode . "o"))))
+                    (dolist (key (list near far))
                       (let ((line (drover-list-test-remote-line key))
                             (cells (drover-list-test-key-cells key)))
                         (ert-info ((format "%S %s" layout line))
@@ -8782,8 +8787,6 @@ ordinary window keeps the host's name and age."
                 (drover-list--on-window-change side))
               (let ((layout (if width 'columns 'narrow)))
                 (funcall check layout)
-                (should (drover-list-test-icon-face-p '(opencode . "o") 'drover-host-local))
-                (should (equal (drover-list-test-tooltip-at '(opencode . "o") "@") "here — local"))
                 (should (drover-list-test-icon-face-p near 'drover-dim))
                 (should (drover-list-test-icon-face-p far 'drover-host-disconnected))
                 (should (equal (drover-list-test-tooltip-at near "@") "core — connected"))

@@ -428,9 +428,9 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  host      The host of a session, this host in `drover-host-local',
            another dimmed, and how long ago it was last heard from
            while it is not connected; in two lines,
-           an icon too (see `drover-host-icon'), and in the sidebar,
-           its icon alone, its tooltip naming the host and telling how
-           it stands.
+           another host's icon too (see `drover-host-icon'), and in the
+           sidebar, that icon alone, nothing for this host; its tooltip
+           names the host and tells how it stands.
  harness   What runs the session (see `drover-harnesses'): its icon and
            name, its icon alone where room is short, as in two lines.
  location  The project, as views show it (see
@@ -1501,7 +1501,7 @@ It names the host and tells how it stands, as when shown.  For
   "Return the host of SESSION as its column shows it at NOW.
 This host's label is in `drover-host-local', another's dimmed, then,
 while it is not connected, how long ago it was last heard from; the
-tooltip tells how it stands.  In two lines, its icon shows besides
+tooltip tells how it stands.  In two lines, another host's icon shows besides
 \(see `drover-list--host-icon')."
   (let ((host (drover-session-host session)))
     (propertize (drover-face (concat (drover-list--one-line (drover-host-label host))
@@ -1603,7 +1603,8 @@ icon (see `drover-list--host-icon'); the context, its pie (see
 harness, its icon (see `drover-list--compact'); any other its text."
   (let ((text (or (alist-get field (drover-list--row-texts row)) "")))
     (or (pcase field
-          ('host (and (not (string-empty-p text))
+          ('host (and (drover-session-host (drover-list--row-session row))
+                      (not (string-empty-p text))
                       (let ((session (drover-list--row-session row)))
                         (drover-list--host-icon (drover-session-host session)
                                                 (drover-session-stale session)))))
@@ -2001,17 +2002,22 @@ the width of that icon.  Widths are in pixels."
       (drover-list--summary-add summary row 1))
     summary))
 
-(defun drover-list--has-p (field summary)
+(defun drover-list--has-p (field summary &optional metrics)
   "Return non-nil when a row of SUMMARY has something to show for FIELD.
 What comes and goes with a session's turns counts whether it shows now
 or not, so that a turn changes no field the list shows: the summary for
 any row, as any session may come to need the user, and the prompt
-cache for a row that may show one (see `drover-list--caching-p')."
+cache for a row that may show one (see `drover-list--caching-p').
+For a field showing its icon alone in METRICS, count its icons, so
+local hosts take no room in the sidebar."
   (pcase field
     ('title t)
     ('summary (drover-list--tally-any-p (aref summary 1)))
     ('cache (drover-list--tally-any-p (aref summary 2)))
-    (_ (drover-list--tally-any-p (aref summary (drover-list--text-index field))))))
+    (_ (drover-list--tally-any-p
+        (aref summary (if (and metrics (drover-list--icon-alone-p field metrics))
+                          (drover-list--kept-index field)
+                        (drover-list--text-index field)))))))
 
 ;;;; Layout
 
@@ -2141,7 +2147,7 @@ what a session's turn changes: whether it needs the user, its prompt
 cache, its subagents at work."
   (let* ((gap (plist-get metrics :gap))
          (present (seq-filter (lambda (entry)
-                                (and (drover-list--has-p (car entry) summary)
+                                (and (drover-list--has-p (car entry) summary metrics)
                                      (or (eq (car entry) 'title)
                                          (not (memq (car entry) drover-list-hidden-fields)))))
                               drover-list-fields))
