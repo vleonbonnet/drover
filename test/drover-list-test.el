@@ -2373,6 +2373,20 @@ An error the line shows whole already is not repeated."
                                       " +and 150 more files\n    Directory")
                               (drover-list-test-visible-text))))))
 
+(ert-deftest drover-list-test-changes-column-compact ()
+  "Counts of lines past a thousand show in thousands in the column, whole in the details."
+  (drover-list-test-with
+      (list (drover-test-session "c" :status 'done :since (drover-list-test-ago 60)
+                                 :changes '(45294 6142 409)))
+    (setq drover-test-recaps '(("c" :prompt "Go")))
+    (revert-buffer)
+    (should (string-match-p "+45k −6\\.1k · 409 files +1m$" (drover-list-test-heading "c")))
+    (setq drover-list-hidden-fields '(harness changes))
+    (revert-buffer)
+    (drover-list-test-goto "c")
+    (magit-section-show (magit-current-section))
+    (should (string-match-p "^    Changes +\\+45294 −6142 · 409 files$" (drover-list-test-visible-text)))))
+
 (ert-deftest drover-list-test-changes-asked-for-the-sessions-in-sight ()
   "The list asks what the sessions it shows changed, those it expands too."
   (drover-list-test-with (list (drover-test-session "a" :status 'done :since (drover-list-test-ago 60))

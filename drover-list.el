@@ -1447,24 +1447,30 @@ plain, the session working away from it."
           (drover-face line 'opencode-setting-inherited)
         line))))
 
-(defun drover-list--changes-line (additions deletions files)
+(defun drover-list--changes-line (additions deletions files &optional compact)
   "Return ADDITIONS, DELETIONS and FILES, what a session changed, as a line.
 Such as \"+120 −14 · 3 files\", the counts of lines in the faces
 `drover-added' and `drover-removed', each left out when nil, the files
-dimmed.  Nil when FILES is not a positive number."
+dimmed.  With COMPACT, counts of lines past a thousand are told in
+thousands or millions, as sizes of contexts are, such as \"+45k −6.1k ·
+409 files\".  Nil when FILES is not a positive number."
   (when (and (natnump files) (> files 0))
-    (let ((counts (delq nil (list (and (natnump additions) (drover-face (format "+%d" additions) 'drover-added))
-                                  (and (natnump deletions) (drover-face (format "−%d" deletions) 'drover-removed)))))
-          (files (drover-face (format "%d file%s" files (if (= files 1) "" "s")) 'drover-dim)))
-      (if counts
-          (concat (string-join counts " ") (drover-face " · " 'drover-dim) files)
-        files))))
+    (cl-flet ((count (lines) (if compact (opencode-format-tokens lines) (number-to-string lines))))
+      (let ((counts (delq nil (list (and (natnump additions)
+                                         (drover-face (concat "+" (count additions)) 'drover-added))
+                                    (and (natnump deletions)
+                                         (drover-face (concat "−" (count deletions)) 'drover-removed)))))
+            (files (drover-face (format "%d file%s" files (if (= files 1) "" "s")) 'drover-dim)))
+        (if counts
+            (concat (string-join counts " ") (drover-face " · " 'drover-dim) files)
+          files)))))
 
 (defun drover-list--changes-text (session)
   "Return what SESSION changed in all its turns as its column shows it, or nil.
-See `drover-session-changes' and `drover-list--changes-line'."
+Its counts of lines compact, the details telling them whole.  See
+`drover-session-changes' and `drover-list--changes-line'."
   (pcase (drover-session-changes session)
-    (`(,additions ,deletions ,files) (drover-list--changes-line additions deletions files))))
+    (`(,additions ,deletions ,files) (drover-list--changes-line additions deletions files t))))
 
 (defun drover-list--host-age (session now)
   "Return how long ago the host of SESSION was last heard from at NOW, or nil.
@@ -3106,7 +3112,7 @@ part `changes', the last telling how many more files there are."
     (when (> limit 0)
       (if (null files)
           (unless (memq 'changes whole)
-            (when-let* ((line (drover-list--changes-text session)))
+            (when-let* ((line (and totals (apply #'drover-list--changes-line totals))))
               (list line)))
         (let* ((count (if session-files (max (length files) (or (nth 2 totals) 0)) (length files)))
                (head (if session-files
