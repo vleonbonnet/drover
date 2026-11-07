@@ -425,12 +425,12 @@ Each entry is (FIELD . PROPERTIES).  FIELD is one of:
  attempt   The attempt the session works in, of a task worked on in
            several places, such as a fan-out's (see `drover-fanout'):
            its number, and the harness and model it was given.
- host      The host of a session of another host, and how long ago it
-           was last heard from while it is not connected; in two lines,
+ host      The host of a session, this host in `drover-host-local',
+           another dimmed, and how long ago it was last heard from
+           while it is not connected; in two lines,
            an icon too (see `drover-host-icon'), and in the sidebar,
            its icon alone, its tooltip naming the host and telling how
-           it stands; nothing for this host's, so that a list of them
-           has no such column.
+           it stands.
  harness   What runs the session (see `drover-harnesses'): its icon and
            name, its icon alone where room is short, as in two lines.
  location  The project, as views show it (see
@@ -541,7 +541,7 @@ changes it for the session, with one switch per field."
   '((title . "The status of the session, the subagents at work under it, and its title")
     (goal . "The goal the session works under: iterations run of their limit, and how it stands")
     (attempt . "The attempt of its task the session works in, and the model it was given")
-    (host . "The host the session runs on, if another; and since when it is not connected")
+    (host . "The host the session runs on, green for this host; and since when it is not connected")
     (harness . "What runs the session: its front end, or the CLI that recorded it")
     (location . "The project the session works in")
     (branch . "The branch the session works on, greyed out when its repository's default one")
@@ -1490,36 +1490,40 @@ It names the host and tells how it stands, as when shown.  For
   (drover-with-reporting "list tooltip"
     (when-let* ((host (and (or (bufferp object) (stringp object))
                            (get-text-property position 'drover-list-host object))))
-      (drover-bound-lines
-       (concat "Host: " (drover-host-label host)
-               (when-let* ((state (drover-host-state host)))
-                 (concat "\nNot connected: " state)))))))
+      (let ((host (unless (eq host 'local) host)))
+        (drover-bound-lines
+         (concat "Host: " (drover-host-label host)
+                 (unless host " (local)")
+                 (when-let* ((state (drover-host-state host)))
+                   (concat "\nNot connected: " state))))))))
 
 (defun drover-list--host-text (session now)
-  "Return the host of SESSION as its column shows it at NOW, or nil if this host's.
-The host's label, dimmed, then, while it is not connected, how long ago
-it was last heard from; the tooltip tells how it stands.  In two lines,
-its icon shows besides (see `drover-list--host-icon')."
-  (when-let* ((host (drover-session-host session)))
+  "Return the host of SESSION as its column shows it at NOW.
+This host's label is in `drover-host-local', another's dimmed, then,
+while it is not connected, how long ago it was last heard from; the
+tooltip tells how it stands.  In two lines, its icon shows besides
+\(see `drover-list--host-icon')."
+  (let ((host (drover-session-host session)))
     (propertize (drover-face (concat (drover-list--one-line (drover-host-label host))
                                      (when-let* ((age (drover-list--host-age session now)))
                                        (concat " " age)))
-                             'drover-dim)
-                'drover-list-host host
+                             (if host 'drover-dim 'drover-host-local))
+                'drover-list-host (or host 'local)
                 'help-echo #'drover-list--host-help-echo)))
 
 (defvar drover-list--drawn)
 
 (defun drover-list--host-icon-help-echo (_window object position)
   "Return the tooltip of the host's icon drawn at POSITION in OBJECT.
-It names the host and tells whether it is connected, and since when it
-is not, as \"core — disconnected for 5m\", then how it stands, if not
-connected.  In the list's buffer, the session drawn there tells whether
+It names the host and tells whether it is local or connected, and since
+when it is not, as \"core — disconnected for 5m\", then how it stands, if
+not connected.  In the list's buffer, the session drawn there tells whether
 it is connected, as the icon shows it.  For `help-echo'."
   (drover-with-reporting "list tooltip"
     (when-let* ((host (and (or (bufferp object) (stringp object))
                            (get-text-property position 'drover-list-host object))))
-      (let* ((session (and (bufferp object)
+      (let* ((host (unless (eq host 'local) host))
+             (session (and (bufferp object)
                            (with-current-buffer object
                              (when-let* ((section (drover-list--session-section
                                                    (magit-section-at position))))
@@ -1530,16 +1534,18 @@ it is connected, as the icon shows it.  For `help-echo'."
              (age (and session (drover-list--host-age session (drover-list--now)))))
         (drover-bound-lines
          (concat (drover-list--one-line (drover-host-label host)) " — "
-                 (cond (age (concat "disconnected for " age))
+                 (cond ((null host) "local")
+                       (age (concat "disconnected for " age))
                        (disconnected "disconnected")
                        (t "connected"))
                  (and disconnected state (concat "\n" state))))))))
 
 (defun drover-list--host-icon (host disconnected)
-  "Return the icon telling that a session runs on HOST, another host, in its cell.
-That of `drover-host-icon', dimmed, or, when DISCONNECTED, in the face
-`drover-host-disconnected', of the same width, its tooltip naming HOST
-and telling how it stands (see `drover-list--host-icon-help-echo').
+  "Return the icon of HOST, nil for this host, in its cell.
+That of `drover-host-icon', in `drover-host-local' for this host, else
+dimmed or, when DISCONNECTED, in `drover-host-disconnected', of the
+same width, its tooltip naming HOST and telling how it stands
+\(see `drover-list--host-icon-help-echo').
 The sessions of a host share one, made once as widths are measured (see
 `drover-list--memo')."
   (let ((disconnected (and disconnected t)))
@@ -1547,8 +1553,10 @@ The sessions of a host share one, made once as widths are measured (see
                        (lambda (host)
                          (propertize (drover-list--icon
                                       (drover-face drover-host-icon
-                                                   (if disconnected 'drover-host-disconnected 'drover-dim)))
-                                     'drover-list-host host
+                                                   (cond ((null host) 'drover-host-local)
+                                                         (disconnected 'drover-host-disconnected)
+                                                         (t 'drover-dim))))
+                                     'drover-list-host (or host 'local)
                                      'help-echo #'drover-list--host-icon-help-echo))
                        host)))
 
@@ -1589,7 +1597,7 @@ made once as widths are measured (see `drover-list--memo')."
 
 (defun drover-list--field-icon (field row)
   "Return what FIELD of ROW shows in two lines as an icon alone, or \"\".
-The host, for a session of another host whose host the row shows, its
+The host, for a session whose host the row shows, its
 icon (see `drover-list--host-icon'); the context, its pie (see
 `drover-list--context-pie'); a field of an icon and a name, such as the
 harness, its icon (see `drover-list--compact'); any other its text."
@@ -1727,7 +1735,7 @@ place, is the same row; see `drover-list--inputs'."
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
         ;; Printed with each row, so a digest of the harnesses, not them.
         (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon
-                                    drover-host-icon drover-context-pie-icons)))
+                                    drover-host drover-host-icon drover-context-pie-icons)))
         drover-list--text-fields (plist-get metrics :caching)
         ;; Last: `drover-list--peers-of' compares the others.
         drover-list--measuring))

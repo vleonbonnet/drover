@@ -63,6 +63,10 @@
   "Face of the harness of a session, its icon and name (see `drover-harnesses')."
   :group 'drover-faces)
 
+(defface drover-host-local '((t :inherit success :weight normal))
+  "Face of this host's name and icon in the session list."
+  :group 'drover-faces)
+
 (defface drover-host-disconnected '((t :inherit warning :weight normal))
   "Face of the icon of a host not connected (see `drover-host-icon').
 Of the weight of the icon of a host connected, dimmed, so that the
@@ -90,12 +94,12 @@ off the count."
   :group 'drover)
 
 (defcustom drover-host-icon "\U000F048D" ; nf-md-server_network
-  "Icon telling that a session runs on another host, before its name.
+  "Icon of the host a session runs on, before its name.
 Lists show it in the host's field, beside the host's name in two lines,
-alone in the sidebar, where room is short; the sessions of this host
-show none.  Its tooltip names the host and tells whether it is
-connected; it is dimmed while the host is, else in the face
-`drover-host-disconnected'.
+alone in the sidebar, where room is short.  This host's icon is in
+`drover-host-local'.  Its tooltip names the host and tells whether it
+is local or connected; another host's is dimmed while connected, else
+in the face `drover-host-disconnected'.
 A Nerd Font icon by default; any short string will do, such as \"⇄\"."
   :type 'string
   :group 'drover)
