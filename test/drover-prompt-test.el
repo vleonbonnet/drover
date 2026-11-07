@@ -1530,6 +1530,62 @@ of a frame stays."
             (should (eq (drover-session-backend (drover-prompt-read-target "To: ")) 'fake))
             (should (equal (seq-take offered 2) '("session b" "session b <2>")))))))))
 
+(ert-deftest drover-prompt-test-target-order-shown ()
+  "A session comes as the buffers showing it: its own, those belonging to it, another host's too; lists aside."
+  (drover-prompt-test-with
+    (let ((drover-host-label-function nil)
+          (a (drover-prompt-test--session "a"))
+          ;; Another host's, shown by its mirror, which tells it.
+          (m (drover-prompt-test--session "m" :host "core" :since 10.0))
+          ;; Another host's, shown by a buffer belonging to it, as by its view.
+          (v (drover-test-session "v" :host "core" :since 20.0))
+          ;; Other hosts' shown nowhere: last, the latest active first.
+          (o (drover-test-session "o" :host "core" :since 30.0))
+          (n (drover-test-session "n" :host "core" :since 40.0))
+          (view (generate-new-buffer "view of v"))
+          (review (generate-new-buffer "review of a"))
+          (listing (generate-new-buffer "list")))
+      (drover-prompt-test--session "b")
+      (setq drover-test-sessions (append drover-test-sessions (list v o n)))
+      (push (cons "view of v" view) drover-prompt-test-buffers)
+      (push (cons "review of a" review) drover-prompt-test-buffers)
+      (push (cons "list" listing) drover-prompt-test-buffers)
+      (with-current-buffer (drover-prompt-test--buffer-of "m")
+        (setq-local drover-session-at-point-function (lambda () m)))
+      (with-current-buffer view
+        (setq-local drover-session-at-point-function (lambda () v)))
+      (with-current-buffer review
+        (setq-local drover-session-at-point-function (lambda () a)))
+      ;; A list's session at point is not the list's: it ranks none.
+      (with-current-buffer listing
+        (setq-local drover-view-p t)
+        (setq-local drover-session-at-point-function (lambda () n)))
+      (cl-flet ((order ()
+                  (mapcar (lambda (entry) (drover-session-id (car entry)))
+                          (drover-prompt--target-sessions))))
+        (save-window-excursion
+          (dolist (buffer (list (drover-prompt-test--buffer-of "a") (drover-prompt-test--buffer-of "b")
+                                view (drover-prompt-test--buffer-of "m") review listing))
+            (switch-to-buffer buffer))
+          (with-temp-buffer
+            ;; a by its review, used after its own buffer.
+            (should (equal (order) '("a" "m" "v" "b" "n" "o")))
+            ;; Other hosts' sessions without buffers, named after their titles and hosts.
+            (drover-prompt-test-choosing (lambda (names) (car names))
+              (should (eq (drover-prompt-read-target "To: ") a))
+              (should (equal offered '("session a" "Session m @core" "Session v @core" "session b"
+                                       "Session n @core" "Session o @core"))))
+            ;; Those shown here are offered first, however active the others.
+            (let ((drover-prompt-remote-limit 2))
+              (should (equal (order) '("a" "m" "v" "b"))))
+            (let ((drover-prompt-remote-limit 1))
+              (should (equal (order) '("a" "m" "b"))))
+            (let ((drover-prompt-remote-limit 0))
+              (should (equal (order) '("a" "b")))))
+          ;; In the mirror, its session comes first.
+          (with-current-buffer (drover-prompt-test--buffer-of "m")
+            (should (equal (order) '("m" "a" "v" "b" "n" "o")))))))))
+
 (ert-deftest drover-prompt-test-target-none ()
   "Without a target, the picker says so rather than asking."
   (drover-prompt-test-with

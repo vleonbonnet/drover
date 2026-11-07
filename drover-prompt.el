@@ -1906,52 +1906,86 @@ The key of `drover-dispatch' opens `drover-prompt-options-menu' there."
 ;;;; Choosing where the prompt goes
 
 (defcustom drover-prompt-remote-limit 50
-  "Sessions of other hosts the prompt offers to send to, the latest active first.
+  "Sessions of other hosts the prompt offers to send to, at most.
+Those shown in a buffer here come first, then the latest active.
 Their hosts submit the prompt through their backends; it goes as text,
 attachments being this host's files."
   :type 'natnum
   :group 'drover)
 
+(defun drover-prompt--buffer-ranks ()
+  "Return the ranks of the buffers, and of the sessions they belong to.
+The value is (BUFFERS . SESSIONS).  BUFFERS is a hash table of the
+live buffers to their rank, the current buffer 0, then the others from
+1 in the order of `buffer-list'.  SESSIONS is a hash table of the keys
+of the sessions buffers belong to (see `drover-buffer-session') to the
+least rank of those buffers.  A list of sessions belongs to none, its
+session at point being only where its point is."
+  (let ((buffers (make-hash-table :test #'eq))
+        (sessions (make-hash-table :test #'equal))
+        (rank 0))
+    (dolist (buffer (buffer-list))
+      (puthash buffer (cl-incf rank) buffers))
+    (puthash (current-buffer) 0 buffers)
+    (dolist (buffer (buffer-list))
+      (when-let* (((buffer-local-value 'drover-session-at-point-function buffer))
+                  ((not (with-current-buffer buffer (drover-session-list-p))))
+                  (session (drover-with-reporting "session of a buffer"
+                             (drover-buffer-session buffer))))
+        (let ((key (drover-session-key session))
+              (rank (gethash buffer buffers)))
+          (when (< rank (gethash key sessions most-positive-fixnum))
+            (puthash key rank sessions)))))
+    (cons buffers sessions)))
+
 (defun drover-prompt--target-sessions ()
   "Return the running sessions the prompt may go to, with their buffers.
 The value is a list of (SESSION . BUFFER): the sessions whose backend
-takes prompts (:send) and that have a live buffer, the current
-buffer's first, then in the order of `buffer-list'.  Those drover
+takes prompts (:send) and that have a live buffer.  Those drover
 archived itself are among them, a buffer still showing them: sent a
-prompt, they are restored first (see `drover-unarchive-to-send').
-Then come the sessions of other hosts connected that take prompts
-there, their owners submitting them, as (SESSION), the latest active
-first, `drover-prompt-remote-limit' at most."
-  (let ((ranks (make-hash-table :test #'eq))
-        (rank 0)
-        (current (current-buffer))
-        (remote nil))
-    (dolist (buffer (buffer-list))
-      (puthash buffer (cl-incf rank) ranks))
-    (puthash current 0 ranks)
-    (append
-     (sort (delq nil (mapcar (lambda (session)
-                               (if (drover-session-host session)
-                                   (progn (when (and (not (drover-session-stale session))
-                                                     (not (drover-session-archived session))
-                                                     (drover-supports-p session :send))
-                                            (push session remote))
-                                          nil)
-                                 (when-let* (((drover-supports-p session :send))
-                                             (buffer (drover-session-buffer session)))
-                                   (cons session buffer))))
-                             (append (drover-sessions) (drover-archived-live-sessions))))
-           (lambda (a b)
-             (< (gethash (cdr a) ranks most-positive-fixnum)
-                (gethash (cdr b) ranks most-positive-fixnum))))
-     (mapcar #'list
-             (seq-take (sort remote :key (lambda (session)
-                                           ;; A session telling no activity comes last,
-                                           ;; never before the latest active ones.
-                                           (- (or (drover-session-since session)
-                                                  (drover-session-updated session)
-                                                  0))))
-                       drover-prompt-remote-limit)))))
+prompt, they are restored first (see `drover-unarchive-to-send').  The
+sessions of other hosts connected that take prompts there, their
+owners submitting them, are among them too, as (SESSION),
+`drover-prompt-remote-limit' at most.
+
+A session comes as its buffer used last does: the current buffer's
+first, then in the order of `buffer-list'.  Its buffers are those
+belonging to it (see `drover-prompt--buffer-ranks'), as its review,
+and for a session of this host its own (`drover-session-buffer').
+Another host's session is shown here by buffers belonging to it, its
+mirror, its OpenCode buffer or its view, which all tell it: asking its
+backend for its buffer too would only search them again.  The sessions
+of other hosts shown in no buffer here come last, the latest active
+first; of those of other hosts, the ones shown here are offered first."
+  (pcase-let* ((`(,buffers . ,shown) (drover-prompt--buffer-ranks))
+               (local nil)
+               (remote nil))
+    (cl-flet ((rank-of (session buffer)
+                (min (or (and buffer (gethash buffer buffers)) most-positive-fixnum)
+                     (gethash (drover-session-key session) shown most-positive-fixnum))))
+      (dolist (session (append (drover-sessions) (drover-archived-live-sessions)))
+        (if (drover-session-host session)
+            (when (and (not (drover-session-stale session))
+                       (not (drover-session-archived session))
+                       (drover-supports-p session :send))
+              (push (cons (rank-of session nil) (list session)) remote))
+          (when-let* (((drover-supports-p session :send))
+                      (buffer (drover-session-buffer session)))
+            (push (cons (rank-of session buffer) (cons session buffer)) local)))))
+    (let* ((remote (seq-take (sort (nreverse remote)
+                                   :key (lambda (entry)
+                                          (if (< (car entry) most-positive-fixnum)
+                                              (vector 0 (car entry))
+                                            ;; A session telling no activity comes last,
+                                            ;; never before the latest active ones.
+                                            (let ((session (cadr entry)))
+                                              (vector 1 (- (or (drover-session-since session)
+                                                               (drover-session-updated session)
+                                                               0)))))))
+                             drover-prompt-remote-limit))
+           (unshown-p (lambda (entry) (= (car entry) most-positive-fixnum))))
+      (mapcar #'cdr (append (sort (nconc (nreverse local) (seq-remove unshown-p remote)) :key #'car)
+                            (seq-filter unshown-p remote))))))
 
 
 (defun drover-prompt--new-targets ()
@@ -2157,11 +2191,14 @@ echo area says so."
 (defun drover-prompt-read-target (prompt &rest keys)
   "Read where to send the prompt, with PROMPT.
 The candidates are the running sessions whose backend takes prompts
-and that have a live buffer, the current buffer's first, then the most
-recently used, each annotated with its backend, what it runs and its
-status, then the new sessions of `drover-prompt-new-targets' whose
-feature is installed and whose engine can run the model chosen, then
-the new sessions other hosts start (see `drover-remote-mode').
+and that have a live buffer, and those of other hosts, in the order of
+`drover-prompt--target-sessions': the current buffer's first, then the
+most recently used, another host's session by the buffers showing it
+here, those of other hosts shown in none last.  Each is annotated with
+its backend, what it runs and its status.  Then come the new sessions
+of `drover-prompt-new-targets' whose feature is installed and whose
+engine can run the model chosen, then the new sessions other hosts
+start (see `drover-remote-mode').
 Return the `drover-session' chosen, or for a new session its entry of
 `drover-prompt-new-targets', a plist (:backend BACKEND :engine ENGINE
 ...), or for one of another host a plist (:host NAME :host-label LABEL
