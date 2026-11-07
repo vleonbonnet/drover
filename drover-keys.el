@@ -88,7 +88,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 21))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 24))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -114,6 +114,7 @@
 (autoload 'drover-prompt-toggle "drover-prompt" nil t)
 (autoload 'drover-schedule-list "drover-schedule" nil t)
 (autoload 'drover-goal "drover-goal" nil t)
+(autoload 'drover-wrap-up "drover-wrap-up" nil t)
 (autoload 'drover-goal-list "drover-goal" nil t)
 (autoload 'drover-fanout "drover-fanout" nil t)
 (autoload 'drover-search "drover-search" nil t)
@@ -646,8 +647,8 @@ other lists."
   "c" #'drover-open-subagent
   "r" #'drover-rename
   "x" #'drover-delete
-  "z" #'drover-archive
-  "Z" #'drover-unarchive
+  "z" #'drover-archive-toggle
+  "Z" #'drover-wrap-up
   "g" #'drover-refresh
   "+" #'drover-new-session
   "v" #'drover-peek
@@ -2123,6 +2124,14 @@ when it has some."
   (when-let* ((session (drover-dispatch-session :edit-pending)))
     (> (drover-pending-prompts session) 0)))
 
+(defun drover--dispatch-archive-description ()
+  "Return the description of the archive's toggle in the dispatch menu.
+\"Unarchive\" when it restores the sessions it acts on, as
+`drover-archive-toggle' tells, else \"Archive\"."
+  (let* ((scope (drover--scope))
+         (sessions (or (plist-get scope :selection) (plist-get scope :session))))
+    (if (and sessions (drover--toggle-restores-p sessions)) "Unarchive" "Archive")))
+
 (defun drover--dispatch-stop-description ()
   "Return the description of Stop actions in the dispatch menu.
 How far the actions on several sessions running are follows it, as the
@@ -2422,10 +2431,12 @@ session chosen for it, else to one asked for, unshown."
                      :inapt-if-not (lambda () (or (drover-dispatch-list-p) (drover-dispatch-session))))
                     ("r" "Rename" drover-rename :inapt-if-not (lambda () (drover-dispatch-session :rename)))
                     ("x" "Delete" drover-delete :inapt-if-not (lambda () (drover-dispatch-selection :delete)))
-                    ("z" "Archive" drover-archive
-                     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-archivable-p)))
-                    ("Z" "Unarchive" drover-unarchive
-                     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-unarchivable-p)))
+                    ("z" drover--dispatch-archive-description drover-archive-toggle
+                     :inapt-if-not (lambda () (drover-dispatch-selection
+                                               nil (lambda (session) (or (drover-archivable-p session)
+                                                                         (drover-unarchivable-p session))))))
+                    ("Z" "Wrap up" drover-wrap-up
+                     :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-wrap-up-p)))
                     ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)]
           drover--view-columns
           ;; Only while the menu acts on one of drover's lists, here or in

@@ -68,8 +68,10 @@
 (require 'drover-model)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 23))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 24))
   (load "drover-core" nil t))
+
+(autoload 'drover-wrap-up-session "drover-wrap-up")
 
 ;; Spyglass is loaded as the mode starts, not to compile this file.
 (defvar spyglass-instance-id)
@@ -328,7 +330,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs" "queued" "changes")
+    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -372,7 +374,9 @@ of it; \"changes\": it reads what its sessions changed in all their
 turns from its engines (see `drover-changes'), for those a peer shows
 \(message `chg', the keys of the sessions), and tells them in their
 records (:changes, the lines added and removed and the files) and the
-files in their recaps (:files).")
+files in their recaps (:files); \"wrap-up\": it wraps its sessions up
+for its peers (action `wrap-up', see `drover-wrap-up'), telling the
+peer that asked how each ended in a message `note'.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -805,7 +809,8 @@ greys out what its access forbids, and this host checks it again."
                  (and (drover-supports-p record :rename) "rename")
                  (and (drover-supports-p record :requests) (drover-supports-p record :answer) "answer")
                  (and (drover-supports-p record :submit) "send")
-                 (and (drover-supports-p record :apply-options) "options"))))))
+                 (and (drover-supports-p record :apply-options) "options")
+                 (and (drover-wrap-up-p record) "wrap-up"))))))
 
 (defconst drover-remote--options
   '(("agent" . :agent) ("model" . :model) ("variant" . :variant))
@@ -1246,6 +1251,17 @@ Records are read from STATE as they are now."
   "Send MESSAGE to CONNECTION's peer on drover's channel."
   (when (spyglass-connection-live-p connection)
     (spyglass-channel-send connection drover-remote-channel message)))
+
+(defun drover-remote-tell-peer (name text)
+  "Tell the peer NAME TEXT, a line its user sees, as a message `note'.
+Noted in its history too; nothing is told while it is not connected.
+For what this host does for a peer and ends later, such as wrapping a
+session up (see `drover-wrap-up')."
+  (when-let* ((peer (drover-remote--peer name))
+              (connection (drover-remote--peer-connection peer))
+              (text (drover-bound-line text 300)))
+    (drover-remote--event peer 'note "told: %s" text)
+    (drover-remote--send connection (list :t "note" :text text))))
 
 (defun drover-remote--hello (connection &optional ask)
   "Greet CONNECTION's peer; with ASK, asking it to greet back."
@@ -1925,7 +1941,8 @@ last drops the sessions it did not list."
         (drover-remote--schedule-work peer)))))
 
 (defconst drover-remote--actions
-  '("interrupt" "mark-seen" "archive" "unarchive" "delete" "rename" "answer" "send" "options")
+  '("interrupt" "mark-seen" "archive" "unarchive" "delete" "rename" "answer" "send" "options"
+    "wrap-up")
   "The actions on its sessions a host performs for its peers.")
 
 (defun drover-remote--note-ops (peer key data)
@@ -2261,7 +2278,8 @@ PENDING maps the owner's keys to the kinds asked, as
   '((:interrupt . "interrupt") (:mark-seen . "mark-seen") (:archive . "archive")
     (:unarchive . "unarchive") (:delete . "delete") (:rename . "rename")
     (:respond . "answer") (:send . "send") (:submit . "send")
-    (:requests . "answer") (:answer . "answer") (:apply-options . "options"))
+    (:requests . "answer") (:answer . "answer") (:apply-options . "options")
+    (:wrap-up . "wrap-up"))
   "The operations of a peer's proxy forwarded to the owner, by action.")
 
 (defun drover-remote--refusal (peer &optional session action)
@@ -2282,7 +2300,8 @@ Without SESSION and ACTION, why it takes no action at all."
    ((and session action
          (let ((ops (gethash (drover-session-id session) (drover-remote--peer-ops peer) 'unknown)))
            (and (listp ops) (not (member action ops)))))
-    (format "%s does not %s it" (drover-remote--label peer) action))))
+    (format "%s does not %s" (drover-remote--label peer)
+            (if (equal action "wrap-up") "wrap it up" (concat action " it"))))))
 
 (defun drover-remote--supports (name session operation)
   "Return non-nil when the peer NAME takes OPERATION on SESSION now.
@@ -2927,6 +2946,11 @@ prompt sent waits, queued.  Nothing shows a window nor asks."
               (drover-unarchive-to-send record)
               (drover-backend-call record :submit (plist-get args :text) #'then
                                    (lambda (message &rest _) (else message)))))))))
+      ("wrap-up"
+       (condition-case err
+           (progn (drover-wrap-up-session record drover-remote--acting-peer)
+                  (then))
+         (error (else (drover-error-message err)))))
       ("options"
        (if (not (drover-supports-p record :apply-options))
            (else "its options are set on its host")
@@ -6439,6 +6463,9 @@ CALLBACK gets (REPLY ERROR) once."
      :unarchive-confirms t
      :delete (drover-remote--confirming name "delete")
      :delete-confirms t
+     ;; The owner wraps it up, and tells how it ended.
+     :wrap-up (drover-remote--confirming name "wrap-up")
+     :wrap-up-confirms t
      :rename (lambda (session title) (drover-remote--rename name session title))
      :respond (lambda (session) (drover-remote--respond name session))
      :send (lambda (session text token &optional attachments)

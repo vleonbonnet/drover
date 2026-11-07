@@ -150,8 +150,8 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                             ("<tab>" . drover-build-and-go)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
-                            ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive)
-                            ("Z" . drover-unarchive) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
+                            ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive-toggle)
+                            ("Z" . drover-wrap-up) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
                             ("R" . drover-review) ("V" . drover-view)))
                          (lambda (a b) (string< (car a) (car b))))))
     (dolist (binding bindings)
@@ -1143,25 +1143,34 @@ a list in a window.")
         (should-not (member "A" (drover-keys-test-apt 'drover-dispatch)))))))
 
 (ert-deftest drover-keys-test-dispatch-archive ()
-  "z applies to a session not archived, by its backend or by drover; Z to one archived."
+  "z archives a session not archived, by its backend or by drover, and restores one archived.
+Z wraps up a session not archived whose conversation is known and which
+takes prompts."
   (drover-keys-test-with (list (drover-test-session "s"))
     (drover-keys-test-in 'view "s"
       (let ((apt (drover-keys-test-apt 'drover-dispatch)))
         (should (member "z" apt))
+        ;; Its conversation is not known, nor does it take prompts.
         (should-not (member "Z" apt))))
     (drover-test-with-state
       (drover-test-register-simple 'shown (list (drover-session-create :backend 'shown :id "t"
                                                                        :engine 'claude-code :engine-id "c")
-                                                (drover-session-create :backend 'shown :id "u")))
+                                                (drover-session-create :backend 'shown :id "u"))
+                                   :submit #'ignore)
       (with-temp-buffer
         (setq-local drover-view-p t)
         (setq-local drover-session-at-point-function (lambda () (drover-find 'shown "t")))
         ;; Its backend has no archive: drover archives it.
-        (should (member "z" (drover-keys-test-apt 'drover-dispatch)))
-        (drover-archive-session (drover-find 'shown "t"))
         (let ((apt (drover-keys-test-apt 'drover-dispatch)))
-          (should-not (member "z" apt))
+          (should (member "z" apt))
           (should (member "Z" apt)))
+        (should (equal (drover--dispatch-archive-description) "Archive"))
+        (drover-archive-session (drover-find 'shown "t"))
+        ;; z restores it; it cannot be wrapped up again.
+        (let ((apt (drover-keys-test-apt 'drover-dispatch)))
+          (should (member "z" apt))
+          (should-not (member "Z" apt)))
+        (should (equal (drover--dispatch-archive-description) "Unarchive"))
         ;; Of a conversation not known yet, it cannot.
         (setq-local drover-session-at-point-function (lambda () (drover-find 'shown "u")))
         (let ((apt (drover-keys-test-apt 'drover-dispatch)))

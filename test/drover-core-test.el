@@ -2213,7 +2213,7 @@ defines Send, and a function failing tells none."
       (should (= (length drover-test-archived-calls) 2)))))
 
 (ert-deftest drover-test-unarchive ()
-  "Z restores the archived sessions selected, through their backend."
+  "Unarchiving restores the archived sessions selected, through their backend."
   (drover-test-with-backend (list (drover-test-session "live"))
     (let ((drover-test-archived-calls nil))
       (drover-test-register-archived)
@@ -3077,6 +3077,35 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
       (should (= done 1)))))
 
 ;;;; Git branches
+
+(ert-deftest drover-test-git-directory-msys ()
+  "A linked worktree's Git directory, as MSYS2's Git names it on Windows, is found."
+  (let ((system-type 'windows-nt))
+    (should (equal (drover--native-file-name "/c/Users/me/repo/.git/worktrees/wt") "c:/Users/me/repo/.git/worktrees/wt"))
+    (should (equal (drover--native-file-name "/d") "d:/"))
+    (should (equal (drover--native-file-name "/cd/x") "/cd/x")))
+  (let ((system-type 'darwin))
+    (should (equal (drover--native-file-name "/c/Users/me") "/c/Users/me")))
+  (let* ((root (file-name-as-directory (file-truename (make-temp-file "drover-git-directory" t))))
+         (admin (expand-file-name "repo/.git/worktrees/wt/" root))
+         (worktree (expand-file-name "wt/" root)))
+    (unwind-protect
+        (progn
+          (make-directory admin t)
+          (make-directory worktree t)
+          (with-temp-file (expand-file-name ".git" worktree)
+            (insert "gitdir: "
+                    (if (and (eq system-type 'windows-nt) (string-match "\\`\\([a-zA-Z]\\):/" admin))
+                        (concat "/" (downcase (match-string 1 admin)) "/" (substring admin (match-end 0)))
+                      admin)
+                    "\n"))
+          (should (drover-test-same-directory-p (drover--git-directory worktree) admin)))
+      (delete-directory root t))))
+
+(defun drover-test-same-directory-p (a b)
+  "Return non-nil when A and B name the same directory, case aside."
+  (equal (downcase (directory-file-name (expand-file-name a)))
+         (downcase (directory-file-name (expand-file-name b)))))
 
 (ert-deftest drover-test-git-branch ()
   (let* ((root (file-name-as-directory (make-temp-file "drover-git" t)))

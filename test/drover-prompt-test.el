@@ -1957,6 +1957,44 @@ PROPERTIES are more of its properties.  Return the buffer."
       (should (equal warnings '("Broken did not take the prompt: Gone; it is in the kill ring"))))
     (should-not (drover-prompt-buffer))))
 
+(ert-deftest drover-prompt-test-sent-functions ()
+  "The prompt's send tells `drover-prompt-sent-functions' once its command ended.
+For a running session and a new one; a failed send, and the other
+sends, tell nothing."
+  ;; The sends of the tests before tell their hooks once they ran: not this one's.
+  (accept-process-output nil 0.05)
+  (drover-prompt-test-with
+    (let* ((sent nil)
+           (drover-prompt-sent-functions
+            (list (lambda (session buffer new)
+                    (push (list (drover-session-id session) (and buffer (buffer-name buffer)) new) sent))))
+           (drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake session"))))
+      (drover-prompt-test--register 'shown "Shown" :send #'ignore)
+      (with-current-buffer (drover-prompt-test--prompt "text")
+        (drover-prompt-test-choosing (lambda (_) "Shown")
+          (drover-prompt-submit)))
+      ;; Once the command ended, its windows settled.
+      (should-not sent)
+      (accept-process-output nil 0.05)
+      (should (equal sent '(("Shown" "Shown" nil))))
+      (setq sent nil)
+      (let ((prompt (drover-prompt-test--prompt "Do it")))
+        (with-current-buffer prompt
+          (setq default-directory "/")
+          (drover-prompt-test-choosing (lambda (_) "[New Fake session…]")
+            (drover-prompt-submit))))
+      (accept-process-output nil 0.05)
+      (should (equal sent '(("new-0" nil t))))
+      (setq sent nil)
+      (drover-prompt-test--register 'broken "Broken" :send (lambda (&rest _) (error "Gone")))
+      (drover-prompt-test-with-warnings
+        (with-current-buffer (drover-prompt-test--prompt "text")
+          (drover-prompt-test-choosing (lambda (_) "Broken")
+            (drover-prompt-submit))))
+      (drover-prompt-send-to (drover-find 'shown "Shown") "again")
+      (accept-process-output nil 0.05)
+      (should-not sent))))
+
 (ert-deftest drover-prompt-test-send-restores-archived ()
   "A session drover archived, its buffer still open, is offered, and restored before it is sent to.
 One that cannot be restored is sent nothing, the prompt kept, and the

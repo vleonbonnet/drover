@@ -745,6 +745,61 @@ restart of the host's remote layer, its counters rising."
           (should-not (plist-get (nth 2 applied) :model))
           (should-not (plist-get (nth 2 applied) :variant)))))))
 
+(ert-deftest drover-remote-test-wrap-up-performed ()
+  "The owner offers to wrap up the sessions it may, does it for a peer, and tells it how it ended."
+  (drover-test-with-engines
+    (drover-test-register-engine 'fake)
+    (drover-remote-test-owning (list (drover-test-session "a" :engine 'fake :engine-id "conv-a" :status 'idle)
+                                     (drover-test-session "w" :engine 'fake :engine-id "conv-w" :status 'waiting))
+      (setf (alist-get 'fake drover--backends)
+            (append (list :submit #'ignore) (alist-get 'fake drover--backends)))
+      (let ((record (drover-index-session '(fake . "a")))
+            (outcomes nil)
+            (begun nil))
+        (should (member "wrap-up" (append (drover-remote--record-ops record) nil)))
+        ;; Waiting for the user, it is not offered.
+        (should-not (member "wrap-up" (append (drover-remote--record-ops (drover-index-session '(fake . "w"))) nil)))
+        (cl-letf (((symbol-function 'drover-wrap-up-session)
+                   (lambda (session peer) (push (list (drover-session-id session) peer) begun))))
+          (let ((drover-remote--acting-peer "laptop"))
+            (drover-remote--perform "wrap-up" nil record
+                                    (lambda (ok &optional message) (push (list ok message) outcomes)))))
+        (should (equal begun '(("a" "laptop"))))
+        (should (equal outcomes '((t nil))))
+        (cl-letf (((symbol-function 'drover-wrap-up-session)
+                   (lambda (&rest _) (user-error "Session a cannot be wrapped up: it is archived already"))))
+          (drover-remote--perform "wrap-up" nil record
+                                  (lambda (ok &optional message) (push (list ok message) outcomes))))
+        (should (equal (car outcomes) '(nil "Session a cannot be wrapped up: it is archived already")))
+        ;; How it ended goes to the peer that asked, as a note, while connected.
+        (let ((peer (drover-remote-test--peer state "laptop")))
+          (setf (drover-remote--peer-connection peer) 'connection)
+          (drover-remote-tell-peer "laptop" "Session a stays open: the agent asks: keep the branch?")
+          (should (equal (car sent) '(connection :t "note"
+                                                 :text "Session a stays open: the agent asks: keep the branch?")))
+          (setf (drover-remote--peer-connection peer) nil)
+          (setq sent nil)
+          (drover-remote-tell-peer "laptop" "Wrapped up Session a")
+          (drover-remote-tell-peer "nobody" "Wrapped up Session a")
+          (should-not sent))))))
+
+(ert-deftest drover-remote-test-wrap-up-asked ()
+  "A peer's session is wrapped up by its owner, when the owner offers to."
+  (let ((peer (drover-remote--peer-make :name "core" :caps '("actions" "wrap-up") :state 'open :granted 'act
+                                        :ops (make-hash-table :test #'equal)))
+        (session (drover-session-create :backend 'remote:core :id '(fake . "a") :host "core")))
+    (drover-remote--note-ops peer '(fake . "a") '(:ops ["archive" "send" "wrap-up"]))
+    (should-not (drover-remote--refusal peer session "wrap-up"))
+    ;; An owner of an older drover tells no such action.
+    (drover-remote--note-ops peer '(fake . "a") '(:ops ["archive" "send"]))
+    (should (equal (drover-remote--refusal peer session "wrap-up") "core does not wrap it up"))
+    (should (equal (drover-remote--refusal peer session "archive") nil))
+    (drover-remote--note-ops peer '(fake . "a") '(:ops ["send"]))
+    (should (equal (drover-remote--refusal peer session "archive") "core does not archive it"))
+    ;; Read access takes no action.
+    (setf (drover-remote--peer-granted peer) 'read)
+    (should (string-match-p "read access" (drover-remote--refusal peer session "wrap-up")))))
+
 (ert-deftest drover-remote-test-opts-and-dirs ()
   "A peer reads a session's options and this host's directories, and applies options."
   (drover-remote-test-with nil

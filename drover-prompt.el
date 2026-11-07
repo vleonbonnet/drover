@@ -232,6 +232,16 @@ this host's, for its links and attachments.")
 (defvar-local drover-prompt-host-directory nil
   "Directory of `drover-prompt-host' a new session of the prompt starts in.")
 
+(defvar drover-prompt-sent-functions nil
+  "Functions called with (SESSION BUFFER NEW) once the prompt went to SESSION.
+The prompt's send (`drover-prompt-submit') runs them once its backend
+took the text, after the command, the prompt's window gone and a new
+session shown: BUFFER is SESSION's buffer here then, or nil, and NEW is
+non-nil for a session the send started, here or on another host.  Other
+sends, such as `drover-prompt-send-to', a scheduled prompt's or a
+task's, do not run them.  Each function runs on its own (see
+`drover-run-hook-reporting').")
+
 (defvar drover-prompt-remote-functions nil
   "How the prompt starts sessions on other hosts, or nil when it cannot.
 `drover-remote-mode' sets it, a plist of functions:
@@ -1393,7 +1403,8 @@ new session; a SESSION whose BUFFER died meanwhile is reported, and so
 is a backend failing to send.  ATTACHMENTS, the prompt's, each
 \(BACKEND . DATA), go with it when of SESSION's backend, given to its
 :send; the others cannot, which is told, their labels going as text.
-This may run from a process filter or a timer, so it signals nothing."
+This may run from a process filter or a timer, so it signals nothing.
+Return non-nil once the backend took TEXT."
   (let* ((title (drover-session-display-title session))
          (send (drover-backend-property session :send))
          (backend (drover-session-backend session))
@@ -1411,13 +1422,25 @@ This may run from a process filter or a timer, so it signals nothing."
                      (length others) (if (cdr others) "s" "")
                      (drover-backend-label (car (car others))) title))
       (condition-case err
-          (save-current-buffer
-            (if own
-                (funcall send session text token own)
-              (funcall send session text token)))
+          (progn
+            (save-current-buffer
+              (if own
+                  (funcall send session text token own)
+                (funcall send session text token)))
+            t)
         (error
          (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
-                      title (drover-error-message err))))))))
+                      title (drover-error-message err))
+         nil))))))
+
+(defun drover-prompt--sent (session new)
+  "Run `drover-prompt-sent-functions' for SESSION, NEW when the send started it.
+From a timer: the prompt's window goes, and a new session shows, as the
+command ends."
+  (run-at-time 0 nil (lambda ()
+                       (drover-with-reporting "prompt sent"
+                         (drover-run-hook-reporting 'drover-prompt-sent-functions
+                                                    session (drover-session-buffer session) new)))))
 
 (defun drover-prompt--send-to-session (session content buffer)
   "Send CONTENT of the prompt BUFFER to the running SESSION.
@@ -1438,8 +1461,10 @@ CONTENT leaves the prompt."
                  (drover-session-display-title session))
       (drover-unarchive-to-send session)
       (drover-prompt-apply-options session explicit
-                                   (lambda () (drover-prompt--deliver session target text token
-                                                                        (plist-get content :attachments))))
+                                   (lambda ()
+                                     (when (drover-prompt--deliver session target text token
+                                                                   (plist-get content :attachments))
+                                       (drover-prompt--sent session nil))))
       (drover-prompt-consume content buffer))))
 
 (defun drover-prompt--send-to-new (target content buffer)
@@ -1470,7 +1495,8 @@ CONTENT leaves the prompt, unless the backend refuses at once."
             (refused nil))
         (funcall create (buffer-local-value 'default-directory buffer) engine options
                  (lambda (session)
-                   (drover-prompt--deliver session nil text nil (plist-get content :attachments)))
+                   (when (drover-prompt--deliver session nil text nil (plist-get content :attachments))
+                     (drover-prompt--sent session t)))
                  (lambda (reason)
                    (drover-warn "No new %s: %s; the prompt is in the kill ring" label reason)
                    (unless returned
@@ -1551,7 +1577,8 @@ Attachments, files of this host, go as their labels in the text."
                                  (drover-prompt-consume content buffer))
                                (drover-message "%s started %s" label (or (plist-get result :title) "a session")))))))
         (drover-prompt-consume content buffer)
-        (drover-prompt--remote :open host result)))))
+        (when-let* ((record (drover-prompt--remote :open host result)))
+          (drover-prompt--sent record t))))))
 
 (defun drover-prompt-submit ()
   "Send the prompt to a session chosen among the running ones and new ones.
