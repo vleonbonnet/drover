@@ -450,6 +450,23 @@ writing the files drover reads end them."
     (with-temp-file file
       (insert content))))
 
+(defun drover-test-program (file script)
+  "Write a program running SCRIPT, a POSIX shell script, as FILE; return its name.
+That is FILE, executable.  Windows starts no script, so there it is a
+batch file beside it, FILE.cmd, having the shell of MSYS2 or Git for
+Windows run FILE, as npm's shims start its programs there; the test is
+skipped without such a shell."
+  (drover-test-write file (concat "#!/bin/sh\n" script))
+  (set-file-modes file #o755)
+  (if (not (memq system-type '(windows-nt ms-dos)))
+      file
+    (let ((shell (or (executable-find "sh") (ert-skip "No POSIX shell to run a script"))))
+      (drover-test-write (concat file ".cmd")
+                         (format "@\"%s\" \"%s\" %%*\r\n"
+                                 (subst-char-in-string ?/ ?\\ (expand-file-name shell))
+                                 (expand-file-name file)))
+      (concat file ".cmd"))))
+
 (defun drover-test-wait-commands (&optional seconds)
   "Wait for the commands of `drover-command-run' to end, SECONDS at most.
 SECONDS defaults to 10.  Return non-nil when they all ended."

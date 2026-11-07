@@ -192,14 +192,11 @@ came after: the accessors of today read past its end."
 (ert-deftest drover-robustness-test-sentinel ()
   "What a command of drover's answered is followed, its error reported briefly."
   (drover-claude-code-transcripts-test-with
-    (let* ((script (expand-file-name "claude" home))
-           (drover-claude-code-program script)
+    (let* ((drover-claude-code-program (drover-test-program (expand-file-name "claude" home) "echo '[]'\n"))
            (drover-claude-code-agents-interval 30)
            (drover-claude-code-transcripts--agents-time 0)
            (drover-claude-code-transcripts--agents-job nil)
            (big (drover-robustness-test-index 2000)))
-      (drover-test-write script "#!/bin/sh\necho '[]'\n")
-      (set-file-modes script #o755)
       (let ((messages
              (drover-robustness-test-messages
                (cl-letf (((symbol-function 'drover-claude-code-transcripts--agents-listed)

@@ -383,11 +383,8 @@ the test's own, not the user's: its home and current directory are root."
         (should (file-exists-p (expand-file-name "draft.txt" worktree)))))))
 
 (defun drover-task-test-gh (root script)
-  "Write a stub of gh in ROOT running SCRIPT, a shell script; return its file."
-  (let ((file (expand-file-name "bin/gh" root)))
-    (drover-test-write file (concat "#!/bin/sh\n" script))
-    (set-file-modes file #o755)
-    file))
+  "Write a stub of gh in ROOT running SCRIPT, a shell script; return its name."
+  (drover-test-program (expand-file-name "bin/gh" root) script))
 
 (ert-deftest drover-task-test-finish-pull-request ()
   "Pushed and a pull request opened; cleaned up only once merged, a squashed branch deleted."

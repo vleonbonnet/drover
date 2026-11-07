@@ -280,11 +280,10 @@ without a terminal to ask in otherwise, as its version 0.166 does."
   (drover-codex-rollouts-test-with
     (let* ((project (expand-file-name "work/" home))
            (log (expand-file-name "codex.log" home))
-           (script (expand-file-name "bin/codex" home))
+           (script (drover-test-program (expand-file-name "bin/codex" home)
+                                        (format "echo \"$@\" >> %s\n[ \"$1\" != unarchive ]\n"
+                                                (shell-quote-argument log))))
            (drover-codex-program script))
-      (drover-test-write script (format "#!/bin/sh\necho \"$@\" >> %s\n[ \"$1\" != unarchive ]\n"
-                                        (shell-quote-argument log)))
-      (set-file-modes script #o755)
       (drover-fixture-codex drover-codex-rollouts-test-a project)
       (drover-codex-rollouts-test-scan)
       (let ((session (drover-find 'codex drover-codex-rollouts-test-a))
@@ -316,17 +315,15 @@ without a terminal to ask in otherwise, as its version 0.166 does."
   (drover-codex-rollouts-test-with
     (let* ((project (expand-file-name "work/" home))
            (log (expand-file-name "codex.log" home))
-           (script (expand-file-name "bin/codex" home))
-           (drover-codex-program script)
+           (drover-codex-program
+            (drover-test-program (expand-file-name "bin/codex" home)
+                                 (format (concat "echo \"$@\" >> %s\n"
+                                                 "if [ \"$2\" = --force ]; then\n"
+                                                 "  echo \"error: unexpected argument '--force' found\" >&2; exit 2\nfi\n"
+                                                 "[ \"$2\" != %s ]\n")
+                                         (shell-quote-argument log) drover-codex-rollouts-test-b)))
            (warnings nil)
            (messages nil))
-      (drover-test-write script
-                         (format (concat "#!/bin/sh\necho \"$@\" >> %s\n"
-                                         "if [ \"$2\" = --force ]; then\n"
-                                         "  echo \"error: unexpected argument '--force' found\" >&2; exit 2\nfi\n"
-                                         "[ \"$2\" != %s ]\n")
-                                 (shell-quote-argument log) drover-codex-rollouts-test-b))
-      (set-file-modes script #o755)
       (drover-fixture-codex drover-codex-rollouts-test-a project)
       (drover-fixture-codex drover-codex-rollouts-test-b project :start 1790000100.0)
       (drover-codex-rollouts-test-scan)
