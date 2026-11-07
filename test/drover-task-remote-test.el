@@ -43,10 +43,19 @@
     (should-not (plist-get reply :failure))
     reply))
 
+(defmacro drover-task-remote-test-with-repo (&rest body)
+  "Run BODY as `drover-task-test-with-repo' does, the agent stopped before the repository goes.
+The agent works in the repository, and Windows removes no directory a
+process still uses."
+  (declare (indent 0) (debug t))
+  `(drover-task-test-with-repo
+     (unwind-protect (progn ,@body)
+       (drover-remote-test-stop-agent))))
+
 (ert-deftest drover-task-remote-test-start-and-finish ()
   "Another host starts a task in its repository, then finishes it, as this one asks."
   (drover-remote-test-with nil
-    (drover-task-test-with-repo
+    (drover-task-remote-test-with-repo
       (let ((process-environment (append (list "DROVER_AGENT_ACCESS=full" (concat "DROVER_AGENT_TASKS=" checkout))
                                          process-environment)))
         (drover-remote-test-connect (drover-remote-test-start-agent dir)))
@@ -107,7 +116,7 @@
 (ert-deftest drover-task-remote-test-access ()
   "A peer of act access starts tasks but finishes none; one of read access does neither."
   (drover-remote-test-with nil
-    (drover-task-test-with-repo
+    (drover-task-remote-test-with-repo
       (let ((process-environment (append (list "DROVER_AGENT_ACCESS=act" (concat "DROVER_AGENT_TASKS=" checkout))
                                          process-environment)))
         (drover-remote-test-connect (drover-remote-test-start-agent dir)))
