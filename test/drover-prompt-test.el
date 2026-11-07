@@ -902,7 +902,7 @@ and effort its backend tells first, an effort by default dimmed."
         (activate-mark)
         (drover-prompt-add-context)
         (with-current-buffer (drover-prompt-buffer)
-          (should (equal default-directory "/"))
+          (should (equal default-directory (expand-file-name "/")))
           (should (string-match-p "\\`From buffer .* line 3:\n#\\+begin_src emacs-lisp\n(one)\n(two)\n#\\+end_src\n\n\\'"
                                   (buffer-string)))
           (should (eobp)))))))
@@ -1241,7 +1241,7 @@ fields, quote their lines whole too."
                       (should window)
                       (should (eq (selected-window) window))
                       (should (eq (window-parameter window 'window-side) 'bottom))
-                      (should (equal (buffer-local-value 'default-directory prompt) "/"))
+                      (should (equal (buffer-local-value 'default-directory prompt) (expand-file-name "/")))
                       ;; From the prompt itself, it hides.
                       (with-current-buffer prompt
                         (drover-prompt-toggle))
@@ -2140,7 +2140,7 @@ user told why on one line."
         (with-current-buffer prompt
           (should (equal (buffer-string) "first line\nsecond line"))
           (should (= (point) (point-max)))
-          (should (equal default-directory "/tmp/a/"))
+          (should (equal default-directory (expand-file-name "/tmp/a/")))
           (should (equal (plist-get drover-prompt--chosen-session :key) '(fake . "a")))
           (should (equal (plist-get drover-prompt--chosen-session :title) "Session a"))
           (should (eq (plist-get drover-prompt--chosen-session :session) session))

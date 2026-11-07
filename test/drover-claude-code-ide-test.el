@@ -329,7 +329,7 @@ session of `buffer', a temporary buffer, active."
   "A new session gets an explicit --session-id, recorded on its terminal."
   (drover-claude-code-ide-test-starting "--model haiku"
     (should (eq (drover-claude-code-ide-start "/tmp/project") buffer))
-    (should (equal (car observed) "/tmp/project/"))
+    (should (equal (car observed) (expand-file-name "/tmp/project/")))
     (should (string-match "\\`--model haiku --session-id \\([^ ]+\\)\\'" (nth 1 observed)))
     (let ((id (match-string 1 (nth 1 observed))))
       (should (string-match-p "\\`[[:xdigit:]]\\{8\\}-[[:xdigit:]]\\{4\\}-4[[:xdigit:]]\\{3\\}-[89ab][[:xdigit:]]\\{3\\}-[[:xdigit:]]\\{12\\}\\'"
@@ -362,7 +362,7 @@ session of `buffer', a temporary buffer, active."
   (drover-claude-code-ide-test-starting "--verbose"
     (let ((id "33333333-3333-4333-8333-333333333333"))
       (should (eq (drover-claude-code-ide-resume id "/tmp/project/") buffer))
-      (should (equal observed (list "/tmp/project/" (concat "--verbose --resume " id) nil)))
+      (should (equal observed (list (expand-file-name "/tmp/project/") (concat "--verbose --resume " id) nil)))
       (should (equal drover-claude-code-ide-session-id id))))
   (drover-claude-code-ide-test-starting "--verbose"
     (drover-claude-code-ide-resume "a b" "/tmp/project/")
@@ -398,7 +398,7 @@ session of `buffer', a temporary buffer, active."
   (drover-claude-code-ide-test-starting "--verbose"
     (let ((id "33333333-3333-4333-8333-333333333333"))
       (should (eq (drover-claude-code-ide-fork id "/tmp/project/") buffer))
-      (should (equal (car observed) "/tmp/project/"))
+      (should (equal (car observed) (expand-file-name "/tmp/project/")))
       (should (string-match (concat "\\`--verbose --resume " id " --fork-session --session-id \\([^ ]+\\)\\'")
                             (nth 1 observed)))
       (let ((fork (match-string 1 (nth 1 observed))))
@@ -420,7 +420,7 @@ session of `buffer', a temporary buffer, active."
           (setq session (drover-claude-code-ide-test-session terminal))
           (should (drover-supports-p session :fork))
           (drover-fork session)
-          (should (equal forked '(("conv" "/work/drover/")))))))))
+          (should (equal forked (list (list "conv" (expand-file-name "/work/drover/"))))))))))
 
 (ert-deftest drover-claude-code-ide-test-compact ()
   "Compacting types /compact in the terminal, once its turn ended and it reads input."
@@ -730,7 +730,8 @@ session of `buffer', a temporary buffer, active."
     (let ((orphan (drover-claude-code-ide-test-terminal "*claude* drover"))
           (tracked (drover-claude-code-ide-test-terminal "*claude-code[app]*" :mcp-session "/work/app/"))
           (shell (drover-claude-code-ide-test-terminal "*ghostel*")))
-      (setq drover-claude-code-ide-test-newest '(("/work/drover/" . "newest") ("/work/app/" . "app")))
+      (setq drover-claude-code-ide-test-newest (list (cons (expand-file-name "/work/drover/") "newest")
+                                                     (cons (expand-file-name "/work/app/") "app")))
       (should (equal (drover-claude-code-ide-current-session-id orphan) "newest"))
       (should (equal (drover-claude-code-ide-current-session-id tracked) "app"))
       (should-not (drover-claude-code-ide-current-session-id shell))
@@ -755,7 +756,7 @@ session of `buffer', a temporary buffer, active."
       (delete-process (get-buffer-process dead))
       (with-current-buffer tracked
         (setq-local drover-claude-code-ide-session-id "tracked-id"))
-      (setq drover-claude-code-ide-test-newest '(("/work/notes/" . "notes-guess")))
+      (setq drover-claude-code-ide-test-newest (list (cons (expand-file-name "/work/notes/") "notes-guess")))
       (let ((sessions (drover-claude-code-ide--sessions)))
         (should (equal (mapcar #'drover-session-buffer sessions) (list tracked orphan)))
         (should-not (memq shell (mapcar #'drover-session-buffer sessions)))
@@ -767,8 +768,8 @@ session of `buffer', a temporary buffer, active."
           (should-not (drover-session-engine-id b))
           (should (equal (drover-session-title a) "*claude-code[app]*"))
           (should (equal (drover-session-title b) "~/notes"))
-          (should (equal (drover-session-directory a) "/work/app/"))
-          (should (equal (drover-session-directory b) "/work/notes/"))
+          (should (equal (drover-session-directory a) (expand-file-name "/work/app/")))
+          (should (equal (drover-session-directory b) (expand-file-name "/work/notes/")))
           (should (equal (drover-session-branch a) "main"))
           (should (eq (drover-session-status b) 'idle))
           (should-not (equal (drover-session-id a) (drover-session-id b)))
@@ -788,7 +789,7 @@ drover merges sessions of different backends by engine identifier, so a
 guess could hide another session of the directory."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* guess")))
-      (setq drover-claude-code-ide-test-newest '(("/work/drover/" . "newest")))
+      (setq drover-claude-code-ide-test-newest (list (cons (expand-file-name "/work/drover/") "newest")))
       (should-not (drover-session-engine-id (drover-claude-code-ide-test-session terminal)))
       ;; Links still guess, as they did.
       (should (equal (drover-claude-code-ide-current-session-id terminal) "newest"))
@@ -1477,7 +1478,8 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
               (with-current-buffer terminal
                 (setq-local drover-claude-code-ide-session-id "known"))
               (should (equal (drover-claude-code-ide--options session) (list :model model :variant 'high)))
-              (should (member '(transcript "known" "/work/drover/") drover-claude-code-ide-test-calls))
+              (should (member (list 'transcript "known" (expand-file-name "/work/drover/"))
+                              drover-claude-code-ide-test-calls))
               (setq turn nil)
               (should-not (drover-claude-code-ide--options session))
               (should (equal (drover-claude-code-ide--settable session) '(:agent :model)))))
@@ -1493,7 +1495,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
       (unwind-protect
           (cl-letf (((symbol-function 'drover-claude-code-transcript)
                      (lambda (id directory)
-                       (should (equal (list id directory) '("known" "/work/drover/")))
+                       (should (equal (list id directory) (list "known" (expand-file-name "/work/drover/"))))
                        transcript)))
             (let ((session (drover-claude-code-ide-test-session terminal))
                   (recap nil))
@@ -1515,7 +1517,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
       (unwind-protect
           (cl-letf (((symbol-function 'drover-claude-code-transcript)
                      (lambda (id directory)
-                       (should (equal (list id directory) '("known" "/work/drover/")))
+                       (should (equal (list id directory) (list "known" (expand-file-name "/work/drover/"))))
                        transcript))
                     ((symbol-function 'drover-claude-code-last-turn)
                      (lambda (file) (should (equal file transcript)) (cl-incf reads) turn))
@@ -1691,7 +1693,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
       (cl-letf (((symbol-function 'claude-code-ide--get-working-directory)
                  (lambda () (concat default-directory "root/"))))
         (should (equal (funcall drover-claude-code-project-directory-function "/work/app")
-                       "/work/app/root/")))))
+                       (expand-file-name "/work/app/root/"))))))
   ;; A function of the user's stays.
   (drover-claude-code-ide-test-isolated
     (setq drover-claude-code-start-flags-function #'ignore

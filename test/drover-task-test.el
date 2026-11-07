@@ -155,7 +155,8 @@ the test's own, not the user's: its home and current directory are root."
 (ert-deftest drover-task-test-canonical ()
   "One directory, however spelt: aliases, MSYS's /c/, a drive's letter."
   (let ((drover-task-path-aliases '(("/Users/val/Documents/" . "/Users/val/local/"))))
-    (should (equal (drover-task-canonical "/Users/val/Documents/source/repo/") "/Users/val/local/source/repo/"))
+    (should (equal (drover-task-canonical "/Users/val/Documents/source/repo/")
+                   (expand-file-name "/Users/val/local/source/repo/")))
     (should (drover-task-same-file-p "/Users/val/Documents/source/repo" "/Users/val/local/source/repo/"))
     (should-not (drover-task-same-file-p "/Users/val/Documents/x" "/Users/val/local/y")))
   (let ((system-type 'windows-nt))
@@ -163,7 +164,8 @@ the test's own, not the user's: its home and current directory are root."
     (should (equal (drover-task--native-name "/C") "c:/"))
     (should (equal (drover-task--native-name "C:/Users/val/repo/") "c:/Users/val/repo/"))
     (should (equal (drover-task--native-name "c:/Users/val/repo/") "c:/Users/val/repo/")))
-  (should (equal (drover-task--native-name "/c/Users/") "/c/Users/")))
+  (let ((system-type 'darwin))
+    (should (equal (drover-task--native-name "/c/Users/") "/c/Users/"))))
 
 (ert-deftest drover-task-test-repository-names ()
   "A repository's name from its remote: OWNER/NAME on a forge, its base name else."

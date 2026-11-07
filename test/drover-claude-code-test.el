@@ -560,8 +560,8 @@ serves and a model without effort.")
 (ert-deftest drover-claude-code-test-directories ()
   "Transcripts and running sessions live under the home directory."
   (let ((drover-claude-code-home "/claude-home"))
-    (should (equal (drover-claude-code-projects-directory) "/claude-home/projects/"))
-    (should (equal (drover-claude-code-sessions-directory) "/claude-home/sessions/"))))
+    (should (equal (drover-claude-code-projects-directory) (expand-file-name "/claude-home/projects/")))
+    (should (equal (drover-claude-code-sessions-directory) (expand-file-name "/claude-home/sessions/")))))
 
 (ert-deftest drover-claude-code-test-encode-decode ()
   "A directory encodes as Claude Code names it, and decodes back."

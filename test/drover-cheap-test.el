@@ -958,7 +958,7 @@ no answer yet.  The cheap model is Reaver's, its chain behind it."
     (setenv "OPENCODE_CONFIG_DIR" "/oc")
     (should (equal (drover-cheap-title-file) (expand-file-name "/oc/opencode.json")))
     (let ((drover-cheap-title-file "/elsewhere/title.json"))
-      (should (equal (drover-cheap-title-file) "/elsewhere/title.json")))))
+      (should (equal (drover-cheap-title-file) (expand-file-name "/elsewhere/title.json"))))))
 
 (ert-deftest drover-cheap-test-title-apply ()
   "The model is written as it changes, by provider and identifier; no model deletes the file."
