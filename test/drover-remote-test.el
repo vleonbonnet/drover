@@ -2739,7 +2739,9 @@ told, saying why."
         (kill-buffer view)))))
 
 (ert-deftest drover-remote-test-mirror-fast-output ()
-  "A terminal writing fast reaches its mirror whole, the mirror never keeping Emacs long."
+  "A terminal writing fast reaches its mirror whole, the mirror never keeping Emacs long.
+Garbage collections are the whole Emacs's, not the mirror's: the longest
+a timer waits leaves out those made meanwhile."
   (drover-remote-test-with nil
     (drover-remote-test-start-full dir)
     (drover-remote-test-command "sessions" :n 2)
@@ -2748,19 +2750,23 @@ told, saying why."
     (save-window-excursion
       (let ((mirror (drover-remote-test-open "s1"))
             (last (float-time))
+            (collected gc-elapsed)
             (worst 0.0)
             (start nil)
+            (collecting nil)
             (ticker nil))
         (drover-remote-test-live mirror)
         (setq ticker (run-with-timer 0.005 0.005 (lambda ()
                                                     (let ((now (float-time)))
-                                                      (setq worst (max worst (- now last)) last now)))))
+                                                      (setq worst (max worst (- now last (- gc-elapsed collected)))
+                                                            last now
+                                                            collected gc-elapsed)))))
         (unwind-protect
             (progn
               ;; What earlier tests allocated is collected now, not as
               ;; this measures: a heap of all of them takes 130 ms.
               (garbage-collect)
-              (setq start (float-time) last start)
+              (setq start (float-time) last start collected gc-elapsed collecting gc-elapsed)
               ;; 8 MB written as a program would, its scrollback 512 kB.
               (drover-remote-test-command "emit" :id "s1" :bytes (* 8 1024 1024) :keep (* 512 1024))
               (drover-remote-test-wait (lambda () (with-current-buffer mirror
@@ -2769,6 +2775,7 @@ told, saying why."
                                        120))
           (cancel-timer ticker))
         (let* ((elapsed (- (float-time) start))
+               (collections (- gc-elapsed collecting))
                (state (drover-remote-test-terminal "s1")))
           (drover-remote-test-wait (lambda () (equal (drover-remote-test-digest mirror)
                                                      (plist-get (drover-remote-test-terminal "s1") :digest)))
@@ -2778,8 +2785,8 @@ told, saying why."
           (ignore state)
           ;; The mirror holds the scrollback, not all that was written.
           (should (<= (buffer-size mirror) (+ (* 512 1024) 100)))
-          (message "Fast output: 8 MB in %.2f s, the longest Emacs kept from its timers %.1f ms"
-                   elapsed (* 1000 worst))
+          (message "Fast output: 8 MB in %.2f s, the longest Emacs kept from its timers %.1f ms, %.1f ms collecting"
+                   elapsed (* 1000 worst) (* 1000 collections))
           (should (< worst 0.1)))
         (kill-buffer mirror)))))
 
