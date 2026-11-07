@@ -3840,6 +3840,17 @@ too, are listed here once it is connected."
         (should (equal (car (completion-boundaries (concat root "al") table nil "")) (length root)))
         ;; Without a directory, where its sessions run.
         (should (equal (all-completions "" table) '("/work/project/"))))
+      ;; Read as that host takes it, whatever this one's rules, as a
+      ;; Windows host's on macOS: spelt as typed, a drive's slashes forward.
+      (pcase-dolist (`(,typed . ,read) '(("C:\\Users\\val\\proj" . "C:/Users/val/proj/")
+                                         ("c:/x/" . "c:/x/")
+                                         ("/Users/val/x" . "/Users/val/x/")
+                                         ("~/x" . "~/x/")))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) typed)))
+          (should (equal (drover-remote-read-directory "agent" "Directory: ") read))))
+      (dolist (typed '("relative/x" "" "C:relative"))
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) typed)))
+          (should-error (drover-remote-read-directory "agent" "Directory: ") :type 'user-error)))
       ;; Listed once a while.
       (should (gethash (cons "agent" root) drover-remote--listings))
       ;; Where a directory of this host is there: this host's map, else

@@ -5943,18 +5943,37 @@ RECENT directories."
               parent (mapcar (lambda (name) (concat name "/")) (drover-remote--subdirectories peer parent))
               (substring string start) predicate action))))))))
 
+(defun drover-remote--peer-absolute-p (directory)
+  "Return non-nil when DIRECTORY, a peer's, is absolute on some system.
+Rooted, as /x or \\x, under a drive, as c:/x or c:\\x, or under a home,
+as ~/x: the peer takes it by its own rules, which this host's may not
+be, as macOS's are not Windows's."
+  (string-match-p "\\`\\(?:[/\\~]\\|[a-zA-Z]:[/\\]\\)" directory))
+
+(defun drover-remote--peer-directory-name (directory)
+  "Return DIRECTORY, a peer's, as a directory name, with a trailing slash.
+Spelt as given, but for the backslashes of a name under a drive, a
+Windows one, which become slashes; this host's `file-name-as-directory'
+would spell it by this host's rules."
+  (let ((name (if (string-match-p "\\`[a-zA-Z]:" directory)
+                  (replace-regexp-in-string "\\\\" "/" directory)
+                directory)))
+    (if (string-suffix-p "/" name) name (concat name "/"))))
+
 (defun drover-remote-read-directory (name prompt &optional default)
   "Read with PROMPT a directory of the peer NAME, starting from DEFAULT.
 It completes on the directories NAME lists, names alone, and on those
-its sessions run in.  Return it, with a trailing slash."
+its sessions run in.  Return it, with a trailing slash.  An absolute
+name on any system is taken, NAME's being unknown here: NAME refuses
+one that is not its."
   (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
          (recent (drover-remote--recent-directories peer))
          (directory (string-trim (completing-read prompt (drover-remote--directory-table peer recent)
                                                   nil nil default 'drover-remote--directory-history))))
-    (unless (and (not (string-empty-p directory)) (file-name-absolute-p directory))
+    (unless (and (not (string-empty-p directory)) (drover-remote--peer-absolute-p directory))
       (user-error "%s is not a directory of %s" (if (string-empty-p directory) "Nothing" directory)
                   (drover-remote--label peer)))
-    (file-name-as-directory directory)))
+    (drover-remote--peer-directory-name directory)))
 
 (defun drover-remote--new (peer target directory text options callback)
   "Have PEER start the session TARGET describes in DIRECTORY, its, with TEXT.
