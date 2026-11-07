@@ -953,6 +953,10 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
           drover-transcript-engines (append (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
                                             (and (getenv "DROVER_AGENT_CODEX") '(codex)))
           drover-refresh-delay 0.02
+          ;; Kills stay in its kill ring, off the system's clipboard (see
+          ;; test/batch-tests.el).
+          interprogram-cut-function nil
+          interprogram-paste-function nil
           ;; What sessions changed is read once a test asks for it.
           drover-changes-prefetch-function nil
           spyglass-registration-file (expand-file-name "server.json" dir)

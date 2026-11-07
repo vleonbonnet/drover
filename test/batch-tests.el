@@ -127,6 +127,11 @@ was not, and 2 when running the tests failed."
     ;; As ERT: better crash loudly than recover from undefined behavior.
     (setq attempt-stack-overflow-recovery nil
           attempt-orderly-shutdown-on-fatal-signal nil)
+    ;; Kills stay in the kill ring.  On Windows a batch Emacs writes the
+    ;; system's clipboard, the user's, and another batch Emacs owning it,
+    ;; which never reads its window messages, holds that write 5 s.
+    (setq interprogram-cut-function nil
+          interprogram-paste-function nil)
     (unwind-protect
         (let ((stats (ert-run-tests-batch (batch-tests-selector))))
           (unless (member times '(nil ""))
