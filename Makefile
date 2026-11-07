@@ -56,27 +56,15 @@ compile:
 # Every file, the backends of optional front ends included, compiles
 # with the required packages alone, as a package manager compiles it,
 # in a copy of the sources so that no front end's checkout is found
-# beside them.  Its byte code must be the byte code compiled with the
-# front ends present, if any, so that the backends work either way: the
-# same but for the numbers of uninterned symbols, which count those
-# made before in the compiling Emacs, and the positions of docstrings in
-# the file, which the length of those numbers shifts.
-UNNUMBER = LC_ALL=C sed -E -e 's/(\#:[A-Za-z_-]*[A-Za-z_-])[0-9]+/\1/g' -e 's/\(\#\$$ \. [0-9]+\)/(\#$$ . N)/g'
+# beside them.  The definitions must match, apart from uninterned-symbol
+# numbering, docstring positions and the printer's shared-object labels.
 compile-standalone:
 	@build=$$(mktemp -d); status=0; \
 	cp $(SOURCES) "$$build" && \
 	(cd "$$build" && $(EMACS) -Q --batch -L . $(REQUIRED_PATH) $(PREFER_NEWER) $(NO_WARNINGS) \
 	   -f batch-byte-compile $(SOURCES)) || status=1; \
 	if [ $$status -eq 0 ]; then \
-	  for elc in $(SOURCES:.el=.elc); do \
-	    if [ -f "$$elc" ]; then \
-	      $(UNNUMBER) "$$elc" > "$$build/present"; \
-	      $(UNNUMBER) "$$build/$$elc" > "$$build/alone"; \
-	      if ! cmp -s "$$build/present" "$$build/alone"; then \
-	        echo "$$elc differs when compiled without the optional front ends"; status=1; \
-	      fi; \
-	    fi; \
-	  done; \
+	  $(EMACS) -Q --batch --script test/bytecode-compare.el "$$build" $(SOURCES:.el=.elc) || status=1; \
 	fi; \
 	rm -rf "$$build"; \
 	[ $$status -ne 0 ] || echo "Compiled with the required packages alone: $(SOURCES)"; \

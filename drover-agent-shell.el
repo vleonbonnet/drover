@@ -481,6 +481,9 @@ One of them is called, once."
   (cond
    ((not (buffer-live-p buffer)) (funcall else "its buffer is gone"))
    ((drover-agent-shell--initialized-p buffer) (funcall then))
+   ((and (map-elt (buffer-local-value 'agent-shell--state buffer) :connection-error)
+         (not (map-elt (buffer-local-value 'agent-shell--state buffer) :connection-retrying)))
+    (funcall else (map-elt (buffer-local-value 'agent-shell--state buffer) :connection-error)))
    ((buffer-local-value 'drover-agent-shell--start-error buffer)
     (funcall else (buffer-local-value 'drover-agent-shell--start-error buffer)))
    (t
@@ -512,15 +515,21 @@ One of them is called, once."
 (defun drover-agent-shell-send-text (buffer text)
   "Submit TEXT as a prompt to the shell of BUFFER.
 A shell still starting gets it once initialized; a busy one queues it;
-a ready one takes it at once, without taking the focus."
+a ready one takes it at once, without taking the focus.  A disconnected
+shell takes it through its submission path, which reconnects first."
   ;; Not on `prompt-ready', which comes before the default model and
   ;; mode are set: submitting then would start a second bootstrap.
-  (drover-agent-shell--when-initialized
-   buffer
-   (lambda () (drover-agent-shell--submit buffer text))
-   (lambda (reason)
-     (drover-warn "%s did not take the prompt (%s); it is in the kill ring"
-                  (if (buffer-live-p buffer) (buffer-name buffer) "The agent shell") reason))))
+  (if (and (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (and (map-elt agent-shell--state :connection-error)
+                  (not (map-elt agent-shell--state :connection-retrying)))))
+      (drover-agent-shell--submit buffer text)
+    (drover-agent-shell--when-initialized
+     buffer
+     (lambda () (drover-agent-shell--submit buffer text))
+     (lambda (reason)
+       (drover-warn "%s did not take the prompt (%s); it is in the kill ring"
+                    (if (buffer-live-p buffer) (buffer-name buffer) "The agent shell") reason)))))
 
 (defun drover-agent-shell--send (session text _token)
   "Submit TEXT to the shell of SESSION, as the backend's :send."
@@ -889,6 +898,11 @@ The value is a plist of :status, :since, :detail and :requests, as
 `drover-session' records hold them."
   (let ((outcome drover-agent-shell--outcome))
     (cond
+     ((and (map-elt state :connection-error)
+           (not (map-elt state :connection-retrying)))
+      (list :status 'failed
+            :since (map-elt state :connection-since)
+            :detail (drover-transcript-text (map-elt state :connection-error))))
      ((not (drover-agent-shell--initialized-p (current-buffer)))
       (if drover-agent-shell--start-error
           (list :status (if (eq (plist-get outcome :status) 'failed) 'failed 'idle)

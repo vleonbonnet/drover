@@ -458,7 +458,7 @@ the shell started with."
              (start (car (drover-agent-shell-test--calls-of 'agent-shell--start)))
              (shell (drover-session-buffer session)))
         (should (eq (caar created) 'then))
-        (should (equal (car start) "/work/drover/"))
+        (should (equal (car start) (expand-file-name "/work/drover/")))
         (should (equal (cdr start) (list :config config :no-focus t :new-session t
                                          :session-strategy 'new)))
         (should (equal (drover-agent-shell-test--calls-of 'agent-shell--display-buffer)
@@ -686,6 +686,22 @@ the shell started with."
                        '("failed did not take the prompt (No codex-acp); it is in the kill ring")))
         ;; Only the shell's own subscription is left.
         (should (= (length (drover-agent-shell-test-subscriptions shell)) 1))))))
+
+(ert-deftest drover-agent-shell-test-send-disconnected ()
+  "A new prompt reaches the reconnecting submit path, not a dormant subscription."
+  (drover-agent-shell-test-with
+    (drover-agent-shell-test-with-submit
+      (let ((shell (drover-agent-shell-test-shell 'codex "disconnected")) reason)
+        (with-current-buffer shell
+          (setf (map-elt agent-shell--state :connection-error) "Adapter disconnected"))
+        (drover-agent-shell--when-initialized shell
+                                              (lambda () (ert-fail "Not connected"))
+                                              (lambda (message) (setq reason message)))
+        (should (equal reason "Adapter disconnected"))
+        (drover-agent-shell-send-text shell "hello")
+        (should-not (drover-agent-shell-test-subscriptions shell))
+        (should (equal (drover-agent-shell-test--calls-of 'agent-shell-insert)
+                       (list (list :shell-buffer shell :text "hello" :submit t :no-focus t))))))))
 
 (ert-deftest drover-agent-shell-test-send-operation ()
   "The backend's :send submits to the session's shell, and reports a gone one."
@@ -1391,6 +1407,30 @@ One of OpenCode keeps the provider it names, and has nothing recorded."
           (should (equal (drover-agent-shell-test-status running) before))
           (drover-recap (drover-agent-shell-test-session running) (lambda (value) (setq recap value)))
           (should-not (plist-get recap :error)))))))
+
+(ert-deftest drover-agent-shell-test-status-disconnected ()
+  "Seeing a disconnected shell cannot clear its transport failure."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code)))
+      (with-current-buffer shell
+        (setf (map-elt agent-shell--state :connection-error) "Adapter disconnected"
+              (map-elt agent-shell--state :connection-since) 123.0
+              (map-elt agent-shell--state :init-finished) nil))
+      (drover-agent-shell-test-emit shell 'error :message "Adapter disconnected")
+      (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
+      (should (equal (drover-agent-shell-test-status shell)
+                     '(failed "Adapter disconnected" nil)))
+      (should (= (drover-session-since (drover-agent-shell-test-session shell)) 123.0))
+      (with-current-buffer shell
+        (setf (map-elt agent-shell--state :connection-retrying) t))
+      (drover-agent-shell-test-emit shell 'init-started)
+      (should (equal (drover-agent-shell-test-status shell) '(working "starting" nil)))
+      (with-current-buffer shell
+        (setf (map-elt agent-shell--state :connection-error) nil
+              (map-elt agent-shell--state :connection-retrying) nil
+              (map-elt agent-shell--state :init-finished) t))
+      (drover-agent-shell-test-emit shell 'init-finished)
+      (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))))
 
 (ert-deftest drover-agent-shell-test-status-working ()
   "A busy shell works since its prompt was submitted."
