@@ -680,8 +680,11 @@ B only in tool calls and results; Codex's A \"axolotl\" in its prompt.
   "The backends' search never keeps Emacs from its timers more than a few milliseconds.
 Over 120 conversations of fixtures, some of megabytes, the longest any
 function of the search runs, from timers, the process or the command,
-stays under 5 ms, and a timer ticking every hundredth of a second never
-waits much longer.  `make bench-search' measures it to the millisecond."
+stays under 5 ms, starting one run of ripgrep per backend at most, and
+a timer ticking every hundredth of a second never waits much longer.
+Starting a process is the system's work, as collecting garbage is the
+whole Emacs's: well under a millisecond on macOS, 7 to 17 ms on Windows,
+it is not counted.  `make bench-search' measures it to the millisecond."
   (skip-unless (executable-find "rg"))
   (drover-search-test-with-transcripts
     (dotimes (n 120)
@@ -691,26 +694,52 @@ waits much longer.  `make bench-search' measures it to the millisecond."
                              :filler (if (zerop (% n 7)) 400000 0)))
     (drover-transcript-scan drover-claude-code-transcripts--index)
     (drover-changed-now)
+    ;; Ripgrep found as the first search finds it, once per Emacs: 7 to 11
+    ;; ms on Windows, looking in each directory with each suffix.
+    (should (drover-transcript--ripgrep))
     (let ((longest 0.0)
+          (slowest nil)
+          (starting 0.0)
+          (starts 0)
+          (most-starts 0)
           (functions '(drover-search--start drover-search--receive drover-transcript--search-filter
                                             drover-transcript--search-sentinel drover-search--start-later)))
+      ;; What starting processes takes, all along.  Advising it may compile
+      ;; a trampoline first, which takes a while: before what is timed.
+      (advice-add 'make-process :around
+                  (lambda (original &rest arguments)
+                    (let ((begin (float-time)))
+                      (prog1 (apply original arguments)
+                        (setq starting (+ starting (- (float-time) begin))
+                              starts (1+ starts)))))
+                  '((name . drover-search-test-starting)))
       (dolist (function functions)
         (advice-add function :around
                     ;; Garbage collections are the whole Emacs's, not the search's.
                     (lambda (original &rest arguments)
                       (let ((begin (float-time))
-                            (collecting gc-elapsed))
+                            (collecting gc-elapsed)
+                            (started starting)
+                            (count starts))
                         (prog1 (apply original arguments)
-                          (setq longest (max longest (- (float-time) begin (- gc-elapsed collecting)))))))
+                          (let ((took (- (float-time) begin (- gc-elapsed collecting) (- starting started))))
+                            (when (> took longest)
+                              (setq longest took
+                                    slowest function)))
+                          (setq most-starts (max most-starts (- starts count))))))
                     '((name . drover-search-test-timing))))
       (unwind-protect
           (let* ((collecting gc-elapsed)
+                 (started starting)
                  (lag (drover-test-lag (lambda () (drover-search-test-text "reply"))))
-                 (collected (- gc-elapsed collecting)))
-            (message "Search of 122 transcripts: longest function %.2f ms, longest gap %.1f ms, %.1f ms collecting"
-                     (* 1000 longest) (* 1000 lag) (* 1000 collected))
+                 (collected (- gc-elapsed collecting))
+                 (spent (- starting started)))
+            (message "Search of 122 transcripts: longest function %.2f ms (%s), longest gap %.1f ms, %.1f ms collecting, %d processes started in %.1f ms"
+                     (* 1000 longest) slowest (* 1000 lag) (* 1000 collected) starts (* 1000 spent))
             (should (< longest 0.005))
-            (should (< lag (+ 0.03 collected))))
+            (should (<= most-starts (length (drover-search-sources))))
+            (should (< lag (+ 0.03 collected spent))))
+        (advice-remove 'make-process 'drover-search-test-starting)
         (dolist (function functions)
           (advice-remove function 'drover-search-test-timing))))))
 
