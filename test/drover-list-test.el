@@ -5332,6 +5332,24 @@ sidebar did not step aside after all."
     (with-current-buffer buffer
       (should (= drover-list--width (with-selected-window first (drover-list--line-width)))))))
 
+(ert-deftest drover-list-test-previewed-beside-the-sidebar ()
+  "A list previewed beside the sidebar, the minibuffer active, is drawn at once.
+The sidebar stays until the minibuffer exited, as consult previews
+buffers: the list is drawn for the room it has, rather than wait."
+  (drover-list-test-alone-beside
+    (with-current-buffer buffer
+      (setq drover-list--stale t))
+    (set-window-buffer first buffer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'drover-list--windows-provisional-p) (lambda () t)))
+          (should (equal (drover-list-test-counting-drawings
+                           (drover-list--on-window-change first))
+                         (list (with-selected-window first (drover-list--line-width)))))
+          (should-not drover-list--awaiting-place)
+          (drover-list-test-place)
+          (should (drover-list--side-window)))
+      (remove-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer))))
+
 (ert-deftest drover-list-test-from-the-sidebar ()
   "From the sidebar, the list takes the window where you work, as sessions do.
 It never splits a window, nor shows in the sidebar's; the sidebar steps

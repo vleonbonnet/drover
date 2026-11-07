@@ -363,7 +363,7 @@ The buffer is made once and erased each time, as transient's is."
         transient--suffixes nil))
 
 (defun drover-toggle-bench--menu-step ()
-  "Move to the next session from the menu set up, which sets it up and draws it again.
+  "Move to the next session from the menu set up, then set it up and draw it.
 As `transient--refresh-transient' does after a command of the menu that
 keeps it, the menu having `:refresh-suffixes'."
   (drover--dispatch-navigate #'drover-list-next-session)
