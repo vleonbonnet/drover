@@ -1439,19 +1439,25 @@ the shell goes.  The backend's :close."
 The agent deletes the session as ACP's session/delete asks, all it
 keeps of it included, such as Claude Code's transcripts; an agent that
 cannot is reported, and its shell kept.  The request is answered later:
-the shell goes once the agent deleted the session.  The backend's
-:delete."
+the shell goes once the agent deleted the session.  Codex's agent
+leaves the conversations of its subagents, which drover then deletes
+with Codex's CLI (see `drover-codex-rollouts-delete-subagents').  The
+backend's :delete."
   (let* ((buffer (drover-agent-shell--live-buffer session))
          (title (drover-session-display-title session))
          (acp (or (drover-agent-shell--acp-session buffer)
-                  (user-error "%s has no session to delete yet" title))))
+                  (user-error "%s has no session to delete yet" title)))
+         (codex (and (eq (drover-session-engine session) 'codex)
+                     (or (drover-session-engine-id session) (cdr acp)))))
     (acp-send-request
      :client (car acp)
      :request (acp-make-session-delete-request :session-id (cdr acp))
      :on-success (lambda (_response)
                    (drover-with-reporting "agent-shell delete"
                      (when (buffer-live-p buffer)
-                       (drover-agent-shell--close buffer))))
+                       (drover-agent-shell--close buffer))
+                     (when codex
+                       (drover-codex-rollouts-delete-subagents codex title))))
      :on-failure (lambda (error &rest _)
                    (drover-with-reporting "agent-shell delete"
                      (drover-warn "The agent of %s did not delete its session (%s); its shell stays"

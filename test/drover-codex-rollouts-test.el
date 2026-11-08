@@ -349,6 +349,68 @@ without a terminal to ask in otherwise, as its version 0.166 does."
         (should (equal (length warnings) 1))
         (should (string-match-p "\\`Codex could not delete" (car warnings)))))))
 
+(ert-deftest drover-codex-rollouts-test-delete-subagents ()
+  "Deleting a conversation deletes its subagents' conversations then, and theirs.
+Guardian's reviews among them, one after the other, once it is gone;
+another conversation's stay.  A refusal is told, and without the CLI
+they stay, which is told."
+  (drover-codex-rollouts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (log (expand-file-name "codex.log" home))
+           (a drover-codex-rollouts-test-a)
+           (b drover-codex-rollouts-test-b)
+           (spawned "019f0000-0000-7000-8000-0000000000c1")
+           (review "019f0000-0000-7000-8000-0000000000c2")
+           (nested "019f0000-0000-7000-8000-0000000000c3")
+           (refused "019f0000-0000-7000-8000-0000000000c4")
+           (taken "019f0000-0000-7000-8000-0000000000c5")
+           (drover-codex-program
+            (drover-test-program (expand-file-name "bin/codex" home)
+                                 (format "echo \"$@\" >> %s\n[ \"$3\" != %s ]\n"
+                                         (shell-quote-argument log) refused)))
+           (warnings nil)
+           (messages nil))
+      (drover-fixture-codex a project :prompt "Parent A")
+      (drover-fixture-codex spawned project :parent a :start 1790000010.0)
+      (drover-fixture-codex review project :parent a :guardian t :start 1790000020.0)
+      (drover-fixture-codex nested project :parent spawned :guardian t :start 1790000030.0)
+      (drover-fixture-codex b project :prompt "Parent B" :start 1790000100.0)
+      (drover-fixture-codex refused project :parent b :guardian t :start 1790000110.0)
+      (drover-fixture-codex taken project :parent b :guardian t :start 1790000120.0)
+      (drover-codex-rollouts-test-scan)
+      (should (equal (drover-session-parent (drover-find 'codex review)) a))
+      (should (equal (sort (drover-codex-rollouts-descendants a) #'string<) (list spawned review nested)))
+      (cl-letf (((symbol-function 'drover-warn)
+                 (lambda (format &rest args) (push (apply #'format-message format args) warnings)))
+                ((symbol-function 'drover-message)
+                 (lambda (format &rest args) (push (apply #'format-message format args) messages))))
+        (drover-codex-rollouts--delete (drover-find 'codex a))
+        (should (drover-test-wait-commands))
+        (let ((deleted (mapcar (lambda (line) (car (last (split-string line))))
+                               (split-string (with-temp-buffer (insert-file-contents log) (buffer-string))
+                                             "\n" t))))
+          ;; The conversation first, then each under it, below its parent.
+          (should (equal (car deleted) a))
+          (should (equal (sort (copy-sequence (cdr deleted)) #'string<) (list spawned review nested)))
+          (should (< (seq-position deleted spawned) (seq-position deleted nested))))
+        (should-not warnings)
+        (should (equal (reverse messages)
+                       '("Codex deleted Parent A" "Codex deleted the 3 subagent conversations of Parent A")))
+        ;; One refused: told, with what went wrong.
+        (delete-file log)
+        (setq messages nil)
+        (drover-codex-rollouts--delete (drover-find 'codex b))
+        (should (drover-test-wait-commands))
+        (should (equal (reverse messages) '("Codex deleted Parent B")))
+        (should (equal warnings
+                       '("Codex could not delete 1 of the 2 subagent conversations of Parent B: exit status 1")))
+        ;; Without the CLI, they stay, and it is told.
+        (setq warnings nil)
+        (let ((drover-codex-program (expand-file-name "no-codex" home)))
+          (drover-codex-rollouts-delete-subagents a "Parent A"))
+        (should (equal warnings
+                       '("The 3 subagent conversations of Parent A stay: the Codex CLI, `drover-codex-program', deletes them, and is not found")))))))
+
 ;;;; Turns ended and context
 
 (defun drover-codex-rollouts-test-since (time)

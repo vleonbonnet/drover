@@ -264,13 +264,15 @@ TEXT is what the CLI tells of it, in DIRECTORY."
 
 (cl-defun drover-fixture-codex (id directory &key (start 1790000000.0) (prompt "Add the export command")
                                    (reply "The export command writes CSV.") (model "gpt-5.5")
-                                   (effort "high") (source "cli") parent archived (instructions 2000)
-                                   (branch "feature"))
+                                   (effort "high") (source "cli") parent guardian archived
+                                   (instructions 2000) (branch "feature"))
   "Write the rollout of a Codex conversation ID run in DIRECTORY, and return its file.
 Its session_meta carries INSTRUCTIONS bytes of base instructions, its
 git BRANCH after them; SOURCE is its origin, PARENT the conversation
-spawning a subagent.  Then the context Codex adds, PROMPT, the turn's
-context with MODEL and EFFORT, a patch and REPLY."
+spawning a subagent, or, with GUARDIAN non-nil, the conversation whose
+request for approval Guardian reviews in it, as Codex 0.165 records
+it.  Then the context Codex adds, PROMPT, the turn's context with MODEL
+and EFFORT, a patch and REPLY."
   (make-directory directory t)
   (let ((file (drover-fixture-codex-file id start archived))
         (time (drover-fixture-time start)))
@@ -279,15 +281,19 @@ context with MODEL and EFFORT, a patch and REPLY."
      (list
       (drover-fixture-line
        :timestamp time :type "session_meta"
-       :payload (list :session_id id :id id :timestamp time :cwd directory :originator "codex_cli_rs"
-                      :cli_version "0.166.0"
-                      :source (if parent
-                                  (list :subagent (list :thread_spawn (list :parent_thread_id parent
-                                                                            :depth 1)))
-                                source)
-                      :model_provider "openai"
-                      :base_instructions (list :text (make-string instructions ?i))
-                      :git (list :branch branch)))
+       :payload (append
+                 (list :session_id id :id id)
+                 (and guardian (list :parent_thread_id parent))
+                 (list :timestamp time :cwd directory :originator "codex_cli_rs"
+                       :cli_version "0.166.0"
+                       :source (cond (guardian (list :subagent (list :other "guardian")))
+                                     (parent (list :subagent (list :thread_spawn (list :parent_thread_id parent
+                                                                                       :depth 1))))
+                                     (t source)))
+                 (and guardian (list :thread_source "guardian_review"))
+                 (list :model_provider "openai"
+                       :base_instructions (list :text (make-string instructions ?i))
+                       :git (list :branch branch))))
       (drover-fixture-line :timestamp time :type "response_item"
                            :payload (list :type "message" :role "developer"
                                           :content (vector (list :type "input_text" :text "<permissions>"))))

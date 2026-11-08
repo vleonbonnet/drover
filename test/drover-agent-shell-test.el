@@ -1834,6 +1834,30 @@ cancelled turn."
             (funcall (plist-get request :on-success) nil)
             (should-not (buffer-live-p shell))))))))
 
+(ert-deftest drover-agent-shell-test-delete-codex-subagents ()
+  "A Codex conversation deleted by its agent has its subagents' deleted then, and only it."
+  (drover-agent-shell-test-with
+    (let ((requests nil)
+          (subagents nil))
+      (cl-letf (((symbol-function 'acp-send-request)
+                 (lambda (&rest arguments) (push arguments requests)))
+                ((symbol-function 'drover-codex-rollouts-delete-subagents)
+                 (lambda (id title) (push (list id title) subagents))))
+        (dolist (engine '(codex claude-code))
+          (let ((shell (drover-agent-shell-test-shell engine (format "deleting %s" engine))))
+            (with-current-buffer shell
+              (map-put! agent-shell--state :client 'client))
+            (drover-agent-shell-test-initialize shell (format "%s-thread" engine))
+            (with-current-buffer shell
+              (drover-agent-shell--setup))
+            (drover-delete (drover-agent-shell-test-session shell))
+            ;; Not before the agent deleted the conversation.
+            (should-not subagents)
+            (funcall (plist-get (car requests) :on-success) nil)
+            (should-not (buffer-live-p shell))
+            (should (equal subagents (and (eq engine 'codex) '(("codex-thread" "deleting codex")))))
+            (setq subagents nil)))))))
+
 (defun drover-agent-shell-test-type-input (shell text)
   "Give SHELL a process, as shell-maker does, and type TEXT at its prompt."
   (with-current-buffer shell

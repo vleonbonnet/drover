@@ -55,7 +55,10 @@
 ;; `drover-codex-program' is found; otherwise drover archives it itself,
 ;; and cannot delete it.  Version 0.166 of the CLI moves a rollout to
 ;; archived_sessions/ and back, and refuses to delete without --force
-;; when no terminal can ask.
+;; when no terminal can ask.  Deleting a conversation, here or through
+;; an ACP agent, leaves its subagents' rollouts, such as the threads in
+;; which Codex's Guardian reviewed its requests for approval: drover
+;; deletes them with the CLI too, once the conversation is gone.
 ;;
 ;; agent-shell's backend installs this one as it installs itself
 ;; (`drover-codex-rollouts-install').
@@ -786,33 +789,50 @@ refuses an option it does not have with \"unexpected argument\"."
                 (string-match-p (concat "unexpected argument '" (regexp-quote option) "'") said))
               options)))
 
-(defun drover-codex-rollouts--run (session command done &optional options)
+(defun drover-codex-rollouts--call (command id options callback)
+  "Run the Codex CLI's COMMAND on conversation ID, without waiting.
+OPTIONS are the strings of its options, which a CLI too old to know
+them runs without.  CALLBACK is called once it ran, with nil, or with
+what went wrong, a string: what the CLI said, else its exit status."
+  (drover-command-run
+   (concat "codex " command)
+   (apply #'drover-codex-rollouts-command command id options)
+   (lambda (result)
+     (cond
+      ((eql (plist-get result :exit) 0) (funcall callback nil))
+      ((and options (drover-codex-rollouts--unknown-option-p result options))
+       (drover-codex-rollouts--call command id nil callback))
+      (t (funcall callback
+                  (or (plist-get result :failure)
+                      (let ((said (string-trim (concat (plist-get result :errors) "\n"
+                                                       (plist-get result :output)))))
+                        (if (string-empty-p said)
+                            (format "exit status %s" (plist-get result :exit))
+                          said)))))))))
+
+(defun drover-codex-rollouts--look-soon ()
+  "Look at the rollouts again soon, as a command of the CLI changed them."
+  (when-let* ((index (drover-codex-rollouts--current-index)))
+    (drover-transcript-look-soon index)))
+
+(defun drover-codex-rollouts--run (session command done &optional options then)
   "Run the Codex CLI's COMMAND on the conversation of SESSION, without waiting.
 OPTIONS are the strings of its options, which a CLI too old to know
 them runs without.  DONE, a past participle such as \"archived\",
-tells the outcome once it ran; a failure is reported with what the CLI
-said.  The rollouts are looked at again either way."
+tells the outcome once it ran, and THEN, a function of no argument, is
+called then; a failure is reported with what the CLI said.  The
+rollouts are looked at again either way."
   (let ((title (drover-session-display-title session)))
-    (drover-command-run
-     (concat "codex " command)
-     (apply #'drover-codex-rollouts-command command (drover-session-id session) options)
-     (lambda (result)
-       (if (and options
-                (not (eql (plist-get result :exit) 0))
-                (drover-codex-rollouts--unknown-option-p result options))
-           (drover-codex-rollouts--run session command done)
-         (unwind-protect
-             (if (eql (plist-get result :exit) 0)
-                 (drover-message "Codex %s %s" done title)
-               (drover-warn "Codex could not %s %s: %s" command title
-                            (or (plist-get result :failure)
-                                (let ((said (string-trim (concat (plist-get result :errors) "\n"
-                                                                 (plist-get result :output)))))
-                                  (if (string-empty-p said)
-                                      (format "exit status %s" (plist-get result :exit))
-                                    said)))))
-           (when-let* ((index (drover-codex-rollouts--current-index)))
-             (drover-transcript-look-soon index))))))))
+    (drover-codex-rollouts--call
+     command (drover-session-id session) options
+     (lambda (failure)
+       (unwind-protect
+           (if failure
+               (drover-warn "Codex could not %s %s: %s" command title failure)
+             (drover-message "Codex %s %s" done title)
+             (when then
+               (funcall then)))
+         (drover-codex-rollouts--look-soon))))))
 
 (defun drover-codex-rollouts--archive (session)
   "Archive the conversation of SESSION with \"codex archive\".
@@ -826,12 +846,75 @@ The CLI moves its rollout back among the sessions.  The backend's
 :unarchive."
   (drover-codex-rollouts--run session "unarchive" "restored"))
 
+(defun drover-codex-rollouts-descendants (id)
+  "Return the identifiers of the conversations under conversation ID.
+They are its subagents, as their rollouts name their parent, then
+theirs: the agents it spawned, and the threads in which Codex's
+Guardian reviewed its requests for approval.  The rollouts changed
+lately are read first, so that a review just made is among them."
+  (when-let* ((index (drover-codex-rollouts--current-index)))
+    (drover-transcript-scan index t)
+    (let ((children (make-hash-table :test #'equal))
+          (queue (list id))
+          (found nil))
+      (drover-transcript-map (lambda (_file data)
+                               (when-let* ((parent (plist-get data :parent))
+                                           (child (plist-get data :id)))
+                                 (push child (gethash parent children))))
+                             index)
+      (while queue
+        (dolist (child (gethash (pop queue) children))
+          (unless (or (equal child id) (member child found))
+            (push child found)
+            (setq queue (append queue (list child))))))
+      (nreverse found))))
+
+(defun drover-codex-rollouts-delete-subagents (id title)
+  "Delete the conversations under conversation ID, of TITLE, with the Codex CLI.
+Neither \"codex delete\" nor an ACP agent deleting a conversation
+deletes its subagents' (see `drover-codex-rollouts-descendants'), which
+drover would then list under a conversation gone.  Called once ID is
+deleted, they are deleted one after the other, with \"codex delete
+--force\", and what was deleted, or refused, told once all ran.
+Without the CLI, they stay, which a warning tells."
+  (when-let* ((ids (drover-codex-rollouts-descendants id)))
+    (let* ((many (cdr ids))
+           (what (if many
+                     (format "%d subagent conversations of %s" (length ids) title)
+                   (format "subagent conversation of %s" title))))
+      (if (not (drover-codex-rollouts--program))
+          (drover-warn "The %s %s: the Codex CLI, `drover-codex-program', deletes %s, and is not found"
+                       what (if many "stay" "stays") (if many "them" "it"))
+        (let ((failures nil))
+          (cl-labels ((next (remaining)
+                        (if remaining
+                            (drover-codex-rollouts--call
+                             "delete" (car remaining) '("--force")
+                             (lambda (failure)
+                               (when failure
+                                 (push failure failures))
+                               (next (cdr remaining))))
+                          (unwind-protect
+                              (cond
+                               ((null failures) (drover-message "Codex deleted the %s" what))
+                               ((= (length failures) (length ids))
+                                (drover-warn "Codex could not delete the %s: %s" what (car (last failures))))
+                               (t (drover-warn "Codex could not delete %d of the %s: %s"
+                                               (length failures) what (car (last failures)))))
+                            (drover-codex-rollouts--look-soon)))))
+            (next ids)))))))
+
 (defun drover-codex-rollouts--delete (session)
   "Delete the conversation of SESSION with \"codex delete --force\".
 Drover asked the user already: without --force, the CLI refuses to
 delete without a terminal to ask in.  A CLI too old to know --force
-deletes without it.  The backend's :delete."
-  (drover-codex-rollouts--run session "delete" "deleted" '("--force")))
+deletes without it.  Once it is deleted, its subagents' conversations
+are too (see `drover-codex-rollouts-delete-subagents').  The backend's
+:delete."
+  (let ((id (drover-session-id session))
+        (title (drover-session-display-title session)))
+    (drover-codex-rollouts--run session "delete" "deleted" '("--force")
+                                (lambda () (drover-codex-rollouts-delete-subagents id title)))))
 
 (defun drover-codex-rollouts--supports (_session operation)
   "Return non-nil when OPERATION applies, as the backend's :supports.
