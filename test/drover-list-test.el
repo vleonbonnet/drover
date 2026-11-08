@@ -4557,11 +4557,102 @@ list in an ordinary window keeps Magit's, and both measure alike."
               (should (equal (funcall background) "#3c2610"))
               (should (= 1 (seq-count (lambda (entry) (eq (car entry) 'magit-section-highlight))
                                       face-remapping-alist)))
+              ;; Both highlights show only in the windows of the filter,
+              ;; Magit's own included (see the next test).
+              (let ((filter '(:window drover-list-selected t)))
+                (should (equal (cdr (assq 'magit-section-highlight face-remapping-alist))
+                               `((:filtered ,filter (drover-list-sidebar-highlight (:background "#3c2610")))
+                                 (:filtered ,filter magit-section-highlight))))
+                (should (equal (cdr (assq 'magit-section-heading-selection face-remapping-alist))
+                               `((:filtered ,filter magit-section-heading-selection)))))
               (should (equal (car (drover-list--measure-context))
                              (with-current-buffer buffer (car (drover-list--measure-context))))))
-            (should-not (assq 'magit-section-highlight face-remapping-alist)))
+            (should-not (assq 'magit-section-highlight face-remapping-alist))
+            (should-not (assq 'magit-section-heading-selection face-remapping-alist)))
         (set-face-background 'default default)
         (set-face-background 'magit-section-highlight highlight)))))
+
+(ert-deftest drover-list-test-sidebar-highlight-where-selected ()
+  "The row at point stands out in the sidebar only while it is selected.
+The window parameter the highlights' filter reads is t in the sidebar's
+window while it is selected, or while the minibuffer is, entered from
+it, and nil from any other window; of two windows showing the sidebar,
+the selected one alone.  A window is drawn anew only as its value
+changes.  While a region selects rows, they stand out in every window
+showing the sidebar: the region ending, or selecting no row, as a group's
+heading alone, hides them again, and so does a redraw that leaves it
+selecting no row."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+      (let* ((side (drover-list-side '(4)))
+             (sidebar (window-buffer side))
+             (drawn nil)
+             (update (symbol-function 'force-window-update)))
+        (cl-flet ((shows (window) (window-parameter window 'drover-list-selected))
+                  (changed () (drover-list--highlight-windows-changed)))
+          (cl-letf (((symbol-function 'force-window-update)
+                     (lambda (&optional object) (push object drawn) (funcall update object))))
+            (should (eq (selected-window) side))
+            ;; Drawn while selected, the sidebar marked its window.
+            (should (eq (shows side) t))
+            (changed)
+            (should-not drawn)
+            ;; Working elsewhere.
+            (select-window first)
+            (changed)
+            (should-not (shows side))
+            (should (equal drawn (list side)))
+            ;; In the minibuffer, entered from the sidebar or from elsewhere.
+            (select-window (minibuffer-window))
+            (cl-letf (((symbol-function 'minibuffer-selected-window) (lambda () side)))
+              (changed)
+              (should (eq (shows side) t)))
+            (cl-letf (((symbol-function 'minibuffer-selected-window) (lambda () first)))
+              (changed)
+              (should-not (shows side)))
+            ;; The sidebar's buffer in an ordinary window too.
+            (select-window first)
+            (set-window-buffer first sidebar)
+            (changed)
+            (should (eq (shows first) t))
+            (should-not (shows side))
+            (select-window side)
+            (changed)
+            (should (eq (shows side) t))
+            (should-not (shows first))
+            (set-window-buffer first "*other 1*")
+            ;; A region selecting rows shows them from anywhere, through
+            ;; the mark's hooks.
+            (let ((transient-mark-mode t))
+              (with-current-buffer sidebar
+                (drover-list-test-goto "ask")
+                (set-mark (point))
+                (goto-char (oref (drover-list-test-section "done") start))
+                (should (equal (mapcar (lambda (section) (cdr (oref section value)))
+                                       (drover-list--selected-sections))
+                               '("ask" "fail" "done"))))
+              (select-window first)
+              (changed)
+              (should (eq (shows side) t))
+              (with-current-buffer sidebar
+                (deactivate-mark)
+                (should-not (shows side))
+                (activate-mark)
+                (should (eq (shows side) t))
+                ;; A redraw leaving the region on a group's heading alone.
+                (drover-list-test-goto-group 'idle)
+                (set-marker (mark-marker) (point))
+                (set-window-point side (point))
+                (should (region-active-p))
+                (should-not (drover-list--selected-sections))
+                (should (eq (shows side) t))
+                (revert-buffer)
+                (should-not (shows side))
+                ;; Nor does a region selecting no row show from anywhere.
+                (deactivate-mark)
+                (set-mark (point))
+                (should-not (shows side))
+                (deactivate-mark)))))))))
 
 (ert-deftest drover-list-test-line-width-leaves-the-truncation-glyph ()
   "Lines leave the room of the glyph telling a line is cut, as Emacs keeps it.

@@ -865,15 +865,19 @@ showing it, else the selected window."
 
 (defun drover-list--measure-context ()
   "Return what the widths of texts depend on besides the texts themselves.
-That is a copy of the face remapping of the buffer but for the highlight
-of the row at point, which
-`face-remap-add-relative' changes in place, the frame measuring them,
-the fonts of the faces lines are drawn in, so that a face given another
-font measures anew, and the functions measuring."
+That is a copy of the face remapping of the buffer but for the
+highlights of the row at point and of the region (see
+`drover-list--remap-highlight'), which `face-remap-add-relative' changes
+in place, the frame measuring them, the fonts of the faces lines are
+drawn in, so that a face given another font measures anew, and the
+functions measuring."
   (let ((frame (window-frame (drover-list--window))))
-    ;; The sidebar's highlight, a background, measures nothing: the
-    ;; lists measure alike with it.
-    (list (copy-tree (assq-delete-all 'magit-section-highlight (copy-sequence face-remapping-alist)))
+    ;; The sidebar's highlight, a background, measures nothing, nor
+    ;; does showing Magit's in some windows only: the lists measure
+    ;; alike with them.
+    (list (copy-tree (assq-delete-all 'magit-section-heading-selection
+                                      (assq-delete-all 'magit-section-highlight
+                                                       (copy-sequence face-remapping-alist))))
           frame
           (mapcar (lambda (face) (face-font face frame))
                   '(default drover-list variable-pitch fixed-pitch header-line bold))
@@ -4382,6 +4386,8 @@ forgotten, drawn with the rest, unless KEEP-PENDING is non-nil."
                                        (make-hash-table :test #'equal)))
     (drover-list--prefetch)
     (magit-section-update-highlight t)
+    ;; The region may select rows no longer, or others.
+    (drover-list--set-highlight-windows)
     (set-buffer-modified-p nil)
     (push (current-buffer) magit-section--refreshed-buffers)
     (drover-list--defer)
@@ -4999,6 +5005,8 @@ drawing anew keeps them."
         (when sessions
           (drover-prefetch sessions drover-list--prefetch-kinds))))
     (magit-section-update-highlight t)
+    ;; The region may select rows no longer, or others.
+    (drover-list--set-highlight-windows)
     (set-buffer-modified-p nil)
     (push (current-buffer) magit-section--refreshed-buffers)
     (ignore gone)
@@ -5792,6 +5800,8 @@ Magit's selection in lists is drover's then (see
   (add-hook 'drover-changed-hook #'drover-list--on-change)
   (add-hook 'window-buffer-change-functions #'drover-list--windows-changed)
   (add-hook 'window-selection-change-functions #'drover-list--windows-changed)
+  (add-hook 'window-buffer-change-functions #'drover-list--highlight-windows-changed)
+  (add-hook 'window-selection-change-functions #'drover-list--highlight-windows-changed)
   (add-hook 'window-buffer-change-functions #'drover-list--place-soon)
   (add-hook 'window-configuration-change-hook #'drover-list--place-soon)
   (add-hook 'kill-buffer-hook #'drover-list--buffer-killed)
@@ -5819,6 +5829,8 @@ as a mode applied again, keeps no overlay of the caches it drew.  For
       (remove-hook 'drover-changed-hook #'drover-list--on-change)
       (remove-hook 'window-buffer-change-functions #'drover-list--windows-changed)
       (remove-hook 'window-selection-change-functions #'drover-list--windows-changed)
+      (remove-hook 'window-buffer-change-functions #'drover-list--highlight-windows-changed)
+      (remove-hook 'window-selection-change-functions #'drover-list--highlight-windows-changed)
       (remove-hook 'window-buffer-change-functions #'drover-list--place-soon)
       (remove-hook 'window-configuration-change-hook #'drover-list--place-soon)
       (remove-hook 'minibuffer-exit-hook #'drover-list--place-after-minibuffer)
@@ -6752,7 +6764,10 @@ between, as it shows.  For the sidebar's `post-command-hook'."
           (set-marker (mark-marker) start))))))
 
 ;; The row at point stands out a little more than in Magit's buffers:
-;; without a cursor, its highlight alone tells where point is.
+;; without a cursor, its highlight alone tells where point is.  As a
+;; cursor, it shows only in the window where the sidebar is selected,
+;; whereas the rows a region selects show in every window, as in
+;; Magit's buffers.
 
 (defface drover-list-sidebar-highlight '((t))
   "Face of the row at point in the sidebar, over `magit-section-highlight'.
@@ -6799,17 +6814,72 @@ background; nil when either is not a colour."
                                 default highlight)
                      '(2))))))
 
+(defconst drover-list--highlight-filter '(:window drover-list-selected t)
+  "Face filter of the sidebar's highlights: the windows they show in.
+Those whose parameter `drover-list-selected' is t, which
+`drover-list--set-highlight-windows' sets.")
+
+;; Only the sidebar's windows depend on the parameter, and drover draws
+;; them anew as it changes: Emacs would draw the whole frame anew.
+(put 'drover-list-selected :filtered 'ignore)
+
 (defun drover-list--remap-highlight ()
-  "Draw the highlight of the row at point in the current sidebar as the theme says.
+  "Draw the highlights of the current sidebar as the theme says, where they show.
 Over `magit-section-highlight', the face `drover-list-sidebar-highlight',
 then the background of `drover-list--highlight-background': a theme
-enabled or disabled draws it anew (see `drover-list--theme-changed')."
+enabled or disabled draws it anew (see `drover-list--theme-changed').
+That highlight, and `magit-section-heading-selection', which Magit
+draws the headings a region selects in, show only in the windows of
+`drover-list--highlight-filter'."
   (when drover-list--highlight-cookie
     (face-remap-remove-relative drover-list--highlight-cookie))
   (setq drover-list--highlight-cookie
-        (apply #'face-remap-add-relative 'magit-section-highlight 'drover-list-sidebar-highlight
-               (when-let* ((background (drover-list--highlight-background)))
-                 (list (list :background background))))))
+        (face-remap-add-relative 'magit-section-highlight
+                                 (list :filtered drover-list--highlight-filter
+                                       (cons 'drover-list-sidebar-highlight
+                                             (when-let* ((background (drover-list--highlight-background)))
+                                               (list (list :background background)))))))
+  (dolist (face '(magit-section-highlight magit-section-heading-selection))
+    (face-remap-set-base face (list :filtered drover-list--highlight-filter face))))
+
+(defun drover-list--shows-highlight-p (window)
+  "Return non-nil when the highlights of the current sidebar show in WINDOW.
+The row at point stands out where keys go: in the selected window, or,
+while the minibuffer is selected, in the window selected before it,
+where Emacs shows the region too.  The rows a region selects stand out
+in every window."
+  (or (eq window (selected-window))
+      (and (window-minibuffer-p) (eq window (minibuffer-selected-window)))
+      (drover-list--selected-sections)))
+
+(defun drover-list--set-highlight-windows ()
+  "Mark the windows where the highlights of the current sidebar show.
+Each window showing the sidebar gets the window parameter
+`drover-list-selected', t when `drover-list--shows-highlight-p' says so,
+else nil, which `drover-list--highlight-filter' reads; a window whose
+value changes is drawn anew.  In another buffer, it does nothing."
+  (when (derived-mode-p 'drover-list-sidebar-mode)
+    (dolist (window (get-buffer-window-list nil 'nomini t))
+      (let ((value (and (drover-list--shows-highlight-p window) t)))
+        (unless (eq (window-parameter window 'drover-list-selected) value)
+          (set-window-parameter window 'drover-list-selected value)
+          (force-window-update window))))))
+
+(defun drover-list--highlight-windows-changed (&optional _frame)
+  "Mark anew the windows where the highlights of the sidebars show.
+See `drover-list--set-highlight-windows'.  For
+`window-selection-change-functions' and `window-buffer-change-functions'."
+  (drover-with-reporting "sidebar highlight"
+    (dolist (buffer (drover-list--buffers))
+      (with-current-buffer buffer
+        (drover-list--set-highlight-windows)))))
+
+(defun drover-list--region-toggled ()
+  "Mark anew the windows where the highlights of the current sidebar show.
+A region selecting rows shows them in every window.  For the sidebar's
+`activate-mark-hook' and `deactivate-mark-hook'."
+  (drover-with-reporting "sidebar highlight"
+    (drover-list--set-highlight-windows)))
 
 (defun drover-list--sidebar-window-p (window)
   "Return non-nil when WINDOW is a side window showing the sidebar."
@@ -6862,10 +6932,11 @@ nothing.  Its lines begin with their glyphs, and its side window has no
 fringes.
 
 It shows no cursor: the row at point stands out (see
-`drover-list-sidebar-highlight-contrast'), and point stays at the start
-of a row, \\[drover-list-next-row] and \\[drover-list-previous-row] moving by rows.  A click on a
-session's row opens it, as \\[drover-open-at-point] does there; one on a group's heading
-does nothing, and the mouse drags no region.
+`drover-list-sidebar-highlight-contrast') while its window is selected,
+and point stays at the start of a row, \\[drover-list-next-row] and \\[drover-list-previous-row] moving
+by rows.  The rows a region selects stand out from any window.  A
+click on a session's row opens it, as \\[drover-open-at-point] does there; one on a
+group's heading does nothing, and the mouse drags no region.
 
 \\{drover-list-sidebar-mode-map}"
   :group 'drover-list
@@ -6878,7 +6949,18 @@ does nothing, and the mouse drags no region.
   (drover-list--remap-highlight)
   (remove-hook 'magit-section-set-visibility-hook #'drover-list--cached-visibility t)
   (add-hook 'post-command-hook #'drover-list--sidebar-settle nil t)
-  (add-hook 'window-buffer-change-functions #'drover-list--sidebar-shown nil t))
+  (add-hook 'window-buffer-change-functions #'drover-list--sidebar-shown nil t)
+  (add-hook 'activate-mark-hook #'drover-list--region-toggled nil t)
+  (add-hook 'deactivate-mark-hook #'drover-list--region-toggled nil t))
+
+;; Loaded over an older drover, its sidebars hide their highlight too.
+(dolist (buffer (drover-list--buffers))
+  (with-current-buffer buffer
+    (when (derived-mode-p 'drover-list-sidebar-mode)
+      (drover-list--remap-highlight)
+      (add-hook 'activate-mark-hook #'drover-list--region-toggled nil t)
+      (add-hook 'deactivate-mark-hook #'drover-list--region-toggled nil t)
+      (drover-list--set-highlight-windows))))
 
 (defun drover-list-unload-function ()
   "Give Magit back its own selection, before `unload-feature' unloads the lists."
