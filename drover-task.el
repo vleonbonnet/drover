@@ -72,7 +72,7 @@
 (declare-function drover-prompt-to-markdown "drover-prompt" (text))
 (declare-function drover-prompt-org-task "drover-prompt" ())
 (declare-function drover-remote-ask-task "drover-remote" (name request callback &optional seconds))
-(declare-function drover-remote-open-started "drover-remote" (name result))
+(declare-function drover-remote-open-started "drover-remote" (name result &optional hidden))
 (declare-function sqlite-select "sqlite.c" (db query &optional values return-type))
 (declare-function sqlite-open "sqlite.c" (&optional file readonly disable-trusted-schema))
 (declare-function sqlite-close "sqlite.c" (db))

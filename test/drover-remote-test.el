@@ -3846,8 +3846,13 @@ too, are listed here once it is connected."
                                   :agents)
                        '("build")))
         (save-window-excursion
-          (let ((result (drover-remote-start "agent" target work "Hello service" nil #'ignore)))
+          (let ((result (drover-remote-start "agent" target work "Hello service" nil #'ignore))
+                (shown (window-buffer (selected-window))))
             (should (equal (plist-get result :key) '(opencode . "ses_new1")))
+            ;; Hidden, it is found once listed, not opened.
+            (should (drover-remote-open-started "agent" result t))
+            (should (eq (window-buffer (selected-window)) shown))
+            (should-not (drover-remote--oc-buffer "agent" '(opencode . "ses_new1")))
             (drover-remote-open-started "agent" result)
             (let ((buffer (drover-remote-test-wait
                            (lambda () (drover-remote--oc-buffer "agent" '(opencode . "ses_new1"))))))

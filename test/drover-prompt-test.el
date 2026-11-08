@@ -1639,7 +1639,7 @@ of a frame stays."
                            (setq started (list host (plist-get target :engine) directory text
                                                (plist-get options :model) (plist-get options :agent)))
                            (list :key '(fake . "n1") :title "Started"))
-                  :open (lambda (host result) (setq opened (list host (plist-get result :key)))))))
+                  :open (lambda (host result hidden) (setq opened (list host (plist-get result :key) hidden))))))
       (drover-prompt-test-choosing (lambda (names) (car (last names)))
         (should (equal (plist-get (drover-prompt-read-target "To: ") :host) "core"))
         (should (equal offered '("[New Fake session…]" "[New Fake session on Core…]"))))
@@ -1672,8 +1672,16 @@ of a frame stays."
         (drover-prompt-test-choosing (lambda (names) (car (last names)))
           (drover-prompt-submit)))
       (should (equal started (list "core" 'fake "C:/Users/val/work/" "Do it there" deep "plan")))
-      (should (equal opened '("core" (fake . "n1"))))
+      (should (equal opened '("core" (fake . "n1") nil)))
       (should-not (get-buffer drover-prompt-buffer-name))
+      ;; Started in no window here: not opened.
+      (let ((drover-prompt-display-new nil))
+        (with-current-buffer (drover-prompt-buffer t)
+          (insert "Quietly")
+          (drover-prompt-test-choosing (lambda (names) (car (last names)))
+            (drover-prompt-submit))))
+      (should (equal (nth 3 started) "Quietly"))
+      (should (equal opened '("core" (fake . "n1") t)))
       ;; Not started there: the prompt stays.
       (with-current-buffer (drover-prompt-buffer t)
         (insert "Again")
@@ -1994,6 +2002,56 @@ sends, tell nothing."
       (drover-prompt-send-to (drover-find 'shown "Shown") "again")
       (accept-process-output nil 0.05)
       (should-not sent))))
+
+(ert-deftest drover-prompt-test-display-new ()
+  "A session the prompt starts shows in no window when `drover-prompt-display-new' is nil.
+It starts hidden, and takes its prompt in no window when started later,
+as an OpenCode session is; the windows stay as they were.  Shown by
+default."
+  ;; The sends of the tests before tell their hooks once they ran: not this one's.
+  (accept-process-output nil 0.05)
+  (drover-prompt-test-with
+    (let* ((drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake session")))
+           (drover-prompt-display-new nil)
+           (other (generate-new-buffer "*drover prompt test other*"))
+           (pending nil)
+           (displayed nil)
+           (sent nil)
+           (drover-prompt-sent-functions
+            (list (lambda (session _buffer new) (push (list (drover-session-id session) new) sent)))))
+      (push (cons "other" other) drover-prompt-test-buffers)
+      (apply #'drover-register-backend 'fake
+             :create (lambda (directory engine options then else)
+                       (push (list :create (display-buffer other)) displayed)
+                       (setq pending (lambda () (drover-test--create directory engine options then else))))
+             :send (lambda (session text _token)
+                     (push (list :send (display-buffer other)) displayed)
+                     (push (list :send (drover-session-id session) text) drover-test-calls))
+             (alist-get 'fake drover--backends))
+      (save-window-excursion
+        (delete-other-windows)
+        (let ((windows (window-list)))
+          (with-current-buffer (drover-prompt-test--prompt "Do it")
+            (setq default-directory "/")
+            (drover-prompt-test-choosing (lambda (_) "[New Fake session…]")
+              (drover-prompt-submit)))
+          (funcall pending)
+          (accept-process-output nil 0.05)
+          (should (equal displayed '((:send nil) (:create nil))))
+          (should (equal (window-list) windows))
+          (should-not (get-buffer-window other t))))
+      (should (plist-get (nth 3 (assq :create drover-test-calls)) :hidden))
+      (should (equal (assq :send drover-test-calls) '(:send "new-0" "Do it")))
+      (should (equal sent '(("new-0" t))))
+      (setq drover-test-calls nil)
+      (let ((drover-prompt-display-new t))
+        (with-current-buffer (drover-prompt-test--prompt "Shown")
+          (setq default-directory "/")
+          (drover-prompt-test-choosing (lambda (_) "[New Fake session…]")
+            (save-window-excursion
+              (drover-prompt-submit)
+              (funcall pending)))))
+      (should-not (plist-member (nth 3 (assq :create drover-test-calls)) :hidden)))))
 
 (ert-deftest drover-prompt-test-send-restores-archived ()
   "A session drover archived, its buffer still open, is offered, and restored before it is sent to.

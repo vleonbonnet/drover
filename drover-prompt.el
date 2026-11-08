@@ -108,6 +108,14 @@ A frame already showing the prompt is raised instead."
   :type 'sexp
   :group 'drover)
 
+(defcustom drover-prompt-display-new t
+  "Whether a session the prompt's send starts shows in a window.
+Nil starts it in no window, as a task's sessions start, the windows
+staying as they were but for the prompt's: the list and the mode line
+follow it, and one of another host is not opened here."
+  :type 'boolean
+  :group 'drover)
+
 (defcustom drover-prompt-mode-languages
   '((sh-mode . "bash") (bash-ts-mode . "bash") (lisp-interaction-mode . "emacs-lisp")
     (vterm-mode . "console") (eat-mode . "console") (ghostel-mode . "console")
@@ -236,7 +244,8 @@ this host's, for its links and attachments.")
   "Functions called with (SESSION BUFFER NEW) once the prompt went to SESSION.
 The prompt's send (`drover-prompt-submit') runs them once its backend
 took the text, after the command, the prompt's window gone and a new
-session shown: BUFFER is SESSION's buffer here then, or nil, and NEW is
+session shown (see `drover-prompt-display-new'): BUFFER is SESSION's
+buffer here then, or nil, and NEW is
 non-nil for a session the send started, here or on another host.  Other
 sends, such as `drover-prompt-send-to', a scheduled prompt's or a
 task's, do not run them.  Each function runs on its own (see
@@ -266,7 +275,9 @@ task's, do not run them.  Each function runs on its own (see
             there, waited for: returning its host's answer, nil when
             the wait was stopped, LATER getting it then, or signaling
             a `user-error'.
- :open      Of a host's NAME and that answer, opening the session.")
+ :open      Of a host's NAME, that answer and HIDDEN, opening the
+            session, unless HIDDEN is non-nil, and returning its
+            record once listed, else nil.")
 
 (defvar-local drover-prompt--defaults nil
   "Defaults data of the engines, as an alist (ENGINE . DEFAULTS).
@@ -1467,17 +1478,29 @@ CONTENT leaves the prompt."
                                        (drover-prompt--sent session nil))))
       (drover-prompt-consume content buffer))))
 
+(defun drover-prompt--hiding (hidden function)
+  "Call FUNCTION and return its value, in no new window when HIDDEN is non-nil.
+HIDDEN shows the buffers FUNCTION displays in no window, and restores
+the windows it changes otherwise, as a task's hidden session starts."
+  (if (not hidden)
+      (funcall function)
+    (save-window-excursion
+      (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+        (funcall function)))))
+
 (defun drover-prompt--send-to-new (target content buffer)
   "Start the new session TARGET describes and send it CONTENT of the prompt BUFFER.
 TARGET is an entry of `drover-prompt-new-targets'.  Its feature is
 loaded; its backend, which must be registered and run its engine,
-starts the session in BUFFER's directory with the options chosen there.
-CONTENT leaves the prompt, unless the backend refuses at once."
+starts the session in BUFFER's directory with the options chosen there,
+in no window when `drover-prompt-display-new' is nil.  CONTENT leaves
+the prompt, unless the backend refuses at once."
   (let* ((backend (plist-get target :backend))
          (engine (plist-get target :engine))
          (feature (plist-get target :feature))
          (label (or (plist-get target :label)
-                    (format "%s session" (drover-engine-label engine)))))
+                    (format "%s session" (drover-engine-label engine))))
+         (hidden (not drover-prompt-display-new)))
     (when feature
       (require feature))
     (let ((create (drover-backend-property backend :create)))
@@ -1489,18 +1512,26 @@ CONTENT leaves the prompt, unless the backend refuses at once."
       (let ((options (with-current-buffer buffer
                        (append (drover-prompt-explicit-options buffer)
                                (list :title drover-prompt-title
-                                     :defaults (alist-get engine drover-prompt--defaults)))))
+                                     :defaults (alist-get engine drover-prompt--defaults))
+                               (and hidden (list :hidden t)))))
             (text (plist-get content :text))
             (returned nil)
             (refused nil))
-        (funcall create (buffer-local-value 'default-directory buffer) engine options
-                 (lambda (session)
-                   (when (drover-prompt--deliver session nil text nil (plist-get content :attachments))
-                     (drover-prompt--sent session t)))
-                 (lambda (reason)
-                   (drover-warn "No new %s: %s; the prompt is in the kill ring" label reason)
-                   (unless returned
-                     (setq refused t))))
+        (drover-prompt--hiding
+         hidden
+         (lambda ()
+           (funcall create (buffer-local-value 'default-directory buffer) engine options
+                    (lambda (session)
+                      ;; THEN may come later, from a process or a timer.
+                      (when (drover-prompt--hiding
+                             hidden
+                             (lambda ()
+                               (drover-prompt--deliver session nil text nil (plist-get content :attachments))))
+                        (drover-prompt--sent session t)))
+                    (lambda (reason)
+                      (drover-warn "No new %s: %s; the prompt is in the kill ring" label reason)
+                      (unless returned
+                        (setq refused t))))))
         (setq returned t)
         (unless refused
           (drover-prompt-consume content buffer))))))
@@ -1533,11 +1564,11 @@ read first unless BUFFER's new sessions start on that host already
 BUFFER's `default-directory' to; the host and directory become
 BUFFER's, kept for the next prompt as a directory chosen is.  The host
 starts it through its own backend, with the options chosen in BUFFER
-and CONTENT's text, waited for: CONTENT
-then leaves the prompt and the session opens here, an OpenCode session
-in a full buffer through its host, a terminal or a shell mirrored.
-When it does not start, a `user-error' says why and the prompt stays.
-Attachments, files of this host, go as their labels in the text."
+and CONTENT's text, waited for: CONTENT then leaves the prompt and the
+session opens here, an OpenCode session in a full buffer through its
+host, a terminal or a shell mirrored, unless `drover-prompt-display-new'
+is nil.  When it does not start, a `user-error' says why and the prompt
+stays.  Attachments, files of this host, go as their labels in the text."
   (let* ((host (plist-get target :host))
          (label (or (plist-get target :host-label) (drover-prompt--host-label host)))
          (engine (plist-get target :engine))
@@ -1577,7 +1608,7 @@ Attachments, files of this host, go as their labels in the text."
                                  (drover-prompt-consume content buffer))
                                (drover-message "%s started %s" label (or (plist-get result :title) "a session")))))))
         (drover-prompt-consume content buffer)
-        (when-let* ((record (drover-prompt--remote :open host result)))
+        (when-let* ((record (drover-prompt--remote :open host result (not drover-prompt-display-new))))
           (drover-prompt--sent record t))))))
 
 (defun drover-prompt-submit ()

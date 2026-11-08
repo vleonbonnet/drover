@@ -6053,13 +6053,14 @@ LATER being called, from a timer, with the answer once it comes, or
                               (equal (drover-session-engine-id record) eid)))
                        (hash-table-values (drover-remote--peer-records peer)))))))
 
-(defun drover-remote-open-started (name result)
+(defun drover-remote-open-started (name result &optional hidden)
   "Open the session the peer NAME started, as RESULT, its answer, names it.
 Once NAME's records list it, waited for in the command,
 `drover-remote-open-timeout' seconds at most (see
 `drover-remote--await'): an OpenCode session in a
-full buffer through NAME, a terminal or a shell mirrored.  Return its
-record, or nil when not listed in time, which the echo area tells."
+full buffer through NAME, a terminal or a shell mirrored; with HIDDEN
+non-nil, it is not opened.  Return its record, or nil when not listed
+in time, which the echo area tells."
   (let* ((peer (or (drover-remote--peer name) (user-error "%s is not a peer" name)))
          (record nil))
     (drover-remote--await peer (lambda () (setq record (drover-remote--started-record peer result)))
@@ -6072,7 +6073,8 @@ record, or nil when not listed in time, which the echo area tells."
                                (drover-remote--label peer) (or (plist-get result :title) "a session"))
                nil)
       (drover-changed-now)
-      (drover-open (or (drover-index-session (drover-session-key record)) record))
+      (unless hidden
+        (drover-open (or (drover-index-session (drover-session-key record)) record)))
       record)))
 
 (defun drover-remote--prompt-targets (&optional wait)
