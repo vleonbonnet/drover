@@ -36,7 +36,9 @@
 ;; that does not end within `drover-command-timeout' seconds is stopped,
 ;; and its caller told.  The runner keeps the environment it started
 ;; with: once `process-environment' changes, the next command starts a
-;; new runner, the old one ending after its commands.
+;; new runner, the old one ending after its commands.  Variables for
+;; some commands only, `drover-command-environment', reach them through
+;; env instead, and the runner stays.
 ;;
 ;; Where no POSIX shell is found (`drover-command-shell'), commands are
 ;; processes of Emacs's own, as they used to be.
@@ -61,6 +63,13 @@ command as a process of Emacs's own."
   "Seconds a command drover runs may take before it is stopped."
   :type 'number
   :group 'drover)
+
+(defvar drover-command-environment nil
+  "Variables, NAME=VALUE strings, that the commands started now get.
+Bound around `drover-command-run', added to `process-environment'.  A
+command the runner starts gets them through env, the runner keeping
+its own environment; a command started directly, as on Windows, in the
+environment of its process, sparing a process of env's.")
 
 (defconst drover-command-output-limit (* 1024 1024)
   "Bytes of a command's output, and of its errors, drover reads at most.")
@@ -134,6 +143,8 @@ the command's identifier, for `drover-command-live-p' and
               (process-send-string
                runner (concat (mapconcat #'shell-quote-argument
                                          (append (list "drover_run" (number-to-string id) directory)
+                                                 (and drover-command-environment
+                                                      (cons "env" drover-command-environment))
                                                  command)
                                          " ")
                               "\n")))
@@ -368,7 +379,7 @@ rather than its start (see `drover-command-run')."
          (errors (generate-new-buffer " *drover command errors*" t))
          (default-directory (file-name-as-directory directory))
          (started (drover-command--literal command))
-         (process-environment (append (cdr started) process-environment))
+         (process-environment (append (cdr started) drover-command-environment process-environment))
          (limit drover-command-output-limit)
          (process nil)
          (stderr nil)

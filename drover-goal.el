@@ -410,15 +410,16 @@ Past `drover-goal-log-limit' bytes, only a line that it is full."
 
 ;;;; Checks
 
-(defun drover-goal--command (command directory goal)
-  "Return the command running COMMAND in DIRECTORY for GOAL.
-Its errors merged into its output, in `drover-goal-environment'."
-  (append (and (executable-find "env")
-               (append (list "env")
-                       drover-goal-environment
-                       (list (concat "DROVER_WORKTREE_PATH=" (directory-file-name directory))
-                             (concat "DROVER_TASK=" (or (plist-get goal :task) "")))))
-          (list drover-goal-shell "-c" (concat "exec 2>&1; " command))))
+(defun drover-goal--command (command)
+  "Return the command running COMMAND, its errors merged into its output."
+  (list drover-goal-shell "-c" (concat "exec 2>&1; " command)))
+
+(defun drover-goal--environment (directory goal)
+  "Return the variables a check of GOAL runs with in DIRECTORY.
+Those of `drover-goal-environment', the worktree's path and the task."
+  (append drover-goal-environment
+          (list (concat "DROVER_WORKTREE_PATH=" (directory-file-name directory))
+                (concat "DROVER_TASK=" (or (plist-get goal :task) "")))))
 
 (defun drover-goal--run-commands (goal commands directory callback)
   "Run COMMANDS of GOAL in DIRECTORY one after the other, then call CALLBACK.
@@ -432,12 +433,13 @@ all passed, :results, a plist per command run (:command :exit :seconds
           (funcall callback (list :ok t :results (nreverse results)))
         (let ((command (car left))
               (start (float-time))
-              (drover-command-timeout drover-goal-check-timeout))
+              (drover-command-timeout drover-goal-check-timeout)
+              (drover-command-environment (drover-goal--environment directory goal)))
           (condition-case err
               (drover-goal--run-put
                goal :command
                (drover-command-run
-                "goal check" (drover-goal--command command directory goal)
+                "goal check" (drover-goal--command command)
                 (lambda (result)
                   (drover-with-reporting "goal check"
                     (drover-goal--run-put goal :command nil)
@@ -563,15 +565,15 @@ The failing lines first, then the end of the output, within
   "Call CALLBACK with the hash of the tree of what DIRECTORY holds, or nil.
 Its files as they are, tracked or not but ignored ones, written through
 a temporary index, so that the worktree's own index is not touched."
-  (let ((index (make-temp-name (expand-file-name "drover-goal-index-" temporary-file-directory))))
+  (let ((index (make-temp-name (expand-file-name "drover-goal-index-" temporary-file-directory)))
+        (drover-command-environment drover-task-git-environment))
     (condition-case err
         (drover-command-run
          "goal tree"
-         (append (and (executable-find "env") (cons "env" drover-task-git-environment))
-                 (list drover-goal-shell "-c"
-                       (format "GIT_INDEX_FILE=%s; export GIT_INDEX_FILE; %s read-tree HEAD && %s add -A && %s write-tree; status=$?; rm -f \"$GIT_INDEX_FILE\"; exit $status"
-                               (shell-quote-argument index) drover-task-git-program drover-task-git-program
-                               drover-task-git-program)))
+         (list drover-goal-shell "-c"
+               (format "GIT_INDEX_FILE=%s; export GIT_INDEX_FILE; %s read-tree HEAD && %s add -A && %s write-tree; status=$?; rm -f \"$GIT_INDEX_FILE\"; exit $status"
+                       (shell-quote-argument index) drover-task-git-program drover-task-git-program
+                       drover-task-git-program))
          (lambda (result)
            (drover-with-reporting "goal tree"
              (funcall callback (and (eql (plist-get result :exit) 0)

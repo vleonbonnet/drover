@@ -104,25 +104,18 @@ directory keeps its trailing slash, or lack of it."
 
 ;;;; Running commands
 
-(defun drover-task-git--command (program arguments)
-  "Return the command running PROGRAM with ARGUMENTS in the tasks' environment."
-  (if (executable-find "env")
-      (append (list "env") drover-task-git-environment (cons program arguments))
-    (cons program arguments)))
-
 (cl-defun drover-task-run (directory program arguments callback &key (timeout 120) name)
   "Run PROGRAM with ARGUMENTS in DIRECTORY, then call CALLBACK with its result.
 The result is a plist: :exit, :output and :errors once it ran, else
 :failure, why it did not, as `drover-command-run' tells; with :ok non-nil
 for an exit status of 0.  It runs within TIMEOUT seconds, prompting
-for nothing; NAME names it in reports."
+for nothing, with `drover-command-environment' as bound around it too;
+NAME names it in reports."
   (let ((drover-command-timeout timeout)
-        (process-environment (if (executable-find "env")
-                                 process-environment
-                               (append drover-task-git-environment process-environment))))
+        (drover-command-environment (append drover-task-git-environment drover-command-environment)))
     (condition-case err
         (drover-command-run (or name (format "%s %s" (file-name-nondirectory program) (car arguments)))
-                            (drover-task-git--command program arguments)
+                            (cons program arguments)
                             (lambda (result)
                               (funcall callback (if (eql (plist-get result :exit) 0)
                                                     (append (list :ok t) result)

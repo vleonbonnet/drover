@@ -276,6 +276,31 @@ the runner, started once, starts them."
             (accept-process-output nil 0.02)))
         (should-not (process-live-p old))))))
 
+(ert-deftest drover-command-test-environment-of-a-command ()
+  "Variables of `drover-command-environment' reach the commands started with them.
+Through the runner, which keeps its environment and so stays, as when
+started directly, as on Windows, where env would be one more process."
+  (let ((printenv (executable-find "printenv")))
+    (skip-unless printenv)
+    (drover-command-test-with
+      (cl-flet ((check ()
+                  (let ((drover-command-environment '("DROVER_TEST=one")))
+                    (should (equal (plist-get (drover-command-test-run (list printenv "DROVER_TEST")) :output)
+                                   "one\n")))
+                  (should (equal (plist-get (drover-command-test-run (list printenv "DROVER_TEST")) :exit)
+                                 1))))
+        (when (file-executable-p "/bin/sh")
+          (ert-info ("Through the runner")
+            (let ((drover-command-shell "/bin/sh"))
+              (check)
+              (let ((runner drover-command--runner))
+                (check)
+                (should (eq runner drover-command--runner)))))
+          (drover-command-stop))
+        (ert-info ("Directly")
+          (let ((drover-command-shell nil))
+            (check)))))))
+
 (ert-deftest drover-command-test-callback-errors ()
   "A callback's error is reported briefly, as out of any command."
   (skip-unless (file-executable-p "/bin/sh"))
