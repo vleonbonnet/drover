@@ -158,6 +158,12 @@ It goes over the face `header-line'; inheriting `drover-list', it draws
 the names in the font of the columns they name."
   :group 'drover-faces)
 
+(defface drover-list-number '((t :inherit help-key-binding))
+  "Face of the numbers rows show while `drover-dispatch' opens sessions by number.
+Each session its digits open shows its digit in place of its status
+glyph, as a key: see `drover-list-number-rows'."
+  :group 'drover-faces)
+
 (define-obsolete-face-alias 'drover-list-current 'opencode-session-active "0.1.0")
 
 (defconst drover-list-buffer-name "*drover sessions*"
@@ -880,7 +886,7 @@ functions measuring."
                                                        (copy-sequence face-remapping-alist))))
           frame
           (mapcar (lambda (face) (face-font face frame))
-                  '(default drover-list variable-pitch fixed-pitch header-line bold))
+                  '(default drover-list variable-pitch fixed-pitch header-line bold drover-list-number))
           (drover-list--measurer))))
 
 (defun drover-list--measurer ()
@@ -1247,20 +1253,25 @@ STILL: one character displays the frame of the time of METRICS, the
 next one a space reaching the end of the cell, so that what follows
 never moves.  Their properties `drover-list-frame' and
 `drover-list-frame-pad' name STATUS: from frame to frame, only their
-display changes."
+display changes.
+
+The whole cell has the property `drover-list-status-cell', by which a
+number is drawn over it (see `drover-list--draw-numbers')."
   (let ((glyph (opencode-session-status-glyph status))
         (cell (plist-get metrics :status-cell)))
-    (if-let* ((frames (and (not still) (alist-get status (plist-get metrics :frames)))))
-        (pcase-let* ((`(,strings ,widths ,width) frames)
-                     (index (opencode-session-status-frame-index (length strings) (plist-get metrics :now))))
-          (concat (drover-list--pad (car cell))
-                  (propertize (if (string-empty-p glyph)
-                                  (drover-face " " (opencode-session-status-face status))
-                                (substring glyph 0 1))
-                              'display (nth index strings) 'drover-list-frame status)
-                  (propertize " " 'display `(space :width (,(- width (nth index widths))))
-                              'drover-list-frame-pad status)))
-      (drover-list--in-cell glyph cell))))
+    (propertize
+     (if-let* ((frames (and (not still) (alist-get status (plist-get metrics :frames)))))
+         (pcase-let* ((`(,strings ,widths ,width) frames)
+                      (index (opencode-session-status-frame-index (length strings) (plist-get metrics :now))))
+           (concat (drover-list--pad (car cell))
+                   (propertize (if (string-empty-p glyph)
+                                   (drover-face " " (opencode-session-status-face status))
+                                 (substring glyph 0 1))
+                               'display (nth index strings) 'drover-list-frame status)
+                   (propertize " " 'display `(space :width (,(- width (nth index widths))))
+                               'drover-list-frame-pad status)))
+       (drover-list--in-cell glyph cell))
+     'drover-list-status-cell t)))
 
 (defun drover-list--subagents-help (subagents)
   "Return the tooltip naming SUBAGENTS, active sessions, by what they do.
@@ -1695,7 +1706,10 @@ buffers are shown (see `drover-list--places'), or nil, and :caching,
 the backends that may report prompt caches (see
 `drover-list--caching').  The status cell
 holds every status glyph and frame, so that titles line up whatever
-the status; the subagent cell both glyphs of `opencode-subagent-icons'.
+the status, and the digits drawn in its place while the dispatch menu
+opens sessions by number (see `drover-list-number-rows'), so that
+titles stay put then; the subagent cell both glyphs of
+`opencode-subagent-icons'.
 Widths are in pixels; the lines of a list that folds leave room for the
 ellipsis Magit adds to collapsed headings.  Rows depend on the margin,
 not on where lines draw them, so that the sidebar and the other list
@@ -1708,7 +1722,8 @@ share them (see `drover-list--peer-rows')."
                                    '(working retrying))))
          (status-cell (drover-list--cell
                        (append (mapcar #'opencode-session-status-glyph statuses)
-                               (mapcan (lambda (entry) (copy-sequence (nth 1 entry))) frames)))))
+                               (mapcan (lambda (entry) (copy-sequence (nth 1 entry))) frames)
+                               (mapcar #'drover-list--number-string (number-sequence 0 9))))))
     (let ((metrics (list :now now
                          :char char
                          :gap (* drover-list--gap char)
@@ -3632,9 +3647,11 @@ many trees are left."
 
 (defun drover-list--drawn-later (start end)
   "Take in the rows drawn between START and END after the list was drawn.
-Their animated glyphs animate, their prompt caches are drawn."
+Their animated glyphs animate, their prompt caches are drawn, and so are
+their numbers while the list shows them (see `drover-list-number-rows')."
   (setq drover-list--animated (append drover-list--animated (drover-list--collect-animated start end)))
   (drover-list--draw-caches)
+  (drover-list--draw-numbers)
   (drover-list--update-timers))
 
 (defun drover-list--model-group (section)
@@ -4388,6 +4405,8 @@ forgotten, drawn with the rest, unless KEEP-PENDING is non-nil."
     (magit-section-update-highlight t)
     ;; The region may select rows no longer, or others.
     (drover-list--set-highlight-windows)
+    ;; Numbers shown move with their rows, or to other ones.
+    (drover-list--draw-numbers)
     (set-buffer-modified-p nil)
     (push (current-buffer) magit-section--refreshed-buffers)
     (drover-list--defer)
@@ -5007,6 +5026,8 @@ drawing anew keeps them."
     (magit-section-update-highlight t)
     ;; The region may select rows no longer, or others.
     (drover-list--set-highlight-windows)
+    ;; Numbers shown move with their rows, or to other ones.
+    (drover-list--draw-numbers)
     (set-buffer-modified-p nil)
     (push (current-buffer) magit-section--refreshed-buffers)
     (ignore gone)
@@ -5820,6 +5841,7 @@ as a mode applied again, keeps no overlay of the caches it drew.  For
   (drover-with-reporting "list"
     (drover-list--forget)
     (drover-list--drop-caches)
+    (drover-list--drop-numbers)
     (when (timerp drover-list--recap-timer)
       (cancel-timer drover-list--recap-timer))
     (when (timerp drover-list--deferred-timer)
@@ -6472,7 +6494,9 @@ the list shows them; their subagents are not numbered, nor the sessions
 of collapsed groups.  NUMBER 0 is the last of them.  Point goes to the
 session's row, then the session opens: from a side window, in the
 window where you work.  Interactively, NUMBER is the digit typed: the
-list binds 1 to 9 and 0, as does `drover-dispatch' while a list shows."
+list binds 1 to 9 and 0, as does `drover-dispatch' while a list shows,
+the list then showing each session's number on its row (see
+`drover-list-number-rows')."
   (interactive (list (drover-list--typed-number)) drover-list-mode)
   (drover-list--check)
   (let ((section (or (drover-list--numbered-section number)
@@ -6481,6 +6505,111 @@ list binds 1 to 9 and 0, as does `drover-dispatch' while a list shows."
                        (user-error "No session numbered %d" number)))))
     (goto-char (oref section start))
     (drover-open-at-point)))
+
+;;;; Numbers shown while the menu opens sessions by number
+
+;; While `drover-dispatch' binds the digits, the list they number shows
+;; each session's number on its row, in place of its status glyph: in
+;; the glyph's cell, which holds the digits too (see
+;; `drover-list--metrics'), so that no title moves and nothing is laid
+;; out again as the menu opens and closes.  Overlays draw them, in the
+;; window the digits act on alone, placed again as the list is drawn.
+
+(defvar-local drover-list--numbers-window nil
+  "The window the current list shows its numbers in, or nil.
+See `drover-list-number-rows'.")
+
+(defvar-local drover-list--number-overlays nil
+  "The overlays drawing the numbers of the current list, as (NUMBER . OVERLAY).")
+
+(defun drover-list--number-string (number)
+  "Return NUMBER, a digit, as a row shows it in place of its status glyph."
+  (drover-face (number-to-string number) 'drover-list-number))
+
+(defun drover-list--numbered-cells ()
+  "Return where the current list draws its numbers, as (NUMBER START END)s.
+NUMBER is a digit the dispatch menu opens a session by (see
+`drover-list--numbered-tree'), from 1 to 9, then 0, the last, unless
+that session has one of the others already.  START and END bound the
+status cell of the session's row, which `drover-list--status-glyph'
+marks.  A row left for later has none until drawn: drawing it for its
+number would draw most of the list as the menu opens."
+  (when (and drover-list--model (drover-list--current-p))
+    (let ((cells nil)
+          (numbered nil))
+      (dolist (number '(1 2 3 4 5 6 7 8 9 0))
+        (when-let* ((tree (car (drover-list--numbered-tree number)))
+                    ((not (memq tree numbered)))
+                    (section (drover-list--row-section (car (drover-list--tree-shown tree))))
+                    (end (oref section content))
+                    (start (text-property-any (oref section start) end 'drover-list-status-cell t)))
+          (push tree numbered)
+          (push (list number start (next-single-property-change start 'drover-list-status-cell nil end))
+                cells)))
+      (nreverse cells))))
+
+(defun drover-list--draw-numbers ()
+  "Draw the numbers of the current list as it stands, or remove them.
+They show in `drover-list--numbers-window' while it shows the list (see
+`drover-list-number-rows').  Each overlay displays its digit in place of
+the cell, and the spaces padding it to the cell's width before and
+after it: Emacs ignores the display properties of a string an overlay
+displays, but not those of its `before-string' and `after-string'.
+Only the overlays whose place, number, window or padding changed are
+touched: each change of an overlay has Emacs lay out the lines of the
+windows showing the list anew."
+  (let* ((window drover-list--numbers-window)
+         (cells (and (window-live-p window)
+                     (eq (window-buffer window) (current-buffer))
+                     (drover-list--numbered-cells)))
+         (cell (and cells (plist-get (drover-list--model-layout drover-list--model) :status-cell)))
+         (kept nil))
+    (pcase-dolist (`(,number ,start ,end) cells)
+      (let* ((overlay (cdr (assq number drover-list--number-overlays)))
+             (digit (drover-list--number-string number))
+             (properties `((display . ,digit)
+                           (before-string . ,(drover-list--pad (car cell)))
+                           (after-string . ,(drover-list--pad (- (cdr cell)
+                                                                 (drover-list--pixel-width digit))))
+                           (window . ,window))))
+        (if (and overlay (overlay-buffer overlay))
+            (unless (and (= (overlay-start overlay) start) (= (overlay-end overlay) end))
+              (move-overlay overlay start end))
+          ;; Rows inserted before it, at its start, stay out of it.
+          (setq overlay (make-overlay start end nil t nil))
+          (overlay-put overlay 'drover-list-number number))
+        (pcase-dolist (`(,property . ,value) properties)
+          (unless (equal-including-properties (overlay-get overlay property) value)
+            (overlay-put overlay property value)))
+        (push (cons number overlay) kept)))
+    (pcase-dolist (`(,number . ,overlay) drover-list--number-overlays)
+      (unless (eq (cdr (assq number kept)) overlay)
+        (delete-overlay overlay)))
+    (setq drover-list--number-overlays (nreverse kept))))
+
+(defun drover-list--drop-numbers ()
+  "Remove the numbers the current list shows, and show none until asked again."
+  (setq drover-list--numbers-window nil)
+  (pcase-dolist (`(,_ . ,overlay) drover-list--number-overlays)
+    (delete-overlay overlay))
+  (setq drover-list--number-overlays nil))
+
+(defun drover-list-number-rows (buffer window)
+  "Have the list BUFFER show the numbers of its sessions in WINDOW, or none.
+The dispatch menu calls it while its digits open sessions of BUFFER by
+number, as typed in WINDOW (see `drover-list-open-numbered'), and with
+WINDOW nil once they no longer do.  Each session the digits open shows
+its digit in place of its status glyph, in the face `drover-list-number',
+in WINDOW alone: 1 to 9 the first nine sessions at the top of their
+trees, 0 the last one, unless it has one of those.  The numbers follow
+the list as it is drawn anew."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when (derived-mode-p 'drover-list-mode)
+        (if window
+            (progn (setq drover-list--numbers-window window)
+                   (drover-list--draw-numbers))
+          (drover-list--drop-numbers))))))
 
 ;;;; Reordering for display
 
@@ -6572,7 +6701,9 @@ session's last turn, \\[drover-open-at-point] opens the session at point and
 \\[drover-list-display] shows it, the list staying selected.  The digits 1
 to 9 open the first nine sessions at the top of their trees, 0 the last
 one, subagents and collapsed groups not counted: see
-`drover-list-open-numbered'.
+`drover-list-open-numbered'.  While `drover-dispatch' opens them by
+number too, the list shows each one's number on its row, in place of
+its status glyph (see `drover-list-number-rows').
 
 What a line shows depends on the window's width: see
 `drover-list-fields'.  In columns, the header line names them; hover
@@ -6963,8 +7094,12 @@ group's heading does nothing, and the mouse drags no region.
       (drover-list--set-highlight-windows))))
 
 (defun drover-list-unload-function ()
-  "Give Magit back its own selection, before `unload-feature' unloads the lists."
+  "Give Magit back its own selection, before `unload-feature' unloads the lists.
+The numbers lists show for the dispatch menu go too."
   (advice-remove 'magit-region-sections #'drover-list--region-advice)
+  (dolist (buffer (drover-list--buffers))
+    (with-current-buffer buffer
+      (drover-list--drop-numbers)))
   nil)
 
 (provide 'drover-list)

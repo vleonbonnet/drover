@@ -1058,6 +1058,60 @@ opens from there as RET there opens it."
       (drover--call-in-window window (lambda () (apply function arguments)))
     (apply function arguments)))
 
+;; While the menu binds the digits, the list they number shows each
+;; session's number on its row.  Transient runs no hook as it refreshes,
+;; nor as a minibuffer read suspends a menu, but the list numbered
+;; changes with neither: it shows its numbers as the menu's buffer is
+;; made, as it opens, resumes or comes back after a minibuffer read, and
+;; as a menu exits, which another may replace; the list draws them anew
+;; as it is drawn (see `drover-list-number-rows').
+
+(declare-function drover-list-number-rows "drover-list" (buffer window))
+
+(defvar drover--dispatch-numbered nil
+  "The list showing the numbers of the dispatch menu's digits, or nil.
+A cons (BUFFER . WINDOW), as `drover--dispatch-numbers-target' returns.")
+
+(defun drover--dispatch-numbers-target ()
+  "Return the list whose sessions the open dispatch menu's digits open, or nil.
+The value is (BUFFER . WINDOW): the list, and the window the digits act
+in (see `drover--dispatch-in-numbered-list'), the one where the menu
+opened, in a list, else `drover--dispatch-numbers-window'.  It is nil
+unless `drover-dispatch' is the menu open, and while its digits have no
+list to number."
+  (when-let* ((prefix transient--prefix)
+              ((eq (oref prefix command) 'drover-dispatch))
+              (origin transient--original-buffer)
+              ((buffer-live-p origin)))
+    (with-current-buffer origin
+      (if drover-view-p
+          (let ((window transient--original-window))
+            (and (window-live-p window)
+                 (eq (window-buffer window) origin)
+                 (cons origin window)))
+        (when-let* ((window (drover--dispatch-numbers-window)))
+          (cons (window-buffer window) window))))))
+
+(defun drover--dispatch-number-rows ()
+  "Have the list the dispatch menu's digits number show its numbers, and it alone.
+See `drover--dispatch-numbers-target'; a list no longer numbered shows
+its numbers no longer."
+  (let ((target (drover--dispatch-numbers-target)))
+    (unless (equal target drover--dispatch-numbered)
+      (when-let* ((buffer (car drover--dispatch-numbered)))
+        (drover-list-number-rows buffer nil))
+      (setq drover--dispatch-numbered target)
+      (when target
+        (drover-list-number-rows (car target) (cdr target))))))
+
+(defun drover--dispatch-menu-changed ()
+  "Show the numbers of the dispatch menu's digits on their list, or no longer.
+For `transient-setup-buffer-hook', run as a menu's buffer is made, and
+`transient-exit-hook', run as a menu exits, another replacing it or
+not: see `drover--dispatch-number-rows'."
+  (drover-with-reporting "menu numbers"
+    (drover--dispatch-number-rows)))
+
 (defun drover--dispatch-goal (function &rest arguments)
   "Apply FUNCTION to ARGUMENTS on an Org heading, else as a session command.
 In Org, on the heading at point; elsewhere, on the session at point, of
@@ -2430,7 +2484,9 @@ itself, RET opens the session and M-RET sends that prompt.
 The digits 1 to 9 open the sessions at the top of their trees by
 number, 0 the last, as in the list (see `drover-list-open-numbered'):
 those of the list the menu acts on, else of the list shown on the
-frame, such as the sidebar beside a session's buffer.
+frame, such as the sidebar beside a session's buffer.  While the menu
+shows, that list shows each of those sessions' number on its row, in
+place of its status glyph (see `drover-list-number-rows').
 
 Send sends drover's prompt from any buffer, as from the prompt, to the
 session chosen for it, else to one asked for, unshown."
@@ -2587,8 +2643,12 @@ session chosen for it, else to one asked for, unshown."
   drover--menu-close
   (interactive)
   (setq drover--dispatch-close-keys (drover--dispatch-own-keys))
+  (add-hook 'transient-setup-buffer-hook #'drover--dispatch-menu-changed)
+  (add-hook 'transient-exit-hook #'drover--dispatch-menu-changed)
   (transient-setup 'drover-dispatch nil nil :scope (drover--context)
-                   :display-action drover-menu-display-action))
+                   :display-action drover-menu-display-action)
+  ;; The menu's buffer may have been made already, by a menu it replaced.
+  (drover--dispatch-number-rows))
 
 (transient-define-prefix drover-view ()
   "Choose how drover's session lists sort, group and filter sessions.
@@ -2618,6 +2678,16 @@ takes."
   ;; The list's window, from which the dispatch menu may have opened it.
   (transient-setup 'drover-view nil nil :scope (selected-window)
                    :display-action drover-menu-display-action))
+
+(defun drover-keys-unload-function ()
+  "Stop showing the dispatch menu's numbers, before `unload-feature' unloads it."
+  (remove-hook 'transient-setup-buffer-hook #'drover--dispatch-menu-changed)
+  (remove-hook 'transient-exit-hook #'drover--dispatch-menu-changed)
+  (when-let* ((buffer (car drover--dispatch-numbered))
+              ((fboundp 'drover-list-number-rows)))
+    (drover-list-number-rows buffer nil))
+  (setq drover--dispatch-numbered nil)
+  nil)
 
 (provide 'drover-keys)
 ;;; drover-keys.el ends here

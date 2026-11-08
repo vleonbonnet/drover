@@ -7717,6 +7717,193 @@ goes to the session opened."
                                    (oref (if (zerop number) (car (last tops)) (nth (1- number) tops))
                                          value)))))))))))))
 
+;;;; Numbers shown while the menu opens sessions by number
+
+(defun drover-list-test-numbers (buffer)
+  "Return the numbers the list BUFFER shows, as (NUMBER ID WINDOW)s by number.
+ID is the session whose row shows NUMBER, WINDOW the window it shows
+in.  Each covers the whole status cell of its row, and displays its
+digit in the face `drover-list-number', padded before and after to the
+width of the cell."
+  (with-current-buffer buffer
+    (let ((numbers nil))
+      (dolist (overlay (overlays-in (point-min) (point-max)))
+        (when-let* ((number (overlay-get overlay 'drover-list-number)))
+          (let* ((start (overlay-start overlay))
+                 (end (overlay-end overlay))
+                 (display (overlay-get overlay 'display)))
+            (should (get-text-property start 'drover-list-status-cell))
+            (should-not (get-text-property (1- start) 'drover-list-status-cell))
+            (should (= end (next-single-property-change start 'drover-list-status-cell nil (point-max))))
+            (should (equal display (number-to-string number)))
+            (should (eq (get-text-property 0 'face display) 'drover-list-number))
+            (should (= (+ (drover-list--pixel-width (or (overlay-get overlay 'before-string) ""))
+                          (drover-list--pixel-width display)
+                          (drover-list--pixel-width (or (overlay-get overlay 'after-string) "")))
+                       (drover-list--pixel-width (buffer-substring start end))))
+            (push (list number
+                        (save-excursion (goto-char start) (drover-list-test-id-at-point))
+                        (overlay-get overlay 'window))
+                  numbers))))
+      (sort numbers (lambda (a b) (< (car a) (car b)))))))
+
+(ert-deftest drover-list-test-dispatch-numbers-rows ()
+  "While the menu's digits open the sidebar's sessions, its rows show their numbers.
+In the sidebar's window, each in place of its status glyph; 0 on no
+row, the last session having a number of its own.  However the menu
+closes, the numbers go; with no list in sight, no list shows any."
+  (drover-list-test-elsewhere
+    (should-not (drover-list-test-numbers buffer))
+    (dolist (close '("C-g" "q" "3"))
+      (ert-info (close)
+        (set-window-buffer first code)
+        (select-window first)
+        (set-buffer code)
+        (execute-kbd-macro (kbd "C-'"))
+        (should (equal (drover-list-test-numbers buffer)
+                       `((1 "ask" ,side) (2 "fail" ,side) (3 "done" ,side) (4 "work" ,side)
+                         (5 "idle" ,side))))
+        (execute-kbd-macro (kbd close))
+        (should-not transient--prefix)
+        (should-not (drover-list-test-numbers buffer))
+        (should-not drover--dispatch-numbered)))
+    (should (equal (car drover-test-calls) (list :open "done" nil first)))
+    (set-window-buffer first code)
+    (set-buffer code)
+    (delete-window side)
+    (execute-kbd-macro (kbd "C-'"))
+    (should-not (drover-list-test-numbers buffer))
+    (should-not drover--dispatch-numbered)
+    (execute-kbd-macro (kbd "C-g"))))
+
+(ert-deftest drover-list-test-dispatch-numbers-follow ()
+  "The numbers follow the list as it is drawn anew, in place or whole, the menu open."
+  (drover-list-test-elsewhere
+    (execute-kbd-macro (kbd "C-'"))
+    ;; A session gone, drawn in place.
+    (setq drover-test-sessions (seq-remove (lambda (session) (equal (drover-session-id session) "fail"))
+                                           drover-test-sessions))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (let ((expected `((1 "ask" ,side) (2 "done" ,side) (3 "work" ,side) (4 "idle" ,side))))
+      (should (equal (drover-list-test-numbers buffer) expected))
+      ;; Drawn whole.
+      (with-current-buffer buffer
+        (revert-buffer))
+      (should (equal (drover-list-test-numbers buffer) expected))
+      ;; Moving in the list, the menu staying open, leaves them.
+      (execute-kbd-macro (kbd "C-n"))
+      (should transient--prefix)
+      (should (equal (drover-list-test-at-side side) "done"))
+      (should (equal (drover-list-test-numbers buffer) expected)))
+    (execute-kbd-macro (kbd "C-g"))
+    (should-not (drover-list-test-numbers buffer))))
+
+(ert-deftest drover-list-test-dispatch-numbers-replaced ()
+  "Another menu replacing the dispatch menu, the numbers go; resumed, they come back."
+  (drover-list-test-elsewhere
+    (execute-kbd-macro (kbd "C-'"))
+    (should (drover-list-test-numbers buffer))
+    ;; As `transient-exit-hook' runs once another menu replaced it.
+    (let ((transient--prefix (transient-prefix :command 'drover-view)))
+      (drover--dispatch-menu-changed))
+    (should-not (drover-list-test-numbers buffer))
+    (should-not drover--dispatch-numbered)
+    (drover--dispatch-menu-changed)
+    (should (drover-list-test-numbers buffer))
+    ;; Suspended, then resumed.
+    (execute-kbd-macro (kbd "C-z"))
+    (should-not transient--prefix)
+    (should-not (drover-list-test-numbers buffer))
+    (transient-resume)
+    (should (eq (oref transient--prefix command) 'drover-dispatch))
+    (should (equal (mapcar #'car (drover-list-test-numbers buffer)) '(1 2 3 4 5)))
+    (execute-kbd-macro (kbd "C-g"))
+    (should-not (drover-list-test-numbers buffer))))
+
+(ert-deftest drover-list-test-dispatch-numbers-in-list ()
+  "Opened in the list, the menu has it show its numbers in its own window.
+The idle group being collapsed, its session has no number, and 0 is the
+last of the others."
+  (drover-list-test-with (drover-list-test-side-sample)
+    (drover-list-test--register-buffers)
+    (pcase-let ((`(,first ,second) (drover-list-test--main)))
+      (ignore second)
+      (drover-list)
+      (should (eq (window-buffer first) buffer))
+      (use-local-map (let ((map (make-sparse-keymap)))
+                       (set-keymap-parent map drover-list-mode-map)
+                       (keymap-set map "C-'" #'drover-dispatch)
+                       map))
+      (unwind-protect
+          (progn
+            (execute-kbd-macro (kbd "C-'"))
+            (should (equal (drover-list-test-numbers buffer)
+                           `((1 "ask" ,first) (2 "fail" ,first) (3 "done" ,first) (4 "work" ,first))))
+            (execute-kbd-macro (kbd "C-g"))
+            (should-not (drover-list-test-numbers buffer)))
+        (use-local-map drover-list-mode-map)))))
+
+(ert-deftest drover-list-test-numbers-of-rows-drawn-later ()
+  "A row left for later shows its number once drawn, and is not drawn for it."
+  (drover-list-test-with (drover-list-test-random-sessions 60)
+    (drover-list-test-shown
+      (let ((drover-group-by nil)
+            (drover-show-subagents 'all))
+        (cl-letf (((symbol-function 'drover-list--first-rows) (lambda () 10)))
+          (revert-buffer)
+          (should drover-list--undrawn)
+          (drover-list-number-rows buffer (selected-window))
+          (should drover-list--undrawn)
+          (let ((numbers (drover-list-test-numbers buffer)))
+            (should (assq 1 numbers))
+            (should-not (assq 0 numbers)))
+          (drover-list--draw-undrawn)
+          (let ((last (oref (car (last (seq-filter
+                                        (lambda (section)
+                                          (zerop (drover-list--row-depth
+                                                  (gethash (oref section value)
+                                                           (drover-list--model-rows drover-list--model)))))
+                                        (drover-list--reachable-sessions))))
+                            value))
+                (numbers (drover-list-test-numbers buffer)))
+            (should (equal (mapcar #'car numbers) '(0 1 2 3 4 5 6 7 8 9)))
+            (should (equal (nth 1 (assq 0 numbers)) (cdr last))))
+          (drover-list-number-rows buffer nil)
+          (should-not (drover-list-test-numbers buffer)))))))
+
+(ert-deftest drover-list-test-status-cell-holds-digits ()
+  "The status cell holds the digits drawn in its place, so that no title moves for them."
+  (drover-list-test-with-font
+    (drover-list-test-with (drover-list-test-side-sample)
+      (let ((drover-list-test-ink '((?5 0 . 15))))
+        (revert-buffer)
+        (should (equal (plist-get (drover-list--metrics 0) :status-cell) '(0 . 15)))))))
+
+(ert-deftest drover-list-test-numbers-keep-titles-in-place ()
+  "Drawn in place of the status glyphs, the numbers move no title, as Emacs draws them.
+The cell is wider than its glyphs and digits, so that they are padded:
+Emacs draws no padding put in the string an overlay displays."
+  (drover-list-test-with-font
+    (drover-list-test-with (drover-list-test-side-sample)
+      (drover-list-test-shown
+        (let ((drover-list-test-ink '((?5 0 . 15)))
+              (ids '("ask" "fail" "done" "work")))
+          (revert-buffer)
+          (cl-flet ((title-x (id)
+                      (save-excursion
+                        (drover-list-test-goto id)
+                        (let ((start (line-beginning-position)))
+                          (search-forward (concat "Session " id))
+                          (car (window-text-pixel-size nil start (match-beginning 0)))))))
+            (let ((before (mapcar #'title-x ids)))
+              (should (> (car before) 8))
+              (drover-list-number-rows buffer (selected-window))
+              (should (equal (mapcar #'car (drover-list-test-numbers buffer)) '(1 2 3 4)))
+              (should (equal (mapcar #'title-x ids) before))
+              (drover-list-number-rows buffer nil)
+              (should-not (drover-list-test-numbers buffer)))))))))
+
 ;;;; Columns
 
 (ert-deftest drover-list-test-hidden-fields ()
