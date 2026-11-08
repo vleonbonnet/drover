@@ -246,7 +246,7 @@ So it does as the count is made anew, and as it follows a change."
                                "  ⚑ Session w  drover:main  permit: bash: make\n"
                                "  ✓ Session d\n"
                                "\n"
-                               "mouse-1: visit them in this order\n"
+                               "mouse-1: visit live caches first, then these, then idle sessions\n"
                                "mouse-3: choose a session")))
         (should (eq (drover-attention-test-face-at help "cache 4m") 'drover-dim))))))
 
@@ -487,7 +487,8 @@ pixels; spaces displayed as stretches advance by their width."
 ;;;; Visiting the next session
 
 (defun drover-attention-test-sessions ()
-  "Return sessions needing the user in a known order: w, f, d1, d2."
+  "Return sessions in a known round: w, f, d1, d2, which need the user, then i.
+i is idle; r, working, is never visited."
   (list (drover-test-session "i" :status 'idle :updated 100.0)
         (drover-test-session "d2" :status 'done :since 40.0)
         (drover-test-session "w" :status 'waiting :since 50.0)
@@ -518,10 +519,10 @@ pixels; spaces displayed as stretches advance by their width."
   (drover-attention-test-with (drover-attention-test-sessions)
     (should (equal (drover-attention-test-messages
                      (drover-next)
-                     (dotimes (_ 5)
+                     (dotimes (_ 6)
                        (drover-attention-test-press)))
-                   '("1/4" "2/4" "3/4" "4/4" "1/4" "2/4")))
-    (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "w" "f")))))
+                   '("1/5" "2/5" "3/5" "4/5" "5/5" "1/5" "2/5")))
+    (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "i" "w" "f")))))
 
 (ert-deftest drover-attention-test-next-keeps-first-order ()
   "Sessions changing during a round leave its queue as it was, after the last too."
@@ -537,15 +538,16 @@ pixels; spaces displayed as stretches advance by their width."
     (drover-changed-now)
     (dotimes (_ 4)
       (drover-attention-test-press))
-    ;; w no longer needs the user, but is still the round's first.
+    ;; w no longer needs the user, but is still the round's first; i,
+    ;; gone, is passed over.
     (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "w")))
     (should (equal drover-attention--queue
-                   '((fake . "w") (fake . "f") (fake . "d1") (fake . "d2"))))))
+                   '((fake . "w") (fake . "f") (fake . "d1") (fake . "d2") (fake . "i"))))))
 
 (ert-deftest drover-attention-test-next-newcomers-wait ()
   "Sessions coming to need the user during a round wait for the next one."
   (drover-attention-test-with (drover-attention-test-sessions)
-    (should (equal (drover-attention-test-messages (drover-next)) '("1/4")))
+    (should (equal (drover-attention-test-messages (drover-next)) '("1/5")))
     (setq drover-test-sessions
           (append drover-test-sessions
                   (list (drover-test-session "m" :status 'done :since 5.0)
@@ -553,13 +555,13 @@ pixels; spaces displayed as stretches advance by their width."
     (drover-backend-changed 'fake)
     (drover-changed-now)
     (should (equal (drover-attention-test-messages
-                     (dotimes (_ 4)
+                     (dotimes (_ 5)
                        (drover-attention-test-press)))
-                   '("2/4" "3/4" "4/4" "1/4")))
-    (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "w")))
+                   '("2/5" "3/5" "4/5" "5/5" "1/5")))
+    (should (equal (drover-attention-test-opened) '("w" "f" "d1" "d2" "i" "w")))
     ;; Another command ends the round: the next press lines them up anew.
     (drover-attention-test-other-command)
-    (should (equal (drover-attention-test-messages (drover-attention-test-press)) '("1/6")))
+    (should (equal (drover-attention-test-messages (drover-attention-test-press)) '("1/7")))
     (should (equal (car (last (drover-attention-test-opened))) "w"))
     (drover-attention-test-press)
     (should (equal (car (last (drover-attention-test-opened))) "n"))))
@@ -571,12 +573,12 @@ pixels; spaces displayed as stretches advance by their width."
     (setq drover-test-sessions (seq-remove (lambda (session)
                                              (equal (drover-session-id session) "f"))
                                            drover-test-sessions))
-    (should (equal (drover-attention-test-messages (drover-attention-test-press)) '("3/4")))
+    (should (equal (drover-attention-test-messages (drover-attention-test-press)) '("3/5")))
     (should (equal (drover-attention-test-opened) '("w" "d1")))
     ;; And as the round comes round again.
-    (drover-attention-test-press)
-    (drover-attention-test-press)
-    (should (equal (drover-attention-test-opened) '("w" "d1" "d2" "w")))))
+    (dotimes (_ 3)
+      (drover-attention-test-press))
+    (should (equal (drover-attention-test-opened) '("w" "d1" "d2" "i" "w")))))
 
 (ert-deftest drover-attention-test-next-opens-fresh-records ()
   (drover-attention-test-with (drover-attention-test-sessions)
@@ -621,16 +623,36 @@ pixels; spaces displayed as stretches advance by their width."
     (should (equal (drover-attention-test-opened) '("a" "a")))))
 
 (ert-deftest drover-attention-test-next-nothing-to-do ()
-  (drover-attention-test-with (list (drover-test-session "r" :status 'working)
-                                    (drover-test-session "i" :status 'idle))
-    (let ((messages (drover-attention-test-messages (drover-next))))
-      (should (equal messages '("No session needs you")))
+  "With every session in the middle of a turn, nothing is visited, and the echo says so.
+Not even a session whose cache lives, nor an idle subagent."
+  (drover-attention-test-with (list (drover-test-session "r" :status 'working
+                                                         :cache-expires (+ (float-time) 60) :cache-ttl 300)
+                                    (drover-test-session "t" :status 'retrying)
+                                    (drover-test-session "s" :parent "r" :status 'idle))
+    (let* ((drover-show-subagents 'all)
+           (messages (drover-attention-test-messages (drover-next))))
+      (should (equal messages '("No session to visit")))
       (should-not drover-test-calls)
       (should-not drover-attention--queue)
-      (should-not (memq #'drover-attention--after-command post-command-hook)))
-    (should (equal (drover-attention-test-messages (drover-attention-test-press))
-                   '("No session needs you")))
-    (should-not drover-test-calls)))
+      (should-not (memq #'drover-attention--after-command post-command-hook))
+      (should (equal (drover-attention-test-messages (drover-attention-test-press))
+                     '("No session to visit")))
+      (should-not drover-test-calls))))
+
+(ert-deftest drover-attention-test-next-goes-on-to-idle ()
+  "Once no session needs the user, a press visits the idle ones, as lists draw them."
+  (drover-attention-test-with (list (drover-test-session "r" :status 'working)
+                                    (drover-test-session "i1" :status 'idle :updated 10.0)
+                                    (drover-test-session "i2" :status 'idle :updated 20.0))
+    (let ((drover-group-by nil)
+          (drover-sort-by 'updated)
+          (drover-sort-descending t))
+      (should (equal (drover-attention-test-messages
+                       (drover-next)
+                       (drover-attention-test-press)
+                       (drover-attention-test-press))
+                     '("1/2" "2/2" "1/2")))
+      (should (equal (drover-attention-test-opened) '("i2" "i1" "i2"))))))
 
 (ert-deftest drover-attention-test-next-echoes-position ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0
@@ -1016,8 +1038,10 @@ The commands typing the name are M-x's, judged as it ends."
   (mapcar #'drover-session-id sessions))
 
 (defun drover-attention-test-cached (now)
-  "Return sessions needing the user, some with a prompt cache live at NOW.
-They are visited c2, c1, then the others as lists draw them."
+  "Return sessions, some with a prompt cache live at NOW.
+Of those needing the user, c2 and c1 come first, then the others as
+lists draw them; a round begins with i, idle, whose cache expires
+first."
   (list (drover-test-session "d1" :status 'done :since 30.0)
         (drover-test-session "c1" :status 'done :since 40.0
                              :cache-expires (+ now 600) :cache-ttl 3600)
@@ -1034,15 +1058,73 @@ They are visited c2, c1, then the others as lists draw them."
 
 (ert-deftest drover-attention-test-next-caches-first ()
   "Live caches first, the soonest to expire first, then the others as lists draw them.
-An expired cache counts as none, and so does a subagent's."
+An expired cache counts as none, and so does a subagent's.  A cache
+comes first whether its session needs the user or is idle; one of a
+session working does not count, the session being left out."
   (let ((now (float-time)))
     (drover-attention-test-with (drover-attention-test-cached now)
       (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions) now))
                      '("c2" "c1" "w" "k" "x" "d1")))
       (drover-next)
-      (dotimes (_ 6)
+      (dotimes (_ 7)
         (drover-attention-test-press))
-      (should (equal (drover-attention-test-opened) '("c2" "c1" "w" "root" "x" "d1" "c2"))))))
+      (should (equal (drover-attention-test-opened) '("i" "c2" "c1" "w" "root" "x" "d1" "i"))))))
+
+(ert-deftest drover-attention-test-next-tiers ()
+  "A round visits live caches, then sessions needing the user, then open idle ones, then the others.
+Each in the order lists draw them; a session whose cache lives comes by
+its cache, whatever else it is; a session working never comes, its
+cache live or not."
+  (let ((now (float-time))
+        (buffers (list (generate-new-buffer " *open1*") (generate-new-buffer " *open2*"))))
+    (unwind-protect
+        (drover-attention-test-with
+            (list (drover-test-session "closed1" :status 'idle :updated 90.0)
+                  (drover-test-session "open1" :status 'idle :updated 80.0)
+                  (drover-test-session "done1" :status 'done :since 70.0 :updated 70.0)
+                  (drover-test-session "closed2" :status 'idle :updated 60.0)
+                  (drover-test-session "open2" :status 'idle :updated 50.0)
+                  (drover-test-session "done2" :status 'done :since 40.0 :updated 40.0)
+                  (drover-test-session "cached-idle" :status 'idle :updated 30.0
+                                       :cache-expires (+ now 100) :cache-ttl 300)
+                  (drover-test-session "cached-done" :status 'done :since 20.0 :updated 20.0
+                                       :cache-expires (+ now 200) :cache-ttl 300)
+                  (drover-test-session "busy" :status 'working :updated 10.0
+                                       :cache-expires (+ now 50) :cache-ttl 300))
+          (let ((drover-group-by nil)
+                (drover-sort-by 'updated)
+                (drover-sort-descending t)
+                (open `(("open1" . ,(car buffers)) ("open2" . ,(cadr buffers)))))
+            (apply #'drover-register-backend
+                   'fake
+                   :buffer (lambda (session) (cdr (assoc (drover-session-id session) open)))
+                   (alist-get 'fake drover--backends))
+            (should (equal (drover-attention-test-ids
+                            (drover-visit-order (drover-attention--round-sessions) now))
+                           '("cached-idle" "cached-done" "done1" "done2" "open1" "open2"
+                             "closed1" "closed2")))
+            (drover-next)
+            (dotimes (_ 7)
+              (drover-attention-test-press))
+            (should (equal (drover-attention-test-opened)
+                           '("cached-idle" "cached-done" "done1" "done2" "open1" "open2"
+                             "closed1" "closed2")))))
+      (mapc #'kill-buffer buffers))))
+
+(ert-deftest drover-attention-test-next-tree-once ()
+  "An idle session whose subagent waits for the user comes once, as that subagent does."
+  (drover-attention-test-with (list (drover-test-session "other" :status 'idle :updated 90.0)
+                                    (drover-test-session "root" :status 'idle :updated 10.0)
+                                    (drover-test-session "asking" :parent "root" :status 'waiting
+                                                         :since 5.0))
+    (let ((drover-group-by nil)
+          (drover-sort-by 'updated)
+          (drover-sort-descending t))
+      (should (equal (drover-attention-test-messages
+                       (drover-next)
+                       (drover-attention-test-press))
+                     '("1/2" "2/2")))
+      (should (equal (drover-attention-test-opened) '("root" "other"))))))
 
 (ert-deftest drover-attention-test-order-subagent-by-root-cache ()
   "A subagent waiting ranks by the cache of the top of its tree, which answering it resumes.

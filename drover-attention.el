@@ -27,16 +27,18 @@
 ;;   in the face of the most urgent of them, as other indicators of the
 ;;   mode line show a count: a symbol, a space and the number.  It counts what lists show
 ;;   under `drover-show-subagents', and every subagent waiting for you.
-;;   mouse-1 on it visits the first of them, mouse-3 chooses one.
-;; - `drover-next' lines up the sessions that need you, those whose
-;;   prompt cache expires soonest first, then as the list shows them
-;;   (`drover-attention-order'), a subagent waiting for you through the
-;;   top of its tree, and visits the first; each press after it visits
-;;   the next of that queue, the last followed by the first, until a
+;;   mouse-1 on it runs `drover-next', mouse-3 chooses a session.
+;; - `drover-next' lines up the sessions to attend to: those whose
+;;   prompt cache expires soonest first, whether they need you or not,
+;;   then those that need you, then the idle ones with a buffer, then
+;;   the other idle ones, each as the list shows them
+;;   (`drover-visit-order'), a subagent waiting for you through the top
+;;   of its tree, and visits the first; each press after it visits the
+;;   next of that queue, the last followed by the first, until a
 ;;   command other than `drover-next' runs, as `undo' chains.
 ;; - `drover-select' chooses any session with completion, grouped by
 ;;   status, those needing you first, in the order `drover-next' visits
-;;   them.
+;;   them among themselves.
 
 ;;; Code:
 
@@ -48,7 +50,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 17))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 26))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
@@ -61,8 +63,9 @@ Such as \"2/5\" in the echo area: the buffer visited shows the session."
 
 (defvar drover-attention--queue nil
   "Keys of the sessions the round of `drover-next' visits, in order, or nil.
-They are the sessions needing the user at the round's first press, a
-tree once, in the order then; nil when no round runs.")
+They are the sessions of `drover-attention--round-sessions' at the
+round's first press, a tree once, in the order then; nil when no round
+runs.")
 
 (defvar drover-attention--position 0
   "Position in `drover-attention--queue' of the session last visited.")
@@ -112,10 +115,13 @@ at NOW, the current time by default, tells how long it has left (see
 
 (defun drover-attention--help (sessions &optional now)
   "Return the help text of the mode line count of SESSIONS.
-SESSIONS come in the order `drover-next' visits them, the order the
-text lists them in (see `drover-attention-order'), their caches as they
-stand at NOW.  It names `drover-attention--help-sessions' sessions at
-most, and how many more: Emacs measures a tooltip whole to show it."
+SESSIONS come in the order `drover-next' visits them among themselves,
+the order the text lists them in (see `drover-attention-order'), their
+caches as they stand at NOW.  It names `drover-attention--help-sessions'
+sessions at most, and how many more: Emacs measures a tooltip whole to
+show it.  Clicking it runs `drover-next', whose round may begin with an
+idle session whose cache expires sooner, and goes on to idle sessions:
+the last line says so."
   (let ((count (length sessions)))
     (concat "Sessions that need you, in the order of `drover-next':"
             (mapconcat (lambda (session)
@@ -124,7 +130,8 @@ most, and how many more: Emacs measures a tooltip whole to show it."
                        "")
             (and (> count drover-attention--help-sessions)
                  (format "\n  … and %d more" (- count drover-attention--help-sessions)))
-            "\n\nmouse-1: visit them in this order\nmouse-3: choose a session")))
+            "\n\nmouse-1: visit live caches first, then these, then idle sessions"
+            "\nmouse-3: choose a session")))
 
 (defvar drover-attention--pads (make-hash-table :test #'equal)
   "Room the glyph of the mode line needs, measured.
@@ -340,10 +347,10 @@ is the mode line's to do.  It
 counts the sessions lists show under `drover-show-subagents', and every
 subagent waiting for you, which blocks its parent (see
 `drover-surfaced-sessions').  Its tooltip lists them in the order
-`drover-next' visits them; clicking it visits the first, then the
-next (`drover-next'), and clicking it
-with the right button chooses one (`drover-select').  Enabling the mode
-starts the backends."
+`drover-next' visits them among themselves; clicking it runs
+`drover-next', which visits live caches first, then them, then idle
+sessions, and clicking it with the right button chooses a session
+\(`drover-select').  Enabling the mode starts the backends."
   :global t
   :group 'drover
   (if drover-attention-mode
@@ -464,17 +471,29 @@ its arguments, judged as it ends, such as `execute-extended-command'."
                 (drover-attention--chains-p this-command last-command-event))
       (drover-attention--end-round))))
 
+(defun drover-attention--round-sessions ()
+  "Return the sessions a round of `drover-next' lines up, most urgent first.
+They are those of `drover-surfaced-sessions' that need the user, and
+those at the top of their trees in the middle of no turn, idle: a
+session working has nothing to answer until its turn ends, when it
+comes to need the user, and a subagent is answered through its parent."
+  (drover-sort (seq-filter (lambda (session)
+                             (or (drover-session-attention-p session)
+                                 (and (null (drover-session-parent session))
+                                      (not (drover-session-active-p session)))))
+                           (drover-surfaced-sessions))))
+
 (defun drover-attention--start (window)
   "Begin a round of `drover-next', visiting its first session in WINDOW.
-The round's queue is the sessions needing the user, in the order as it
-stands (see `drover-attention-order'), a tree once (see
+The round's queue is the sessions of `drover-attention--round-sessions',
+in the order as it stands (see `drover-visit-order'), a tree once (see
 `drover-attention--targets'); its first is visited even when WINDOW
 shows it already."
-  (let ((targets (drover-attention--targets (drover-attention-order (drover-attention-sessions)))))
+  (let ((targets (drover-attention--targets (drover-visit-order (drover-attention--round-sessions)))))
     (if (null targets)
         (progn
           (drover-attention--end-round)
-          (message "No session needs you"))
+          (message "No session to visit"))
       (setq drover-attention--queue (mapcar #'drover-session-key targets))
       (add-hook 'post-command-hook #'drover-attention--after-command)
       (drover-attention--visit (car targets) 0 window))))
@@ -497,13 +516,16 @@ of the round is gone."
 
 ;;;###autoload
 (defun drover-next ()
-  "Visit the next session that needs you, in the selected window.
-A first press lines up the sessions that need you and visits the first,
-even the session shown.  First come those whose prompt cache lives, the
-one to expire soonest first, so that a turn sent to it reuses it; then
-the others, in the order the list and the sidebar show them, as
-`drover-group-by' and `drover-sort-by' arrange them (see
-`drover-attention-order').  A subagent waiting for you is visited
+  "Visit the next session to attend to, in the selected window.
+A first press lines up the sessions and visits the first, even the
+session shown.  First come those whose prompt cache lives, whether
+they need you or not, the one to expire soonest first, so that a turn
+sent to it reuses it; then those that need you; then the idle ones
+with a buffer; then the other idle ones, which their backends may
+resume to show them.  Each comes in the order the list and the sidebar
+show them, as `drover-group-by' and `drover-sort-by' arrange them (see
+`drover-visit-order').  Sessions in the middle of a turn are left out,
+and so are subagents, but one waiting for you, which is visited
 through the top of its tree, where you answer it and whose cache it
 ranks by, the tree coming once.
 
@@ -516,9 +538,11 @@ the next press lines sessions up anew.  What happens to sessions
 meanwhile leaves the queue as it is: statuses changing, caches renewed
 or expiring, sessions coming to need you.  A session gone is passed
 over; one that fails to open is told on one line, and the next press
-goes on past it.  The echo area tells the place in the round, such as
-2/5 (see `drover-attention-echo').  From a side window, such as the
-prompt's, sessions show in the window you came from."
+goes on past it.  With every session in the middle of a turn, there is
+none to visit, and the echo area says so.  It tells the place in the
+round otherwise, such as 2/5 (see `drover-attention-echo').  From a
+side window, such as the prompt's, sessions show in the window you
+came from."
   (interactive)
   (let ((window (drover-attention--window)))
     (unless (and drover-attention--queue

@@ -326,6 +326,10 @@ drawing anew draws at once is its first screens, whatever moved since."
                      (visits (drover-bench-measure
                               (lambda () (drover-attention-order (drover-attention-sessions) drover-bench-now))
                               5))
+                     ;; The round of `drover-next' takes the idle sessions too.
+                     (round (drover-bench-measure
+                             (lambda () (drover-visit-order (drover-attention--round-sessions) drover-bench-now))
+                             5))
                      (tooltip (drover-bench-measure #'drover-attention--help-echo 5)))
                 (drover-bench-log "%-6s %4d rows" mode rows)
                 (drover-bench-log "  drawn whole: %s | %s | %s"
@@ -356,9 +360,12 @@ drawing anew draws at once is its first screens, whatever moved since."
                                   (drover-bench-row "one coming" coming 10))
                 (drover-bench-log "               %d of 10 turns drawn in place; the same as drawn anew: %s"
                                   in-place (if same "yes" "NO"))
-                (drover-bench-log "  needing you: %s | %s"
+                (drover-bench-log "  needing you: %s | %s | %s"
                                   (drover-bench-row (format "the order of %d visits" (length (drover-attention-sessions)))
                                                     visits 100)
+                                  (drover-bench-row (format "a round of %d"
+                                                            (length (drover-attention--round-sessions)))
+                                                    round 300)
                                   (drover-bench-row "the mode line's tooltip" tooltip 100))
                 (drover-bench-two-lists top second)))
             (drover-bench-default-view top second)))

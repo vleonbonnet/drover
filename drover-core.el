@@ -73,7 +73,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 25
+(defconst drover-core-generation 26
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -2755,8 +2755,8 @@ own."
 
 (defun drover-attention-cache (session &optional now)
   "Return when the prompt cache answering SESSION expires, if live at NOW.
-SESSION needs the user; the cache is the one of the session visited
-for it (see `drover-attention-target'), as lists show it (see
+SESSION is one `drover-next' visits; the cache is the one of the session
+visited for it (see `drover-attention-target'), as lists show it (see
 `drover-session-shown-cache-fraction'): a subagent waiting for the user
 has the cache of the top of its tree, which its answer reuses, another
 subagent none.  NOW defaults to the current time; nil when no cache
@@ -2765,23 +2765,23 @@ lives then."
     (and (drover-session-shown-cache-fraction target now)
          (drover-session-cache-expires target))))
 
-(defun drover-attention-order (sessions &optional now)
-  "Return SESSIONS, sessions needing the user, in the order to visit them.
+(defun drover-visit-order (sessions &optional now)
+  "Return SESSIONS in the order `drover-next' visits them.
 First come those with a live prompt cache at NOW, the current time by
-default, the cache to expire soonest first: a turn sent while it lives
-reuses it.  A cache is live as lists show it (see
-`drover-attention-cache'): a subagent's never is, but a subagent
-waiting for the user has the cache of the top of its tree, which
-answering it resumes.  The others follow in the order lists draw them
-\(see `drover-view-groups'), as `drover-group-by' groups them and
-`drover-sort-by' sorts them, each subagent under its parent: a
-subagent lists hide but come in the place they would draw it, and a
-session `drover-filter' leaves out after those it keeps, in the order
-lists would draw it without the filter (see `drover--view-positions').
-Caches expiring alike come in that order too.  `drover-next' visits
-sessions in this order, a subagent waiting through the top of its
-tree, the mode line's tooltip lists them in it, and `drover-select'
-offers them in it."
+default, whether they need the user or not, the cache to expire
+soonest first: a turn sent while it lives reuses it.  A cache is live
+as lists show it (see `drover-attention-cache'): a subagent's never
+is, but a subagent waiting for the user has the cache of the top of
+its tree, which answering it resumes.  Then come the sessions needing
+the user, then those with a buffer, which show at once, then the
+others, which their backends may have to resume to show.  Each of
+these comes in the order lists draw them (see `drover-view-groups'),
+as `drover-group-by' groups them and `drover-sort-by' sorts them, each
+subagent under its parent: a subagent lists hide comes in the place
+they would draw it, and a session `drover-filter' leaves out after
+those it keeps, in the order lists would draw it without the filter
+\(see `drover--view-positions').  Caches expiring alike come as the
+sessions without a cache do."
   (when sessions
     (let ((now (or now (float-time)))
           (keys (make-hash-table :test #'equal)))
@@ -2789,21 +2789,38 @@ offers them in it."
         (puthash (drover-session-key session) t keys))
       (let* ((positions (drover--view-positions (drover--listed-sessions) keys now))
              (keyed (mapcar (lambda (session)
-                              (list session
-                                    (drover-attention-cache session now)
-                                    (gethash (drover-session-key session) positions
-                                             most-positive-fixnum)))
+                              (let ((expires (drover-attention-cache session now)))
+                                (list session
+                                      expires
+                                      ;; A buffer is asked for only of the sessions it ranks.
+                                      (cond ((drover-session-attention-p session) 0)
+                                            ((or expires (drover-session-buffer session)) 1)
+                                            (t 2))
+                                      (gethash (drover-session-key session) positions
+                                               most-positive-fixnum))))
                             sessions)))
         ;; `sort' is stable: sessions lists do not draw keep the order of
         ;; SESSIONS.
         (mapcar #'car
                 (sort keyed
-                      (pcase-lambda (`(,_ ,expires-a ,position-a) `(,_ ,expires-b ,position-b))
+                      (pcase-lambda (`(,_ ,expires-a ,tier-a ,position-a)
+                                     `(,_ ,expires-b ,tier-b ,position-b))
                         (cond ((and expires-a expires-b (/= expires-a expires-b))
                                (< expires-a expires-b))
                               ((and expires-a (not expires-b)) t)
                               ((and expires-b (not expires-a)) nil)
+                              ((/= tier-a tier-b) (< tier-a tier-b))
                               (t (< position-a position-b))))))))))
+
+(defun drover-attention-order (sessions &optional now)
+  "Return SESSIONS, sessions needing the user, in the order to visit them.
+That is their order in `drover-visit-order' at NOW, the current time by
+default: first those with a live prompt cache, the cache to expire
+soonest first, then the others in the order lists draw them.  The mode
+line's tooltip lists them in it, `drover-select' offers them in it, and
+`drover-next' visits them in it, among the idle sessions its round
+takes too."
+  (drover-visit-order sessions now))
 
 (defun drover-find (backend id)
   "Return the session ID of BACKEND, or nil.

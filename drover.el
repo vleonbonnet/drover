@@ -34,7 +34,9 @@
 ;; not a front end is loaded (see `drover-transcript-engines'), and
 ;; resumed as they open, in claude-code-ide or agent-shell, loaded then
 ;; if need be.  `drover-attention-mode' shows how many sessions need you in
-;; the mode line and `drover-next' visits them in turn; `drover-list'
+;; the mode line and `drover-next' visits sessions in turn: those whose
+;; prompt cache expires soonest, then those needing you, then the idle
+;; ones; `drover-list'
 ;; lists every session in a window, and `drover-list-side' in a sidebar
 ;; beside your work, both at once if you like, each laid out for its
 ;; window's width.
