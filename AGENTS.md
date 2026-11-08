@@ -5,7 +5,8 @@ Emacs package gathering the sessions of coding agent front ends (opencode.el, Cl
 ## Commands
 
 - `make test-one FILE=test/drover-list-test.el` (`SELECTOR=regexp` for some of its tests): the file you change, in seconds. Use it while working.
-- `make compile lint test`: once before merging. `compile` must stay free of warnings and `lint` (checkdoc) clean; `test` takes about 20 s, each file in a batch Emacs of its own, so no test may count on another having run.
+- `make compile lint test`: once before merging. `compile` must stay free of warnings and `lint` (checkdoc) clean; `test` takes about 20 s on the Mac and about 4 minutes on Core, each file in a batch Emacs of its own, so no test may count on another having run.
+- A test that fails: rerun it alone (`make test-one FILE=… SELECTOR=^name$`), and on main to learn whether your change broke it, rather than running the whole of `test` again or in a second checkout. Timing tests of the remote layer can fail only while the processors are busy.
 - Benchmarks (`make bench`, `bench-bulk`, `bench-search`, `bench-idle`, `bench-usage`) only for performance work. With `EMACS_GUI` they start one hidden graphical Emacs: one run at a time.
 - Core, the Windows host: `make bench-remote REMOTE=core SSH=myssh REMOTE_EMACS=/ucrt64/bin/emacs`.
 

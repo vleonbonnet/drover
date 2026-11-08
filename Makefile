@@ -37,6 +37,9 @@ BATCH = $(EMACS) -Q --batch $(LOAD_PATH) $(PREFER_NEWER)
 # writes to a peer that just closed, as the tests of the remote layer
 # do; ignored signals stay ignored across exec.
 NOPIPE = trap '' PIPE;
+# Tests run below the normal priority, so that what the user does comes
+# first; they still take every processor nothing else wants.
+NICE ?= nice -n 10
 NO_WARNINGS = --eval '(setq byte-compile-error-on-warn t)'
 
 SOURCES = $(filter-out %-pkg.el %-autoloads.el,$(wildcard drover*.el))
@@ -130,7 +133,7 @@ test-job/%:
 	$(TEST_ENV) BATCH_TESTS_FILE=$$file BATCH_TESTS_SHARD=$$i/$$n \
 	BATCH_TESTS_TIMES="$(TEST_LOGS)/times/$$base.times" BATCH_TESTS_TIMES_OUT="$(TEST_LOGS)/$$name.times" \
 	test/batch-tests.sh run -t $(TIMEOUT) -m $(RSS_LIMIT) -o "$(TEST_LOGS)/$$name.log" -n $$name \
-	  $(BATCH) -l $$file -l test/batch-tests.el -f batch-tests-run
+	  $(NICE) $(BATCH) -l $$file -l test/batch-tests.el -f batch-tests-run
 
 # Each test file whole, alone, one at a time.
 test-alone:
@@ -140,7 +143,7 @@ test-alone:
 # to run while working, before the whole of test.
 test-one: test-compile
 	@if [ -z "$(FILE)" ]; then echo "test-one needs FILE, a test file"; exit 2; fi
-	$(NOPIPE) $(TEST_ENV) BATCH_TESTS_FILE="$(FILE)" $(BATCH) -l $(FILE) -l test/batch-tests.el -f batch-tests-run \
+	$(NOPIPE) $(TEST_ENV) BATCH_TESTS_FILE="$(FILE)" $(NICE) $(BATCH) -l $(FILE) -l test/batch-tests.el -f batch-tests-run \
 	  < /dev/null
 
 # Times the list over thousands of sessions, as compiled: not part of

@@ -37,6 +37,25 @@ ran() {
     | sed -E 's/ \([^,]*, ([0-9.]+) sec\)$/ (\1 s)/'
 }
 
+# Set rss to the resident memory of process $1 in kB, or to nothing once
+# it is gone.  /proc, where there is one, as on Linux and MSYS2, gives it
+# without starting a process; MSYS2's ps cannot, having no -o.
+resident() {
+  rss=
+  if [ -d /proc ]; then
+    local key value rest
+    [ -r "/proc/$1/status" ] || return 0
+    while read -r key value rest; do
+      if [ "$key" = VmRSS: ]; then
+        rss=$value
+        return 0
+      fi
+    done < "/proc/$1/status"
+  else
+    rss=$(ps -o rss= -p "$1" 2> /dev/null | tr -d ' ')
+  fi
+}
+
 run() {
   local limit=600 rss_limit=2097152 log='' name='' option OPTIND=1
   while getopts t:m:o:n: option; do
@@ -59,6 +78,19 @@ run() {
   "$@" < /dev/null > "$log" 2>&1 &
   local pid=$!
   (
+    # The watcher looks each half second without starting a process
+    # where bash can wait on its own, 4.4 and later: on MSYS2 a process
+    # costs tens of milliseconds and an antivirus scan, and eight
+    # watchers starting four a second took two of eight processors.  It
+    # reads a pipe from a sleep outlasting the limit, which never writes,
+    # until the read times out.
+    sleeper=
+    trap '[ -z "$sleeper" ] || kill "$sleeper" 2> /dev/null; exit' TERM
+    if [ "${BASH_VERSINFO[0]}" -gt 4 ] \
+         || { [ "${BASH_VERSINFO[0]}" -eq 4 ] && [ "${BASH_VERSINFO[1]}" -ge 4 ]; }; then
+      exec 3< <(exec sleep $((limit + 10)))
+      sleeper=$!
+    fi
     start=$SECONDS
     while kill -0 "$pid" 2> /dev/null; do
       reason=
@@ -66,7 +98,7 @@ run() {
         reason="still running after $limit s"
         echo 124 > "$log.killed"
       else
-        rss=$(ps -o rss= -p "$pid" 2> /dev/null | tr -d ' ')
+        resident "$pid"
         if [ -n "$rss" ] && [ "$rss" -gt "$rss_limit" ] 2> /dev/null; then
           reason="resident memory past $rss_limit kB"
           echo 137 > "$log.killed"
@@ -83,8 +115,15 @@ run() {
         kill -9 "$pid" 2> /dev/null
         break
       fi
+      if [ -n "$sleeper" ]; then
+        read -r -t 0.5 -u 3 _
+        # Past 128 the read timed out; else the sleep is gone.
+        [ $? -gt 128 ] && continue
+        sleeper=
+      fi
       sleep 0.5
     done
+    [ -z "$sleeper" ] || kill "$sleeper" 2> /dev/null
   ) &
   local watcher=$!
   wait "$pid"
