@@ -47,6 +47,7 @@
 (defvar ghostel-exit-functions)
 (defvar ghostel-mode-hook)
 (defvar ghostel--pid)
+(defvar ghostel--pending-redraw)
 (defvar ghostel-buffer-name-function)
 (defvar vterm-exit-functions)
 (defvar vterm-mode-hook)
@@ -1063,6 +1064,18 @@ conversation's, or an OpenCode session's."
       (kill-buffer terminal)
       (should-not (drover-claude-code-ide-ready-p terminal)))))
 
+(defmacro drover-claude-code-ide-test-drawing (drawn &rest body)
+  "Run BODY with Ghostel's drawing of a hidden terminal recorded in DRAWN.
+Drawing a terminal shows its input box, its caret ready."
+  (declare (indent 1) (debug t))
+  `(cl-letf (((symbol-function 'ghostel--commit-frame)
+              (lambda (buffer)
+                (push buffer ,drawn)
+                (with-current-buffer buffer
+                  (setq-local ghostel--pending-redraw nil))
+                (drover-claude-code-ide-test-ready buffer))))
+     ,@body))
+
 (defmacro drover-claude-code-ide-test-typing (&rest body)
   "Run BODY with the input functions of Ghostel, vterm and eat recorded."
   (declare (indent 0) (debug t))
@@ -1096,6 +1109,46 @@ conversation's, or an OpenCode session's."
         (should (equal (drover-claude-code-ide-test-called 'ghostel-send-key) '(("return"))))
         (should-not (buffer-local-value 'drover-claude-code-ide--submitting terminal))
         (should-not drover-claude-code-ide-test-warnings)))))
+
+(ert-deftest drover-claude-code-ide-test-send-to-hidden-ghostel ()
+  "A Ghostel terminal no window shows is drawn before its text is read.
+Ghostel draws a terminal only while a window shows it: one started
+hidden would never read input.  One a window shows, or with nothing
+pending, is left to Ghostel."
+  (drover-claude-code-ide-test-with
+    (drover-claude-code-ide-test-typing
+      (let ((terminal (drover-claude-code-ide-test-terminal "*claude* hidden"))
+            (drawn nil))
+        (drover-claude-code-ide-test-drawing drawn
+          (should-not (drover-claude-code-ide-ready-p terminal))
+          (should-not drawn)
+          (with-current-buffer terminal
+            (setq-local ghostel--pending-redraw t))
+          (save-window-excursion
+            (set-window-buffer (selected-window) terminal)
+            (should-not (drover-claude-code-ide-ready-p terminal)))
+          (should-not drawn)
+          (drover-claude-code-ide-send-text terminal "Prompt")
+          (should (equal drawn (list terminal)))
+          (should (equal (drover-claude-code-ide-test-called 'ghostel-paste-string) '(("Prompt"))))
+          (should-not drover-claude-code-ide-test-warnings))))))
+
+(ert-deftest drover-claude-code-ide-test-read-hidden-ghostel ()
+  "The mode, the input box and the preview of a hidden Ghostel terminal are read once drawn."
+  (drover-claude-code-ide-test-with
+    (let ((drawn nil))
+      (drover-claude-code-ide-test-drawing drawn
+        (dolist (read (list (lambda (terminal) (drover-claude-code-ide--mode terminal))
+                            (lambda (terminal) (drover-claude-code-ide--input-box terminal))
+                            (lambda (terminal)
+                              (drover-claude-code-ide--preview (drover-claude-code-ide-test-session terminal)
+                                                               #'ignore))))
+          (let ((terminal (drover-claude-code-ide-test-terminal "*claude* hidden")))
+            (with-current-buffer terminal
+              (setq-local ghostel--pending-redraw t))
+            (setq drawn nil)
+            (funcall read terminal)
+            (should (equal drawn (list terminal)))))))))
 
 (ert-deftest drover-claude-code-ide-test-send-to-vterm-and-eat ()
   "A vterm terminal leaves copy mode; vterm and eat get a bracketed paste."

@@ -108,6 +108,7 @@
 (defvar ghostel-program-status)
 (defvar ghostel-buffer-name-function)
 (defvar ghostel--pid)
+(defvar ghostel--pending-redraw)
 (defvar vterm-buffer-name-string)
 (defvar vterm-copy-mode)
 (defvar eat-terminal)
@@ -121,6 +122,7 @@
 (declare-function vterm-copy-mode "ext:vterm" (&optional arg))
 (declare-function eat-term-send-string "ext:eat" (terminal string))
 (declare-function ghostel-cursor-point "ext:ghostel" ())
+(declare-function ghostel--commit-frame "ext:ghostel" (buffer))
 (declare-function vterm--get-cursor-point "ext:vterm" ())
 
 ;;;; Options
@@ -774,10 +776,27 @@ FUNCTION is called with no argument; what it signals is reported."
 
 ;;;; Sending
 
+(defun drover-claude-code-ide--render (buffer)
+  "Draw the output terminal BUFFER holds back for want of a window.
+Ghostel draws a terminal only while a window shows it, so the text of
+one started hidden, as for a task or another host, would stay empty,
+and the session never be ready.  Drover reads a terminal's text through
+this first: what is pending is drawn then, as Ghostel draws a hidden
+terminal for its exit hooks.  A terminal a window shows is left to
+Ghostel's own redraws."
+  (when (and (buffer-live-p buffer)
+             (fboundp 'ghostel--commit-frame)
+             (with-current-buffer buffer
+               (and (derived-mode-p 'ghostel-mode)
+                    (bound-and-true-p ghostel--pending-redraw)))
+             (not (get-buffer-window buffer t)))
+    (ghostel--commit-frame buffer)))
+
 (defun drover-claude-code-ide-ready-p (buffer)
   "Return non-nil when the Claude Code interface in BUFFER reads input.
 Its input caret (see `drover-claude-code-ide-input-regexp') shows only
 once it does."
+  (drover-claude-code-ide--render buffer)
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
          (save-excursion
@@ -979,6 +998,7 @@ suggestion of a next prompt (see
 first line is all in faces.  A box of more than
 `drover-claude-code-ide--draft-lines' lines is not read, and its text
 is cut to `drover-claude-code-ide--draft-limit' characters."
+  (drover-claude-code-ide--render buffer)
   (with-current-buffer buffer
     (let ((cursor (drover-claude-code-ide--cursor)))
       (if (not (and cursor (<= (point-min) cursor (point-max))))
@@ -1096,6 +1116,7 @@ The mode is named as --permission-mode takes it, \"default\" when the
 footer shows none (see `drover-claude-code-ide--mode-indicators'): the
 footer is the few lines below the last input box.  Nil when no input
 box shows, as while the CLI starts, or a dialog stands in its place."
+  (drover-claude-code-ide--render buffer)
   (with-current-buffer buffer
     (save-excursion
       (goto-char (point-max))
@@ -1418,6 +1439,7 @@ Claude Code or no terminal starts."
   "Call CALLBACK with the last lines of SESSION's terminal, or nil."
   (funcall callback
            (when-let* ((buffer (drover-claude-code-ide--buffer session)))
+             (drover-claude-code-ide--render buffer)
              (with-current-buffer buffer
                (save-excursion
                  (goto-char (point-max))
