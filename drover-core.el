@@ -5873,7 +5873,13 @@ It is, in order:
     ACTION;
  5. for `last-answer', the most recently selected buffer defining it."
   (let ((list (drover-session-list-p)))
-    (drover--prompt-target action (and list (drover-session-at-point t)) list)))
+    ;; Only these actions look at the session at point, which its backend
+    ;; may have to list all its sessions to find: Send's name in the menu
+    ;; asks for the target of `send' as the menu opens.
+    (drover--prompt-target action
+                           (and list (memq action drover--list-prompt-actions)
+                                (drover-session-at-point t))
+                           list)))
 
 (defun drover--prompt-call (buffer action)
   "Perform prompt ACTION in BUFFER.

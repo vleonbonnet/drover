@@ -1315,6 +1315,24 @@ defines Send, and a function failing tells none."
         (should (equal (car (car drover-test-actions)) 'agent))
         (should (eq (nth 1 (car drover-test-actions)) (cdr (assoc "s" buffers))))))))
 
+(ert-deftest drover-test-prompt-target-looks-at-point-when-needed ()
+  "Only the actions a list's session answers look for the session at point."
+  (let ((drover-prepared-prompt-function nil)
+        (looked 0))
+    (drover-test-with-buffers (list (drover-test-session "s"))
+        (list (cons "s" (generate-new-buffer " s")))
+      (with-current-buffer (cdr (assoc "s" buffers))
+        (drover-prompt-define 'model (drover-test-action 'model)))
+      (drover-test-at-point "s"
+        (setq-local drover-view-p t)
+        (add-function :before (local 'drover-session-at-point-function)
+                      (lambda () (cl-incf looked)))
+        (dolist (action '(send revert fork compact))
+          (should-not (drover-prompt-target action)))
+        (should (= looked 0))
+        (should (eq (drover-prompt-target 'model) (cdr (assoc "s" buffers))))
+        (should (= looked 1))))))
+
 (ert-deftest drover-test-prompt-target-default-buffer ()
   (let ((default (generate-new-buffer " default"))
         (drover-default-prompt-buffer-function nil)

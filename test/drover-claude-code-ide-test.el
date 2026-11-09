@@ -795,6 +795,31 @@ session of `buffer', a temporary buffer, active."
           (should (eq (drover-session-buffer (drover-find 'claude-code-ide (drover-session-id a)))
                       tracked)))))))
 
+(ert-deftest drover-claude-code-ide-test-session-alone ()
+  "A terminal's session is found alone, as the backend lists it among all."
+  (drover-claude-code-ide-test-with
+    (let* ((_tracked (drover-claude-code-ide-test-terminal "*claude-code[app]*" :mcp-session "/work/app"))
+           (orphan (drover-claude-code-ide-test-terminal "*claude* ~/notes" :mode 'vterm-mode
+                                                         :directory "/work/notes/"))
+           (sessions (drover-claude-code-ide--sessions))
+           (listed 0))
+      (should (= (length sessions) 2))
+      (advice-add 'drover-claude-code-ide--sessions :before (lambda () (cl-incf listed))
+                  '((name . drover-claude-code-ide-test-count)))
+      (unwind-protect
+          (progn
+            (dolist (session sessions)
+              (should (equal (drover-claude-code-ide--session (drover-session-id session)) session))
+              (should (equal (drover-find 'claude-code-ide (drover-session-id session)) session)))
+            (should (= listed 0))
+            (should-not (drover-claude-code-ide--session "terminal-none"))
+            ;; Its Claude gone, the terminal is listed no longer, nor found.
+            (delete-process (get-buffer-process orphan))
+            (should-not (drover-claude-code-ide--session (drover-session-id (nth 1 sessions))))
+            (should (equal (mapcar #'drover-session-id (drover-claude-code-ide--sessions))
+                           (list (drover-session-id (car sessions))))))
+        (advice-remove 'drover-claude-code-ide--sessions 'drover-claude-code-ide-test-count)))))
+
 (ert-deftest drover-claude-code-ide-test-engine-id-never-guessed ()
   "A terminal's engine identifier stays unknown until the CLI records it.
 drover merges sessions of different backends by engine identifier, so a

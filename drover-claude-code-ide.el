@@ -364,12 +364,15 @@ the title of a session whose conversation records none yet."
                   name)))
     (if (string-empty-p title) name title)))
 
+(defun drover-claude-code-ide--token-buffer (token)
+  "Return the live terminal whose session's identifier is TOKEN, or nil."
+  (seq-find (lambda (buffer)
+              (equal (buffer-local-value 'drover-claude-code-ide--token buffer) token))
+            (buffer-list)))
+
 (defun drover-claude-code-ide--buffer (session)
   "Return the live terminal of SESSION, or nil."
-  (let ((token (drover-session-id session)))
-    (seq-find (lambda (buffer)
-                (equal (buffer-local-value 'drover-claude-code-ide--token buffer) token))
-              (buffer-list))))
+  (drover-claude-code-ide--token-buffer (drover-session-id session)))
 
 (defun drover-claude-code-ide--live-buffer (session)
   "Return the live terminal of SESSION, signalling a `user-error' when gone."
@@ -791,6 +794,17 @@ what was read.  Nil without a turn."
   "Return the sessions of the Claude terminals."
   (mapcar (lambda (entry) (drover-claude-code-ide--session-of (car entry)))
           (drover-claude-code-ide--buffers)))
+
+(defun drover-claude-code-ide--session (id)
+  "Return the session ID of a Claude terminal, or nil.
+It is the record `drover-claude-code-ide--sessions' lists for the
+terminal ID identifies, made alone: each reads files of its own, about a
+millisecond on Windows, and the session at point is found this way as
+the dispatch menu opens.  Nil once the terminal is gone or no longer
+Claude's."
+  (when-let* ((buffer (drover-claude-code-ide--token-buffer id))
+              ((drover-claude-code-ide--claude-buffer-p buffer)))
+    (drover-claude-code-ide--session-of buffer)))
 
 (defun drover-claude-code-ide--buffer-session ()
   "Return the session of the current terminal, or nil when not Claude's."
@@ -1745,6 +1759,7 @@ With several, the most recently used."
    ;; From the transcripts, see `drover-recorded-run'.
    :caches t
    :sessions #'drover-claude-code-ide--sessions
+   :session #'drover-claude-code-ide--session
    :open #'drover-claude-code-ide--open
    :respond #'drover-claude-code-ide--respond
    :interrupt #'drover-claude-code-ide--interrupt
