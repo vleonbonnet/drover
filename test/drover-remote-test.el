@@ -738,29 +738,29 @@ restart of the host's remote layer, its counters rising."
     (should (eq (gethash key (drover-remote--peer-ops peer) 'untold) 'untold))))
 
 (ert-deftest drover-remote-test-options-performed ()
-  "Options are applied through the backend, a model its engine cannot run dropped."
+  "Options are applied through the backend, an incompatible model refused."
   (drover-test-with-engines
-    (drover-test-register-engine 'fake)
-    (drover-remote-test-owning (list (drover-test-session "a" :engine 'fake :status 'idle))
-      (let ((record (drover-index-session '(fake . "a")))
-            (outcomes nil))
-        (should (member "options" (append (drover-remote--record-ops record) nil)))
-        (drover-remote--tell-model 'fake (drover-test-model "m1" :provider-id "p" :name "M1"))
-        (drover-remote--perform "options" '(:agent "plan" :model ("p" . "m1") :variant high) record
-                                (lambda (ok &optional message) (push (list ok message) outcomes)))
-        (should (equal (car outcomes) '(t nil)))
-        (let ((applied (seq-find (lambda (call) (eq (car call) :apply-options)) drover-test-calls)))
-          (should (equal (plist-get (nth 2 applied) :agent) "plan"))
-          (should (equal (drover-model-id (plist-get (nth 2 applied) :model)) "m1"))
-          (should (eq (plist-get (nth 2 applied) :variant) 'high)))
-        (setq drover-test-calls nil)
-        (drover-remote--perform "options" '(:model ("q" . "elsewhere") :variant low) record
-                                (lambda (ok &optional message) (push (list ok message) outcomes)))
-        (should-not (car (car outcomes)))
-        (should (string-match-p "cannot run" (cadr (car outcomes))))
-        (let ((applied (seq-find (lambda (call) (eq (car call) :apply-options)) drover-test-calls)))
-          (should-not (plist-get (nth 2 applied) :model))
-          (should-not (plist-get (nth 2 applied) :variant)))))))
+   (drover-test-register-engine 'fake)
+   (drover-remote-test-owning (list (drover-test-session "a" :engine 'fake :status 'idle))
+     (let ((record (drover-index-session '(fake . "a")))
+           (outcomes nil))
+       (should (member "options" (append (drover-remote--record-ops record) nil)))
+       (drover-remote--tell-model 'fake (drover-test-model "m1" :provider-id "p" :name "M1"))
+       (drover-remote--perform "options" '(:agent "plan" :model ("p" . "m1") :variant high) record
+                               (lambda (ok &optional message) (push (list ok message) outcomes)))
+       (should (equal (car outcomes) '(t nil)))
+       (let ((applied (seq-find (lambda (call) (eq (car call) :apply-options)) drover-test-calls)))
+         (should (equal (plist-get (nth 2 applied) :agent) "plan"))
+         (should (equal (drover-model-id (plist-get (nth 2 applied) :model)) "m1"))
+         (should (eq (plist-get (nth 2 applied) :variant) 'high)))
+       (setq drover-test-calls nil)
+       (drover-remote--perform "options" '(:model ("q" . "elsewhere") :variant low) record
+                               (lambda (ok &optional message) (push (list ok message) outcomes)))
+       (should-not (car (car outcomes)))
+       (should (string-match-p "no matching model" (cadr (car outcomes))))
+       (let ((applied (seq-find (lambda (call) (eq (car call) :apply-options)) drover-test-calls)))
+         (should-not (plist-get (nth 2 applied) :model))
+         (should-not (plist-get (nth 2 applied) :variant)))))))
 
 (ert-deftest drover-remote-test-wrap-up-performed ()
   "The owner offers to wrap up the sessions it may, does it for a peer, and tells it how it ended."
@@ -1729,7 +1729,7 @@ leading back to what holds it would print it again from each."
         (should (equal (drover-session-agent (drover-remote-test-session "s0")) "review"))))))
 
 (ert-deftest drover-remote-test-options-refused-there ()
-  "Options the owner refuses are reported, and the prompt goes out anyway."
+  "Options the owner refuses reach the failure callback, never success."
   (drover-remote-test-with nil
     (drover-remote-test-start-full dir)
     (drover-remote-test-command "sessions" :n 1)
@@ -1746,12 +1746,11 @@ leading back to what holds it would print it again from each."
         (should (eq applied 'nothing))
         (drover-backend-call session :apply-options
                              (list :model (drover-test-model "unknown" :provider-id "p"))
-                             (lambda () (setq applied t)))
-        (drover-remote-test-wait (lambda () (eq applied t))))
-      (should (eq applied t))
-      (should (equal (length warnings) 1))
-      (should (string-match-p "did not apply the options: .*cannot run unknown; sending the prompt anyway"
-                              (car warnings))))))
+                             (lambda () (setq applied t))
+                             (lambda (reason) (setq applied reason)))
+        (drover-remote-test-wait (lambda () (stringp applied))))
+      (should (string-match-p "no matching model" applied))
+      (should-not warnings))))
 
 (ert-deftest drover-remote-test-answer-request ()
   "A request of another host's session is answered here, what it asks coming from its owner."

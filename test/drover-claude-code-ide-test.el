@@ -1432,14 +1432,14 @@ pending, is left to Ghostel."
                              terminal (list :model (drover-claude-code-ide-test-model "opus"))))
                    1))
         (should (equal drover-claude-code-ide-test-warnings
-                       '("*claude* busy is not ready for /model; keeping its current model")))
+                       '("Could not set the model of *claude* busy: *claude* busy is not ready for /model")))
         (setq drover-claude-code-ide-test-warnings nil)
         (drover-claude-code-ide-test-ready terminal)
         (should (= (funcall (drover-claude-code-ide-test-apply
                              terminal (list :model (drover-claude-code-ide-test-model "gpt-5" 'opencode))))
                    1))
         (should (equal drover-claude-code-ide-test-warnings
-                       '("*claude* busy cannot run gpt-5; keeping its current model")))
+                       '("Could not set the model of *claude* busy: *claude* busy cannot run gpt-5")))
         (should-not drover-claude-code-ide-test-calls)
         (setq drover-claude-code-ide-test-warnings nil)
         (cl-letf (((symbol-function 'ghostel-send-string) (lambda (_) (error "Gone"))))
@@ -1447,7 +1447,7 @@ pending, is left to Ghostel."
                                terminal (list :model (drover-claude-code-ide-test-model "opus"))))
                      1)))
         (should (equal drover-claude-code-ide-test-warnings
-                       '("Could not set the model of *claude* busy: Gone; sending the prompt anyway")))
+                       '("Could not set the model of *claude* busy: Gone")))
         (should-not (drover-claude-code-ide-test-pending))))))
 
 ;;;; Permission modes
@@ -1609,7 +1609,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
           (drover-claude-code-ide-test-fire)
           (should (= (funcall then) 1))
           (should-not (drover-claude-code-ide-test-pending))
-          (should-not drover-claude-code-ide-test-warnings))))))
+          (should (equal drover-claude-code-ide-test-warnings '("*claude* dying is gone"))))))))
 
 (ert-deftest drover-claude-code-ide-test-press-backtab ()
   "Shift+Tab reaches each terminal as it takes it."

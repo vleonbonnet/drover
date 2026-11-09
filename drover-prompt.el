@@ -74,6 +74,7 @@
 (require 'org-src)
 (require 'drover-core)
 (require 'drover-model)
+(require 'drover-selection)
 (require 'drover-ui)
 (require 'opencode-look)
 (require 'drover-keys)
@@ -216,6 +217,16 @@ It bounds the quote of replies of few long lines, as
 (defvar-local drover-prompt-picked-model nil
   "Model the user chose for the prompt, a `drover-model', or nil for the default.")
 
+(defvar-local drover-prompt-picked-provider nil
+  "Serving provider chosen for the next prompt.
+Nil leaves the provider to the destination's defaults.")
+
+(defvar-local drover-prompt-model-selection nil
+  "Non-nil when the chosen model and effort are provider-independent choices.")
+
+(defvar-local drover-prompt--sending nil
+  "Non-nil while this prompt is waiting for a send to settle.")
+
 (defvar-local drover-prompt-picked-variant nil
   "Variant the user chose for the prompt, a symbol, or nil for the default.")
 
@@ -317,6 +328,7 @@ A plist (:key KEY :title TITLE :session SESSION): KEY is the session's
     (attach . drover-prompt-insert-attachment)
     (agent . drover-prompt-choose-agent)
     (model . drover-prompt-choose-model)
+    (provider . drover-prompt-choose-provider)
     (effort . drover-prompt-choose-effort)
     (directory . drover-prompt-choose-directory)
     (copy-block . drover-prompt-copy-src-block)
@@ -431,6 +443,8 @@ the defaults are fetched again."
         drover-prompt-host-directory nil
         drover-prompt-picked-agent nil
         drover-prompt-picked-model nil
+        drover-prompt-picked-provider nil
+        drover-prompt-model-selection nil
         drover-prompt-picked-variant nil
         drover-prompt-title nil
         drover-prompt--chosen-session nil)
@@ -480,11 +494,12 @@ nil until told, asked meanwhile, and waited for WAIT seconds."
 AGENT, MODEL and VARIANT are the explicit choices; what is not chosen
 is what HOST told a session started without a choice runs, the variant
 of a model chosen its default."
-  (let ((default (plist-get (alist-get engine (drover-prompt--host-engines host directory)) :default)))
-    (list :agent (or agent (plist-get default :agent))
-          :model (or model (plist-get default :model))
-          :variant (or variant
-                       (if model (drover-model-default-variant model) (plist-get default :variant))))))
+  (let* ((entry (alist-get engine (drover-prompt--host-engines host directory)))
+         (default (plist-get entry :default))
+         (options (list :agent agent :model model :variant variant
+                        :provider drover-prompt-picked-provider :selection drover-prompt-model-selection)))
+    (or (plist-get (drover-selection-resolve engine options default (plist-get entry :models) t) :effective)
+        options)))
 
 (defun drover-prompt--host-default-directory (host &optional buffer wait)
   "Return where a new session of the prompt BUFFER starts on HOST, or nil.
@@ -505,33 +520,60 @@ It can when it has an identifier for it (see `drover-model-id-for')."
   "Return the options chosen in the prompt BUFFER, as an options plist.
 BUFFER defaults to the prompt buffer.  The plist is (:agent AGENT
 :model MODEL :variant VARIANT), each nil when not chosen, all of them
-without a prompt buffer; see `drover-model'."
+without a prompt buffer.  Independent choices add :selection t and
+an explicitly chosen serving provider adds :provider."
   (let ((buffer (or buffer (drover-prompt-buffer))))
     (if (buffer-live-p buffer)
         (with-current-buffer buffer
-          (list :agent (and drover-prompt-picked-agent
-                            (not (string-empty-p drover-prompt-picked-agent))
-                            drover-prompt-picked-agent)
-                :model drover-prompt-picked-model
-                :variant drover-prompt-picked-variant))
+          (append (list :agent (and drover-prompt-picked-agent
+                                    (not (string-empty-p drover-prompt-picked-agent))
+                                    drover-prompt-picked-agent)
+                        :model drover-prompt-picked-model
+                        :variant drover-prompt-picked-variant)
+                  (and drover-prompt-picked-provider (list :provider drover-prompt-picked-provider))
+                  (and drover-prompt-model-selection '(:selection t))))
       (list :agent nil :model nil :variant nil))))
 
-(defun drover-prompt-options-for (session options &optional warn)
-  "Return OPTIONS, an options plist, as SESSION can run them.
-A model the engine of SESSION cannot run, having no identifier for it
-\(see `drover-model-id-for'), is dropped, and its variant with it, since
-a variant belongs to its model; with WARN, that is reported with
-`drover-warn'."
-  (let ((agent (plist-get options :agent))
-        (model (plist-get options :model))
-        (variant (plist-get options :variant)))
-    (if (and model (not (drover-prompt--runs-p model (drover-session-engine session))))
-        (progn
-          (when warn
-            (drover-warn "%s cannot be applied to %s; keeping its current model"
-                         (drover-model-label model) (drover-session-display-title session)))
-          (list :agent agent :model nil :variant nil))
-      (list :agent agent :model model :variant variant))))
+(defun drover-prompt--resolve (target current options &optional buffer)
+  "Resolve OPTIONS for TARGET, whose running options are CURRENT.
+TARGET is a session or a new-target plist.  BUFFER supplies defaults
+and the directory for a new session.  Return the result of
+`drover-selection-resolve', including its incompatibility reason."
+  (let* ((session (and (drover-session-p target) target))
+         (engine (if session (drover-session-engine session) (plist-get target :engine)))
+         (host (if session (drover-session-host session) (plist-get target :host)))
+         (buffer (or buffer (drover-prompt-buffer)))
+         (directory (or (and session (drover-session-directory session))
+                        (and buffer (if host (drover-prompt--host-default-directory host buffer)
+                                      (buffer-local-value 'default-directory buffer))) default-directory))
+         (entry (and host (alist-get engine (drover-prompt--host-engines host directory))))
+         (models (if host (plist-get entry :models) (drover--engine-models engine directory)))
+         (defaults (and buffer (alist-get engine (buffer-local-value 'drover-prompt--defaults buffer))))
+         (current (if session current
+                    (if host (plist-get entry :default)
+                      (drover-engine-resolve engine defaults (plist-get options :agent) nil nil))))
+         (settable (if session
+                       (and (drover-supports-p session :apply-options)
+                            (if (drover-supports-p session :settable)
+                                (drover-backend-call session :settable) '(:agent :model :variant)))
+                     t))
+         (resolved (drover-selection-resolve engine options current models settable)))
+    (when (and (not session) (not host) (not (plist-get resolved :failure)))
+      (let ((native (plist-get resolved :options)))
+        (setq resolved (plist-put resolved :effective
+                                  (drover-engine-resolve engine defaults (plist-get native :agent)
+                                                         (plist-get native :model) (plist-get native :variant))))))
+    resolved))
+
+(defun drover-prompt-options-for (session options &optional _warn)
+  "Return OPTIONS resolved for SESSION, or signal why they cannot apply.
+The optional _WARN is accepted for callers of the former best-effort
+filter.  Explicit choices are never discarded."
+  (let* ((current (and (drover-supports-p session :options) (drover-backend-call session :options)))
+         (resolved (drover-prompt--resolve session current options)))
+    (when-let* ((failure (plist-get resolved :failure)))
+      (user-error "%s: %s" (drover-session-display-title session) failure))
+    (plist-get resolved :options)))
 
 (defun drover-prompt--once (function)
   "Return a function of no argument calling FUNCTION the first time only."
@@ -541,29 +583,41 @@ a variant belongs to its model; with WARN, that is reported with
         (setq called t)
         (funcall function)))))
 
-(defun drover-prompt--apply (session options then)
-  "Give OPTIONS, already filtered for SESSION, to its backend, then call THEN.
-Without :apply-options, THEN is called at once.  THEN is called once,
-even when the backend signals, which is reported."
-  (let ((apply (drover-backend-property session :apply-options))
-        (then (drover-prompt--once then)))
+(defun drover-prompt--apply (session options then &optional else)
+  "Apply resolved OPTIONS to SESSION, then call THEN once on success.
+ELSE receives a failure string; without ELSE a failure is reported."
+  (let* ((apply (drover-backend-property session :apply-options))
+         (settled nil)
+         (success (lambda ()
+                    (drover-with-reporting "prompt options"
+                      (unless settled (setq settled t) (funcall then)))))
+         (failure (lambda (reason)
+                    (drover-with-reporting "prompt options"
+                      (unless settled
+                        (setq settled t)
+                        (if else (funcall else reason)
+                          (drover-warn "%s; prompt not sent" reason)))))))
     (if (not (functionp apply))
-        (funcall then)
+        (if (seq-some (lambda (key) (plist-get options key)) '(:agent :model :variant))
+            (funcall failure "This session cannot apply prompt options")
+          (funcall success))
       (condition-case err
-          (funcall apply session options then)
+          (funcall apply session options success failure)
         (error
-         (drover-warn "Could not apply the options to %s: %s; sending the prompt anyway"
-                      (drover-session-display-title session) (drover-error-message err))
-         (funcall then))))))
+         (funcall failure (format "Could not apply the options to %s: %s"
+                                  (drover-session-display-title session) (drover-error-message err))))))))
 
-(defun drover-prompt-apply-options (session options then)
-  "Apply OPTIONS, an options plist, to the running SESSION, then call THEN.
-OPTIONS are filtered for SESSION as `drover-prompt-options-for' does,
-with a warning, then given to its backend's :apply-options; without
-it, or without SESSION, THEN is called at once."
+(defun drover-prompt-apply-options (session options then &optional else)
+  "Apply explicit OPTIONS to the running SESSION, then call THEN once.
+OPTIONS are resolved by `drover-prompt-options-for'.  An incompatible
+choice or a failed switch calls ELSE with a message, or reports the
+failure when ELSE is nil, without calling THEN."
   (if (null session)
       (funcall then)
-    (drover-prompt--apply session (drover-prompt-options-for session options t) then)))
+    (condition-case err
+        (drover-prompt--apply session (drover-prompt-options-for session options t) then else)
+      (error (if else (funcall else (drover-error-message err))
+               (drover-warn "%s; prompt not sent" (drover-error-message err)))))))
 
 (defun drover-prompt-engine-options (engine agent model variant &optional buffer)
   "Return the resolved options a new session of ENGINE would run.
@@ -571,7 +625,12 @@ AGENT, MODEL and VARIANT are the explicit choices; the engine resolves
 them with the defaults the prompt BUFFER holds for it, BUFFER
 defaulting to the current one.  See `drover-engine-resolve'."
   (with-current-buffer (or buffer (current-buffer))
-    (drover-engine-resolve engine (alist-get engine drover-prompt--defaults) agent model variant)))
+    (if (and (or model variant drover-prompt-picked-provider) drover-prompt-model-selection)
+        (let* ((options (append (list :agent agent :model model :variant variant :selection t)
+                                (and drover-prompt-picked-provider (list :provider drover-prompt-picked-provider))))
+               (resolved (drover-prompt--resolve (list :engine engine) nil options (current-buffer))))
+          (or (plist-get resolved :effective) options))
+      (drover-engine-resolve engine (alist-get engine drover-prompt--defaults) agent model variant))))
 
 (defun drover-prompt--display-engine (&optional buffer)
   "Return the engine whose new session the prompt BUFFER describes.
@@ -633,11 +692,12 @@ The pickers' \"Default\" entry names them."
                            (drover-backend-call session :options))))
         (list :agent nil :model (plist-get current :model) :variant (plist-get current :variant))))
      (drover-prompt-host
-      (drover-prompt--host-resolve drover-prompt-host drover-prompt-host-directory
-                                   (drover-prompt--display-engine) nil nil nil))
+      (plist-get (alist-get (drover-prompt--display-engine)
+                            (drover-prompt--host-engines drover-prompt-host drover-prompt-host-directory))
+                 :default))
      (t
-      (drover-prompt-engine-options (or drover-prompt--last-engine drover-prompt-default-engine)
-                                    nil nil nil)))))
+      (let ((engine (or drover-prompt--last-engine drover-prompt-default-engine)))
+        (drover-engine-resolve engine (alist-get engine drover-prompt--defaults) nil nil nil))))))
 
 (defun drover-prompt-effective-options (&optional buffer)
   "Return what the prompt BUFFER shows it runs, as a display plist.
@@ -674,11 +734,13 @@ its :directory is then the host's, named by :host-label."
             :directory-explicit-p (or (and host t) drover-prompt-directory-picked-p)
             :agent (if session drover-prompt-picked-agent (plist-get resolved :agent))
             :agent-explicit-p (and drover-prompt-picked-agent t)
-            :model (plist-get (if session entry resolved) :model)
+            :provider drover-prompt-picked-provider
+            :provider-explicit-p (and drover-prompt-picked-provider t)
+            :model (or (plist-get (if session entry resolved) :model) drover-prompt-picked-model)
             :model-explicit-p (if session
                                   (plist-get entry :model-explicit-p)
                                 (and drover-prompt-picked-model t))
-            :variant (plist-get (if session entry resolved) :variant)
+            :variant (or (plist-get (if session entry resolved) :variant) drover-prompt-picked-variant)
             :variant-explicit-p (if session
                                     (plist-get entry :variant-explicit-p)
                                   (and drover-prompt-picked-variant t))))))
@@ -775,8 +837,11 @@ defines it.  The session chosen to send to, if any, follows them."
      "  " (funcall key #'drover-prompt-agent "agent")
      (drover-prompt--header-option (plist-get options :agent) (plist-get options :agent-explicit-p))
      "  " (funcall key #'drover-prompt-model "model")
-     (drover-prompt--header-option (and model (drover-model-label model))
+     (drover-prompt--header-option (and model (or (drover-model-name model) (drover-model-id model)))
                                    (plist-get options :model-explicit-p))
+     "  " (funcall key #'drover-prompt-provider "provider")
+     (drover-prompt--header-option (or (plist-get options :provider) (and model (drover-model-provider-name model)))
+                                   (plist-get options :provider-explicit-p))
      "  " (funcall key #'drover-prompt-effort "effort")
      (drover-prompt--header-option (and variant (symbol-name variant))
                                    (plist-get options :variant-explicit-p)))))
@@ -1471,12 +1536,31 @@ CONTENT leaves the prompt."
         (message "Not sent to %s; the prompt is in the kill ring"
                  (drover-session-display-title session))
       (drover-unarchive-to-send session)
-      (drover-prompt-apply-options session explicit
-                                   (lambda ()
-                                     (when (drover-prompt--deliver session target text token
-                                                                   (plist-get content :attachments))
-                                       (drover-prompt--sent session nil))))
-      (drover-prompt-consume content buffer))))
+      (let ((finish (drover-prompt--begin-send buffer)))
+        (drover-prompt-apply-options
+         session explicit
+         (lambda ()
+           (unwind-protect
+               (when (drover-prompt--deliver session target text token (plist-get content :attachments))
+                 (when (drover-prompt--unchanged-p content buffer)
+                   (drover-prompt-consume content buffer))
+                 (drover-prompt--sent session nil))
+             (funcall finish)))
+         (lambda (reason)
+           (funcall finish)
+           (drover-warn "%s; prompt not sent" reason)))))))
+
+(defun drover-prompt--begin-send (buffer)
+  "Mark prompt BUFFER as sending and return a function clearing that state."
+  (with-current-buffer buffer
+    (when drover-prompt--sending (user-error "This prompt is already being sent"))
+    (let ((token (list t)))
+      (setq drover-prompt--sending token)
+      (lambda ()
+        (when (buffer-live-p buffer)
+          (with-current-buffer buffer
+            (when (eq drover-prompt--sending token)
+              (setq drover-prompt--sending nil))))))))
 
 (defun drover-prompt--hiding (hidden function)
   "Call FUNCTION and return its value, in no new window when HIDDEN is non-nil.
@@ -1494,7 +1578,7 @@ TARGET is an entry of `drover-prompt-new-targets'.  Its feature is
 loaded; its backend, which must be registered and run its engine,
 starts the session in BUFFER's directory with the options chosen there,
 in no window when `drover-prompt-display-new' is nil.  CONTENT leaves
-the prompt, unless the backend refuses at once."
+the prompt once delivered, if it is still unchanged."
   (let* ((backend (plist-get target :backend))
          (engine (plist-get target :engine))
          (feature (plist-get target :feature))
@@ -1509,41 +1593,50 @@ the prompt, unless the backend refuses at once."
                    (memq engine (drover-backend-engines backend)))
         (user-error "%s starts no %s session"
                     (drover-backend-label backend) (drover-engine-label engine)))
-      (let ((options (with-current-buffer buffer
-                       (append (drover-prompt-explicit-options buffer)
-                               (list :title drover-prompt-title
-                                     :defaults (alist-get engine drover-prompt--defaults))
-                               (and hidden (list :hidden t)))))
-            (text (plist-get content :text))
-            (returned nil)
-            (refused nil))
-        (drover-prompt--hiding
-         hidden
-         (lambda ()
-           (funcall create (buffer-local-value 'default-directory buffer) engine options
-                    (lambda (session)
-                      ;; THEN may come later, from a process or a timer.
-                      (when (drover-prompt--hiding
-                             hidden
-                             (lambda ()
-                               (drover-prompt--deliver session nil text nil (plist-get content :attachments))))
-                        (drover-prompt--sent session t)))
-                    (lambda (reason)
-                      (drover-warn "No new %s: %s; the prompt is in the kill ring" label reason)
-                      (unless returned
-                        (setq refused t))))))
-        (setq returned t)
-        (unless refused
-          (drover-prompt-consume content buffer))))))
+      (let* ((resolved (drover-prompt--resolve target nil (drover-prompt-explicit-options buffer) buffer))
+             (_ (when-let* ((why (plist-get resolved :failure))) (user-error "%s" why)))
+             (options (with-current-buffer buffer
+                        (append (plist-get resolved :options)
+                                (list :title drover-prompt-title
+                                      :defaults (alist-get engine drover-prompt--defaults))
+                                (and hidden (list :hidden t)))))
+             (text (plist-get content :text))
+             (settled nil)
+             (finish (drover-prompt--begin-send buffer)))
+        (condition-case err
+            (drover-prompt--hiding
+             hidden
+             (lambda ()
+               (funcall create (buffer-local-value 'default-directory buffer) engine options
+                        (lambda (session)
+                          ;; THEN may come later, from a process or a timer.
+                          (unless settled
+                            (setq settled t)
+                            (funcall finish)
+                            (when (drover-prompt--hiding
+                                   hidden
+                                   (lambda ()
+                                     (drover-prompt--deliver session nil text nil (plist-get content :attachments))))
+                              (when (drover-prompt--unchanged-p content buffer)
+                                (drover-prompt-consume content buffer))
+                              (drover-prompt--sent session t))))
+                        (lambda (reason)
+                          (unless settled
+                            (setq settled t)
+                            (funcall finish)
+                            (drover-warn "No new %s: %s; the prompt stays" label reason))))))
+          ((error quit) (funcall finish) (signal (car err) (cdr err))))))))
 
 (defun drover-prompt--unchanged-p (content buffer)
   "Return non-nil when the prompt BUFFER still holds CONTENT as it was taken."
   (and (buffer-live-p buffer)
        (with-current-buffer buffer
-         (equal (string-trim (if (plist-get content :region)
-                                 (buffer-substring-no-properties (plist-get content :start) (plist-get content :end))
-                               (buffer-substring-no-properties (point-min) (point-max))))
-                (plist-get content :org)))))
+         (and (or (not (plist-get content :region))
+                  (<= (point-min) (plist-get content :start) (plist-get content :end) (point-max)))
+              (equal (string-trim (if (plist-get content :region)
+                                      (buffer-substring-no-properties (plist-get content :start) (plist-get content :end))
+                                    (buffer-substring-no-properties (point-min) (point-max))))
+                     (plist-get content :org))))))
 
 (defun drover-prompt--host-offers-p (host directory engine model)
   "Return non-nil unless HOST told it runs no MODEL with ENGINE in DIRECTORY.
@@ -1582,13 +1675,11 @@ stays.  Attachments, files of this host, go as their labels in the text."
       (setq drover-prompt-host host
             drover-prompt-host-directory directory)
       (force-mode-line-update))
-    (let* ((explicit (drover-prompt-explicit-options buffer))
-           (model (plist-get explicit :model))
-           (options (list :agent (plist-get explicit :agent)
-                          :model model
-                          :variant (and (or (null model) (drover-prompt--runs-p model engine))
-                                        (plist-get explicit :variant))
-                          :title (buffer-local-value 'drover-prompt-title buffer)))
+    (let* ((resolved (drover-prompt--resolve target nil (drover-prompt-explicit-options buffer) buffer))
+           (_ (when-let* ((why (plist-get resolved :failure))) (user-error "%s" why)))
+           (options (append (plist-get resolved :options)
+                            (list :title (buffer-local-value 'drover-prompt-title buffer))))
+           (model (plist-get options :model))
            (attachments (plist-get content :attachments)))
       (when model
         (unless (drover-prompt--runs-p model engine)
@@ -1599,32 +1690,46 @@ stays.  Attachments, files of this host, go as their labels in the text."
       (when attachments
         (drover-warn "%d attachment%s went to %s as text only"
                      (length attachments) (if (cdr attachments) "s" "") label))
-      (when-let* ((result (drover-prompt--remote
-                           :start host target directory (plist-get content :text) options
-                           (lambda (result)
-                             (if-let* ((why (plist-get result :failure)))
-                                 (drover-warn "No new %s: %s; the prompt stays" what why)
-                               (when (drover-prompt--unchanged-p content buffer)
-                                 (drover-prompt-consume content buffer))
-                               (drover-message "%s started %s" label (or (plist-get result :title) "a session")))))))
-        (drover-prompt-consume content buffer)
-        (when-let* ((record (drover-prompt--remote :open host result (not drover-prompt-display-new))))
-          (drover-prompt--sent record t))))))
+      (let ((finish (drover-prompt--begin-send buffer))
+            (settled nil))
+        (condition-case err
+            (when-let* ((result (drover-prompt--remote
+                                 :start host target directory (plist-get content :text) options
+                                 (lambda (result)
+                                   (drover-with-reporting "remote prompt"
+                                     (unless settled
+                                       (setq settled t)
+                                       (funcall finish)
+                                       (if-let* ((why (plist-get result :failure)))
+                                           (drover-warn "No new %s: %s; the prompt stays" what why)
+                                         (when (drover-prompt--unchanged-p content buffer)
+                                           (drover-prompt-consume content buffer))
+                                         (drover-message "%s started %s" label
+                                                         (or (plist-get result :title) "a session")))))))))
+              (unless settled
+                (setq settled t)
+                (funcall finish)
+                (when (drover-prompt--unchanged-p content buffer)
+                  (drover-prompt-consume content buffer))
+                (when-let* ((record (drover-prompt--remote :open host result (not drover-prompt-display-new))))
+                  (drover-prompt--sent record t))))
+          ((error quit) (funcall finish) (signal (car err) (cdr err))))))))
 
 (defun drover-prompt-submit ()
   "Send the prompt to a session chosen among the running ones and new ones.
 With an active region, only the region is sent.  The text, in Org, is
 put in the kill ring, then converted to Markdown.  To a running session,
-the options chosen in the prompt are applied first, those its engine
-cannot run left out with a warning; to a new session, they are its
+the options chosen in the prompt must all apply first; to a new
+session, they are its
 start options.  The text sent leaves the prompt, unless nothing was
 sent: a check the user cancelled keeps it, region included.  This is
 the prompt action `send'."
   (interactive)
   (let* ((buffer (drover-prompt--prompt-buffer))
+         (_ (when (buffer-local-value 'drover-prompt--sending buffer)
+              (user-error "This prompt is already being sent")))
          (content (or (drover-prompt-content buffer)
                       (user-error "Prompt is empty"))))
-    ;; The prompt leaves the buffer before the backend took it.
     (kill-new (plist-get content :org))
     (let ((target (with-current-buffer buffer
                     (drover-prompt-read-target "Send to session: "))))
@@ -1755,12 +1860,16 @@ undisplayed when missing, as from the target picker's option menu."
                                                   (plist-get options :agent-explicit-p))
                 (when model
                   (concat (propertize " [model: " 'face 'minibuffer-prompt)
-                          (drover-prompt-option-display (drover-model-label model)
+                          (drover-prompt-option-display (or (drover-model-name model) (drover-model-id model))
                                                         (plist-get options :model-explicit-p))
                           (when variant
                             (concat "/" (drover-prompt-option-display
                                          (symbol-name variant) (plist-get options :variant-explicit-p))))
-                          (propertize "]" 'face 'minibuffer-prompt))))))
+                          (propertize "]" 'face 'minibuffer-prompt)))
+                (drover-prompt--minibuffer-option
+                 "provider" (or (plist-get options :provider)
+                                (and model (or (drover-model-provider-name model) (drover-model-provider-id model))))
+                 (plist-get options :provider-explicit-p)))))
     (unless (string-empty-p info)
       info)))
 
@@ -1810,18 +1919,21 @@ milliseconds with many windows."
       (drover-prompt--refresh-completion))))
 
 (defun drover-prompt--options-host (buffer)
-  "Return the host new sessions of the prompt BUFFER start on, nil for this one.
-Nil too for a prompt set to go to a running session, whose options its
-own host's catalogs do not decide."
+  "Return the host supplying the prompt BUFFER's catalogs, nil for this one."
   (with-current-buffer buffer
-    (and drover-prompt-host (not (drover-prompt--chosen-target)) drover-prompt-host)))
+    (if-let* ((session (drover-prompt--chosen-target)))
+        (drover-session-host session)
+      drover-prompt-host)))
 
 (defun drover-prompt--host-catalogs (buffer)
   "Return what the host of the prompt BUFFER told of its engines, waited for."
   (with-current-buffer buffer
-    (or (drover-prompt--host-engines drover-prompt-host drover-prompt-host-directory drover-prompt-host-timeout)
-        (user-error "%s did not tell its agents and models in %s"
-                    (drover-prompt--host-label drover-prompt-host) drover-prompt-host-directory))))
+    (let* ((session (drover-prompt--chosen-target))
+           (host (drover-prompt--options-host buffer))
+           (directory (if session (drover-session-directory session) drover-prompt-host-directory)))
+      (or (drover-prompt--host-engines host directory drover-prompt-host-timeout)
+          (user-error "%s did not tell its agents and models in %s"
+                      (drover-prompt--host-label host) directory)))))
 
 (defun drover-prompt-choose-agent ()
   "Choose the agent the prompt runs, among those the engines offer.
@@ -1852,24 +1964,53 @@ agents.  This is the prompt action `agent'."
 
 (defun drover-prompt-choose-model ()
   "Choose the model the prompt runs, among those the engines offer.
-A variant chosen before is dropped, as it belongs to its model.  New
-sessions of another host (see `drover-prompt-host') choose among that
-host's models.  This is the prompt action `model'."
+Provider and effort choices are kept.  New sessions of another host
+choose among that host's models.  This is the prompt action `model'."
   (interactive)
   (let* ((buffer (drover-prompt--options-buffer))
          (host (drover-prompt--options-host buffer))
-         (models (and host
-                      (drover-model-merge-all
-                       (mapcan (lambda (entry) (copy-sequence (plist-get (cdr entry) :models)))
-                               (drover-prompt--host-catalogs buffer)))))
-         (model (drover-read-model (plist-get (drover-prompt-inherited-options buffer) :model)
+         (models (lambda ()
+                   (drover-selection-models (drover-prompt--selection-catalogs buffer)
+                                            (buffer-local-value 'drover-prompt-picked-provider buffer)
+                                            (buffer-local-value 'drover-prompt-picked-variant buffer))))
+         (inherited (plist-get (drover-prompt-inherited-options buffer) :model))
+         (default (and inherited (drover-model-create :id (drover-selection-id inherited)
+                                                      :name (drover-model-name inherited))))
+         (model (drover-read-model default
                                    (if host
                                        (buffer-local-value 'drover-prompt-host-directory buffer)
                                      (buffer-local-value 'default-directory buffer))
-                                   (and host (lambda () models)))))
+                                   models)))
     (with-current-buffer buffer
       (setq drover-prompt-picked-model model
-            drover-prompt-picked-variant nil))
+            drover-prompt-model-selection t))
+    (drover-prompt--refresh-display buffer)))
+
+(defun drover-prompt--selection-catalogs (buffer)
+  "Return the catalogs for selections in prompt BUFFER, kept by engine."
+  (if (drover-prompt--options-host buffer)
+      (mapcar (lambda (entry) (cons (car entry) (plist-get (cdr entry) :models)))
+              (drover-prompt--host-catalogs buffer))
+    (drover-model-catalogs (buffer-local-value 'default-directory buffer))))
+
+(defun drover-prompt-choose-provider ()
+  "Choose the serving provider for the next prompt, independently of its model."
+  (interactive)
+  (let* ((buffer (drover-prompt--options-buffer))
+         (model (buffer-local-value 'drover-prompt-picked-model buffer))
+         (logical (buffer-local-value 'drover-prompt-model-selection buffer))
+         (id (and model (if logical (drover-model-id model) (drover-selection-id model))))
+         (candidates (cons '("Default" . nil)
+                           (drover-selection-providers
+                            (drover-prompt--selection-catalogs buffer) id
+                            (buffer-local-value 'drover-prompt-picked-variant buffer))))
+         (choice (completing-read "Provider: " (drover--completion-table candidates 'drover-provider)
+                                  nil t nil nil "Default")))
+    (with-current-buffer buffer
+      (setq drover-prompt-picked-provider (cdr (assoc choice candidates)))
+      (when (and model (not logical))
+        (setq drover-prompt-picked-model (drover-model-create :id id :name (drover-model-name model))))
+      (setq drover-prompt-model-selection t))
     (drover-prompt--refresh-display buffer)))
 
 (defun drover-prompt-choose-effort ()
@@ -1878,8 +2019,15 @@ The model is the one chosen, else the one a new session would run.
 This is the prompt action `effort'."
   (interactive)
   (let* ((buffer (drover-prompt--options-buffer))
-         (model (or (buffer-local-value 'drover-prompt-picked-model buffer)
-                    (plist-get (drover-prompt-inherited-options buffer) :model))))
+         (picked (buffer-local-value 'drover-prompt-picked-model buffer))
+         (base (or picked (plist-get (drover-prompt-inherited-options buffer) :model)))
+         (id (and base (if (and picked (buffer-local-value 'drover-prompt-model-selection buffer))
+                           (drover-model-id base) (drover-selection-id base))))
+         (model (or (seq-find (lambda (model) (equal (drover-model-id model) id))
+                              (drover-selection-models
+                               (drover-prompt--selection-catalogs buffer)
+                               (buffer-local-value 'drover-prompt-picked-provider buffer)))
+                    base)))
     (cond
      ((not model) (message "Choose a model first"))
      ((not (drover-model-variants-known model))
@@ -1888,7 +2036,12 @@ This is the prompt action `effort'."
      (t
       (let ((variant (drover-read-variant model)))
         (with-current-buffer buffer
-          (setq drover-prompt-picked-variant variant))
+          (setq drover-prompt-picked-variant variant)
+          (when (and picked (not drover-prompt-model-selection))
+            (setq drover-prompt-picked-provider
+                  (or drover-prompt-picked-provider (drover-model-provider-id picked))
+                  drover-prompt-picked-model (drover-model-create :id id :name (drover-model-name picked))))
+          (setq drover-prompt-model-selection t))
         (drover-prompt--refresh-display buffer))))))
 
 (defun drover-prompt--read-host (buffer)
@@ -1949,6 +2102,7 @@ among its directories.  This is the prompt action `directory'."
   [["Prompt runs"
     ("a" "Agent" drover-prompt-choose-agent)
     ("m" "Model" drover-prompt-choose-model)
+    ("P" "Provider" drover-prompt-choose-provider)
     ("e" "Effort" drover-prompt-choose-effort)
     ("d" "Directory" drover-prompt-choose-directory)]]
   drover--menu-close
@@ -2054,52 +2208,22 @@ first; of those of other hosts, the ones shown here are offered first."
               drover-prompt-new-targets))
 
 (defun drover-prompt--entry-options (target current buffer)
-  "Return the model and variant TARGET runs once sent the prompt BUFFER.
-TARGET is a running session, whose CURRENT options its backend's
-:options told, or an entry of `drover-prompt-new-targets', or a new
-session of another host.  The choices of BUFFER apply as sending
-applies them: a model the engine cannot run drops both model and
-variant; a new session starts with them, resolved by its engine, or by
-what its host told; a running session that cannot change its variant keeps
-it; one whose engine runs a model's default variant when switched to
-it (:model-resets-variant) does so.  The value is an entry plist,
-\(:model :model-explicit-p :variant :variant-explicit-p), with the keys
-known only; nil for a new session without a prompt buffer."
-  (let* ((session (and (drover-session-p target) target))
-         (engine (if session (drover-session-engine session) (plist-get target :engine)))
-         (live (buffer-live-p buffer))
-         (picked (and live (buffer-local-value 'drover-prompt-picked-model buffer)))
-         (model (and picked (drover-prompt--runs-p picked engine) picked))
-         (variant (and live (or model (not picked))
-                       (buffer-local-value 'drover-prompt-picked-variant buffer))))
-    (cond
-     ((and (not session) live)
-      (let ((resolved (if-let* ((host (plist-get target :host)))
-                          (drover-prompt--host-resolve host (drover-prompt--host-default-directory host buffer)
-                                                       engine (buffer-local-value 'drover-prompt-picked-agent buffer)
-                                                       model variant)
-                        (drover-prompt-engine-options
-                         engine (buffer-local-value 'drover-prompt-picked-agent buffer)
-                         model variant buffer))))
-        (list :model (plist-get resolved :model) :model-explicit-p (and model t)
-              :variant (plist-get resolved :variant) :variant-explicit-p (and variant t))))
-     ((not session) nil)
-     ((not (memq :variant (if (drover-supports-p session :settable)
-                              (drover-backend-call session :settable)
-                            '(:agent :model :variant))))
-      (if model
-          (list :model model :model-explicit-p t :variant (plist-get current :variant))
-        current))
-     (model
-      (list :model model :model-explicit-p t
-            :variant (or variant
-                         (if (drover-engine-property engine :model-resets-variant)
-                             (drover-model-default-variant model)
-                           (plist-get current :variant)))
-            :variant-explicit-p (and variant t)))
-     (variant
-      (list :model (plist-get current :model) :variant variant :variant-explicit-p t))
-     (t current))))
+  "Return what TARGET runs after the choices of prompt BUFFER apply.
+CURRENT holds a running session's options.  Incompatible destinations
+carry :failure instead of advertising settings they cannot apply."
+  (if (not (buffer-live-p buffer)) current
+    (let* ((options (drover-prompt-explicit-options buffer))
+           (resolved (drover-prompt--resolve target current options buffer))
+           (effective (plist-get resolved :effective)))
+      (cond
+       ((plist-get resolved :failure) resolved)
+       ((and (drover-session-p target)
+             (not (seq-some (lambda (key) (plist-get options key)) '(:model :provider :variant)))) current)
+       (t
+        (list :model (plist-get effective :model)
+              :model-explicit-p (and (or (plist-get options :model) (plist-get options :provider)) t)
+              :variant (plist-get effective :variant)
+              :variant-explicit-p (and (plist-get options :variant) t)))))))
 
 (defun drover-prompt--options-label (options)
   "Return the model and variant of entry OPTIONS as the header shows them, or nil."
@@ -2200,23 +2324,14 @@ and why it has its status."
                        (concat "  " (propertize summary 'face 'completions-annotations)))))))))
 
 (defun drover-prompt--target-predicate (candidates)
-  "Return the predicate hiding the new sessions of CANDIDATES that cannot start.
-A new session's engine must be able to run the model chosen in the
-prompt, and another host must not have told it runs no such model;
-running sessions always show, as the user may send to one anyway, the
-model left out."
+  "Return the predicate keeping CANDIDATES that can honor the prompt's choices."
   (lambda (candidate)
     (let* ((name (if (consp candidate) (car candidate) candidate))
            (entry (cdr (assoc name candidates)))
            (target (plist-get entry :target))
            (prompt (drover-prompt-buffer))
-           (model (and prompt (buffer-local-value 'drover-prompt-picked-model prompt))))
-      (or (drover-session-p target)
-          (null model)
-          (and (drover-prompt--runs-p model (plist-get target :engine))
-               (or (not (plist-get target :host))
-                   (drover-prompt--host-offers-p (plist-get target :host) (plist-get entry :directory)
-                                                 (plist-get target :engine) model)))))))
+           (options (drover-prompt-explicit-options prompt)))
+      (not (plist-get (drover-prompt--resolve target (plist-get entry :current) options prompt) :failure)))))
 
 (defun drover-prompt--setup-picker (keymap)
   "Set up the minibuffer of the target picker, with KEYMAP over its own keys.
@@ -2300,7 +2415,7 @@ Where new sessions are offered, or with :options-menu, the key of
               (keymap (and (or targets (plist-get keys :options-menu)) drover-prompt-target-map))
               (choice (minibuffer-with-setup-hook (lambda () (drover-prompt--setup-picker keymap))
                         (completing-read prompt table
-                                         (and targets (drover-prompt--target-predicate candidates))
+                                         (drover-prompt--target-predicate candidates)
                                          t))))
          (or (plist-get (cdr (assoc choice candidates)) :target)
              (user-error "No session %s" choice)))))))

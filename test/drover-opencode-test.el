@@ -2898,7 +2898,7 @@ Return a function telling how many times the backend called back."
     (let ((done (drover-opencode-test-apply session '(:agent "missing"))))
       (should (eql (funcall done) 1))
       (should-not posts)
-      (should (string-match-p "refused agent missing (.*cannot run as agent missing); sending the prompt anyway"
+      (should (string-match-p "refused agent missing (.*cannot run as agent missing)"
                               (car warnings))))
     (let ((done (drover-opencode-test-apply session '(:agent "build"))))
       (should (eql (funcall done) 1))
@@ -2914,7 +2914,7 @@ Return a function telling how many times the backend called back."
       (setq opencode-session-model nil))
     (let ((done (drover-opencode-test-apply session '(:variant high))))
       (should (eql (funcall done) 1))
-      (should (string-match-p "names no model to run variant high on; keeping its default"
+      (should (string-match-p "names no model to run variant high on"
                               (car warnings))))
     ;; Nothing chosen, nothing asked.
     (setq posts nil)
@@ -3032,7 +3032,7 @@ Return a function telling how many times the backend called back."
                               (opencode-error--make :method 'get :path "/api/session/ses_1"
                                                     :message "Gone")))))
           (should (eql (funcall (drover-opencode-test-apply session '(:variant low))) 1))
-          (should (string-match-p "Could not open Title ses_1: .*Gone; sending the prompt anyway"
+          (should (string-match-p "Could not open Title ses_1: .*Gone"
                                   (car warnings)))
           (drover-backend-call session :send "go" nil)
           (should (string-match-p "Title ses_1 did not take the prompt: .*Gone; it is in the kill ring"

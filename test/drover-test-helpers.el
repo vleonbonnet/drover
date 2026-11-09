@@ -177,7 +177,7 @@ The session is served from then on, and given to THEN; with
   (push (list :check (drover-session-id session) text options) drover-test-calls)
   drover-test-check-result)
 
-(defun drover-test--apply-options (session options then)
+(defun drover-test--apply-options (session options then &optional _else)
   "Record OPTIONS applied to SESSION, then call THEN, as :apply-options does."
   (push (list :apply-options (drover-session-id session) options) drover-test-calls)
   (funcall then))

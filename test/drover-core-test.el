@@ -3065,7 +3065,7 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
       (should (equal ran '(effort)))
       (should (= done 1))
       (should (equal warnings
-                     '((drover "Could not set model: No such model; sending the prompt anyway"
+                     '((drover "Could not set model: No such model"
                                :warning))))
       ;; Signalling once settled warns nothing more.
       (setq warnings nil)
@@ -3088,7 +3088,7 @@ They are newest first, as (TYPE MESSAGE LEVEL)."
           (accept-process-output nil 0.01)))
       (should (= done 1))
       (should (equal warnings
-                     '((drover "Timed out setting agent; sending the prompt anyway" :warning))))
+                     '((drover "Timed out setting agent" :warning))))
       (funcall late)
       (should (= done 1)))))
 

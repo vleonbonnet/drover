@@ -763,11 +763,11 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
           (funcall (cdar steps) #'ignore))
         (should (equal (drover-agent-shell-test--calls-of 'mode) `((,shell "plan") (,shell "auto"))))
         (should-not drover-agent-shell-test--warnings)
-        (should-not (drover-agent-shell--option-steps shell 'claude-code "reviewer" nil nil nil nil))
-        (should-not (drover-agent-shell--option-steps shell 'codex "plan" nil nil nil nil))
+        (drover-run-steps (drover-agent-shell--option-steps shell 'claude-code "reviewer" nil nil nil nil) #'ignore)
+        (drover-run-steps (drover-agent-shell--option-steps shell 'codex "plan" nil nil nil nil) #'ignore)
         (should (equal (reverse drover-agent-shell-test--warnings)
-                       '("claude takes its agent at session start; keeping its current agent instead of reviewer"
-                         "claude takes its agent at session start; keeping its current agent instead of plan")))
+                       '("claude takes agent reviewer at session start"
+                         "claude takes agent plan at session start")))
         (let ((steps (drover-agent-shell--option-steps shell 'opencode "review" nil nil nil nil)))
           (funcall (cdar steps) #'ignore)
           (should (equal (car (last (drover-agent-shell-test--calls-of 'mode))) (list shell "review"))))))))
@@ -818,8 +818,13 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
         (drover-agent-shell--apply-options session (list :model model) (lambda () (push 4 sent)))
         (should (equal sent '(4 3 2 1)))
         (should (equal (reverse drover-agent-shell-test--warnings)
-                       '("claude offers no thought level for max; keeping its current effort"
-                         "claude refused model opus: Unknown value; sending the prompt anyway")))
+                       '("claude offers no thought level for max"
+                         "claude refused model opus: Unknown value")))
+        (let (failure)
+          (drover-agent-shell--apply-options session (list :model model :variant 'low)
+                                             (lambda () (ert-fail "Sent after a refused model"))
+                                             (lambda (reason) (setq failure reason)))
+          (should (string-match-p "refused model" failure)))
         ;; Nothing to apply.
         (drover-agent-shell--apply-options session nil (lambda () (push 5 sent)))
         (should (equal (car sent) 5))))))

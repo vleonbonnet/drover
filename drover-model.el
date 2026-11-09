@@ -511,6 +511,18 @@ what was remembered of each model (see `drover--remember-models')."
                              (drover--remember-models engine models)
                            models)))))))
 
+(defun drover-model-catalogs (&optional directory)
+  "Return the models offered in DIRECTORY, kept apart by engine.
+The result is an alist (ENGINE . MODELS), in the order of
+`drover-model-engine-order'.  Each engine's first answering source
+supplies its models, including remembered models."
+  (let* ((directory (or directory default-directory))
+         (with-source (delete-dups (append (mapcar #'car drover--model-sources)
+                                           (drover--remembered-engines))))
+         (engines (delete-dups (seq-filter (lambda (engine) (memq engine with-source))
+                                           (append drover-model-engine-order (drover-engines) with-source)))))
+    (mapcar (lambda (engine) (cons engine (drover--engine-models engine directory))) engines)))
+
 (defun drover-models (&optional directory)
   "Return every model the engines offer in DIRECTORY.
 DIRECTORY defaults to `default-directory'.  Each engine answers
@@ -520,19 +532,13 @@ Engines come in the order of `drover-model-engine-order', then of
 `drover-engines', then any other with a source or remembered models; a
 model reported twice, with the same provider and identifier, is the
 first report."
-  (let* ((directory (or directory default-directory))
-         (with-source (delete-dups (append (mapcar #'car drover--model-sources)
-                                           (drover--remembered-engines))))
-         (engines (delete-dups (seq-filter (lambda (engine) (memq engine with-source))
-                                           (append drover-model-engine-order (drover-engines)
-                                                   with-source))))
-         (seen (make-hash-table :test #'equal)))
+  (let ((seen (make-hash-table :test #'equal)))
     (seq-filter (lambda (model)
                   (let ((key (drover-model-key model)))
                     (unless (gethash key seen)
                       (puthash key t seen))))
-                (mapcan (lambda (engine) (copy-sequence (drover--engine-models engine directory)))
-                        engines))))
+                (mapcan (lambda (entry) (copy-sequence (cdr entry)))
+                        (drover-model-catalogs directory)))))
 
 ;;;; Remembered models
 

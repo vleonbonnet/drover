@@ -73,22 +73,25 @@ is defined, no former file read, nothing displayed, nor the list
 drawn.  Buffers of sessions BODY makes are killed."
   (declare (indent 0) (debug t))
   `(drover-test-with-backend nil
-     (drover-test-with-state
-       (let ((drover-schedule--queue (drover-schedule--queue-make :loaded t))
-             (drover-schedule--triggers nil)
-             (drover-schedule-former-files nil)
-             (drover-schedule-display-function #'ignore)
-             (drover-schedule-test-blocker nil)
-             (drover-schedule-test-submitted nil)
-             (drover-schedule-test-buffers nil))
-         (drover-schedule-test--register)
-         (unwind-protect
-             (cl-letf (((symbol-function 'drover-schedule--refresh) #'ignore))
-               ,@body)
-           (drover-schedule-test--stop)
-           (dolist (entry drover-schedule-test-buffers)
-             (when (buffer-live-p (cdr entry))
-               (kill-buffer (cdr entry)))))))))
+                             (drover-test-with-engines
+                              (drover-test-register-engine 'claude-code :directory #'ignore)
+                              (drover-test-register-engine 'opencode :directory #'ignore)
+                              (drover-test-with-state
+                               (let ((drover-schedule--queue (drover-schedule--queue-make :loaded t))
+                                     (drover-schedule--triggers nil)
+                                     (drover-schedule-former-files nil)
+                                     (drover-schedule-display-function #'ignore)
+                                     (drover-schedule-test-blocker nil)
+                                     (drover-schedule-test-submitted nil)
+                                     (drover-schedule-test-buffers nil))
+                                 (drover-schedule-test--register)
+                                 (unwind-protect
+                                     (cl-letf (((symbol-function 'drover-schedule--refresh) #'ignore))
+                                       ,@body)
+                                   (drover-schedule-test--stop)
+                                   (dolist (entry drover-schedule-test-buffers)
+                                     (when (buffer-live-p (cdr entry))
+                                       (kill-buffer (cdr entry))))))))))
 
 (defun drover-schedule-test-reload ()
   "Forget the queue, then read it again from its file and arm its timers."
@@ -524,15 +527,13 @@ drawn.  Buffers of sessions BODY makes are killed."
       (should (equal (plist-get (car (drover-schedule--jobs)) :prompt) "first part")))))
 
 (ert-deftest drover-schedule-test-prompt-buffer-incompatible-model ()
-  "A model the session cannot run is reported at once and dropped with its variant."
+  "An incompatible choice is refused, preserving the prompt and its choices."
   (drover-schedule-test-state
-    (let (warned)
-      (drover-schedule-test-prompt (drover-schedule-test-model 'opencode)
-        (cl-letf (((symbol-function 'display-warning) (lambda (&rest args) (push args warned))))
-          (drover-schedule-prompt))
-        (should warned)
-        (should (equal (plist-get (car (drover-schedule--jobs)) :options)
-                       '(:agent "plan" :model nil :variant nil)))))))
+    (drover-schedule-test-prompt (drover-schedule-test-model 'opencode)
+      (should-error (drover-schedule-prompt) :type 'user-error)
+      (should (buffer-live-p prompt-buf))
+      (should drover-prompt-picked-model)
+      (should-not (drover-schedule--jobs)))))
 
 (ert-deftest drover-schedule-test-prompt-buffer-empty ()
   "An empty prompt reads the text to send; no explicit option stores none."
@@ -873,7 +874,7 @@ drawn.  Buffers of sessions BODY makes are killed."
         (setf (plist-get job :options) '(:agent "plan" :model nil :variant high))
         (puthash (plist-get job :id) run (drover-schedule--active))
         (cl-letf (((symbol-function 'drover-prompt-apply-options)
-                   (lambda (target options then) (setq applied (list target options then)))))
+                   (lambda (target options then &optional _else) (setq applied (list target options then)))))
           (drover-schedule--send job run)
           (should (eq (plist-get job :status) 'sending))
           (should (equal (butlast applied) (list session '(:agent "plan" :model nil :variant high))))
@@ -889,11 +890,28 @@ drawn.  Buffers of sessions BODY makes are killed."
              (job (drover-schedule-test-job)) (run (list :buffer closed)) then)
         (setf (plist-get job :options) '(:agent "plan"))
         (puthash (plist-get job :id) run (drover-schedule--active))
-        (cl-letf (((symbol-function 'drover-prompt-apply-options) (lambda (_ _ next) (setq then next))))
+        (cl-letf (((symbol-function 'drover-prompt-apply-options) (lambda (_ _ next &optional _else) (setq then next))))
           (drover-schedule--send job run)
           (kill-buffer closed)
           (funcall then))
         (should (eq (plist-get job :status) 'failed))))))
+
+(ert-deftest drover-schedule-test-switch-refused ()
+  "A refused scheduled option marks the job failed without submitting its text."
+  (drover-schedule-test-state
+    (drover-schedule-test-session)
+    (let* ((buffer (drover-schedule-test-buffer))
+           (job (drover-schedule-test-job))
+           (run (list :buffer buffer)))
+      (setf (plist-get job :options) '(:variant high))
+      (puthash (plist-get job :id) run (drover-schedule--active))
+      (cl-letf (((symbol-function 'drover-prompt-apply-options)
+                 (lambda (_session _options then &optional else)
+                   (funcall else "Effort refused")
+                   (funcall then))))
+        (drover-schedule--send job run))
+      (should (eq (plist-get job :status) 'failed))
+      (should-not drover-schedule-test-submitted))))
 
 (ert-deftest drover-schedule-test-exact-session ()
   "The buffer delivered to shows the conversation in the job's backend, with a live process."

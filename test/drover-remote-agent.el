@@ -374,7 +374,7 @@ directory named \"fail\"; in one named \"slow\", a second later."
              (push (vector "send" (drover-session-id session) text) drover-remote-agent--calls)
              (drover-remote-agent--confirm then))
    ;; Options applied as a front end would, the agent changing at once.
-   :apply-options (lambda (session options then)
+   :apply-options (lambda (session options then &optional _else)
                     (push (vector "options" (drover-session-id session)
                                   (or (plist-get options :agent) :false)
                                   (let ((model (plist-get options :model)))
