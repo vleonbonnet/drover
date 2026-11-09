@@ -2419,14 +2419,32 @@ command, so that ten keys take one line.")
   (let ((key (cl-call-next-method obj)))
     (concat key (propertize "…9 0" 'face (get-text-property 0 'face key)))))
 
+(defun drover--menu-keys (prefix)
+  "Return the keys of the entries PREFIX defines, as vectors.
+Those of the groups it holds and includes by name are among them, those
+other packages added too, and those an :if may leave out."
+  (let ((keys nil))
+    (named-let walk ((group (transient--get-layout prefix)))
+      (dolist (child (aref group 2))
+        (cond ((vectorp child) (walk child))
+              ((and child (symbolp child)) (walk (transient--get-layout child)))
+              ((consp child)
+               (when-let* ((key (transient--suffix-key child)))
+                 (push (key-parse key) keys))))))
+    keys))
+
 (defun drover--dispatch-own-keys ()
   "Return the keys running `drover-dispatch' in the current buffer.
 Those of the menu's own entries, which keep their command there, and
 those of menus and remappings are left out."
-  (seq-remove (lambda (key)
-                (or (memq (aref key 0) '(menu-bar tool-bar tab-bar remap))
-                    (ignore-errors (transient-get-suffix 'drover-dispatch (key-description key)))))
-              (where-is-internal #'drover-dispatch)))
+  ;; One walk over the menu's entries, rather than `transient-get-suffix'
+  ;; for each key: it searches every group again for each group it meets,
+  ;; 300 ms for a key no entry has, as the keys opening the menu.
+  (let ((entries (drover--menu-keys 'drover-dispatch)))
+    (seq-remove (lambda (key)
+                  (or (memq (aref key 0) '(menu-bar tool-bar tab-bar remap))
+                      (member (key-parse (key-description key)) entries)))
+                (where-is-internal #'drover-dispatch))))
 
 (defun drover--dispatch-close-entries (_children)
   "Return the entries of `drover-dispatch' closing it.

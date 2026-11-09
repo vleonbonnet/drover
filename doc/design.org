@@ -286,7 +286,7 @@ Ungrouped, as lists are by default, every tree is in one group and drawn, none i
 
 ** Showing the sidebar, opening the menu
 
-=make bench-toggle= (=test/drover-toggle-bench.el=) times what the user waits for as the sidebar steps aside and comes back, as it is toggled, and as the dispatch menu opens, over the 2510 sessions of =make bench=, 30 with a buffer, every row drawn, as an idle Emacs has drawn them.  A batch Emacs runs no window change function: the bench runs them as redisplay does, buffer-local then global, then drover's timers of no delay, until nothing changes.  =DROVER_BENCH_PROFILE= profiles each measure, =DROVER_BENCH_ONLY= takes those a regexp matches.  On Core, Windows, in batch, the frame 80 columns wide, the sidebar 35, averages per run, garbage collections included:
+=make bench-toggle= (=test/drover-toggle-bench.el=) times what the user waits for as the sidebar steps aside and comes back, as it is toggled, and as the dispatch menu opens, over the 2510 sessions of =make bench=, 30 with a buffer, every row drawn, as an idle Emacs has drawn them.  The menu opens as =drover-dispatch= opens it, bound to three global keys, as a user binds it, its buffer made anew, as transient kills it as a menu exits.  A batch Emacs runs no window change function: the bench runs them as redisplay does, buffer-local then global, then drover's timers of no delay, until nothing changes.  =DROVER_BENCH_PROFILE= profiles each measure, =DROVER_BENCH_ONLY= takes those a regexp matches.  On Core, Windows, in batch, the frame 80 columns wide, the sidebar 35, averages per run, garbage collections included:
 
 | What                                             | Before                       | After                        |
 |--------------------------------------------------+------------------------------+------------------------------|
@@ -298,6 +298,9 @@ Ungrouped, as lists are by default, every tree is in one group and drawn, none i
 | The dispatch menu opened, a list in sight        | 79 to 102 ms, 4.6 to 5.3 MB  | 17 to 33 ms, 0.75 to 0.87 MB |
 | The dispatch menu opened, no list in sight       | 42 ms, 1.85 MB               | 9 to 18 ms, 0.39 MB          |
 | The next session, from the menu                  | 63 ms, 3.25 MB               | 17 to 30 ms, 0.74 MB         |
+| The dispatch menu opened, bound to three keys    | 1.9 to 2.9 s, 70 to 107 MB   | 9 to 25 ms, 0.44 to 0.93 MB  |
+
+The menu's first three rows were measured with no key bound to it.  Bound to keys, it looked each up among its entries with =transient-get-suffix=, which searches the groups of a group again for each group it meets, all of them for a key no entry has: 300 ms a key over =drover-dispatch=, a second in the user's Emacs on Core, where the menu has three.  One walk over its entries now finds them all (=drover--menu-keys=, see [[*Keys: four sets in one menu][Keys: four sets in one menu]]).
 
 A collection costs 50 to 90 ms in that heap, so that a menu allocating a megabyte pays one every few times it opens; what it still allocates is mostly transient's own, =format-spec= for every entry, each in a temporary buffer, and its suffixes and keymaps made anew.  The list shown after the minute's refresh draws in place the rows whose ages changed, some fifty a minute in the bench.  While two backends list one conversation, a hidden list is still drawn whole as it shows again, 80 to 190 ms: the index is not followed session by session while records of several backends make one session (see [[*The index of sessions][The index of sessions]]).
 
@@ -420,7 +423,7 @@ The menu shows every entry that may apply where it is invoked, greying out those
 
 Other packages add their global commands to the menu relative to drover's keys, as Magit extensions do: more lists of sessions after =p=, before drover's search, =S=, the OpenCode backend's search of open buffers having made way for it (see [[*Searching sessions][Searching sessions]]); more ways to pick a session or prompt go after ='=, the Prompt group's last (its ="=, =N=, =E= and ='=), before the scheduled prompts of =#=, or after =b=.  These places are kept stable on purpose.
 
-The menu closes on =C-g=, transient's key, on every key the user binds it to (=drover--dispatch-close-entries=, whichever opened it), and on =q=, a key of no set: drover's lists and reports quit on =q=, and the user reaching for it in the menu that opened over them means to close the menu.  Drover's other menus (=drover-view=, =drover-search-menu=, =drover-usage-menu=, =drover-prompt-options-menu=) include the same hidden group, =drover--menu-close=, rather than =transient-bind-q-to-quit=, which would change every transient of Emacs.
+The menu closes on =C-g=, transient's key, on every key the user binds it to (=drover--dispatch-close-entries=, whichever opened it), but those of its own entries, which keep their command (=drover--dispatch-own-keys=, the keys of every entry read once, =drover--menu-keys=), and on =q=, a key of no set: drover's lists and reports quit on =q=, and the user reaching for it in the menu that opened over them means to close the menu.  Drover's other menus (=drover-view=, =drover-search-menu=, =drover-usage-menu=, =drover-prompt-options-menu=) include the same hidden group, =drover--menu-close=, rather than =transient-bind-q-to-quit=, which would change every transient of Emacs.
 
 ** Values beside their keys
 

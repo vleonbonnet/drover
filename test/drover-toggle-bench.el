@@ -30,7 +30,8 @@
 ;;   and beside the list;
 ;; - the dispatch menu opened from the list, the sidebar, a buffer
 ;;   while a list shows, a buffer without a list in sight and the prompt
-;;   buffer; moving to the next session from it, which sets it up again.
+;;   buffer, bound to three keys, as a user binds it; moving to the next
+;;   session from it, which sets it up again.
 ;;
 ;; Each measure tells the time, the garbage collections and their time,
 ;; the megabytes allocated and the lists drawn whole, averages per run.
@@ -339,17 +340,28 @@ source."
 
 ;;;; The menu
 
+(defconst drover-toggle-bench--menu-keys '("C-'" "s-'" "<f19>")
+  "The global keys running `drover-dispatch' in the bench, as a user binds it.
+The menu closes on them, and looks them up among its entries as it opens.")
+
 (defun drover-toggle-bench--open-menu ()
-  "Set up `drover-dispatch' here and draw it into a buffer, as transient does."
+  "Open `drover-dispatch' here, drawing it into a buffer not shown.
+As the command does, then `transient-setup' and `transient--show'."
   (setq drover--dispatch-close-keys (drover--dispatch-own-keys))
+  (add-hook 'transient-setup-buffer-hook #'drover--dispatch-menu-changed)
+  (add-hook 'transient-exit-hook #'drover--dispatch-menu-changed)
   (transient--init-transient 'drover-dispatch nil
                              (list :scope (drover--context)
                                    :display-action drover-menu-display-action))
-  (drover-toggle-bench--draw-menu))
+  (setq transient--original-window (selected-window)
+        transient--original-buffer (current-buffer))
+  (drover-toggle-bench--draw-menu)
+  (drover--dispatch-number-rows))
 
 (defun drover-toggle-bench--draw-menu ()
   "Draw the menu set up into its buffer, as `transient--show' does.
-The buffer is made once and erased each time, as transient's is."
+The buffer is made as the menu opens, running `transient-setup-buffer-hook',
+and erased as the menu is drawn again while it stays open."
   (let ((transient--shadowed-buffer (current-buffer))
         (setup (not (get-buffer " *drover bench menu*"))))
     (with-current-buffer (get-buffer-create " *drover bench menu*")
@@ -357,10 +369,13 @@ The buffer is made once and erased each time, as transient's is."
       (transient--insert-menu setup))))
 
 (defun drover-toggle-bench--close-menu ()
-  "Forget the menu set up."
+  "Close the menu set up, as transient does as it exits: its buffer killed."
+  (when-let* ((menu (get-buffer " *drover bench menu*")))
+    (kill-buffer menu))
   (setq transient--prefix nil
         transient--layout nil
-        transient--suffixes nil))
+        transient--suffixes nil)
+  (run-hooks 'transient-exit-hook))
 
 (defun drover-toggle-bench--menu-step ()
   "Move to the next session from the menu set up, then set it up and draw it.
@@ -556,6 +571,8 @@ sidebar shown and both lists drawn."
             (progn
               (drover-start)
               (drover-attention-mode 1)
+              (dolist (key drover-toggle-bench--menu-keys)
+                (keymap-global-set key #'drover-dispatch))
               (delete-other-windows)
               (setq main (selected-window))
               (set-window-buffer main scratch)
@@ -579,6 +596,8 @@ sidebar shown and both lists drawn."
                 (drover-toggle-bench--menu main list scratch)
                 (drover-toggle-bench--shared main list scratch)))
           (drover-attention-mode -1)
+          (dolist (key drover-toggle-bench--menu-keys)
+            (keymap-global-unset key t))
           (dolist (buffer (drover-list--buffers))
             (kill-buffer buffer))
           (kill-buffer scratch)

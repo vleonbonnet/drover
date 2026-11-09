@@ -1033,8 +1033,10 @@ It applies only while the session has some, in lists and in its buffer."
     (keymap-set map "C-'" #'drover-dispatch)
     (keymap-set map "<f19>" #'drover-dispatch)
     (keymap-set map "s-'" #'drover-dispatch)
-    ;; A key of an entry keeps its command.
-    (keymap-set map "j" #'drover-dispatch)
+    ;; A key of an entry keeps its command: of a group in a group, of a
+    ;; group included by name, of a hidden group, written otherwise.
+    (dolist (key '("j" "M-RET" "= m" "q" "2" "<tab>" "C-m"))
+      (keymap-set map key #'drover-dispatch))
     (with-temp-buffer
       (use-local-map map)
       (cl-letf (((symbol-function 'transient-setup)
@@ -1060,6 +1062,19 @@ It applies only while the session has some, in lists and in its buffer."
           (use-global-map global))))
     (should-not drover--dispatch-close-keys)
     (should-not (drover--dispatch-close-entries nil))))
+
+(ert-deftest drover-keys-test-menu-keys ()
+  "The keys of a menu's entries are those transient finds in it."
+  (let ((keys (drover--menu-keys 'drover-dispatch))
+        (defined (drover-keys-test-defined-keys 'drover-dispatch)))
+    (should (equal (sort (mapcar #'key-description keys) #'string<)
+                   (sort (mapcar #'car defined) #'string<)))
+    (dolist (entry defined)
+      (should (transient-get-suffix 'drover-dispatch (car entry))))
+    ;; An included group's, a hidden group's, and none of the opening keys.
+    (dolist (key '("= m" "q" "0"))
+      (should (member (key-parse key) keys)))
+    (should-not (member (key-parse "C-'") keys))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-entries ()
   "The prompt's entries open it from anywhere, but from the prompt itself."
