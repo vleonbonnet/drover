@@ -66,6 +66,7 @@
 (require 'drover-core)
 (require 'drover-ui)
 (require 'drover-model)
+(require 'drover-selection)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 24))
@@ -2448,13 +2449,12 @@ a line once it refused or failed."
                             drover-remote-prompt-limit))
     (drover-remote--act name "send" session (list :text (substring-no-properties text)) then else)))
 
-(defun drover-remote--apply-options-there (name session options then)
+(defun drover-remote--apply-options-there (name session options then &optional else)
   "Have the peer NAME apply OPTIONS to SESSION, then call THEN once.
 For the proxy's :apply-options: OPTIONS, explicit and filtered for
 SESSION already, go as the action `options', a model as the peer named
-it, [PROVIDER, ID].  What the owner refused, or applied otherwise, is
-warned about, and THEN called whichever way, as a prompt goes out once
-its options were applied."
+it, [PROVIDER, ID].  ELSE receives a refusal or failure string.  Without
+ELSE, a failure is reported and THEN runs for legacy callers."
   (let* ((agent (plist-get options :agent))
          (model (plist-get options :model))
          (variant (plist-get options :variant))
@@ -2470,9 +2470,10 @@ its options were applied."
       (drover-remote--act name "options" session args
                           (lambda (&rest _) (funcall then))
                           (lambda (message)
-                            (drover-warn "%s did not apply the options: %s; sending the prompt anyway"
-                                         (drover-session-display-title session) message)
-                            (funcall then))))))
+                            (if else (funcall else message)
+                              (drover-warn "%s did not apply the options: %s"
+                                           (drover-session-display-title session) message)
+                              (funcall then)))))))
 
 (defun drover-remote--settable-there (name session)
   "Return which of :agent, :model and :variant the peer NAME can change of SESSION.
@@ -3041,17 +3042,14 @@ all its sessions settled, or failed past its deadline."
 
 (defun drover-remote--apply-options (record args settle)
   "Apply the options ARGS carry to RECORD, this host's, then call SETTLE.
-ARGS hold :agent, :model, (PROVIDER . ID), and :variant.  A model its
-engine cannot run is dropped, and its variant with it, as the prompt
-does.  SETTLE takes t, or nil and a line telling what it runs instead,
+ARGS hold :agent, :model, (PROVIDER . ID), and :variant.  Explicit
+choices are validated against the owner's offerings.  SETTLE takes t,
+or nil and a line telling why a choice could not apply,
 once its backend applied them; nothing shows a window nor asks."
   (let* ((engine (drover-session-engine record))
          (asked (plist-get args :model))
          (model (and asked engine (drover-remote--told-model engine (car asked) (cdr asked))))
          (runs (or (null model) (drover-model-id-for model engine)))
-         (options (list :agent (plist-get args :agent)
-                        :model (and runs model)
-                        :variant (and runs (plist-get args :variant))))
          (settled nil))
     (cl-flet ((settle (ok &optional message)
                 (unless settled
@@ -3062,8 +3060,12 @@ once its backend applied them; nothing shows a window nor asks."
         (condition-case err
             (save-window-excursion
               (drover-quietly
+                (require 'drover-prompt)
                 (drover-backend-call
-                 record :apply-options options
+                 record :apply-options
+                 (drover-prompt-options-for record
+                                            (list :agent (plist-get args :agent) :model model
+                                                  :variant (plist-get args :variant)))
                  (lambda ()
                    (drover-with-reporting "remote options"
                      (let* ((now (and (drover-supports-p record :options)
@@ -3075,7 +3077,8 @@ once its backend applied them; nothing shows a window nor asks."
                         ((and model (drover-model-p current)
                               (not (equal (drover-model-key current) (drover-model-key model))))
                          (settle nil (format "applied, but it runs %s" (drover-model-label current))))
-                        (t (settle t)))))))))
+                        (t (settle t))))))
+                 (lambda (reason) (settle nil reason)))))
           (error (settle nil (drover-error-message err))))))))
 
 (defun drover-remote--on-opts (peer key reply)
@@ -5675,13 +5678,18 @@ engine's identifier, or why it did not start, within
                         (save-window-excursion
                           (save-current-buffer
                             (drover-quietly
-                              (funcall (drover-backend-property backend :create)
-                                       directory engine
-                                       (list :agent (plist-get args :agent) :model (plist-get args :model)
-                                             :variant (plist-get args :variant) :title (plist-get args :title)
-                                             :defaults defaults :hidden t)
-                                       #'started
-                                       (lambda (why) (drover-with-reporting "remote new" (fail why)))))))
+                              (let* ((resolved (drover-selection-resolve
+                                                engine args
+                                                (drover-engine-resolve engine defaults (plist-get args :agent) nil nil)
+                                                (drover--engine-models engine directory) t))
+                                     (failure (plist-get resolved :failure)))
+                                (if failure (fail failure)
+                                  (funcall (drover-backend-property backend :create)
+                                           directory engine
+                                           (append (plist-get resolved :options)
+                                                   (list :title (plist-get args :title) :defaults defaults :hidden t))
+                                           #'started
+                                           (lambda (why) (drover-with-reporting "remote new" (fail why)))))))))
                       (error (fail (drover-error-message err)))))))
       (setq timer (run-at-time drover-remote-new-timeout nil
                                (lambda () (drover-with-reporting "remote new" (fail "it did not start in time")))))
@@ -6499,8 +6507,8 @@ CALLBACK gets (REPLY ERROR) once."
      :send (lambda (session text token &optional attachments)
              (drover-remote--send-prompt name session text token attachments))
      ;; Options the owner applies, before a prompt.
-     :apply-options (lambda (session options then)
-                      (drover-remote--apply-options-there name session options then))
+     :apply-options (lambda (session options then &optional else)
+                      (drover-remote--apply-options-there name session options then else))
      :settable (lambda (session) (drover-remote--settable-there name session))
      ;; Without asking, as agents act (see `drover-anvil').
      :submit (lambda (session text then else) (drover-remote--submit name session text then else))

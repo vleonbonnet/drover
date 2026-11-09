@@ -1976,10 +1976,9 @@ as `drover-model' describes them: explicit choices (:agent :model
              nothing, else a token handed to :send.
  :apply-options
              Function of a SESSION, explicit OPTIONS filtered for it and
-             THEN, applying OPTIONS to the running SESSION and calling
-             THEN exactly once, whatever happened.  What cannot be
-             applied is reported with `drover-warn', the prompt being
-             sent anyway.
+              THEN and optional ELSE, applying OPTIONS to the running
+              SESSION.  Call THEN once on success, or ELSE with a
+              failure string.  A failed explicit choice prevents send.
  :send       Function of a SESSION, a TEXT and the TOKEN :check returned
              (nil without :check, or for a new session), submitting TEXT
              as a prompt once SESSION is ready.  A failure is reported
@@ -4784,8 +4783,8 @@ the archive is confirmed, is not: it closes, as archiving says."
 (defcustom drover-step-timeout 15
   "Seconds a step of `drover-run-steps' may take before the next one runs.
 Steps are requests to a running session, such as switching its model
-before a prompt is sent; one that takes longer is reported and given
-up, so the prompt still goes out."
+before a prompt is sent.  A timeout fails a strict sequence, or is
+reported and skipped when no failure callback was given."
   :type 'number
   :group 'drover)
 
@@ -4796,37 +4795,37 @@ message is a warning of type `drover', FORMAT-STRING and ARGS as for
 `format-message', the message bounded (see `drover-format-message')."
   (display-warning 'drover (apply #'drover-format-message format-string args) :warning))
 
-(defun drover-run-steps (steps then)
+(defun drover-run-steps (steps then &optional else)
   "Run asynchronous STEPS in order, then call THEN with no argument.
 STEPS is a list of (LABEL . FUNCTION): FUNCTION is called with NEXT, a
 function of no argument it calls once its request settled, whichever
 way.  A step that signals, or that has not called NEXT after
 `drover-step-timeout' seconds, is reported with `drover-warn', naming
 LABEL, and the next step runs; NEXT called late, or twice, does
-nothing.  THEN is called exactly once."
+nothing.  With ELSE, NEXT accepts a failure string, and a failure or
+timeout calls ELSE instead of advancing.  THEN or ELSE runs once."
   (if (null steps)
       (funcall then)
     (let* ((label (caar steps))
            (settled nil)
            (timer nil)
-           (next (lambda ()
+           (next (lambda (&optional failure)
                    (unless settled
                      (setq settled t)
                      (when timer (cancel-timer timer))
-                     (drover-run-steps (cdr steps) then)))))
+                     (if (and failure else) (funcall else failure)
+                       (when failure (drover-warn "%s" failure))
+                       (drover-run-steps (cdr steps) then else))))))
       (setq timer (run-at-time drover-step-timeout nil
                                (lambda ()
                                  (drover-with-reporting "prompt steps"
                                    (unless settled
-                                     (drover-warn "Timed out setting %s; sending the prompt anyway" label)
-                                     (funcall next))))))
+                                     (funcall next (format "Timed out setting %s" label)))))))
       (condition-case err
           (funcall (cdar steps) next)
         (error
          (unless settled
-           (drover-warn "Could not set %s: %s; sending the prompt anyway"
-                        label (drover-error-message err))
-           (funcall next)))))))
+           (funcall next (format "Could not set %s: %s" label (drover-error-message err)))))))))
 
 ;;;; Git branches
 
@@ -5797,13 +5796,13 @@ from anywhere; nil keeps them to prompt buffers and lists."
   :type '(choice (const :tag "None" nil) function)
   :group 'drover)
 
-(defconst drover--default-prompt-actions '(agent model effort directory)
+(defconst drover--default-prompt-actions '(agent model provider effort directory)
   "Prompt actions that fall back on `drover-default-prompt-buffer-function'.")
 
 (defconst drover--backend-prompt-actions '((compact . :compact) (fork . :fork))
   "Prompt actions that, in a list, are backend operations on the session.")
 
-(defconst drover--list-prompt-actions '(agent model effort directory last-answer)
+(defconst drover--list-prompt-actions '(agent model provider effort directory last-answer)
   "Prompt actions that, in a list, apply to the buffer of the session at point.
 The others edit or read what the user sees in a prompt buffer, the input
 or the text at point, and so apply only there.")

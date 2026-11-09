@@ -900,6 +900,19 @@ supports; a model without effort levels runs none."
        supported
        (seq-some (lambda (layer) (alist-get 'maxEffortLevel (cdr layer))) layers)))))
 
+(defun drover-claude-code--provider-name (layers)
+  "Return the serving provider named by the environment and settings LAYERS.
+A custom endpoint tells no provider identity, so returns nil."
+  (cl-flet ((value (name)
+              (or (drover-getenv name)
+                  (seq-some (lambda (layer) (map-nested-elt (cdr layer) (list 'env (intern name)))) layers))))
+    (cond
+     ((member (value "CLAUDE_CODE_USE_BEDROCK") '("1" "true")) "Amazon Bedrock")
+     ((member (value "CLAUDE_CODE_USE_VERTEX") '("1" "true")) "Google Vertex AI")
+     ((member (value "CLAUDE_CODE_USE_FOUNDRY") '("1" "true")) "Azure AI Foundry")
+     ((value "ANTHROPIC_BASE_URL") nil)
+     (t "Anthropic"))))
+
 (defun drover-claude-code-model (id layers catalog)
   "Return the `drover-model' of Claude Code model ID.
 CATALOG names it and offers its effort levels as variants (see
@@ -911,7 +924,7 @@ whatever model it names, an alias too."
   (let* ((base (drover-claude-code--base-id id))
          (entry (drover-claude-code--catalog-model catalog base)))
     (drover-model-create
-     :provider-name "Anthropic"
+     :provider-name (drover-claude-code--provider-name layers)
      :id id
      :name (when-let* ((name (alist-get 'name entry)))
              (concat name (substring id (length base))))

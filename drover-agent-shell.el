@@ -568,14 +568,12 @@ The backend's :submit."
 ;;;; Options of running shells
 
 (defun drover-agent-shell--step-failure (buffer label next)
-  "Return an ACP failure handler warning that BUFFER refused LABEL.
-The handler then calls NEXT, so the prompt is sent anyway."
+  "Return an ACP failure handler passing BUFFER's refusal of LABEL to NEXT."
   (lambda (acp-error &rest _)
     (drover-with-reporting "agent-shell options"
-      (drover-warn "%s refused %s: %s; sending the prompt anyway"
-                   (buffer-name buffer) label
-                   (or (and (consp acp-error) (map-elt acp-error 'message)) acp-error))
-      (funcall next))))
+      (funcall next (drover-format-message "%s refused %s: %s"
+                                           (buffer-name buffer) label
+                                           (or (and (consp acp-error) (map-elt acp-error 'message)) acp-error))))))
 
 (defun drover-agent-shell--option-steps (buffer engine agent model-id model effort-variant variant)
   "Return the steps applying a prompt's choices to the shell of BUFFER.
@@ -605,9 +603,8 @@ the thought levels the model switch before it brought.  See
                              (agent-shell--config-option-set-mode-id
                               :mode-id mode :on-success next
                               :on-failure (drover-agent-shell--step-failure buffer label next))))))
-               (drover-warn "%s takes its agent at session start; keeping its current agent instead of %s"
-                            name agent)
-               nil))
+               (cons "agent" (lambda (next)
+                               (funcall next (format "%s takes agent %s at session start" name agent))))))
            (when model
              (if model-id
                  (let ((label (format "model %s" model-id)))
@@ -617,9 +614,8 @@ the thought levels the model switch before it brought.  See
                              (agent-shell--config-option-set-model-id
                               :model-id model-id :on-success next
                               :on-failure (drover-agent-shell--step-failure buffer label next))))))
-               (drover-warn "%s cannot run %s; keeping its current model"
-                            name (drover-model-label model))
-               nil))
+               (cons "model" (lambda (next)
+                               (funcall next (format "%s cannot run %s" name (drover-model-label model)))))))
            (when candidates
              (let ((label (format "effort %s" effort-variant)))
                (cons label
@@ -629,25 +625,23 @@ the thought levels the model switch before it brought.  See
                                       (drover-agent-shell--thought-level (agent-shell--state) candidates))))
                          (cond
                           ((null target)
-                           (when variant
-                             (drover-warn "%s offers no thought level for %s; keeping its current effort"
-                                          name variant))
-                           (funcall next))
+                           (funcall next (and variant (format "%s offers no thought level for %s" name variant))))
                           ((equal target (map-elt option :current-value)) (funcall next))
                           (t (with-current-buffer buffer
                                (agent-shell--config-option-set-thought-level-id
                                 :thought-level-id target :on-success next
                                 :on-failure (drover-agent-shell--step-failure buffer label next))))))))))))))
 
-(defun drover-agent-shell--apply-options (session options then)
+(defun drover-agent-shell--apply-options (session options then &optional else)
   "Apply explicit OPTIONS to the running shell of SESSION, then call THEN once.
 OPTIONS are filtered for SESSION already.  A shell still starting is
 waited for, as options are set on its ACP session.  An explicit
 OpenCode model also sets its default variant, since OpenCode's ACP
-adapter otherwise picks the first effort it offers."
+adapter otherwise picks the first effort it offers.  ELSE receives a
+failure string instead of THEN running when a switch fails."
   (let ((buffer (drover-session-buffer session)))
     (if (null buffer)
-        (funcall then)
+        (if else (funcall else "The shell is gone") (funcall then))
       (let* ((engine (drover-session-engine session))
              (agent (let ((agent (plist-get options :agent)))
                       (and agent (not (string-empty-p agent)) agent)))
@@ -662,9 +656,9 @@ adapter otherwise picks the first effort it offers."
             (funcall then)
           (drover-agent-shell--when-initialized
            buffer
-           (lambda () (drover-run-steps steps then))
+           (lambda () (drover-run-steps steps then else))
            ;; :send reports a shell that will not start.
-           (lambda (_reason) (funcall then))))))))
+           (lambda (reason) (if else (funcall else reason) (funcall then)))))))))
 
 (defun drover-agent-shell--split-model-id (engine value)
   "Return (PROVIDER . ID) of model VALUE of a shell of ENGINE.
@@ -831,7 +825,7 @@ Each is registered live: what it answers is remembered.")
 
 (defconst drover-agent-shell--model-events
   '(init-session init-model init-config-options config-option-update
-    session-selected session-restored)
+                 session-selected session-restored)
   "Events after which a shell may offer other models or thought levels.
 Its session, new or loaded, brings the agent's models; its options, set
 at start or changed by the agent, the thought levels of its model.")

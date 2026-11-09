@@ -1333,13 +1333,13 @@ message when the session cannot be opened, or when FUNCTION signals."
     (error (funcall else (drover-error-message err)))))
 
 (defun drover-opencode--switch-failure (buffer label next)
-  "Return a switch's failure handler reporting LABEL of BUFFER, then calling NEXT.
-The prompt still goes out.  The handler takes an `opencode-error', or
+  "Return a switch's failure handler passing LABEL of BUFFER to NEXT.
+The handler takes an `opencode-error', or
 opencode.el's message for an agent the session cannot run."
   (lambda (error)
-    (drover-warn "%s refused %s (%s); sending the prompt anyway"
-                 (buffer-name buffer) label (opencode-error-describe error))
-    (funcall next)))
+    (drover-with-reporting "OpenCode options"
+      (funcall next (format "%s refused %s (%s)"
+                            (buffer-name buffer) label (opencode-error-describe error))))))
 
 (defun drover-opencode--variant-ref (variant)
   "Return the model reference this session buffer runs, naming VARIANT, or nil."
@@ -1359,7 +1359,7 @@ service applies every switch to the turns that follow."
                 (lambda (next)
                   (if (buffer-live-p buffer)
                       (with-current-buffer buffer (funcall function next))
-                    (funcall next)))))
+                    (funcall next "The session buffer is gone")))))
       (delq nil
             (list
              (when agent
@@ -1381,9 +1381,8 @@ service applies every switch to the turns that follow."
                               (opencode-switch-model
                                ref :then next
                                :else (drover-opencode--switch-failure buffer label next))
-                            (drover-warn "%s names no model to run variant %s on; keeping its default"
-                                         (buffer-name buffer) variant)
-                            (funcall next))))))))))))
+                            (funcall next (format "%s names no model to run variant %s on"
+                                                  (buffer-name buffer) variant)))))))))))))
 
 (defun drover-opencode--switch-target (buffer agent model variant)
   "Return what the session of BUFFER runs once AGENT, MODEL and VARIANT applied.
@@ -1423,14 +1422,15 @@ checked by nothing.  The backend's :check."
                                                (plist-get options :model)
                                                (plist-get options :variant)))))))
 
-(defun drover-opencode--apply-options (session options then)
+(defun drover-opencode--apply-options (session options then &optional else)
   "Apply the explicit OPTIONS to the running SESSION, then call THEN.
 OPTIONS are already filtered for SESSION.  Each option is a request to
 the service, chained by `drover-opencode--option-steps': the agent
 first, keeping the current model and variant unless it pins its own or
 OPTIONS name one, then a lone variant on the model the session runs.
-THEN runs once they all settled, whatever happened.  The backend's
-:apply-options."
+THEN runs once they succeed; ELSE receives a failure string when a
+step fails.  Without ELSE, failures are reported and skipped.
+The backend's :apply-options."
   (let ((agent (plist-get options :agent))
         (model (plist-get options :model))
         (variant (plist-get options :variant))
@@ -1441,11 +1441,11 @@ THEN runs once they all settled, whatever happened.  The backend's
        session
        (lambda ()
          (drover-run-steps (drover-opencode--option-steps (current-buffer) agent model variant)
-                           then))
+                           then else))
        (lambda (message)
-         (drover-warn "Could not open %s: %s; sending the prompt anyway"
-                      (drover-session-display-title session) message)
-         (funcall then))))))
+         (if else (funcall else message)
+           (drover-warn "Could not open %s: %s" (drover-session-display-title session) message)
+           (funcall then)))))))
 
 (defun drover-opencode--restore-refused-p (error)
   "Return non-nil when ERROR, of a send, is the refusal to restore its session.

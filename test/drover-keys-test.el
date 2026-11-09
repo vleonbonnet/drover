@@ -63,7 +63,7 @@ draw; or `prompt', a buffer with every prompt action.  ID may be nil."
        ('view (setq-local drover-view-p t))
        ('list (drover-session-keys-mode))
        ('prompt (dolist (action '(send schedule clear attach slash mention revert revert-cancel copy-block
-                                       agent model effort directory compact fork last-answer open-link))
+                                       agent model provider effort directory compact fork last-answer open-link))
                   (drover-prompt-define action (drover-keys-test-action action)))))
      ,@body))
 
@@ -731,7 +731,7 @@ which lists show too."
                         (drover-prompt-mention . mention) (drover-prompt-revert . revert)
                         (drover-prompt-revert-cancel . revert-cancel)
                         (drover-prompt-copy-block . copy-block) (drover-prompt-agent . agent)
-                        (drover-prompt-model . model) (drover-prompt-effort . effort)
+                        (drover-prompt-model . model) (drover-prompt-provider . provider) (drover-prompt-effort . effort)
                         (drover-prompt-directory . directory)
                         (drover-prompt-last-answer . last-answer)
                         (drover-prompt-open-link . open-link)
@@ -750,7 +750,7 @@ which lists show too."
   '(("Sessions" ("j" "B" "b" "l" "L" "p" "S" "$"))
     ("Prompt" ("\"" "N" "E" "'" "#"))
     ("Task" ("n" "F" "I" "&" "W"))
-    ("Prompt runs" ("a" "m" "e" "d"))
+    ("Prompt runs" ("a" "m" "P" "e" "d"))
     ("Input" ("RET"))
     ("Conversation" ("C" "f" "H" "."))
     ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G")))
@@ -880,7 +880,7 @@ the prefix of the other's, which would hide it."
                    ("I" . drover-task-link-session) ("W" . drover-task-sweep) ("&" . drover-fanout) ("G" . drover-goal) ("'" . drover-prompt-toggle) ("l" . drover-list)
                    ("L" . drover-list-side) ("p" . drover-select-project) ("S" . drover-search)
                    ("a" . drover-prompt-agent)
-                   ("m" . drover-prompt-model) ("e" . drover-prompt-effort)
+                   ("m" . drover-prompt-model) ("P" . drover-prompt-provider) ("e" . drover-prompt-effort)
                    ("d" . drover-prompt-directory) ("C" . drover-compact) ("f" . drover-fork)
                    ("." . drover-prompt-last-answer) ("O" . drover-prompt-open-link)
                    ("RET" . drover-prompt-send) ("S-<return>" . drover-prompt-schedule)
@@ -915,7 +915,7 @@ the prefix of the other's, which would hide it."
   (map-keymap (lambda (event command)
                 (unless (eq command 'drover-view)
                   (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch
-                                                                   (key-description (vector event))))
+                                                                    (key-description (vector event))))
                                          :command)
                               command))))
               drover-session-map))
@@ -930,7 +930,7 @@ agent, model, effort and directory of the next prompt are among them."
       (setq drover-default-prompt-buffer-function
             (eval (car (get 'drover-default-prompt-buffer-function 'standard-value)) t))
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "e" "d"))))))
+                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d"))))))
 
 (defun drover-keys-test-description (function)
   "Return what description FUNCTION gives in `drover-dispatch' set up here."
@@ -1222,7 +1222,7 @@ Drover's view settings apply only while one of drover's views shows."
   (drover-keys-test-with (list (drover-test-session "s" :status 'working))
     (drover-keys-test-in 'prompt "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "e" "d"
+                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d"
                        "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T" "C" "f" "." "O"
                        "o" "K" "+" "g" "r" "x" "z" "G"))))))
 
@@ -1273,7 +1273,7 @@ shows, so they apply only there."
             (setq drover-default-prompt-buffer-function (lambda () default))
             (with-temp-buffer
               (should (equal (drover-keys-test-apt 'drover-dispatch)
-                             '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "e" "d")))
+                             '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d")))
               (call-interactively #'drover-prompt-model)
               (should (equal drover-keys-test-actions (list (list 'model default)))))
             ;; Deciding what applies never calls the function, which may
@@ -1333,7 +1333,7 @@ go after p, more prompt commands after O."
         (transient-append-suffix 'drover-dispatch "'" '("%" "Percent" ignore))
         (transient-append-suffix 'drover-dispatch "b" '("&" "Pick" ignore))
         (transient-append-suffix 'drover-dispatch "p" '("!" "Lists" ignore))
-        (transient-append-suffix 'drover-dispatch "O" '("P" "Other" ignore))
+        (transient-append-suffix 'drover-dispatch "O" '("J" "Other" ignore))
         ;; In a prompt buffer, where every prompt key shows.
         (drover-keys-test-with nil
           (drover-keys-test-in 'prompt nil
@@ -1348,8 +1348,8 @@ go after p, more prompt commands after O."
                 (should (follows "'" "%"))
                 (should (follows "%" "#"))
                 (should (follows "p" "!"))
-                (should (follows "O" "P")))))))
-    (dolist (key '("%" "&" "!" "P"))
+                (should (follows "O" "J")))))))
+    (dolist (key '("%" "&" "!" "J"))
       (transient-remove-suffix 'drover-dispatch key))))
 
 (ert-deftest drover-keys-test-dispatch-scope-computed-once ()
@@ -1661,7 +1661,7 @@ The columns, the sort, the grouping and follow mode do not scope a search."
           (should-not (seq-find (lambda (line) (string-search "Column" line)) lines)))))))
 
 (defconst drover-keys-test-menu-heights
-  '((view 160 16) (view 240 13) (prompt-list 160 17) (prompt-list 240 13)
+  '((view 160 16) (view 240 13) (prompt-list 160 18) (prompt-list 240 14)
     (elsewhere 160 10) (elsewhere 240 10) (view-menu 160 8) (search 160 7))
   "The most lines each menu takes, where, as wide: (WHERE WIDTH LINES).
 In one of drover's lists, in a prompt buffer with a list in sight, in

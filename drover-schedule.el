@@ -202,6 +202,8 @@ The file is read again then, and its timers armed anew."
   (and (listp options)
        (or (null (plist-get options :agent)) (stringp (plist-get options :agent)))
        (or (null (plist-get options :model)) (drover-model-p (plist-get options :model)))
+       (or (null (plist-get options :provider)) (stringp (plist-get options :provider)))
+       (memq (plist-get options :selection) '(nil t))
        (symbolp (plist-get options :variant))))
 
 (defun drover-schedule-job-valid-p (job)
@@ -249,8 +251,8 @@ its backend."
                                    (if-let* (((listp value))
                                              (stored (plist-get value :model)))
                                        (let ((model (drover-schedule--model-in stored)))
-                                         (list :agent (plist-get value :agent) :model model
-                                               :variant (and model (plist-get value :variant))))
+                                         (plist-put (plist-put (copy-sequence value) :model model)
+                                                    :variant (and model (plist-get value :variant))))
                                      value))))
             (_ (setq copy (plist-put copy key value))))))
       (dolist (key '(:error :sent-at))
@@ -984,10 +986,11 @@ instead.  A prompt with attachments is refused: the queue keeps text."
          (chosen (drover-schedule-read-when
                   (and (memq (drover-session-status session) '(working retrying)) t)))
          (text (if content (plist-get content :text) (drover-schedule-read-prompt)))
-         (options (drover-prompt-options-for session (drover-prompt-explicit-options prompt) t)))
+         (options (drover-prompt-explicit-options prompt)))
+    (drover-prompt-options-for session options t)
     (drover-schedule-enqueue
      (append target (list :options (and (seq-some (lambda (key) (plist-get options key))
-                                                  '(:agent :model :variant))
+                                                  '(:agent :model :provider :variant))
                                         options)))
      chosen text)
     ;; A blank region read instead leaves the rest of the prompt alone.
@@ -1174,7 +1177,10 @@ cancelled or timed out meanwhile sends nothing."
            (drover-schedule--guard job run 'interrupted
              (if (not (buffer-live-p buffer))
                  (drover-schedule--finish job run 'failed "Session buffer was closed before submission")
-               (drover-schedule--submit job run)))))
+               (drover-schedule--submit job run))))
+         (lambda (reason)
+           (drover-schedule--guard job run 'failed
+             (drover-schedule--finish job run 'failed reason))))
       (drover-schedule--submit job run))))
 
 (defun drover-schedule--poll (job run)

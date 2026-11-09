@@ -618,6 +618,11 @@ lists show."
   (interactive)
   (drover-prompt-run 'effort))
 
+(defun drover-prompt-provider ()
+  "Choose the serving provider, through the prompt action `provider'."
+  (interactive)
+  (drover-prompt-run 'provider))
+
 (defun drover-prompt-directory ()
   "Move the session to another directory, through the prompt action `directory'."
   (interactive)
@@ -2188,6 +2193,10 @@ The value is that of `drover--option'."
                                      (drover--menu-model-name (plist-get options :model)))
                                 (plist-get options :model-explicit-p)))
         ('effort (drover--option (plist-get options :variant) (plist-get options :variant-explicit-p)))
+        ('provider (drover--option (or (plist-get options :provider)
+                                       (and (plist-get options :model)
+                                            (drover-model-provider-name (plist-get options :model))))
+                                   (plist-get options :provider-explicit-p)))
         ('directory (drover--option (when-let* ((directory (plist-get options :directory)))
                                       (if-let* ((host (plist-get options :host-label)))
                                           (format "%s: %s" host (directory-file-name directory))
@@ -2523,6 +2532,8 @@ session chosen for it, else to one asked for, unshown."
                          :inapt-if-not (lambda () (drover-dispatch-prompt-p 'agent)))
                         ("m" "Model" drover-prompt-model :class drover--prompt-option :action model
                          :inapt-if-not (lambda () (drover-dispatch-prompt-p 'model)))
+                        ("P" "Provider" drover-prompt-provider :class drover--prompt-option :action provider
+                         :inapt-if-not (lambda () (drover-dispatch-prompt-p 'provider)))
                         ("e" "Effort" drover-prompt-effort :class drover--prompt-option :action effort
                          :inapt-if-not (lambda () (drover-dispatch-prompt-p 'effort)))
                         ("d" "Directory" drover-prompt-directory :class drover--prompt-option :action directory

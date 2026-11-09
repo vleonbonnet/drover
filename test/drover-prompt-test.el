@@ -237,7 +237,7 @@ names of the latest call, and `metadata' its completion metadata."
         (should (equal (sort (mapcar (lambda (entry) (symbol-name (car entry))) drover-prompt-actions)
                              #'string<)
                        '("agent" "attach" "clear" "copy-block" "directory" "effort" "model"
-                         "open-link" "schedule" "send")))
+                         "open-link" "provider" "schedule" "send")))
         (should (eq (alist-get 'send drover-prompt-actions) #'drover-prompt-submit))
         (should (eq (alist-get 'clear drover-prompt-actions) #'drover-prompt-erase))
         (should (eq (alist-get 'effort drover-prompt-actions) #'drover-prompt-choose-effort))
@@ -260,6 +260,7 @@ names of the latest call, and `metadata' its completion metadata."
               #'drover-prompt-options-menu))
   (pcase-dolist (`(,key . ,command) '(("a" . drover-prompt-choose-agent)
                                       ("m" . drover-prompt-choose-model)
+                                      ("P" . drover-prompt-choose-provider)
                                       ("e" . drover-prompt-choose-effort)
                                       ("d" . drover-prompt-choose-directory)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-prompt-options-menu key)) :command)
@@ -271,7 +272,7 @@ names of the latest call, and `metadata' its completion metadata."
                        map))
       (let ((header (substring-no-properties (drover-prompt--header-line))))
         (should (string-prefix-p "C-' RET send  C-' S-<return> schedule  C-' i attach  |  C-' d cwd" header))
-        (should (string-match-p "  a agent  m model  e effort\\'" header)))
+        (should (string-match-p "  a agent  m model  P provider  e effort\\'" header)))
       ;; A buffer not scheduling names no key for it.
       (drover-prompt-define 'schedule nil)
       (should-not (string-match-p "schedule" (drover-prompt--header-line)))
@@ -490,8 +491,8 @@ Each is (DIRECTORY CALLBACK)."
             drover-prompt-picked-agent nil
             drover-prompt-directory-picked-p t)
       (let ((info (drover-prompt--minibuffer-info (current-buffer))))
-        (should (string-suffix-p " [agent: plan] [model: Anthropic: opus/high]" info))
-        (should (eq (get-text-property (string-match "Anthropic: opus" info) 'face info)
+        (should (string-suffix-p " [agent: plan] [model: opus/high] [provider: Anthropic]" info))
+        (should (eq (get-text-property (string-match "opus" info) 'face info)
                     'opencode-setting-chosen))
         (should (eq (get-text-property (string-match "plan" info) 'face info)
                     'opencode-setting-inherited))
@@ -660,17 +661,16 @@ and effort its backend tells first, an effort by default dimmed."
       (with-current-buffer prompt
         (setq drover-prompt-picked-model fable
               drover-prompt-picked-variant 'low))
-      (should (equal (drover-prompt--entry-options terminal terminal-options prompt)
-                     (list :model fable :model-explicit-p t :variant 'xhigh)))
+      (should (plist-get (drover-prompt--entry-options terminal terminal-options prompt) :failure))
       (should (equal (drover-prompt--entry-options new nil prompt)
                      (list :model fable :model-explicit-p t :variant 'low :variant-explicit-p t)))
-      ;; A model the session cannot run drops both choices.
-      (should (equal (drover-prompt--entry-options shell shell-options prompt) shell-options))
+      ;; A destination cannot silently drop explicit choices.
+      (should (plist-get (drover-prompt--entry-options shell shell-options prompt) :failure))
       ;; A session takes a lone variant.
       (with-current-buffer prompt
         (setq drover-prompt-picked-model nil))
       (should (equal (drover-prompt--entry-options shell shell-options prompt)
-                     (list :model gpt :variant 'low :variant-explicit-p t)))
+                     (list :model gpt :model-explicit-p nil :variant 'low :variant-explicit-p t)))
       ;; A chosen model runs its default variant where the engine resets
       ;; it, and keeps the session's elsewhere.
       (with-current-buffer prompt
@@ -710,7 +710,7 @@ and effort its backend tells first, an effort by default dimmed."
       (should (equal drover-prompt-picked-agent "review")))))
 
 (ert-deftest drover-prompt-test-choose-model-and-effort ()
-  "A chosen model drops the variant chosen before; the effort is of the model run."
+  "Model choices preserve effort and only offer models supporting that effort."
   (drover-prompt-test-with
     (let ((high (drover-test-model "high" :variants '((low) (high)) :default-variant 'high))
           (bare (drover-test-model "bare")))
@@ -719,11 +719,12 @@ and effort its backend tells first, an effort by default dimmed."
       (with-current-buffer (drover-prompt-buffer t)
         (setq drover-prompt-picked-variant 'low)
         (drover-prompt-test-choosing (lambda (names)
-                                       (should (equal names '("Default" "high" "bare")))
-                                       "bare")
+                                       (should (equal names '("Default" "high")))
+                                       "high")
           (drover-prompt-choose-model))
-        (should (eq drover-prompt-picked-model bare))
-        (should-not drover-prompt-picked-variant)
+        (should (equal (drover-model-id drover-prompt-picked-model) (drover-model-id high)))
+        (should (eq drover-prompt-picked-variant 'low))
+        (setq drover-prompt-picked-model bare drover-prompt-picked-variant nil)
         (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (ert-fail "No variant"))))
           (drover-prompt-test-with-messages
             (drover-prompt-choose-effort)
@@ -732,7 +733,7 @@ and effort its backend tells first, an effort by default dimmed."
             (should (equal messages '("Choose a model first" "No variants for bare")))))
         (setq drover-prompt-picked-model high)
         (drover-prompt-test-choosing (lambda (names)
-                                       (should (equal names '("Default (high)" "low" "high")))
+                                       (should (equal names '("Default" "low" "high")))
                                        "low")
           (drover-prompt-choose-effort))
         (should (eq drover-prompt-picked-variant 'low))))))
@@ -750,7 +751,7 @@ and effort its backend tells first, an effort by default dimmed."
           (drover-prompt-test-choosing (lambda (_names) "bare")
             (with-temp-buffer
               (drover-prompt-choose-model))))
-        (should (eq drover-prompt-picked-model bare))
+        (should (equal (drover-model-id drover-prompt-picked-model) (drover-model-id bare)))
         (should (member (cons (current-buffer) nil) forced))
         (should-not (rassq t forced))))))
 
@@ -1444,7 +1445,7 @@ of a frame stays."
                      (list :agent "plan" :model model :variant 'high))))))
 
 (ert-deftest drover-prompt-test-options-for ()
-  "A model the session's engine cannot run goes with its variant, with a warning when asked."
+  "An incompatible model is refused rather than silently dropping the choice."
   (drover-prompt-test-with
     (let* ((runs (drover-test-model "runs"))
            (other (drover-test-model "other" :engines '(other)))
@@ -1453,21 +1454,21 @@ of a frame stays."
       (drover-prompt-test-with-warnings
         (should (equal (drover-prompt-options-for session (list :agent "plan" :model runs :variant 'high))
                        (list :agent "plan" :model runs :variant 'high)))
-        (should (equal (drover-prompt-options-for session (list :agent "plan" :model other :variant 'high))
-                       (list :agent "plan" :model nil :variant nil)))
+        (should-error (drover-prompt-options-for session (list :agent "plan" :model other :variant 'high))
+                      :type 'user-error)
         (should-not warnings)
-        (should (equal (drover-prompt-options-for session (list :model other :variant 'high) t)
-                       (list :agent nil :model nil :variant nil)))
-        (should (equal warnings '("other cannot be applied to Session a; keeping its current model")))
+        (should-error (drover-prompt-options-for session (list :model other :variant 'high) t)
+                      :type 'user-error)
+        (should-not warnings)
         ;; OpenCode takes provider-qualified models only.
-        (should-not (plist-get (drover-prompt-options-for (drover-test-session "o" :engine 'opencode)
-                                                          (list :model qualified))
-                               :model))
+        (should-error (drover-prompt-options-for (drover-test-session "o" :engine 'opencode)
+                                                 (list :model qualified)) :type 'user-error)
+        (setq drover-test-options (list (list "a" :model runs)))
         (should (equal (drover-prompt-options-for session (list :variant 'low))
                        (list :agent nil :model nil :variant 'low)))))))
 
 (ert-deftest drover-prompt-test-apply-options ()
-  "Options are filtered, then given to the backend, which calls THEN; THEN runs once whatever happens."
+  "Only successfully applied choices reach THEN, at most once."
   (drover-prompt-test-with
     (let ((other (drover-test-model "other" :engines '(other)))
           (session (drover-test-session "a" :engine 'fake))
@@ -1475,27 +1476,26 @@ of a frame stays."
       (drover-prompt-test-with-warnings
         (drover-prompt-apply-options session (list :agent "plan" :model other :variant 'high)
                                      (lambda () (cl-incf ran)))
-        (should (= ran 1))
-        (should (equal drover-test-calls '((:apply-options "a" (:agent "plan" :model nil :variant nil)))))
+        (should (= ran 0))
+        (should-not drover-test-calls)
         (should (equal (length warnings) 1))
         ;; Without a session, or without the operation, THEN runs at once.
         (drover-prompt-apply-options nil (list :agent "plan" :model other) (lambda () (cl-incf ran)))
-        (should (= ran 2))
+        (should (= ran 1))
         (drover-test-register-simple 'simple nil)
         (drover-prompt-apply-options (drover-session-create :backend 'simple :id "s") '(:agent "plan")
                                      (lambda () (cl-incf ran)))
-        (should (= ran 3))
+        (should (= ran 1))
         ;; A backend failing after calling THEN does not call it twice.
         (drover-test-register-simple 'broken nil
-                                     :apply-options (lambda (_session _options then)
+                                     :apply-options (lambda (_session _options then &optional _else)
                                                       (funcall then)
                                                       (error "Broken")))
         (setq warnings nil)
         (drover-prompt-apply-options (drover-session-create :backend 'broken :id "b" :title "B")
                                      '(:agent "plan") (lambda () (cl-incf ran)))
-        (should (= ran 4))
-        (should (equal warnings
-                       '("Could not apply the options to B: Broken; sending the prompt anyway")))))))
+        (should (= ran 2))
+        (should-not warnings)))))
 
 ;;;; The target picker
 
@@ -1610,9 +1610,9 @@ of a frame stays."
         (with-current-buffer (drover-prompt-buffer t)
           (setq drover-prompt-picked-model other))
         (drover-prompt-read-target "To: ")
-        (should (equal offered '("session a" "[New Other session…]")))
-        (drover-prompt-read-target "To: " :existing-only t)
-        (should (equal offered '("session a")))))))
+        (should (equal offered '("[New Other session…]")))
+        (should-error (drover-prompt-read-target "To: " :existing-only t) :type 'user-error)
+        (should-not offered)))))
 
 (ert-deftest drover-prompt-test-other-hosts ()
   "Other hosts' new sessions follow this host's; a host chosen with the directory shows its agents, models and defaults, and starts there."
@@ -1664,7 +1664,7 @@ of a frame stays."
         (drover-prompt-test-choosing (lambda (names) (seq-find (lambda (name) (string-search "Deep" name)) names))
           (drover-prompt-choose-model)
           (should (equal offered '("Default (Fast)" "Fast" "Deep"))))
-        (should (eq drover-prompt-picked-model deep))
+        (should (equal (drover-model-id drover-prompt-picked-model) (drover-model-id deep)))
         ;; Two agents: the other one, without asking.
         (drover-prompt-choose-agent)
         (should (equal drover-prompt-picked-agent "plan"))
@@ -1815,7 +1815,7 @@ of a frame stays."
         (insert "session draft")
         (setq-local drover-session-at-point-function (lambda () session)))
       (setf (plist-get (alist-get 'fake drover--backends) :apply-options)
-            (lambda (target options then)
+            (lambda (target options then &optional _else)
               (push (list :apply-options (drover-session-id target) options) drover-test-calls)
               (setq pending then)))
       (with-current-buffer (drover-prompt-test--buffer-of "a")
@@ -1870,10 +1870,10 @@ of a frame stays."
                        (:send "a" "```sh\nls\n```" fake-token)))))))
 
 (ert-deftest drover-prompt-test-send-whole ()
-  "The whole prompt goes, and the prompt with its window, the options filtered for the session."
+  "The whole prompt goes with its explicit options, closing its window."
   (drover-prompt-test-with
     (let ((prompt (drover-prompt-test--prompt "  all of it\n"))
-          (other (drover-test-model "other" :engines '(other))))
+          (other (drover-test-model "other")))
       (drover-prompt-test--session "a")
       (with-current-buffer prompt
         (setq drover-prompt-picked-model other
@@ -1887,13 +1887,13 @@ of a frame stays."
             (drover-prompt-test-choosing (lambda (_) "session a")
               (with-current-buffer prompt
                 (drover-prompt-submit)))
-            (should (equal warnings '("other cannot be applied to Session a; keeping its current model"))))
+            (should-not warnings))
           (should-not (buffer-live-p prompt))
           (should-not (window-live-p window))))
       (should (equal (car kill-ring) "all of it"))
       (should (equal (reverse drover-test-calls)
-                     '((:check "a" "all of it" (:agent "plan" :model nil :variant nil))
-                       (:apply-options "a" (:agent "plan" :model nil :variant nil))
+                     `((:check "a" "all of it" (:agent "plan" :model ,other :variant high))
+                       (:apply-options "a" (:agent "plan" :model ,other :variant high))
                        (:send "a" "all of it" fake-token)))))))
 
 (ert-deftest drover-prompt-test-send-cancelled ()
@@ -1943,12 +1943,12 @@ PROPERTIES are more of its properties.  Return the buffer."
     (let* ((pending nil)
            (buffer (drover-prompt-test--register
                     'slow "Slow"
-                    :apply-options (lambda (_session _options then) (setq pending then))
+                    :apply-options (lambda (_session _options then &optional _else) (setq pending then))
                     :send (lambda (&rest _) (ert-fail "Sent to a dead session")))))
       (with-current-buffer (drover-prompt-test--prompt "text")
         (drover-prompt-test-choosing (lambda (_) "Slow")
           (drover-prompt-submit)))
-      (should-not (drover-prompt-buffer))
+      (should (drover-prompt-buffer))
       (kill-buffer buffer)
       (drover-prompt-test-with-warnings
         (funcall pending)
@@ -1963,7 +1963,7 @@ PROPERTIES are more of its properties.  Return the buffer."
         (drover-prompt-test-choosing (lambda (_) "Broken")
           (drover-prompt-submit)))
       (should (equal warnings '("Broken did not take the prompt: Gone; it is in the kill ring"))))
-    (should-not (drover-prompt-buffer))))
+    (should (drover-prompt-buffer))))
 
 (ert-deftest drover-prompt-test-sent-functions ()
   "The prompt's send tells `drover-prompt-sent-functions' once its command ended.
@@ -2119,7 +2119,7 @@ user told why on one line."
                        (:send "new-0" "Do it" nil)))))))
 
 (ert-deftest drover-prompt-test-send-new-refused ()
-  "A new session refused at once keeps the prompt; refused later, the prompt went already."
+  "A new session refused synchronously or asynchronously keeps the prompt."
   (drover-prompt-test-with
     (let ((drover-prompt-new-targets '((:backend fake :engine fake :label "Fake session")))
           (prompt (drover-prompt-test--prompt "Do it")))
@@ -2128,7 +2128,7 @@ user told why on one line."
         (with-current-buffer prompt
           (drover-prompt-test-choosing (lambda (_) "[New Fake session…]")
             (drover-prompt-submit)))
-        (should (equal warnings '("No new Fake session: no service; the prompt is in the kill ring"))))
+        (should (equal warnings '("No new Fake session: no service; the prompt stays"))))
       (should (equal (with-current-buffer prompt (buffer-string)) "Do it"))
       (let ((else nil))
         (drover-test-register-simple 'later nil
@@ -2139,11 +2139,11 @@ user told why on one line."
         (with-current-buffer prompt
           (drover-prompt-test-choosing (lambda (_) "[New Later session…]")
             (drover-prompt-submit)))
-        (should-not (buffer-live-p prompt))
+        (should (buffer-live-p prompt))
         (drover-prompt-test-with-warnings
           (funcall else "timed out")
           (should (equal warnings
-                         '("No new Later session: timed out; the prompt is in the kill ring"))))))))
+                         '("No new Later session: timed out; the prompt stays"))))))))
 
 (ert-deftest drover-prompt-test-send-new-without-send ()
   "A new session whose backend takes no prompt is reported."
