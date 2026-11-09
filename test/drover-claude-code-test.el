@@ -676,6 +676,29 @@ serves and a model without effort.")
       (drover-test-write record "[1, 2]")
       (should-not (drover-claude-code-pid-session-id 12345)))))
 
+(ert-deftest drover-claude-code-test-pid-session-status ()
+  "A live record is cached only until its file changes, including removal."
+  (drover-test-with-homes
+   (let* ((id "11111111-1111-4111-8111-111111111111")
+          (file (expand-file-name "12345.json" (drover-claude-code-sessions-directory)))
+          (read (symbol-function 'drover-read-json))
+          (reads 0))
+     (cl-letf (((symbol-function 'drover-read-json)
+                (lambda (path) (cl-incf reads) (funcall read path))))
+       (drover-test-write file (json-serialize `((pid . 12345) (sessionId . ,id) (status . "shell"))))
+       (set-file-times file (seconds-to-time 1000))
+       (should (equal (alist-get 'status (drover-claude-code-pid-session 12345)) "shell"))
+       (should (equal (drover-claude-code-pid-session-id 12345) id))
+       (should (= reads 1))
+       (drover-test-write file (json-serialize `((pid . 12345) (sessionId . ,id) (status . "idle"))))
+       (set-file-times file (seconds-to-time 1001))
+       (should (equal (alist-get 'status (drover-claude-code-pid-session 12345)) "idle"))
+       (should (= reads 2))
+       (delete-file file)
+       (should-not (drover-claude-code-pid-session 12345))
+       (drover-test-write file "{\"pid\":")
+       (should-not (drover-claude-code-pid-session 12345))))))
+
 (ert-deftest drover-claude-code-test-newest-session-id ()
   "The newest transcript of a directory names its last session."
   (drover-test-with-homes

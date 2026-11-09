@@ -40,10 +40,12 @@
 ;; Statuses come from Ghostel's program status, which Claude Code
 ;; reports through OSC 7501 (or OSC 9;4): a `blocked' record anywhere
 ;; waits for the user, then an `error' one fails, else the root record
-;; tells whether the session works, is done or idles.  A turn that ended
-;; while the terminal was in front of the user, or that the user looked
-;; at since, is seen and idles.  vterm and eat terminals have no such
-;; channel and always idle.
+;; tells whether the session works, is done or idles.  The CLI's live
+;; process record also tells work, including a shell still running
+;; after a reply ended, and requests; it is followed even while hidden.
+;; A turn that ended while the terminal was in front of the user, or looked
+;; at since, is seen and idles.  vterm and eat terminals use the process
+;; record alone when it is available.
 ;;
 ;; The prompt starts sessions with the flags its options stand for,
 ;; switches a running session's permission mode with Shift+Tab, reading
@@ -390,15 +392,18 @@ the terminal's process (see `drover-claude-code-pid-session-id'), else
 `drover-claude-code-ide-session-id', so that a session resumed,
 continued or switched within the CLI is followed; nothing is guessed."
   (with-current-buffer (or buffer (current-buffer))
-    (let* ((process (get-buffer-process (current-buffer)))
-           (pid (and (process-live-p process)
-                     ;; A Ghostel terminal's buffer process may stand in for
-                     ;; the program, whose own PID Ghostel keeps.
-                     (or (bound-and-true-p ghostel--pid) (process-id process))))
+    (let* ((pid (drover-claude-code-ide--pid))
            (id (and (integerp pid) (drover-claude-code-pid-session-id pid))))
       (when id
         (setq-local drover-claude-code-ide-session-id id))
       drover-claude-code-ide-session-id)))
+
+(defun drover-claude-code-ide--pid ()
+  "Return the PID of the current terminal's live process, or nil."
+  (let ((process (get-buffer-process (current-buffer))))
+    (when (process-live-p process)
+      ;; Ghostel's buffer process may only stand in for its program.
+      (or (bound-and-true-p ghostel--pid) (process-id process)))))
 
 (defun drover-claude-code-ide-current-session-id (&optional buffer)
   "Return the identifier of the session terminal BUFFER runs, or a guess, or nil.
@@ -501,12 +506,37 @@ conversation at once; otherwise it is looked for as it starts (see
             (unless (buffer-local-value 'drover-claude-code-ide-session-id buffer)
               (drover-claude-code-ide--capture-session-id buffer working-dir)))
           (drover-backend-changed 'claude-code-ide)
+          (drover-claude-code-ide--watch-status)
           (drover-models-changed 'claude-code))
       (error (drover-warn "Cannot follow the new Claude terminal %s: %s"
                           buffer-name (drover-error-message err))))
     result))
 
 ;;;; Statuses
+
+(defcustom drover-claude-code-ide-status-interval 2
+  "Seconds between looks at the live process records of Claude terminals.
+One timer follows all terminals, hidden ones too, reading a record only
+when its file changed.  Nil leaves status tracking to terminal events."
+  :type '(choice (const :tag "Terminal events alone" nil) (number :tag "Seconds"))
+  :group 'drover)
+
+(defvar drover-claude-code-ide--status-timer nil
+  "Timer following the live process records of Claude terminals, or nil.")
+
+(defun drover-claude-code-ide--watch-status ()
+  "Start following live process records, unless already followed."
+  (when (and drover-claude-code-ide-status-interval
+             (not (timerp drover-claude-code-ide--status-timer)))
+    (let ((interval (max 0.1 drover-claude-code-ide-status-interval)))
+      (setq drover-claude-code-ide--status-timer
+            (run-at-time interval interval #'drover-claude-code-ide--poll-status)))))
+
+(defun drover-claude-code-ide--stop-status ()
+  "Stop following live process records."
+  (when (timerp drover-claude-code-ide--status-timer)
+    (cancel-timer drover-claude-code-ide--status-timer))
+  (setq drover-claude-code-ide--status-timer nil))
 
 (defvar-local drover-claude-code-ide--entries nil
   "The program status records this terminal's status followed when last noted.")
@@ -540,6 +570,28 @@ are, else the root record, the program's own.  RECORDS are
       (when-let* ((root (assoc "" records)))
         (list root))))
 
+(defun drover-claude-code-ide--live-entries ()
+  "Return the current terminal's governing records, including its live process.
+Requests take precedence over errors, then work.  Terminal records give
+the details first.  The process adds work and requests OSC does not tell,
+never a completion or its acknowledgment, which remain the terminal's."
+  (let* ((entries (drover-claude-code-ide--governing (drover-claude-code-ide--records)))
+         (terminal-state (drover-claude-code-ide--state-of entries))
+         (record (drover-claude-code-pid-session (drover-claude-code-ide--pid)))
+         (status (or (alist-get 'status record) (alist-get 'state record)))
+         (state (drover-claude-code-run-state status)))
+    (cond ((eq terminal-state 'blocked) entries)
+          ((eq state 'blocked)
+           (list (list "process" :state 'blocked
+                       :msg (or (drover-bound-line (alist-get 'waitingFor record)) "Waiting for input"))))
+          ((eq terminal-state 'error) entries)
+          ((eq state 'working)
+           (if (eq terminal-state 'working)
+               entries
+             (list (list "process" :state 'working
+                         :msg (if (equal status "shell") "Waiting for background shell" "Working")))))
+          (t entries))))
+
 (defun drover-claude-code-ide--state-of (entries)
   "Return the state the governing ENTRIES stand for, a symbol.
 A `blocked' entry wins over an `error' one; without entries, `idle'."
@@ -554,7 +606,7 @@ When the records its status follows changed, the state's start is noted
 when it changed, the time of a turn's activity too (see
 `drover-claude-code-ide--activity'), and the turn is unseen unless SEEN.
 SEEN non-nil marks the state seen whatever changed."
-  (let ((entries (drover-claude-code-ide--governing (drover-claude-code-ide--records))))
+  (let ((entries (drover-claude-code-ide--live-entries)))
     (unless (equal entries drover-claude-code-ide--entries)
       (let ((state (drover-claude-code-ide--state-of entries))
             (before (or drover-claude-code-ide--state 'idle))
@@ -568,6 +620,24 @@ SEEN non-nil marks the state seen whatever changed."
         (setq-local drover-claude-code-ide--seen nil)))
     (when seen
       (setq-local drover-claude-code-ide--seen t))))
+
+(defun drover-claude-code-ide--poll-status ()
+  "Follow live process records, reporting only terminals whose state changed."
+  (drover-with-reporting "Claude process status"
+    (let ((buffers (and drover-claude-code-ide-status-interval
+                        (drover-claude-code-ide--buffers)))
+          (focused (drover-claude-code-ide--focused-buffers)))
+      (unless buffers
+        (drover-claude-code-ide--stop-status))
+      (dolist (entry buffers)
+        (with-current-buffer (car entry)
+          (let ((before (list drover-claude-code-ide--entries drover-claude-code-ide--seen
+                              drover-claude-code-ide-session-id)))
+            (drover-claude-code-ide-live-session-id)
+            (drover-claude-code-ide--note-status (memq (current-buffer) focused))
+            (unless (equal before (list drover-claude-code-ide--entries drover-claude-code-ide--seen
+                                        drover-claude-code-ide-session-id))
+              (drover-backend-changed 'claude-code-ide drover-claude-code-ide--token))))))))
 
 (defun drover-claude-code-ide--unseen-p ()
   "Return non-nil when the current terminal's turn ended unseen."
@@ -685,6 +755,7 @@ what was read.  Nil without a turn."
 
 (defun drover-claude-code-ide--session-of (buffer)
   "Return the `drover-session' of terminal BUFFER."
+  (drover-claude-code-ide--watch-status)
   (let* ((directory (drover-claude-code-ide--directory buffer))
          (status (drover-claude-code-ide--status buffer)))
     (with-current-buffer buffer
@@ -1707,6 +1778,7 @@ With several, the most recently used."
   (drover-with-reporting "Claude terminal"
     (setq-local drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
     (add-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed nil t)
+    (drover-claude-code-ide--watch-status)
     (drover-backend-changed 'claude-code-ide)))
 
 (defun drover-claude-code-ide--teardown-terminal ()
@@ -1772,6 +1844,7 @@ claude-code-ide starts sessions."
 
 (defun drover-claude-code-ide--uninstall ()
   "Undo `drover-claude-code-ide--install'."
+  (drover-claude-code-ide--stop-status)
   (drover-unregister-backend 'claude-code-ide)
   (drover-unregister-resumer 'claude-code 'claude-code-ide)
   (drover-claude-code-transcripts-uninstall 'claude-code-ide)

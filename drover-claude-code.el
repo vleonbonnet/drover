@@ -293,18 +293,32 @@ The engine's :directory (see `drover-register-engine')."
     (funcall else (format "No project directory holds Claude Code session %s"
                           (drover-bound-line session-id)))))
 
-(defun drover-claude-code-pid-session-id (pid)
-  "Return the identifier of the session the Claude Code process PID runs, or nil.
+(defun drover-claude-code-pid-session (pid)
+  "Return the live session record of the Claude Code process PID, or nil.
 The CLI records it, by PID, under `drover-claude-code-sessions-directory'."
   (when (integerp pid)
-    ;; Not cached: the record changes as the session is resumed or switched.
-    (let* ((record (drover-read-json (expand-file-name (format "%d.json" pid)
-                                                       (drover-claude-code-sessions-directory))))
+    (let* ((record (drover-read-json-cached (expand-file-name (format "%d.json" pid)
+                                                              (drover-claude-code-sessions-directory))))
            (id (and (drover-json-object-p record) (alist-get 'sessionId record))))
-      (and (eql (alist-get 'pid record) pid)
+      (and id (eql (alist-get 'pid record) pid)
            (stringp id)
            (string-match-p drover-claude-code--uuid-regexp id)
-           id))))
+           record))))
+
+(defun drover-claude-code-pid-session-id (pid)
+  "Return the identifier of the session the Claude Code process PID runs, or nil."
+  (alist-get 'sessionId (drover-claude-code-pid-session pid)))
+
+(defun drover-claude-code-run-state (state)
+  "Return the program state of Claude Code's live STATE, or nil when unknown.
+Interactive sessions report `status', background agents `state'.  A
+shell still running after the reply ended is work, as a busy turn is."
+  (pcase state
+    ((or "working" "running" "busy" "shell") 'working)
+    ((or "blocked" "waiting" "needs-input" "needs_input" "input") 'blocked)
+    ("done" 'done)
+    ((or "error" "failed") 'error)
+    ("idle" 'idle)))
 
 (defun drover-claude-code-buckets (directory)
   "Return the subdirectories of transcripts of sessions in DIRECTORY.

@@ -825,10 +825,10 @@ failed, its error the detail (see
          (where (if (equal (plist-get agent :kind) "background")
                     "in the background"
                   "in another terminal")))
-    (pcase state
-      ((or "working" "running" "busy")
-       (list 'working nil (concat "working " where)))
-      ((or "blocked" "waiting" "needs-input" "needs_input" "input")
+    (pcase (drover-claude-code-run-state state)
+      ('working
+       (list 'working nil (concat (if (equal state "shell") "shell running " "working ") where)))
+      ('blocked
        (list 'waiting
              (list (list :kind 'permission
                          :summary (format "waits %s: claude attach %s" where
@@ -1271,7 +1271,8 @@ A hash table mapping each conversation to a plist of :kind, :state,
       (when-let* (((drover-json-object-p entry))
                   (id (alist-get 'sessionId entry))
                   ((stringp id)))
-        (puthash id (list :kind (alist-get 'kind entry) :state (alist-get 'state entry)
+        (puthash id (list :kind (alist-get 'kind entry)
+                          :state (or (alist-get 'status entry) (alist-get 'state entry))
                           :short (alist-get 'id entry) :name (alist-get 'name entry))
                  table)))
     table))

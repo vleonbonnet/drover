@@ -830,6 +830,28 @@ front end's session taken again."
         (should-not (drover-supports-p b2 :delete))
         (should (drover-supports-p b3 :delete))))))
 
+(ert-deftest drover-claude-code-transcripts-test-interactive-agent-status ()
+  "Interactive sessions report status, including a shell running after a reply."
+  (drover-claude-code-transcripts-test-with
+    (let ((project (expand-file-name "work/" home)))
+      (dolist (id '("busy" "shell" "waiting" "idle" "legacy"))
+        (drover-fixture-claude id project))
+      (drover-claude-code-transcripts-test-scan)
+      (drover-claude-code-transcripts--agents-listed
+       (drover-claude-code-transcripts--parse-agents
+        "[{\"kind\":\"interactive\",\"sessionId\":\"busy\",\"status\":\"busy\"},
+          {\"kind\":\"interactive\",\"sessionId\":\"shell\",\"status\":\"shell\"},
+          {\"kind\":\"interactive\",\"sessionId\":\"waiting\",\"status\":\"waiting\"},
+          {\"kind\":\"interactive\",\"sessionId\":\"idle\",\"status\":\"idle\"},
+          {\"kind\":\"background\",\"sessionId\":\"legacy\",\"state\":\"working\"}]"))
+      (drover-changed-now)
+      (dolist (id '("busy" "shell" "legacy"))
+        (should (eq (drover-session-status (drover-find 'claude-code id)) 'working)))
+      (should (equal (drover-session-detail (drover-find 'claude-code "shell"))
+                     "shell running in another terminal"))
+      (should (eq (drover-session-status (drover-find 'claude-code "waiting")) 'waiting))
+      (should (eq (drover-session-status (drover-find 'claude-code "idle")) 'idle)))))
+
 (ert-deftest drover-claude-code-transcripts-test-agents-command ()
   "\"claude agents --json\" runs without waiting, while a list shows, and its answer is followed."
   (drover-claude-code-transcripts-test-with
