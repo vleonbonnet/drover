@@ -87,6 +87,7 @@
 (require 'drover-core)
 (require 'drover-keys)
 (require 'drover-model)
+(require 'drover-selection)
 (require 'opencode)
 (require 'seq)
 (require 'subr-x)
@@ -1890,6 +1891,60 @@ Everything after the process mark goes; \\[undo] brings it back."
     (user-error "Not in an OpenCode session"))
   (opencode-session-compact opencode-session-id))
 
+(defun drover-opencode--session-model-catalog ()
+  "Return the model offerings of this session's service and directory.
+Keep the buffer's service binding: a relayed session reads its owner's
+catalogs, whereas the engine's model source reads the local service."
+  (opencode--require-session)
+  (drover-opencode--catalog-models (opencode-catalog-wait 'model)
+                                   (opencode-catalog-wait 'provider)))
+
+(defun drover-opencode--select-offering (models options)
+  "Apply independent OPTIONS to this session using its native MODELS.
+Keep its explicitly chosen effort when the new offering supports it,
+translating the variant name; otherwise take the offering's default."
+  (let* ((current (drover-opencode--ref-model opencode-session-model models))
+         (variant (drover-opencode--ref-variant opencode-session-model))
+         (resolved (drover-selection-resolve 'opencode options
+                                             (list :model current :variant variant) models t)))
+    (when-let* ((failure (plist-get resolved :failure)))
+      (user-error "%s" failure))
+    (when-let* ((model (plist-get (plist-get resolved :options) :model)))
+      (let* ((effort (and variant
+                          (or (drover-selection-effort (assq variant (drover-model-variants current)))
+                              variant)))
+             (native (and effort (drover-selection-variant model effort))))
+        (opencode-switch-model (drover-opencode-model-ref model native))))))
+
+(defun drover-opencode--choose-model ()
+  "Choose this session's logical model, independently of its provider.
+Its current provider is preferred when it offers that model."
+  (interactive)
+  (let* ((models (drover-opencode--session-model-catalog))
+         (choices (drover-selection-models (list (cons 'opencode models))))
+         (current (drover-opencode--ref-model opencode-session-model models))
+         (default (and current
+                       (seq-find (lambda (model) (equal (drover-model-id model) (drover-selection-id current)))
+                                 choices))))
+    (unless choices (user-error "This session's service offers no models"))
+    (when-let* ((model (drover-read-model default default-directory (lambda () choices) t)))
+      (drover-opencode--select-offering models (list :selection t :model model)))))
+
+(defun drover-opencode--choose-provider ()
+  "Choose the serving provider of this session's current logical model."
+  (interactive)
+  (let* ((models (drover-opencode--session-model-catalog))
+         (current (or (drover-opencode--ref-model opencode-session-model models)
+                      (user-error "Choose a model first")))
+         (candidates (drover-selection-providers (list (cons 'opencode models))
+                                                 (drover-selection-id current)))
+         (default (car (rassoc (drover-selection-provider 'opencode current) candidates))))
+    (unless candidates (user-error "This session's service offers no provider for its model"))
+    (let ((choice (completing-read "Provider: " (drover--completion-table candidates 'drover-provider)
+                                   nil t nil nil default)))
+      (drover-opencode--select-offering models
+                                        (list :selection t :provider (cdr (assoc choice candidates)))))))
+
 (defconst drover-opencode--prompt-actions
   '((send . opencode-send-input)
     (clear . drover-opencode--clear-input)
@@ -1900,7 +1955,8 @@ Everything after the process mark goes; \\[undo] brings it back."
     (revert-cancel . opencode-revert-clear)
     (copy-block . opencode-yank-code-block)
     (agent . opencode-select-agent)
-    (model . opencode-select-model)
+    (model . drover-opencode--choose-model)
+    (provider . drover-opencode--choose-provider)
     (effort . opencode-select-variant)
     (directory . drover-opencode--move-session)
     (compact . drover-opencode--compact-session)

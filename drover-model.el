@@ -856,7 +856,7 @@ MINIBUFFER is gone."
         (drover-with-reporting "completion refresh"
           (funcall function))))))
 
-(defun drover-read-model (&optional default directory models)
+(defun drover-read-model (&optional default directory models required)
   "Read a model among those the engines offer in DIRECTORY, or the default.
 The first candidate, \"Default\", stands for no choice and returns nil;
 it names DEFAULT, the model a new session would run without one, when
@@ -865,17 +865,18 @@ function of no argument returning them, such as those another host
 told, annotated with `drover-model-annotation', in the category
 `drover-model'.  Models arriving while it reads (see
 `drover-models-changed') are offered as they come.  Return the
-`drover-model' chosen, or nil."
+`drover-model' chosen, or nil.  With REQUIRED, omit the no-choice entry
+and preselect DEFAULT among the models offered, as a session picker does."
   (let* ((directory (or directory default-directory))
          (default-label (if default
                             (format "Default (%s)" (drover-model-label default))
                           "Default"))
          (candidates nil)
          (collect (lambda ()
-                    (setq candidates (cons (cons default-label nil)
-                                           (drover-model-candidates (if models
-                                                                        (funcall models)
-                                                                      (drover-models directory)))))))
+                    (setq candidates (append (unless required (list (cons default-label nil)))
+                                             (drover-model-candidates (if models
+                                                                          (funcall models)
+                                                                        (drover-models directory)))))))
          (minibuffer nil)
          (refresh (lambda (_engine)
                     (funcall collect)
@@ -890,7 +891,14 @@ told, annotated with `drover-model-annotation', in the category
                                           (lambda (label)
                                             (when-let* ((model (cdr (assoc label candidates))))
                                               (drover-model-annotation model))))
-                                         nil t nil nil default-label))))
+                                         nil t nil nil
+                                         (if required
+                                             (car (seq-find (lambda (entry)
+                                                              (and default
+                                                                   (equal (drover-model-key default)
+                                                                          (drover-model-key (cdr entry)))))
+                                                            candidates))
+                                           default-label)))))
           (cdr (assoc choice candidates)))
       (remove-hook 'drover-models-changed-hook refresh))))
 

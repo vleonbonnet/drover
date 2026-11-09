@@ -2152,7 +2152,7 @@ beside Send, as Magit shows a value.")
 
 (defun drover--option-target (action)
   "Return what prompt ACTION of the dispatch menu changes, or nil.
-ACTION is `agent', `model', `effort' or `directory'.  The value is
+ACTION is `agent', `model', `provider', `effort' or `directory'.  The value is
 \(prompt . BUFFER) for drover's prompt BUFFER, or (session . SESSION)
 for the session whose buffer ACTION applies to, as
 `drover-prompt-target' finds them from where the menu acts.  The
@@ -2208,13 +2208,17 @@ The value is that of `drover--option'."
 The model and effort are those its backend tells it runs now, through
 :options, when it can, else those of its record; an effort the model
 runs by default is not chosen."
-  (let* ((options (and (memq action '(model effort))
+  (let* ((options (and (memq action '(model provider effort))
                        (drover-supports-p session :options)
                        (drover-backend-call session :options)))
          (model (plist-get options :model)))
     (pcase action
       ('agent (drover--option (drover-session-agent session) t))
       ('model (drover--option (if model (drover--menu-model-name model) (drover-session-model session)) t))
+      ('provider (drover--option (or (and model (or (drover-model-provider-name model)
+                                                    (drover-model-provider-id model)))
+                                     (drover-session-provider-name session)
+                                     (drover-session-provider session)) t))
       ('effort (if model
                    (let ((variant (plist-get options :variant)))
                      (drover--option variant (not (eq variant (drover-model-default-variant model)))))

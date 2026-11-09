@@ -556,16 +556,17 @@ and effort its backend tells first, an effort by default dimmed."
   (require 'drover-keys-test)
   (drover-prompt-test-with
     (let* ((session (drover-prompt-test--session "s" :agent "build" :model "Opus 5.5" :effort "high"
-                                                 :effort-default t :directory "/work/s/"))
+                                                 :provider-name "Anthropic" :effort-default t :directory "/work/s/"))
            (buffer (drover-prompt-test--buffer-of "s")))
       (with-current-buffer buffer
         (setq-local drover-session-at-point-function (lambda () session))
-        (dolist (action '(agent model effort directory))
+        (dolist (action '(agent model provider effort directory))
           (drover-prompt-define action #'ignore)))
       (cl-flet ((value (key) (drover-keys-test-value key 'drover-dispatch))
                 (face (key) (get-text-property 0 'face (drover-keys-test-value key 'drover-dispatch))))
         (with-current-buffer buffer
           (should (equal (mapcar #'value '("a" "m" "e" "d")) '("build" "Opus 5.5" "high" "/work/s")))
+          (should (equal (value "P") "Anthropic"))
           (should (eq (face "a") 'transient-value))
           (should (eq (face "e") 'transient-inactive-value))
           (should (equal (drover--dispatch-options-description) "Session runs"))
@@ -573,10 +574,11 @@ and effort its backend tells first, an effort by default dimmed."
           (setf (alist-get 'fake drover--backends)
                 (append (list :options (lambda (_)
                                          (list :model (drover-test-model "gpt-a" :name "GPT A"
-                                                                         :default-variant 'medium)
+                                                                         :provider-name "OpenAI" :default-variant 'medium)
                                                :variant 'xhigh)))
                         (alist-get 'fake drover--backends)))
           (should (equal (value "m") "GPT A"))
+          (should (equal (value "P") "OpenAI"))
           (should (equal (value "e") "xhigh"))
           (should (eq (face "e") 'transient-value)))
         ;; From a list, the session at point's, its buffer being open.
@@ -584,6 +586,7 @@ and effort its backend tells first, an effort by default dimmed."
           (setq-local drover-view-p t
                       drover-session-at-point-function (lambda () session))
           (should (equal (value "a") "build"))
+          (should (equal (value "P") "OpenAI"))
           (should (equal (drover--dispatch-options-description) "Session runs")))))))
 
 (ert-deftest drover-prompt-test-menu-option-stays-open ()
