@@ -366,6 +366,35 @@
       (should (equal (with-temp-buffer (insert-file-contents (drover-remote-push--file)) (buffer-string))
                      "(:version 1 :registrations (garbage")))))
 
+(ert-deftest drover-remote-push-test-restart-tells-what-changed ()
+  "A restart tells each phone what changed while pushes stopped; a start does not.
+What changes while the remote layer restarts never reaches the hook, as
+the requests a restart answers in between: the phone kept the
+notification of a session no longer needing the user.  As Emacs starts,
+the index fills as the backends report, and nothing goes until a
+session's need changes."
+  (drover-remote-push-test-with (list (drover-test-session "a" :status 'done))
+    (let ((phone (drover-remote-push-test--peer "adept" :viewer t)))
+      (drover-remote-push-test--register phone)
+      (should (drover-remote-push-test--pushes-after 0))
+      (should (equal (plist-get (drover-remote-push-test--last) :r) "need"))
+      ;; Stopped, a change goes unseen; started as Emacs starts, it stays so.
+      (drover-remote-push-stop)
+      (drover-remote-push-test--change (list (drover-test-session "a" :status 'idle)))
+      (drover-remote-push-start)
+      (drover-remote-push-test--settle nil 0.5)
+      (should (= (length drover-remote-push-test--sent) 1))
+      ;; Restarted, the phone is told.
+      (drover-remote-push-stop)
+      (drover-remote-push-start t)
+      (should (drover-remote-push-test--pushes-after 1))
+      (should (equal (plist-get (drover-remote-push-test--last) :r) "clear"))
+      ;; Nothing changed since: restarting again pushes nothing.
+      (drover-remote-push-stop)
+      (drover-remote-push-start t)
+      (drover-remote-push-test--settle nil 0.5)
+      (should (= (length drover-remote-push-test--sent) 2)))))
+
 (ert-deftest drover-remote-push-test-curl ()
   "Curl posts the body with the token to a server, telling its status."
   (skip-unless (and (drover-remote-push-available-p) (executable-find drover-remote-push-curl)))

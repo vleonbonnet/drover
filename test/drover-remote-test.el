@@ -610,13 +610,15 @@ resume window."
       (should (= (plist-get (drover-remote-owner-stats) :subscribers) 0)))))
 
 (defun drover-remote-test--pushes (count)
-  "Wait until the agent posted COUNT pushes; return them, oldest first."
+  "Wait until the agent posted COUNT pushes; return them, oldest first.
+Fewer fail the test, rather than leave its checks to the pushes before."
   (let (pushes)
     (drover-remote-test-wait
      (lambda ()
        (setq pushes (plist-get (drover-remote-test-command "pushes") :pushes))
        (>= (length pushes) count))
      10)
+    (should (>= (length pushes) count))
     (append pushes nil)))
 
 (defun drover-remote-test--opened (push key)

@@ -113,7 +113,7 @@
 (declare-function drover-links-conversation "drover-links" (session))
 (declare-function drover-links-link "drover-links" (conversation))
 (defvar drover-schedule-changed-hook)
-(declare-function drover-remote-push-start "drover-remote-push" ())
+(declare-function drover-remote-push-start "drover-remote-push" (&optional restart))
 (declare-function drover-remote-push-stop "drover-remote-push" ())
 (declare-function drover-remote-push-available-p "drover-remote-push" ())
 (declare-function drover-remote-push-on-request "drover-remote-push" (peer message reply))
@@ -550,7 +550,7 @@ anew, and peers greet each other again."
       (setq drover-remote--state nil)
       (drover-stale-layout "the state of the remote layer")
       (when (bound-and-true-p drover-remote-mode)
-        (drover-remote--start))
+        (drover-remote--start t))
       drover-remote--state)))
 
 (defun drover-remote--stat (object key &optional amount)
@@ -8230,8 +8230,11 @@ ID, ELSE why it could not.  For the engine's :import (see
 
 ;;;; The mode
 
-(defun drover-remote--start ()
-  "Make the state of the remote layer and connect to the peers."
+(defun drover-remote--start (&optional restart)
+  "Make the state of the remote layer and connect to the peers.
+RESTART non-nil tells that the layer ran before in this Emacs: phones
+are then told what changed while it was stopped (see
+`drover-remote-push-start')."
   (let ((state (drover-remote--state-make :epoch (substring (spyglass-wire-random-token) 0 16))))
     (setq drover-remote--state state)
     (spyglass-register-channel drover-remote-channel #'drover-remote--handle
@@ -8246,7 +8249,7 @@ ID, ELSE why it could not.  For the engine's :import (see
     (drover-remote--adopt-shares state)
     (add-hook 'drover-changed-hook #'drover-remote--owner-changed)
     (require 'drover-remote-push)
-    (drover-remote-push-start)
+    (drover-remote-push-start restart)
     (add-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
     (add-hook 'spyglass-share-state-functions #'drover-remote--share-event)
     (add-hook 'drover-unsent-functions #'drover-remote--unsent)
@@ -8369,9 +8372,10 @@ dropping a stream whose write failed, as those offering
             ;; Drover counts on spyglass to drop a stream a write failed on.
             (unless (fboundp 'spyglass-reconnect)
               (user-error "`drover-remote-mode' needs a newer spyglass, one dropping a stream whose write failed"))
-            (when drover-remote--state (drover-remote--stop "restart"))
-            (drover-start)
-            (drover-remote--start))
+            (let ((restart (and drover-remote--state t)))
+              (when restart (drover-remote--stop "restart"))
+              (drover-start)
+              (drover-remote--start restart)))
         (error (setq drover-remote-mode nil)
                (signal (car err) (cdr err))))
     (drover-remote--stop)))

@@ -1012,14 +1012,22 @@ saw live, which it reconciles its notifications with."
 
 ;;;; Starting and stopping
 
-(defun drover-remote-push-start ()
-  "Make the state of pushes, reading the phones registered before."
+(defun drover-remote-push-start (&optional restart)
+  "Make the state of pushes, reading the phones registered before.
+With RESTART, the remote layer ran before in this Emacs: what changed
+while pushes stopped, requests answered in between included, never
+reached the hook, and each phone is told it, against what it was last
+shown, as the index is whole.  As Emacs starts, the index fills as the
+backends report: a phone is told what changed once a session's need
+does, rather than of sessions not reported yet."
   (drover-remote-push-stop)
   (let ((state (drover-remote-push--state-make)))
     (setq drover-remote-push--state state)
     (drover-remote-push--load state)
     (when (> (hash-table-count (drover-remote-push--state-regs state)) 0)
-      (drover-remote-push--follow state t))
+      (drover-remote-push--follow state t)
+      (when restart
+        (drover-remote-push--dirty state)))
     (add-hook 'drover-changed-hook #'drover-remote-push-changed)
     state))
 
