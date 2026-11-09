@@ -1216,6 +1216,35 @@ learnt, gives the model; nothing when unknown."
               (should (eq (drover-backend-call session :buffer) shell))))
         (delete-directory directory t)))))
 
+(ert-deftest drover-agent-shell-test-buffer-by-id ()
+  "A session's shell is found by its identifier, without listing the shells."
+  (drover-agent-shell-test-with
+    (let* ((one (drover-agent-shell-test-shell 'opencode "one"))
+           (two (drover-agent-shell-test-shell 'claude-code "two"))
+           (sessions (mapcar #'drover-agent-shell-test-session (list one two)))
+           (other (generate-new-buffer " not a shell"))
+           (listed 0))
+      (push other drover-agent-shell-test--buffers)
+      (should (= (length (delq nil sessions)) 2))
+      ;; A buffer carrying a shell's identifier is no shell.
+      (with-current-buffer other
+        (setq-local drover-agent-shell--id (drover-session-id (car sessions))))
+      (bury-buffer one)
+      (advice-add 'agent-shell-buffers :before (lambda () (cl-incf listed))
+                  '((name . drover-agent-shell-test-count)))
+      (unwind-protect
+          (progn
+            (should (eq (drover-session-buffer (car sessions)) one))
+            (should (eq (drover-session-buffer (cadr sessions)) two))
+            (should (= listed 0))
+            ;; A shell without agent-shell's state is gone, and a killed one.
+            (with-current-buffer two
+              (setq-local agent-shell--state nil))
+            (should-not (drover-session-buffer (cadr sessions)))
+            (kill-buffer one)
+            (should-not (drover-session-buffer (car sessions))))
+        (advice-remove 'agent-shell-buffers 'drover-agent-shell-test-count)))))
+
 (ert-deftest drover-agent-shell-test-resumed-conversation ()
   "A shell loading a conversation shows it as old as its newest event.
 What the agent sends as the shell loads it is no activity of the

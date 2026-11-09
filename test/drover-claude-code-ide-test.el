@@ -802,8 +802,15 @@ session of `buffer', a temporary buffer, active."
            (orphan (drover-claude-code-ide-test-terminal "*claude* ~/notes" :mode 'vterm-mode
                                                          :directory "/work/notes/"))
            (sessions (drover-claude-code-ide--sessions))
+           (copy (generate-new-buffer " not a terminal"))
            (listed 0))
+      (push copy drover-claude-code-ide-test-buffers)
       (should (= (length sessions) 2))
+      ;; A buffer carrying a terminal's token, listed before it, is none.
+      (with-current-buffer copy
+        (setq-local drover-claude-code-ide--token (drover-session-id (nth 1 sessions))))
+      (bury-buffer orphan)
+      (should (eq (drover-session-buffer (nth 1 sessions)) orphan))
       (advice-add 'drover-claude-code-ide--sessions :before (lambda () (cl-incf listed))
                   '((name . drover-claude-code-ide-test-count)))
       (unwind-protect

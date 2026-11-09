@@ -2414,6 +2414,29 @@ See `drover-remote-test-opened'."
       (when (buffer-live-p buffer)
         (kill-buffer buffer)))))
 
+(ert-deftest drover-remote-test-mirror-buffers-by-mode ()
+  "Mirrors are told by their mode first, then by what they show."
+  (skip-unless (drover-remote-test--available-p))
+  (let ((buffers nil))
+    (cl-flet ((make (name mode kind)
+                (let ((buffer (generate-new-buffer name)))
+                  (push buffer buffers)
+                  (with-current-buffer buffer
+                    (funcall mode)
+                    (setq-local spyglass--mirror (spyglass--make-mirror :state 'closed :reason "no such share"))
+                    (setq-local drover-remote--shown (cons "core" '(fake . "s0")))
+                    (when kind
+                      (setq-local drover-remote--mirror-kind kind)))
+                  buffer)))
+      (unwind-protect
+          (let ((mirror (make "*Session s0@core*" #'spyglass-mirror-mode "terminal")))
+            (make "*not a mirror*" #'fundamental-mode "terminal")
+            (make "*mirroring nothing*" #'spyglass-mirror-mode nil)
+            (should (equal (drover-remote--mirror-buffers "core" '(fake . "s0")) (list mirror)))
+            (should-not (drover-remote--mirror-buffers "core" '(fake . "s1")))
+            (should-not (drover-remote--mirror-buffers "agent" '(fake . "s0"))))
+        (mapc #'kill-buffer buffers)))))
+
 (defun drover-remote-test-mirrors-of (id)
   "Return the buffers here mirroring the agent's session ID."
   (drover-remote--mirror-buffers "agent" (cons 'fake id)))

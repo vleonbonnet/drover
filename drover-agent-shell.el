@@ -261,13 +261,16 @@ Oldest first; they are queued again once the turn ended.")
 
 ;;;; Shells
 
+(defun drover-agent-shell--live-p (buffer)
+  "Return non-nil when BUFFER is a live shell, as agent-shell made it."
+  (and (buffer-live-p buffer)
+       (with-current-buffer buffer
+         (and (derived-mode-p 'agent-shell-mode) agent-shell--state
+              (bound-and-true-p shell-maker--config) t))))
+
 (defun drover-agent-shell--shells ()
   "Return the live agent-shell buffers, most recently used first."
-  (seq-filter (lambda (buffer)
-                (and (buffer-live-p buffer)
-                     (with-current-buffer buffer
-                       (and (derived-mode-p 'agent-shell-mode) agent-shell--state t))))
-              (agent-shell-buffers)))
+  (seq-filter #'drover-agent-shell--live-p (agent-shell-buffers)))
 
 (defun drover-agent-shell--engine (&optional buffer)
   "Return the engine of the shell of BUFFER, the current one by default.
@@ -997,10 +1000,18 @@ again receives it whole, which is no activity of the conversation."
   (mapcar #'drover-agent-shell--session (drover-agent-shell--shells)))
 
 (defun drover-agent-shell--buffer (session)
-  "Return the live buffer of the shell of SESSION, or nil."
+  "Return the live buffer of the shell of SESSION, or nil.
+It is found by its identifier among the buffers in agent-shell's mode,
+rather than among `drover-agent-shell--shells', which visits every
+buffer: lists ask for the buffer of every session they draw.  The mode
+is read first, as reading a variable in a buffer where it is not local
+searches every variable local there, hundreds in an Org buffer."
   (let ((id (drover-session-id session)))
-    (seq-find (lambda (buffer) (equal (buffer-local-value 'drover-agent-shell--id buffer) id))
-              (drover-agent-shell--shells))))
+    (seq-find (lambda (buffer)
+                (and (provided-mode-derived-p (buffer-local-value 'major-mode buffer) 'agent-shell-mode)
+                     (equal (buffer-local-value 'drover-agent-shell--id buffer) id)
+                     (drover-agent-shell--live-p buffer)))
+              (buffer-list))))
 
 (defun drover-agent-shell--buffer-session ()
   "Return the session of the current shell."

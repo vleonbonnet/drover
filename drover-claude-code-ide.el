@@ -365,10 +365,16 @@ the title of a session whose conversation records none yet."
     (if (string-empty-p title) name title)))
 
 (defun drover-claude-code-ide--token-buffer (token)
-  "Return the live terminal whose session's identifier is TOKEN, or nil."
-  (seq-find (lambda (buffer)
-              (equal (buffer-local-value 'drover-claude-code-ide--token buffer) token))
-            (buffer-list)))
+  "Return the live terminal whose session's identifier is TOKEN, or nil.
+Only the terminals claude-code-ide tracks and those in a terminal mode
+are asked: reading a variable in a buffer where it is not local searches
+every variable local there, hundreds in an Org buffer, and the lists ask
+for the buffer of every session they draw."
+  (let ((tracked (drover-claude-code-ide--tracked)))
+    (seq-find (lambda (buffer)
+                (and (or (assq buffer tracked) (drover-claude-code-ide--terminal-p buffer))
+                     (equal (buffer-local-value 'drover-claude-code-ide--token buffer) token)))
+              (buffer-list))))
 
 (defun drover-claude-code-ide--buffer (session)
   "Return the live terminal of SESSION, or nil."

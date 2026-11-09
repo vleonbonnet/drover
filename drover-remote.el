@@ -7059,15 +7059,23 @@ in no window: see `drover-remote-show' for AGAIN and NOTE."
 
 ;;;; Mirrors of a peer's terminals
 
+(defun drover-remote--mirror-p (buffer)
+  "Return non-nil when BUFFER mirrors the terminal of a peer's session.
+Its mode is read first: reading a variable in a buffer where it is not
+local searches every variable local there, hundreds in an Org buffer,
+and the lists look for the mirror of every session of a peer they draw."
+  (and (provided-mode-derived-p (buffer-local-value 'major-mode buffer) 'spyglass-mirror-mode)
+       (buffer-local-value 'drover-remote--mirror-kind buffer)
+       (local-variable-p 'spyglass--mirror buffer)))
+
 (defun drover-remote--mirror-buffers (name key)
   "Return the live buffers mirroring the peer NAME's session KEY, newest first.
 Found by what they show (`drover-remote--shown'), which they keep
 whatever remote layer made them: a layer made anew, as reloading a
 drover whose structures changed makes it, knows none of them."
   (seq-filter (lambda (buffer)
-                (and (buffer-local-value 'drover-remote--mirror-kind buffer)
-                     (equal (buffer-local-value 'drover-remote--shown buffer) (cons name key))
-                     (local-variable-p 'spyglass--mirror buffer)))
+                (and (drover-remote--mirror-p buffer)
+                     (equal (buffer-local-value 'drover-remote--shown buffer) (cons name key))))
               (buffer-list)))
 
 (defun drover-remote--mirror-buffer (peer key)
@@ -7098,11 +7106,10 @@ none of its mirrors made as the session was opened again."
   (let ((name (drover-remote--peer-name peer))
         (keys nil))
     (dolist (buffer (buffer-list))
-      (let ((shown (buffer-local-value 'drover-remote--shown buffer)))
-        (when (and (equal (car-safe shown) name)
-                   (buffer-local-value 'drover-remote--mirror-kind buffer)
-                   (local-variable-p 'spyglass--mirror buffer))
-          (cl-pushnew (cdr shown) keys :test #'equal))))
+      (when (drover-remote--mirror-p buffer)
+        (let ((shown (buffer-local-value 'drover-remote--shown buffer)))
+          (when (equal (car-safe shown) name)
+            (cl-pushnew (cdr shown) keys :test #'equal)))))
     (dolist (key keys)
       (let ((kept (drover-remote--mirror-buffer peer key)))
         (dolist (other (drover-remote--mirror-buffers name key))

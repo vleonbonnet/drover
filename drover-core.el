@@ -1784,7 +1784,11 @@ PROPERTIES is a plist of:
              a string showing where the session stands, or nil.
  :new        Function of a directory starting a session there.
  :buffer     Function of a session returning the live buffer showing
-             it, or nil.
+             it, or nil.  Lists call it for every session they draw,
+             as the windows show other buffers, so it must be cheap:
+             looking through `buffer-list', read a buffer's mode
+             before its variables, as reading a variable not local
+             to a buffer searches every variable local there.
  :close      Function of a session closing its buffer, if it has one,
              without asking: archiving closes the buffer of the session
              archived (see `drover-archive-session').  What the buffer
