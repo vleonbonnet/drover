@@ -113,14 +113,24 @@ settings of the list are their defaults, and the clock stands still at
 (defun drover-list-test-fake-width (string)
   "Return the width of STRING in a fake proportional font.
 An i is 3 pixels wide, an m 12, a space 4, and any other character 7.
-A space displayed as a stretch counts its own width."
-  (let ((width 0))
-    (dotimes (index (length string))
-      (setq width (+ width
-                     (pcase (get-text-property index 'display string)
-                       (`(space :width (,pixels)) pixels)
-                       ((and (pred stringp) display) (drover-list-test-fake-width display))
-                       (_ (pcase (aref string index) (?i 3) (?m 12) (?\s 4) (_ 7)))))))
+A space displayed as a stretch counts its own width, and a character
+displayed as a string that string's width.  It measures by runs of the
+same display, with compiled functions: the lists measure thousands of
+strings, and this file runs as source."
+  (let ((end (length string))
+        (start 0)
+        (width 0))
+    (while (< start end)
+      (let ((display (get-text-property start 'display string))
+            (next (next-single-property-change start 'display string end)))
+        (setq width (+ width
+                       (pcase display
+                         (`(space :width (,pixels)) (* pixels (- next start)))
+                         ((pred stringp) (* (drover-list-test-fake-width display) (- next start)))
+                         (_ (let ((run (substring-no-properties string start next)))
+                              (+ (* 7 (length run)) (* -4 (cl-count ?i run))
+                                 (* 5 (cl-count ?m run)) (* -3 (cl-count ?\s run))))))))
+        (setq start next)))
     width))
 
 (defvar drover-list-test-width 1000
