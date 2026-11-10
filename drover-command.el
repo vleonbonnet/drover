@@ -50,6 +50,8 @@
 (require 'subr-x)
 (require 'drover-core)
 
+(declare-function w32-application-type "w32proc.c" (program))
+
 (defcustom drover-command-shell
   (and (not (memq system-type '(windows-nt ms-dos))) "/bin/sh")
   "The POSIX shell starting drover's commands, or nil to start them directly.
