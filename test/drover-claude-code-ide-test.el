@@ -936,6 +936,46 @@ guess could hide another session of the directory."
           (should (eq (drover-session-status (session)) 'idle))
           (should-not (drover-session-detail (session))))))))
 
+(ert-deftest drover-claude-code-ide-test-handed-back ()
+  "Work starting soon after the user's RET, or digit at a request, is the turn they gave.
+A digit outside a request, a key typed after, or work starting too
+late, give none."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* keys" :mcp-session t))
+          (drover-claude-code-ide-test-clock 100.0)
+          (map (make-sparse-keymap))
+          (noted nil))
+      (define-key map "a" #'ignore)
+      (cl-letf (((symbol-function 'float-time) (lambda (&rest _) drover-claude-code-ide-test-clock))
+                ((symbol-function 'drover-note-handed-off)
+                 (lambda (session how origin &optional buffer)
+                   (push (list (eq (drover-session-buffer session) terminal) how origin buffer) noted))))
+        (with-current-buffer terminal
+          (drover-claude-code-ide--setup-terminal)
+          (should (memq #'drover-claude-code-ide--note-key pre-command-hook))
+          (use-local-map map))
+        (cl-flet ((press (key)
+                    (cl-letf (((symbol-function 'this-command-keys-vector) (lambda () (vector key))))
+                      (with-current-buffer terminal
+                        (run-hooks 'pre-command-hook))))
+                  (work (from &optional later)
+                    (drover-claude-code-ide-test-status terminal from)
+                    (setq drover-claude-code-ide-test-clock (+ drover-claude-code-ide-test-clock (or later 1)))
+                    (drover-claude-code-ide-test-status terminal '(("" :state working)))
+                    (drover-claude-code-ide-test-fire)
+                    (prog1 noted (setq noted nil))))
+          (press ?1)
+          (should (equal (work '(("" :state blocked :kind permission))) '((t answer front-end nil))))
+          (press 'return)
+          (should (equal (work '(("" :state done))) '((t prompt front-end nil))))
+          (press ?2)
+          (should-not (work '(("" :state done))))
+          (press 'return)
+          (press ?a)
+          (should-not (work nil))
+          (press 'return)
+          (should-not (work nil 10)))))))
+
 (ert-deftest drover-claude-code-ide-test-resumed-conversation ()
   "A terminal resuming a conversation shows it as old as its newest message.
 The conversation began when its transcript tells; the idle status the

@@ -655,6 +655,54 @@ own."
                   ((not (plist-get work :end))))
         (setq-local drover-claude-code-ide--work (plist-put (copy-sequence work) :seen t))))))
 
+(defvar-local drover-claude-code-ide--keyed nil
+  "The user's last key in this terminal that may give the CLI its turn, or nil.
+A cons (TIME . KEY), KEY `return' or `digit' (see
+`drover-claude-code-ide--note-key').")
+
+(defconst drover-claude-code-ide--handed-wait 3
+  "Seconds after a key within which work the CLI starts is the turn it gave.
+The status interval is added (see `drover-claude-code-ide-status-interval'):
+a status read from the process records comes that late.")
+
+(defun drover-claude-code-ide--note-key ()
+  "Note a key the user presses in the current terminal, for the turn it may give.
+For `pre-command-hook', local to terminals.  The CLI tells no prompt
+submitted nor request answered, only that it works: RET pressed alone
+may submit either, a digit pressed alone answer a request, so those
+are noted, and the work starting soon after is the turn they gave (see
+`drover-claude-code-ide--note-handed-back').  Any other key the
+terminal's own keymap binds forgets it: the user went on typing there.
+Keys bound elsewhere, as those selecting another window, leave it, and
+keys of a longer sequence, as drover's prompt's, are not the
+terminal's: drover tells of its own sends."
+  (drover-with-reporting "Claude terminal keys"
+    (let* ((keys (this-command-keys-vector))
+           (key (and (= (length keys) 1) (aref keys 0))))
+      (cond ((memq key '(return kp-enter ?\r))
+             (setq-local drover-claude-code-ide--keyed (cons (float-time) 'return)))
+            ((and (characterp key) (<= ?1 key ?9))
+             (setq-local drover-claude-code-ide--keyed (cons (float-time) 'digit)))
+            ((and drover-claude-code-ide--keyed (current-local-map)
+                  (commandp (lookup-key (current-local-map) keys)))
+             (setq-local drover-claude-code-ide--keyed nil))))))
+
+(defun drover-claude-code-ide--note-handed-back (before now)
+  "Note the turn the user's last key gave the current terminal's session, if any.
+Its state goes from BEFORE to working at NOW.  From a request, RET or a
+digit answered it; otherwise RET submitted a prompt.  The session is
+told of from a timer, out of the status being read."
+  (when-let* ((keyed drover-claude-code-ide--keyed)
+              ((<= (- now (car keyed))
+                   (+ drover-claude-code-ide--handed-wait (or drover-claude-code-ide-status-interval 0))))
+              ((or (eq before 'blocked) (eq (cdr keyed) 'return))))
+    (setq-local drover-claude-code-ide--keyed nil)
+    (drover-claude-code-ide--later
+     (current-buffer) 0
+     (lambda ()
+       (when-let* ((session (drover-claude-code-ide--buffer-session)))
+         (drover-note-handed-off session (if (eq before 'blocked) 'answer 'prompt) 'front-end))))))
+
 (defun drover-claude-code-ide--note-work (before state now)
   "Note work beginning or ending in the current terminal at NOW.
 Its state goes from BEFORE to STATE.  Work beginning while no turn runs
@@ -662,7 +710,11 @@ notes how the terminal stood (see `drover-claude-code-ide--work'); a
 request to the user drops that, being a turn's.  Work ending notes its
 end and has its transcript looked at at once, and again once
 `drover-claude-code-ide--settle-wait' passed, the session listed anew
-then, so that `drover-claude-code-ide--settle' learns what it was."
+then, so that `drover-claude-code-ide--settle' learns what it was.
+Work beginning soon after a key of the user's is a turn the key gave
+\(see `drover-claude-code-ide--note-handed-back')."
+  (when (and (eq state 'working) (memq before '(idle done error blocked)))
+    (drover-claude-code-ide--note-handed-back before now))
   (cond
    ((eq state 'blocked)
     (setq-local drover-claude-code-ide--work nil))
@@ -1895,6 +1947,7 @@ With several, the most recently used."
   (drover-with-reporting "Claude terminal"
     (setq-local drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
     (add-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed nil t)
+    (add-hook 'pre-command-hook #'drover-claude-code-ide--note-key nil t)
     (drover-claude-code-ide--watch-status)
     (drover-backend-changed 'claude-code-ide)))
 
@@ -1902,7 +1955,8 @@ With several, the most recently used."
   "Undo `drover-claude-code-ide--setup-terminal' in the current terminal."
   (when (eq drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
     (kill-local-variable 'drover-session-at-point-function))
-  (remove-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed t))
+  (remove-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed t)
+  (remove-hook 'pre-command-hook #'drover-claude-code-ide--note-key t))
 
 (defun drover-claude-code-ide--hooks ()
   "Return the hooks the backend follows, as (HOOK . FUNCTION)."
