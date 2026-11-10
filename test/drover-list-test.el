@@ -4844,7 +4844,7 @@ Windows changing restyle each list several times a redisplay: while
 they show the same buffers, no session is looked at again."
   (drover-list-test-with (drover-list-test-side-sample)
     (drover-list-test--register-buffers)
-    (pcase-let ((`(,first ,_second) (drover-list-test--main)))
+    (pcase-let ((`(,first ,second) (drover-list-test--main)))
       (with-current-buffer (window-buffer (drover-list--show-side))
         (set-window-buffer first (get-buffer-create "*session work*"))
         (drover-list--windows-changed)
@@ -4857,6 +4857,14 @@ they show the same buffers, no session is looked at again."
                        (apply state arguments))))
             (drover-list--windows-changed)
             (drover-list--restyle-titles)
+            (should (zerop looked))
+            ;; A menu showing, then gone: no session's buffer either way.
+            (let ((menu (split-window second nil 'below)))
+              (set-window-buffer menu (get-buffer-create " *menu*"))
+              (drover-list--windows-changed)
+              (delete-window menu)
+              (kill-buffer " *menu*")
+              (drover-list--windows-changed))
             (should (zerop looked))
             ;; Another buffer shown: looked at again.
             (set-window-buffer first (get-buffer-create "*session ask*"))

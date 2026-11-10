@@ -5728,10 +5728,28 @@ windows changing run `drover-list--restyle-titles' several times a
 redisplay, for each list, and one session buffer killed unseen forgets
 it (see `drover-list--buffer-killed').")
 
+(defun drover-list--may-show-session-p (buffer)
+  "Return non-nil when BUFFER may be the buffer of a session.
+Drover's lists and prompt are none, nor minibuffers, nor the internal
+buffers whose names begin with a space, such as transient's menu, but
+those lists drew sessions in (see `drover-list--session-buffers')."
+  (or (gethash buffer drover-list--session-buffers)
+      (not (or (minibufferp buffer)
+               (string-prefix-p " " (buffer-name buffer))
+               (buffer-local-value 'drover-view-p buffer)
+               (and (local-variable-p 'drover-prompt-mode buffer)
+                    (buffer-local-value 'drover-prompt-mode buffer))))))
+
 (defun drover-list--places-key (places)
   "Return what PLACES, a value of `drover-list--places', tells, as a list.
-Two values of the same places are `equal'."
-  (cons (car places) (hash-table-keys (cdr places))))
+Two values placing alike the buffers that may be sessions' are `equal'
+\(see `drover-list--may-show-session-p'): no title depends on where the
+others are, so that a menu opening, the prompt or the minibuffer,
+restyles nothing, which looked up every session's buffer, 12 ms in a
+sidebar of 450 rows."
+  (let ((active (car places)))
+    (cons (and active (drover-list--may-show-session-p active) active)
+          (seq-filter #'drover-list--may-show-session-p (hash-table-keys (cdr places))))))
 
 (defun drover-list--restyle-titles ()
   "Give the titles of the current list the faces of where their sessions are now.
