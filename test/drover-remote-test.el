@@ -1575,7 +1575,10 @@ one revision."
 Its Emacs stuck, its connection stays open to the system: only the
 heartbeat tells.  Spyglass looked at it every half interval, which
 `drover-remote-heartbeat''s integers halved to whole seconds, 1 to 0:
-a timer that never repeated, and the peer stayed open."
+a timer that never repeated, and the peer stayed open.  The timeout
+is of the time this Emacs ran: the time it was kept from its timers,
+as when every processor is busy, is not held against the peer (see
+`spyglass--unheard'), nor counted here."
   (drover-remote-test-with nil
     (drover-remote-test-connect (drover-remote-test-start-agent dir))
     (drover-remote-test-command "sessions" :n 3)
@@ -1584,11 +1587,19 @@ a timer that never repeated, and the peer stayed open."
            (timer (spyglass-connection-timer (drover-remote--peer-connection peer))))
       (should (= (timer--repeat-delay timer) 0.5))
       (drover-remote-test-frozen dir
-        (let ((start (float-time)))
-          (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 15)
+        (let* ((start (float-time))
+               (last start)
+               (kept 0.0)
+               (ticker (run-with-timer 0.1 0.1 (lambda ()
+                                                  (let ((now (float-time)))
+                                                    (setq kept (+ kept (max 0.0 (- now last 0.1)))
+                                                          last now))))))
+          (unwind-protect
+              (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 30)
+            (cancel-timer ticker))
           ;; The timeout, 4 s, and a look every half second.
           (should-not (eq (drover-remote--peer-state peer) 'open))
-          (should (< (- (float-time) start) 5.5)))
+          (should (< (- (float-time) start kept) 5.5)))
         (drover-changed-now)
         (should (= (length (drover-remote-test-remote)) 3))
         (should (seq-every-p #'drover-session-stale (drover-remote-test-remote))))
@@ -2811,7 +2822,13 @@ told, saying why."
 (ert-deftest drover-remote-test-mirror-fast-output ()
   "A terminal writing fast reaches its mirror whole, the mirror never keeping Emacs long.
 Garbage collections are the whole Emacs's, not the mirror's: the longest
-a timer waits leaves out those made meanwhile."
+a timer waits leaves out those made meanwhile.  Kept is the time Emacs
+ran between two ticks of a timer, not the time that passed: with every
+processor busy, as when the tests run eight at once, the system leaves
+Emacs waiting hundreds of milliseconds at a time, reading nothing and
+running nothing: nearly a second passed between two ticks while Emacs
+ran less than 16 ms.  The time Emacs ran is its process's processor
+time, which counts its other threads too: no more of it than passed."
   (drover-remote-test-with nil
     (drover-remote-test-start-full dir)
     (drover-remote-test-command "sessions" :n 2)
@@ -2820,23 +2837,31 @@ a timer waits leaves out those made meanwhile."
     (save-window-excursion
       (let ((mirror (drover-remote-test-open "s1"))
             (last (float-time))
+            (ran (float-time (get-internal-run-time)))
             (collected gc-elapsed)
             (worst 0.0)
+            (longest 0.0)
             (start nil)
             (collecting nil)
             (ticker nil))
         (drover-remote-test-live mirror)
         (setq ticker (run-with-timer 0.005 0.005 (lambda ()
-                                                    (let ((now (float-time)))
-                                                      (setq worst (max worst (- now last (- gc-elapsed collected)))
+                                                    (let ((now (float-time))
+                                                          (running (float-time (get-internal-run-time)))
+                                                          (collections (- gc-elapsed collected)))
+                                                      (setq worst (max worst (- (min (- now last) (- running ran))
+                                                                                collections))
+                                                            longest (max longest (- now last collections))
                                                             last now
+                                                            ran running
                                                             collected gc-elapsed)))))
         (unwind-protect
             (progn
               ;; What earlier tests allocated is collected now, not as
               ;; this measures: a heap of all of them takes 130 ms.
               (garbage-collect)
-              (setq start (float-time) last start collected gc-elapsed collecting gc-elapsed)
+              (setq start (float-time) last start ran (float-time (get-internal-run-time))
+                    collected gc-elapsed collecting gc-elapsed)
               ;; 8 MB written as a program would, its scrollback 512 kB.
               (drover-remote-test-command "emit" :id "s1" :bytes (* 8 1024 1024) :keep (* 512 1024))
               (drover-remote-test-wait (lambda () (with-current-buffer mirror
@@ -2855,8 +2880,8 @@ a timer waits leaves out those made meanwhile."
           (ignore state)
           ;; The mirror holds the scrollback, not all that was written.
           (should (<= (buffer-size mirror) (+ (* 512 1024) 100)))
-          (message "Fast output: 8 MB in %.2f s, the longest Emacs kept from its timers %.1f ms, %.1f ms collecting"
-                   elapsed (* 1000 worst) (* 1000 collections))
+          (message "Fast output: 8 MB in %.2f s, the longest Emacs kept from its timers %.1f ms (%.1f ms passed), %.1f ms collecting"
+                   elapsed (* 1000 worst) (* 1000 longest) (* 1000 collections))
           (should (< worst 0.1)))
         (kill-buffer mirror)))))
 
