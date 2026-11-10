@@ -299,8 +299,10 @@ subagents under their parent, those the list hides marked so."
 An entry matches when every word of QUERY is in what it tells, or when
 a backend found QUERY in what its session said (see the hits of
 STATE).  A subagent the list hides shows when it matches and no session
-above it does, as the list shows such a subagent under a filter.
-Without words, the entries the list shows.  It allocates nothing but
+above it does, at the top of a tree of its own or not: the list shows
+such a subagent under a filter only below a parent it lists, while a
+search looks for it.  Without words, the entries the list shows.  It
+allocates nothing but
 the list it returns, as it runs at every key typed."
   (let* ((words (drover-search--words query))
          (hits (drover-search--state-hits state))

@@ -151,10 +151,11 @@ The value is one of `drover-subagent-modes':
          is active.
  none    No subagent.
 
-Whatever the value, a subagent matching `drover-filter' shows when it
-explains why its tree is listed (see `drover-view-trees').  A subagent
-whose parent is not listed, archived, deleted or not loaded, shows as
-any subagent does, at the top of a tree of its own.  A hidden
+Whatever the value, a subagent matching `drover-filter' shows under its
+parent when it explains why the parent is listed (see
+`drover-view-trees').  A subagent whose parent is not listed, archived,
+deleted or not loaded, shows as any subagent does, at the top of a tree
+of its own, filter or not: it explains no parent.  A hidden
 subagent never places its parent in a group; whether a parent has
 active subagents, shown or not, its line tells.  Change it for every
 view with `drover-toggle-subagents', =u in the menus' View group,
@@ -1355,7 +1356,10 @@ session in it is in the middle of a turn, or never; or when SHOWN, a
 function of a tree, returns non-nil for it.  A subagent whose parent is
 not among the sessions, at the top of a tree of its own (see
 `drover-tree'), is no exception: its parent archived, deleted or not
-loaded, it is a subagent still.  Each tree ranks by what remains
+loaded, it is a subagent still.  SHOWN keeps such a tree too, which
+views ask only to place sessions (see `drover--view-positions'): a
+filter's matches keep none (see `drover--filter-trees').  Each tree
+ranks by what remains
 visible, so a hidden subagent never places its parent in a group its
 own status does not explain.  NODES are ranked, as `drover-tree'
 returns them."
@@ -3620,21 +3624,24 @@ SESSION must satisfy every member of FILTER that is set."
   "Return trees NODES cut down to FILTER, and the trees to show.
 The value is (TREES . SHOWN): TREES keep the sessions matching FILTER
 and the sessions above them; SHOWN is a hash table of the keys of the
-sessions on the way to a match from its root, the match included, when
-no session above that match matches too."
+sessions below the root of a tree on the way to a match, the match
+included, when no session above that match matches too.  They explain
+why their parent is listed.  A root is never among them: a subagent at
+the top of a tree of its own, its parent not listed, explains no parent,
+and shows as `drover-show-subagents' says, matching or not."
   (let ((shown (make-hash-table :test #'equal)))
-    (cl-labels ((cut (node matched-above)
+    (cl-labels ((cut (node matched-above root)
                   (let* ((session (drover-node-session node))
                          (match (drover-filter-match-p session filter))
                          (children (delq nil (mapcar (lambda (child)
-                                                       (cut child (or matched-above match)))
+                                                       (cut child (or matched-above match) nil))
                                                      (drover-node-children node)))))
                     (when (or match children)
                       ;; Kept, so a match is at or under it.
-                      (unless matched-above
+                      (unless (or matched-above root)
                         (puthash (drover-session-key session) t shown))
                       (drover--node session children)))))
-      (cons (sort (delq nil (mapcar (lambda (node) (cut node nil)) nodes))
+      (cons (sort (delq nil (mapcar (lambda (node) (cut node nil t)) nodes))
                   #'drover--node-before-p)
             shown))))
 
@@ -3666,7 +3673,9 @@ those of `drover-known-sessions', cut down to `drover-filter' (see
 `drover-tree-visible').  While a filter is set, a subagent that matches
 it shows whatever `drover-show-subagents' says, even `none', unless a
 session above it matches too: the view then explains why each tree is
-listed without listing every subagent of a matching session."
+listed without listing every subagent of a matching session.  A
+subagent at the top of a tree of its own, its parent not listed, has no
+parent to explain: it shows as the mode says, filter or not."
   (car (drover--view-trees (or sessions (drover-known-sessions)))))
 
 (defun drover-view-subagent-counts (&optional sessions)

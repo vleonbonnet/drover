@@ -3817,15 +3817,23 @@ line starts the next; a part wider than a line is cut."
 
 (defun drover-list--insert-empty (sessions layout)
   "Insert why the list shows none of SESSIONS, every session known.
-When there are SESSIONS, `drover-filter' left them all out; the View
-menu tells which filter and clears it.  Lines fit the width of LAYOUT."
+When there are SESSIONS, `drover-filter' left them all out, or those
+it kept are subagents `drover-show-subagents' hides, at the top of
+trees of their own, their parents not listed; the View menu tells which
+filter and clears it, and which subagents show.  Lines fit the width of
+LAYOUT."
   (magit-insert-section (drover-list-empty)
-    (let ((width (plist-get layout :width)))
+    (let ((width (plist-get layout :width))
+          (hidden (and sessions (> (cdr (drover-view-subagent-counts sessions)) 0))))
       (cond
        ((null (drover-backends))
         (insert (drover-list--flow '("No agent backend is registered.") width)
                 (drover-list--flow '("Load an agent front end, such as opencode.el, to see its sessions.")
                                    width)))
+       ((and hidden (drover-filter-active-p))
+        (insert (drover-list--flow '("Every session the filter keeps is a hidden subagent.") width)))
+       (hidden
+        (insert (drover-list--flow '("Every session is a hidden subagent.") width)))
        ((and sessions (drover-filter-active-p))
         (insert (drover-list--flow '("No session matches the filter.") width)))
        (t (insert "No sessions.\n"))))))
@@ -4118,8 +4126,8 @@ follow a change (see `drover-list--shared')."
   "Insert the sections of MODEL at point, SESSIONS being every session known."
   (let ((layout (drover-list--model-layout model)))
     (magit-insert-section (drover-list)
-      ;; Every tree the filter keeps has its root shown, so no row means
-      ;; no session at all, or none the filter keeps.
+      ;; No row means no session at all, none the filter keeps, or only
+      ;; subagents the mode hides atop trees of their own.
       (if (zerop (drover-list--model-size model))
           (drover-list--insert-empty sessions layout)
         (dolist (group (drover-list--model-groups model))

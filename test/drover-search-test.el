@@ -128,6 +128,18 @@ In STATE, by default a search made now."
       (should (equal (drover-search-test-ids "") '("p" "s" "q" "t")))
       (should (equal (drover-search-test-ids "other") '("q" "t"))))))
 
+(ert-deftest drover-search-test-hidden-orphan ()
+  "A subagent atop a tree of its own, hidden, is found by its words, filter or not.
+Its parent not listed, the list hides it under a filter as without one,
+and the search offers it once it matches."
+  (drover-search-test-with
+      (list (drover-test-session "a" :title "Alpha" :updated 10.0)
+            (drover-test-session "o" :title "Lonely helper" :parent "gone" :status 'idle :updated 9.0))
+    (dolist (filter '(nil (:host (:exclude "elsewhere"))))
+      (let ((drover-filter filter))
+        (should (equal (drover-search-test-ids "") '("a")))
+        (should (equal (drover-search-test-ids "lonely") '("o")))))))
+
 (ert-deftest drover-search-test-search-texts ()
   "The texts backends tell for searching match, those of recording backends too."
   (drover-search-test-with (list (drover-test-session "a" :engine 'claude-code :engine-id "conv-a")

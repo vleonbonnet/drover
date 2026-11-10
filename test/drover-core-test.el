@@ -891,10 +891,52 @@ did under a session archived alone while its subagents stayed."
       (should (equal (drover-test-ids (drover-surfaced-sessions)) '("root" "asking")))
       (should (equal (drover-test-tree-shape (drover-view-trees)) '(("root"))))
       (should (equal (drover-view-subagent-counts) '(3 . 3)))
-      ;; Matching a filter, it explains why it is listed.
+      ;; Matching a filter, it has no listed parent to explain: the mode
+      ;; hides it still.
       (setq drover-filter '(:search "ended"))
-      (should (equal (drover-test-tree-shape (drover-view-trees)) '(("ended"))))
-      (should (equal (drover-view-subagent-counts) '(1 . 0))))))
+      (should-not (drover-view-trees))
+      (should (equal (drover-view-subagent-counts) '(1 . 1))))))
+
+(defun drover-test--orphans (quiet)
+  "Return sessions with subagents whose parents are not listed, QUIET the status of one."
+  (list (drover-test-session "root" :status 'idle)
+        (drover-test-session "kid" :parent "root" :status 'idle :title "Wanted kid")
+        (drover-test-session "idle" :parent "gone" :status 'idle)
+        (drover-test-session "busy" :parent "gone" :status 'working)
+        (drover-test-session "quiet" :parent "gone" :status quiet)
+        (drover-test-session "deep" :parent "quiet" :status 'idle :title "Wanted deep")
+        (drover-test-session "a" :parent "b" :status 'idle)
+        (drover-test-session "b" :parent "a" :status 'idle)))
+
+(ert-deftest drover-test-filter-leaves-orphans-to-the-mode ()
+  "A filter never shows a subagent at the top of a tree of its own.
+Its parent not listed, it explains no parent: it shows as
+`drover-show-subagents' says, matching or not, and so does the top of
+a cycle of parents.  A filter left on, such as one leaving out a host,
+used to bring back every such subagent the mode hides.  A subagent
+matching under a listed parent still shows."
+  (drover-test-with-backend (drover-test--orphans 'idle)
+    (dolist (mode drover-subagent-modes)
+      (let ((drover-show-subagents mode)
+            (drover-filter nil))
+        (let ((shape (drover-test-tree-shape (drover-view-trees)))
+              (counts (drover-view-subagent-counts)))
+          (setq drover-filter '(:host (:exclude "elsewhere")))
+          (should (equal (drover-test-tree-shape (drover-view-trees)) shape))
+          (should (equal (drover-view-subagent-counts) counts))
+          (when (eq mode 'active)
+            (should (equal shape '(("busy") ("root"))))))))
+    ;; Matching below a root it does not explain, a subagent shows as the
+    ;; root does.
+    (setq drover-filter '(:search "Wanted deep"))
+    (should-not (drover-view-trees))
+    (should (equal (drover-view-subagent-counts) '(2 . 2)))
+    (setq drover-test-sessions (drover-test--orphans 'working))
+    (should (equal (drover-test-tree-shape (drover-view-trees)) '(("quiet" ("deep")))))
+    ;; Under a listed parent, a match shows whatever the mode.
+    (let ((drover-show-subagents 'none))
+      (setq drover-filter '(:search "Wanted kid"))
+      (should (equal (drover-test-tree-shape (drover-view-trees)) '(("root" ("kid"))))))))
 
 (ert-deftest drover-test-subagent-modes-cycle ()
   "The modes cycle all, active, none; setting one redraws the views."

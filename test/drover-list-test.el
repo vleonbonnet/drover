@@ -678,25 +678,28 @@ sessions; which subagents show, the View menu tells."
   "A subagent whose parent is not listed shows as `drover-show-subagents' says.
 Its parent archived alone, it is a subagent still: active subagents
 only, it leaves the list once its turn ended, and comes back with the
-next, drawn in place as drawn anew; all of them, it shows idle too."
-  (let ((root (drover-list-test-titled "root" "A title longer than the subagent's" :status 'working)))
-    (drover-list-test-with (list root (drover-test-session "child" :parent "archived" :status 'working))
-      (drover-list-test-with-font
-        (drover-list-test-shown
-          (revert-buffer)
-          (should (equal (drover-list-test-groups) '((working "root" "child"))))
-          (dolist (status '(idle working idle))
-            (setq drover-test-sessions (list root (drover-test-session "child" :parent "archived"
-                                                                       :status status)))
-            (drover-backend-changed 'fake "child")
-            (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
-            (should (equal (drover-list-test-groups)
-                           (if (eq status 'idle) '((working "root")) '((working "root" "child")))))
-            (drover-list-test-is-fresh))
-          (drover-set-show-subagents 'all)
-          (should (equal (drover-list-test-groups) '((working "root") (idle "child"))))
-          (drover-set-show-subagents 'none)
-          (should (equal (drover-list-test-groups) '((working "root")))))))))
+next, drawn in place as drawn anew; all of them, it shows idle too.  A
+filter it matches changes nothing: it explains no parent."
+  (dolist (filter '(nil (:host (:exclude "elsewhere"))))
+    (let ((root (drover-list-test-titled "root" "A title longer than the subagent's" :status 'working)))
+      (drover-list-test-with (list root (drover-test-session "child" :parent "archived" :status 'working))
+        (drover-list-test-with-font
+          (drover-list-test-shown
+            (setq drover-filter filter)
+            (revert-buffer)
+            (should (equal (drover-list-test-groups) '((working "root" "child"))))
+            (dolist (status '(idle working idle))
+              (setq drover-test-sessions (list root (drover-test-session "child" :parent "archived"
+                                                                         :status status)))
+              (drover-backend-changed 'fake "child")
+              (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+              (should (equal (drover-list-test-groups)
+                             (if (eq status 'idle) '((working "root")) '((working "root" "child")))))
+              (drover-list-test-is-fresh))
+            (drover-set-show-subagents 'all)
+            (should (equal (drover-list-test-groups) '((working "root") (idle "child"))))
+            (drover-set-show-subagents 'none)
+            (should (equal (drover-list-test-groups) '((working "root"))))))))))
 
 (ert-deftest drover-list-test-subagents-toggle ()
   "=u cycles every view through active, no and all subagents, redrawn at once.
@@ -3936,6 +3939,23 @@ two lines, and what changed while it was hidden is drawn in place after."
     (setq drover-filter '(:search "nowhere"))
     (revert-buffer)
     (should (equal (buffer-string) "No sessions.\n"))))
+
+(ert-deftest drover-list-test-only-hidden-subagents ()
+  "A list whose sessions left are subagents the mode hides says so.
+Their parents not listed, they top trees of their own, which a filter
+does not show, matching or not: the filter is not to blame for them."
+  (drover-list-test-with (list (drover-test-session "child" :parent "archived" :status 'idle))
+    (drover-list-test-shown
+      (revert-buffer)
+      (should (equal (buffer-string) "Every session is a hidden subagent.\n"))
+      (drover-set-filter :host '(:exclude "elsewhere"))
+      (should (equal (buffer-string) "Every session the filter keeps is a hidden subagent.\n"))
+      (drover-set-filter :host nil)
+      (drover-set-filter :search "nowhere")
+      (should (equal (buffer-string) "No session matches the filter.\n"))
+      (drover-filter-clear)
+      (drover-set-show-subagents 'all)
+      (should (equal (drover-list-test-groups) '((idle "child")))))))
 
 ;;;; Entry point and life cycle
 

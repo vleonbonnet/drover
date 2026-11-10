@@ -1213,6 +1213,35 @@ The tree is visited once, through its top, where the subagent is answered."
         (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions)))
                        '("older" "alone" "asking")))))))
 
+(ert-deftest drover-attention-test-order-hidden-orphan-filtered ()
+  "A subagent waiting atop a tree of its own comes where lists would draw it.
+Its parent not listed, lists hide it in `none', under a filter as
+without one, which shows no such subagent: its place among the trees
+is the same either way."
+  (drover-attention-test-with (list (drover-test-session "root" :status 'working :updated 90.0)
+                                    (drover-test-session "asking" :parent "gone" :status 'waiting
+                                                         :since 2.0 :updated 70.0)
+                                    (drover-test-session "alone" :status 'done :since 3.0 :updated 50.0)
+                                    (drover-test-session "older" :status 'done :since 1.0 :updated 10.0))
+    (let ((drover-group-by nil)
+          (drover-sort-by 'updated))
+      (dolist (descending '(t nil))
+        (let* ((drover-sort-descending descending)
+               ;; Where lists draw it, every subagent shown.
+               (drawn (let ((drover-show-subagents 'all))
+                        (seq-filter (lambda (id) (member id '("asking" "alone" "older")))
+                                    (drover-attention-test-ids (drover-tree-sessions
+                                                      (apply #'append (mapcar #'cdr (drover-view-groups))))))))
+               (drover-show-subagents 'none))
+          (should (= (length drawn) 3))
+          (should-not (drover-view-trees (list (drover-find 'fake "asking"))))
+          (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions)))
+                         drawn))
+          (let ((drover-filter '(:host (:exclude "elsewhere"))))
+            (should-not (drover-view-trees (list (drover-find 'fake "asking"))))
+            (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions)))
+                           drawn))))))))
+
 (ert-deftest drover-attention-test-order-filtered-last ()
   "Sessions the filter leaves out come after those lists draw."
   (drover-attention-test-with (list (drover-test-session "a" :status 'done :since 1.0 :project "p")
