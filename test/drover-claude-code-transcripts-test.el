@@ -773,6 +773,43 @@ front end's session taken again."
         (drover-changed-now)
         (should (equal (mapcar #'drover-session-key (drover-sessions)) '((claude-code . "w1"))))))))
 
+(ert-deftest drover-claude-code-transcripts-test-archive-takes-subagents ()
+  "A conversation drover archives through its terminal takes its subagents along.
+They have no conversation of their own, and used to stay, at the top of
+trees of their own.  They leave the sessions in use with it, stay out
+as their transcripts grow, show under it among the archived sessions,
+archived, and come back under it as it is restored."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-with-state
+      (let* ((project (expand-file-name "work/" home))
+             (file (drover-fixture-claude "w1" project :subagents '(("agent-a1" "Explore the list" "Explore"))))
+             (transcript (expand-file-name "w1/subagents/agent-a1.jsonl" (file-name-directory file)))
+             (terminals (list (drover-claude-code-transcripts-test-terminal "w1"))))
+        (drover-test-register-simple 'term (lambda () terminals)
+                                     :session (lambda (id)
+                                                (seq-find (lambda (session) (equal (drover-session-id session) id))
+                                                          terminals)))
+        (drover-claude-code-transcripts-test-scan)
+        (drover-index)
+        (should (equal (drover-index-parent '(claude-code . "w1/agent-a1")) '(term . "terminal-w1")))
+        (drover-archive (drover-find 'term "terminal-w1"))
+        (drover-changed-now)
+        (should-not (drover-index-sessions))
+        (should-not (drover-sessions))
+        (drover-fixture-claude-append transcript (drover-fixture-claude-assistant "w1" project 1790000009.0
+                                                                                  "Still looking" :sidechain t))
+        (drover-claude-code-transcripts-test-scan)
+        (should-not (drover-index-sessions))
+        (let ((drover-show-archived t))
+          (should (equal (drover-test-tree-shape (drover-tree (drover-archived-sessions)))
+                         '(("terminal-w1" ("w1/agent-a1")))))
+          (should (drover-session-archived (drover-find 'claude-code "w1/agent-a1"))))
+        (drover-unarchive (drover-find 'term "terminal-w1"))
+        (drover-changed-now)
+        (should (equal (sort (mapcar #'drover-session-id (drover-index-sessions)) #'string<)
+                       '("terminal-w1" "w1/agent-a1")))
+        (should (equal (drover-index-parent '(claude-code . "w1/agent-a1")) '(term . "terminal-w1")))))))
+
 (ert-deftest drover-claude-code-transcripts-test-delete ()
   "Deleting a closed conversation deletes its transcript and its directory."
   (drover-claude-code-transcripts-test-with

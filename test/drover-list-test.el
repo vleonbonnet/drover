@@ -2875,6 +2875,50 @@ Redraws keep point on the session."
           (should (equal (mapcar #'car (drover-list-test-groups)) '(idle)))
           (drover-set-show-archived nil))))))
 
+(ert-deftest drover-list-test-archived-by-drover-takes-subagents ()
+  "A session drover archives takes the subagents of its conversation along.
+They leave the list with it, drawn in place, show under it among the
+archived sessions, are restored with it, not alone, and come back under
+it, drawn in place too."
+  (drover-list-test-with nil
+    (drover-test-with-state
+      (let ((shown (list (drover-session-create :backend 'shown :id "t1" :title "Terminal" :status 'idle
+                                                :engine 'fake :engine-id "x")
+                         ;; Staying with its subagent, it keeps the columns
+                         ;; as wide and the rows as deep.
+                         (drover-session-create :backend 'shown :id "t2" :status 'idle
+                                                :title "A title longer than the subagent's and its indent"
+                                                :engine 'fake :engine-id "y")))
+            (records (list (drover-session-create :backend 'records :id "x" :title "Record" :status 'idle
+                                                  :engine 'fake :engine-id "x")
+                           (drover-session-create :backend 'records :id "x/agent" :title "Subagent"
+                                                  :status 'idle :engine 'fake :parent "x")
+                           (drover-session-create :backend 'records :id "y/agent" :title "Subagent"
+                                                  :status 'idle :engine 'fake :parent "y"))))
+        (cl-flet ((finder (sessions)
+                    (lambda (id) (seq-find (lambda (session) (equal (drover-session-id session) id)) sessions))))
+          (drover-test-register-simple 'shown (lambda () shown) :session (finder shown))
+          (drover-test-register-simple 'records (lambda () records) :recorded '(fake) :session (finder records)))
+        (drover-list-test-shown
+          (drover-set-show-subagents 'all)
+          (revert-buffer)
+          (should (equal (drover-list-test-groups) '((idle "t1" "x/agent" "t2" "y/agent"))))
+          (drover-archive-session (drover-find 'shown "t1"))
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          (should (equal (drover-list-test-groups) '((idle "t2" "y/agent"))))
+          (drover-list-test-is-fresh)
+          (drover-set-show-archived t)
+          (should (equal (drover-list-test-groups) '((idle "t2" "y/agent") (archived "t1" "x/agent"))))
+          (goto-char (oref (drover-list-test-section "x/agent" 'records) start))
+          (should (drover-session-archived (drover-session-at-point)))
+          (should-error (drover-list-test-press "z") :type 'user-error)
+          (drover-set-show-archived nil)
+          (drover-unarchive-session (drover-find 'shown "t1"))
+          (should (zerop (drover-list-test-counting-redraws (drover-changed-now))))
+          ;; Listed anew, after the session that stayed.
+          (should (equal (drover-list-test-groups) '((idle "t2" "y/agent" "t1" "x/agent"))))
+          (drover-list-test-is-fresh))))))
+
 ;;;; Refreshing
 
 (ert-deftest drover-list-test-refresh-follows-session ()

@@ -2453,9 +2453,9 @@ lists as its engine records them (see `drover--unshadowed')."
 (defun drover-sessions ()
   "Return the sessions of every registered backend, unsorted.
 A backend whose :sessions function fails contributes nothing.  These
-are the sessions backends follow live, but those drover archived (see
-`drover-archive-session'); see `drover-known-sessions' for those lists
-show.
+are the sessions backends follow live, but those drover archived and
+the subagents going with them (see `drover-archive-session'); see
+`drover-known-sessions' for those lists show.
 
 Two front ends may show one conversation of an engine, such as an
 OpenCode session both opencode.el and agent-shell show: records of
@@ -2552,23 +2552,31 @@ be misread; those shown are fetched again."
 The conversations drover archived are left out."
   (drover--unarchived (drover--fetched-sessions 'history)))
 
-(defun drover--recorded-history ()
-  "Return the older conversations the recording backends list, by engine key.
+(defun drover--recorded-history-sessions ()
+  "Return the older sessions the recording backends list, in their order.
 They are what the :history of each backend recording conversations
-answers at once (see :recorded in `drover-register-backend'), as a hash
-table mapping each engine key to its record; the first record wins."
-  (let ((table (make-hash-table :test #'equal)))
+answers at once (see :recorded in `drover-register-backend'): the
+conversations, and the subagents a backend lists with them."
+  (let ((all nil))
     (pcase-dolist (`(,_ . ,properties) drover--backends)
       (when-let* (((plist-get properties :recorded))
                   (history (plist-get properties :history))
                   ((functionp history)))
         (drover-with-reporting "backend history"
-          (funcall history
-                   (lambda (sessions)
-                     (dolist (session sessions)
-                       (when-let* ((key (drover-session-engine-key session))
-                                   ((not (gethash key table))))
-                         (puthash key session table))))))))
+          (funcall history (lambda (sessions) (push sessions all))))))
+    (apply #'append (nreverse all))))
+
+(defun drover--recorded-history (&optional sessions)
+  "Return the older conversations the recording backends list, by engine key.
+They are those of SESSIONS, by default what the :history of each
+backend recording conversations answers at once (see
+`drover--recorded-history-sessions'), as a hash table mapping each
+engine key to its record; the first record wins."
+  (let ((table (make-hash-table :test #'equal)))
+    (dolist (session (or sessions (drover--recorded-history-sessions)))
+      (when-let* ((key (drover-session-engine-key session))
+                  ((not (gethash key table))))
+        (puthash key session table)))
     table))
 
 (defun drover-archived-sessions (&optional live)
@@ -2580,26 +2588,48 @@ following one live, among LIVE, the sessions `drover--live-sessions'
 returns by default, else the record of a backend listing it among the
 older conversations its engine records, else the record drover kept of
 it, when its backend is still registered.  Each has its ARCHIVED set.
-Records of different backends showing one conversation are merged as
-`drover-sessions' merges them."
+The subagents going with a conversation drover archived come with it,
+live or among the older sessions those backends list (see
+`drover--archived-below'), their ARCHIVED set to when it was
+archived, so that lists show them under it.  Records of different
+backends showing one conversation are merged as `drover-sessions'
+merges them."
   (let* ((live (or live (drover--live-sessions)))
+         (below (drover--archived-below live))
          (followed (make-hash-table :test #'equal))
-         (own nil))
-    (dolist (session live)
-      (when-let* ((key (drover-session-engine-key session))
-                  ((drover--archive-entry session)))
-        (push (drover--mark-archived session) (gethash key followed))))
-    (let ((older 'unread))
-      (pcase-dolist (`(,key . ,entry) (drover--archive))
-        (if-let* ((records (gethash key followed)))
-            (setq own (append (nreverse records) own))
-          (when (eq older 'unread)
-            (setq older (drover--recorded-history)))
-          (if-let* ((recorded (gethash key older)))
-              (push (drover--mark-archived recorded) own)
-            (when (assq (plist-get entry :backend) drover--backends)
-              (push (drover--archive-record key entry) own))))))
+         (own nil)
+         (subagents nil)
+         (taken (make-hash-table :test #'equal)))
+    (cl-flet ((take (sessions below)
+                ;; The subagents of SESSIONS going with an archived conversation.
+                (dolist (session sessions)
+                  (when-let* (((not (drover-session-archived session)))
+                              (key (drover-session-key session))
+                              ((not (gethash key taken)))
+                              (above (gethash key below)))
+                    (puthash key t taken)
+                    (push (drover--mark-archived session (drover--archive-lookup above)) subagents)))))
+      (dolist (session live)
+        (when-let* ((key (drover-session-engine-key session))
+                    ((drover--archive-entry session)))
+          (push (drover--mark-archived session) (gethash key followed))))
+      (when below
+        (take live below))
+      (let ((older 'unread))
+        (pcase-dolist (`(,key . ,entry) (drover--archive))
+          (if-let* ((records (gethash key followed)))
+              (setq own (append (nreverse records) own))
+            (when (eq older 'unread)
+              (let ((sessions (drover--recorded-history-sessions)))
+                (setq older (drover--recorded-history sessions))
+                (when-let* ((below (drover--archived-below sessions)))
+                  (take sessions below))))
+            (if-let* ((recorded (gethash key older)))
+                (push (drover--mark-archived recorded) own)
+              (when (assq (plist-get entry :backend) drover--backends)
+                (push (drover--archive-record key entry) own)))))))
     (append (drover--merge-duplicates (append (nreverse own)
+                                              (nreverse subagents)
                                               (seq-filter #'drover-session-archived live)))
             (mapcar (lambda (session)
                       (if (drover-session-archived session)
@@ -3055,6 +3085,9 @@ runs as for a change backends report, KEYS among the sessions changed."
                  :documentation "Keys of the sessions whose parent may be each engine key.")
   (pending nil :documentation "Engine keys whose followers changed, for recorded backends to look at again.
 See `drover--index-settle'.")
+  (withheld (make-hash-table :test #'equal)
+            :documentation "Subagents left out with each conversation drover archived.
+Their keys, by its engine key: see `drover--index-going'.")
   (cyclic nil :documentation "Non-nil when parents form a cycle."))
 
 (drover-note-layout 'drover--index)
@@ -3076,12 +3109,67 @@ made again."
       (drover--schedule-changed)
       nil)))
 
-(defun drover--index-listed (record)
-  "Return RECORD as `drover-sessions' lists it, a copy, or nil when it does not."
+(defun drover--index-listed (index record)
+  "Return RECORD as `drover-sessions' lists it, a copy, or nil when it does not.
+It does not when archived, by its backend or by drover, nor when it
+goes with a conversation drover archived above it (see
+`drover--archived-above'), its parent looked for in INDEX, else asked
+of its backend: INDEX then notes it withheld (see
+`drover--index-going')."
   (and record
        (not (drover-session-archived record))
        (not (drover--archive-entry record))
+       (if-let* ((above (drover--archived-above
+                         record (lambda (session) (drover--parent-record session index)))))
+           (progn (drover--index-withhold index (drover-session-key record) above)
+                  nil)
+         t)
        (copy-sequence record)))
+
+(defun drover--index-withhold (index key above)
+  "Note in INDEX that the session KEY is left out with the conversation ABOVE.
+ABOVE is the engine key of a conversation drover archived.  Restored or
+deleted, it brings KEY back (see `drover--index-going')."
+  (let* ((withheld (drover--index-withheld index))
+         (keys (gethash above withheld)))
+    (unless (member key keys)
+      (puthash above (cons key keys) withheld))))
+
+(defun drover--index-going (index engine-key)
+  "Return the keys of the sessions going with the conversation ENGINE-KEY in INDEX.
+They are the subagents below it, at any depth, which INDEX lists, and
+which leave as drover archives the conversation, and those INDEX left
+out with it (see `drover--index-withhold'), which come back as drover
+restores it or as it is deleted; INDEX forgets those.  A subagent is
+found by its claim on its parent, whether or not INDEX lists the parent:
+by the parent's key, else through the subagent's engine."
+  (let ((records (drover--index-records index))
+        (claims (drover--index-claims index))
+        (engine-claims (drover--index-engine-claims index))
+        (withheld (drover--index-withheld index))
+        (seen (make-hash-table :test #'equal))
+        (stack nil)
+        (going nil))
+    (cl-flet ((below (keys)
+                (dolist (key keys)
+                  (unless (gethash key seen)
+                    (puthash key t seen)
+                    (push key stack)))))
+      (dolist (key (gethash engine-key (drover--index-engines index)))
+        (puthash key t seen))
+      (below (gethash engine-key engine-claims))
+      (dolist (key (gethash engine-key (drover--index-engines index)))
+        (below (gethash key claims)))
+      (below (gethash engine-key withheld))
+      (remhash engine-key withheld)
+      (while stack
+        (let* ((key (pop stack))
+               (record (gethash key records)))
+          (push key going)
+          (below (gethash key claims))
+          (when-let* ((child (and record (drover-session-engine-key record))))
+            (below (gethash child engine-claims))))))
+    (nreverse going)))
 
 (defun drover--index-resolve (index key record)
   "Return the key of the listed parent of RECORD, of KEY, in INDEX, or nil.
@@ -3226,8 +3314,8 @@ no longer while one does.  Return (CHANGED . MOVED), as
                  (properties (alist-get backend drover--backends))
                  (record (drover--index-admit
                           index (drover--index-listed
-                                 (and (functionp (plist-get properties :session))
-                                      (drover--backend-session properties (cdr engine-key)))))))
+                                 index (and (functionp (plist-get properties :session))
+                                            (drover--backend-session properties (cdr engine-key)))))))
             (unless (equal-including-properties record (gethash key (drover--index-records index)))
               (push key changed)
               (setq moved (append (drover--index-put index key record) moved)))))))
@@ -3240,7 +3328,7 @@ which a session listed again keeps while its activity stays near them."
   (let ((index (drover--index-make))
         (times (make-hash-table :test #'equal))
         (listed nil))
-    (dolist (record (drover--unarchived (drover--live-sessions)))
+    (dolist (record (drover--unarchived (drover--live-sessions) index))
       (let ((key (drover-session-key record)))
         ;; The first of several records of one key wins.
         (unless (gethash key (drover--index-records index))
@@ -3268,7 +3356,7 @@ backend no longer registered go."
          (order nil)
          (changed nil)
          (moved nil))
-    (dolist (record (and properties (drover--unarchived (drover--backend-sessions properties))))
+    (dolist (record (and properties (drover--unarchived (drover--backend-sessions properties) index)))
       (let ((key (drover-session-key record)))
         (unless (or (gethash key fresh) (not (drover--index-admit index record)))
           (puthash key record fresh)
@@ -3324,7 +3412,7 @@ following a conversation of KEYS as recorded (see
                      (condition-case err
                          (list (drover--index-admit
                                 index (drover--index-listed
-                                       (drover--bound-record (funcall function (cdr key))))))
+                                       index (drover--bound-record (funcall function (cdr key))))))
                        ((debug error) (drover-report-failure "backend session" err) 'failed))
                    (list nil))
             ('failed (cl-pushnew (car key) relist))
@@ -4123,23 +4211,132 @@ anew: archiving a selection puts thousands."
   (when-let* ((key (drover-session-engine-key session)))
     (drover--archive-lookup key)))
 
-(defun drover--unarchived (sessions)
+;; Drover archives a conversation by its engine key, and a subagent has
+;; none of its own, such as a Claude Code subagent, or one that names
+;; its own conversation: archived alone, the conversation left its
+;; subagents among the sessions in use, at the top of trees of their
+;; own.  A subagent goes with the conversation drover archived above it,
+;; at any depth, as the OpenCode backend has its subagents go with the
+;; session its service archived: out of the sessions in use and the
+;; older ones, and listed under it among the archived ones.
+
+(defun drover--archived-above (session parent-of)
+  "Return the engine key of the conversation drover archived above SESSION, or nil.
+SESSION goes with it, a subagent of it at any depth.  SESSION's own
+conversation is not looked at (see `drover--archive-entry'), nor is a
+session of another host, which its host archives.  Each parent is
+looked for in the archive first, as the conversation of SESSION's
+engine it names, as an archived parent may be listed nowhere; else
+PARENT-OF, a function of a session returning the record of its parent
+or nil, gives the parent, whose own conversation is looked for, then
+its parent's.  A cycle of parents ends the search."
+  (when (and (drover-session-parent session)
+             (not (drover-session-host session))
+             (drover--archive))
+    (let ((current session)
+          (seen nil)
+          (found nil))
+      (while current
+        (let ((parent (drover-session-parent current))
+              (key (drover-session-key current)))
+          (if (or (null parent) (member key seen))
+              (setq current nil)
+            (push key seen)
+            (let ((named (when-let* ((engine (drover-session-engine current)))
+                           (cons engine parent))))
+              (if (and named (drover--archive-lookup named))
+                  (setq found named
+                        current nil)
+                (let* ((record (funcall parent-of current))
+                       (engine-key (and record (drover-session-engine-key record))))
+                  (if (and engine-key (drover--archive-lookup engine-key))
+                      (setq found engine-key
+                            current nil)
+                    (setq current record))))))))
+      found)))
+
+(defun drover--index-parent-record (session index)
+  "Return the record of SESSION's parent in INDEX, or nil.
+The parent is found as `drover-tree' finds it (see
+`drover--index-resolve')."
+  (when-let* ((parent (drover--index-resolve index (drover-session-key session) session)))
+    (gethash parent (drover--index-records index))))
+
+(defun drover--parent-record (session &optional index)
+  "Return the record of SESSION's parent, or nil.
+It is looked for in INDEX, by default the index of the live sessions
+when there is one of this version of drover, else asked of SESSION's
+backend, through its :session, which finds a parent left out of the
+sessions in use, archived, or never listed."
+  (when-let* ((parent (drover-session-parent session)))
+    (or (when-let* ((index (or index
+                               (and drover--index
+                                    (drover-layout-current-p drover--index 'drover--index)
+                                    drover--index))))
+          (drover--index-parent-record session index))
+        (when-let* ((properties (alist-get (drover-session-backend session) drover--backends))
+                    ((functionp (plist-get properties :session))))
+          (drover--backend-session properties parent)))))
+
+(defun drover--archived-below (sessions &optional index)
+  "Return the sessions of SESSIONS going with a conversation drover archived.
+The value is a hash table mapping the key of each subagent going with
+one (see `drover--archived-above') to the engine key of that
+conversation, or nil when none does.  A parent is found among SESSIONS
+as `drover-tree' finds it, by the backend of the subagent naming it,
+else through its engine, else in INDEX, when given."
+  (when (and (drover--archive) (seq-some #'drover-session-parent sessions))
+    (let* ((size (length sessions))
+           (by-key (make-hash-table :test #'equal :size size))
+           (by-engine (make-hash-table :test #'equal :size size))
+           (parent-of (lambda (session)
+                        (let ((parent (drover-session-parent session)))
+                          (or (gethash (cons (drover-session-backend session) parent) by-key)
+                              (when-let* ((engine (drover-session-engine session)))
+                                (gethash (cons engine parent) by-engine))
+                              (and index (drover--index-parent-record session index))))))
+           (below nil))
+      (dolist (session sessions)
+        (puthash (drover-session-key session) session by-key)
+        (when-let* ((engine-key (drover-session-engine-key session)))
+          (unless (gethash engine-key by-engine)
+            (puthash engine-key session by-engine))))
+      (dolist (session sessions)
+        (when-let* ((above (drover--archived-above session parent-of)))
+          (unless below
+            (setq below (make-hash-table :test #'equal)))
+          (puthash (drover-session-key session) above below)))
+      below)))
+
+(defun drover--unarchived (sessions &optional index)
   "Return SESSIONS but those archived: by their backend, or by drover.
 A backend reports its archived sessions through :archived, not among
 the sessions it follows; a record telling it is archived is left out
-all the same."
-  (let ((archive (drover--archive)))
-    (seq-remove (lambda (session)
-                  (or (drover-session-archived session)
-                      (and archive
-                           (when-let* ((key (drover-session-engine-key session)))
-                             (drover--archive-lookup key)))))
-                sessions)))
+all the same.  A subagent going with a conversation drover archived is
+left out with it (see `drover--archived-below'), INDEX, when given,
+noting it withheld (see `drover--index-withhold')."
+  (if (drover--archive)
+      (let ((below (drover--archived-below sessions index)))
+        (when (and below index)
+          (maphash (lambda (key above) (drover--index-withhold index key above)) below))
+        (seq-remove (lambda (session)
+                      (or (drover-session-archived session)
+                          (when-let* ((key (drover-session-engine-key session)))
+                            (drover--archive-lookup key))
+                          (and below (gethash (drover-session-key session) below))))
+                    sessions))
+    (seq-remove #'drover-session-archived sessions)))
 
-(defun drover--mark-archived (session)
-  "Return SESSION, or a copy with its ARCHIVED set when drover archived it."
+(defun drover--mark-archived (session &optional entry)
+  "Return SESSION, or a copy with its ARCHIVED set when drover archived it.
+Drover archived its conversation, or SESSION goes with a conversation
+drover archived above it (see `drover--archived-above'): ENTRY is what
+the archive holds of that conversation, when known."
   (if-let* (((not (drover-session-archived session)))
-            (entry (drover--archive-entry session)))
+            (entry (or entry
+                       (drover--archive-entry session)
+                       (when-let* ((above (drover--archived-above session #'drover--parent-record)))
+                         (drover--archive-lookup above)))))
       (let ((copy (copy-sequence session)))
         (setf (drover-session-archived copy) (plist-get entry :time))
         copy)
@@ -4185,10 +4382,13 @@ session of another host, which its host archives."
                 t))))
 
 (defun drover-unarchivable-p (session)
-  "Return non-nil when SESSION is archived and may be restored."
+  "Return non-nil when SESSION is archived and may be restored.
+A subagent going with a conversation drover archived is restored with
+it, not alone (see `drover--archived-above')."
   (or (and (drover--archive-entry session) t)
       (and (drover-session-archived session)
-           (drover-supports-p session :unarchive))))
+           (drover-supports-p session :unarchive)
+           (not (drover--archived-above session #'drover--parent-record)))))
 
 (defvar drover--front-end-backends)
 
@@ -4216,19 +4416,28 @@ session of another host is wrapped up by its host, when it offers to
   "Report that drover archived or restored the conversation of SESSION.
 Its backend lists its sessions anew; the backends recording the
 conversation (see :recorded in `drover-register-backend') look at it
-alone."
+alone, and the backends of the subagents going with it at those alone:
+the index holds those leaving as it is archived, and those it left out
+with it, which come back as it is restored or deleted (see
+`drover--index-going').  Without an index, views draw everything anew
+from what backends list."
   (drover-backend-changed (drover-session-backend session))
   (when-let* ((key (drover-session-engine-key session)))
     (dolist (backend (drover--recording-backends (car key)))
       (unless (eq backend (drover-session-backend session))
-        (drover-backend-changed backend (cdr key))))))
+        (drover-backend-changed backend (cdr key))))
+    (when (and drover--index (drover-layout-current-p drover--index 'drover--index))
+      (dolist (going (drover--index-going drover--index key))
+        (drover-backend-changed (car going) (cdr going))))))
 
 (defun drover-archive-session (session)
   "Archive SESSION, through its backend, else in drover's own archive.
 A backend without an archive of its own, or whose archive does not take
 SESSION, has its sessions archived by drover, by conversation, so that
 they leave every list until restored with `drover-unarchive-session',
-which they show among while `drover-show-archived' is set.  Signal a
+which they show among while `drover-show-archived' is set.  The
+subagents of such a conversation go with it, at any depth, and come
+back with it (see `drover--archived-above').  Signal a
 `user-error' when SESSION is archived already, or cannot be.
 
 Archived, SESSION's buffer closes (see `drover--close-archived'): the
@@ -4331,7 +4540,10 @@ archived it and no backend lists its conversation any more, neither a
 front end following it nor one listing what its engine records, as for
 a Claude Code conversation whose transcript is gone: restored, it would
 leave every list, so it stays archived, and listed among the archived
-sessions.  A buffer archiving was to close once its turn ended stays open.
+sessions.  Signal one too for a subagent going with a conversation
+drover archived (see `drover--archived-above'): it is restored with
+that conversation, not alone.  A buffer archiving was to close once its
+turn ended stays open.
 
 A backend whose restore is confirmed later (:unarchive-confirms) has
 SESSION's record fetched among the archived sessions forgotten once it
@@ -4344,6 +4556,12 @@ warning."
     (drover--archive-forget session)
     (drover--close-cancel session)
     (drover--archive-changed session))
+   ((when-let* ((above (drover--archived-above session #'drover--parent-record)))
+      (user-error "%s goes with %s, archived: restore that"
+                  (drover-session-display-title session)
+                  (if-let* ((conversation (drover-archived-conversation above)))
+                      (drover-session-display-title conversation)
+                    "the session above it"))))
    ((and (drover-session-archived session) (drover-backend-property session :unarchive-confirms))
     (let ((backend (drover-session-backend session))
           (id (drover-session-id session))

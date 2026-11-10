@@ -665,6 +665,73 @@ holds the identifiers its :session was asked for."
             (drover-unarchive-session archived)))
         (should-not (drover--archive))))))
 
+(ert-deftest drover-test-drover-archive-index-follows-subagents ()
+  "The index follows the subagents going with a conversation drover archives.
+Archived through the front end following it, the conversation takes the
+subagents its recording backend lists out of the index at once, each
+looked at alone, at any depth, the parent of a deeper one asked of its
+backend once out of the index.  They stay out as they change, or come,
+in an index made anew too, and come back with it, under it again.
+Deleted, it leaves its subagents at the top of trees of their own."
+  (let ((records (list (drover-test-record "x")
+                       (drover-test-record "x/agent" :engine-id nil :parent "x")
+                       (drover-test-record "s1" :parent "x")
+                       (drover-test-record "s2" :parent "s1")
+                       (drover-test-record "y"))))
+    (drover-test-with-recorded records
+      (drover-test-with-state
+        (setq drover-test-sessions (list (drover-test-session "terminal" :engine 'fake :engine-id "x")))
+        (drover-backend-changed 'fake "terminal")
+        (drover-changed-now)
+        (should (equal (drover-index-parent '(records . "x/agent")) '(fake . "terminal")))
+        (should (equal (drover-index-parent '(records . "s2")) '(records . "s1")))
+        (setq recorded-asked nil)
+        (drover-archive-session (drover-find 'fake "terminal"))
+        (drover-changed-now)
+        (should (cl-subsetp '("s1" "s2" "terminal" "x/agent") (drover-test-index-ids changed) :test #'equal))
+        (should (cl-subsetp '("x" "x/agent" "s1" "s2") recorded-asked :test #'equal))
+        (should (drover-index-incremental-p))
+        (should (equal (drover-test-index-ids (drover-index-sessions)) '("y")))
+        (should (equal (drover-test-index-ids (drover-sessions)) '("y")))
+        ;; Changing, or coming, they stay out.
+        (setq records (append (list (drover-test-record "x/agent" :engine-id nil :parent "x" :title "Renamed")
+                                    (drover-test-record "x/agent-2" :engine-id nil :parent "x"))
+                              (cddr records)))
+        (dolist (id '("x/agent" "x/agent-2" "s2"))
+          (drover-backend-changed 'records id)
+          (drover-changed-now)
+          (should (equal (drover-test-index-ids (drover-index-sessions)) '("y"))))
+        ;; An index made anew leaves them out too.
+        (setq drover--index nil)
+        (should (equal (drover-test-index-ids (drover-index-sessions)) '("y")))
+        ;; Restored, they come back under it.
+        (drover-unarchive-session (drover-find 'fake "terminal"))
+        (drover-changed-now)
+        (let ((back '("s1" "s2" "terminal" "x/agent" "x/agent-2" "y")))
+          (should (drover-index-incremental-p))
+          (should (equal (drover-test-index-ids (drover-index-sessions)) back))
+          (should (equal (drover-index-parent '(records . "x/agent")) '(fake . "terminal")))
+          (should (equal (drover-index-parent '(records . "x/agent-2")) '(fake . "terminal")))
+          (should (equal (drover-index-parent '(records . "s2")) '(records . "s1")))
+          (setq drover--index nil)
+          (should (equal (drover-test-index-ids (drover-index-sessions)) back)))
+        ;; Deleted archived, its conversation's subagents left behind come
+        ;; back at the top of trees of their own.
+        (drover-archive-session (drover-find 'fake "terminal"))
+        (drover-changed-now)
+        (should (equal (drover-test-index-ids (drover-index-sessions)) '("y")))
+        (drover-test-register-simple 'fake (lambda () drover-test-sessions)
+                                     :session (lambda (id)
+                                                (seq-find (lambda (session) (equal (drover-session-id session) id))
+                                                          drover-test-sessions))
+                                     :delete (lambda (_session) (setq drover-test-sessions nil)))
+        (setq records (seq-remove (lambda (record) (equal (drover-session-id record) "x")) records))
+        (drover-delete-session (drover-find 'fake "terminal"))
+        (drover-changed-now)
+        (should (equal (drover-test-index-ids (drover-index-sessions)) '("s1" "s2" "x/agent" "x/agent-2" "y")))
+        (should-not (drover-index-parent '(records . "x/agent")))
+        (should (equal (drover-index-parent '(records . "s2")) '(records . "s1")))))))
+
 (ert-deftest drover-test-format-age ()
   (should (equal (opencode-format-age nil) ""))
   (should (equal (opencode-format-age (- drover-test-now 42) drover-test-now) "42s"))
@@ -2555,6 +2622,108 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
           (should (equal drover-test-calls '((:delete "conv-a"))))
           (should-not (drover-archived-sessions))
           (should-not (drover--archive)))))))
+
+(defun drover-test-claude-record (id &rest properties)
+  "Return the record of Claude Code conversation ID by the backend `records'.
+Its engine identifier is ID, but as PROPERTIES say otherwise; it is
+idle."
+  (apply #'drover-session-create
+         (append properties (list :backend 'records :id id :title (concat "Record " id) :status 'idle
+                                  :engine 'claude-code :engine-id id))))
+
+(defun drover-test-register-claude-records (records &rest properties)
+  "Register `records', listing Claude Code conversations as their engine records them.
+RECORDS is a function returning them; PROPERTIES are more properties of
+the backend, such as :history."
+  (apply #'drover-test-register-simple 'records records
+         :recorded '(claude-code)
+         :session (lambda (id)
+                    (seq-find (lambda (record) (equal (drover-session-id record) id)) (funcall records)))
+         properties))
+
+(ert-deftest drover-test-drover-archive-takes-subagents ()
+  "A subagent goes with the conversation drover archived above it, at any depth.
+It leaves the sessions in use with it, as a Claude Code subagent, which
+has no conversation of its own, used to stay, at the top of a tree of its
+own.  It shows under it among the archived sessions, archived when it
+was; it is restored with it, not alone, and comes back with it.  A
+session of another host is its host's to archive."
+  (let ((sessions (list (drover-test-shown "a") (drover-test-shown "b")))
+        (records (list (drover-test-claude-record "conv-a")
+                       (drover-test-claude-record "conv-a/agent-1" :engine-id nil :parent "conv-a")
+                       (drover-test-claude-record "conv-s1" :parent "conv-a")
+                       (drover-test-claude-record "conv-s2" :parent "conv-s1")
+                       (drover-test-claude-record "conv-b/agent-1" :engine-id nil :parent "conv-b")
+                       (drover-test-claude-record "elsewhere" :parent "conv-a" :host "core"))))
+    (drover-test-with-shown sessions
+      (drover-test-register-claude-records (lambda () records)
+                                           :unarchive (drover-test--recorder :unarchive))
+      (cl-flet ((ids (sessions) (sort (mapcar #'drover-session-id sessions) #'string<)))
+        (let ((all '("a" "b" "conv-a/agent-1" "conv-b/agent-1" "conv-s1" "conv-s2" "elsewhere")))
+          (should (equal (ids (drover-sessions)) all))
+          (should (equal (ids (drover-index-sessions)) all))
+          (cl-letf (((symbol-function 'float-time) (lambda (&optional _) 100.0)))
+            (drover-archive (drover-find 'shown "a")))
+          (drover-changed-now)
+          ;; Its subagents leave with it; another conversation's stay, and
+          ;; another host's session.
+          (should (equal (ids (drover-sessions)) '("b" "conv-b/agent-1" "elsewhere")))
+          (should (equal (ids (drover-index-sessions)) '("b" "conv-b/agent-1" "elsewhere")))
+          (should-not (drover-attention-sessions))
+          ;; Found, a subagent tells it is archived, but is restored with
+          ;; the conversation, not alone.
+          (let ((s2 (drover-find 'records "conv-s2")))
+            (should (eql (drover-session-archived s2) 100.0))
+            (should (drover-session-archived-p s2))
+            (should-not (drover-archivable-p s2))
+            (should-not (drover-unarchivable-p s2))
+            (let ((err (should-error (drover-unarchive-session s2) :type 'user-error)))
+              (should (equal (cadr err) "Record conv-s2 goes with Shown a, archived: restore that"))))
+          (should-not drover-test-calls)
+          ;; Shown under it among the archived sessions.
+          (let ((drover-show-archived t)
+                (drover-show-subagents 'all))
+            (should (equal (mapcar #'drover-session-key (drover-archived-sessions))
+                           '((shown . "a") (records . "conv-a/agent-1")
+                             (records . "conv-s1") (records . "conv-s2"))))
+            (should (equal (mapcar #'drover-session-archived (drover-archived-sessions))
+                           '(100.0 100.0 100.0 100.0)))
+            (should (equal (drover-test-tree-shape (drover-tree (drover-archived-sessions)))
+                           '(("a" ("conv-a/agent-1") ("conv-s1" ("conv-s2")))))))
+          ;; Restored, they come back with it.
+          (drover-unarchive-session (drover-find 'shown "a"))
+          (drover-changed-now)
+          (should (equal (ids (drover-sessions)) all))
+          (should (equal (ids (drover-index-sessions)) all))
+          (should (equal (drover-index-parent '(records . "conv-s2")) '(records . "conv-s1"))))))))
+
+(ert-deftest drover-test-drover-archive-older-subagents ()
+  "The subagents of an older conversation drover archived go with it.
+A backend listing what its engine records lists them with it among the
+older sessions: they leave those, and show under it among the archived
+ones, until it is restored."
+  (let ((older (list (drover-test-claude-record "conv-old")
+                     (drover-test-claude-record "conv-old/agent-1" :engine-id nil :parent "conv-old")
+                     (drover-test-claude-record "conv-kept")
+                     (drover-test-claude-record "conv-kept/agent-1" :engine-id nil :parent "conv-kept"))))
+    (drover-test-with-shown nil
+      (drover-test-register-claude-records #'ignore
+                                           :history (lambda (callback) (funcall callback older)))
+      (drover-archive-session (car older))
+      (let ((drover-show-subagents 'all))
+        (drover-set-show-history t)
+        (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
+                               (drover-group-trees (drover-view-trees) 'status))
+                       '((idle ("conv-kept" ("conv-kept/agent-1"))))))
+        (drover-set-show-archived t)
+        (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
+                               (drover-group-trees (drover-view-trees) 'status))
+                       '((idle ("conv-kept" ("conv-kept/agent-1")))
+                         (archived ("conv-old" ("conv-old/agent-1"))))))
+        (drover-unarchive-session (drover-find 'records "conv-old"))
+        (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
+                               (drover-group-trees (drover-view-trees) 'status))
+                       '((idle ("conv-old" ("conv-old/agent-1")) ("conv-kept" ("conv-kept/agent-1"))))))))))
 
 ;;;; Closing the buffers of archived sessions
 
