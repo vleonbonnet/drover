@@ -6304,6 +6304,76 @@ Interactively, SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
   (drover-backend-call (or (and session (drover-session-to-answer session)) session) :respond))
 
+;;;; Turns handed back
+
+(defvar drover-handed-off-functions nil
+  "Functions called with (SESSION BUFFERS HOW ORIGIN) once SESSION has its turn.
+The user gave SESSION what it waited for: nothing is left to do in its
+buffers until its turn ends, so that they may be buried, for one.
+
+HOW is `prompt' for a prompt sent to SESSION, `start' for a session a
+prompt started, `build' for `drover-build-and-go', `answer' for one of
+its requests answered, a permission or a question.  ORIGIN is `drover'
+when drover's prompt or commands gave it, `front-end' when the
+session's front end tells it was given there, which includes an answer
+given in the front end's own menu that `drover-respond' opened.
+
+BUFFERS are the live buffers here of SESSION and, for an answer, of the
+sessions above it, a parent's whose subagent asked, and the buffer the
+user acted from when it is another; nil for a session of another host.
+They run from a timer, once the command ended and its windows settled,
+once per session however many reported it meanwhile, each function on
+its own (see `drover-run-hook-reporting').")
+
+(defvar drover--handed-off nil
+  "Sessions handed their turns, for `drover-handed-off-functions', latest first.
+Each entry is (KEY SESSION BUFFERS HOW ORIGIN), as the first report of
+SESSION gave it, BUFFERS those the reports named.")
+
+(defvar drover--handed-off-timer nil
+  "Timer telling `drover-handed-off-functions' of `drover--handed-off', or nil.")
+
+(defun drover-note-handed-off (session how origin &optional buffer)
+  "Note that SESSION has its turn back, given as HOW from ORIGIN.
+HOW and ORIGIN are as `drover-handed-off-functions' gets them; BUFFER is
+the buffer the user acted from, when it may be other than SESSION's.
+The functions run once the current command ended; a session reported
+again before is told of once, as first reported, with BUFFER added.
+Front ends call this for what the user gives a session in its own
+buffers."
+  (when session
+    (let* ((key (drover-session-key session))
+           (entry (assoc key drover--handed-off))
+           (buffers (and (buffer-live-p buffer) (list buffer))))
+      (if entry
+          (setf (nth 2 entry) (seq-uniq (append (nth 2 entry) buffers)))
+        (push (list key session buffers how origin) drover--handed-off))
+      (unless (timerp drover--handed-off-timer)
+        (setq drover--handed-off-timer (run-at-time 0 nil #'drover--tell-handed-off))))))
+
+(defun drover--tell-handed-off ()
+  "Run `drover-handed-off-functions' for the sessions `drover--handed-off' holds."
+  (drover-with-reporting "turn handed back"
+    (let ((entries (reverse drover--handed-off)))
+      (setq drover--handed-off nil
+            drover--handed-off-timer nil)
+      (pcase-dolist (`(,key ,session ,buffers ,how ,origin) entries)
+        (drover-run-hook-reporting 'drover-handed-off-functions
+                                   session (drover--handed-off-buffers session key buffers how)
+                                   how origin)))))
+
+(defun drover--handed-off-buffers (session key buffers how)
+  "Return the live buffers of SESSION, whose key is KEY, then BUFFERS.
+For HOW `answer', the buffers of the sessions above SESSION follow its
+own: their turns wait on it."
+  (let ((found (list (drover-session-buffer session)))
+        (parent key))
+    (when (eq how 'answer)
+      (while (setq parent (drover-index-parent parent))
+        (when-let* ((record (drover-index-session parent)))
+          (push (drover-session-buffer record) found))))
+    (seq-uniq (seq-filter #'buffer-live-p (append (nreverse found) buffers)))))
+
 (defun drover-pending-prompts (session)
   "Return how many pending prompts of SESSION its backend can withdraw, maybe 0.
 They are prompts sent to SESSION that it has not taken yet, as those

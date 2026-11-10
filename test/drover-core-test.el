@@ -216,6 +216,49 @@ of \"none\" asks."
       (drover-backend-changed 'fake "deep")
       (should (equal (answers "root") '((:respond "near")))))))
 
+(ert-deftest drover-test-handed-off ()
+  "A session handed its turn is told of once the command ended, once per report run.
+An answer brings the buffers of the sessions above it, a prompt only
+its own; the buffer the user acted from follows; a failing function
+stops neither the others nor the next session."
+  (drover-test-with-backend (drover-test-asking-family)
+                            (let* ((buffers (mapcar (lambda (id) (cons id (generate-new-buffer (concat "buffer " id))))
+                                                    '("root" "mid" "deep" "own")))
+                                   (acting (generate-new-buffer "acting"))
+                                   (told nil)
+                                   (drover--handed-off nil)
+                                   (drover--handed-off-timer nil)
+                                   (drover-handed-off-functions
+                                    (list (lambda (&rest _) (error "Broken"))
+                                          (lambda (session found how origin)
+                                            (push (list (drover-session-id session) (mapcar #'buffer-name found) how origin)
+                                                  told)))))
+                              (unwind-protect
+                                  (cl-letf (((symbol-function 'drover-report-failure) #'ignore))
+                                    (apply #'drover-register-backend 'fake
+                                           :buffer (lambda (session)
+                                                     (alist-get (drover-session-id session) buffers nil nil #'equal))
+                                           (alist-get 'fake drover--backends))
+                                    (drover-note-handed-off (drover-find 'fake "deep") 'answer 'front-end acting)
+                                    (drover-note-handed-off (drover-find 'fake "deep") 'prompt 'drover)
+                                    (drover-note-handed-off (drover-find 'fake "own") 'prompt 'drover)
+                                    (drover-note-handed-off nil 'prompt 'drover)
+                                    (should-not told)
+                                    (accept-process-output nil 0.05)
+                                    (should (equal (reverse told)
+                                                   '(("deep" ("buffer deep" "buffer mid" "buffer root" "acting") answer front-end)
+                                                     ("own" ("buffer own") prompt drover))))
+                                    (setq told nil)
+                                    (kill-buffer (alist-get "mid" buffers nil nil #'equal))
+                                    (drover-note-handed-off (drover-find 'fake "deep") 'prompt 'drover)
+                                    (drover-note-handed-off (drover-find 'fake "mid") 'answer 'drover)
+                                    (accept-process-output nil 0.05)
+                                    (should (equal (reverse told)
+                                                   '(("deep" ("buffer deep") prompt drover)
+                                                     ("mid" ("buffer root") answer drover)))))
+                                (mapc (lambda (entry) (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry)))) buffers)
+                                (kill-buffer acting)))))
+
 (ert-deftest drover-test-recap ()
   "A recap comes from the backend once; a missing or failing :recap is a failure."
   (drover-test-with-backend nil

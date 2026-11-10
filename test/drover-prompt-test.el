@@ -1679,7 +1679,9 @@ of a frame stays."
                            (setq started (list host (plist-get target :engine) directory text
                                                (plist-get options :model) (plist-get options :agent)))
                            (list :key '(fake . "n1") :title "Started"))
-                  :open (lambda (host result hidden) (setq opened (list host (plist-get result :key) hidden))))))
+                  :open (lambda (host result hidden)
+                          (setq opened (list host (plist-get result :key) hidden))
+                          (drover-test-session "n1")))))
       (drover-prompt-test-choosing (lambda (names) (car (last names)))
         (should (equal (plist-get (drover-prompt-read-target "To: ") :host) "core"))
         (should (equal offered '("[New Fake session…]" "[New Fake session on Core…]"))))
@@ -1842,13 +1844,21 @@ of a frame stays."
     (current-buffer)))
 
 (ert-deftest drover-prompt-test-build-and-go-waits-for-agent ()
-  "Build checks its target agent, waits for the switch and sends once, preserving drafts."
+  "Build checks its target agent, waits for the switch and sends once, preserving drafts.
+Once sent, the session has its turn (see `drover-handed-off-functions')."
   (require 'drover-keys)
+  ;; The sends of the tests before tell their hooks once they ran: not this one's.
+  (accept-process-output nil 0.05)
   (drover-prompt-test-with
     (drover-test-register-engine 'opencode :build-agent "build")
     (let* ((session (drover-prompt-test--session "a" :engine 'opencode :agent "plan"))
            (prompt (drover-prompt-test--prompt "unfinished draft"))
-           (pending nil))
+           (pending nil)
+           (handed nil)
+           (drover-handed-off-functions
+            (list (lambda (session buffers how origin)
+                    (push (list (drover-session-id session) (mapcar #'buffer-name buffers) how origin)
+                          handed)))))
       (with-current-buffer prompt
         (setq drover-prompt-picked-agent "plan"))
       (with-current-buffer (drover-prompt-test--buffer-of "a")
@@ -1864,10 +1874,14 @@ of a frame stays."
                      '((:check "a" "Go ahead" (:agent "build" :model nil :variant nil))
                        (:apply-options "a" (:agent "build" :model nil :variant nil)))))
       (should pending)
+      (accept-process-output nil 0.05)
+      (should-not handed)
       (funcall pending)
       (funcall pending)
       (should (equal (seq-filter (lambda (call) (eq (car call) :send)) drover-test-calls)
                      '((:send "a" "Go ahead" fake-token))))
+      (accept-process-output nil 0.05)
+      (should (equal handed '(("a" ("session a") build drover))))
       (with-current-buffer prompt
         (should (equal (buffer-string) "unfinished draft"))
         (should (equal drover-prompt-picked-agent "plan")))
@@ -2005,17 +2019,18 @@ PROPERTIES are more of its properties.  Return the buffer."
       (should (equal warnings '("Broken did not take the prompt: Gone; it is in the kill ring"))))
     (should (drover-prompt-buffer))))
 
-(ert-deftest drover-prompt-test-sent-functions ()
-  "The prompt's send tells `drover-prompt-sent-functions' once its command ended.
-For a running session and a new one; a failed send, and the other
-sends, tell nothing."
+(ert-deftest drover-prompt-test-handed-off ()
+  "The prompt's send hands the session its turn, told once its command ended.
+For a running session and a new one, through `drover-handed-off-functions';
+a failed send, and the other sends, tell nothing."
   ;; The sends of the tests before tell their hooks once they ran: not this one's.
   (accept-process-output nil 0.05)
   (drover-prompt-test-with
     (let* ((sent nil)
-           (drover-prompt-sent-functions
-            (list (lambda (session buffer new)
-                    (push (list (drover-session-id session) (and buffer (buffer-name buffer)) new) sent))))
+           (drover-handed-off-functions
+            (list (lambda (session buffers how origin)
+                    (push (list (drover-session-id session) (mapcar #'buffer-name buffers) how origin)
+                          sent))))
            (drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake session"))))
       (drover-prompt-test--register 'shown "Shown" :send #'ignore)
       (with-current-buffer (drover-prompt-test--prompt "text")
@@ -2024,7 +2039,7 @@ sends, tell nothing."
       ;; Once the command ended, its windows settled.
       (should-not sent)
       (accept-process-output nil 0.05)
-      (should (equal sent '(("Shown" "Shown" nil))))
+      (should (equal sent '(("Shown" ("Shown") prompt drover))))
       (setq sent nil)
       (let ((prompt (drover-prompt-test--prompt "Do it")))
         (with-current-buffer prompt
@@ -2032,7 +2047,7 @@ sends, tell nothing."
           (drover-prompt-test-choosing (lambda (_) "[New Fake session…]")
             (drover-prompt-submit))))
       (accept-process-output nil 0.05)
-      (should (equal sent '(("new-0" nil t))))
+      (should (equal sent '(("new-0" nil start drover))))
       (setq sent nil)
       (drover-prompt-test--register 'broken "Broken" :send (lambda (&rest _) (error "Gone")))
       (drover-prompt-test-with-warnings
@@ -2057,8 +2072,8 @@ default."
            (pending nil)
            (displayed nil)
            (sent nil)
-           (drover-prompt-sent-functions
-            (list (lambda (session _buffer new) (push (list (drover-session-id session) new) sent)))))
+           (drover-handed-off-functions
+            (list (lambda (session _buffers how _origin) (push (list (drover-session-id session) how) sent)))))
       (push (cons "other" other) drover-prompt-test-buffers)
       (apply #'drover-register-backend 'fake
              :create (lambda (directory engine options then else)
@@ -2082,7 +2097,7 @@ default."
           (should-not (get-buffer-window other t))))
       (should (plist-get (nth 3 (assq :create drover-test-calls)) :hidden))
       (should (equal (assq :send drover-test-calls) '(:send "new-0" "Do it")))
-      (should (equal sent '(("new-0" t))))
+      (should (equal sent '(("new-0" start))))
       (setq drover-test-calls nil)
       (let ((drover-prompt-display-new t))
         (with-current-buffer (drover-prompt-test--prompt "Shown")

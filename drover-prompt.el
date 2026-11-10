@@ -251,17 +251,6 @@ this host's, for its links and attachments.")
 (defvar-local drover-prompt-host-directory nil
   "Directory of `drover-prompt-host' a new session of the prompt starts in.")
 
-(defvar drover-prompt-sent-functions nil
-  "Functions called with (SESSION BUFFER NEW) once the prompt went to SESSION.
-The prompt's send (`drover-prompt-submit') runs them once its backend
-took the text, after the command, the prompt's window gone and a new
-session shown (see `drover-prompt-display-new'): BUFFER is SESSION's
-buffer here then, or nil, and NEW is
-non-nil for a session the send started, here or on another host.  Other
-sends, such as `drover-prompt-send-to', a scheduled prompt's or a
-task's, do not run them.  Each function runs on its own (see
-`drover-run-hook-reporting').")
-
 (defvar drover-prompt-remote-functions nil
   "How the prompt starts sessions on other hosts, or nil when it cannot.
 `drover-remote-mode' sets it, a plist of functions:
@@ -1070,7 +1059,7 @@ backend."
                         (format "it goes to %s" title))))))
 
 ;;;###autoload
-(defun drover-prompt-send-to (session text &optional options)
+(defun drover-prompt-send-to (session text &optional options then)
   "Send TEXT, in Org, to SESSION at once, as the prompt sends it.
 The prompt is left as it is.  TEXT goes to the kill ring, then as
 Markdown (see `drover-prompt-to-markdown') through SESSION's backend,
@@ -1079,8 +1068,10 @@ explicit options plist, are checked and applied before sending, as
 the prompt's choices are.  A session drover archived is restored first
 \(see `drover-unarchive-to-send'); one that cannot be signals a
 `user-error'.  Return non-nil when the checks allow delivery to proceed.
-Front ends call this to send a prompt of their own making, as a review
-of a session's changes does (see `drover-review')."
+THEN, a function of no argument, is called once the backend took the
+text, after OPTIONS were applied.  Front ends call this to send a
+prompt of their own making, as a review of a session's changes does
+\(see `drover-review')."
   (let* ((markdown (drover-prompt-to-markdown text))
          (target (drover-session-buffer session))
          (check (drover-backend-property session :check))
@@ -1093,13 +1084,16 @@ of a session's changes does (see `drover-review')."
                         (drover-session-display-title session))
                nil)
       (drover-unarchive-to-send session)
-      (if options
-          (drover-prompt-apply-options
-           session options
-           (lambda ()
-             (drover-with-reporting "prompt after options"
-               (drover-prompt--deliver session target markdown token))))
-        (drover-prompt--deliver session target markdown token))
+      (cl-flet ((deliver ()
+                  (when (and (drover-prompt--deliver session target markdown token) then)
+                    (funcall then))))
+        (if options
+            (drover-prompt-apply-options
+             session options
+             (lambda ()
+               (drover-with-reporting "prompt after options"
+                 (deliver))))
+          (deliver)))
       t)))
 
 (defun drover-prompt-forget-target ()
@@ -1516,13 +1510,12 @@ Return non-nil once the backend took TEXT."
          nil))))))
 
 (defun drover-prompt--sent (session new)
-  "Run `drover-prompt-sent-functions' for SESSION, NEW when the send started it.
-From a timer: the prompt's window goes, and a new session shows, as the
-command ends."
-  (run-at-time 0 nil (lambda ()
-                       (drover-with-reporting "prompt sent"
-                         (drover-run-hook-reporting 'drover-prompt-sent-functions
-                                                    session (drover-session-buffer session) new)))))
+  "Note that the prompt's send handed SESSION its turn, NEW when it started it.
+See `drover-handed-off-functions', which run once the command ended:
+the prompt's window goes, and a new session shows, as it ends.  Other
+sends, such as `drover-prompt-send-to', a scheduled prompt's or a
+task's, note nothing: the user did not send them now."
+  (drover-note-handed-off session (if new 'start 'prompt) 'drover))
 
 (defun drover-prompt--send-to-session (session content buffer)
   "Send CONTENT of the prompt BUFFER to the running SESSION.

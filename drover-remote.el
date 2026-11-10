@@ -2674,7 +2674,9 @@ it through its backend, its records then telling the request answered."
         (let ((answer (drover-remote--read-answer (car requests) label))
               (title (drover-session-display-title session)))
           (drover-remote--act name "answer" session answer
-                              (lambda () (drover-message "Answered %s on %s" title label))
+                              (lambda ()
+                                (drover-message "Answered %s on %s" title label)
+                                (drover-note-handed-off session 'answer 'drover))
                               (lambda (message) (drover-warn "Could not answer %s: %s" title message))))))))
 
 ;;;; Performing a peer's actions

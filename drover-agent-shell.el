@@ -508,12 +508,19 @@ One of them is called, once."
                                   (funcall else "its session choice was cancelled"))
                                  (_ (funcall else "it was closed")))))))))))))
 
+(defvar drover-agent-shell--submitting nil
+  "Non-nil while drover submits a prompt to a shell.
+Its `input-submitted' event is drover's send, not the user's at the
+shell: drover tells of it itself, if it was the user's (see
+`drover-agent-shell--handed-back').")
+
 (defun drover-agent-shell--submit (buffer text)
   "Submit TEXT to the initialized shell of BUFFER, queued while it is busy."
   (with-current-buffer buffer
     (if (shell-maker-busy)
         (agent-shell-prompt-queue text)
-      (agent-shell-insert :shell-buffer buffer :text text :submit t :no-focus t))))
+      (let ((drover-agent-shell--submitting t))
+        (agent-shell-insert :shell-buffer buffer :text text :submit t :no-focus t)))))
 
 (defun drover-agent-shell-send-text (buffer text)
   "Submit TEXT as a prompt to the shell of BUFFER.
@@ -1063,12 +1070,33 @@ success."
    ((not (and (eq status 'done) (eq (plist-get drover-agent-shell--outcome :status) 'failed)))
     (setq drover-agent-shell--outcome (list :status status :detail detail :time (float-time))))))
 
+(defun drover-agent-shell--handed-back (how)
+  "Note that the user handed the current shell its turn back, as HOW.
+HOW is `prompt' or `answer'.  Only what a command of the user's gives
+counts: not a prompt drover submits (see
+`drover-agent-shell--submitting'), nor one agent-shell takes from its
+queue as a turn ends, nor an answer an agent-shell responder or
+another host gives, all of which run out of any command.  The buffer
+of the selected window goes with it when it shows this shell, as its
+viewport does."
+  (when (and this-command (not drover-agent-shell--submitting))
+    (when-let* ((session (drover-agent-shell--buffer-session)))
+      (let ((acting (window-buffer (selected-window))))
+        (drover-note-handed-off session how 'front-end
+                                (and (eq (drover-agent-shell--shell-of acting) (current-buffer))
+                                     acting))))))
+
 (defun drover-agent-shell--on-event (event)
   "Follow EVENT of the current shell, and report what changed to drover."
   (drover-with-reporting "agent-shell event"
     (let* ((kind (map-elt event :event))
            (data (map-elt event :data))
            (request (map-elt data :request-id)))
+      (pcase kind
+        ((or 'input-submitted 'permission-response 'elicitation-response)
+         ;; A request cancelled, or a form dismissed, does not give the agent its answer.
+         (unless (or (map-elt data :cancelled) (equal (format "%s" (map-elt data :action)) "cancel"))
+           (drover-agent-shell--handed-back (if (eq kind 'input-submitted) 'prompt 'answer)))))
       (pcase kind
         ('input-submitted
          (setq drover-agent-shell--outcome nil

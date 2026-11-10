@@ -186,6 +186,7 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (opencode-state-updated-functions nil)
          (opencode-session-buffer-functions nil)
          (opencode-catalog-changed-functions nil)
+         (opencode-handed-back-functions nil)
          (opencode-session-buffers (make-hash-table :test #'equal))
          (drover-opencode-test-entries ,entries)
          (drover-opencode-test-calls nil)
@@ -1693,6 +1694,36 @@ by asking, and is killed after BODY if it is still live."
            (with-current-buffer buffer
              (let ((kill-buffer-query-functions nil))
                (kill-buffer buffer))))))))
+
+(ert-deftest drover-opencode-test-handed-back ()
+  "A turn opencode.el hands back from a session buffer hands the session its turn.
+An answer to a subagent's request brings its parent's buffer, the one
+the user looks at; an answer another host gives here does not count."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1")
+                                   (drover-opencode-test-entry "ses_2" :parent-id "ses_1"))
+    (drover-start)
+    (should (memq #'drover-opencode--handed-back opencode-handed-back-functions))
+    (drover-opencode-test-with-buffers '("" "")
+      (let ((noted nil))
+        (cl-letf (((symbol-function 'drover-note-handed-off)
+                   (lambda (session how origin &optional buffer)
+                     (push (list (drover-session-id session) how origin (and buffer (buffer-name buffer)))
+                           noted))))
+          (save-window-excursion
+            (set-window-buffer (selected-window) (nth 0 buffers))
+            (with-current-buffer (nth 0 buffers)
+              (opencode-handed-back 'command))
+            (with-current-buffer (nth 1 buffers)
+              (opencode-handed-back 'question)
+              (let ((drover-opencode--answering t))
+                (opencode-handed-back 'permission)))
+            (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+            (with-current-buffer (nth 1 buffers)
+              (opencode-handed-back 'permission))))
+        (should (equal (reverse noted)
+                       `(("ses_1" prompt front-end nil)
+                         ("ses_2" answer front-end ,(buffer-name (nth 0 buffers)))
+                         ("ses_2" answer front-end nil))))))))
 
 (ert-deftest drover-opencode-test-archive-closes-buffer ()
   "Archiving closes the session's buffer once the service took it, mid-turn too.

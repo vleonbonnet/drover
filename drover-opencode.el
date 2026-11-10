@@ -1037,6 +1037,29 @@ catalogs show in no session of this backend."
     (unless (drover-opencode--remote-p)
       (drover-backend-changed 'opencode))))
 
+(defvar drover-opencode--answering nil
+  "Non-nil while the backend answers a request for another host (see :answer).")
+
+(defun drover-opencode--handed-back (kind)
+  "Note that the session of the current buffer has its turn back, given as KIND.
+For `opencode-handed-back-functions': KIND `permission' or `question' is
+an answer, given in this buffer or in place, from another; the buffer
+of the selected window, the user's acting from it, goes with it when it
+is a session buffer.  A prompt or a command is sent from this buffer.
+A session of another host's service is that host's drover's, and an
+answer another host gives here is that host's (see
+`drover-opencode--answer')."
+  (drover-with-reporting "OpenCode turn handed back"
+    (unless (or drover-opencode--answering (drover-opencode--remote-p))
+      (when-let* ((session (drover-opencode--buffer-session)))
+        (let ((acting (window-buffer (selected-window))))
+          (drover-note-handed-off session (if (memq kind '(permission question)) 'answer 'prompt)
+                                  'front-end
+                                  (and (not (eq acting (current-buffer)))
+                                       (with-current-buffer acting
+                                         (derived-mode-p 'opencode-session-mode))
+                                       acting)))))))
+
 (defun drover-opencode--start ()
   "Follow the registry, session buffers, catalogs and projects; bootstrap it.
 The registry does not change when a session's buffer opens or closes,
@@ -1045,6 +1068,7 @@ yet views show what sessions run by their catalogs."
   (add-hook 'opencode-state-updated-functions #'drover-opencode--updated)
   (add-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (add-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
+  (add-hook 'opencode-handed-back-functions #'drover-opencode--handed-back)
   (opencode-events-register "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-register "server.connected" #'drover-opencode--projects-changed)
   (dolist (type drover-opencode--moving-events)
@@ -1239,42 +1263,43 @@ strings, or (:dismiss t).  Nothing asks the user.  The backend's
      (opencode--sync-requests
       (lambda ()
         (drover-with-reporting "OpenCode answer"
-                               (let ((permission (seq-find (lambda (p) (equal (plist-get p :id) id)) opencode-pending-permissions))
-                                     (entry (opencode--form-find :id id)))
-                                 (cond
-                                  (permission
-                                   (let ((decision (plist-get answer :decision)))
-                                     (if (not (member decision '("once" "always" "reject")))
-                                         (funcall else "no such choice")
-                                       (opencode-permission-reply permission (intern decision))
-                                       (funcall then))))
-                                  ((not (and entry (not (plist-get entry :submitted))))
-                                   (funcall else "no such request pending"))
-                                  ((plist-get answer :dismiss)
-                                   (opencode-form-send entry t)
-                                   (funcall then))
-                                  (t
-                                   (let* ((pairs (plist-get answer :answer))
-                                          (form (plist-get entry :form))
-                                          (body nil))
-                                     (dolist (field (opencode-form-fields form))
-                                       (let* ((key (alist-get 'key field))
-                                              (given (and (stringp key) (assoc key pairs)))
-                                              (value (and given (drover-opencode--field-value field (cdr given)))))
-                                         (when value
-                                           (push (cons (intern key) value) body))))
-                                     (plist-put entry :submitted t)
-                                     (opencode-request
-                                      'post (format "/api/session/%s/form/%s/reply" opencode-session-id id)
-                                      :body `((answer . ,(or (nreverse body) (opencode-empty-object))))
-                                      :then (lambda (_)
-                                              (drover-with-reporting "OpenCode answer"
-                                                                     (opencode--form-resolved id)
-                                                                     (funcall then)))
-                                      :else (lambda (error)
-                                              (drover-with-reporting "OpenCode answer"
-                                                                     (plist-put entry :submitted nil)
-                                                                     (funcall else (opencode-error-describe error)))))))))))))
+          (let ((permission (seq-find (lambda (p) (equal (plist-get p :id) id)) opencode-pending-permissions))
+                (entry (opencode--form-find :id id)))
+            (cond
+             (permission
+              (let ((decision (plist-get answer :decision)))
+                (if (not (member decision '("once" "always" "reject")))
+                    (funcall else "no such choice")
+                  (let ((drover-opencode--answering t))
+                    (opencode-permission-reply permission (intern decision)))
+                  (funcall then))))
+             ((not (and entry (not (plist-get entry :submitted))))
+              (funcall else "no such request pending"))
+             ((plist-get answer :dismiss)
+              (opencode-form-send entry t)
+              (funcall then))
+             (t
+              (let* ((pairs (plist-get answer :answer))
+                     (form (plist-get entry :form))
+                     (body nil))
+                (dolist (field (opencode-form-fields form))
+                  (let* ((key (alist-get 'key field))
+                         (given (and (stringp key) (assoc key pairs)))
+                         (value (and given (drover-opencode--field-value field (cdr given)))))
+                    (when value
+                      (push (cons (intern key) value) body))))
+                (plist-put entry :submitted t)
+                (opencode-request
+                 'post (format "/api/session/%s/form/%s/reply" opencode-session-id id)
+                 :body `((answer . ,(or (nreverse body) (opencode-empty-object))))
+                 :then (lambda (_)
+                         (drover-with-reporting "OpenCode answer"
+                           (opencode--form-resolved id)
+                           (funcall then)))
+                 :else (lambda (error)
+                         (drover-with-reporting "OpenCode answer"
+                           (plist-put entry :submitted nil)
+                           (funcall else (opencode-error-describe error)))))))))))))
    else))
 
 (defun drover-opencode--pending-prompts (session)
@@ -2137,6 +2162,7 @@ OpenCode buffers lose drover's keys."
   (remove-hook 'opencode-state-updated-functions #'drover-opencode--updated)
   (remove-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (remove-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
+  (remove-hook 'opencode-handed-back-functions #'drover-opencode--handed-back)
   (opencode-events-unregister "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-unregister "server.connected" #'drover-opencode--projects-changed)
   (dolist (type drover-opencode--moving-events)

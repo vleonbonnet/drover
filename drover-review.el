@@ -69,7 +69,7 @@
   (load "drover-core" nil t))
 
 (declare-function drover-prompt-edit-for "drover-prompt" (session text))
-(declare-function drover-prompt-send-to "drover-prompt" (session text &optional options))
+(declare-function drover-prompt-send-to "drover-prompt" (session text &optional options then))
 (declare-function org-escape-code-in-string "org-src" (s))
 (declare-function magit-diff-working-tree "ext:magit-diff" (&optional rev args files))
 

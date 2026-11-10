@@ -1544,6 +1544,41 @@ One of OpenCode keeps the provider it names, and has nothing recorded."
       (should-not (buffer-local-value 'drover-agent-shell--request-times shell))
       (should (equal (drover-agent-shell-test-status shell) '(working nil nil))))))
 
+(ert-deftest drover-agent-shell-test-handed-back ()
+  "What the user's commands give a shell hands its session the turn.
+A prompt submitted, a permission or a form answered; not one cancelled
+or dismissed, nor what runs out of a command, nor drover's own send."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code))
+          (noted nil))
+      (cl-letf (((symbol-function 'drover-note-handed-off)
+                 (lambda (session how origin &optional buffer)
+                   (push (list (eq (drover-session-buffer session) shell) how origin
+                               (and buffer (buffer-name buffer)))
+                         noted)))
+                ((symbol-function 'agent-shell-insert)
+                 (lambda (&rest _) (drover-agent-shell-test-emit shell 'input-submitted :prompt "sent"))))
+        (save-window-excursion
+          (set-window-buffer (selected-window) shell)
+          ;; Out of a command: a queued prompt, a responder's answer.
+          (let ((this-command nil))
+            (drover-agent-shell-test-emit shell 'input-submitted :prompt "queued")
+            (drover-agent-shell-test-emit shell 'permission-response :request-id 1 :option-id "allow"))
+          (let ((this-command 'shell-maker-submit))
+            (drover-agent-shell-test-emit shell 'input-submitted :prompt "typed")
+            (drover-agent-shell--submit shell "sent")
+            (drover-agent-shell-test-emit shell 'permission-response :request-id 2 :cancelled t)
+            (drover-agent-shell-test-emit shell 'permission-response :request-id 3 :option-id "allow")
+            (drover-agent-shell-test-emit shell 'elicitation-response :request-id 4 :action 'cancel)
+            (drover-agent-shell-test-emit shell 'elicitation-response :request-id 5 :action 'accept)
+            (set-window-buffer (selected-window) (get-buffer-create "*scratch*"))
+            (drover-agent-shell-test-emit shell 'input-submitted :prompt "elsewhere"))))
+      (should (equal (reverse noted)
+                     `((t prompt front-end ,(buffer-name shell))
+                       (t answer front-end ,(buffer-name shell))
+                       (t answer front-end ,(buffer-name shell))
+                       (t prompt front-end nil)))))))
+
 (ert-deftest drover-agent-shell-test-status-ended-turns ()
   "A turn ending unseen is done or failed until seen; a cancelled one is not."
   (drover-agent-shell-test-with

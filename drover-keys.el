@@ -661,13 +661,15 @@ for Claude Code the permission mode `drover-claude-code-agent-modes'
 gives \"build\".  Its backend applies the agent before sending, as for
 options chosen in the prompt; any draft stays as it is.  This applies
 to sessions whose backend can change their agent, of this host or
-another."
+another.  Once sent, SESSION has its turn back (see
+`drover-handed-off-functions')."
   (interactive (list (drover-session-at-point)))
   (unless (drover-build-and-go-p session)
     (user-error "%s cannot switch to a build agent"
                 (if session (drover-session-display-title session) "No session")))
   (drover-prompt-send-to session "Go ahead"
-                         (list :agent (drover-engine-build-agent (drover-session-engine session)))))
+                         (list :agent (drover-engine-build-agent (drover-session-engine session)))
+                         (lambda () (drover-note-handed-off session 'build 'drover))))
 
 ;;;; Session keys
 
