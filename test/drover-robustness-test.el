@@ -57,6 +57,15 @@ Errors out of commands are reported, not debugged."
        ,@body)
      (nreverse messages)))
 
+(defun drover-robustness-test-wait (predicate)
+  "Process events until PREDICATE returns non-nil, 10 seconds at most.
+Not `sleep-for' a fixed time: past its end it returns without running
+the timers due, and with every processor busy that much time passes in
+one wait, as the timer refreshing drover waits to run."
+  (let ((end (+ (float-time) 10)))
+    (while (and (not (funcall predicate)) (< (float-time) end))
+      (accept-process-output nil 0.01))))
+
 (defun drover-robustness-test-bounded-p (messages)
   "Return non-nil when every one of MESSAGES is one short line."
   (seq-every-p (lambda (message)
@@ -180,9 +189,9 @@ came after: the accessors of today read past its end."
       (add-hook 'drover-changed-hook (lambda () (cl-incf ran)) t)
       (let ((messages (drover-robustness-test-messages
                         (drover-backend-changed 'fake "a")
-                        (sleep-for 0.2)
+                        (drover-robustness-test-wait (lambda () (= ran 1)))
                         (drover-backend-changed 'fake "a")
-                        (sleep-for 0.2))))
+                        (drover-robustness-test-wait (lambda () (= ran 2))))))
         (should (= ran 2))
         (should (= (length messages) 1))
         (should (drover-robustness-test-bounded-p messages))
@@ -682,11 +691,19 @@ and a session changes, as its timers follow."
                         (setq load-path (cons ,(directory-file-name root) (delete ,old load-path)))
                         (dolist (file (directory-files ,root t "\\`drover.*\\.el\\'"))
                           (load file nil t))
+                        ;; Each change followed as it is: a fixed wait, past
+                        ;; its end, returns without running the timers due.
+                        (defvar refreshed 0)
+                        (add-hook 'drover-changed-hook (lambda () (setq refreshed (1+ refreshed))) t)
+                        (defun wait-refreshed (count)
+                          (let ((end (+ (float-time) 30)))
+                            (while (and (< refreshed count) (< (float-time) end))
+                              (accept-process-output nil 0.01))))
                         (setf (drover-session-status (nth 5 sessions)) 'done)
                         (drover-backend-changed 'fake "s5")
-                        (sleep-for 0.3)
+                        (wait-refreshed 1)
                         (drover-backend-changed 'fake "s6")
-                        (sleep-for 0.3)
+                        (wait-refreshed 2)
                         (with-current-buffer (drover-list--buffer)
                           (princ (format "RESULT %S\n"
                                          (list :longest (apply #'max 0 (mapcar #'length messages))
