@@ -45,7 +45,12 @@
 ;; after a reply ended, and requests; it is followed even while hidden.
 ;; A turn that ended while the terminal was in front of the user, or looked
 ;; at since, is seen and idles.  vterm and eat terminals use the process
-;; record alone when it is available.
+;; record alone when it is available.  Work the CLI does of its own,
+;; compacting a conversation that sat idle before its prompt cache
+;; expires, reports work and its end as a turn does, but is none: once
+;; the conversation's transcript tells so, the terminal stands as it did
+;; before, as old, its turn seen or not as it was (see
+;; `drover-claude-code-ide--settle').
 ;;
 ;; The prompt starts sessions with the flags its options stand for,
 ;; switches a running session's permission mode with Shift+Tab, reading
@@ -565,6 +570,19 @@ conversation again tells too: the conversation did nothing then.")
 (defvar-local drover-claude-code-ide--seen nil
   "Non-nil when the user saw the turn this terminal's state ended.")
 
+(defvar-local drover-claude-code-ide--work nil
+  "How this terminal stood as its latest work began, until settled, or nil.
+A plist of :id, the conversation then; :start, when the work began;
+:state, :since, :activity and :seen, the terminal's before it; and
+:end, when it ended, once it did.  Work the CLI did of its own,
+compacting the conversation as it sat idle, is no turn: the terminal
+stands again as it did before (see `drover-claude-code-ide--settle').")
+
+(defconst drover-claude-code-ide--settle-wait 2
+  "Seconds ended work waits for its transcript to tell whether it was a turn.
+The CLI records a turn's prompt as the turn starts, and a compaction
+before it reports its end: this is for a transcript read late.")
+
 (defun drover-claude-code-ide--records ()
   "Return the program status records of the current terminal, newest first."
   (bound-and-true-p ghostel-program-status))
@@ -613,14 +631,18 @@ A `blocked' entry wins over an `error' one; without entries, `idle'."
   "Note the program status of the current terminal, SEEN by the user or not.
 When the records its status follows changed, the state's start is noted
 when it changed, the time of a turn's activity too (see
-`drover-claude-code-ide--activity'), and the turn is unseen unless SEEN.
-SEEN non-nil marks the state seen whatever changed."
+`drover-claude-code-ide--activity'), and the turn is unseen unless SEEN;
+work beginning or ending is noted (see `drover-claude-code-ide--note-work').
+SEEN non-nil marks the state seen whatever changed, and the turn before
+work not yet ended: the terminal shows it while the CLI works of its
+own."
   (let ((entries (drover-claude-code-ide--live-entries)))
     (unless (equal entries drover-claude-code-ide--entries)
       (let ((state (drover-claude-code-ide--state-of entries))
             (before (or drover-claude-code-ide--state 'idle))
             (now (float-time)))
         (unless (eq state before)
+          (drover-claude-code-ide--note-work before state now)
           (setq-local drover-claude-code-ide--since now))
         (when (or (not (eq state 'idle)) (memq before '(working blocked)))
           (setq-local drover-claude-code-ide--activity now))
@@ -628,7 +650,65 @@ SEEN non-nil marks the state seen whatever changed."
         (setq-local drover-claude-code-ide--state state)
         (setq-local drover-claude-code-ide--seen nil)))
     (when seen
-      (setq-local drover-claude-code-ide--seen t))))
+      (setq-local drover-claude-code-ide--seen t)
+      (when-let* ((work drover-claude-code-ide--work)
+                  ((not (plist-get work :end))))
+        (setq-local drover-claude-code-ide--work (plist-put (copy-sequence work) :seen t))))))
+
+(defun drover-claude-code-ide--note-work (before state now)
+  "Note work beginning or ending in the current terminal at NOW.
+Its state goes from BEFORE to STATE.  Work beginning while no turn runs
+notes how the terminal stood (see `drover-claude-code-ide--work'); a
+request to the user drops that, being a turn's.  Work ending notes its
+end and has its transcript looked at at once, and again once
+`drover-claude-code-ide--settle-wait' passed, the session listed anew
+then, so that `drover-claude-code-ide--settle' learns what it was."
+  (cond
+   ((eq state 'blocked)
+    (setq-local drover-claude-code-ide--work nil))
+   ((and (eq state 'working) (memq before '(idle done error)))
+    (setq-local drover-claude-code-ide--work
+                (list :id drover-claude-code-ide-session-id :start now :state before
+                      :since drover-claude-code-ide--since :activity drover-claude-code-ide--activity
+                      :seen drover-claude-code-ide--seen)))
+   ((and (eq before 'working) drover-claude-code-ide--work
+         (not (plist-get drover-claude-code-ide--work :end)))
+    (if-let* ((id (plist-get drover-claude-code-ide--work :id)))
+        (let ((token drover-claude-code-ide--token))
+          (setq-local drover-claude-code-ide--work (append drover-claude-code-ide--work (list :end now)))
+          (drover-claude-code-transcripts-check id)
+          (drover-claude-code-ide--later (current-buffer) drover-claude-code-ide--settle-wait
+                                         (lambda ()
+                                           (drover-claude-code-transcripts-check id)
+                                           (drover-backend-changed 'claude-code-ide token))))
+      (setq-local drover-claude-code-ide--work nil)))))
+
+(defun drover-claude-code-ide--settle ()
+  "Settle the work the current terminal ended; return non-nil while it cannot.
+What the work was, its transcript tells (see
+`drover-claude-code-transcripts-work-between'): a compaction the CLI ran
+of its own as the conversation sat idle leaves the terminal as it stood
+before, its state's start, its last activity and whether its turn was
+seen, its turn seen when none showed; a turn, or a conversation other
+than the one the work began in, leaves it as its status tells.  While
+the transcript tells neither, for `drover-claude-code-ide--settle-wait'
+seconds after the work ended, the value is non-nil: the work is not
+over, the session still works.  Past them, it was a turn."
+  (when-let* ((work drover-claude-code-ide--work)
+              (end (plist-get work :end)))
+    (let ((told (and (equal (plist-get work :id) drover-claude-code-ide-session-id)
+                     (drover-claude-code-transcripts-work-between
+                      (plist-get work :id) (plist-get work :start) end))))
+      (if (and (eq told 'quiet) (< (- (float-time) end) drover-claude-code-ide--settle-wait))
+          t
+        (when (eq told 'compaction)
+          (setq-local drover-claude-code-ide--since (plist-get work :since))
+          (setq-local drover-claude-code-ide--activity (plist-get work :activity))
+          (setq-local drover-claude-code-ide--seen
+                      (or drover-claude-code-ide--seen (plist-get work :seen)
+                          (not (memq (plist-get work :state) '(done error))))))
+        (setq-local drover-claude-code-ide--work nil)
+        nil))))
 
 (defun drover-claude-code-ide--poll-status ()
   "Follow live process records, reporting only terminals whose state changed."
@@ -703,12 +783,17 @@ and `after-focus-change-function'."
                        (symbol-name (or kind 'permission))))))
 
 (defun drover-claude-code-ide--status (buffer)
-  "Return the status of terminal BUFFER, as (STATUS REQUESTS DETAIL)."
+  "Return the status of terminal BUFFER, as (STATUS REQUESTS DETAIL).
+Work ended that its transcript does not tell yet works still, and work
+the CLI did of its own leaves the status it found (see
+`drover-claude-code-ide--settle')."
   (with-current-buffer buffer
     (drover-claude-code-ide--note-status nil)
     (let* ((entries drover-claude-code-ide--entries)
            (records (mapcar #'cdr entries)))
-      (pcase drover-claude-code-ide--state
+      (pcase (if (drover-claude-code-ide--settle) 'settling drover-claude-code-ide--state)
+        ;; Its records tell the end of work that may be no turn.
+        ('settling (list 'working nil nil))
         ('blocked
          (list 'waiting
                (mapcar #'drover-claude-code-ide--request

@@ -245,6 +245,75 @@ TEXT is what the CLI tells of it, in DIRECTORY."
    :error "server_error" :isApiErrorMessage t :userType "external" :entrypoint "cli" :cwd directory
    :sessionId id :version "2.1.316" :gitBranch "main"))
 
+(defun drover-fixture-claude-summary (id directory time)
+  "Return the record of the summary a compaction of conversation ID left at TIME.
+As Claude Code 2.1.322 writes it, in DIRECTORY: a message of the user
+the model reads in place of the conversation, shown in the CLI's
+transcript view alone."
+  (drover-fixture-line
+   :parentUuid (format "%s-b%d" id (truncate time)) :isSidechain :false :promptId (concat "prompt-" id)
+   :type "user"
+   :message (list :role "user"
+                  :content (concat "This session is being continued from a previous conversation that ran"
+                                   " out of context. The summary below covers the earlier portion of the"
+                                   " conversation.\n\nSummary:\n1. Primary Request and Intent: fix the login"
+                                   " redirect."))
+   :isVisibleInTranscriptOnly t :isCompactSummary t
+   :uuid (format "%s-c%d" id (truncate time)) :timestamp (drover-fixture-time time)
+   :userType "external" :entrypoint "cli" :cwd directory :sessionId id :version "2.1.322"
+   :gitBranch "main"))
+
+(cl-defun drover-fixture-claude-compaction (id directory time &key (trigger "auto") (pre 305569)
+                                               (post 18467) (duration 66) idle)
+  "Return the records of a compaction of conversation ID in DIRECTORY ending at TIME.
+As Claude Code 2.1.322 writes them: the boundary, its TRIGGER, `auto'
+or `manual', the tokens of the conversation before, PRE, and after,
+POST, as the CLI estimates them (left out when nil), and its DURATION
+in seconds; the summary (see `drover-fixture-claude-summary'); a file
+read again, attached; with IDLE, the note the CLI writes after
+compacting a conversation that sat idle; and of a manual one, the
+/compact command, typed DURATION seconds before, then its output."
+  (let ((boundary (format "%s-b%d" id (truncate time)))
+        (stamp (drover-fixture-time time)))
+    (append
+     (list (drover-fixture-line
+            :parentUuid :null :logicalParentUuid (format "%s-a%d" id (truncate (- time duration)))
+            :isSidechain :false :type "system" :subtype "compact_boundary"
+            :content "Conversation compacted" :isMeta :false :timestamp stamp :uuid boundary :level "info"
+            :compactMetadata (append (list :trigger trigger :preTokens pre)
+                                     (and post (list :postTokens post))
+                                     (list :durationMs (* 1000 duration)
+                                           :preservedSegment (list :headUuid (format "%s-a%d" id 0)
+                                                                   :anchorUuid (format "%s-c%d" id (truncate time))
+                                                                   :tailUuid (format "%s-a%d" id 0))))
+            :userType "external" :entrypoint "cli" :cwd directory :sessionId id :version "2.1.322"
+            :gitBranch "main")
+           (drover-fixture-claude-summary id directory time)
+           (drover-fixture-line
+            :parentUuid (format "%s-c%d" id (truncate time)) :isSidechain :false :type "attachment"
+            :attachment (list :type "file" :filename (expand-file-name "notes.org" directory)
+                              :content (list :type "text" :file (list :content "* Notes")))
+            :uuid (format "%s-f%d" id (truncate time)) :timestamp stamp :userType "external"
+            :entrypoint "cli" :cwd directory :sessionId id :version "2.1.322" :gitBranch "main"))
+     (and idle
+          (list (drover-fixture-line
+                 :parentUuid (format "%s-f%d" id (truncate time)) :isSidechain :false :type "system"
+                 :subtype "informational"
+                 :content (concat "Compacted while idle, before the prompt cache expired · turn off with"
+                                  " \"idleCompaction\": false in settings.json")
+                 :isMeta :false :timestamp stamp :uuid (format "%s-n%d" id (truncate time)) :level "notice"
+                 :userType "external" :entrypoint "cli" :cwd directory :sessionId id :version "2.1.322"
+                 :gitBranch "main")))
+     (and (equal trigger "manual")
+          (list (drover-fixture-claude-user id directory (- time duration)
+                                            "<local-command-caveat>Caveat</local-command-caveat>" :meta t)
+                (drover-fixture-claude-user
+                 id directory (- time duration)
+                 "<command-name>/compact</command-name>\n<command-message>compact</command-message>\n<command-args></command-args>")
+                (drover-fixture-claude-user
+                 id directory time
+                 "<local-command-stdout>Compacted PostCompact [callback] completed successfully</local-command-stdout>"))))))
+
 (defun drover-fixture-claude-exit (id directory time)
   "Return the records of /exit typed in conversation ID in DIRECTORY at TIME."
   (list (drover-fixture-claude-user id directory time

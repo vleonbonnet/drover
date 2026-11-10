@@ -87,6 +87,8 @@
       (drover-fixture-claude-user id directory (+ time 6) "[Request interrupted by user]")
       (car (drover-fixture-claude-exit id directory (+ time 7)))
       (drover-fixture-line :type "system" :subtype "compact_boundary" :timestamp (drover-fixture-time (+ time 8)))
+      ;; Shown by the boundary alone.
+      (drover-fixture-claude-summary id directory (+ time 8))
       (drover-fixture-claude-assistant id directory (+ time 9) "All green.")))
     file))
 

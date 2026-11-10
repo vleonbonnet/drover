@@ -125,7 +125,11 @@ killed after."
                  `((type . "user") (message (content ((type . "text") (text . ,text))))))))
   (should (equal (drover-claude-code--prompt-p
                   '((type . "user") (message (content . "Why was the request interrupted?"))))
-                 "Why was the request interrupted?")))
+                 "Why was the request interrupted?"))
+  ;; Nor the summary a compaction leaves.
+  (should-not (drover-claude-code--prompt-p
+               (json-parse-string (drover-fixture-claude-summary "s" "/work/" 1790000000.0)
+                                  :object-type 'alist :null-object nil :false-object nil))))
 
 (ert-deftest drover-claude-code-transcripts-test-titles ()
   "The title the user gave wins over the one the CLI generated, the newest of each."
@@ -1363,6 +1367,178 @@ writing keeps the lifetime of the newest write."
         (should (< 0.49 (drover-session-shown-cache-fraction session) 0.51))
         (should (drover-backend-caches-p 'claude-code))))))
 
+(defun drover-claude-code-transcripts-test-run (id)
+  "Return the context and cache conversation ID shows, as listed.
+Its context's tokens and whether estimated, then its cache's expiry,
+lifetime, tokens and prompt tokens."
+  (let ((session (drover-find 'claude-code id)))
+    (list (drover-session-context-tokens session) (drover-session-context-estimated session)
+          (drover-session-cache-expires session) (drover-session-cache-ttl session)
+          (drover-session-cache-tokens session) (drover-session-cache-prompt-tokens session))))
+
+(ert-deftest drover-claude-code-transcripts-test-compacted ()
+  "A compaction newer than the newest reply leaves the size of its summary, estimated, and no cache.
+The next request sends the summary, which nothing cached begins with.
+The summary is no message: compacting a conversation that sat idle
+leaves it as its last turn did, done until seen, as old.  The next
+reply measures the context again, and caches anew."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let* ((start 1790000100.0)
+           (compacted (+ start 3306))
+           (project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "m1" project)))
+      (drover-claude-code-transcripts-test-turn file "m1" project start
+                                                (drover-fixture-claude-usage :input 2 :hour 825 :read 302933))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-run "m1")
+                     (list 303760 nil (+ start 3600) 3600 303758 303760)))
+      (apply #'drover-fixture-claude-append file
+             (drover-fixture-claude-compaction "m1" project compacted :idle t))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-run "m1") '(18467 t nil nil nil nil)))
+      (should (equal (drover-session-updated (drover-find 'claude-code "m1")) (+ start 60)))
+      (should (equal (drover-claude-code-transcripts-test-state "m1") (list 'done (+ start 60) nil)))
+      ;; Read whole, as by another Emacs: the same, and the compaction told.
+      (let ((data (drover-claude-code-transcripts--read file (file-attributes file) nil)))
+        (should (equal (mapcar (lambda (key) (plist-get data key))
+                               '(:context :context-estimated :cache-tokens :requested :updated :ended :outcome))
+                       (list 18467 t nil nil (+ start 60) (+ start 60) 'done)))
+        (should (equal (plist-get data :compacted) (list :start (- compacted 66.0) :end compacted :own t))))
+      ;; The next turn measures it, and writes the summary into the cache.
+      (drover-claude-code-transcripts-test-turn file "m1" project (+ compacted 600)
+                                                (drover-fixture-claude-usage :input 2 :hour 20000 :read 32000))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-run "m1")
+                     (list 52002 nil (+ compacted 600 3600) 3600 52000 52002)))
+      (should-not (plist-get (drover-claude-code-transcripts--data "m1") :compacted)))))
+
+(ert-deftest drover-claude-code-transcripts-test-compacted-far-back ()
+  "A compaction is found past a tail its attachments fill, as is the reply before it.
+Claude Code attaches the files it read again, hundreds of kilobytes, to
+the summary: whether the transcript is read anew or grown, its last
+activity stays the reply's."
+  (drover-claude-code-transcripts-test-with
+    (let* ((start 1790000100.0)
+           (project (expand-file-name "work/" home))
+           ;; Past the head: read anew, only the look behind the tail finds them.
+           (file (drover-fixture-claude "m2" project :filler (* 2 drover-transcript-window))))
+      (drover-claude-code-transcripts-test-turn file "m2" project start
+                                                (drover-fixture-claude-usage :input 2 :hour 825 :read 302933))
+      (drover-claude-code-transcripts-test-scan)
+      (apply #'drover-fixture-claude-append file
+             (append (drover-fixture-claude-compaction "m2" project (+ start 3306) :idle t)
+                     (drover-fixture-claude-blob "m2" (* 3 drover-transcript-window))))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (drover-claude-code-transcripts-test-run "m2") '(18467 t nil nil nil nil)))
+      (should (equal (drover-session-updated (drover-find 'claude-code "m2")) (+ start 60)))
+      (let ((data (drover-claude-code-transcripts--read file (file-attributes file) nil)))
+        (should (equal (list (plist-get data :context) (plist-get data :context-estimated)
+                             (plist-get data :updated))
+                       (list 18467 t (+ start 60))))))))
+
+(ert-deftest drover-claude-code-transcripts-test-compacted-without-size ()
+  "A compaction telling no size leaves the context unknown, not the size before it.
+Neither is the reply before it looked for behind the tail."
+  (drover-claude-code-transcripts-test-with
+    (let* ((start 1790000100.0)
+           (project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "m3" project :filler (* 2 drover-transcript-window))))
+      (drover-claude-code-transcripts-test-turn file "m3" project start
+                                                (drover-fixture-claude-usage :input 2 :hour 825 :read 302933))
+      (apply #'drover-fixture-claude-append file
+             (append (drover-fixture-claude-blob "m3" (* 3 drover-transcript-window))
+                     (drover-fixture-claude-compaction "m3" project (+ start 3306) :post nil)))
+      (dolist (data (list (drover-claude-code-transcripts--read file (file-attributes file) nil)
+                          (progn (drover-claude-code-transcripts-test-scan)
+                                 (drover-claude-code-transcripts--data "m3"))))
+        (should (equal (list (plist-get data :context) (plist-get data :context-estimated)
+                             (plist-get data :cache-tokens))
+                       '(nil nil nil))))
+      (should (equal (drover-claude-code-transcripts-test-run "m3") '(nil nil nil nil nil nil))))))
+
+(ert-deftest drover-claude-code-transcripts-test-compacted-in-turn-or-by-hand ()
+  "A compaction within a turn is followed by replies telling their usage; the user's own is activity.
+The context full, Claude Code compacts it between a tool's result and
+the next reply, which measures it.  The user's /compact is the newest
+activity, its conversation idle, and not the CLI's own."
+  (drover-claude-code-transcripts-test-with
+    (let* ((start 1790000100.0)
+           (project (expand-file-name "work/" home))
+           (turn (drover-fixture-claude "m4" project))
+           (manual (drover-fixture-claude "m5" project)))
+      (drover-fixture-claude-append
+       turn
+       (drover-fixture-claude-user "m4" project start "Go on")
+       (drover-fixture-claude-assistant "m4" project (+ start 1) "Reading" :stop "tool_use"
+                                        :usage (drover-fixture-claude-usage :input 2 :hour 900 :read 960000)))
+      (apply #'drover-fixture-claude-append turn
+             (append (list (drover-fixture-claude-tool-result "m4" project (+ start 2)))
+                     (drover-fixture-claude-compaction "m4" project (+ start 70) :pre 967698 :post 31636)
+                     (list (drover-fixture-claude-assistant
+                            "m4" project (+ start 90) "Done." :parent (format "m4-c%d" (truncate (+ start 70)))
+                            :usage (drover-fixture-claude-usage :input 2 :hour 9000 :read 31000)))))
+      (drover-claude-code-transcripts-test-turn manual "m5" project start
+                                                (drover-fixture-claude-usage :input 2 :hour 825 :read 302933))
+      (apply #'drover-fixture-claude-append manual
+             (drover-fixture-claude-compaction "m5" project (+ start 600) :trigger "manual" :duration 50))
+      (drover-claude-code-transcripts-test-scan)
+      (should (equal (car (drover-claude-code-transcripts-test-run "m4")) 40002))
+      (should-not (cadr (drover-claude-code-transcripts-test-run "m4")))
+      (should (equal (drover-claude-code-transcripts-test-run "m5") '(18467 t nil nil nil nil)))
+      (should (equal (drover-session-updated (drover-find 'claude-code "m5")) (+ start 600)))
+      (should (eq (drover-session-status (drover-find 'claude-code "m5")) 'idle))
+      (should-not (plist-get (plist-get (drover-claude-code-transcripts--data "m5") :compacted) :own)))))
+
+(ert-deftest drover-claude-code-transcripts-test-work-between ()
+  "The transcript tells what a front end saw the CLI work at: a turn, its own compaction, or not yet.
+A turn records a message as it starts; a compaction the CLI ran of its
+own records none, and ends during the work; the user's /compact is a
+turn.  The times allow for clocks apart."
+  (drover-claude-code-transcripts-test-with
+    (let* ((start 1790000100.0)
+           (end (+ start 3306))
+           (project (expand-file-name "work/" home))
+           (idle (drover-fixture-claude "w1" project))
+           (manual (drover-fixture-claude "w2" project)))
+      (dolist (file (list idle manual))
+        (drover-claude-code-transcripts-test-turn file (file-name-base file) project start
+                                                  (drover-fixture-claude-usage :input 2 :hour 825 :read 302933)))
+      (apply #'drover-fixture-claude-append idle (drover-fixture-claude-compaction "w1" project end :idle t))
+      (apply #'drover-fixture-claude-append manual
+             (drover-fixture-claude-compaction "w2" project end :trigger "manual"))
+      (drover-claude-code-transcripts-test-scan)
+      (should (eq (drover-claude-code-transcripts-work-between "w1" (- end 66) end) 'compaction))
+      ;; Seen a few seconds off, as by a clock ahead.
+      (should (eq (drover-claude-code-transcripts-work-between "w1" (- end 60) (- end 5)) 'compaction))
+      (should (eq (drover-claude-code-transcripts-work-between "w2" (- end 66) end) 'turn))
+      ;; Work the compaction does not account for.
+      (should (eq (drover-claude-code-transcripts-work-between "w1" (+ end 100) (+ end 160)) 'quiet))
+      ;; The turn itself.
+      (should (eq (drover-claude-code-transcripts-work-between "w1" start (+ start 60)) 'turn))
+      (should-not (drover-claude-code-transcripts-work-between "unknown" start end)))))
+
+(ert-deftest drover-claude-code-transcripts-test-recap-after-compaction ()
+  "The recap of a compacted conversation is its last turn, not the summary, however far back.
+Claude Code attaches the files it read again to the summary, past the
+end of the transcript the recap reads first; the model of the last turn
+is found as far back."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (near (drover-fixture-claude "c1" project :prompt "Explain the cache" :reply "It keeps an hour."))
+           (far (drover-fixture-claude "c2" project :prompt "Explain the cache" :reply "It keeps an hour.")))
+      (apply #'drover-fixture-claude-append near
+             (drover-fixture-claude-compaction "c1" project 1790003306.0 :idle t))
+      (apply #'drover-fixture-claude-append far
+             (append (drover-fixture-claude-compaction "c2" project 1790003306.0 :idle t)
+                     (drover-fixture-claude-blob "c2" (* 2 drover-claude-code--transcript-tail))))
+      (dolist (file (list near far))
+        (let ((recap (drover-claude-code-recap file)))
+          (should (equal (plist-get recap :prompt) "Explain the cache"))
+          (should (equal (plist-get recap :reply) "It keeps an hour.")))
+        (should (equal (drover-claude-code-last-turn file) '("claude-opus-5-5")))))))
+
 (ert-deftest drover-claude-code-transcripts-test-front-end-run ()
   "A front end following a conversation takes its provider, context and cache from the transcript."
   (drover-claude-code-transcripts-test-with
@@ -1380,10 +1556,21 @@ writing keeps the lifetime of the newest write."
         (should (equal (plist-get run :provider-name) "Anthropic"))
         (let ((terminal (apply #'drover-session-create :backend 'term :id "t" :status 'working
                                :engine 'claude-code :engine-id "u1" run)))
-          (dolist (slot '(provider provider-name context-tokens context-limit cache-expires cache-ttl
-                                   cache-tokens cache-prompt-tokens))
+          (dolist (slot '(provider provider-name context-tokens context-estimated context-limit
+                                   cache-expires cache-ttl cache-tokens cache-prompt-tokens))
             (should (equal (cl-struct-slot-value 'drover-session slot terminal)
                            (cl-struct-slot-value 'drover-session slot record))))))
+      ;; Compacted: the size it left, estimated, and no cache.
+      (apply #'drover-fixture-claude-append file
+             (drover-fixture-claude-compaction "u1" project 1790003406.0 :idle t))
+      (drover-claude-code-transcripts-test-scan)
+      (let ((run (drover-recorded-run 'claude-code "u1")))
+        (should (equal (list (plist-get run :context-tokens) (plist-get run :context-estimated)
+                             (plist-get run :cache-expires) (plist-get run :cache-tokens))
+                       '(18467 t nil nil)))
+        (should (drover-session-context-estimated
+                 (apply #'drover-session-create :backend 'term :id "t" :status 'idle
+                        :engine 'claude-code :engine-id "u1" run))))
       (should-not (drover-recorded-run 'claude-code "unknown"))
       (should-not (drover-recorded-run 'opencode "u1")))))
 
@@ -1437,6 +1624,34 @@ summary, done or idle, and so does the same record of another host."
           (should (equal (memq 'drover-dim (ensure-list (get-text-property
                                                          0 'face (drover-list--title-text record 0 nil))))
                          (and seen '(drover-dim)))))))))
+
+(ert-deftest drover-claude-code-transcripts-test-compacted-row ()
+  "A compacted conversation shows as an OpenCode session after a compaction.
+Its context the size the compaction left, estimated, and no cache; done
+still, as its last turn left it."
+  (drover-claude-code-transcripts-test-with
+    (drover-test-write-claude-catalog)
+    (drover-claude-code-transcripts-test-since 1789990000)
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "v2" project :ai-title "Keep the page")))
+      (drover-claude-code-transcripts-test-turn file "v2" project 1790000100.0
+                                                (drover-fixture-claude-usage :input 10 :hour 2000 :read 48000))
+      (apply #'drover-fixture-claude-append file
+             (drover-fixture-claude-compaction "v2" project 1790003406.0 :idle t))
+      (drover-claude-code-transcripts-test-scan)
+      (let* ((record (drover-find 'claude-code "v2"))
+             (opencode (drover-session-create
+                        :backend 'opencode :id "ses_v2" :engine 'opencode :engine-id "ses_v2"
+                        :title "Keep the page" :directory project
+                        :status 'done :since 1790000160.0 :updated 1790000160.0 :created 1790000000.0
+                        :model "Opus 5.5"
+                        :provider (cdr (assoc "\\`anthropic\\'" opencode-provider-icons))
+                        :provider-name "Anthropic"
+                        :context-tokens 18467 :context-estimated t :context-limit 1000000))
+             (row (drover-claude-code-transcripts-test-row record)))
+        (should (equal row (drover-claude-code-transcripts-test-row opencode)))
+        (should-not (nth 2 row))
+        (should (string-match-p "~" (cdr (assq 'context (nthcdr 3 row)))))))))
 
 (ert-deftest drover-claude-code-transcripts-test-remote-rows ()
   "A conversation of another host's transcript shows as this host's does.

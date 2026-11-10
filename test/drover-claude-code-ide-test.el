@@ -1062,6 +1062,193 @@ conversation's, or an OpenCode session's."
         (drover-claude-code-ide-test-status terminal '(("" :state done)))
         (should (eq (status) 'done))))))
 
+(defmacro drover-claude-code-ide-test-compacting (&rest body)
+  "Run BODY with the backend installed, the clock stopped, in the fixtures' homes.
+`project' is a directory there, `clock' the time `float-time' returns
+unless given one, and `scan' looks at the transcripts now."
+  (declare (indent 0) (debug t))
+  `(drover-test-with-homes
+     (drover-claude-code-ide-test-with
+       (let* ((project (file-name-as-directory (expand-file-name "work" home)))
+              (clock 1790000100.0)
+              (float-time (symbol-function 'float-time)))
+         (cl-letf (((symbol-function 'float-time)
+                    (lambda (&optional time) (if time (funcall float-time time) clock))))
+           (cl-flet ((scan () (drover-transcript-scan drover-claude-code-transcripts--index)))
+             ,@body))))))
+
+(defun drover-claude-code-ide-test-turn (terminal file id project start end)
+  "Run a turn of conversation ID in TERMINAL from START to END, its prompt and reply in FILE.
+The reply, in PROJECT, writes 825 tokens into an hour's cache and reads
+302933 from it."
+  (drover-claude-code-ide-test-status terminal '(("" :state working)))
+  (drover-fixture-claude-append
+   file
+   (drover-fixture-claude-user id project start "Go on")
+   (drover-fixture-claude-assistant id project end "Done." :parent (format "%s-u%d" id (truncate start))
+                                    :usage (drover-fixture-claude-usage :input 2 :hour 825 :read 302933))))
+
+(ert-deftest drover-claude-code-ide-test-idle-compaction ()
+  "A compaction the CLI runs of its own as the conversation sits idle is no turn.
+Its terminal tells work and its end as for a turn.  Until the transcript
+tells what it was, the session works still; once it tells a compaction,
+the session stands as it did before: as old, its turn seen or not as it
+was, its context the summary's, estimated, and no cache."
+  (drover-claude-code-ide-test-compacting
+    (dolist (seen '(t nil))
+      (let* ((id (if seen "i1" "i2"))
+             (start clock)
+             (compacted (+ start 3306))
+             (file (drover-fixture-claude id project))
+             (terminal (drover-claude-code-ide-test-terminal (concat "*claude* " id) :directory project)))
+        (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+          (with-current-buffer terminal
+            (setq-local drover-claude-code-ide-session-id id))
+          (setq drover-claude-code-ide-test-focused (and seen (list terminal)))
+          (drover-claude-code-ide-test-turn terminal file id project start (+ start 60))
+          (setq clock (+ start 60))
+          (drover-claude-code-ide-test-status terminal '(("" :state done :msg "Fixed")))
+          (scan)
+          (should (eq (drover-session-status (session)) (if seen 'idle 'done)))
+          (setq drover-claude-code-ide-test-focused nil)
+          ;; Fifty-four minutes on, the CLI compacts the conversation.
+          (setq clock (- compacted 66))
+          (drover-claude-code-ide-test-status terminal '(("" :state working :msg "Compacting")))
+          (should (eq (drover-session-status (session)) 'working))
+          (setq clock compacted)
+          (apply #'drover-fixture-claude-append file
+                 (drover-fixture-claude-compaction id project compacted :idle t))
+          (setq drover-claude-code-ide-test-changes nil)
+          (drover-claude-code-ide-test-status terminal '(("" :state done :msg "Fixed")))
+          ;; Not read yet: the work goes on.
+          (should (eq (drover-session-status (session)) 'working))
+          (should-not (drover-session-detail (session)))
+          (setq clock (+ compacted 0.2))
+          (scan)
+          (let ((session (session)))
+            (should (eq (drover-session-status session) (if seen 'idle 'done)))
+            (should (eql (drover-session-since session) (+ start 60)))
+            (should (eql (drover-session-updated session) (+ start 60)))
+            (should (eql (drover-session-last-activity session) (+ start 60)))
+            (should (equal (list (drover-session-context-tokens session) (drover-session-context-estimated session)
+                                 (drover-session-cache-expires session) (drover-session-cache-tokens session))
+                           '(18467 t nil nil))))
+          ;; The second look at the transcript, after the wait, lists it anew.
+          (drover-claude-code-ide-test-fire)
+          (should (member (list 'claude-code-ide (buffer-local-value 'drover-claude-code-ide--token terminal))
+                          drover-claude-code-ide-test-changes))
+          (should (eq (drover-session-status (session)) (if seen 'idle 'done)))
+          (setq clock 1790000100.0))))))
+
+(ert-deftest drover-claude-code-ide-test-work-told-late ()
+  "Work whose transcript tells nothing works on for a while, then is a turn, as before.
+A transcript read late has its time to tell a compaction."
+  (drover-claude-code-ide-test-compacting
+    (let* ((start clock)
+           (file (drover-fixture-claude "l1" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* late" :directory project)))
+      (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "l1"))
+        (drover-claude-code-ide-test-turn terminal file "l1" project start (+ start 60))
+        (setq clock (+ start 60))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        (setq clock (+ start 3240))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (setq clock (+ start 3306))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        (setq clock (+ start 3307))
+        (should (eq (drover-session-status (session)) 'working))
+        (setq clock (+ start 3309))
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should (eql (drover-session-since session) (+ start 3306)))
+          (should (eql (drover-session-updated session) (+ start 3306))))))))
+
+(ert-deftest drover-claude-code-ide-test-compact-by-hand-is-a-turn ()
+  "The user's /compact, and a turn the context filled, are turns: done, as old as their end."
+  (drover-claude-code-ide-test-compacting
+    (let* ((start clock)
+           (file (drover-fixture-claude "h1" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* by hand" :directory project)))
+      (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "h1"))
+        (drover-claude-code-ide-test-turn terminal file "h1" project start (+ start 60))
+        (setq clock (+ start 60))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        ;; /compact, typed ten minutes on.
+        (setq clock (+ start 600))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (setq clock (+ start 650))
+        (apply #'drover-fixture-claude-append file
+               (drover-fixture-claude-compaction "h1" project (+ start 650) :trigger "manual" :duration 50))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should (eql (drover-session-since session) (+ start 650)))
+          (should (eql (drover-session-updated session) (+ start 650)))
+          (should (drover-session-context-estimated session)))
+        ;; A turn the context filled: compacted in the middle.
+        (setq clock (+ start 1000))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (apply #'drover-fixture-claude-append file
+               (append (list (drover-fixture-claude-user "h1" project (+ start 1000) "Go on")
+                             (drover-fixture-claude-assistant "h1" project (+ start 1001) "Reading"
+                                                              :stop "tool_use" :parent (format "h1-u%d" (truncate (+ start 1000))))
+                             (drover-fixture-claude-tool-result "h1" project (+ start 1002)))
+                       (drover-fixture-claude-compaction "h1" project (+ start 1070))
+                       (list (drover-fixture-claude-assistant
+                              "h1" project (+ start 1090) "Done." :parent (format "h1-c%d" (truncate (+ start 1070)))
+                              :usage (drover-fixture-claude-usage :input 2 :hour 9000 :read 31000)))))
+        (setq clock (+ start 1090))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should (eql (drover-session-since session) (+ start 1090)))
+          (should (equal (list (drover-session-context-tokens session) (drover-session-context-estimated session))
+                         '(40002 nil))))))))
+
+(ert-deftest drover-claude-code-ide-test-work-of-a-turn-anyway ()
+  "Work that waits for the user, or moves to another conversation, is a turn at once."
+  (drover-claude-code-ide-test-compacting
+    (let* ((start clock)
+           (file (drover-fixture-claude "t1" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* anyway" :directory project)))
+      (drover-fixture-claude "t2" project)
+      (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "t1"))
+        (drover-claude-code-ide-test-turn terminal file "t1" project start (+ start 60))
+        (setq clock (+ start 60))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        (setq clock (+ start 3240))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (drover-claude-code-ide-test-status terminal '(("" :state blocked :kind permission :title "Bash")))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (setq clock (+ start 3306))
+        (apply #'drover-fixture-claude-append file
+               (drover-fixture-claude-compaction "t1" project (+ start 3306) :idle t))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (scan)
+        (should (eq (drover-session-status (session)) 'done))
+        (should (eql (drover-session-since (session)) (+ start 3306)))
+        ;; Another conversation since the work began.
+        (setq clock (+ start 4000))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "t2"))
+        (setq clock (+ start 4066))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (should (eq (drover-session-status (session)) 'done))
+        (should (eql (drover-session-since (session)) (+ start 4066)))))))
+
 (ert-deftest drover-claude-code-ide-test-background-shell ()
   "A reply ending or acknowledged does not finish a shell still running."
   (drover-claude-code-ide-test-with
@@ -1780,6 +1967,11 @@ soon after; the buffer is named after it once read, not before."
             (should-error (rename "Review") :type 'user-error)
             (should-not (drover-claude-code-ide-test-called 'ghostel-send-string))
             (drover-claude-code-ide-test-status terminal '(("" :state done)))
+            ;; The end of work has the transcript looked at, now and after a while.
+            (should (equal checked '("conv")))
+            (drover-claude-code-ide-test-fire)
+            (should (equal checked '("conv" "conv")))
+            (setq checked nil)
             (should-error (rename " \n ") :type 'user-error)
             (rename "  Review\nthe   drafts ")
             (should (equal (drover-claude-code-ide-test-called 'ghostel-send-string) '(("/rename Review the drafts"))))

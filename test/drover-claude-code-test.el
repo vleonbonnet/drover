@@ -821,26 +821,38 @@ serves and a model without effort.")
       (should (equal (drover-claude-code-recap file)
                      '(:prompt "Fix the build" :reply "Fixed:\nit builds."
                        :changes (("/w/a.el" 3 2) ("/w/b.el" 2 0)) :error "API Error: overloaded")))
-      ;; A turn longer than what is read keeps the prompt recorded apart.
+      (with-temp-buffer
+        (insert (json-encode '((type . "last-prompt") (lastPrompt . "Fix the build"))) "\n"
+                (json-encode '((type . "assistant")
+                               (message (id . "m3") (content . [((type . "text") (text . "Still on it"))]))))
+                "\n")
+        (append-to-file (point-min) (point-max) file))
+      ;; A tail without the prompt: read further back.
       (let ((drover-claude-code--transcript-tail 200))
-        (with-temp-buffer
-          (insert (json-encode '((type . "last-prompt") (lastPrompt . "Fix the build"))) "\n"
-                  (json-encode '((type . "assistant")
-                                 (message (id . "m3") (content . [((type . "text") (text . "Still on it"))]))))
-                  "\n")
-          (append-to-file (point-min) (point-max) file))
+        (should (equal (drover-claude-code-recap file)
+                       '(:prompt "Fix the build" :reply "Still on it"
+                         :changes (("/w/a.el" 3 2) ("/w/b.el" 2 0)) :error "API Error: overloaded"))))
+      ;; A turn longer than what is read keeps the prompt recorded apart.
+      (let ((drover-claude-code--transcript-tail 200)
+            (drover-claude-code--turn-tail 200))
         (should (equal (drover-claude-code-recap file)
                        '(:prompt "Fix the build" :reply "Still on it" :changes nil :error nil)))))))
 
 (ert-deftest drover-claude-code-test-last-turn-reads-the-end ()
-  "Only the end of a long transcript is read."
+  "Only the end of a long transcript is read: its tail, then further back when the tail holds no turn."
   (drover-test-with-homes
     (let ((file (expand-file-name "transcript.jsonl" home))
-          (drover-claude-code--transcript-tail 200))
+          (drover-claude-code--transcript-tail 200)
+          (drover-claude-code--turn-tail 400))
       (drover-test-write
        file
        (concat "{\"type\":\"assistant\",\"requestedModel\":\"claude-opus-5-5\",\"effort\":\"xhigh\"}\n"
                (make-string 300 ?x) "\n"))
+      (should (equal (drover-claude-code-last-turn file) '("claude-opus-5-5" . xhigh)))
+      (drover-test-write
+       file
+       (concat "{\"type\":\"assistant\",\"requestedModel\":\"claude-opus-5-5\",\"effort\":\"xhigh\"}\n"
+               (make-string 500 ?x) "\n"))
       (should-not (drover-claude-code-last-turn file)))))
 
 (provide 'drover-claude-code-test)

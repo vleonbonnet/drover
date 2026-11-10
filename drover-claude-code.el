@@ -397,7 +397,16 @@ moved to the trash when `delete-by-moving-to-trash' says so."
     (delete-directory (cdr files) t t)))
 
 (defconst drover-claude-code--transcript-tail 262144
-  "Bytes at the end of a transcript `drover-claude-code-last-turn' reads.")
+  "Bytes at the end of a transcript read first for its last turn.
+`drover-claude-code-last-turn' and `drover-claude-code-recap' read them,
+and `drover-claude-code--turn-tail' bytes when they hold no turn.")
+
+(defconst drover-claude-code--turn-tail (* 8 1024 1024)
+  "Bytes at the end of a transcript read for its last turn, past its tail.
+A compaction appends the summary it wrote and the files it read again,
+hundreds of kilobytes past the turn before it, and a turn's tools may
+return as much.  Past them, the last turn's changes read the whole
+transcript, the newest prompt being further back.")
 
 (defvar drover-claude-code--last-turns (make-hash-table :test #'equal)
   "Transcripts mapped to (STAMP . TURN), as last read.
@@ -421,10 +430,18 @@ without effort.  Nil when no turn is found."
 
 (defun drover-claude-code--read-last-turn (file size)
   "Return (MODEL-ID . EFFORT) of the newest main turn transcript FILE records.
-SIZE is the file's: only its end is read.  See
-`drover-claude-code-last-turn'."
+SIZE is the file's: only its end is read, its tail, else, when the tail
+holds no turn, as after a compaction, further back (see
+`drover-claude-code--turn-tail').  See `drover-claude-code-last-turn'."
+  (or (drover-claude-code--read-turn-in file size drover-claude-code--transcript-tail)
+      (and (> size drover-claude-code--transcript-tail)
+           (drover-claude-code--read-turn-in file size drover-claude-code--turn-tail))))
+
+(defun drover-claude-code--read-turn-in (file size bytes)
+  "Return (MODEL-ID . EFFORT) of the newest main turn of the last BYTES of FILE.
+SIZE is the file's.  Nil when they record no turn."
   (with-temp-buffer
-    (insert-file-contents file nil (max 0 (- size drover-claude-code--transcript-tail)) size)
+    (insert-file-contents file nil (max 0 (- size bytes)) size)
     (goto-char (point-max))
     (let (turn)
       ;; Searching the key first skips lines that cannot be turns
@@ -445,14 +462,15 @@ SIZE is the file's: only its end is read.  See
         (beginning-of-line))
       turn)))
 
-(defun drover-claude-code--transcript-records (file)
+(defun drover-claude-code--transcript-records (file &optional bytes)
   "Return the records at the end of transcript FILE, newest first.
-Only the last `drover-claude-code--transcript-tail' bytes are read; a
-line cut by that, or that is not a JSON object, is left out."
+Only its last BYTES are read, by default
+`drover-claude-code--transcript-tail'; a line cut by that, or that is
+not a JSON object, is left out."
   (when (file-readable-p file)
     (with-temp-buffer
       (let ((size (file-attribute-size (file-attributes file))))
-        (insert-file-contents file nil (max 0 (- size drover-claude-code--transcript-tail)) size))
+        (insert-file-contents file nil (max 0 (- size (or bytes drover-claude-code--transcript-tail))) size))
       (let ((records nil))
         (goto-char (point-min))
         (while (not (eobp))
@@ -485,13 +503,23 @@ line cut by that, or that is not a JSON object, is left out."
 Commands Claude Code runs and their output, and the note it records
 when the user interrupts a turn, \"[Request interrupted by user]\".")
 
+(defun drover-claude-code--summary-p (record)
+  "Return non-nil when RECORD is the summary a compaction left in its place.
+Claude Code records it as a message of the user, which the model reads
+in place of the conversation before it; the user typed none of it, and
+the CLI shows it in its transcript view alone."
+  (or (alist-get 'isCompactSummary record)
+      (alist-get 'isVisibleInTranscriptOnly record)))
+
 (defun drover-claude-code--prompt-p (record)
   "Return the text RECORD gives as a prompt of the user, or nil.
-Tool results, notes Claude Code adds for itself, the commands it runs,
-such as /model, and its note of an interruption are no prompt."
+Tool results, notes Claude Code adds for itself, the summary a
+compaction leaves, the commands it runs, such as /model, and its note
+of an interruption are no prompt."
   (when (and (equal (alist-get 'type record) "user")
              (not (alist-get 'isMeta record))
-             (not (alist-get 'toolUseResult record)))
+             (not (alist-get 'toolUseResult record))
+             (not (drover-claude-code--summary-p record)))
     (let ((content (alist-get 'content (alist-get 'message record))))
       (unless (and (listp content)
                    (seq-some (lambda (block)
@@ -532,11 +560,26 @@ the CLI recorded, and its changes the files its tools wrote or edited,
 with the lines they added and deleted.  Subagents' records are left
 out, unless SIDECHAIN: FILE is then a subagent's own transcript, whose
 records are all of its side chain, the prompt the task it was given.
-Only the end of FILE is read: a turn longer than that has no prompt,
-unless the CLI recorded the last prompt apart."
+Only the end of FILE is read, its tail, else, when the tail holds no
+prompt, as after a compaction, further back (see
+`drover-claude-code--turn-tail'): a turn longer than that has no
+prompt, unless the CLI recorded the last prompt apart."
+  (let ((recap (drover-claude-code--recap-of (drover-claude-code--transcript-records file) sidechain)))
+    (when (and (not (car recap))
+               (> (or (file-attribute-size (file-attributes file)) 0) drover-claude-code--transcript-tail))
+      (setq recap (drover-claude-code--recap-of
+                   (drover-claude-code--transcript-records file drover-claude-code--turn-tail)
+                   sidechain)))
+    (cdr recap)))
+
+(defun drover-claude-code--recap-of (records sidechain)
+  "Return the recap of the last turn RECORDS tell, as (FOUND . RECAP).
+RECORDS come newest first.  RECAP is as `drover-claude-code-recap'
+returns it, FOUND non-nil when RECORDS hold the turn's prompt.
+SIDECHAIN is as for `drover-claude-code-recap'."
   (let (prompt last-prompt reply reply-id error changes)
     (catch 'turn
-      (dolist (record (drover-claude-code--transcript-records file))
+      (dolist (record records)
         (unless (and (not sidechain) (alist-get 'isSidechain record))
           (pcase (alist-get 'type record)
             ("last-prompt"
@@ -561,23 +604,19 @@ unless the CLI recorded the last prompt apart."
                (when-let* ((change (drover-claude-code--change record)))
                  ;; Walking back in time, pushing puts the oldest first.
                  (push change changes))))))))
-    (list :prompt (or prompt (and (stringp last-prompt) (not (string-blank-p last-prompt)) last-prompt))
-          :reply reply
-          :changes (let ((merged nil))
-                     (dolist (change changes)
-                       (if-let* ((known (assoc (car change) merged)))
-                           (setcdr known (list (+ (nth 1 known) (nth 1 change))
-                                               (+ (nth 2 known) (nth 2 change))))
-                         (push (copy-sequence change) merged)))
-                     (nreverse merged))
-          :error error)))
+    (cons (and prompt t)
+          (list :prompt (or prompt (and (stringp last-prompt) (not (string-blank-p last-prompt)) last-prompt))
+                :reply reply
+                :changes (let ((merged nil))
+                           (dolist (change changes)
+                             (if-let* ((known (assoc (car change) merged)))
+                                 (setcdr known (list (+ (nth 1 known) (nth 1 change))
+                                                     (+ (nth 2 known) (nth 2 change))))
+                               (push (copy-sequence change) merged)))
+                           (nreverse merged))
+                :error error))))
 
 ;;;; Changes
-
-(defconst drover-claude-code--turn-tail (* 8 1024 1024)
-  "Bytes at the end of a transcript looked at first for the last turn's changes.
-Past them, the whole transcript is read, the newest prompt being further
-back.")
 
 (defun drover-claude-code--edit (record)
   "Return what RECORD's tool result changed, as (TIME FILE STATUS PATCH), or nil.

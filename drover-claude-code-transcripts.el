@@ -50,8 +50,16 @@
 ;; `drover-transcript-unseen-p'), else idle; its newest reply tells the
 ;; size of its context and its prompt cache, which expires an hour or
 ;; five minutes after its last request, as Claude Code asked for it
-;; (see `drover-claude-code-transcripts--usage').  Front ends following
-;; a conversation take those from here (:recorded-run).
+;; (see `drover-claude-code-transcripts--usage').  A compaction since
+;; tells the size of the summary it left, estimated, and no cache: the
+;; next request sends the summary, which nothing cached begins with.
+;; Front ends following a conversation take those from here
+;; (:recorded-run).
+;;
+;; Claude Code compacts a large conversation of its own as it sits idle,
+;; shortly before its prompt cache expires: the summary is no message,
+;; and the conversation stays as it stood after its last turn (see
+;; `drover-claude-code-transcripts-work-between').
 ;;
 ;; Opening a conversation resumes it in a front end (`drover-resume'):
 ;; claude-code-ide runs \"claude --resume ID\" in a terminal, agent-shell
@@ -109,7 +117,7 @@ list of drover's shows."
 
 ;;;; State
 
-(defconst drover-claude-code-transcripts--reader-version 6
+(defconst drover-claude-code-transcripts--reader-version 7
   "Version of `drover-claude-code-transcripts--read'.
 Raised when it reads anew what it read before, so that what an older
 one read and kept between Emacs sessions is read again.")
@@ -192,6 +200,11 @@ prompt of the user, on one line, or nil."
                                (isSidechain . ,(save-excursion
                                                  (goto-char line-beg)
                                                  (and (search-forward "\"isSidechain\":true" line-end t) t)))
+                               ;; A compaction's summary is often too long a line.
+                               (isCompactSummary . ,(save-excursion
+                                                      (goto-char line-beg)
+                                                      (and (search-forward "\"isCompactSummary\":true" line-end t)
+                                                           t)))
                                (message (content . ,content))))))))
           (goto-char line-end)
           (forward-line 1)))
@@ -287,40 +300,94 @@ counts what the next request sends again."
      (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens)
      (drover-claude-code-transcripts--tokens usage 'cache_read_input_tokens)))
 
+(defconst drover-claude-code-transcripts--compaction-marker "\"subtype\":\"compact_boundary\""
+  "What the record of a compaction holds, and no other.
+Within a JSON string its quotes are escaped: a message quoting it does
+not hold it.")
+
+(defun drover-claude-code-transcripts--compaction-p (record)
+  "Return non-nil when RECORD is the record of a compaction of the conversation.
+Claude Code records one as it replaces the conversation with a summary
+of it: as the user types /compact, as the context fills up, or of its
+own, as the conversation sits idle before its prompt cache expires.
+A subagent's tells nothing of the conversation."
+  (and (equal (alist-get 'type record) "system")
+       (equal (alist-get 'subtype record) "compact_boundary")
+       (not (alist-get 'isSidechain record))))
+
+(defun drover-claude-code-transcripts--compacted (record)
+  "Return what the compaction RECORD leaves the conversation running on.
+The plist `drover-claude-code-transcripts--usage' returns until a reply
+tells more: :context, the size of the summary the compaction left, as
+Claude Code estimates it (postTokens), with :context-estimated, or nil
+without one; no prompt cache, as the next request sends the summary,
+which nothing cached begins with; and :compacted, a plist of when the
+compaction ran, :start and :end, and :own, non-nil unless the user
+asked for it."
+  (let* ((metadata (alist-get 'compactMetadata record))
+         (metadata (and (drover-json-object-p metadata) metadata))
+         (post (alist-get 'postTokens metadata))
+         (post (and (natnump post) (> post 0) post))
+         (duration (alist-get 'durationMs metadata))
+         (end (drover-transcript-time (alist-get 'timestamp record))))
+    (list :context post :context-estimated (and post t)
+          :cache-tokens nil :cache-prompt-tokens nil :requested nil :cache-ttl nil
+          :compacted (and end
+                          (list :start (if (and (numberp duration) (> duration 0))
+                                           (- end (/ duration 1000.0))
+                                         end)
+                                :end end
+                                :own (not (equal (alist-get 'trigger metadata) "manual")))))))
+
 (defun drover-claude-code-transcripts--usage (beg end)
   "Return what the newest reply of a main turn from BEG to END tells it ran on.
 A plist of :context, the tokens of its prompt, uncached, written into
 the cache and read from it, as the API counts what the next request
-sends again; :cache-tokens, those of the prompt cache, read or written;
-:cache-prompt-tokens, those of the prompt; :requested, when its request
-was sent (see `drover-claude-code-transcripts--requested'), which
-starts the cache's lifetime anew; and :cache-ttl, that lifetime, the
-one the newest request writing the cache asked for (see
+sends again, and :context-estimated, nil; :cache-tokens, those of the
+prompt cache, read or written; :cache-prompt-tokens, those of the
+prompt; :requested, when its request was sent (see
+`drover-claude-code-transcripts--requested'), which starts the cache's
+lifetime anew; :cache-ttl, that lifetime, the one the newest request
+writing the cache asked for (see
 `drover-claude-code-transcripts--write-ttl'), if one is there: a request
 reading the cache without writing keeps the lifetime it was written
-with.  Nil without such a reply."
-  (when-let* ((record (drover-transcript-last drover-claude-code-transcripts--usage-marker
-                                              #'drover-claude-code-transcripts--usage-record-p
-                                              beg end)))
-    (let* ((usage (alist-get 'usage (alist-get 'message record)))
-           (written (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens))
-           (read (drover-claude-code-transcripts--tokens usage 'cache_read_input_tokens))
-           (prompt (drover-claude-code-transcripts--prompt-tokens usage))
-           (ttl (or (drover-claude-code-transcripts--write-ttl usage)
-                    (when-let* ((writer (drover-transcript-last
-                                         drover-claude-code-transcripts--usage-marker
-                                         (lambda (record)
-                                           (and (drover-claude-code-transcripts--usage-record-p record)
-                                                (drover-claude-code-transcripts--write-ttl
-                                                 (alist-get 'usage (alist-get 'message record)))))
-                                         beg end)))
-                      (drover-claude-code-transcripts--write-ttl
-                       (alist-get 'usage (alist-get 'message writer)))))))
-      (append (list :context prompt
-                    :cache-tokens (+ written read)
-                    :cache-prompt-tokens prompt
-                    :requested (drover-claude-code-transcripts--requested record beg end))
-              (and ttl (list :cache-ttl ttl))))))
+with; and :compacted, nil.  A compaction newer than any such reply
+tells instead what it left (see `drover-claude-code-transcripts--compacted'):
+the conversation before it is no longer sent, nor its replies' usage of
+any account, nor the cache they wrote.  Nil without either."
+  (let* ((boundary (drover-transcript-last-line drover-claude-code-transcripts--compaction-marker
+                                                #'drover-claude-code-transcripts--compaction-p
+                                                beg end))
+         (from (if boundary (car boundary) beg))
+         (record (drover-transcript-last drover-claude-code-transcripts--usage-marker
+                                         #'drover-claude-code-transcripts--usage-record-p
+                                         from end)))
+    (cond
+     (record
+      (let* ((usage (alist-get 'usage (alist-get 'message record)))
+             (written (drover-claude-code-transcripts--tokens usage 'cache_creation_input_tokens))
+             (read (drover-claude-code-transcripts--tokens usage 'cache_read_input_tokens))
+             (prompt (drover-claude-code-transcripts--prompt-tokens usage))
+             (ttl (or (drover-claude-code-transcripts--write-ttl usage)
+                      (when-let* ((writer (drover-transcript-last
+                                           drover-claude-code-transcripts--usage-marker
+                                           (lambda (record)
+                                             (and (drover-claude-code-transcripts--usage-record-p record)
+                                                  (drover-claude-code-transcripts--write-ttl
+                                                   (alist-get 'usage (alist-get 'message record)))))
+                                           from end)))
+                        (drover-claude-code-transcripts--write-ttl
+                         (alist-get 'usage (alist-get 'message writer)))))))
+        ;; Told whole, nil members too: they replace what an older read
+        ;; told, of a compaction among them.  Past a compaction, the
+        ;; lifetime of a cache written before it tells nothing.
+        (append (list :context prompt :context-estimated nil
+                      :cache-tokens (+ written read)
+                      :cache-prompt-tokens prompt
+                      :requested (drover-claude-code-transcripts--requested record beg end)
+                      :compacted nil)
+                (and (or ttl boundary) (list :cache-ttl ttl)))))
+     (boundary (drover-claude-code-transcripts--compacted (cdr boundary))))))
 
 (defconst drover-claude-code-transcripts--batch-entrypoints '("sdk-cli" "sdk-py")
   "Entry points of Claude Code run by a program rather than a user.
@@ -361,9 +428,13 @@ the program (see `drover-claude-code-transcripts--batch-entrypoints')."
 That is a prompt, a reply or a tool's result, not what the CLI records
 of its own as it opens the conversation again: a note (isMeta), a
 record kept for the transcript only, and the reply it makes up for a
-prompt left without one.  Its API errors are messages: they end a turn."
+prompt left without one; nor the summary a compaction leaves (see
+`drover-claude-code--summary-p'), which the CLI writes of its own too,
+as the conversation sits idle.  Its API errors are messages: they end
+a turn."
   (pcase (alist-get 'type record)
-    ("user" (not (or (alist-get 'isMeta record) (alist-get 'queueTranscriptOnly record))))
+    ("user" (not (or (alist-get 'isMeta record) (alist-get 'queueTranscriptOnly record)
+                     (drover-claude-code--summary-p record))))
     ("assistant" (or (alist-get 'isApiErrorMessage record)
                      (not (equal (alist-get 'model (alist-get 'message record)) "<synthetic>"))))))
 
@@ -734,7 +805,9 @@ conversation again.  Its titles are read as
                                (drover-transcript-look-before-tail-for
                                 file size tail grown
                                 (append (unless (plist-get recent :updated) (list #'drover-claude-code-transcripts--end))
-                                        (unless (plist-get recent :context) (list #'drover-claude-code-transcripts--usage))
+                                        ;; A compaction there tells a size, or none.
+                                        (unless (plist-member recent :context)
+                                          (list #'drover-claude-code-transcripts--usage))
                                         (unless (plist-get recent :model) (list #'drover-claude-code-transcripts--turn-told))
                                         (unless title (list (drover-claude-code-transcripts--title-reader
                                                             names (and grown (plist-get before :agent-names)))))))))
@@ -884,9 +957,10 @@ CATALOG is Claude Code's model catalog, or nil.  See
 Keyword arguments of `drover-session-create', those its newest reply
 tells: its provider, Anthropic, as OpenCode shows it, the size of its
 context and its model's (see `drover-claude-code-transcripts--context-limit'),
-and its prompt cache, which expires its lifetime after its request was
-sent, as the API keeps a cache for its lifetime from its last use.
-CATALOG is Claude Code's model catalog, or nil."
+the size estimated when a compaction since left it, and its prompt
+cache, which expires its lifetime after its request was sent, as the
+API keeps a cache for its lifetime from its last use.  CATALOG is
+Claude Code's model catalog, or nil."
   (let ((model (plist-get data :model))
         (tokens (plist-get data :context))
         (cached (plist-get data :cache-tokens))
@@ -894,6 +968,7 @@ CATALOG is Claude Code's model catalog, or nil."
     (append (and model (drover-transcript-provider "anthropic" "Anthropic"))
             (and (natnump tokens) (> tokens 0)
                  (list :context-tokens tokens
+                       :context-estimated (and (plist-get data :context-estimated) t)
                        :context-limit (and model (drover-claude-code-transcripts--context-limit
                                                   model tokens catalog))))
             (and (natnump cached) (> cached 0) requested
@@ -947,6 +1022,7 @@ it once."
              :provider (plist-get run :provider)
              :provider-name (plist-get run :provider-name)
              :context-tokens (plist-get run :context-tokens)
+             :context-estimated (plist-get run :context-estimated)
              :context-limit (plist-get run :context-limit)
              :cache-expires (plist-get run :cache-expires)
              :cache-ttl (plist-get run :cache-ttl)
@@ -1051,6 +1127,30 @@ as a title.  Return non-nil when the transcript is to be read again."
   (when-let* ((index (drover-claude-code-transcripts--current-index))
               (file (drover-claude-code-transcripts--file id)))
     (drover-transcript-check index file)))
+
+(defconst drover-claude-code-transcripts--clock-slack 10
+  "Seconds by which a transcript's times and this Emacs's may differ.
+The CLI dates its records by its own clock, and a busy Emacs reads a
+terminal's output late.")
+
+(defun drover-claude-code-transcripts-work-between (id start end)
+  "Return what the transcript of conversation ID tells of work START to END.
+START and END are float times, when a front end saw the CLI work.  The
+value is `turn' when a message was recorded since START, as a prompt is
+as its turn starts; `compaction' when none was, and a compaction the
+CLI ran of its own, not the user's /compact, ended during the work:
+the CLI compacted the conversation as it sat idle, which is no turn;
+`quiet' when the transcript tells neither yet; nil when it was never
+read.  Times differ by `drover-claude-code-transcripts--clock-slack'
+seconds at most."
+  (when-let* ((data (drover-claude-code-transcripts--data id)))
+    (let* ((slack drover-claude-code-transcripts--clock-slack)
+           (from (- start slack))
+           (compacted (plist-get data :compacted))
+           (ended (plist-get compacted :end)))
+      (cond ((>= (or (plist-get data :updated) 0) from) 'turn)
+            ((and (plist-get compacted :own) ended (<= from ended (+ end slack))) 'compaction)
+            (t 'quiet)))))
 
 (defun drover-claude-code-transcripts--recorded-run (id)
   "Return what conversation ID ran on, as its transcript tells, or nil.

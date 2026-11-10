@@ -823,19 +823,28 @@ the buffer's bounds."
         (if backward (beginning-of-line) (end-of-line))))
     (nreverse records)))
 
-(defun drover-transcript-last (marker &optional predicate beg end)
-  "Return the last line containing MARKER that parses, between BEG and END.
-With PREDICATE, the last one for which it returns non-nil."
+(defun drover-transcript-last-line (marker &optional predicate beg end)
+  "Return the last line containing MARKER that parses, and where it ends.
+The line is looked for between BEG and END.  The value is (LINE-END .
+RECORD), RECORD the line parsed and LINE-END the position its line
+ends at, END at most, or nil.  With PREDICATE, the last line for which
+it returns non-nil."
   (save-excursion
-    (goto-char (or end (point-max)))
     (let ((beg (or beg (point-min)))
+          (end (or end (point-max)))
           (found nil))
+      (goto-char end)
       (while (and (not found) (search-backward marker beg t))
         (let ((record (drover-transcript-line)))
           (when (and record (or (null predicate) (funcall predicate record)))
-            (setq found record)))
+            (setq found (cons (min end (line-end-position)) record))))
         (beginning-of-line))
       found)))
+
+(defun drover-transcript-last (marker &optional predicate beg end)
+  "Return the last line containing MARKER that parses, between BEG and END.
+With PREDICATE, the last one for which it returns non-nil."
+  (cdr (drover-transcript-last-line marker predicate beg end)))
 
 (defun drover-transcript-time (string)
   "Return the ISO 8601 time STRING as a float time, or nil."

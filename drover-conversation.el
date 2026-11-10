@@ -43,6 +43,7 @@
 
 (declare-function drover-claude-code-session-files "drover-claude-code" (id &optional dir))
 (declare-function drover-claude-code--prompt-p "drover-claude-code" (record))
+(declare-function drover-claude-code--summary-p "drover-claude-code" (record))
 (declare-function drover-claude-code--texts "drover-claude-code" (content))
 (declare-function drover-claude-code--edit "drover-claude-code" (record))
 (declare-function drover-codex-rollout-file "drover-codex" (id))
@@ -224,6 +225,8 @@ Files are named relative to DIRECTORY, the session's, when under it."
                              (and (listp content) content)))
                (when-let* ((edit (drover-claude-code--edit record)))
                  (list (drover-conversation--patch (nth 1 edit) (nth 2 edit) (nth 3 edit) directory)))))
+             ;; The boundary before it shows the compaction.
+             ((drover-claude-code--summary-p record) nil)
              ((drover-claude-code--prompt-p record)
               (list (drover-conversation--entry 'user (drover-claude-code--prompt-p record))))
              (t
