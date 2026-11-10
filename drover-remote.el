@@ -2517,12 +2517,17 @@ Nil while it is not.  A peer answers the pings spyglass sends once it
 has been silent its heartbeat interval (see `drover-remote--heartbeat'),
 looked at every half interval: silent twice the interval, it is
 stopped, busy for long, or frozen in a question, though its connection
-is dropped only past the heartbeat's timeout."
+is dropped only past the heartbeat's timeout.  Silent while this Emacs
+could hear it, as spyglass counts it (`spyglass-connection-silence'):
+right after a command kept Emacs, the peer's answer waits unread, and
+the wait for it gave up at once."
   (when-let* ((connection (drover-remote--peer-connection peer))
               ((spyglass-connection-live-p connection))
-              (heard (ignore-errors (spyglass-connection-last-recv connection))))
-    (let ((silent (- (float-time) heard)))
-      (and (> silent (* 2 (car (drover-remote--heartbeat peer)))) silent))))
+              (silent (ignore-errors
+                        (if (fboundp 'spyglass-connection-silence)
+                            (spyglass-connection-silence connection)
+                          (- (float-time) (spyglass-connection-last-recv connection))))))
+    (and (> silent (* 2 (car (drover-remote--heartbeat peer)))) silent)))
 
 (defun drover-remote--await (peer done timeout)
   "Wait in a command until DONE, a function of no argument, returns non-nil.

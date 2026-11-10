@@ -161,6 +161,25 @@ With DROVER_REMOTE_TEST_DEBUG set, print what it printed."
       (error "Agent: %s" (plist-get answer :error)))
     (plist-get answer :reply)))
 
+(defun drover-remote-test-ran (function)
+  "Call FUNCTION; return how long this Emacs ran meanwhile, and its value.
+The value is (SECONDS . VALUE): the seconds that passed, less those
+Emacs was kept from its timers, as when every processor is busy, which
+a timer ticking every tenth of a second tells.  Spyglass and drover
+leave that time out of a peer's silence (see
+`spyglass-connection-silence'): a bound on how soon a silent peer is
+found counts the time this Emacs ran."
+  (let* ((start (float-time))
+         (last start)
+         (kept 0.0)
+         (ticker (run-with-timer 0.1 0.1 (lambda ()
+                                           (let ((now (float-time)))
+                                             (setq kept (+ kept (max 0.0 (- now last 0.1)))
+                                                   last now)))))
+         (value (unwind-protect (funcall function)
+                  (cancel-timer ticker))))
+    (cons (- (float-time) start kept) value)))
+
 (defmacro drover-remote-test-frozen (dir &rest body)
   "Run BODY while the agent's Emacs is stuck, then let it go on.
 Stuck as by a question a dialog box asks: it reads nothing and runs no
@@ -178,10 +197,21 @@ directory, where the file letting it go on is written."
 
 ;;;; This host
 
+(defconst drover-remote-test-quick-heartbeat '(1 . 4)
+  "The heartbeat of the tests of a peer falling silent, as (INTERVAL . TIMEOUT).
+The others keep drover's own, `drover-remote-heartbeat''s standard
+value: with every processor busy, as when the tests run eight at once,
+an agent Emacs answering its first request of a kind, loading what it
+needs, went silent past 2 s, which this heartbeat's twice the interval
+takes for a frozen peer.")
+
 (defmacro drover-remote-test-with (sessions &rest body)
   "Run BODY as the host `viewer' serving SESSIONS of the fake backend.
 `dir' is a fresh directory, deleted after, with this host's spyglass
-registration; the agent, if BODY starts one, is stopped after."
+registration; the agent, if BODY starts one, is stopped after.  Peers
+have drover's own heartbeat; a test of silent peers sets
+`drover-remote-heartbeat', bound here, to
+`drover-remote-test-quick-heartbeat' before it connects."
   (declare (indent 1) (debug t))
   `(progn
      (skip-unless (drover-remote-test--available-p))
@@ -192,7 +222,7 @@ registration; the agent, if BODY starts one, is stopped after."
               (drover-host-aliases nil)
               (drover-refresh-delay 0.02)
               (drover-remote-standby-delay 1)
-              (drover-remote-heartbeat '(1 . 4))
+              (drover-remote-heartbeat (eval (car (get 'drover-remote-heartbeat 'standard-value)) t))
               (drover-remote-accept-unknown nil)
               (drover-remote-peers nil)
               (drover-group-by nil)
@@ -1580,6 +1610,7 @@ is of the time this Emacs ran: the time it was kept from its timers,
 as when every processor is busy, is not held against the peer (see
 `spyglass--unheard'), nor counted here."
   (drover-remote-test-with nil
+    (setq drover-remote-heartbeat drover-remote-test-quick-heartbeat)
     (drover-remote-test-connect (drover-remote-test-start-agent dir))
     (drover-remote-test-command "sessions" :n 3)
     (drover-remote-test-synced 3)
@@ -1587,19 +1618,13 @@ as when every processor is busy, is not held against the peer (see
            (timer (spyglass-connection-timer (drover-remote--peer-connection peer))))
       (should (= (timer--repeat-delay timer) 0.5))
       (drover-remote-test-frozen dir
-        (let* ((start (float-time))
-               (last start)
-               (kept 0.0)
-               (ticker (run-with-timer 0.1 0.1 (lambda ()
-                                                  (let ((now (float-time)))
-                                                    (setq kept (+ kept (max 0.0 (- now last 0.1)))
-                                                          last now))))))
-          (unwind-protect
-              (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 30)
-            (cancel-timer ticker))
+        (let ((ran (car (drover-remote-test-ran
+                         (lambda ()
+                           (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open)))
+                                                    30))))))
           ;; The timeout, 4 s, and a look every half second.
           (should-not (eq (drover-remote--peer-state peer) 'open))
-          (should (< (- (float-time) start kept) 5.5)))
+          (should (< ran 5.5)))
         (drover-changed-now)
         (should (= (length (drover-remote-test-remote)) 3))
         (should (seq-every-p #'drover-session-stale (drover-remote-test-remote))))
@@ -2654,8 +2679,10 @@ See `drover-remote-test-opened'."
 Opening its session shows at once a buffer waiting for its terminal; a
 command waiting for its answer gives up as it falls silent; the
 connection dropped, the waiting buffer gives way to the session as last
-told, saying why."
+told, saying why.  How soon it gives up is counted in the time this
+Emacs ran (see `drover-remote-test-ran')."
   (drover-remote-test-with nil
+    (setq drover-remote-heartbeat drover-remote-test-quick-heartbeat)
     (drover-remote-test-start-full dir)
     (drover-remote-test-command "sessions" :n 2)
     (drover-remote-test-synced 2)
@@ -2675,18 +2702,40 @@ told, saying why."
               (switch-to-buffer "*scratch*")
               (drover-open (drover-remote-test-session "s1"))
               (should (eq (window-buffer) waiting))
-              (setq start (float-time))
-              (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "ls" :directory dir) 30)))
+              (pcase-let ((`(,ran ,reply ,error)
+                           (drover-remote-test-ran
+                            (lambda () (drover-remote--wait peer (list :op "ls" :directory dir) 30)))))
                 (should-not reply)
-                (should (string-match-p (format "%s has not been heard from" label) error)))
-              ;; Silent twice its heartbeat interval, 1 s here.
-              (should (< (- (float-time) start) 3))
+                (should (string-match-p (format "%s has not been heard from" label) error))
+                ;; Silent twice its heartbeat interval, 1 s here.
+                (should (< ran 3)))
               (drover-remote-test-wait (lambda () (not (buffer-live-p waiting))) 15)
               (should-not (buffer-live-p waiting))
               (with-current-buffer (window-buffer)
                 (should (derived-mode-p 'drover-remote-session-mode))
                 (should (string-match-p "Its terminal did not open" (buffer-string)))))))))
     (drover-remote-test-wait (lambda () (eq (drover-remote--peer-state (drover-remote--peer "agent")) 'open)) 30)))
+
+(ert-deftest drover-remote-test-wait-after-a-long-command ()
+  "A command waiting for a peer after its own work kept Emacs finds the peer's answer.
+Past twice the heartbeat's interval without reading, the peer's
+frames waited unread, and the wait gave up at once, the peer not heard
+from: its silence counted the time this Emacs could not hear it."
+  (drover-remote-test-with nil
+    (setq drover-remote-heartbeat drover-remote-test-quick-heartbeat)
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 1)
+    (drover-remote-test-synced 1)
+    (let ((peer (drover-remote--peer "agent")))
+      ;; The command's own work: three intervals, within the timeout.
+      (let ((end (+ (float-time) 3)))
+        (while (< (float-time) end)))
+      (should (> (- (float-time) (spyglass-connection-last-recv (drover-remote--peer-connection peer)))
+                 (* 2 (car drover-remote-test-quick-heartbeat))))
+      (pcase-let ((`(,reply ,error) (drover-remote--wait peer (list :op "opts" :key ["fake" "s0"]) 10)))
+        (should-not error)
+        (should (equal (plist-get reply :e) "fake")))
+      (should (eq (drover-remote--peer-state peer) 'open)))))
 
 (ert-deftest drover-remote-test-mirror-resumes-conversation ()
   "A conversation without a terminal is resumed there, out of its windows, then mirrored here; once."
