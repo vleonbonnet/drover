@@ -469,13 +469,44 @@ Its functions take the ENGINE.  `drover-models-changed' runs it, and
 `drover-read-model' offers from it the models that arrive while it
 reads.")
 
+(defvar drover--models-kept nil
+  "The models made while `drover-keeping-models' runs, by what made them.
+A hash table while it runs, else nil.")
+
+(defmacro drover-keeping-models (&rest body)
+  "Run BODY, models made once for what they are made from.
+Work asking for the same models many times runs in it, such as the
+target picker of the prompt resolving each candidate: sources make
+their models anew whenever asked, and Claude Code's, from every live
+shell's, took 30 ms each time.  The catalogs engines read on disk to
+describe models are read once too.  A change of the models an engine
+offers (see `drover-models-changed') forgets all those kept."
+  (declare (indent 0) (debug t))
+  `(let ((drover--models-kept (or drover--models-kept (make-hash-table :test #'equal))))
+     ,@body))
+
+(defun drover-models-kept (key make)
+  "Return what MAKE, a function of no argument, makes for KEY.
+That is models, or a catalog they are made from.  KEY, a list compared
+with `equal', stands for what MAKE makes them from.  While
+`drover-keeping-models' runs, they are made once for KEY, and the same
+value returned again: callers must not modify it."
+  (if (not drover--models-kept)
+      (funcall make)
+    (let ((kept (gethash key drover--models-kept drover--models-kept)))
+      (if (eq kept drover--models-kept)
+          (puthash key (funcall make) drover--models-kept)
+        kept))))
+
 (defun drover-models-changed (engine)
   "Note that the models the sources of ENGINE offer changed.
 A source calls it when its models arrive or change, such as when a
-live session starts.  What a live source of ENGINE answers now is
-remembered, then `drover-models-changed-hook' runs.  A function of the
-hook failing is reported, and stops neither the others nor the
-caller."
+live session starts.  The models `drover-keeping-models' kept are
+forgotten.  What a live source of ENGINE answers now is remembered,
+then `drover-models-changed-hook' runs.  A function of the hook
+failing is reported, and stops neither the others nor the caller."
+  (when drover--models-kept
+    (clrhash drover--models-kept))
   (drover-with-reporting "models changed"
     (drover--engine-models engine default-directory))
   (run-hook-wrapped 'drover-models-changed-hook
@@ -495,21 +526,25 @@ caller."
 A source that fails does not answer.  The models remembered answer at
 `drover-model-memory-depth', after sources registered at the same
 depth.  What a live source answers is remembered, and completed by
-what was remembered of each model (see `drover--remember-models')."
-  (let ((sources (sort (append (seq-filter (lambda (source) (eq (car source) engine))
-                                           drover--model-sources)
-                               ;; The memory, which has no function.
-                               (list (list engine drover-model-memory-depth nil nil)))
-                       (lambda (a b) (< (nth 1 a) (nth 1 b))))))
-    (catch 'answer
-      (dolist (source sources)
-        (when-let* ((models (drover-with-reporting "model source"
-                              (if (nth 2 source)
-                                  (funcall (nth 2 source) directory)
-                                (drover-remembered-models engine)))))
-          (throw 'answer (if (nth 3 source)
-                             (drover--remember-models engine models)
-                           models)))))))
+what was remembered of each model (see `drover--remember-models').
+While `drover-keeping-models' runs, they are made once."
+  (drover-models-kept
+   (list 'engine engine directory)
+   (lambda ()
+     (let ((sources (sort (append (seq-filter (lambda (source) (eq (car source) engine))
+                                              drover--model-sources)
+                                  ;; The memory, which has no function.
+                                  (list (list engine drover-model-memory-depth nil nil)))
+                          (lambda (a b) (< (nth 1 a) (nth 1 b))))))
+       (catch 'answer
+         (dolist (source sources)
+           (when-let* ((models (drover-with-reporting "model source"
+                                 (if (nth 2 source)
+                                     (funcall (nth 2 source) directory)
+                                   (drover-remembered-models engine)))))
+             (throw 'answer (if (nth 3 source)
+                                (drover--remember-models engine models)
+                              models)))))))))
 
 (defun drover-model-catalogs (&optional directory)
   "Return the models offered in DIRECTORY, kept apart by engine.

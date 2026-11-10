@@ -89,10 +89,12 @@ required, no new session offered, and the default engine is `fake'."
 
 (defun drover-prompt-test--session (id &rest properties)
   "Serve a fake session ID with PROPERTIES, of engine `fake', with a buffer.
-Return the session."
+The backend reports it, as a backend does a new session.  Return the
+session."
   (let ((session (apply #'drover-test-session id (append properties (list :engine 'fake))))
         (buffer (generate-new-buffer (concat "session " id))))
     (setq drover-test-sessions (append drover-test-sessions (list session)))
+    (drover-backend-changed 'fake)
     (push (cons id buffer) drover-prompt-test-buffers)
     session))
 
@@ -687,6 +689,36 @@ and effort its backend tells first, an effort by default dimmed."
                       (drover-prompt--options-label (drover-prompt--entry-options shell shell-options prompt)))
                      "openai: gpt-a / medium"))
       (should-not (drover-prompt--options-label nil)))))
+
+(ert-deftest drover-prompt-test-resolve-models-when-chosen ()
+  "A destination's models are read only when a model, provider or effort is chosen.
+What is resolved without a choice is what the models would resolve."
+  (drover-prompt-test-with
+    (let* ((opus (drover-test-model "claude-opus-5-5" :provider-name "Anthropic" :engines '(claude)
+                                    :variants '((high) (low))))
+           (fable (drover-test-model "claude-fable-5-1" :provider-name "Anthropic" :engines '(claude)))
+           (current (list :model opus :variant 'high))
+           (terminal (drover-test-session "t" :engine 'claude))
+           (prompt (drover-prompt-buffer t))
+           (settable (and (drover-supports-p terminal :apply-options)
+                          (if (drover-supports-p terminal :settable)
+                              (drover-backend-call terminal :settable)
+                            '(:agent :model :variant))))
+           (asked 0))
+      (drover-test-register-engine 'claude)
+      (drover-register-model-source 'claude (lambda (_directory) (cl-incf asked) (list opus fable)))
+      (dolist (options (list (drover-prompt-explicit-options prompt)
+                             (list :agent "plan" :model nil :variant nil)
+                             (list :agent nil :model nil :variant nil :selection t)))
+        (should (equal (drover-prompt--resolve terminal current options prompt)
+                       (drover-selection-resolve 'claude options current (list opus fable) settable))))
+      (should (= asked 0))
+      (dolist (options (list (list :agent nil :model fable :variant nil)
+                             (list :agent nil :model nil :variant 'low)
+                             (list :agent nil :model nil :variant nil :provider "anthropic")))
+        (setq asked 0)
+        (drover-prompt--resolve terminal current options prompt)
+        (should (= asked 1))))))
 
 ;;;; Choosing what the prompt runs
 
@@ -1510,6 +1542,7 @@ of a frame stays."
       (drover-prompt-test--session "c")
       ;; A session without a buffer, or whose backend takes no prompt, is no target.
       (setq drover-test-sessions (append drover-test-sessions (list (drover-test-session "nobuffer"))))
+      (drover-backend-changed 'fake)
       (let ((other (generate-new-buffer "simple session")))
         (push (cons "simple" other) drover-prompt-test-buffers)
         (drover-test-register-simple 'simple (list (drover-session-create :backend 'simple :id "x"))
@@ -1519,19 +1552,22 @@ of a frame stays."
         (switch-to-buffer (drover-prompt-test--buffer-of "a"))
         (with-current-buffer (drover-prompt-test--buffer-of "b")
           (drover-prompt-test-choosing (lambda (names) (cadr names))
-            (should (eq (drover-prompt-read-target "To: ") a))
+            (should (equal (drover-prompt-read-target "To: ") a))
             (should (equal offered '("session b" "session a" "session c")))
             (should (eq (completion-metadata-get metadata 'category) 'drover-target))
             (should (eq (completion-metadata-get metadata 'display-sort-function) #'identity)))
           (drover-prompt-test-choosing (lambda (names) (car names))
-            (should (eq (drover-prompt-read-target "To: " :existing-only t) b)))
-          ;; Two sessions in one buffer are told apart.
+            (should (equal (drover-prompt-read-target "To: " :existing-only t) b)))
+          ;; Two sessions in one buffer are told apart, in either order.
           (drover-test-register-simple 'twin (list (drover-session-create :backend 'twin :id "t"))
                                        :buffer (lambda (_) (drover-prompt-test--buffer-of "b"))
                                        :send #'ignore)
-          (drover-prompt-test-choosing (lambda (names) (cadr names))
-            (should (eq (drover-session-backend (drover-prompt-read-target "To: ")) 'fake))
-            (should (equal (seq-take offered 2) '("session b" "session b <2>")))))))))
+          (let ((backends (mapcar (lambda (pick)
+                                    (drover-prompt-test-choosing pick
+                                      (prog1 (drover-session-backend (drover-prompt-read-target "To: "))
+                                        (should (equal (seq-take offered 2) '("session b" "session b <2>"))))))
+                                  (list #'car #'cadr))))
+            (should (equal (sort backends #'string<) '(fake twin)))))))))
 
 (ert-deftest drover-prompt-test-target-order-shown ()
   "A session comes as the buffers showing it: its own, those belonging to it, another host's too; lists aside."
@@ -1550,6 +1586,7 @@ of a frame stays."
           (listing (generate-new-buffer "list")))
       (drover-prompt-test--session "b")
       (setq drover-test-sessions (append drover-test-sessions (list v o n)))
+      (drover-backend-changed 'fake)
       (push (cons "view of v" view) drover-prompt-test-buffers)
       (push (cons "review of a" review) drover-prompt-test-buffers)
       (push (cons "list" listing) drover-prompt-test-buffers)
@@ -1575,7 +1612,7 @@ of a frame stays."
             (should (equal (order) '("a" "m" "v" "b" "n" "o")))
             ;; Other hosts' sessions without buffers, named after their titles and hosts.
             (drover-prompt-test-choosing (lambda (names) (car names))
-              (should (eq (drover-prompt-read-target "To: ") a))
+              (should (equal (drover-prompt-read-target "To: ") a))
               (should (equal offered '("session a" "Session m @core" "Session v @core" "session b"
                                        "Session n @core" "Session o @core"))))
             ;; Those shown here are offered first, however active the others.
@@ -1760,9 +1797,9 @@ of a frame stays."
                      (push (command-remapping #'drover-dispatch nil (list (current-local-map)))
                            keymaps))
                    "session a")))
-        (should (eq (drover-prompt-read-target "To: ") session))
-        (should (eq (drover-prompt-read-target "To: " :existing-only t) session))
-        (should (eq (drover-prompt-read-target "To: " :existing-only t :options-menu t) session)))
+        (should (equal (drover-prompt-read-target "To: ") session))
+        (should (equal (drover-prompt-read-target "To: " :existing-only t) session))
+        (should (equal (drover-prompt-read-target "To: " :existing-only t :options-menu t) session)))
       (should (equal (nreverse keymaps)
                      '(drover-prompt-options-menu nil drover-prompt-options-menu))))))
 

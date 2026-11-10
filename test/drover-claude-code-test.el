@@ -276,7 +276,25 @@ serves and a model without effort.")
       (drover-test-write (expand-file-name "old-cc.json" directory)
                          "{\"catalog\": {\"surface\": \"desktop\"}}")
       (set-file-times (expand-file-name "old-cc.json" directory) (seconds-to-time 2600000))
-      (should-not (drover-claude-code-catalog)))))
+      (should-not (drover-claude-code-catalog))
+      ;; Read once while models are kept, until they change.
+      (set-file-times (expand-file-name "org-cc.json" directory) (seconds-to-time 2700000))
+      (let ((listed 0))
+        (advice-add 'directory-files :before
+                    (lambda (listed-directory &rest _)
+                      (when (string-prefix-p (directory-file-name directory) listed-directory)
+                        (cl-incf listed)))
+                    '((name . drover-claude-code-test-count)))
+        (unwind-protect
+            (drover-keeping-models
+              (dotimes (_ 3)
+                (should (equal (map-nested-elt (drover-claude-code-catalog) '(state model)) "claude-opus-5")))
+              (should (= listed 1))
+              (drover-models-changed 'claude-code)
+              (dotimes (_ 2)
+                (drover-claude-code-catalog))
+              (should (= listed 2)))
+          (advice-remove 'directory-files 'drover-claude-code-test-count))))))
 
 (ert-deftest drover-claude-code-test-model ()
   "A model takes its name, variants and default effort from the catalog."
@@ -540,17 +558,23 @@ serves and a model without effort.")
       (drover-test-with-backend
           (list (drover-test-session "a" :engine 'claude-code :engine-id "id-a" :directory project)
                 (drover-test-session "b" :engine 'codex :engine-id "id-b" :directory project)
-                (drover-test-session "c" :engine 'claude-code :directory project))
+                (drover-test-session "c" :engine 'claude-code :directory project)
+                ;; Another host's, its transcript there.
+                (drover-test-session "d" :engine 'claude-code :engine-id "id-d" :directory project
+                                     :host "reaver"))
         (should-not (drover-claude-code--last-used))
         (drover-test-write history "{}\n")
         (set-file-times history (seconds-to-time 1000000))
         (should (= (drover-claude-code--last-used) 1000000.0))
         (let ((transcript (drover-claude-code-transcript "id-a" project))
-              (other (drover-claude-code-transcript "id-b" project)))
+              (other (drover-claude-code-transcript "id-b" project))
+              (remote (drover-claude-code-transcript "id-d" project)))
           (drover-test-write transcript "{}\n")
           (drover-test-write other "{}\n")
+          (drover-test-write remote "{}\n")
           (set-file-times transcript (seconds-to-time 2000000))
           (set-file-times other (seconds-to-time 3000000))
+          (set-file-times remote (seconds-to-time 4000000))
           (should (= (drover-claude-code--last-used) 2000000.0))
           (set-file-times history (seconds-to-time 2500000))
           (should (= (funcall (drover-engine-property 'claude-code :last-used)) 2500000.0)))))))
@@ -735,7 +759,22 @@ serves and a model without effort.")
       (with-temp-buffer
         (insert "{\"type\":\"assistant\",\"requestedModel\":\"claude-haiku-4-5\",\"effort\":null}\n")
         (append-to-file (point-min) (point-max) file))
-      (should (equal (drover-claude-code-last-turn file) '("claude-haiku-4-5"))))))
+      (should (equal (drover-claude-code-last-turn file) '("claude-haiku-4-5")))
+      ;; Read again only once the file changed.
+      (let ((read 0))
+        (advice-add 'drover-claude-code--read-last-turn :before (lambda (&rest _) (cl-incf read))
+                    '((name . drover-claude-code-test-count)))
+        (unwind-protect
+            (progn
+              (dotimes (_ 3)
+                (should (equal (drover-claude-code-last-turn file) '("claude-haiku-4-5"))))
+              (should (= read 0))
+              (with-temp-buffer
+                (insert "{\"type\":\"assistant\",\"requestedModel\":\"claude-opus-5-5\",\"effort\":\"high\"}\n")
+                (append-to-file (point-min) (point-max) file))
+              (should (equal (drover-claude-code-last-turn file) '("claude-opus-5-5" . high)))
+              (should (= read 1)))
+          (advice-remove 'drover-claude-code--read-last-turn 'drover-claude-code-test-count))))))
 
 (ert-deftest drover-claude-code-test-recap ()
   "The recap of a transcript's last turn: its prompt, reply, error and files changed."

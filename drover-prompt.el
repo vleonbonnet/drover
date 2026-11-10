@@ -538,7 +538,11 @@ an explicitly chosen serving provider adds :provider."
   "Resolve OPTIONS for TARGET, whose running options are CURRENT.
 TARGET is a session or a new-target plist.  BUFFER supplies defaults
 and the directory for a new session.  Return the result of
-`drover-selection-resolve', including its incompatibility reason."
+`drover-selection-resolve', including its incompatibility reason.
+The engine's models are read only when OPTIONS choose a model, a
+provider or an effort, which `drover-selection-resolve' checks against
+them: the target picker resolves every candidate, and Claude Code's
+models, made from every live shell's, took 30 ms each time."
   (let* ((session (and (drover-session-p target) target))
          (engine (if session (drover-session-engine session) (plist-get target :engine)))
          (host (if session (drover-session-host session) (plist-get target :host)))
@@ -547,7 +551,9 @@ and the directory for a new session.  Return the result of
                         (and buffer (if host (drover-prompt--host-default-directory host buffer)
                                       (buffer-local-value 'default-directory buffer))) default-directory))
          (entry (and host (alist-get engine (drover-prompt--host-engines host directory))))
-         (models (if host (plist-get entry :models) (drover--engine-models engine directory)))
+         (chosen (seq-some (lambda (key) (plist-get options key)) '(:model :provider :variant)))
+         (models (cond (host (plist-get entry :models))
+                       (chosen (drover--engine-models engine directory))))
          (defaults (and buffer (alist-get engine (buffer-local-value 'drover-prompt--defaults buffer))))
          (current (if session current
                     (if host (plist-get entry :default)
@@ -2168,14 +2174,18 @@ Another host's session is shown here by buffers belonging to it, its
 mirror, its OpenCode buffer or its view, which all tell it: asking its
 backend for its buffer too would only search them again.  The sessions
 of other hosts shown in no buffer here come last, the latest active
-first; of those of other hosts, the ones shown here are offered first."
+first; of those of other hosts, the ones shown here are offered first.
+
+The sessions are those of the index (see `drover-index-sessions'), as
+backends last reported them: listing every backend's anew took longer
+than the rest of the picker."
   (pcase-let* ((`(,buffers . ,shown) (drover-prompt--buffer-ranks))
                (local nil)
                (remote nil))
     (cl-flet ((rank-of (session buffer)
                 (min (or (and buffer (gethash buffer buffers)) most-positive-fixnum)
                      (gethash (drover-session-key session) shown most-positive-fixnum))))
-      (dolist (session (append (drover-sessions) (drover-archived-live-sessions)))
+      (dolist (session (append (drover-index-sessions) (drover-archived-live-sessions)))
         (if (drover-session-host session)
             (when (and (not (drover-session-stale session))
                        (not (drover-session-archived session))
@@ -2385,7 +2395,17 @@ asking, while it takes prompts.  KEYS are:
                  without new sessions.
 
 Where new sessions are offered, or with :options-menu, the key of
-`drover-dispatch' opens `drover-prompt-options-menu'."
+`drover-dispatch' opens `drover-prompt-options-menu'.
+
+The models of each engine and directory are made once while it reads
+\(see `drover-keeping-models'): what each candidate would run is
+resolved as it is filtered and as it is annotated."
+  (drover-keeping-models
+    (drover-prompt--read-target prompt keys)))
+
+(defun drover-prompt--read-target (prompt keys)
+  "Read where to send the prompt, with PROMPT, as KEYS tell.
+See `drover-prompt-read-target'."
   (let* ((existing-only (plist-get keys :existing-only))
          (sessions (drover-prompt--target-sessions))
          (prompt-buffer (drover-prompt-buffer)))

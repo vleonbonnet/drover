@@ -918,6 +918,40 @@ is in `drover-agent-shell-test--refused', when it calls :on-failure."
       (should-not (drover-agent-shell--codex-models "/work"))
       (should-not (drover-agent-shell--gemini-cli-models "/work")))))
 
+(ert-deftest drover-agent-shell-test-live-models-made-once ()
+  "Shells listing the same models make them once, merged as each shell's would be."
+  (drover-agent-shell-test-with
+    (let ((shells (list (drover-agent-shell-test-shell 'claude-code)
+                        (drover-agent-shell-test-shell 'claude-code)
+                        (drover-agent-shell-test-shell 'claude-code)))
+          (made 0))
+      (dolist (shell (seq-take shells 2))
+        (drover-agent-shell-test-options shell
+                                         '("model" "model" "opus" "opus" "sonnet")
+                                         '("effort" "thought_level" "high" "low" "high")))
+      (drover-agent-shell-test-options (nth 2 shells) '("model" "model" "sonnet" "opus" "sonnet"))
+      (let ((each (drover-model-merge-all
+                   (mapcan (lambda (buffer)
+                             (with-current-buffer buffer
+                               (copy-sequence (drover-agent-shell--shell-models 'claude-code agent-shell--state))))
+                           (drover-agent-shell--shells)))))
+        (advice-add 'drover-claude-code-acp-models :before (lambda (&rest _) (cl-incf made))
+                    '((name . drover-agent-shell-test-count)))
+        (unwind-protect
+            (progn
+              (should (equal (drover-agent-shell--live-models 'claude-code) each))
+              (should (= made 2))
+              ;; Kept while models are, until they change.
+              (setq made 0)
+              (drover-keeping-models
+                (drover-agent-shell--live-models 'claude-code)
+                (drover-agent-shell--live-models 'claude-code)
+                (should (= made 2))
+                (drover-models-changed 'claude-code)
+                (should (equal (drover-agent-shell--live-models 'claude-code) each))
+                (should (= made 4))))
+          (advice-remove 'drover-claude-code-acp-models 'drover-agent-shell-test-count))))))
+
 (ert-deftest drover-agent-shell-test-claude-models-identified ()
   "A Claude shell's aliases are the catalog's models, each once, with its own levels."
   (drover-agent-shell-test-with

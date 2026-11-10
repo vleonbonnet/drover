@@ -702,25 +702,32 @@ others the variants their engine tells otherwise, else unknown ones.
 Claude Code's models are identified through the catalog its CLI
 caches, the alias the shell lists kept as the name agent-shell takes
 \(see `drover-claude-code-acp-models'); Codex's take the levels its
-agent lists apart, per model (see `drover-codex-acp-models')."
-  (pcase engine
-    ('claude-code (drover-claude-code-acp-models options current levels 'agent-shell))
-    ('codex (drover-codex-acp-models
-             options current levels
-             (drover-codex-acp-model-efforts
-              (mapcar (lambda (model) (map-elt model :model-id))
-                      (map-nested-elt state '(:session :models))))))
-    (_ (mapcar (pcase-lambda (`(,value . ,name))
-                 (pcase-let ((`(,provider . ,id) (drover-agent-shell--split-model-id engine value))
-                             (current-p (equal value current)))
-                   (drover-model-create
-                    :provider-id provider
-                    :id id
-                    :name name
-                    :variants (and current-p (mapcar #'list levels))
-                    :variants-known current-p
-                    :engines (delete-dups (cons engine (drover-model-engines-for provider id))))))
-               options))))
+agent lists apart, per model (see `drover-codex-acp-models').
+
+While `drover-keeping-models' runs, shells listing the same models make
+them once: a shell's take two or three milliseconds, its catalog read
+and each model described."
+  (let ((models (and (eq engine 'codex) (map-nested-elt state '(:session :models)))))
+    (drover-models-kept
+     (list 'agent-shell engine options current levels models)
+     (lambda ()
+       (pcase engine
+         ('claude-code (drover-claude-code-acp-models options current levels 'agent-shell))
+         ('codex (drover-codex-acp-models
+                  options current levels
+                  (drover-codex-acp-model-efforts
+                   (mapcar (lambda (model) (map-elt model :model-id)) models))))
+         (_ (mapcar (pcase-lambda (`(,value . ,name))
+                      (pcase-let ((`(,provider . ,id) (drover-agent-shell--split-model-id engine value))
+                                  (current-p (equal value current)))
+                        (drover-model-create
+                         :provider-id provider
+                         :id id
+                         :name name
+                         :variants (and current-p (mapcar #'list levels))
+                         :variants-known current-p
+                         :engines (delete-dups (cons engine (drover-model-engines-for provider id))))))
+                    options)))))))
 
 (defun drover-agent-shell--shell-models (engine state)
   "Return the models the shell of ENGINE offers in STATE.
@@ -792,13 +799,20 @@ An ACP agent publishes its models once its session exists, so a
 running shell is the catalog of its engine.  Each shell tells the
 thought levels of the model it runs (see
 `drover-agent-shell--shell-models'): a model several shells list is
-merged, each telling what it knows, most recently used shell first."
-  (drover-model-merge-all
-   (mapcan (lambda (buffer)
-             (with-current-buffer buffer
-               (when (eq (drover-agent-shell--engine) engine)
-                 (drover-agent-shell--shell-models engine agent-shell--state))))
-           (drover-agent-shell--shells))))
+merged, each telling what it knows, most recently used shell first.
+Shells listing the same models, often all of an engine's, make them
+once (see `drover-keeping-models'), and are merged once."
+  (drover-keeping-models
+    (let ((lists nil))
+      (dolist (buffer (drover-agent-shell--shells))
+        (with-current-buffer buffer
+          (when (eq (drover-agent-shell--engine) engine)
+            ;; The same list for the same models, kept: not to be joined
+            ;; destructively.
+            (let ((models (drover-agent-shell--shell-models engine agent-shell--state)))
+              (unless (memq models lists)
+                (push models lists))))))
+      (drover-model-merge-all (apply #'append (nreverse lists))))))
 
 (defun drover-agent-shell--claude-code-models (_directory)
   "Return the Claude Code models live shells offer."

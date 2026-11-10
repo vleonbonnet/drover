@@ -338,6 +338,39 @@ table's metadata."
       (should (equal (mapcar #'drover-model-id (drover-models "/"))
                      '("claude-opus-5-5" "claude-opus-5-5" "x"))))))
 
+(ert-deftest drover-model-test-keeping-models ()
+  "While models are kept, each engine's are made once per directory, until they change."
+  (drover-test-with-engines
+    (let* ((calls nil)
+           (opus (drover-model-create :id "claude-opus-5-5" :engines '(claude-code)))
+           (fable (drover-model-create :id "claude-fable-5-1" :engines '(claude-code)))
+           (models (list opus)))
+      (drover-register-model-source 'claude-code (lambda (directory) (push directory calls) models))
+      ;; Made anew each time otherwise.
+      (dotimes (_ 2) (drover--engine-models 'claude-code "/a/"))
+      (should (equal calls '("/a/" "/a/")))
+      (setq calls nil)
+      (drover-keeping-models
+        (dotimes (_ 3)
+          (should (equal (drover--engine-models 'claude-code "/a/") (list opus)))
+          (drover--engine-models 'claude-code "/b/"))
+        (should (equal (reverse calls) '("/a/" "/b/")))
+        ;; Nested, the same are kept.
+        (drover-keeping-models
+          (drover--engine-models 'claude-code "/a/"))
+        (should (= (length calls) 2))
+        ;; Changed models are made anew, and kept again.
+        (setq models (list opus fable) calls nil)
+        (let ((default-directory "/a/"))
+          (drover-models-changed 'claude-code))
+        (should (equal (drover--engine-models 'claude-code "/a/") (list opus fable)))
+        (should (equal (drover--engine-models 'claude-code "/b/") (list opus fable)))
+        (should (equal (reverse calls) '("/a/" "/b/"))))
+      ;; Kept no longer once it returns.
+      (setq calls nil)
+      (drover--engine-models 'claude-code "/a/")
+      (should (equal calls '("/a/"))))))
+
 ;;;; Remembered models
 
 (defmacro drover-model-test-remembering (&rest body)

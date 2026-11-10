@@ -2582,6 +2582,10 @@ engine key to its record; the first record wins."
         (puthash key session table)))
     table))
 
+;; Defined with drover's archive, below: special here too, else the
+;; bindings below would be lexical where this file is compiled alone.
+(defvar drover--archive-checking)
+
 (defun drover-archived-sessions (&optional live)
   "Return the archived sessions lists show while `drover-show-archived' is set.
 They are those the backends' :archived functions fetched, those a
@@ -2597,7 +2601,8 @@ live or among the older sessions those backends list (see
 archived, so that lists show them under it.  Records of different
 backends showing one conversation are merged as `drover-sessions'
 merges them."
-  (let* ((live (or live (drover--live-sessions)))
+  (let* ((drover--archive-checking (or drover--archive-checking t))
+         (live (or live (drover--live-sessions)))
          (below (drover--archived-below live))
          (followed (make-hash-table :test #'equal))
          (own nil)
@@ -3031,10 +3036,6 @@ See `drover--changed-applied'."
                 (append drover--changed-applied changed)))))))
 
 (defvar drover--index)
-
-;; Defined with drover's archive, below: special here too, else the
-;; binding below would be lexical where this file is compiled alone.
-(defvar drover--archive-checking)
 
 (defun drover--run-changed ()
   "Bring the index up to date, then run `drover-changed-hook'.
@@ -4359,18 +4360,20 @@ A backend reports its archived sessions through :archived, not among
 the sessions it follows; a record telling it is archived is left out
 all the same.  A subagent going with a conversation drover archived is
 left out with it (see `drover--archived-below'), INDEX, when given,
-noting it withheld (see `drover--index-withhold')."
-  (if (drover--archive)
-      (let ((below (drover--archived-below sessions index)))
-        (when (and below index)
-          (maphash (lambda (key above) (drover--index-withhold index key above)) below))
-        (seq-remove (lambda (session)
-                      (or (drover-session-archived session)
-                          (when-let* ((key (drover-session-engine-key session)))
-                            (drover--archive-lookup key))
-                          (and below (gethash (drover-session-key session) below))))
-                    sessions))
-    (seq-remove #'drover-session-archived sessions)))
+noting it withheld (see `drover--index-withhold').  The archive's file
+is looked at once."
+  (let ((drover--archive-checking (or drover--archive-checking t)))
+    (if (drover--archive)
+        (let ((below (drover--archived-below sessions index)))
+          (when (and below index)
+            (maphash (lambda (key above) (drover--index-withhold index key above)) below))
+          (seq-remove (lambda (session)
+                        (or (drover-session-archived session)
+                            (when-let* ((key (drover-session-engine-key session)))
+                              (drover--archive-lookup key))
+                            (and below (gethash (drover-session-key session) below))))
+                      sessions))
+      (seq-remove #'drover-session-archived sessions))))
 
 (defun drover--mark-archived (session &optional entry)
   "Return SESSION, or a copy with its ARCHIVED set when drover archived it.
@@ -4667,12 +4670,13 @@ They are left out of `drover-sessions', yet have buffers a prompt may
 go to, restoring them (see `drover-unarchive-to-send').  Records of
 different backends showing one conversation are merged as
 `drover-sessions' merges them."
-  (when (drover--archive)
-    (drover--merge-duplicates
-     (seq-filter (lambda (session)
-                   (when-let* ((key (drover-session-engine-key session)))
-                     (drover--archive-lookup key)))
-                 (drover--live-sessions)))))
+  (let ((drover--archive-checking (or drover--archive-checking t)))
+    (when (drover--archive)
+      (drover--merge-duplicates
+       (seq-filter (lambda (session)
+                     (when-let* ((key (drover-session-engine-key session)))
+                       (drover--archive-lookup key)))
+                   (drover--live-sessions))))))
 
 (defun drover-archived-left (backend id)
   "Forget the record of session ID of BACKEND fetched as archived: it left.

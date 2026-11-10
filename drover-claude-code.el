@@ -390,33 +390,51 @@ moved to the trash when `delete-by-moving-to-trash' says so."
 (defconst drover-claude-code--transcript-tail 262144
   "Bytes at the end of a transcript `drover-claude-code-last-turn' reads.")
 
+(defvar drover-claude-code--last-turns (make-hash-table :test #'equal)
+  "Transcripts mapped to (STAMP . TURN), as last read.
+TURN is what `drover-claude-code-last-turn' returned, STAMP the file's
+size and modification time then.")
+
 (defun drover-claude-code-last-turn (file)
   "Return (MODEL-ID . EFFORT) of the newest main turn transcript FILE records.
-Only the end of the file is read.  EFFORT is a symbol, nil for a model
+Only the end of the file is read, again only once the file changed: a
+transcript only grows, and the prompt's target picker asks this of
+every Claude terminal as it opens.  EFFORT is a symbol, nil for a model
 without effort.  Nil when no turn is found."
-  (when (file-readable-p file)
-    (with-temp-buffer
-      (let ((size (file-attribute-size (file-attributes file))))
-        (insert-file-contents file nil (max 0 (- size drover-claude-code--transcript-tail)) size))
-      (goto-char (point-max))
-      (let (turn)
-        ;; Searching the key first skips lines that cannot be turns
-        ;; without parsing them; the record itself decides.
-        (while (and (not turn) (re-search-backward "\"requestedModel\":\"" nil t))
-          (when-let* ((record (ignore-errors
-                                (json-parse-string (buffer-substring-no-properties
-                                                    (line-beginning-position) (line-end-position))
-                                                   :object-type 'alist :null-object nil
-                                                   :false-object nil)))
-                      ((drover-json-object-p record))
-                      ((equal (alist-get 'type record) "assistant"))
-                      ((not (alist-get 'isSidechain record)))
-                      (model (alist-get 'requestedModel record))
-                      ((stringp model)))
-            (let ((effort (alist-get 'effort record)))
-              (setq turn (cons model (and (stringp effort) (intern effort))))))
-          (beginning-of-line))
-        turn))))
+  (when-let* (((file-readable-p file))
+              (attributes (file-attributes file)))
+    (let ((stamp (cons (file-attribute-size attributes) (file-attribute-modification-time attributes)))
+          (kept (gethash file drover-claude-code--last-turns)))
+      (if (equal (car kept) stamp)
+          (cdr kept)
+        (cdr (puthash file (cons stamp (drover-claude-code--read-last-turn file (car stamp)))
+                      drover-claude-code--last-turns))))))
+
+(defun drover-claude-code--read-last-turn (file size)
+  "Return (MODEL-ID . EFFORT) of the newest main turn transcript FILE records.
+SIZE is the file's: only its end is read.  See
+`drover-claude-code-last-turn'."
+  (with-temp-buffer
+    (insert-file-contents file nil (max 0 (- size drover-claude-code--transcript-tail)) size)
+    (goto-char (point-max))
+    (let (turn)
+      ;; Searching the key first skips lines that cannot be turns
+      ;; without parsing them; the record itself decides.
+      (while (and (not turn) (re-search-backward "\"requestedModel\":\"" nil t))
+        (when-let* ((record (ignore-errors
+                              (json-parse-string (buffer-substring-no-properties
+                                                  (line-beginning-position) (line-end-position))
+                                                 :object-type 'alist :null-object nil
+                                                 :false-object nil)))
+                    ((drover-json-object-p record))
+                    ((equal (alist-get 'type record) "assistant"))
+                    ((not (alist-get 'isSidechain record)))
+                    (model (alist-get 'requestedModel record))
+                    ((stringp model)))
+          (let ((effort (alist-get 'effort record)))
+            (setq turn (cons model (and (stringp effort) (intern effort))))))
+        (beginning-of-line))
+      turn)))
 
 (defun drover-claude-code--transcript-records (file)
   "Return the records at the end of transcript FILE, newest first.
@@ -709,15 +727,20 @@ The flags come from `drover-claude-code-start-flags-function'."
 (defun drover-claude-code-catalog ()
   "Return the model catalog Claude Code last cached, or nil.
 Its `config' lists every model's name, short name and effort options,
-its `state' the default model and the default effort of each model."
-  (let* ((directory (expand-file-name "cache/model-catalog" drover-claude-code-home))
-         (file (car (sort (ignore-errors (directory-files directory t "-cc\\.json\\'" t))
-                          :key (lambda (file) (or (drover-file-mtime file) 0))
-                          :reverse t)))
-         (catalog (and file (alist-get 'catalog (drover-read-json-cached file)))))
-    (and (drover-json-object-p catalog)
-         (equal (alist-get 'surface catalog) "cc")
-         catalog)))
+its `state' the default model and the default effort of each model.
+While `drover-keeping-models' runs, it is read once: finding it lists
+its directory, and every Claude session described reads it."
+  (drover-models-kept
+   (list 'claude-code-catalog drover-claude-code-home)
+   (lambda ()
+     (let* ((directory (expand-file-name "cache/model-catalog" drover-claude-code-home))
+            (file (car (sort (ignore-errors (directory-files directory t "-cc\\.json\\'" t))
+                             :key (lambda (file) (or (drover-file-mtime file) 0))
+                             :reverse t)))
+            (catalog (and file (alist-get 'catalog (drover-read-json-cached file)))))
+       (and (drover-json-object-p catalog)
+            (equal (alist-get 'surface catalog) "cc")
+            catalog)))))
 
 (defun drover-claude-code--model-key (id)
   "Return the family-version key of the Claude model ID, a zero minor dropped."
@@ -1052,10 +1075,14 @@ Code gives the model."
 Interactive sessions append each prompt to history.jsonl; sessions run
 through the SDK, as agent-shell's are, write only their transcripts,
 so the transcripts of the sessions front ends follow count too, not
-those of every conversation recorded, which only grow when run."
+those of every conversation recorded, which only grow when run, nor
+those of other hosts, whose transcripts are there.  The sessions are
+those of the index, which the prompt asks as it opens: listing every
+backend's took 130 ms there."
   (let ((times (list (drover-file-mtime (expand-file-name "history.jsonl" drover-claude-code-home)))))
-    (dolist (session (drover-sessions))
+    (dolist (session (drover-index-sessions))
       (when-let* (((eq (drover-session-engine session) 'claude-code))
+                  ((not (drover-session-host session)))
                   ((not (drover-backend-property session :recorded)))
                   (id (drover-session-engine-id session))
                   (directory (drover-session-directory session)))
