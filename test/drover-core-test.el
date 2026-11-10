@@ -102,13 +102,54 @@ subagent, \"busy\" works, under a subagent whose turn ended unseen."
     ;; None: a subagent waiting for the user blocks its parent.
     (let ((drover-show-subagents 'none))
       (should (equal (drover-test-ids (drover-surfaced-sessions)) '("root" "asking" "alone"))))
-    ;; The filter narrows lists only.
+    ;; The filter narrows them as it narrows lists, but unfiltered.
     (let ((drover-filter '(:project "elsewhere")))
-      (should (equal (drover-test-ids (drover-surfaced-sessions))
+      (should-not (drover-surfaced-sessions))
+      (should (equal (drover-test-ids (drover-surfaced-sessions nil t))
                      '("root" "quiet" "asking" "path" "busy" "alone"))))
     ;; Given sessions, those.
     (should (equal (drover-test-ids (drover-surfaced-sessions (last drover-test-sessions)))
                    '("alone")))))
+
+(ert-deftest drover-test-surfaced-sessions-filter ()
+  "Under a filter, sessions surface as lists draw them, and subagents waiting in a tree kept.
+A subagent waiting in a tree the filter keeps surfaces whether it
+matches or not: it is answered from the top of its tree, which lists
+draw.  One in a tree the filter leaves out does not, nor one alone,
+its parent gone, that does not match."
+  (drover-test-with-backend
+      (list (drover-test-session "kept" :status 'idle :project "p")
+            (drover-test-session "asking" :parent "kept" :status 'waiting :project "q")
+            (drover-test-session "ended" :parent "kept" :status 'done :project "q")
+            (drover-test-session "out" :status 'idle :project "q")
+            (drover-test-session "blocked" :parent "out" :status 'waiting :project "q")
+            (drover-test-session "matching" :parent "out" :status 'done :project "p")
+            (drover-test-session "lost" :parent "gone" :status 'waiting :project "q")
+            (drover-test-session "found" :parent "gone" :status 'waiting :project "p")
+            (drover-test-session "far" :status 'done :project "p" :host "peer" :stale 10.0))
+    (let ((drover-filter '(:project "p")))
+      ;; Active: "out" shows as the way to the subagent matching, which
+      ;; the filter shows, active or not.
+      (should (equal (drover-test-ids (drover-surfaced-sessions))
+                     '("kept" "asking" "out" "blocked" "matching" "found")))
+      ;; None: the same, the subagent matching shown all the same.
+      (let ((drover-show-subagents 'none))
+        (should (equal (drover-test-ids (drover-surfaced-sessions))
+                       '("kept" "asking" "out" "blocked" "matching" "found"))))
+      ;; A tree no session of which matches leaves its subagent waiting
+      ;; out too.
+      (setq drover-test-sessions (seq-remove (lambda (session)
+                                               (equal (drover-session-id session) "matching"))
+                                             drover-test-sessions))
+      (drover-backend-changed 'fake)
+      (drover-changed-now)
+      (should (equal (drover-test-ids (drover-surfaced-sessions)) '("kept" "asking" "found")))
+      ;; All: the subagents the filter keeps, the one ended not.
+      (let ((drover-show-subagents 'all))
+        (should (equal (drover-test-ids (drover-surfaced-sessions)) '("kept" "asking" "found"))))
+      ;; Unfiltered, as lists would show them without the filter.
+      (should (equal (drover-test-ids (drover-surfaced-sessions nil t))
+                     '("kept" "asking" "out" "blocked" "lost" "found"))))))
 
 (ert-deftest drover-test-attention-sessions-follow-subagent-mode ()
   "The sessions needing the user are those lists show, and every subagent asking."

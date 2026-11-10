@@ -34,6 +34,9 @@
                                    (drover-attention-mode nil)
                                    (drover-attention-mode-line nil)
                                    (drover-attention--mode-string-origin nil)
+                                   (drover-attention--sessions nil)
+                                   (drover-attention--layout nil)
+                                   (drover-attention--filter nil)
                                    (drover-attention--queue nil)
                                    (drover-attention--position 0)
                                    (drover-attention--depth 0)
@@ -191,7 +194,8 @@ count as it was; forcing every mode line costs tens of milliseconds."
           (should-not forced))))))
 
 (ert-deftest drover-attention-test-format-follows-subagent-mode ()
-  "The count is that of what lists show, and of every subagent waiting for the user."
+  "The count is that of what lists show, and of every subagent waiting for the user.
+Those in a tree the filter keeps, whatever the subagent mode."
   (drover-attention-test-with (list (drover-test-session "root" :status 'working)
                                     (drover-test-session "ended" :parent "root" :status 'done)
                                     (drover-test-session "broke" :parent "root" :status 'failed)
@@ -209,8 +213,10 @@ count as it was; forcing every mode line costs tens of milliseconds."
     (let ((help (drover-attention-test-help drover-attention-mode-line)))
       (should (string-match-p "Session asking" help))
       (should-not (string-match-p "Session ended\\|Session broke" help)))
-    ;; A filter narrows lists, not the count.
+    ;; The filter narrows the count as it narrows lists.
     (drover-set-filter :project "elsewhere")
+    (should-not drover-attention-mode-line)
+    (drover-set-filter :project nil)
     (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
 
 (ert-deftest drover-attention-test-orphans-follow-subagent-mode ()
@@ -1243,7 +1249,8 @@ is the same either way."
                            drawn))))))))
 
 (ert-deftest drover-attention-test-order-filtered-last ()
-  "Sessions the filter leaves out come after those lists draw."
+  "The filter leaves the sessions it hides out; unfiltered, they come last.
+Unfiltered as `drover-select' offers them: after those lists draw."
   (drover-attention-test-with (list (drover-test-session "a" :status 'done :since 1.0 :project "p")
                                     (drover-test-session "b" :status 'waiting :since 2.0 :project "q")
                                     (drover-test-session "c" :status 'failed :since 3.0 :project "p"))
@@ -1251,7 +1258,222 @@ is the same either way."
                    '("b" "c" "a")))
     (let ((drover-filter '(:project "p")))
       (should (equal (drover-attention-test-ids (drover-attention-order (drover-attention-sessions)))
+                     '("c" "a")))
+      (should (equal (drover-attention-test-ids
+                      (drover-attention-order (seq-filter #'drover-session-attention-p
+                                                          (drover-surfaced-sessions nil t))))
                      '("c" "a" "b"))))))
+
+;;;; The filter
+
+(defun drover-attention-test-counted ()
+  "Return the identifiers of the sessions the count holds, sorted."
+  (sort (mapcar #'drover-session-id (hash-table-values drover-attention--sessions)) #'string<))
+
+(defun drover-attention-test-fresh ()
+  "Return the identifiers of the sessions needing the user, found anew, sorted."
+  (sort (mapcar #'drover-session-id (drover-attention-sessions)) #'string<))
+
+(ert-deftest drover-attention-test-count-follows-filter-in-place ()
+  "Under a filter, the count follows a change through its tree, finding none anew.
+A match keeps the top of its tree, and a subagent waiting in a tree
+kept counts, whether it matches or not."
+  (drover-attention-test-with
+      (list (drover-attention-test-titled "root" "Fix login" :status 'done :since 1.0)
+            (drover-attention-test-titled "explore" "auth explorer" :parent "root" :status 'idle)
+            (drover-attention-test-titled "other" "Other work" :status 'failed :since 2.0)
+            (drover-attention-test-titled "lone" "auth alone" :status 'done :since 3.0))
+    (drover-attention-mode 1)
+    (drover-set-filter :search "auth")
+    (should (equal (drover-attention-test-counted) '("lone" "root")))
+    (let ((recounts 0)
+          (recount (symbol-function 'drover-attention--recount))
+          (root (drover-attention-test-titled "root" "Fix login" :status 'done :since 1.0))
+          (other (drover-attention-test-titled "other" "Other work" :status 'failed :since 2.0))
+          (lone (drover-attention-test-titled "lone" "auth alone" :status 'done :since 3.0))
+          (asking (drover-attention-test-titled "asking" "Which file?" :parent "late"
+                                                :status 'waiting :since 4.0))
+          (late (drover-attention-test-titled "late" "auth late" :status 'idle)))
+      (cl-letf (((symbol-function 'drover-attention--recount)
+                 (lambda () (cl-incf recounts) (funcall recount))))
+        (cl-flet ((explore (title parent)
+                    (drover-attention-test-titled "explore" title :parent parent :status 'idle))
+                  (change (id sessions expected)
+                    (setq drover-test-sessions sessions)
+                    (drover-backend-changed 'fake id)
+                    (drover-changed-now)
+                    (should (equal (list id (drover-attention-test-counted)) (list id expected)))
+                    (should (equal (list id (drover-attention-test-fresh)) (list id expected)))))
+          ;; The match renamed away: its tree goes; and back.
+          (change "explore" (list root (explore "plain explorer" "root") other lone) '("lone"))
+          (change "explore" (list root (explore "auth explorer" "root") other lone) '("lone" "root"))
+          ;; The match gone.
+          (change "explore" (list root other lone) '("lone"))
+          ;; Back, then under another parent: the tree it left goes.
+          (change "explore" (list root (explore "auth explorer" "root") other lone) '("lone" "root"))
+          (change "explore" (list root (explore "auth explorer" "other") other lone) '("lone" "other"))
+          ;; A subagent waiting, matching nothing, alone, then under its
+          ;; parent coming, matching, then alone again.
+          (change "asking" (list root (explore "auth explorer" "other") other lone asking)
+                  '("lone" "other"))
+          (change "late" (list root (explore "auth explorer" "other") other lone asking late)
+                  '("asking" "lone" "other"))
+          (change "late" (list root (explore "auth explorer" "other") other lone asking)
+                  '("lone" "other"))))
+      (should (= recounts 0)))))
+
+(defun drover-attention-test-random-forest (count)
+  "Return COUNT random sessions, in trees of random shapes.
+Most are subagents of a session before them, some alone, their parent
+gone; of every status, of two projects or none, some titled to match a
+search, some of a host not connected."
+  (let ((sessions nil)
+        (ids nil))
+    (dotimes (index count)
+      (let* ((id (format "f%03d" index))
+             (stale (zerop (random 12))))
+        (push (drover-attention-test-titled
+               id (concat (seq-random-elt '("auth " "plain ")) id)
+               :parent (cond ((and ids (< (random 10) 6)) (seq-random-elt ids))
+                             ((zerop (random 12)) "gone"))
+               :status (seq-random-elt '(waiting failed done retrying working idle))
+               :project (seq-random-elt '("alpha" "beta" nil))
+               :host (and stale "peer")
+               :stale (and stale 10.0))
+              sessions)
+        (push id ids)))
+    (nreverse sessions)))
+
+(ert-deftest drover-attention-test-tree-surfaced-as-trees-say ()
+  "Walking the index finds in a tree what `drover-surfaced-sessions' finds in its sessions.
+Over random trees, under every subagent mode and filters of projects,
+a search, statuses and hosts, and of several of them."
+  (random "drover attention tree surfaced")
+  (drover-attention-test-with (drover-attention-test-random-forest 160)
+    (let ((roots (delete-dups (mapcar (lambda (session) (drover-index-root (drover-session-key session)))
+                                      (drover-sessions)))))
+      (cl-flet ((ids (keys) (sort (mapcar #'cdr keys) #'string<)))
+        (should (> (length roots) 20))
+        (should (< (length roots) 100))
+        (dolist (mode '(all active none))
+          (dolist (filter '((:project "alpha") (:project (:exclude "beta")) (:search "auth")
+                            (:statuses (:include waiting working)) (:statuses (:exclude idle done))
+                            (:host (:exclude "peer")) (:search "auth" :statuses (:include done failed))))
+            (let ((drover-show-subagents mode)
+                  (drover-filter filter))
+              (dolist (root roots)
+                (should (equal (list mode filter root
+                                     (ids (hash-table-keys (drover-attention--tree-surfaced root))))
+                               (list mode filter root
+                                     (ids (mapcar #'drover-session-key
+                                                  (drover-surfaced-sessions
+                                                   (drover-index-tree-sessions root)))))))))))))))
+
+(ert-deftest drover-attention-test-count-follows-filter-however-set ()
+  "A filter set otherwise than by `drover-set-filter' is followed all the same.
+As when drover is loaded anew over a count made under other rules: the
+tooltip, made when shown, counts anew, and so does the next change."
+  (drover-attention-test-with (list (drover-test-session "a" :status 'waiting :project "p")
+                                    (drover-test-session "b" :status 'waiting :project "q"))
+    (drover-attention-mode 1)
+    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
+    (setq drover-filter '(:project "p"))
+    (let ((help (drover-attention-test-help drover-attention-mode-line)))
+      (should (string-match-p "Session a" help))
+      (should-not (string-match-p "Session b" help)))
+    (drover-backend-changed 'fake "a")
+    (drover-changed-now)
+    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (setq drover-filter nil)
+    (drover-backend-changed 'fake "a")
+    (drover-changed-now)
+    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
+
+(ert-deftest drover-attention-test-help-names-filter ()
+  "The tooltip names the filter while one is set, the sessions it lists following it."
+  (drover-attention-test-with (list (drover-test-session "a" :status 'waiting :project "p")
+                                    (drover-test-session "b" :status 'done :project "q"))
+    (drover-attention-mode 1)
+    (should-not (string-match-p "Filter" (drover-attention-test-help drover-attention-mode-line)))
+    (drover-set-filter :project "p")
+    (let ((help (drover-attention-test-help drover-attention-mode-line)))
+      (should (string-match-p "Session a" help))
+      (should-not (string-match-p "Session b" help))
+      (should (string-match-p "\n\nFilter: project p\n\nmouse-1" help)))
+    (drover-set-filter :project nil)
+    (should-not (string-match-p "Filter" (drover-attention-test-help drover-attention-mode-line)))))
+
+(ert-deftest drover-attention-test-next-skips-filtered ()
+  "`drover-next' leaves out the sessions the filter hides, their cache expiring first or not."
+  (let ((now (float-time)))
+    (drover-attention-test-with (list (drover-test-session "there" :status 'done :since 1.0 :project "q"
+                                                           :cache-expires (+ now 60) :cache-ttl 300)
+                                      (drover-test-session "here" :status 'done :since 2.0 :project "p"
+                                                           :cache-expires (+ now 240) :cache-ttl 300)
+                                      (drover-test-session "idle" :status 'idle :project "q"))
+      (should (equal (drover-attention-test-ids (drover-visit-order (drover-attention--round-sessions) now))
+                     '("there" "here" "idle")))
+      (drover-set-filter :project "p")
+      (should (equal (drover-attention-test-messages
+                       (drover-next)
+                       (drover-attention-test-press))
+                     '("1/1" "1/1")))
+      (should (equal (drover-attention-test-opened) '("here" "here"))))))
+
+(ert-deftest drover-attention-test-next-filter-hides-all ()
+  "With every session to visit hidden by the filter, the echo area says how many."
+  (drover-attention-test-with (list (drover-test-session "a" :status 'done :project "q")
+                                    (drover-test-session "b" :status 'idle :project "q")
+                                    (drover-test-session "c" :status 'working :project "p"))
+    (drover-set-filter :project "p")
+    (should (equal (drover-attention-test-messages (drover-next))
+                   '("No session to visit; the filter hides 2")))
+    (drover-set-filter :project "nowhere")
+    (should (equal (drover-attention-test-messages (drover-next))
+                   '("No session to visit; the filter hides 2")))
+    (drover-set-filter :project nil)
+    (setq drover-test-sessions (list (drover-test-session "c" :status 'working :project "p")))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (drover-set-filter :project "p")
+    (should (equal (drover-attention-test-messages (drover-next)) '("No session to visit")))
+    (should-not (drover-attention-test-opened))))
+
+(ert-deftest drover-attention-test-next-subagent-the-filter-cuts ()
+  "A subagent waiting that the filter leaves out of a tree it keeps is visited through its top.
+In the place lists draw that top, its tree ranking without the subagent."
+  (drover-attention-test-with (list (drover-test-session "root" :status 'working :project "p" :updated 90.0)
+                                    (drover-test-session "asking" :parent "root" :status 'waiting :project "q"
+                                                         :since 2.0 :updated 2.0)
+                                    (drover-test-session "ended" :status 'done :project "p"
+                                                         :since 3.0 :updated 50.0)
+                                    (drover-test-session "quiet" :status 'idle :project "p" :updated 10.0)
+                                    (drover-test-session "away" :status 'waiting :project "q" :since 1.0))
+    (drover-set-filter :project "p")
+    (let ((drover-group-by nil))
+      ;; By last activity: the top first, for its subagent.
+      (let ((drover-sort-by 'updated)
+            (drover-sort-descending t))
+        (drover-next)
+        (drover-attention-test-press)
+        (drover-attention-test-press))
+      (drover-attention-test-other-command)
+      ;; By urgency: the top, working, after the session done, as lists
+      ;; draw it, not first as it would rank with the subagent shown.
+      (drover-next)
+      (drover-attention-test-press)
+      (drover-attention-test-press))
+    (should (equal (drover-attention-test-opened) '("root" "ended" "quiet" "ended" "root" "quiet")))))
+
+(ert-deftest drover-attention-test-select-ignores-filter ()
+  "`drover-select' offers the sessions the filter hides, after those it keeps."
+  (drover-attention-test-with (list (drover-test-session "b" :status 'waiting :project "q")
+                                    (drover-test-session "a" :status 'done :project "p"))
+    (drover-set-filter :project "p")
+    (drover-attention-test-select "Session b"
+      (drover-select)
+      (should (equal (all-completions "" drover-attention-test-table) '("Session a" "Session b"))))
+    (should (equal drover-test-calls '((:open "b" nil))))))
 
 (ert-deftest drover-attention-test-next-keeps-order-as-caches-change ()
   "Caches expiring or renewed during a round leave its order as it was."

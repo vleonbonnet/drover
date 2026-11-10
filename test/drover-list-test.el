@@ -5852,12 +5852,18 @@ activity first."
 
 ;;;; The order of the sessions needing the user
 
-(defun drover-list-test-attention-order ()
+(defun drover-list-test-attention-order (&optional unfiltered)
   "Return the identifiers of the sessions needing the user in the order to visit them.
 At the clock of the tests, as a pair (CACHED . OTHERS): those visited
 for a live prompt cache, theirs or the top of their tree's (see
-`drover-attention-cache'), and the others, both in order."
-  (let ((order (drover-attention-order (drover-attention-sessions) drover-list-test-clock)))
+`drover-attention-cache'), and the others, both in order.  With
+UNFILTERED, those of every tree, whatever the filter, as
+`drover-select' offers them."
+  (let ((order (drover-attention-order (if unfiltered
+                                           (drover-sort (seq-filter #'drover-session-attention-p
+                                                                    (drover-surfaced-sessions nil t)))
+                                         (drover-attention-sessions))
+                                       drover-list-test-clock)))
     (cons (mapcar #'drover-session-id
                   (seq-filter (lambda (session)
                                 (drover-attention-cache session drover-list-test-clock))
@@ -5906,33 +5912,139 @@ window, which share the view settings, under several of them."
                                  (seq-filter (lambda (id) (member id others)) (drover-list-test-order)))
                            (list mode grouping sort descending others)))))))))
 
-(ert-deftest drover-list-test-attention-order-filter ()
-  "The sessions the filter leaves out come after those both lists draw.
-Those in the order the lists would draw them without the filter."
+(defun drover-list-test-rows (order drawn)
+  "Return the rows lists draw for the sessions of ORDER, in its order.
+DRAWN are the identifiers of the sessions a list draws.  A session's row
+is its own, or that of the session visited for it (see
+`drover-attention-target'), the top of the tree of a subagent waiting
+that the filter leaves out; nil when lists draw neither.  The value is
+a list of (ID . ROW), a row following another alike once."
+  (let ((rows nil))
+    (dolist (id order)
+      (let* ((target (drover-session-id (drover-attention-target (drover-list-test-find id))))
+             (row (cond ((member id drawn) id)
+                        ((member target drawn) target))))
+        (unless (and row (equal row (cdar rows)))
+          (push (cons id row) rows))))
+    (nreverse rows)))
+
+(defun drover-list-test-filtered-sessions ()
+  "Serve 40 random sessions without prompt caches, and set the view to list them.
+Every subagent, ungrouped, the last active first.  One more waits for
+the user under the session of the project alpha last active, of beta
+itself: lists draw its tree before others."
   (random "drover attention order filter")
+  (let* ((sessions (mapcar (lambda (session)
+                             (setf (drover-session-cache-expires session) nil)
+                             session)
+                           (drover-list-test-random-sessions 40)))
+         (top (car (sort (seq-filter (lambda (session)
+                                       (and (equal (drover-session-project session) "alpha")
+                                            (null (drover-session-parent session))))
+                                     sessions)
+                         :key #'drover-session-updated :reverse t))))
+    (setq drover-test-sessions
+          (append sessions
+                  (list (drover-list-test-titled "asking" "Session asking"
+                                                 :parent (drover-session-id top) :status 'waiting
+                                                 :project "beta"
+                                                 :since (drover-list-test-ago 300)
+                                                 :updated (drover-list-test-ago 300))))))
+  (drover-backend-changed 'fake)
+  (drover-set-show-subagents 'all)
+  (drover-set-group-by nil)
+  (drover-set-sort 'updated t))
+
+(ert-deftest drover-list-test-attention-order-filter ()
+  "Under a filter, the sessions needing the user are those both lists draw, in their order.
+And the subagents waiting that the filter leaves out of a tree it keeps,
+each in the place of the top of its tree, which is visited for it."
   (drover-list-test-two-lists
-    (setq drover-test-sessions (mapcar (lambda (session)
-                                         (setf (drover-session-cache-expires session) nil)
-                                         session)
-                                       (drover-list-test-random-sessions 40)))
-    (drover-backend-changed 'fake)
-    (drover-set-show-subagents 'all)
-    (drover-set-group-by nil)
-    (drover-set-sort 'updated t)
-    (let ((whole (cdr (drover-list-test-attention-order))))
+    (drover-list-test-filtered-sessions)
+    (drover-set-filter :project "alpha")
+    (let* ((order (cdr (drover-list-test-attention-order)))
+           (drawn (with-current-buffer sidebar (drover-list-test-order)))
+           (rows (drover-list-test-rows order drawn)))
+      (should order)
+      ;; The subagent the filter leaves out is not drawn, and comes where
+      ;; the top of its tree is, before others.
+      (should-not (member "asking" drawn))
+      (should (< (seq-position order "asking") (1- (length order))))
+      (should (seq-every-p #'cdr rows))
+      (dolist (list (list sidebar buffer))
+        (with-current-buffer list
+          (should (equal (mapcar #'cdr rows)
+                         (seq-filter (lambda (id) (rassoc id rows)) (drover-list-test-order)))))))))
+
+(ert-deftest drover-list-test-attention-order-unfiltered ()
+  "Unfiltered, as `drover-select' offers them, those the filter hides come last.
+In the order the lists would draw them without the filter, after those
+lists draw, which come as under the filter."
+  (drover-list-test-two-lists
+    (drover-list-test-filtered-sessions)
+    (let ((whole (cdr (drover-list-test-attention-order t))))
       (drover-set-filter :project "alpha")
-      (let* ((order (cdr (drover-list-test-attention-order)))
-             (drawn (with-current-buffer sidebar
-                      (seq-filter (lambda (id) (member id order)) (drover-list-test-order))))
-             (left (seq-remove (lambda (id) (member id drawn)) order)))
-        (should drawn)
+      (let* ((order (cdr (drover-list-test-attention-order t)))
+             (drawn (with-current-buffer sidebar (drover-list-test-order)))
+             (rows (drover-list-test-rows order drawn))
+             (shown (seq-take-while #'cdr rows))
+             (left (mapcar #'car (nthcdr (length shown) rows))))
+        (should shown)
         (should left)
-        (should (equal (seq-take order (length drawn)) drawn))
-        (should (equal (nthcdr (length drawn) order)
-                       (seq-filter (lambda (id) (member id left)) whole)))
-        (with-current-buffer buffer
-          (should (equal (seq-filter (lambda (id) (member id order)) (drover-list-test-order))
-                         drawn)))))))
+        (should-not (seq-some #'cdr (nthcdr (length shown) rows)))
+        (should (equal left (seq-filter (lambda (id) (member id left)) whole)))
+        (dolist (list (list sidebar buffer))
+          (with-current-buffer list
+            (should (equal (mapcar #'cdr shown)
+                           (seq-filter (lambda (id) (rassoc id shown)) (drover-list-test-order))))))))))
+
+(ert-deftest drover-list-test-attention-follows-filter ()
+  "Under a filter, the sessions needing the user followed change by change are those found anew.
+Through random changes, under every subagent mode, filters of projects,
+of a search and of statuses, which subagents match apart from their
+parents, as `drover-attention--tree-surfaced' walks the index rather
+than `drover-surfaced-sessions' the trees.  None is found anew but by
+the filter set."
+  (pcase-dolist (`(,mode ,key ,value) '((active :project "alpha") (none :project (:exclude "beta"))
+                                        (all :search "xxxx") (active :search "Session r1")
+                                        (active :statuses (:include waiting working))
+                                        (none :statuses (:exclude idle))
+                                        (all :statuses (:include done failed))))
+    (random (format "drover attention follows filter %s %s %S" mode key value))
+    (drover-test-with-backend (drover-list-test-random-sessions 40)
+      (let ((global-mode-string nil)
+            (drover-attention-mode nil)
+            (drover-attention-mode-line nil)
+            (drover-attention--mode-string-origin nil)
+            (drover-attention--sessions nil)
+            (drover-attention--layout nil)
+            (drover-attention--filter nil)
+            (after-setting-font-hook nil)
+            (enable-theme-functions nil)
+            (recounts 0)
+            (recount (symbol-function 'drover-attention--recount)))
+        (unwind-protect
+            (progn
+              (drover-attention-mode 1)
+              (drover-set-show-subagents mode)
+              (drover-set-filter key value)
+              (cl-letf (((symbol-function 'drover-attention--recount)
+                         (lambda () (cl-incf recounts) (funcall recount))))
+                (dotimes (step 60)
+                  (pcase-let ((`(,sessions . ,ids) (drover-list-test-mutate drover-test-sessions)))
+                    (setq drover-test-sessions sessions)
+                    (dolist (id ids)
+                      (drover-backend-changed 'fake id))
+                    (drover-changed-now)
+                    (should (equal (list mode value step
+                                         (sort (mapcar #'drover-session-id
+                                                       (hash-table-values drover-attention--sessions))
+                                               #'string<))
+                                   (list mode value step
+                                         (sort (mapcar #'drover-session-id (drover-attention-sessions))
+                                               #'string<)))))))
+              (should (= recounts 0)))
+          (drover-attention-mode -1))))))
 
 (ert-deftest drover-list-test-two-lists-share-rows ()
   "A row made for one list, the other copies: its texts are made and measured once."

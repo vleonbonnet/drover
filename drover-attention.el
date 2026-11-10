@@ -26,19 +26,20 @@
 ;;   mode line, as one count after a robot (`drover-attention-glyph'),
 ;;   in the face of the most urgent of them, as other indicators of the
 ;;   mode line show a count: a symbol, a space and the number.  It counts what lists show
-;;   under `drover-show-subagents', and every subagent waiting for you.
-;;   mouse-1 on it runs `drover-next', mouse-3 chooses a session.
-;; - `drover-next' lines up the sessions to attend to: those whose
-;;   prompt cache expires soonest first, whether they need you or not,
-;;   then those that need you, then the idle ones with a buffer, then
-;;   the other idle ones, each as the list shows them
+;;   under `drover-filter' and `drover-show-subagents', and every
+;;   subagent waiting for you in a tree the filter keeps.  mouse-1 on it
+;;   runs `drover-next', mouse-3 chooses a session.
+;; - `drover-next' lines up the sessions to attend to among those lists
+;;   show: those whose prompt cache expires soonest first, whether they
+;;   need you or not, then those that need you, then the idle ones with
+;;   a buffer, then the other idle ones, each as the list shows them
 ;;   (`drover-visit-order'), a subagent waiting for you through the top
 ;;   of its tree, and visits the first; each press after it visits the
 ;;   next of that queue, the last followed by the first, until a
 ;;   command other than `drover-next' runs, as `undo' chains.
-;; - `drover-select' chooses any session with completion, grouped by
-;;   status, those needing you first, in the order `drover-next' visits
-;;   them among themselves.
+;; - `drover-select' chooses any session with completion, whatever the
+;;   filter, grouped by status, those needing you first, in the order
+;;   `drover-next' visits them among themselves.
 
 ;;; Code:
 
@@ -50,7 +51,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 26))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 27))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
@@ -119,10 +120,13 @@ SESSIONS come in the order `drover-next' visits them among themselves,
 the order the text lists them in (see `drover-attention-order'), their
 caches as they stand at NOW.  It names `drover-attention--help-sessions'
 sessions at most, and how many more: Emacs measures a tooltip whole to
-show it.  Clicking it runs `drover-next', whose round may begin with an
-idle session whose cache expires sooner, and goes on to idle sessions:
-the last line says so."
-  (let ((count (length sessions)))
+show it.  While `drover-filter' is set, a line names it: the count, the
+sessions listed and those `drover-next' visits are those it keeps.
+Clicking it runs `drover-next', whose round may begin with an idle
+session whose cache expires sooner, and goes on to idle sessions: the
+last line says so."
+  (let ((count (length sessions))
+        (filter (drover-filter-description nil now)))
     (concat "Sessions that need you, in the order of `drover-next':"
             (mapconcat (lambda (session)
                          (concat "\n  " (drover-attention--describe session now)))
@@ -130,6 +134,7 @@ the last line says so."
                        "")
             (and (> count drover-attention--help-sessions)
                  (format "\n  … and %d more" (- count drover-attention--help-sessions)))
+            (and filter (concat "\n\nFilter: " filter))
             "\n\nmouse-1: visit live caches first, then these, then idle sessions"
             "\nmouse-3: choose a session")))
 
@@ -166,7 +171,8 @@ proportional one."
   "The sessions that need the user, as a hash table by key, or nil.
 They are those of `drover-attention-sessions', kept current as
 sessions change: a change of one session looks at that session and
-those above it, not at every session.")
+those above it, not at every session, or at its whole tree while
+`drover-filter' is set (see `drover-attention--follow').")
 
 (defvar drover-attention--layout nil
   "The layout of the records of `drover-attention--sessions', or nil.
@@ -174,11 +180,18 @@ As `drover-layout' made it when they were found: records made by
 another version of drover are found again (see
 `drover-attention--current-p').")
 
+(defvar drover-attention--filter nil
+  "The `drover-filter' the sessions of `drover-attention--sessions' follow.
+Sessions are found again under another one (see
+`drover-attention--current-p'), however it was set.")
+
 (defun drover-attention--current-p ()
-  "Return non-nil when the sessions needing the user are of the layout now.
-Those are `drover-attention--sessions'; otherwise forget them, so that
-they are found again."
-  (or (drover-layout-matches-p drover-attention--layout)
+  "Return non-nil when the sessions needing the user are current.
+Those are `drover-attention--sessions', current when of the layout now
+and found under the filter now; otherwise forget them, so that they are
+found again."
+  (or (and (drover-layout-matches-p drover-attention--layout)
+           (equal drover-attention--filter drover-filter))
       (setq drover-attention--sessions nil)))
 
 (defun drover-attention--current (&optional now)
@@ -247,7 +260,9 @@ That is `drover-tree-active-p' of its tree, through the index."
   "Return non-nil when SESSION, of KEY in the index, needs the user and shows.
 See `drover-surfaced-sessions': it is no subagent, or a subagent
 `drover-show-subagents' shows, at the top of its tree or not, or waits
-for the user, and its host, if another, is connected."
+for the user, and its host, if another, is connected.  It does not
+tell what `drover-filter' keeps, which depends on the whole tree (see
+`drover-attention--follow-trees')."
   (and (drover-session-attention-p session)
        (not (drover-session-stale session))
        (or (eq (drover-session-status session) 'waiting)
@@ -264,33 +279,135 @@ for the user, and its host, if another, is connected."
                                  (drover-surfaced-sessions (drover-index-sessions))))
       (puthash (drover-session-key session) session table))
     (setq drover-attention--sessions table
-          drover-attention--layout (drover-layout 'drover-session))))
+          drover-attention--layout (drover-layout 'drover-session)
+          drover-attention--filter drover-filter)))
+
+(defun drover-attention--tree-surfaced (root)
+  "Return the sessions of the tree of ROOT that drover points the user to.
+They are those `drover-surfaced-sessions' finds among the sessions of
+that tree alone, under `drover-filter', as a hash table from their keys
+to their records.  It walks the tree in the index, which nests it as
+`drover-tree' does, rather than making trees, filtering and sorting
+them (see `drover-view-trees'): it runs whenever a session of the tree
+changes while a filter is set, and a tree of a fan-out holds hundreds.
+Going up, a session is kept when it or one below it matches, active
+when it or one kept below it is mid-turn, and shown by the filter when
+kept with no session above matching, but the top, which explains no
+parent (see `drover--filter-trees'); going down, a subagent shows when
+its parent does, it is kept, and `drover-show-subagents' or the filter
+shows it, as `drover-tree-visible' says.  The top of a tree kept shows,
+but a subagent there, its parent not listed, which shows as the mode
+says.  And every subagent waiting in a tree kept surfaces, but not a
+session of a host not connected."
+  (let ((nodes (make-hash-table :test #'equal))
+        (surfaced (make-hash-table :test #'equal)))
+    (cl-labels ((up (key matched-above top)
+                  (let* ((session (drover-index-session key))
+                         (match (drover-filter-match-p session))
+                         (kept match)
+                         (active (drover-session-active-p session)))
+                    (dolist (child (drover-index-children key))
+                      (pcase-let ((`(,child-kept . ,child-active) (up child (or matched-above match) nil)))
+                        (when child-kept
+                          (setq kept t)
+                          (when child-active
+                            (setq active t)))))
+                    (puthash key (list session kept active (and kept (not (or matched-above top)))) nodes)
+                    (cons kept active)))
+                (shown-p (key)
+                  (pcase-let ((`(,_ ,kept ,active ,filtered) (gethash key nodes)))
+                    (and kept
+                         (or filtered
+                             (pcase drover-show-subagents
+                               ('all t)
+                               ('none nil)
+                               (_ active))))))
+                (surface (key session)
+                  (unless (drover-session-stale session)
+                    (puthash key session surfaced)))
+                (down (key)
+                  (surface key (car (gethash key nodes)))
+                  (dolist (child (drover-index-children key))
+                    (when (shown-p child)
+                      (down child)))))
+      (when (car (up root nil t))
+        (when (or (null (drover-session-parent (drover-index-session root)))
+                  (shown-p root))
+          (down root))
+        (maphash (lambda (key node)
+                   (when (eq (drover-session-status (car node)) 'waiting)
+                     (surface key (car node))))
+                 nodes)))
+    surfaced))
+
+(defun drover-attention--follow-trees (keys)
+  "Bring the sessions that need the user up to date with KEYS, under a filter.
+While `drover-filter' is set, the change of a session may change what
+lists draw of its whole tree: a match keeps the top of its tree and the
+way to it, and a session coming to match above a match hides it again
+under `none' (see `drover-view-trees').  So each tree holding a session
+of KEYS is looked at again whole (see `drover-attention--tree-surfaced'),
+but a tree none of whose sessions needs the user nor was counted, as
+while sessions work.  A session gone is forgotten; the tree it left
+holds its parent, which the index tells changed too.  Return nil, for
+the caller to find every session again, when the top of a tree has no
+record in the index, which never links a session to a parent it does
+not hold; t otherwise."
+  (let ((roots (make-hash-table :test #'equal)))
+    (dolist (key keys)
+      (if (drover-index-session key)
+          (puthash (drover-index-root key) t roots)
+        (remhash key drover-attention--sessions)))
+    (catch 'recount
+      (maphash
+       (lambda (root _)
+         (unless (drover-index-session root)
+           (throw 'recount nil))
+         (let ((sessions (drover-index-tree-sessions root)))
+           (when (seq-some (lambda (session)
+                             (or (drover-session-attention-p session)
+                                 (gethash (drover-session-key session) drover-attention--sessions)))
+                           sessions)
+             (let ((surfaced (drover-attention--tree-surfaced root)))
+               (dolist (session sessions)
+                 (let ((key (drover-session-key session)))
+                   (if (and (drover-session-attention-p session) (gethash key surfaced))
+                       (puthash key session drover-attention--sessions)
+                     (remhash key drover-attention--sessions))))))))
+       roots)
+      t)))
 
 (defun drover-attention--follow (keys)
   "Bring the sessions that need the user up to date with the change of KEYS.
 A session changing may change whether those above it show, so those
-are looked at again too."
-  (let ((seen (make-hash-table :test #'equal)))
-    (dolist (key keys)
-      (while (and key (not (gethash key seen)))
-        (puthash key t seen)
-        (let ((session (drover-index-session key)))
-          (if (and session (drover-attention--needs-p key session))
-              (puthash key session drover-attention--sessions)
-            (remhash key drover-attention--sessions)))
-        (setq key (drover-index-parent key))))))
+are looked at again too; while `drover-filter' is set, its whole tree
+is (see `drover-attention--follow-trees').  Return nil when the
+sessions must be found again, every one; t otherwise."
+  (if (drover-filter-active-p)
+      (drover-attention--follow-trees keys)
+    (let ((seen (make-hash-table :test #'equal)))
+      (dolist (key keys)
+        (while (and key (not (gethash key seen)))
+          (puthash key t seen)
+          (let ((session (drover-index-session key)))
+            (if (and session (drover-attention--needs-p key session))
+                (puthash key session drover-attention--sessions)
+              (remhash key drover-attention--sessions)))
+          (setq key (drover-index-parent key)))))
+    t))
 
 (defun drover-attention--update (&optional keys)
   "Compute the mode line count again, and redraw mode lines if it changed.
 With KEYS, the sessions changed, look at those alone, and those above
-them, when the index can tell.  Changes come many times a second while
-sessions work, most of them leaving the count as it was; forcing every
-mode line of every frame to be drawn again costs tens of milliseconds
-with many windows, so only a count that reads otherwise forces it.  Its
-tooltip is a function, made when shown: the string compares alike
-whatever the sessions it lists."
-  (if (and keys (drover-attention--current-p) drover-attention--sessions (drover-index-incremental-p))
-      (drover-attention--follow keys)
+them, or their trees while `drover-filter' is set, when the index can
+tell.  Changes come many times a second while sessions work, most of
+them leaving the count as it was; forcing every mode line of every
+frame to be drawn again costs tens of milliseconds with many windows,
+so only a count that reads otherwise forces it.  Its tooltip is a
+function, made when shown: the string compares alike whatever the
+sessions it lists."
+  (unless (and keys (drover-attention--current-p) drover-attention--sessions (drover-index-incremental-p)
+               (drover-attention--follow keys))
     (drover-attention--recount))
   (let ((string (drover-attention--format (hash-table-values drover-attention--sessions))))
     (unless (equal-including-properties string drover-attention-mode-line)
@@ -344,8 +461,9 @@ The mode line holds one count of the sessions whose status is one of
 in the face of the most urgent of them, and nothing when no session
 needs you.  It begins with the glyph: parting it from what comes before
 is the mode line's to do.  It
-counts the sessions lists show under `drover-show-subagents', and every
-subagent waiting for you, which blocks its parent (see
+counts the sessions lists show under `drover-filter' and
+`drover-show-subagents', and every subagent waiting for you in a tree
+the filter keeps, which blocks its parent (see
 `drover-surfaced-sessions').  Its tooltip lists them in the order
 `drover-next' visits them among themselves; clicking it runs
 `drover-next', which visits live caches first, then them, then idle
@@ -471,29 +589,34 @@ its arguments, judged as it ends, such as `execute-extended-command'."
                 (drover-attention--chains-p this-command last-command-event))
       (drover-attention--end-round))))
 
-(defun drover-attention--round-sessions ()
+(defun drover-attention--round-sessions (&optional unfiltered)
   "Return the sessions a round of `drover-next' lines up, most urgent first.
 They are those of `drover-surfaced-sessions' that need the user, and
 those at the top of their trees in the middle of no turn, idle: a
 session working has nothing to answer until its turn ends, when it
-comes to need the user, and a subagent is answered through its parent."
+comes to need the user, and a subagent is answered through its parent.
+They are among those `drover-filter' keeps, but with UNFILTERED."
   (drover-sort (seq-filter (lambda (session)
                              (or (drover-session-attention-p session)
                                  (and (null (drover-session-parent session))
                                       (not (drover-session-active-p session)))))
-                           (drover-surfaced-sessions))))
+                           (drover-surfaced-sessions nil unfiltered))))
 
 (defun drover-attention--start (window)
   "Begin a round of `drover-next', visiting its first session in WINDOW.
 The round's queue is the sessions of `drover-attention--round-sessions',
 in the order as it stands (see `drover-visit-order'), a tree once (see
 `drover-attention--targets'); its first is visited even when WINDOW
-shows it already."
+shows it already.  With none to visit, the echo area says so, and how
+many the filter hides, if it hides some."
   (let ((targets (drover-attention--targets (drover-visit-order (drover-attention--round-sessions)))))
     (if (null targets)
-        (progn
+        (let ((hidden (and (drover-filter-active-p)
+                           (length (drover-attention--targets (drover-attention--round-sessions t))))))
           (drover-attention--end-round)
-          (message "No session to visit"))
+          (if (and hidden (> hidden 0))
+              (message "No session to visit; the filter hides %d" hidden)
+            (message "No session to visit")))
       (setq drover-attention--queue (mapcar #'drover-session-key targets))
       (add-hook 'post-command-hook #'drover-attention--after-command)
       (drover-attention--visit (car targets) 0 window))))
@@ -525,9 +648,10 @@ with a buffer; then the other idle ones, which their backends may
 resume to show them.  Each comes in the order the list and the sidebar
 show them, as `drover-group-by' and `drover-sort-by' arrange them (see
 `drover-visit-order').  Sessions in the middle of a turn are left out,
-and so are subagents, but one waiting for you, which is visited
-through the top of its tree, where you answer it and whose cache it
-ranks by, the tree coming once.
+and so are those `drover-filter' hides, and subagents, but one waiting
+for you in a tree the filter keeps, which is visited through the top
+of its tree, where you answer it and whose cache it ranks by, the tree
+coming once.
 
 Each press after it visits the next session of that queue, the first
 again after the last, for as long as nothing but this command runs
@@ -538,8 +662,9 @@ the next press lines sessions up anew.  What happens to sessions
 meanwhile leaves the queue as it is: statuses changing, caches renewed
 or expiring, sessions coming to need you.  A session gone is passed
 over; one that fails to open is told on one line, and the next press
-goes on past it.  With every session in the middle of a turn, there is
-none to visit, and the echo area says so.  It tells the place in the
+goes on past it.  With every session in the middle of a turn or
+hidden by the filter, there is none to visit, and the echo area says
+so, and how many the filter hides.  It tells the place in the
 round otherwise, such as 2/5 (see `drover-attention-echo').  From a
 side window, such as the prompt's, sessions show in the window you
 came from."
@@ -632,13 +757,15 @@ Their completion category is `drover-session'."
 (defun drover-select (&optional other-window)
   "Choose a session with completion and display it.
 Sessions are those lists show, under `drover-show-subagents', and the
-subagents waiting for you, whatever it says (see
-`drover-surfaced-sessions'): those that need you first, in the order
-`drover-next' visits them (see `drover-attention-order'), then the
-others, most urgent first.  Completion groups them by status.  With a
-prefix argument OTHER-WINDOW, display it in another window."
+subagents waiting for you, whatever it says, as lists would show them
+without `drover-filter': a name is looked for wherever the session is
+\(see `drover-surfaced-sessions').  Those that need you come first, in
+the order `drover-next' visits them (see `drover-attention-order'),
+those the filter hides after those it keeps, then the others, most
+urgent first.  Completion groups them by status.  With a prefix
+argument OTHER-WINDOW, display it in another window."
   (interactive "P")
-  (let* ((surfaced (drover-sort (drover-surfaced-sessions)))
+  (let* ((surfaced (drover-sort (drover-surfaced-sessions nil t)))
          (sessions (append (drover-attention-order
                             (seq-filter #'drover-session-attention-p surfaced))
                            (seq-remove #'drover-session-attention-p surfaced))))
@@ -683,6 +810,12 @@ only sessions whose status began at least that many hours ago."
   (drover-attention-mode -1)
   (drover-attention--end-round)
   nil)
+
+;; Reloaded with the mode on, count anew: the sessions counted before may
+;; follow other rules.
+(when (bound-and-true-p drover-attention-mode)
+  (drover-with-reporting "mode line"
+    (drover-attention--update)))
 
 (provide 'drover-attention)
 ;;; drover-attention.el ends here

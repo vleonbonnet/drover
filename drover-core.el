@@ -52,7 +52,10 @@
 ;; active first, a session running a turn placed by the start of its
 ;; turn rather than its every event (`drover-session-activity'), with
 ;; the subagents `drover-show-subagents' shows.  Those settings are
-;; global, so every view shows the same sessions.  With
+;; global, so every view shows the same sessions, and what drover points
+;; the user to outside them follows them too (`drover-surfaced-sessions'):
+;; the mode-line count and `drover-next' leave out what the filter
+;; hides.  With
 ;; `drover-show-history', views also list the older sessions backends
 ;; keep, and with `drover-show-archived' the archived ones
 ;; (`drover-known-sessions').  Backends without an archive of their own
@@ -73,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 26
+(defconst drover-core-generation 27
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -2695,32 +2698,55 @@ the middle of a turn, or none."
                       (_ (drover-session-active-p session)))))
               (or sessions (drover-sessions))))
 
-(defun drover-surfaced-sessions (&optional sessions)
+(defun drover-surfaced-sessions (&optional sessions unfiltered)
   "Return SESSIONS, or the live sessions, that drover points the user to.
-They are the sessions lists show under `drover-show-subagents', every
-subagent of `all', those in the middle of a turn and the way to them in
-`active', none in `none' (see `drover-tree-visible'), and every
-subagent waiting for the user, whatever the mode: it blocks its parent
-until answered.  `drover-filter', which narrows lists only, does not
-apply.  The sessions of a host not connected, whose statuses may be
-past, are left out (see `drover-session-stale').  The mode-line count,
-`drover-next' and `drover-select' offer them.  They keep their order in
-SESSIONS."
-  (let ((sessions (or sessions (drover-sessions)))
-        (shown (make-hash-table :test #'equal)))
-    (dolist (session (drover-tree-sessions (drover-tree-visible (drover-tree sessions))))
+They are the sessions lists draw: those `drover-filter' keeps, under
+`drover-show-subagents', every subagent of `all', those in the middle of
+a turn and the way to them in `active', none in `none', but a subagent
+matching the filter (see `drover-view-trees').  And every subagent
+waiting for the user in a tree the filter keeps, whatever the mode and
+whether it matches or not: it blocks its parent until answered, and is
+answered from the top of its tree, which lists draw (see
+`drover-attention-target').  With UNFILTERED, the filter does not
+apply: every tree counts, as lists would draw them without it.  The
+sessions of a host not connected, whose statuses may be past, are left
+out (see `drover-session-stale').  The mode-line count and
+`drover-next' offer them, `drover-select' them UNFILTERED.  They keep
+their order in SESSIONS."
+  (let* ((sessions (or sessions (drover-sessions)))
+         (trees (drover-tree sessions))
+         (filtered (and (not unfiltered) (drover-filter-active-p)))
+         (view (if filtered
+                   (drover--view-trees sessions trees)
+                 (cons (drover-tree-visible trees) trees)))
+         (shown (make-hash-table :test #'equal))
+         (listed (and filtered (make-hash-table :test #'equal))))
+    (dolist (session (drover-tree-sessions (car view)))
       (puthash (drover-session-key session) t shown))
+    (when filtered
+      ;; A tree the filter keeps keeps its top: those waiting under it
+      ;; are answered there, matching or not.
+      (let ((kept (make-hash-table :test #'equal)))
+        (dolist (node (cdr view))
+          (puthash (drover-session-key (drover-node-session node)) t kept))
+        (dolist (node trees)
+          (when (gethash (drover-session-key (drover-node-session node)) kept)
+            (dolist (session (drover-tree-sessions (list node)))
+              (puthash (drover-session-key session) t listed))))))
     (seq-filter (lambda (session)
-                  (and (not (drover-session-stale session))
-                       (or (gethash (drover-session-key session) shown)
-                           (eq (drover-session-status session) 'waiting))))
+                  (let ((key (drover-session-key session)))
+                    (and (not (drover-session-stale session))
+                         (or (gethash key shown)
+                             (and (eq (drover-session-status session) 'waiting)
+                                  (or (not filtered) (gethash key listed)))))))
                 sessions)))
 
 (defun drover-attention-sessions ()
   "Return the sessions that need the user, most urgent first.
 They are those of `drover-surfaced-sessions' whose status is one of
-`drover-attention-statuses': the subagents lists hide do not count, but
-those waiting for the user."
+`drover-attention-statuses': the sessions lists do not draw do not
+count, whether `drover-filter' or `drover-show-subagents' hides them,
+but the subagents waiting for the user in a tree the filter keeps."
   (drover-sort (seq-filter #'drover-session-attention-p (drover-surfaced-sessions))))
 
 (defun drover--trees-holding (nodes keys)
@@ -2744,16 +2770,19 @@ depth, the root or a session below it of KEYS, to t."
 
 (defun drover--view-positions (sessions keys now)
   "Return where views draw the sessions of KEYS among SESSIONS.
-KEYS is a hash table of session keys.  The value is a hash table
-mapping each of those among SESSIONS to its place, from 0: the order of
-`drover-view-groups' at NOW, groups in their order, trees sorted in
-each, every session before its subagents, the way to a session of KEYS
-shown whatever `drover-show-subagents' says, as a match of
-`drover-filter' shows (see `drover-tree-visible').  The sessions the
-filter leaves out come after, in the order views would draw them
-without it."
+KEYS is a hash table of session keys.  The value is (POSITIONS
+. FILTERED): POSITIONS a hash table mapping each of those among SESSIONS
+to its place, from 0: the order of `drover-view-groups' at NOW, groups
+in their order, trees sorted in each, every session before its
+subagents, the way to a session of KEYS shown whatever
+`drover-show-subagents' says, as a match of `drover-filter' shows (see
+`drover-tree-visible').  The sessions the filter leaves out come after,
+in the order views would draw them without it; FILTERED is the number
+of places before them, those the trees the filter keeps take, every
+place when no filter is set."
   (let ((positions (make-hash-table :test #'equal))
         (position -1)
+        (filtered nil)
         (trees (drover-tree sessions)))
     (cl-flet ((place (nodes &optional shown)
                 (let ((holding (drover--trees-holding nodes keys)))
@@ -2771,10 +2800,11 @@ without it."
                         (puthash key (cl-incf position) positions)))))))
       (when (drover-filter-active-p)
         (pcase-let ((`(,kept . ,shown) (drover--filter-trees trees drover-filter)))
-          (place kept (lambda (node) (gethash (drover-session-key (drover-node-session node)) shown)))))
+          (place kept (lambda (node) (gethash (drover-session-key (drover-node-session node)) shown))))
+        (setq filtered (1+ position)))
       (when (< (hash-table-count positions) (hash-table-count keys))
         (place trees)))
-    positions))
+    (cons positions (or filtered (1+ position)))))
 
 (defun drover-attention-target (session)
   "Return the session to visit for SESSION, a session needing the user.
@@ -2815,27 +2845,42 @@ others, which their backends may have to resume to show.  Each of
 these comes in the order lists draw them (see `drover-view-groups'),
 as `drover-group-by' groups them and `drover-sort-by' sorts them, each
 subagent under its parent: a subagent lists hide comes in the place
-they would draw it, and a session `drover-filter' leaves out after
-those it keeps, in the order lists would draw it without the filter
-\(see `drover--view-positions').  Caches expiring alike come as the
-sessions without a cache do."
+they would draw it, its tree ranking as it would rank with it shown,
+and a session `drover-filter' leaves out after those it keeps, in the
+order lists would draw it without the filter (see
+`drover--view-positions').  But a subagent waiting for the user that the
+filter leaves out of a tree it keeps comes in the place of the top of
+that tree, which is visited for it (see `drover-attention-target'): its
+tree ranks as lists draw it, without it.  Caches expiring alike come
+as the sessions without a cache do."
   (when sessions
     (let ((now (or now (float-time)))
-          (keys (make-hash-table :test #'equal)))
+          (keys (make-hash-table :test #'equal))
+          (targets (make-hash-table :test #'eq)))
       (dolist (session sessions)
-        (puthash (drover-session-key session) t keys))
-      (let* ((positions (drover--view-positions (drover--listed-sessions) keys now))
-             (keyed (mapcar (lambda (session)
-                              (let ((expires (drover-attention-cache session now)))
-                                (list session
-                                      expires
-                                      ;; A buffer is asked for only of the sessions it ranks.
-                                      (cond ((drover-session-attention-p session) 0)
-                                            ((or expires (drover-session-buffer session)) 1)
-                                            (t 2))
-                                      (gethash (drover-session-key session) positions
-                                               most-positive-fixnum))))
-                            sessions)))
+        (puthash (drover-session-key session) t keys)
+        (let ((target (drover-attention-target session)))
+          (unless (eq target session)
+            (puthash session (drover-session-key target) targets)
+            (puthash (drover-session-key target) t keys))))
+      (pcase-let* ((`(,positions . ,filtered)
+                    (drover--view-positions (drover--listed-sessions) keys now))
+                   (keyed (mapcar (lambda (session)
+                                    (let* ((expires (drover-attention-cache session now))
+                                           (own (gethash (drover-session-key session) positions))
+                                           (target (gethash session targets))
+                                           (stand-in (and target own (>= own filtered)
+                                                          (gethash target positions))))
+                                      (list session
+                                            expires
+                                            ;; A buffer is asked for only of the sessions it ranks.
+                                            (cond ((drover-session-attention-p session) 0)
+                                                  ((or expires (drover-session-buffer session)) 1)
+                                                  (t 2))
+                                            (cond ((and stand-in (< stand-in filtered)) stand-in)
+                                                  (own)
+                                                  (t most-positive-fixnum)))))
+                                  sessions)))
         ;; `sort' is stable: sessions lists do not draw keep the order of
         ;; SESSIONS.
         (mapcar #'car

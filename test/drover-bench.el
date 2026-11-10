@@ -83,8 +83,9 @@
   "The time the clock stands still at, as the list reads it.")
 
 (defun drover-bench-id (kind index)
-  "Return the identifier of session INDEX of KIND, `top' or `sub'."
-  (format "ses_%s%08dAbCdEfGhIjKlMn" (if (eq kind 'top) "t" "s") index))
+  "Return the identifier of session INDEX of KIND, `top', `sub' or `big'.
+Those of `big' are the subagents of one big tree."
+  (format "ses_%s%08dAbCdEfGhIjKlMn" (pcase kind ('top "t") ('sub "s") (_ "b")) index))
 
 (defun drover-bench-session (kind index)
   "Return session INDEX of KIND, `top' or `sub', as a backend would report it."
@@ -368,11 +369,62 @@ drawing anew draws at once is its first screens, whatever moved since."
                                                     round 300)
                                   (drover-bench-row "the mode line's tooltip" tooltip 100))
                 (drover-bench-two-lists top second)))
-            (drover-bench-default-view top second)))
+            (drover-bench-default-view top second)
+            (drover-bench-big-tree (drover-bench-id 'top 2))))
         (drover-attention-mode -1)
         ;; The list follows the change hook of this run alone: the next
         ;; run makes a list of its own.
         (kill-buffer buffer)))))
+
+(defconst drover-bench-big-tree 200
+  "Subagents of the one session of a big tree, as a fan-out makes.")
+
+(defun drover-bench-big-tree (root)
+  "Time a step of a subagent of a big tree under ROOT, without a filter and with one.
+The view is the default one.  The filter keeps every session, as one
+leaving out the sessions of a host does those of this one: the mode
+line's count then follows a change through the whole tree it is in, and
+not only through the sessions above it.  The list is the current
+buffer, alone in the selected window; the tree goes afterwards."
+  (let* ((drover-show-subagents 'active)
+         (drover-group-by nil)
+         (drover-sort-by 'updated)
+         (drover-sort-descending t)
+         (before drover-test-sessions)
+         (subagents (mapcar (lambda (index)
+                              (let ((session (drover-bench-session 'sub index)))
+                                (setf (drover-session-id session) (drover-bench-id 'big index)
+                                      (drover-session-parent session) root)
+                                session))
+                            (number-sequence 0 (1- drover-bench-big-tree))))
+         (sub (drover-session-id (nth 1 subagents)))
+         (key (cons 'fake sub)))
+    (setq drover-test-sessions (append drover-test-sessions subagents))
+    (drover-backend-changed 'fake)
+    (drover-changed-now)
+    (drover-list--revert t)
+    (unwind-protect
+        (cl-flet ((measure ()
+                    (drover-bench-step sub)
+                    (list (drover-bench-measure (lambda () (drover-bench-step sub)) 21)
+                          (drover-bench-measure (lambda () (drover-attention--update (list key))) 21))))
+          (pcase-let* ((`(,step ,count) (measure))
+                       (`(,step-filtered ,count-filtered)
+                        (progn (drover-set-filter :host '(:exclude "elsewhere"))
+                               (measure))))
+            (drover-bench-log "big tree: %d subagents under one session, the default view"
+                              drover-bench-big-tree)
+            (drover-bench-log "  a subagent's step: %s | filtered: %s"
+                              (drover-bench-row "whole" step 10)
+                              (drover-bench-row "whole" step-filtered 10))
+            (drover-bench-log "                     %s | filtered: %s"
+                              (drover-bench-row "count" count 2)
+                              (drover-bench-row "count" count-filtered 2))))
+      (drover-set-filter :host nil)
+      (setq drover-test-sessions before)
+      (drover-backend-changed 'fake)
+      (drover-changed-now)
+      (drover-list--revert t))))
 
 (defun drover-bench-default-view (top second)
   "Time the list as it shows by default, sessions TOP and SECOND taking turns.
