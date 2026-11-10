@@ -7882,6 +7882,36 @@ last of the others."
           (drover-list-number-rows buffer nil)
           (should-not (drover-list-test-numbers buffer)))))))
 
+(ert-deftest drover-list-test-numbers-skip-orphan-subagents ()
+  "A subagent whose parent is not listed has no number, though at the top of a tree.
+It comes and goes as any subagent does: numbered, it would shift the
+numbers after it.  Nor is it 0, coming last; the digits open what the
+rows show."
+  (drover-list-test-with (append (list (drover-test-session "lost" :status 'working :parent "gone"
+                                                            :since (drover-list-test-ago 20))
+                                       (drover-test-session "stray" :status 'working :parent "gone"
+                                                            :since (drover-list-test-ago 6000)))
+                                 (drover-list-test-side-sample))
+    (drover-list-test-shown
+      (revert-buffer)
+      ;; Both show, at the top of trees of their own, one before work, one after it.
+      (should (equal (assq 'working (drover-list-test-groups)) '(working "lost" "work" "stray")))
+      (dolist (id '("lost" "stray"))
+        (should (zerop (drover-list--row-depth
+                        (gethash (cons 'fake id) (drover-list--model-rows drover-list--model))))))
+      (drover-list-number-rows buffer (selected-window))
+      (should (equal (mapcar #'butlast (drover-list-test-numbers buffer))
+                     '((1 "ask") (2 "fail") (3 "done") (4 "work"))))
+      (drover-list-number-rows buffer nil)
+      (pcase-dolist (`(,number . ,id) '((4 . "work") (0 . "work")))
+        (ert-info ((number-to-string number))
+          (setq drover-test-calls nil)
+          (with-current-buffer buffer
+            (drover-list-open-numbered number))
+          (should (equal (cadr (car drover-test-calls)) id))))
+      (with-current-buffer buffer
+        (should-error (drover-list-open-numbered 5) :type 'user-error)))))
+
 (ert-deftest drover-list-test-status-cell-holds-digits ()
   "The status cell holds the digits drawn in its place, so that no title moves for them."
   (drover-list-test-with-font

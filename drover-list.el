@@ -6440,31 +6440,61 @@ Sessions in collapsed groups are passed over."
 
 ;; The digits open the sessions at the top of their trees, counted as
 ;; the list shows them, 0 the last: the list binds them, and so does
-;; the dispatch menu, from any buffer while a list shows on the frame.  Subagents are not counted, so that
-;; a number stays with its session as subagents come and go.
+;; the dispatch menu, from any buffer while a list shows on the frame.
+;; Subagents are not counted, so that a number stays with its session as
+;; subagents come and go: neither those under their parent nor those
+;; whose parent is not listed, at the top of a tree of their own.
+
+(defun drover-list--numbered-p (tree)
+  "Return non-nil when the digits number TREE: its top session is no subagent.
+A subagent whose parent is not listed is at the top of a tree of its own
+\(see `drover-tree'), and comes and goes as any subagent does (see
+`drover-tree-visible'): numbered, it would shift the numbers after it."
+  (null (drover-session-parent (drover-node-session (drover-list--tree-node tree)))))
+
+(defun drover-list--numbered-group-p (group)
+  "Return non-nil when the digits number the trees of GROUP: it is not collapsed.
+Moving through the list passes over the sessions of collapsed groups too."
+  (when-let* ((container (drover-list--group-container group)))
+    (or (eq container magit-root-section) (not (oref container hidden)))))
+
+(defun drover-list--numbered-trees ()
+  "Return the trees the digits number in the current list, by number.
+The trees are numbered from 1 in the order the list shows them, those of
+collapsed groups and those topped by a subagent passed over (see
+`drover-list--numbered-p'), up to 9; 0 is the last of them, which may
+have one of the others too.  The value is a list of (NUMBER TREE
+. GROUP), from 1 to 9 then 0, as many as there are trees, GROUP the
+`drover-list--group' showing TREE."
+  (when-let* ((model drover-list--model))
+    (let ((groups (seq-filter #'drover-list--numbered-group-p (drover-list--model-groups model)))
+          (numbered nil)
+          (count 0))
+      (catch 'done
+        (dolist (group groups)
+          (seq-doseq (tree (drover-list--group-trees group))
+            (when (drover-list--numbered-p tree)
+              (push (cons (setq count (1+ count)) (cons tree group)) numbered)
+              (when (= count 9)
+                (throw 'done nil))))))
+      ;; The last one, looked for from the end: few trees come after it.
+      (when numbered
+        (catch 'done
+          (dolist (group (reverse groups))
+            (let* ((trees (drover-list--group-trees group))
+                   (index (length trees)))
+              (while (> index 0)
+                (let ((tree (aref trees (setq index (1- index)))))
+                  (when (drover-list--numbered-p tree)
+                    (push (cons 0 (cons tree group)) numbered)
+                    (throw 'done nil))))))))
+      (nreverse numbered))))
 
 (defun drover-list--numbered-tree (number)
-  "Return the tree whose top session is numbered NUMBER in the current list.
-The top sessions of the trees are numbered from 1 in the order the list
-shows them, but those of collapsed groups; NUMBER 0 is the last of them.
-The value is (TREE . GROUP), GROUP the `drover-list--group' showing
-TREE, or nil when no tree has that number."
-  (when-let* ((model drover-list--model))
-    (let ((left number)
-          (last nil))
-      (catch 'found
-        (dolist (group (drover-list--model-groups model))
-          (when-let* ((container (drover-list--group-container group))
-                      ((or (eq container magit-root-section) (not (oref container hidden))))
-                      (trees (drover-list--group-trees group))
-                      (count (length trees))
-                      ((> count 0)))
-            (cond ((zerop number)
-                   (setq last (cons (aref trees (1- count)) group)))
-                  ((<= left count)
-                   (throw 'found (cons (aref trees (1- left)) group)))
-                  (t (setq left (- left count))))))
-        last))))
+  "Return the tree the digit NUMBER opens in the current list, or nil.
+See `drover-list--numbered-trees'.  The value is (TREE . GROUP), GROUP
+the `drover-list--group' showing TREE."
+  (cdr (assq number (drover-list--numbered-trees))))
 
 (defun drover-list--numbered-section (number)
   "Return the section of the session numbered NUMBER in the current list, or nil.
@@ -6490,12 +6520,13 @@ or a click on its entry in a menu, read the number instead."
 (defun drover-list-open-numbered (number)
   "Open the session numbered NUMBER in the list, as RET there opens it.
 The sessions at the top of their trees are numbered from 1, in the order
-the list shows them; their subagents are not numbered, nor the sessions
-of collapsed groups.  NUMBER 0 is the last of them.  Point goes to the
-session's row, then the session opens: from a side window, in the
-window where you work.  Interactively, NUMBER is the digit typed: the
-list binds 1 to 9 and 0, as does `drover-dispatch' while a list shows,
-the list then showing each session's number on its row (see
+the list shows them; subagents are not numbered, those whose parent is
+not listed, at the top of a tree of their own, included, nor the
+sessions of collapsed groups.  NUMBER 0 is the last of them.  Point
+goes to the session's row, then the session opens: from a side window,
+in the window where you work.  Interactively, NUMBER is the digit
+typed: the list binds 1 to 9 and 0, as does `drover-dispatch' while a
+list shows, the list then showing each session's number on its row (see
 `drover-list-number-rows')."
   (interactive (list (drover-list--typed-number)) drover-list-mode)
   (drover-list--check)
@@ -6529,7 +6560,7 @@ See `drover-list-number-rows'.")
 (defun drover-list--numbered-cells ()
   "Return where the current list draws its numbers, as (NUMBER START END)s.
 NUMBER is a digit the dispatch menu opens a session by (see
-`drover-list--numbered-tree'), from 1 to 9, then 0, the last, unless
+`drover-list--numbered-trees'), from 1 to 9, then 0, the last, unless
 that session has one of the others already.  START and END bound the
 status cell of the session's row, which `drover-list--status-glyph'
 marks.  A row left for later has none until drawn: drawing it for its
@@ -6537,15 +6568,14 @@ number would draw most of the list as the menu opens."
   (when (and drover-list--model (drover-list--current-p))
     (let ((cells nil)
           (numbered nil))
-      (dolist (number '(1 2 3 4 5 6 7 8 9 0))
-        (when-let* ((tree (car (drover-list--numbered-tree number)))
-                    ((not (memq tree numbered)))
-                    (section (drover-list--row-section (car (drover-list--tree-shown tree))))
-                    (end (oref section content))
-                    (start (text-property-any (oref section start) end 'drover-list-status-cell t)))
+      (pcase-dolist (`(,number ,tree . ,_) (drover-list--numbered-trees))
+        (unless (memq tree numbered)
           (push tree numbered)
-          (push (list number start (next-single-property-change start 'drover-list-status-cell nil end))
-                cells)))
+          (when-let* ((section (drover-list--row-section (car (drover-list--tree-shown tree))))
+                      (end (oref section content))
+                      (start (text-property-any (oref section start) end 'drover-list-status-cell t)))
+            (push (list number start (next-single-property-change start 'drover-list-status-cell nil end))
+                  cells))))
       (nreverse cells))))
 
 (defun drover-list--draw-numbers ()
@@ -6601,8 +6631,8 @@ number, as typed in WINDOW (see `drover-list-open-numbered'), and with
 WINDOW nil once they no longer do.  Each session the digits open shows
 its digit in place of its status glyph, in the face `drover-list-number',
 in WINDOW alone: 1 to 9 the first nine sessions at the top of their
-trees, 0 the last one, unless it has one of those.  The numbers follow
-the list as it is drawn anew."
+trees, but subagents, 0 the last one, unless it has one of those.  The
+numbers follow the list as it is drawn anew."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when (derived-mode-p 'drover-list-mode)
