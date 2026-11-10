@@ -306,6 +306,18 @@ The bench's backend finds a session, and the buffer showing it, at once; real ba
 
 The prompt, and RET from it, choosing where it goes, were slow there too: 849 sessions, 22 Claude terminals and shells, 83 candidates.  The prompt, once shown, asked when Claude Code last took a prompt, which listed every backend's sessions (=drover-sessions=) and looked here for the transcripts of other hosts' sessions, 134 ms; =drover-sessions= itself looked at the archive's file for every session, 95 ms of its 232, and every pass over sessions binds =drover--archive-checking= now, the file looked at once.  The picker listed the sessions again, then resolved what each candidate would run as completion filtered and annotated them, making the engine's models anew each time, 9 ms a candidate: 769 ms filtering, again whenever completion recomputes, and 826 annotating.  The models are read only when the prompt chooses a model, a provider or an effort, which alone they are checked against (=drover-prompt--resolve=), and kept while the picker reads (=drover-keeping-models=): each engine's once per directory, agent-shell's once for shells listing the same models, Claude Code's catalog read once, until =drover-models-changed= forgets them.  The sessions come from the index (=drover-index-sessions=), when Claude Code ran last too, and a Claude terminal's last turn is read again only once its transcript changed (=drover-claude-code-last-turn=).  The picker's work fell from 2.1 s to 135 ms, 230 with a model chosen, filtering 21 ms after.
 
+Timed in that Emacs at last, busy with its sessions, a key at a time injected into the command loop, from the key to the end of the redisplay after it, the median of five, the sidebar showing, no collection meanwhile; the command alone before the slash:
+
+| What                                   | Open          | Close        |
+|----------------------------------------+---------------+--------------|
+| The dispatch menu, from =*scratch*=    | 16 / 41 ms    | 1 / 14 ms    |
+| The prompt                             | 6 / 57 ms     | 1 / 19 ms    |
+| The picker of RET in the prompt, C-g   | 111 / 148 ms  | 5 / 27 ms    |
+| The sidebar, toggled                   | 6 / 91 ms     | 2 / 22 ms    |
+| The list, =drover-list= then =q=       | 107 / 252 ms  | 1 / 21 ms    |
+
+The rest is mostly redisplay, of a frame of terminals and Org buffers.  The picker still makes the record of every session buffer, to rank its sessions by the buffers used last (=drover-prompt--buffer-ranks=), 22 ms, and lists every backend's sessions for the live ones drover archived (=drover-archived-live-sessions=), 38 ms; =drover-list= draws the list whole, asked for, rather than drawing in place what changed while it was hidden.
+
 A collection costs 50 to 90 ms in that heap, so that a menu allocating a megabyte pays one every few times it opens; what it still allocates is mostly transient's own, =format-spec= for every entry, each in a temporary buffer, and its suffixes and keymaps made anew.  The list shown after the minute's refresh draws in place the rows whose ages changed, some fifty a minute in the bench.  While two backends list one conversation, a hidden list is still drawn whole as it shows again, 80 to 190 ms: the index is not followed session by session while records of several backends make one session (see [[*The index of sessions][The index of sessions]]).
 
 ** Acting on thousands at once
