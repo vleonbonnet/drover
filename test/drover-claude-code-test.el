@@ -66,13 +66,21 @@ serves and a model without effort.")
 ;;;; Agents
 
 (ert-deftest drover-claude-code-test-agent-modes ()
-  "Plan and build are permission modes; other agents are not."
+  "Plan and build are permission modes, each owning some; other agents are not."
   (should (equal (drover-claude-code-agent-mode "plan") "plan"))
   (should (equal (drover-claude-code-agent-mode "build") "auto"))
   (should-not (drover-claude-code-agent-mode "reviewer"))
   (should-not (drover-claude-code-agent-mode nil))
   (should (equal (drover-claude-code--agents "/any/") '("plan" "build")))
-  (let ((drover-claude-code-agent-modes '(("review" . "default"))))
+  (should (equal (drover-claude-code-mode-agent "acceptEdits") "build"))
+  (should-not (drover-claude-code-mode-agent "default"))
+  (let ((drover-claude-code-agent-modes '(("plan" "default" "plan") ("build" "auto" "acceptEdits"))))
+    (should (equal (drover-claude-code-agent-mode "plan") "default"))
+    (should (equal (drover-claude-code-mode-agent "default") "plan"))
+    (should (equal (drover-claude-code-mode-agent "plan") "plan"))
+    (should (equal (drover-claude-code-mode-agent "auto") "build"))
+    (should-not (drover-claude-code-mode-agent "dontAsk")))
+  (let ((drover-claude-code-agent-modes '(("review" "default"))))
     (should (equal (drover-claude-code--agents "/any/") '("review")))))
 
 ;;;; Startup defaults
@@ -148,35 +156,38 @@ serves and a model without effort.")
 (ert-deftest drover-claude-code-test-startup-mode ()
   "Claude Code's starting permission mode follows its precedence and names an agent."
   (drover-test-with-homes
-    (let ((project (expand-file-name "project/" home)))
-      (make-directory project t)
-      (cl-flet ((mode ()
-                  (drover-claude-code-startup-mode (drover-claude-code-settings-layers project)))
-                (agent ()
-                  (plist-get (drover-claude-code-defaults project) :agent)))
-        (should-not (mode))
-        (drover-test-write (expand-file-name "settings.json" drover-claude-code-home)
-                           "{\"permissions\": {\"defaultMode\": \"plan\"}}")
-        (should (equal (agent) "plan"))
-        ;; A project's mode outranks the user's, even one no agent stands for.
-        (drover-test-write (expand-file-name ".claude/settings.json" project)
-                           "{\"permissions\": {\"defaultMode\": \"acceptEdits\"}}")
-        (should (equal (mode) "acceptEdits"))
-        (should-not (agent))
-        ;; Local auto leaves the built-in default, not the next layer's mode.
-        (drover-test-write (expand-file-name ".claude/settings.local.json" project)
-                           "{\"permissions\": {\"defaultMode\": \"auto\"}}")
-        (should-not (mode))
-        (drover-test-write (expand-file-name ".claude/settings.local.json" project)
-                           "{\"permissions\": {\"defaultMode\": \"bypassPermissions\"}}")
-        (should (equal (mode) "default"))
-        ;; Managed settings may start auto mode, and the start flag wins.
-        (drover-test-write (expand-file-name "managed-settings.json"
-                                             drover-claude-code-managed-directory)
-                           "{\"permissions\": {\"defaultMode\": \"auto\"}}")
-        (should (equal (agent) "build"))
-        (drover-claude-code-test-with-flags "--permission-mode plan"
-          (should (equal (agent) "plan")))))))
+   (let ((project (expand-file-name "project/" home)))
+     (make-directory project t)
+     (cl-flet ((mode ()
+                 (drover-claude-code-startup-mode (drover-claude-code-settings-layers project)))
+               (agent ()
+                 (plist-get (drover-claude-code-defaults project) :agent)))
+       (should-not (mode))
+       (drover-test-write (expand-file-name "settings.json" drover-claude-code-home)
+                          "{\"permissions\": {\"defaultMode\": \"plan\"}}")
+       (should (equal (agent) "plan"))
+       ;; A project's mode outranks the user's, even one no agent stands for.
+       (drover-test-write (expand-file-name ".claude/settings.json" project)
+                          "{\"permissions\": {\"defaultMode\": \"dontAsk\"}}")
+       (should (equal (mode) "dontAsk"))
+       (should-not (agent))
+       (drover-test-write (expand-file-name ".claude/settings.json" project)
+                          "{\"permissions\": {\"defaultMode\": \"acceptEdits\"}}")
+       (should (equal (agent) "build"))
+       ;; Local auto leaves the built-in default, not the next layer's mode.
+       (drover-test-write (expand-file-name ".claude/settings.local.json" project)
+                          "{\"permissions\": {\"defaultMode\": \"auto\"}}")
+       (should-not (mode))
+       (drover-test-write (expand-file-name ".claude/settings.local.json" project)
+                          "{\"permissions\": {\"defaultMode\": \"bypassPermissions\"}}")
+       (should (equal (mode) "default"))
+       ;; Managed settings may start auto mode, and the start flag wins.
+       (drover-test-write (expand-file-name "managed-settings.json"
+                                            drover-claude-code-managed-directory)
+                          "{\"permissions\": {\"defaultMode\": \"auto\"}}")
+       (should (equal (agent) "build"))
+       (drover-claude-code-test-with-flags "--permission-mode plan"
+         (should (equal (agent) "plan")))))))
 
 (ert-deftest drover-claude-code-test-settings-layers ()
   "Layers come highest first; the home directory's project settings are the user's."

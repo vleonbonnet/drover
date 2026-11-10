@@ -276,7 +276,7 @@ claude-code-ide tracks it, with that project directory when a string."
 
 (ert-deftest drover-claude-code-ide-test-start-flags-agent ()
   "Plan and build start in their permission modes; other agents take --agent."
-  (let ((drover-claude-code-agent-modes '(("plan" . "plan") ("build" . "auto"))))
+  (let ((drover-claude-code-agent-modes '(("plan" "plan") ("build" "auto"))))
     (should (equal (drover-claude-code-ide--start-flags '(:agent "plan") "") "--permission-mode plan"))
     (should (equal (drover-claude-code-ide--start-flags '(:agent "build") "") "--permission-mode auto"))
     (should (equal (drover-claude-code-ide--start-flags '(:agent "reviewer") "") "--agent reviewer"))
@@ -288,7 +288,7 @@ claude-code-ide tracks it, with that project directory when a string."
 
 (ert-deftest drover-claude-code-ide-test-start-flags-order ()
   "Model, name and mode come before the base flags, the effort after them."
-  (let ((drover-claude-code-agent-modes '(("plan" . "plan")))
+  (let ((drover-claude-code-agent-modes '(("plan" "plan")))
         (model (drover-claude-code-ide-test-model "opus[1m]")))
     (should (equal (drover-claude-code-ide--start-flags
                     (list :agent "plan" :title "Fix the bug" :model model :variant 'high)
@@ -541,7 +541,7 @@ session of `buffer', a temporary buffer, active."
   "A new session starts with the flags of its options, and is handed over."
   (drover-claude-code-ide-test-with
     (let* ((claude-code-ide-cli-extra-flags "--verbose")
-           (drover-claude-code-agent-modes '(("plan" . "plan")))
+           (drover-claude-code-agent-modes '(("plan" "plan")))
            (terminal (drover-claude-code-ide-test-terminal "*claude-code[drover]*" :mcp-session t))
            started created failed)
       (cl-letf (((symbol-function 'drover-claude-code-ide-start)
@@ -1416,7 +1416,7 @@ pending, is left to Ghostel."
   "A terminal not reading input keeps its mode; agents not modes are start options."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* agents"))
-          (drover-claude-code-agent-modes '(("plan" . "plan"))))
+          (drover-claude-code-agent-modes '(("plan" "plan"))))
       (should (= (funcall (drover-claude-code-ide-test-apply terminal '(:agent "plan"))) 1))
       (should (equal drover-claude-code-ide-test-warnings
                      '("*claude* agents is not ready for Shift+Tab; keeping its current mode")))
@@ -1546,7 +1546,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
   "Shift+Tab is pressed until the footer shows the mode; prompts wait meanwhile."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* switch"))
-          (drover-claude-code-agent-modes '(("plan" . "plan") ("build" . "auto")))
+          (drover-claude-code-agent-modes '(("plan" "plan") ("build" "auto")))
           (drover-claude-code-ide-test-clock 100.0))
       (cl-letf (((symbol-function 'float-time) (lambda (&rest _) drover-claude-code-ide-test-clock)))
         (drover-claude-code-ide-test-cycling terminal drover-claude-code-ide-test-cycle
@@ -1579,7 +1579,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
   "A mode the cycle never shows is reported once the first mode shows again."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* cycle"))
-          (drover-claude-code-agent-modes '(("build" . "auto"))))
+          (drover-claude-code-agent-modes '(("build" "auto"))))
       (drover-claude-code-ide-test-cycling terminal (butlast drover-claude-code-ide-test-cycle)
         (let ((then (drover-claude-code-ide-test-apply terminal '(:agent "build"))))
           (dotimes (_ 5) (drover-claude-code-ide-test-fire))
@@ -1594,7 +1594,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
   "A footer showing no other mode after Shift+Tab is reported once its time is up."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* stuck"))
-          (drover-claude-code-agent-modes '(("plan" . "plan")))
+          (drover-claude-code-agent-modes '(("plan" "plan")))
           (drover-claude-code-ide-test-clock 100.0))
       (cl-letf (((symbol-function 'float-time) (lambda (&rest _) drover-claude-code-ide-test-clock)))
         (drover-claude-code-ide-test-cycling terminal '(nil)
@@ -1614,7 +1614,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
   "The mode switches first, then /model is typed, then the prompt may follow."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* both"))
-          (drover-claude-code-agent-modes '(("plan" . "plan"))))
+          (drover-claude-code-agent-modes '(("plan" "plan"))))
       (drover-claude-code-ide-test-cycling terminal drover-claude-code-ide-test-cycle
         (let ((then (drover-claude-code-ide-test-apply
                      terminal (list :agent "plan" :model (drover-claude-code-ide-test-model "opus")))))
@@ -1634,7 +1634,7 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
   "A terminal dying while it switches lets the prompt go on, which reports it."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* dying"))
-          (drover-claude-code-agent-modes '(("plan" . "plan"))))
+          (drover-claude-code-agent-modes '(("plan" "plan"))))
       (drover-claude-code-ide-test-cycling terminal drover-claude-code-ide-test-cycle
         (let ((then (drover-claude-code-ide-test-apply terminal '(:agent "plan"))))
           (kill-buffer terminal)

@@ -32,8 +32,8 @@
 ;; The defaults follow Claude Code's documented precedence for the
 ;; model, the effort and the permission mode.  The model catalog the
 ;; CLI caches resolves aliases, names, supported effort levels and the
-;; defaults it serves.  The starting permission mode stands for an
-;; agent of `drover-claude-code-agent-modes': `plan' while it is plan,
+;; defaults it serves.  The starting permission mode stands for the
+;; agent of `drover-claude-code-agent-modes' having it among its modes,
 ;; none where the built-in default decides, as that differs between
 ;; front ends.  A top-level `effortLevel' of user settings no longer
 ;; reaches newer models; the CLI keeps the list of those it does reach
@@ -105,11 +105,15 @@ Each entry is (ALIAS . FAMILY); every other alias names its own family.
   :type '(alist :key-type (string :tag "Alias") :value-type (string :tag "Family"))
   :group 'drover)
 
-(defcustom drover-claude-code-agent-modes '(("plan" . "plan") ("build" . "auto"))
-  "Agents Claude Code runs as permission modes, as (AGENT . MODE).
+(defcustom drover-claude-code-agent-modes '(("plan" "plan") ("build" "auto" "acceptEdits"))
+  "Agents Claude Code runs as permission modes, as (AGENT MODE...).
 Planning and building are permission modes in Claude Code rather than
-agents, and its `--agent' refuses a name no agent definition provides."
-  :type '(alist :key-type (string :tag "Agent") :value-type (string :tag "Permission mode"))
+agents, and its `--agent' refuses a name no agent definition provides.
+A session started or switched to AGENT runs its first MODE, and a
+session in any of its MODEs shows AGENT.  Modes are named as
+--permission-mode takes them."
+  :type '(alist :key-type (string :tag "Agent")
+                :value-type (repeat (string :tag "Permission mode")))
   :group 'drover)
 
 (defvar drover-claude-code-oauth-catalog nil
@@ -137,7 +141,12 @@ itself.  `drover-claude-code-ide' sets it.")
 (defun drover-claude-code-agent-mode (agent)
   "Return the permission mode Claude Code runs AGENT as, or nil.
 See `drover-claude-code-agent-modes'."
-  (cdr (assoc agent drover-claude-code-agent-modes)))
+  (cadr (assoc agent drover-claude-code-agent-modes)))
+
+(defun drover-claude-code-mode-agent (mode)
+  "Return the agent a session in permission MODE shows, or nil.
+See `drover-claude-code-agent-modes'."
+  (car (seq-find (lambda (entry) (member mode (cdr entry))) drover-claude-code-agent-modes)))
 
 (defun drover-claude-code--build-agent ()
   "Return \"build\" while Claude Code runs it as a permission mode, else nil.
@@ -1034,7 +1043,7 @@ engine's :defaults data."
          (id (drover-claude-code-startup-model-id layers catalog))
          (mode (drover-claude-code-startup-mode layers)))
     (list :model (and id (drover-claude-code-model id layers catalog))
-          :agent (car (rassoc mode drover-claude-code-agent-modes))
+          :agent (and mode (drover-claude-code-mode-agent mode))
           :layers layers
           :catalog catalog)))
 

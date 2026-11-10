@@ -213,9 +213,9 @@ table's metadata."
 (ert-deftest drover-model-test-claude-code-build-agent ()
   "Claude Code builds while `drover-claude-code-agent-modes' runs build as a mode."
   (require 'drover-claude-code)
-  (let ((drover-claude-code-agent-modes '(("plan" . "plan") ("build" . "auto"))))
+  (let ((drover-claude-code-agent-modes '(("plan" "plan") ("build" "auto"))))
     (should (equal (drover-engine-build-agent 'claude-code) "build")))
-  (let ((drover-claude-code-agent-modes '(("plan" . "plan"))))
+  (let ((drover-claude-code-agent-modes '(("plan" "plan"))))
     (should-not (drover-engine-build-agent 'claude-code))))
 
 (ert-deftest drover-model-test-fake-engine ()

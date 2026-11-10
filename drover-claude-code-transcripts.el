@@ -941,7 +941,7 @@ it once."
                       (_ (plist-get data :updated)))
              :updated (plist-get data :updated)
              :created (plist-get data :created)
-             :agent (and mode (car (rassoc mode drover-claude-code-agent-modes)))
+             :agent (and mode (drover-claude-code-mode-agent mode))
              :model (and model (drover-claude-code-transcripts--model-name model catalog))
              :effort (plist-get data :effort)
              :provider (plist-get run :provider)
