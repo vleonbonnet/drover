@@ -626,16 +626,12 @@ Drover reads each transcript and rollout whole once, then what was appended, a f
 
 =C-' "= (=drover-prompt-dwim=) opens =*drover*=, an Org buffer, with a link to the line at point and the region quoted in a code block, an Org heading's line as any other; called again from elsewhere, it adds that context where you left point in the prompt. =C-' N= (=drover-prompt-org-task=) starts a planning prompt for the Org task point is in, from anywhere in its entry, folded or narrowed (=drover-prompt-task-format=, =drover-prompt-task-agent=), asking before it replaces a draft. =C-' '= (=drover-prompt-toggle=) shows or hides the prompt.
 
-In drover's own lists, =*drover sessions*= and the sidebar, =C-' "= quotes the sessions selected, or the one at point, for an agent to read: an item per session, its Org link, titled after it, how it stands, and its last reply in a Markdown block, cut to =drover-prompt-quote-reply-lines= lines and =drover-prompt-quote-reply-characters= characters with a note telling how much is left out. Everywhere else, a session's buffer and the lists of other front ends included, it quotes the line at point or the region, whatever session is at point; from a session's own buffer, it says the text comes from that session, by its Org link, rather than from a line of the buffer. The replies are fetched from the backends all at once, the echo area counting them as they arrive; a backend not answering within =drover-prompt-quote-timeout= seconds leaves its session quoted without one:
+In drover's own lists, =*drover sessions*= and the sidebar, =C-' "= quotes the sessions selected, or the one at point, for an agent to read: an item per session, on one line, its Org link, titled after it, how it stands, then, in words, what the list knows of it, as its expanded session tells it: its goal, attempt, host, harness, project, task, branch, agent, model and effort, provider, context, changes, creation, cost and age, and its prompt cache, each left out when unknown. The agent opens the session by its link when it needs more, such as its last reply. Everywhere else, a session's buffer and the lists of other front ends included, it quotes the line at point or the region, whatever session is at point; from a session's own buffer, it says the text comes from that session, by its Org link, rather than from a line of the buffer:
 
 #+begin_example
   Agent sessions:
-  - [[agent-session:opencode/ses_1][Fix the login redirect]] — done
-    Last reply:
-    ,#+begin_src markdown
-    The redirect now keeps the page users came from.
-    ,#+end_src
-  - [[agent-session:opencode/ses_2][Bump the SDK]] — waiting for an answer: asks: Which version?
+  - [[agent-session:opencode/ses_1][Fix the login redirect]] — done — Harness: OpenCode: OpenCode's service, through opencode.el; Project: shop; Branch: fix-redirect; Model: Opus 5.5 high; Changes: +42 −7 · 2 files; Created: 1h ago; Age: 5m ago
+  - [[agent-session:opencode/ses_2][Bump the SDK]] — waiting for an answer: asks: Which version? — Harness: OpenCode: OpenCode's service, through opencode.el; Project: shop; Branch: main; Age: 2m ago
 #+end_example
 
 The header line shows what the prompt would run: directory, agent, model, provider and effort, dim when inherited from the engine's defaults, bold when chosen with =C-' d=, =a=, =m=, =P= and =e=. From another buffer these keys choose for the next prompt. =a= switches directly when only two agents are offered. A new OpenCode session starts on the model you last chose for a session, in the prompt or in opencode.el (=opencode-last-model=), not on the model of the session you last wrote to: replies and scheduled prompts choose nothing. A last choice whose provider the catalog no longer lists, as while it is down, gives way to the service's default model until it is back.

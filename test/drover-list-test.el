@@ -8877,38 +8877,50 @@ The prompt shows nowhere; `prompt' returns its text."
            (kill-buffer prompt))))))
 
 (ert-deftest drover-list-test-quote-selection ()
-  "The prompt quotes the sessions selected: link, status and last reply."
+  "The prompt quotes the sessions selected, each on a line: link, status and facts.
+The facts are those the list knows, in words, the goal's and the cost
+too; no reply is fetched."
   (drover-list-test-quoting
-      (list (drover-test-session "a" :status 'failed :since (drover-list-test-ago 30) :detail "Rate limited")
+      (list (drover-test-session "a" :status 'failed :since (drover-list-test-ago 30) :detail "Rate limited"
+                                 :project "drover" :branch "main" :agent "build"
+                                 :model "Opus" :effort "high" :provider "P" :provider-name "Acme"
+                                 :context-tokens 50000 :context-limit 200000 :changes '(120 14 3)
+                                 :created (drover-list-test-ago 7200))
             (drover-test-session "b" :status 'failed :since (drover-list-test-ago 20))
             (drover-test-session "c" :status 'done :since (drover-list-test-ago 10)))
-    (setq drover-test-recaps
-          `(("a" :prompt "Fix it" :reply ,(concat "Fixed.\n* Not a heading\n#+end_src\n"
-                                                  (mapconcat (lambda (n) (format "Line %d" n))
-                                                             (number-sequence 1 25) "\n")))
-            ("b" :failure "Gone")))
-    (drover-list-test-goto "a")
-    (drover-list-test-type "C-SPC C-n")
-    (let ((messages (drover-list-test-messages (drover-prompt-dwim))))
-      (should (equal (car (last messages)) "Quoted 2 sessions")))
-    (should (equal (prompt)
-                   (concat "Agent sessions:\n"
-                           "- [[test-session:a][Session a]] — failed: Rate limited\n"
-                           "  Last reply:\n"
-                           "  #+begin_src markdown\n"
-                           "  Fixed.\n"
-                           "  ,* Not a heading\n"
-                           "  ,#+end_src\n"
-                           (mapconcat (lambda (n) (format "  Line %d\n" n)) (number-sequence 1 17) "")
-                           "  #+end_src\n"
-                           "  (The reply goes on for 8 more lines.)\n"
-                           ;; Its recap failed: no reply.
-                           "- [[test-session:b][Session b]] — failed\n"
-                           "\n")))
-    ;; Sent, the reply is a Markdown fence, escapes undone.
-    (should (string-match-p "^  ```markdown\n  Fixed\\.\n  \\* Not a heading\n  #\\+end_src\n"
-                            (drover-prompt-to-markdown (prompt))))
-    (should (equal (sort (copy-sequence drover-test-recap-calls) #'string<) '("a" "b")))))
+    (let ((drover-list-goal-function
+           (lambda (session form)
+             (when (equal (drover-session-id session) "a")
+               (pcase form
+                 ('column "◎ ✓ 2/3")
+                 ('text "Ship it — met, follow-ups 2 of 3")))))
+          (drover-list-usage-function
+           (lambda (session form)
+             (when (equal (drover-session-id session) "a")
+               (pcase form
+                 ('value t)
+                 ('column "$3.10")
+                 ('details "$3.10 · 1.2M in, 30k out, 1M cache read, 200k cache write"))))))
+      (drover-list-test-goto "a")
+      (drover-list-test-type "C-SPC C-n")
+      (let ((messages (drover-list-test-messages (drover-prompt-dwim))))
+        (should (equal messages '("Quoted 2 sessions"))))
+      (should (equal (prompt)
+                     (concat "Agent sessions:\n"
+                             "- [[test-session:a][Session a]] — failed: Rate limited — "
+                             "Goal: Ship it — met, follow-ups 2 of 3; Harness: Fake; Project: drover; "
+                             "Branch: main; Agent: @build; Model: Opus high; Provider: Acme; "
+                             "Context: 50k of 200k tokens (25%); Changes: +120 −14 · 3 files; "
+                             "Created: 2h ago; "
+                             "Cost: $3.10 · 1.2M in, 30k out, 1M cache read, 200k cache write; "
+                             "Age: 30s ago\n"
+                             "- [[test-session:b][Session b]] — failed — Harness: Fake; Age: 20s ago\n"
+                             "\n")))
+      ;; Without the faces of the list's texts.
+      (let ((text (drover-prompt-format-sessions (list (drover-find 'fake "a")) (list nil))))
+        (should (string-match-p "^- Session a — failed: Rate limited — Goal: " text))
+        (should (equal-including-properties text (substring-no-properties text))))
+      (should-not drover-test-recap-calls))))
 
 (ert-deftest drover-list-test-quote-at-point ()
   "Without a region, the prompt quotes the session at point; on a heading, the line."
@@ -8916,50 +8928,26 @@ The prompt shows nowhere; `prompt' returns its text."
     (drover-list-test-goto "b")
     (drover-prompt-dwim)
     (should (equal (prompt) (concat "Agent session:\n"
-                                    "- [[test-session:b][Session b]] — done\n"
-                                    "  Last reply:\n"
-                                    "  #+begin_src markdown\n"
-                                    "  Reply of b\n"
-                                    "  #+end_src\n\n")))
+                                    "- [[test-session:b][Session b]] — done — Harness: Fake; Age: 20s ago\n"
+                                    "\n")))
     (with-current-buffer drover-prompt-buffer-name (erase-buffer))
     (drover-list-test-goto-group 'done)
     (drover-prompt-dwim)
     (should (string-prefix-p "From buffer *drover sessions* line" (prompt)))))
 
-(ert-deftest drover-list-test-quote-waits-for-replies ()
-  "Replies arriving later are quoted once all arrived, or once the wait is over."
-  (drover-list-test-quoting (drover-list-test-selection-sample)
-    (setq drover-test-recap-later t)
-    (let ((timers nil))
-      (cl-letf (((symbol-function 'run-at-time)
-                 (lambda (time _repeat function &rest arguments)
-                   (let ((timer (timer-create)))
-                     (push (list time function arguments timer) timers)
-                     timer))))
-        (drover-list-test-goto "a")
-        (drover-list-test-type "C-SPC C-n C-n")
-        (should (equal (drover-list-test-messages (drover-prompt-dwim))
-                       '("Fetching the last replies of 3 sessions… 0/3")))
-        (should-not (prompt))
-        (should (= (caar timers) drover-prompt-quote-timeout))
-        (pcase-dolist (`(,id . ,callback) (reverse drover-test-recap-pending))
-          (unless (equal id "c")
-            (should (equal (drover-list-test-messages
-                            (funcall callback (list :reply (concat "Late reply of " id))))
-                           (list (format "Fetching the last replies of 3 sessions… %d/3"
-                                         (if (equal id "a") 1 2)))))))
-        (should-not (prompt))
-        ;; The wait is over: c is quoted without a reply.
-        (should (equal (drover-list-test-messages
-                        (apply (nth 1 (car timers)) (nth 2 (car timers))))
-                       '("Quoted 3 sessions; 1 reply did not arrive in time")))
-        (let ((text (prompt)))
-          (should (string-match-p "Late reply of a" text))
-          (should (string-match-p "Late reply of b" text))
-          (should (string-match-p "- \\[\\[test-session:c\\]\\[Session c\\]\\] — done\n\n\\'" text))
-          ;; c's reply, arriving later still, adds nothing.
-          (funcall (cdr (assoc "c" drover-test-recap-pending)) (list :reply "Too late"))
-          (should (equal (prompt) text)))))))
+(ert-deftest drover-list-test-details-leave-out-changes-and-cost ()
+  "The details tell the changes file by file, not as a fact, and ask nothing of the usage."
+  (let ((asked nil))
+    (drover-list-test-with
+        (list (drover-test-session "s" :status 'done :since (drover-list-test-ago 60) :changes '(3 1 1)))
+      (let ((drover-list-usage-function (lambda (_session form) (push form asked) nil)))
+        (drover-list-test-goto "s")
+        (let ((facts (drover-list--hidden-facts (drover-find 'fake "s") (list :now drover-test-now) nil)))
+          (should-not (assoc "Changes" facts))
+          (should-not (assoc "Cost" facts))
+          (should (assoc "Age" facts)))
+        (should-not (memq 'details asked))
+        (should (assoc "Changes" (mapcar #'cdr (drover-list-session-facts (drover-find 'fake "s")))))))))
 
 (ert-deftest drover-list-test-prints-in-proportion ()
   "What the lists keep prints in proportion to the sessions they show.

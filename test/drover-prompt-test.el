@@ -950,9 +950,9 @@ another front end, its session keys on: neither quotes a session."
   (drover-prompt-test-with
     (let ((session (drover-prompt-test--session "s"))
           (transient-mark-mode t)
-          (recaps nil))
-      (cl-letf (((symbol-function 'drover-recap)
-                 (lambda (session _callback) (push (drover-session-id session) recaps))))
+          (quoted nil))
+      (cl-letf (((symbol-function 'drover-prompt-quote-sessions)
+                 (lambda (sessions) (push (mapcar #'drover-session-id sessions) quoted))))
         (dolist (list '(nil t))
           (with-temp-buffer
             (setq default-directory "/")
@@ -977,14 +977,14 @@ another front end, its session keys on: neither quotes a session."
               (should (string-match-p "\n#\\+begin_src fundamental\nfirst line\nthe line at point\n#\\+end_src\n\n\\'"
                                       (buffer-string)))
               (erase-buffer))))
-        (should-not recaps)
+        (should-not quoted)
         ;; In drover's own list, the session at point is quoted.
         (with-temp-buffer
           (setq-local drover-view-p t
                       drover-session-at-point-function (lambda () session))
           (insert "Session s\n")
           (drover-prompt-add-context))
-        (should (equal recaps '("s")))))))
+        (should (equal quoted '(("s"))))))))
 
 (ert-deftest drover-prompt-test-session-own-buffer-names-session ()
   "The line of a session's own buffer is quoted from the session, by its link, else its title.

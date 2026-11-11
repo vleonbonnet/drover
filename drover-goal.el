@@ -1556,6 +1556,8 @@ The value of `drover-list-goal-function'."
     (pcase form
       ('value (list (plist-get goal :state) (plist-get goal :iteration) (plist-get goal :iterations)
                     (plist-get goal :seen)))
+      ('text (format "%s — %s, follow-ups %d of %d" (plist-get goal :title) (drover-goal--state-label goal)
+                     (plist-get goal :iteration) (plist-get goal :iterations)))
       ('column
        (let ((count (format "%d/%d" (plist-get goal :iteration) (plist-get goal :iterations))))
          (propertize

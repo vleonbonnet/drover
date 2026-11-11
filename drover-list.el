@@ -95,7 +95,8 @@
 ;; shown, and Magit highlights them; a group's heading selects nothing:
 ;; marking seen, interrupting, archiving, unarchiving and deleting act
 ;; on all of them, copying (`kill-ring-save', M-w) copies their Org
-;; links, and the prompt quotes them with their last replies.
+;; links, and the prompt quotes them, each on a line of what the list
+;; knows of it (`drover-list-session-facts').
 ;;
 ;; With `drover-show-archived', the list shows archived sessions too,
 ;; dimmed, after `opencode-archived-icon', in a group of their own when
@@ -1166,9 +1167,11 @@ FORM `column' and `value' while the field `cost' is hidden."
 
 (defvar drover-list-goal-function nil
   "Function of a session and a form returning what the list shows of its goal.
-The form is `column', for the field `goal', a string or nil, or
-`value', what it is made of, compared with `equal' to tell a row to
-make anew; nil shows no goal.  `drover-goal-mode' sets it.")
+The form is `column', for the field `goal', a string or nil, `text',
+the goal in words for an agent to read, a string or nil (see
+`drover-list-session-facts'), or `value', what it is made of, compared
+with `equal' to tell a row to make anew; nil shows no goal.
+`drover-goal-mode' sets it.")
 
 (defun drover-list--goal (session form)
   "Return the goal of SESSION as FORM shows it, or nil.
@@ -3180,18 +3183,37 @@ part `changes', the last telling how many more files there are."
 
 (defun drover-list--hidden-facts (session layout whole)
   "Return what the line of SESSION does not show of it, as (LABEL VALUE FACE).
-Those are the fields of `drover-list-fields' its line, in LAYOUT,
-leaves out, or shows cut or as an icon alone: those but WHOLE, the
-fields it shows whole (see `drover-list--heading'), such as the model
-in two lines; and what its line cannot tell: the directory of a session
-without a project, the task it serves, and why its host is not
-connected."
-  (let ((now (plist-get layout :now))
+Those are the facts of `drover-list-session-facts' at the time of
+LAYOUT but the changes, which the details list file by file, and those
+of WHOLE, the fields its line shows whole in LAYOUT (see
+`drover-list--heading'): the fields its line leaves out, or shows cut
+or as an icon alone, such as the model in two lines, and what its line
+cannot tell."
+  (seq-keep (pcase-lambda (`(,field ,label ,value ,face))
+              (unless (or (memq field whole) (eq field 'changes))
+                (list label value face)))
+            (drover-list-session-facts session (plist-get layout :now))))
+
+(defun drover-list-session-facts (session &optional now quote)
+  "Return what the list knows of SESSION at NOW, as (FIELD LABEL VALUE FACE).
+The facts are those of the fields of `drover-list-fields' but the
+title, the summary and the prompt cache of a subagent, FIELD naming
+the field and LABEL naming the fact, in the order of the fields, and
+what a line cannot tell: the directory of a session without a project,
+FIELD `directory', the task it serves, `task', and why its host is not
+connected, `host-state'.  VALUE is a string, perhaps in faces; FACE, if
+any, is the face to show it in.  A fact without a value is left out.
+NOW, the current time by default, is that ages count up to.
+
+With QUOTE, the facts are for an agent to read: the goal is told in
+words rather than glyphs (see `drover-list-goal-function'), and the
+cost, with its tokens, is among them, which asking for starts reading
+the usage of every session (see `drover-list-usage-function')."
+  (let ((now (or now (drover-list--now)))
         (facts nil))
     (cl-flet ((fact (field label value &optional face)
-                (when (and value (not (memq field whole))
-                           (not (string-empty-p (drover-list--one-line value))))
-                  (push (list label value face) facts))))
+                (when (and value (not (string-empty-p (drover-list--one-line value))))
+                  (push (list field label value face) facts))))
       (unless (drover-session-project session)
         ;; Another host's, as it names it: not this host's to abbreviate.
         (fact 'directory "Directory" (if-let* ((directory (drover-session-local-directory session)))
@@ -3199,7 +3221,7 @@ connected."
                                        (drover-session-directory session))))
       (fact 'goal "Goal" (and drover-list-goal-function
                               (drover-with-reporting "goal"
-                                (funcall drover-list-goal-function session 'column))))
+                                (funcall drover-list-goal-function session (if quote 'text 'column)))))
       (fact 'attempt "Attempt" (drover-list--attempt-text session t))
       (when-let* ((host (drover-session-host session)))
         (fact 'host "Host" (drover-host-label host))
@@ -3217,8 +3239,16 @@ connected."
             (pcase (car (drover-session-context-tier session))
               ('over 'opencode-context-over)
               ('near 'opencode-context-near)))
+      (fact 'changes "Changes" (pcase (drover-session-changes session)
+                                 (`(,additions ,deletions ,files)
+                                  (drover-list--changes-line additions deletions files))))
       (fact 'created "Created" (when-let* ((created (drover-session-created session)))
                                  (concat (opencode-format-age created now) " ago")))
+      ;; Its tokens too, and nothing while the usage is being read.
+      (fact 'cost "Cost" (and quote drover-list-usage-function
+                              (drover-with-reporting "usage"
+                                (and (funcall drover-list-usage-function session 'value)
+                                     (funcall drover-list-usage-function session 'details)))))
       (fact 'age "Age" (when-let* ((time (drover-list--age-time session)))
                          (concat (opencode-format-age time now) " ago")))
       (fact 'cache "Prompt cache" (and (not (drover-session-parent session))
@@ -6781,8 +6811,8 @@ An active region selects the rows of sessions it touches, those shown,
 as the list highlights them: a group's heading selects nothing, nor do
 the sessions of a collapsed group.  Marking seen, interrupting,
 archiving, unarchiving and deleting act on every selected session,
-\\[drover-list-copy] copies their links, and the prompt quotes them
-with their last replies (see `drover-prompt-dwim').
+\\[drover-list-copy] copies their links, and the prompt quotes them,
+each on a line of what the list knows of it (see `drover-prompt-dwim').
 
 \\{drover-list-mode-map}"
   :group 'drover-list
