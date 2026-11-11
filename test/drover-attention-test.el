@@ -109,7 +109,7 @@
       ;; One face over the whole string, the space included, and the
       ;; whole of it clickable.
       (dotimes (index (length string))
-        (should (eq (get-text-property index 'face string) 'opencode-session-status-waiting))
+        (should (eq (get-text-property index 'face string) 'drover-attention-waiting))
         (should (eq (get-text-property index 'local-map string) drover-attention-mode-line-map))
         (should (eq (get-text-property index 'mouse-face string) 'mode-line-highlight))
         (should (get-text-property index 'help-echo string))))))
@@ -120,12 +120,41 @@
                                     (drover-test-session "f" :status 'failed))
     (drover-attention-mode 1)
     (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "☺") 'opencode-session-status-failed))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-failed))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "☺") 'drover-attention-failed))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-failed))
     (setq drover-test-sessions (list (drover-test-session "d" :status 'done)))
     (drover-backend-changed 'fake)
     (drover-changed-now)
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "1") 'opencode-session-status-done))))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "1") 'drover-attention-done))))
+
+(ert-deftest drover-attention-test-face-tells-state-by-colour ()
+  "The count tells its state by colour, without the emphasis lists give statuses.
+Lists make a waiting session's status bold so that its row stands out;
+the count takes its colour, not its weight, as other indicators of the
+mode line tell their state.  A status added to the statuses counted
+keeps its face of lists."
+  (let ((saved (mapcar (lambda (attribute)
+                         (cons attribute (face-attribute 'opencode-attention attribute)))
+                       '(:foreground :weight))))
+    (unwind-protect
+        (progn
+          ;; A theme whose colour of attention carries no weight of its own.
+          (set-face-attribute 'opencode-attention nil :foreground "#F2994A" :weight 'normal)
+          (should (eq (face-attribute 'opencode-session-status-waiting :weight nil t) 'bold))
+          (should (eq (face-attribute (drover-attention-face 'waiting) :weight nil t) 'normal))
+          (should (equal (face-attribute (drover-attention-face 'waiting) :foreground nil t) "#F2994A"))
+          ;; Failed and done: faces of the count's own, of their statuses' look.
+          (dolist (status '(failed done))
+            (let ((face (drover-attention-face status))
+                  (listed (opencode-session-status-face status)))
+              (should (facep face))
+              (should-not (eq face listed))
+              (dolist (attribute '(:foreground :weight :slant))
+                (should (equal (face-attribute face attribute nil t)
+                               (face-attribute listed attribute nil t))))))
+          (should (eq (drover-attention-face 'working) 'opencode-session-status-working)))
+      (apply #'set-face-attribute 'opencode-attention nil
+             (mapcan (lambda (saved) (list (car saved) (cdr saved))) saved)))))
 
 (ert-deftest drover-attention-test-format-follows-status-order ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
@@ -134,7 +163,7 @@
           (drover-status-order '(done waiting failed retrying working idle)))
       (drover-attention-mode 1)
       (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-      (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-done)))))
+      (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-done)))))
 
 (ert-deftest drover-attention-test-format-honours-statuses ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
@@ -179,7 +208,7 @@ count as it was; forcing every mode line costs tens of milliseconds."
           ;; Another status, the count the same, but in another face.
           (change "w" (lambda (session) (setf (drover-session-status session) 'failed)))
           (should (equal forced '(t)))
-          (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-failed))
+          (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-failed))
           ;; Nothing needing the user any more: the count goes.
           (setq drover-test-sessions nil)
           (setq forced nil)
@@ -209,7 +238,7 @@ Those in a tree the filter keeps, whatever the subagent mode."
     ;; None: the subagent waiting for the user still counts.
     (drover-set-show-subagents 'none)
     (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'opencode-session-status-waiting))
+    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-waiting))
     (let ((help (drover-attention-test-help drover-attention-mode-line)))
       (should (string-match-p "Session asking" help))
       (should-not (string-match-p "Session ended\\|Session broke" help)))
@@ -360,7 +389,7 @@ pixels; spaces displayed as stretches advance by their width."
           (should (equal spans '((0 16 "☺") (20 30 "2"))))))
       ;; Measured as the mode line draws: over its face.
       (should (equal (get-text-property 0 'face (car drover-attention-test-measured))
-                     '(opencode-session-status-waiting mode-line)))
+                     '(drover-attention-waiting mode-line)))
       (should (= (length drover-attention-test-measured) 1))
       ;; Ink reaching 2 pixels left of its start and 25 past its advance,
       ;; more than a space: room before it, and a space as wide as needed.
@@ -374,7 +403,7 @@ pixels; spaces displayed as stretches advance by their width."
           (should (equal spans '((0 37 "☺") (37 47 "2")))))
         ;; The room belongs to the count: one face, clicks and tooltip.
         (dotimes (index (length string))
-          (should (eq (get-text-property index 'face string) 'opencode-session-status-waiting))
+          (should (eq (get-text-property index 'face string) 'drover-attention-waiting))
           (should (eq (get-text-property index 'local-map string) drover-attention-mode-line-map))
           (should (get-text-property index 'help-echo string)))))))
 

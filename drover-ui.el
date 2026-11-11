@@ -83,8 +83,9 @@ icon keeps its width as the host comes and goes."
 
 (defcustom drover-attention-glyph "\U0001F916" ; robot face
   "Glyph before the count of sessions needing you, in the mode line.
-`drover-attention-mode' shows it, a space and the count, in the face of
-the most urgent status counted.  The robot emoji by default, a plain
+`drover-attention-mode' shows it, a space and the count, in the face
+`drover-attention-face' gives the most urgent status counted.  The robot
+emoji by default, a plain
 Unicode symbol as other indicators of the mode line use, such as mail
 counts.  A Nerd Font icon suits a mode line of Nerd Font icons, such as
 \"\\U000F16A4\" (nf-md-robot_excited_outline): an icon whose ink

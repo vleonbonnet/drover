@@ -24,8 +24,9 @@
 ;;
 ;; - `drover-attention-mode' counts the sessions that need you in the
 ;;   mode line, as one count after a robot (`drover-attention-glyph'),
-;;   in the face of the most urgent of them, as other indicators of the
-;;   mode line show a count: a symbol, a space and the number.  It counts what lists show
+;;   in a colour telling the most urgent of them (`drover-attention-face'),
+;;   as other indicators of the mode line show a count: a symbol, a space
+;;   and the number, their state told by colour.  It counts what lists show
 ;;   under `drover-filter' and `drover-show-subagents', and every
 ;;   subagent waiting for you in a tree the filter keeps.  mouse-1 on it
 ;;   runs `drover-next', mouse-3 chooses a session.
@@ -61,6 +62,36 @@ Such as \"2/5\" in the echo area: the buffer visited shows the session."
   :group 'drover)
 
 ;;;; Mode line
+
+;; The count tells its state by colour, as other indicators of a mode
+;; line do; the faces of statuses add the emphasis lists want.
+
+(defface drover-attention-waiting '((t :inherit opencode-attention))
+  "Face of the mode line count when the most urgent status counted is waiting.
+The colour of `opencode-attention', without the weight lists give the
+status of a waiting session to make its row stand out."
+  :group 'drover-faces)
+
+(defface drover-attention-failed '((t :inherit opencode-session-status-failed))
+  "Face of the mode line count when the most urgent status counted is failed."
+  :group 'drover-faces)
+
+(defface drover-attention-done '((t :inherit opencode-session-status-done))
+  "Face of the mode line count when the most urgent status counted is done."
+  :group 'drover-faces)
+
+(defun drover-attention-face (status)
+  "Return the face of the mode line count whose most urgent status is STATUS.
+The count tells its state by colour, as other indicators of the mode
+line do, rather than with the emphasis lists give statuses: waiting,
+failed and done, the statuses needing the user, have faces of their
+own.  Another status, one added to `drover-attention-statuses', takes
+its face in lists."
+  (pcase status
+    ('waiting 'drover-attention-waiting)
+    ('failed 'drover-attention-failed)
+    ('done 'drover-attention-done)
+    (_ (opencode-session-status-face status))))
 
 (defvar drover-attention--queue nil
   "Keys of the sessions the round of `drover-next' visits, in order, or nil.
@@ -215,14 +246,15 @@ every change."
 (defun drover-attention--format (sessions)
   "Return the mode line count of SESSIONS, the sessions that need the user.
 It is `drover-attention-glyph', a space and their number, in the face
-of the most urgent status among them, or nil when SESSIONS is empty.
+`drover-attention-face' gives the most urgent status among them, or nil
+when SESSIONS is empty.
 The space widens, and room is left before the glyph, only where the
 glyph's ink would reach the count or what comes before it (see
 `drover-attention--measure'); the tooltip lists the sessions needing
 the user in the order `drover-next' visits them, when shown (see
 `drover-attention--help-echo')."
   (when sessions
-    (let* ((face (opencode-session-status-face
+    (let* ((face (drover-attention-face
                   (car (seq-sort-by #'drover-status-rank #'<
                                     (delete-dups (mapcar #'drover-session-status sessions))))))
            (glyph drover-attention-glyph)
@@ -458,10 +490,10 @@ For `after-setting-font-hook' and `enable-theme-functions'."
   "Show in the mode line how many sessions need you.
 The mode line holds one count of the sessions whose status is one of
 `drover-attention-statuses' after `drover-attention-glyph' and a space,
-in the face of the most urgent of them, and nothing when no session
-needs you.  It begins with the glyph: parting it from what comes before
-is the mode line's to do.  It
-counts the sessions lists show under `drover-filter' and
+in the face `drover-attention-face' gives the most urgent of them, and
+nothing when no session needs you.  It begins with the glyph: parting
+it from what comes before is the mode line's to do.  It counts the
+sessions lists show under `drover-filter' and
 `drover-show-subagents', and every subagent waiting for you in a tree
 the filter keeps, which blocks its parent (see
 `drover-surfaced-sessions').  Its tooltip lists them in the order
