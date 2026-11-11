@@ -84,6 +84,114 @@
     (let ((drover-selection-model-aliases '((("one" . "deployment") . "gpt-6-astra"))))
       (should (= (length (drover-selection-models catalogs)) 3)))))
 
+(defconst drover-selection-test-identities
+  '(("claude-opus-5-5" "claude-opus-5-5" "claude-opus-5.5" "anthropic/claude-opus-5.5"
+     "anthropic.claude-opus-5-5-v1:0" "us.anthropic.claude-opus-5-5-v1:0")
+    ("claude-sonnet-5-5" "claude-sonnet-5-5" "claude-sonnet-5.5")
+    ("claude-haiku-5-5" "claude-haiku-5-5" "claude-haiku-5.5")
+    ("claude-fable-5-1" "claude-fable-5-1" "claude-fable-5.1")
+    ("claude-opus-4-8" "claude-opus-4-8" "claude-opus-4.8")
+    ("claude-opus-4-8-fast" "claude-opus-4-8-fast" "claude-opus-4.8-fast")
+    ("claude-opus-5-5[1m]" "claude-opus-5-5[1m]" "claude-opus-5.5[1m]")
+    ("claude-opus-5-5-v2:0" "anthropic.claude-opus-5-5-v2:0")
+    ("claude-opus-5-5-preview.2" "claude-opus-5-5-preview.2" "claude-opus-5.5-preview.2")
+    ("claude-sonnet-3-7-20250219" "claude-3-7-sonnet-20250219" "claude-sonnet-3.7-20250219"
+     "eu.anthropic.claude-3-7-sonnet-20250219-v1:0")
+    ("claude-sonnet-3-7-20250220" "claude-3.7-sonnet-20250220")
+    ("claude-sonnet-3-7" "claude-3-7-sonnet" "claude-sonnet-3.7")
+    ("claude-opus-5" "claude-opus-5")
+    ("claude-opus-5-50" "claude-opus-5.50")
+    ("gpt-6-astra" "gpt-6-astra" "openai/gpt-6-astra")
+    ("gpt-6-astra-fast" "gpt-6-astra-fast")
+    ("gpt-6-astra-ultrafast" "gpt-6-astra-ultrafast")
+    ("kimi-k3" "kimi-k3" "moonshotai/kimi-k3" "accounts/fireworks/models/kimi-k3"))
+  "Canonical identities and native spellings, with distinct editions kept apart.
+Claude's decimal spellings and Fireworks' namespace occur in the service
+catalogs; the boundary cases keep normalization from merging editions.")
+
+(ert-deftest drover-selection-test-vendor-identities-and-native-round-trip ()
+  "Equivalent spellings group, and each provider receives its untouched native ID."
+  (drover-test-with-engines
+   (let (models groups)
+     (dolist (group drover-selection-test-identities)
+       (let (offerings)
+         (dolist (id (cdr group))
+           (let* ((provider (format "provider-%s" (length offerings)))
+                  (model (drover-model-create :provider-id provider :id id :name "Shared display name"
+                                              :variants '((deep :effort "high")) :engines '(opencode))))
+             (push model models)
+             (push model offerings)))
+         (push (cons (car group) offerings) groups)))
+     (dolist (ordered (list models (reverse models)))
+       (let ((choices (drover-selection-models (list (cons 'opencode ordered)))))
+         (should (equal (sort (mapcar #'drover-model-id choices) #'string<)
+                        (sort (mapcar #'car drover-selection-test-identities) #'string<)))
+         (dolist (group groups)
+           (let ((choice (seq-find (lambda (model) (equal (drover-model-id model) (car group))) choices)))
+             (dolist (native (cdr group))
+               (let* ((options (list :selection t :model choice :variant 'high
+                                     :provider (drover-model-provider-id native)))
+                      (result (drover-selection-resolve 'opencode options nil ordered t))
+                      (resolved (plist-get (plist-get result :options) :model)))
+                 (should (eq resolved native))
+                 (should (eq (plist-get (plist-get result :options) :variant) 'deep))
+                 (should (equal (drover-model-id-for resolved 'opencode)
+                                (concat (drover-model-provider-id native) "/" (drover-model-id native)))))))))))))
+
+(ert-deftest drover-selection-test-old-logical-choice-and-native-alias ()
+  "Choices saved with the old dotted identity resolve across engines after reload."
+  (drover-test-with-engines
+   (let* ((old-choice (drover-model-create :id "claude-opus-5.5"))
+          (native (drover-model-create :id "claude-opus-5-5" :engines '(claude-code)
+                                       :provider-name "Anthropic" :variants '((high))
+                                       :aliases '(((claude-code . agent-shell) . "opus"))))
+          (options (list :selection t :model old-choice :variant 'high))
+          (saved (plist-get (drover-schedule--job-in (drover-schedule--job-out (list :options options))) :options))
+          (result (drover-selection-resolve 'claude-code saved nil (list native) t)))
+     (should (eq (plist-get (plist-get result :options) :model) native))
+     (should (equal (drover-model-id-for native 'claude-code 'agent-shell) "opus"))
+     (should (equal (drover-selection-providers (list (list 'claude-code native)) "claude-opus-5.5")
+                    '(("Anthropic" . "anthropic"))))
+     (let ((drover-selection-model-aliases '((("custom" . "deployment") . "claude-opus-5.5"))))
+       (should (equal (drover-selection-id (drover-model-create :provider-id "custom" :id "deployment"))
+                      "claude-opus-5-5"))))))
+
+(ert-deftest drover-selection-test-prompt-pickers-canonicalize-old-choices ()
+  "Local and remote prompt pickers share identity, including a pre-reload choice."
+  (drover-test-with-engines
+   (let* ((copilot (drover-model-create :provider-id "github-copilot" :provider-name "Copilot"
+                                        :id "claude-opus-5.5" :name "Claude Opus 5.5" :variants '((high))))
+          (gateway (drover-model-create :provider-id "gateway" :provider-name "Gateway"
+                                        :id "claude-opus-5-5" :name "Claude Opus 5.5" :variants '((high) (max))))
+          (models (list copilot gateway))
+          (drover-prompt-remote-functions
+           (list :catalog (lambda (host _local directory &optional _wait)
+                            (should (equal host "owner"))
+                            (should (equal directory "/remote/"))
+                            (list :engines (list (list 'opencode :models models)))))))
+     (drover-test-register-engine 'opencode)
+     (drover-register-model-source 'opencode (lambda (_) models))
+     (dolist (host '(nil "owner"))
+       (with-temp-buffer
+         (setq-local drover-prompt-mode t drover-prompt-host host drover-prompt-host-directory "/remote/")
+         (let ((choice "Claude Opus 5.5") offered)
+           (cl-letf (((symbol-function 'drover-prompt-inherited-options) #'ignore)
+                     ((symbol-function 'completing-read)
+                      (lambda (_prompt table &rest _)
+                        (setq offered (all-completions "" table))
+                        (should (member choice offered))
+                        choice)))
+             (drover-prompt-choose-model)
+             (should (equal offered '("Default" "Claude Opus 5.5")))
+             (should (equal (drover-model-id drover-prompt-picked-model) "claude-opus-5-5"))
+             (setq drover-prompt-picked-model (drover-model-create :id "claude-opus-5.5") choice "max")
+             (drover-prompt-choose-effort)
+             (should (eq drover-prompt-picked-variant 'max))
+             (setq choice "Gateway")
+             (drover-prompt-choose-provider)
+             (should (equal offered '("Default" "Gateway")))
+             (should (equal drover-prompt-picked-provider "gateway")))))))))
+
 (ert-deftest drover-selection-test-existing-session-switch-capability ()
   "An existing session can change models only when its backend supports that change."
   (drover-selection-test-with

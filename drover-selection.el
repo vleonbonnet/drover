@@ -33,19 +33,36 @@ never used to identify models."
   :type '(alist :key-type (cons string string) :value-type string)
   :group 'drover)
 
+(defun drover-selection--vendor-id (id)
+  "Return the canonical vendor identity of a recognized native ID, or nil.
+Only vendor naming conventions are normalized.  Claude's decimal and
+hyphenated versions agree, as do its family-first and version-first
+spellings.  Editions, context suffixes and dated snapshots stay distinct."
+  (let* ((case-fold-search nil)
+         (bare (replace-regexp-in-string
+                "\\`\\(?:openai/\\|anthropic/\\|google/\\|moonshotai/\\|accounts/fireworks/models/\\)" "" id))
+         (bedrock (string-match "\\`\\(?:global\\.\\|us\\.\\|eu\\.\\|apac\\.\\)?anthropic\\.\\(claude-.+\\)\\'" bare)))
+    (when bedrock
+      (setq bare (replace-regexp-in-string "-v1:0\\'" "" (match-string 1 bare))))
+    (when (string-match "\\`claude-\\([0-9]+\\(?:[.-][0-9]\\{1,2\\}\\)?\\)-\\([a-z]+\\)\\(.*\\)\\'" bare)
+      (setq bare (concat "claude-" (match-string 2 bare) "-" (match-string 1 bare) (match-string 3 bare))))
+    (when (string-match "\\`\\(claude-[a-z]+-[0-9]+\\)\\.\\([0-9]+\\)\\(.*\\)\\'" bare)
+      (setq bare (concat (match-string 1 bare) "-" (match-string 2 bare) (match-string 3 bare))))
+    (and (string-match-p "\\`\\(?:gpt-\\|o[134]-\\|claude-\\|gemini-\\|deepseek-\\|glm-\\|kimi-\\)" bare)
+         bare)))
+
 (defun drover-selection-id (model)
   "Return the provider-independent identity of MODEL.
 Known vendor identifiers are shared across providers.  Other provider
 identifiers stay qualified unless `drover-selection-model-aliases'
-maps them explicitly.  Editions and context suffixes are preserved."
-  (or (alist-get (drover-model-key model) drover-selection-model-aliases nil nil #'equal)
-      (let* ((id (drover-model-id model))
-             (bare (replace-regexp-in-string "\\`\\(?:openai\\|anthropic\\|google\\)/" "" id)))
-        (if (string-match-p "\\`\\(?:gpt-\\|o[134]-\\|claude-\\|gemini-\\|deepseek-\\|glm-\\)" bare)
-            bare
-          (if-let* ((provider (drover-model-provider-id model)))
-              (concat provider "/" id)
-            id)))))
+maps them explicitly.  Native IDs stay on their source records; only
+the identity returned here is canonicalized."
+  (let* ((alias (alist-get (drover-model-key model) drover-selection-model-aliases nil nil #'equal))
+         (id (or alias (drover-model-id model))))
+    (or (drover-selection--vendor-id id) alias
+        (if-let* ((provider (drover-model-provider-id model)))
+            (concat provider "/" id)
+          id))))
 
 (defun drover-selection-provider (engine model)
   "Return the serving provider of ENGINE's MODEL, or nil if unknown.
@@ -78,7 +95,8 @@ provider-qualified model identifier."
   "Return whether ENGINE's MODEL satisfies CHOICE, PROVIDER and EFFORT.
 CHOICE is a logical identifier, or nil.  Unknown efforts remain
 eligible until the destination can validate them."
-  (and (or (null choice) (equal choice (drover-selection-id model)))
+  (and (or (null choice) (equal (or (drover-selection--vendor-id choice) choice)
+                                (drover-selection-id model)))
        (or (null provider) (equal provider (drover-selection-provider engine model)))
        (or (null effort) (not (drover-model-variants-known model))
            (drover-selection-variant model effort))))
@@ -138,9 +156,7 @@ can change.  Return (:options OPTIONS :effective EFFECTIVE), or
          (effort (plist-get options :variant))
          (provider (or (plist-get options :provider)
                        (and picked (not logical) (drover-selection-provider engine picked))))
-         (id (cond ((and picked logical) (drover-model-id picked))
-                   (picked (drover-selection-id picked))
-                   (old (drover-selection-id old))))
+         (id (and (or picked old) (drover-selection-id (or picked old))))
          (available (append models (and old
                                         (not (seq-find (lambda (model) (equal (drover-model-key model)
                                                                               (drover-model-key old))) models))

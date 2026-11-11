@@ -1998,7 +1998,7 @@ choose among that host's models.  This is the prompt action `model'."
   (let* ((buffer (drover-prompt--options-buffer))
          (model (buffer-local-value 'drover-prompt-picked-model buffer))
          (logical (buffer-local-value 'drover-prompt-model-selection buffer))
-         (id (and model (if logical (drover-model-id model) (drover-selection-id model))))
+         (id (and model (drover-selection-id model)))
          (candidates (cons '("Default" . nil)
                            (drover-selection-providers
                             (drover-prompt--selection-catalogs buffer) id
@@ -2020,8 +2020,7 @@ This is the prompt action `effort'."
   (let* ((buffer (drover-prompt--options-buffer))
          (picked (buffer-local-value 'drover-prompt-picked-model buffer))
          (base (or picked (plist-get (drover-prompt-inherited-options buffer) :model)))
-         (id (and base (if (and picked (buffer-local-value 'drover-prompt-model-selection buffer))
-                           (drover-model-id base) (drover-selection-id base))))
+         (id (and base (drover-selection-id base)))
          (model (or (seq-find (lambda (model) (equal (drover-model-id model) id))
                               (drover-selection-models
                                (drover-prompt--selection-catalogs buffer)
