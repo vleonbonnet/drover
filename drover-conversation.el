@@ -52,11 +52,15 @@
 (declare-function drover-codex--file-changes "drover-codex" (changes))
 (declare-function drover-codex--record-edits "drover-codex" (record))
 
-(defvar drover-conversation-window 65536
-  "Bytes read at once, backward or forward.")
+(defcustom drover-conversation-window 65536
+  "Bytes read at once, backward or forward."
+  :type 'natnum
+  :group 'drover)
 
-(defvar drover-conversation-slice 0.008
-  "Seconds a slice of reading takes at most.")
+(defcustom drover-conversation-slice 0.008
+  "Seconds a slice of reading takes at most."
+  :type 'number
+  :group 'drover)
 
 (defconst drover-conversation-parse-limit 262144
   "Bytes at most of a line parsed: a longer one is told by its start alone.")
@@ -76,8 +80,10 @@
 (defconst drover-conversation-reply-bytes (* 512 1024)
   "Bytes at most of a page's entries, encoded.")
 
-(defvar drover-conversation-follow-interval 1.0
-  "Seconds between two looks at the files followed.")
+(defcustom drover-conversation-follow-interval 1.0
+  "Seconds between two looks at the files followed."
+  :type 'number
+  :group 'drover)
 
 (defconst drover-conversation-bounds
   '((user . 32000) (text . 32000) (think . 4000) (tool . 4000) (res . 8000) (patch . 16000) (err . 4000)

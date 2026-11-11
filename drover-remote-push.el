@@ -85,11 +85,15 @@ holds nothing."
   :type 'string
   :group 'drover-remote)
 
-(defvar drover-remote-push-wait 10
-  "Seconds at most a change waits for its push while changes keep coming.")
+(defcustom drover-remote-push-wait 10
+  "Seconds at most a change waits for its push while changes keep coming."
+  :type 'number
+  :group 'drover-remote)
 
-(defvar drover-remote-push-spacing 5
-  "Seconds at least between two pushes to one phone.")
+(defcustom drover-remote-push-spacing 5
+  "Seconds at least between two pushes to one phone."
+  :type 'number
+  :group 'drover-remote)
 
 (defconst drover-remote-push-limit 4096
   "Bytes at most of a push's body, the push server's limit of a message.")
@@ -103,8 +107,10 @@ holds nothing."
 (defconst drover-remote-push-backoff '(10 30 60 300)
   "Seconds a phone's pushes wait after a push server refused or failed, in turn.")
 
-(defvar drover-remote-push-gather 1.5
-  "Seconds a push waits for what a notification shows: requests and excerpts.")
+(defcustom drover-remote-push-gather 1.5
+  "Seconds a push waits for what a notification shows: requests and excerpts."
+  :type 'number
+  :group 'drover-remote)
 
 (defconst drover-remote-push-watches 16
   "Sessions at most a phone watches at once.")

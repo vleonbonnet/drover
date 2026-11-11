@@ -43,8 +43,10 @@
 
 ;;;; The report
 
-(defvar drover-usage-buffer-name "*drover usage*"
-  "The name of the buffer of `drover-usage'.")
+(defcustom drover-usage-buffer-name "*drover usage*"
+  "The name of the buffer of `drover-usage'."
+  :type 'string
+  :group 'drover-usage)
 
 (defvar-keymap drover-usage-mode-map
   :doc "Keymap of `drover-usage-mode'."

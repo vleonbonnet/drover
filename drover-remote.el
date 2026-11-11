@@ -413,11 +413,15 @@ rather than run twice.")
 (defconst drover-remote-tombstones 4096
   "Sessions gone whose revisions the owner keeps, for peers coming back.")
 
-(defvar drover-remote-apply-slice 0.008
-  "Seconds a slice installing records received may take.")
+(defcustom drover-remote-apply-slice 0.008
+  "Seconds a slice installing records received may take."
+  :type 'number
+  :group 'drover-remote)
 
-(defvar drover-remote-send-slice 0.004
-  "Seconds a slice serializing records to send may take.")
+(defcustom drover-remote-send-slice 0.004
+  "Seconds a slice serializing records to send may take."
+  :type 'number
+  :group 'drover-remote)
 
 (defconst drover-remote--name-regexp "\\`[A-Za-z0-9][A-Za-z0-9._-]\\{0,63\\}\\'"
   "What a host's name may be.")
