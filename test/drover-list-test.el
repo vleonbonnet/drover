@@ -8918,7 +8918,7 @@ too; no reply is fetched."
                              "\n")))
       ;; Without the faces of the list's texts.
       (let ((text (drover-prompt-format-sessions (list (drover-find 'fake "a")) (list nil))))
-        (should (string-match-p "^- Session a — failed: Rate limited — Goal: " text))
+        (should (string-match-p "\\`Agent session: Session a — failed: Rate limited — Goal: " text))
         (should (equal-including-properties text (substring-no-properties text))))
       (should-not drover-test-recap-calls))))
 
@@ -8927,8 +8927,9 @@ too; no reply is fetched."
   (drover-list-test-quoting (drover-list-test-selection-sample)
     (drover-list-test-goto "b")
     (drover-prompt-dwim)
-    (should (equal (prompt) (concat "Agent session:\n"
-                                    "- [[test-session:b][Session b]] — done — Harness: Fake; Age: 20s ago\n"
+    ;; Alone, it is no item of a list.
+    (should (equal (prompt) (concat "Agent session: [[test-session:b][Session b]] — done — "
+                                    "Harness: Fake; Age: 20s ago\n"
                                     "\n")))
     (with-current-buffer drover-prompt-buffer-name (erase-buffer))
     (drover-list-test-goto-group 'done)

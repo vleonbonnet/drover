@@ -1194,22 +1194,24 @@ Such as \"Host: core; Branch: main; Age: 2h ago\", from
 (defun drover-prompt-format-sessions (sessions links)
   "Return the Org text quoting SESSIONS for an agent to read.
 LINKS are Org links to SESSIONS, in their order, nil for a session
-without one.  Each session is an item of a list on one line: its link,
-else its title, how it stands, then what the list knows of it (see
-`drover-prompt--quote-facts')."
-  (concat
-   (if (cdr sessions) "Agent sessions:\n" "Agent session:\n")
-   (mapconcat
-    (lambda (pair)
-      (let ((session (car pair))
-            (facts (drover-prompt--quote-facts (car pair))))
-        (concat "- " (or (cdr pair) (drover-prompt--quote-text (drover-session-display-title session)))
-                " — " (drover-prompt--quote-status session)
-                (and (not (string-empty-p facts)) (concat " — " facts))
-                "\n")))
-    (cl-mapcar #'cons sessions links)
-    "")
-   "\n"))
+without one.  A session is told on one line: its link, else its title,
+how it stands, then what the list knows of it (see
+`drover-prompt--quote-facts').  A session alone follows its heading on
+its line; several are the items of a list under theirs."
+  (cl-flet ((line (session link)
+              (let ((facts (drover-prompt--quote-facts session)))
+                (concat (or link (drover-prompt--quote-text (drover-session-display-title session)))
+                        " — " (drover-prompt--quote-status session)
+                        (and (not (string-empty-p facts)) (concat " — " facts))
+                        "\n"))))
+    (concat
+     (if (cdr sessions)
+         (concat "Agent sessions:\n"
+                 (mapconcat (lambda (pair) (concat "- " (line (car pair) (cdr pair))))
+                            (cl-mapcar #'cons sessions links)
+                            ""))
+       (concat "Agent session: " (line (car sessions) (car links))))
+     "\n")))
 
 ;;;; Text
 
