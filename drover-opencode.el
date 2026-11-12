@@ -136,6 +136,8 @@
 (defvar opencode-withdrawn-prompt-function)
 ;; From opencode.el's versions that show where a session stands.
 (defvar opencode-session-summary-function)
+;; From opencode.el's versions that send a prompt to wait on a request.
+(defvar opencode-send-waits)
 (declare-function opencode-session-summary-update "opencode-recap" (&optional buffer))
 
 ;;;; The local service
@@ -1435,18 +1437,30 @@ waited for, as its pins decide the model."
   "Run the send checks of SESSION on TEXT, as for input typed in its buffer.
 OPTIONS are the explicit options about to be applied, so the checks
 consider the turn they lead to (see `drover-opencode--switch-target').
-Return what `opencode-check-send' returns: `cancel', or the metadata to
-send with.  The checks may ask, such as the prompt cache guard before
-an idle session sends its context uncached, so they run from the
-command.  They read the session's buffer: a session without one is
-checked by nothing.  The backend's :check."
+Return `cancel' or `discard' as `opencode-check-send' returns them, or
+a token (:metadata METADATA :waits WAITS): the metadata to send with,
+and whether the prompt is to wait on a request the session awaits (see
+`opencode-send-waits').  The checks may ask, such as the prompt cache
+guard before an idle session sends its context uncached, or what to do
+while the session waits on a request, so they run from the command.
+They read the session's buffer: a session without one is checked by
+nothing.  The backend's :check."
   (when-let* ((buffer (drover-opencode--buffer session)))
     (with-current-buffer buffer
-      (opencode-check-send
-       (append (list :kind 'prompt :text text)
-               (drover-opencode--switch-target buffer (plist-get options :agent)
-                                               (plist-get options :model)
-                                               (plist-get options :variant)))))))
+      (let* ((opencode-send-waits nil)
+             (decision (opencode-check-send
+                        (append (list :kind 'prompt :text text)
+                                (drover-opencode--switch-target buffer (plist-get options :agent)
+                                                                (plist-get options :model)
+                                                                (plist-get options :variant))))))
+        (if (memq decision '(cancel discard))
+            decision
+          (list :metadata decision :waits opencode-send-waits))))))
+
+(defun drover-opencode--waits (_session token)
+  "Return non-nil when the prompt sent with TOKEN waits on a request.
+TOKEN is what `drover-opencode--check' returned.  The backend's :waits."
+  (plist-get token :waits))
 
 (defun drover-opencode--apply-options (session options then &optional else)
   "Apply the explicit OPTIONS to the running SESSION, then call THEN.
@@ -1509,7 +1523,7 @@ such.  The backend's :send."
    (lambda ()
      (let ((buffer (current-buffer)))
        (opencode-session-send
-        text :show t :metadata (and (consp token) token) :attachments attachments
+        text :show t :metadata (plist-get token :metadata) :attachments attachments
         :else (lambda (error)
                 (drover-with-reporting "OpenCode prompt"
                   (drover-warn "%s; it is in the kill ring"
@@ -1856,6 +1870,7 @@ Through the plugin's RPC, `opencode.goal' `get'.  The backend's
      :engines '(opencode)
      :create #'drover-opencode--create
      :check #'drover-opencode--check
+     :waits #'drover-opencode--waits
      :apply-options #'drover-opencode--apply-options
      :send #'drover-opencode--send
      :options #'drover-opencode--options

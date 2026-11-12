@@ -1059,14 +1059,16 @@ backend."
   "Send TEXT, in Org, to SESSION at once, as the prompt sends it.
 The prompt is left as it is.  TEXT goes to the kill ring, then as
 Markdown (see `drover-prompt-to-markdown') through SESSION's backend,
-its checks first: when they cancel, nothing is sent.  OPTIONS, an
-explicit options plist, are checked and applied before sending, as
-the prompt's choices are.  A session drover archived is restored first
-\(see `drover-unarchive-to-send'); one that cannot be signals a
-`user-error'.  Return non-nil when the checks allow delivery to proceed.
-THEN, a function of no argument, is called once the backend took the
-text, after OPTIONS were applied.  Front ends call this to send a
-prompt of their own making, as a review of a session's changes does
+its checks first: when they cancel, or discard the text, nothing is
+sent.  OPTIONS, an explicit options plist, are checked and applied
+before sending, as the prompt's choices are.  A session drover archived
+is restored first (see `drover-unarchive-to-send'); one that cannot be
+signals a `user-error'.  Return non-nil when the checks allow delivery
+to proceed.  THEN, a function of one argument, is called once the
+backend took the text, after OPTIONS were applied, with non-nil when
+SESSION has its turn, nil when the text waits on a request SESSION
+awaits (see `drover-prompt--hands-off-p').  Front ends call this to send
+a prompt of their own making, as a review of a session's changes does
 \(see `drover-review')."
   (let* ((markdown (drover-prompt-to-markdown text))
          (target (drover-session-buffer session))
@@ -1075,22 +1077,27 @@ prompt of their own making, as a review of a session's changes does
                      (funcall check session markdown
                               (and options (drover-prompt-options-for session options))))))
     (kill-new text)
-    (if (eq token 'cancel)
-        (progn (message "Not sent to %s; the prompt is in the kill ring"
-                        (drover-session-display-title session))
-               nil)
-      (drover-unarchive-to-send session)
-      (cl-flet ((deliver ()
-                  (when (and (drover-prompt--deliver session target markdown token) then)
-                    (funcall then))))
-        (if options
-            (drover-prompt-apply-options
-             session options
-             (lambda ()
-               (drover-with-reporting "prompt after options"
-                 (deliver))))
-          (deliver)))
-      t)))
+    (pcase token
+      ('cancel
+       (message "Not sent to %s; the prompt is in the kill ring"
+                (drover-session-display-title session))
+       nil)
+      ('discard
+       (message "Discarded; the prompt is in the kill ring")
+       nil)
+      (_
+       (drover-unarchive-to-send session)
+       (cl-flet ((deliver ()
+                   (when (and (drover-prompt--deliver session target markdown token) then)
+                     (funcall then (drover-prompt--hands-off-p session token)))))
+         (if options
+             (drover-prompt-apply-options
+              session options
+              (lambda ()
+                (drover-with-reporting "prompt after options"
+                  (deliver))))
+           (deliver)))
+       t))))
 
 (defun drover-prompt-forget-target ()
   "Forget the session the prompt goes to: sending it asks where again.
@@ -1455,37 +1462,55 @@ sends, such as `drover-prompt-send-to', a scheduled prompt's or a
 task's, note nothing: the user did not send them now."
   (drover-note-handed-off session (if new 'start 'prompt) 'drover))
 
+(defun drover-prompt--hands-off-p (session token)
+  "Return non-nil when a prompt sent to SESSION with TOKEN hands SESSION its turn.
+TOKEN is what SESSION's :check returned.  The prompt does, unless the
+backend says it waits on a request SESSION awaits (see :waits in
+`drover-register-backend')."
+  (not (and (drover-supports-p session :waits)
+            (drover-with-reporting "backend waits"
+              (drover-backend-call session :waits token)))))
+
 (defun drover-prompt--send-to-session (session content buffer)
   "Send CONTENT of the prompt BUFFER to the running SESSION.
 Its backend's checks run first, for the options about to be applied:
-when they cancel, nothing is sent and the prompt stays.  A session
-drover archived is restored then (see `drover-unarchive-to-send'):
-when it cannot be, a `user-error' says why, nothing is sent and the
-prompt stays.  Otherwise the options are applied, the text sent, and
-CONTENT leaves the prompt."
+when they cancel, nothing is sent and the prompt stays; when they
+discard the prompt, nothing is sent and CONTENT leaves the prompt, in
+the kill ring.  A session drover archived is restored then (see
+`drover-unarchive-to-send'): when it cannot be, a `user-error' says
+why, nothing is sent and the prompt stays.  Otherwise the options are
+applied, the text sent, and CONTENT leaves the prompt; SESSION has its
+turn then, unless the prompt waits on a request SESSION awaits (see
+`drover-prompt--hands-off-p')."
   (let* ((text (plist-get content :text))
          (target (drover-session-buffer session))
          (explicit (drover-prompt-explicit-options buffer))
          (check (drover-backend-property session :check))
          (token (and (functionp check)
                      (funcall check session text (drover-prompt-options-for session explicit)))))
-    (if (eq token 'cancel)
-        (message "Not sent to %s; the prompt is in the kill ring"
-                 (drover-session-display-title session))
-      (drover-unarchive-to-send session)
-      (let ((finish (drover-prompt--begin-send buffer)))
-        (drover-prompt-apply-options
-         session explicit
-         (lambda ()
-           (unwind-protect
-               (when (drover-prompt--deliver session target text token (plist-get content :attachments))
-                 (when (drover-prompt--unchanged-p content buffer)
-                   (drover-prompt-consume content buffer))
-                 (drover-prompt--sent session nil))
-             (funcall finish)))
-         (lambda (reason)
-           (funcall finish)
-           (drover-warn "%s; prompt not sent" reason)))))))
+    (pcase token
+      ('cancel
+       (message "Not sent to %s; the prompt is in the kill ring"
+                (drover-session-display-title session)))
+      ('discard
+       (drover-prompt-consume content buffer)
+       (message "Discarded; the prompt is in the kill ring"))
+      (_
+       (drover-unarchive-to-send session)
+       (let ((finish (drover-prompt--begin-send buffer)))
+         (drover-prompt-apply-options
+          session explicit
+          (lambda ()
+            (unwind-protect
+                (when (drover-prompt--deliver session target text token (plist-get content :attachments))
+                  (when (drover-prompt--unchanged-p content buffer)
+                    (drover-prompt-consume content buffer))
+                  (when (drover-prompt--hands-off-p session token)
+                    (drover-prompt--sent session nil)))
+              (funcall finish)))
+          (lambda (reason)
+            (funcall finish)
+            (drover-warn "%s; prompt not sent" reason))))))))
 
 (defun drover-prompt--begin-send (buffer)
   "Mark prompt BUFFER as sending and return a function clearing that state."
@@ -1659,7 +1684,8 @@ put in the kill ring, then converted to Markdown.  To a running session,
 the options chosen in the prompt must all apply first; to a new
 session, they are its
 start options.  The text sent leaves the prompt, unless nothing was
-sent: a check the user cancelled keeps it, region included.  This is
+sent: a check the user cancelled keeps it, region included, one the
+user told to discard it removes it all the same.  This is
 the prompt action `send'."
   (interactive)
   (let* ((buffer (drover-prompt--prompt-buffer))

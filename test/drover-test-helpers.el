@@ -99,7 +99,9 @@ Its :create is recorded as (:create DIRECTORY ENGINE OPTIONS).")
   "Message the fake backend's :create fails with, or nil to succeed.")
 
 (defvar drover-test-check-result 'fake-token
-  "What the fake backend's :check returns: `cancel', or a token for :send.")
+  "What the fake backend's :check returns: `cancel', `discard', or a token for :send.
+The token `waiting-token' is one whose prompt waits on a request (see
+:waits).")
 
 (defvar drover-test-options nil
   "What the fake sessions run, as an alist (ID . PLIST), for :options.")
@@ -208,6 +210,7 @@ The session is served from then on, and given to THEN; with
    :engines (lambda () drover-test-backend-engines)
    :create #'drover-test--create
    :check #'drover-test--check
+   :waits (lambda (_session token) (eq token 'waiting-token))
    :apply-options #'drover-test--apply-options
    :send (drover-test--recorder :send)
    :options (lambda (session) (alist-get (drover-session-id session) drover-test-options

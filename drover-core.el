@@ -1984,7 +1984,14 @@ as `drover-model' describes them: explicit choices (:agent :model
              filtered for SESSION, running the checks that may ask the
              user before anything is sent.  It runs synchronously, from
              the command.  It returns the symbol `cancel' to send
-             nothing, else a token handed to :send.
+             nothing, keeping the prompt, `discard' to send nothing and
+             delete the prompt, else a token handed to :send.
+ :waits      Function of a SESSION and the TOKEN :check returned, non-nil
+             when the prompt sent with TOKEN is to wait, unread, on a
+             request SESSION awaits, a permission or a question, as the
+             user chose it should: SESSION then does not have its turn
+             (see `drover-handed-off-functions').  Without it, a prompt
+             sent hands SESSION its turn.
  :apply-options
              Function of a SESSION, explicit OPTIONS filtered for it and
               THEN and optional ELSE, applying OPTIONS to the running
@@ -6309,7 +6316,9 @@ Interactively, SESSION is the session at point."
 (defvar drover-handed-off-functions nil
   "Functions called with (SESSION BUFFERS HOW ORIGIN) once SESSION has its turn.
 The user gave SESSION what it waited for: nothing is left to do in its
-buffers until its turn ends, so that they may be buried, for one.
+buffers until its turn ends, so that they may be buried, for one.  A
+prompt sent to wait on a request SESSION awaits gives it nothing (see
+:waits in `drover-register-backend').
 
 HOW is `prompt' for a prompt sent to SESSION, `start' for a session a
 prompt started, `build' for `drover-build-and-go', `answer' for one of

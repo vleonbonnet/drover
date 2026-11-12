@@ -1971,6 +1971,71 @@ Once sent, the session has its turn (see `drover-handed-off-functions')."
       (should (equal (car kill-ring) "one"))
       (should (equal drover-test-calls '((:check "a" "one" (:agent nil :model nil :variant nil))))))))
 
+(ert-deftest drover-prompt-test-send-discarded ()
+  "A check discarding the send sends nothing and removes the prompt's text, kept in the kill ring."
+  (drover-prompt-test-with
+    (let ((transient-mark-mode t)
+          (prompt (drover-prompt-test--prompt "one\ntwo")))
+      (drover-prompt-test--session "a")
+      (setq drover-test-check-result 'discard)
+      (with-current-buffer prompt
+        (goto-char (point-min))
+        (set-mark (point))
+        (end-of-line)
+        (activate-mark)
+        (drover-prompt-test-with-messages
+          (drover-prompt-test-choosing (lambda (_) "session a")
+            (drover-prompt-submit))
+          (should (equal messages '("Discarded; the prompt is in the kill ring"))))
+        (should (equal (buffer-string) "\ntwo")))
+      (should (equal (car kill-ring) "one"))
+      (should (equal drover-test-calls '((:check "a" "one" (:agent nil :model nil :variant nil)))))
+      ;; The whole prompt discarded closes it.
+      (with-current-buffer prompt
+        (drover-prompt-test-with-messages
+          (drover-prompt-test-choosing (lambda (_) "session a")
+            (drover-prompt-submit))))
+      (should-not (buffer-live-p prompt))
+      (should (equal (car kill-ring) "two"))
+      (should-not (assq :send drover-test-calls))
+      ;; Text of the caller's making is only not sent.
+      (drover-prompt-test-with-messages
+        (should-not (drover-prompt-send-to (drover-find 'fake "a") "review")))
+      (should-not (assq :send drover-test-calls)))))
+
+(ert-deftest drover-prompt-test-send-waits ()
+  "A prompt sent to wait on a request the session awaits goes, without handing it its turn."
+  ;; The sends of the tests before tell their hooks once they ran: not this one's.
+  (accept-process-output nil 0.05)
+  (require 'drover-keys)
+  (drover-prompt-test-with
+    (drover-test-register-engine 'opencode :build-agent "build")
+    (let* ((handed nil)
+           (drover-handed-off-functions
+            (list (lambda (session _buffers how _origin) (push (list (drover-session-id session) how) handed))))
+           (session (drover-prompt-test--session "a" :engine 'opencode :agent "plan"))
+           (prompt (drover-prompt-test--prompt "wait for it")))
+      (setq drover-test-check-result 'waiting-token)
+      (with-current-buffer prompt
+        (drover-prompt-test-choosing (lambda (_) "session a")
+          (drover-prompt-submit)))
+      (should-not (buffer-live-p prompt))
+      (should (member '(:send "a" "wait for it" waiting-token) drover-test-calls))
+      (drover-build-and-go session)
+      (should (member '(:send "a" "Go ahead" waiting-token) drover-test-calls))
+      (accept-process-output nil 0.05)
+      (should-not handed)
+      ;; A prompt that does not wait hands it its turn.
+      (setq drover-test-check-result 'fake-token)
+      (with-current-buffer (drover-prompt-test--prompt "now")
+        (drover-prompt-test-choosing (lambda (_) "session a")
+          (drover-prompt-submit)))
+      (accept-process-output nil 0.05)
+      (should (equal handed '(("a" prompt))))
+      (drover-build-and-go session)
+      (accept-process-output nil 0.05)
+      (should (equal handed '(("a" build) ("a" prompt)))))))
+
 (ert-deftest drover-prompt-test-send-empty ()
   "An empty prompt is not sent."
   (drover-prompt-test-with

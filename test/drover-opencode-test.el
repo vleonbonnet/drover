@@ -392,7 +392,7 @@ PROJECTS defaults to `drover-opencode-test-projects'."
     (let ((session (drover-session-create :backend 'opencode :id "ses_1")))
       (dolist (operation '(:start :sessions :open :respond :interrupt :archive :mark-seen :preview :new
                                   :buffer :rename :delete :fork :compact :history :prefetch :recap
-                                  :create :check :apply-options :send :options))
+                                  :create :check :waits :apply-options :send :options))
         (should (drover-supports-p session operation)))
       ;; A running session can change all three.
       (should-not (drover-supports-p session :settable)))))
@@ -3192,7 +3192,8 @@ Return a function telling how many times the backend called back."
                  (lambda (text &rest keys) (setq sent (list (current-buffer) text keys)))))
         (let ((token (drover-backend-call session :check "/not a command" nil)))
           (should (equal checked `((,buffer :kind prompt :text "/not a command"))))
-          (should (equal token '((thinkingLoss . "accept"))))
+          (should (equal token '(:metadata ((thinkingLoss . "accept")) :waits nil)))
+          (should-not (drover-backend-call session :waits token))
           (drover-backend-call session :send "/not a command" token))
         (should (eq (car sent) buffer))
         (should (equal (cadr sent) "/not a command"))
@@ -3213,9 +3214,18 @@ Return a function telling how many times the backend called back."
         (cl-letf (((symbol-function 'opencode-session-send) (lambda (&rest _) (error "No service"))))
           (drover-backend-call session :send "go" nil)
           (should (string-match-p "did not take the prompt: No service" (car warnings))))
-        ;; Cancelled checks cancel.
+        ;; Cancelled or discarding checks say so.
         (cl-letf (((symbol-function 'opencode-check-send) (lambda (_) 'cancel)))
           (should (eq (drover-backend-call session :check "go" nil) 'cancel)))
+        (cl-letf (((symbol-function 'opencode-check-send) (lambda (_) 'discard)))
+          (should (eq (drover-backend-call session :check "go" nil) 'discard)))
+        ;; A prompt the checks send to wait on a request says so in its token.
+        (cl-letf (((symbol-function 'opencode-check-send)
+                   (lambda (_) (setq opencode-send-waits t) nil)))
+          (let ((token (drover-backend-call session :check "go" nil)))
+            (should (equal token '(:metadata nil :waits t)))
+            (should (drover-backend-call session :waits token))
+            (should-not opencode-send-waits)))
         ;; Without a buffer, no check runs.
         (remhash "ses_1" opencode-session-buffers)
         (setq checked nil)
