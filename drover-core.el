@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 27
+(defconst drover-core-generation 28
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1693,12 +1693,27 @@ for FIELD come last, and ties keep the order of urgency."
 
 (defvar drover--history nil
   "Older sessions of the backends, as an alist (BACKEND . SESSIONS).
-Filled by `drover-history-fetch' while `drover-show-history' is set.")
+Filled by `drover-history-fetch' while they are wanted (see
+`drover-fetch-wanted-p').")
 
 (defvar drover--archived nil
   "Archived sessions of the backends, as an alist (BACKEND . SESSIONS).
-Filled by `drover-archived-fetch' while `drover-show-archived' is set,
-from the backends' :archived.")
+Filled by `drover-archived-fetch' while they are wanted (see
+`drover-fetch-wanted-p'), from the backends' :archived.")
+
+(defvar drover--fetched-serial 0
+  "A number that grows whenever the older or archived sessions fetched change.")
+
+(defun drover-fetched-serial ()
+  "Return a number that grows as the older and archived sessions fetched change.
+What keeps sessions taken from `drover-known-sessions' compares it with
+the one it saw to learn that they changed, which `drover-changed-hook'
+does not tell: they are not in the index."
+  drover--fetched-serial)
+
+(defun drover--fetched-changed ()
+  "Note that the older or archived sessions fetched changed."
+  (cl-incf drover--fetched-serial))
 
 (defun drover-register-backend (name &rest properties)
   "Register backend NAME, a symbol, with PROPERTIES.
@@ -2089,6 +2104,7 @@ Backends without a :buffer function never report one."
         drover--started (delq name drover--started)
         drover--history (assq-delete-all name drover--history)
         drover--archived (assq-delete-all name drover--archived))
+  (drover--fetched-changed)
   (drover-backend-changed name))
 
 (defun drover-backends ()
@@ -2545,9 +2561,10 @@ be misread; those shown are fetched again."
     (when (or drover--history drover--archived)
       (setq drover--history nil
             drover--archived nil)
+      (drover--fetched-changed)
       (drover-stale-layout "older and archived sessions")
-      (when drover-show-history (drover--fetch 'history nil))
-      (when drover-show-archived (drover--fetch 'archived nil)))))
+      (when (drover-fetch-wanted-p 'history) (drover--fetch 'history nil))
+      (when (drover-fetch-wanted-p 'archived) (drover--fetch 'archived nil)))))
 
 (defun drover--fetched-sessions (kind)
   "Return the sessions fetched of KIND, `history' or `archived', still registered."
@@ -2675,19 +2692,23 @@ them."
         (puthash (cons 'engine key) t seen)))
     kept))
 
-(defun drover-known-sessions (&optional live)
+(defun drover-known-sessions (&optional live everything)
   "Return the sessions lists show, unsorted.
 They are LIVE, the sessions `drover-sessions' returns by default; while
 `drover-show-archived' is set, the archived sessions (see
 `drover-archived-sessions'); while `drover-show-history' is set, the
-older sessions fetched from the backends.  A live session wins over
-another record of the same session, whether of its own backend or of
-another one with the same engine and engine identifier, an archived
+older sessions fetched from the backends.  With EVERYTHING, the archived
+and older sessions come whether lists show them or not, those fetched
+as they were kept (see `drover-keep-fetched').  A live session wins
+over another record of the same session, whether of its own backend or
+of another one with the same engine and engine identifier, an archived
 record over an older one, and the first of several records of one
 backend wins.  Records of different backends showing one conversation
 are merged as `drover-sessions' merges live ones."
-  (let ((live (or live (drover-sessions))))
-    (if (not (or drover-show-history drover-show-archived))
+  (let ((live (or live (drover-sessions)))
+        (archived (or everything drover-show-archived))
+        (history (or everything drover-show-history)))
+    (if (not (or archived history))
         live
       (let ((seen (make-hash-table :test #'equal)))
         (dolist (session live)
@@ -2695,8 +2716,8 @@ are merged as `drover-sessions' merges live ones."
           (when-let* ((key (drover-session-engine-key session)))
             (puthash (cons 'engine key) t seen)))
         (append live
-                (and drover-show-archived (drover--not-seen (drover-archived-sessions) seen))
-                (and drover-show-history (drover--not-seen (drover--history-sessions) seen)))))))
+                (and archived (drover--not-seen (drover-archived-sessions) seen))
+                (and history (drover--not-seen (drover--history-sessions) seen)))))))
 
 (defun drover-visible-sessions (&optional sessions)
   "Return SESSIONS, or every session, without hidden subagents.
@@ -3919,13 +3940,36 @@ MODE defaults to the global value of `drover-show-subagents'."
 ;;;; Older and archived sessions
 
 ;; A backend fetches its older sessions (:history) and its archived ones
-;; (:archived) on demand, while lists show them.  Each fetch of a kind
-;; and backend has a generation: an answer to an earlier fetch, or
-;; arriving once its kind is hidden, is dropped.
+;; (:archived) on demand, while they are wanted: while lists show them,
+;; and once a search kept them, as it offers every session.  Each fetch
+;; of a kind and backend has a generation: an answer to an earlier
+;; fetch, or arriving once its kind is no longer wanted, is dropped.
 
 (defvar drover--fetch-generations nil
   "Generations of the fetches of sessions, as an alist ((KIND . BACKEND) . N).
 KIND is `history' or `archived'.")
+
+(defvar drover--fetch-kept nil
+  "The kinds of sessions kept fetched whether lists show them or not.
+`history' and `archived', as `drover-keep-fetched' kept them, for the
+rest of the Emacs session.")
+
+(defvar drover--fetch-started nil
+  "When the last fetch of each kind and backend started, an alist.
+Its entries are ((KIND . BACKEND) . TIME).")
+
+(defvar drover--fetch-pending nil
+  "The fetches whose answer is awaited, a list of (KIND . BACKEND).")
+
+(defun drover-fetch-wanted-p (kind)
+  "Return non-nil while the sessions of KIND are to be fetched and kept.
+KIND is `history' or `archived': wanted while lists show them (see
+`drover-show-history' and `drover-show-archived'), and once kept (see
+`drover-keep-fetched').  A backend that fetches them again after an
+event of its own, as one moving its sessions into the archive or out of
+it, does so while they are wanted."
+  (or (if (eq kind 'history) drover-show-history drover-show-archived)
+      (and (memq kind drover--fetch-kept) t)))
 
 (defun drover--fetch-generation (kind backend)
   "Return the generation of the last fetch of KIND from BACKEND."
@@ -3935,36 +3979,83 @@ KIND is `history' or `archived'.")
   "Make every fetch of KIND in progress stale, so that its answer is dropped."
   (dolist (entry drover--fetch-generations)
     (when (eq (caar entry) kind)
-      (cl-incf (cdr entry)))))
+      (cl-incf (cdr entry))))
+  (setq drover--fetch-pending (seq-remove (lambda (pending) (eq (car pending) kind))
+                                          drover--fetch-pending)))
 
 (defun drover--fetch (kind backends)
   "Fetch the sessions of KIND from BACKENDS, those of every backend when nil.
-KIND is `history', fetched by :history into `drover--history' while
-`drover-show-history' is set, or `archived', by :archived into
-`drover--archived' while `drover-show-archived' is set.  Each backend's
-answer replaces what it answered before and redraws the views, as long
-as KIND stays shown and no later fetch of KIND from that backend
-started meanwhile.  A backend failing to start its fetch is reported,
-the others fetching all the same."
-  (let ((operation (if (eq kind 'history) :history :archived)))
+KIND is `history', fetched by :history into `drover--history', or
+`archived', by :archived into `drover--archived', while they are
+wanted, as `drover-fetch-wanted-p' tells.  Each backend's answer
+replaces what it answered before, as long as KIND stays wanted and no
+later fetch of KIND from that backend started meanwhile; it redraws the
+views when they show KIND.  A backend failing to start its fetch is
+reported, the others fetching all the same."
+  (let ((operation (if (eq kind 'history) :history :archived))
+        (now (float-time)))
     (dolist (backend (or backends (drover-backends)))
       (when-let* ((function (drover-backend-property backend operation))
                   ((functionp function)))
         (let ((generation (cl-incf (alist-get (cons kind backend) drover--fetch-generations
-                                              0 nil #'equal))))
+                                              0 nil #'equal)))
+              (pending (cons kind backend)))
+          (setf (alist-get pending drover--fetch-started nil nil #'equal) now)
+          (unless (member pending drover--fetch-pending)
+            (push pending drover--fetch-pending))
           (drover-with-reporting "backend fetch"
             (funcall function
                      (lambda (sessions)
                        ;; Called back from a process or a timer, as often.
                        (drover-with-reporting "backend fetch"
-                         (when (and (if (eq kind 'history) drover-show-history drover-show-archived)
-                                    (= generation (drover--fetch-generation kind backend)))
-                           (drover--fetched-current)
-                           (let ((sessions (mapcar #'drover--bound-record sessions)))
-                             (if (eq kind 'history)
-                                 (setf (alist-get backend drover--history) sessions)
-                               (setf (alist-get backend drover--archived) sessions)))
-                           (drover-backend-changed backend)))))))))))
+                         (when (= generation (drover--fetch-generation kind backend))
+                           (setq drover--fetch-pending (delete pending drover--fetch-pending))
+                           (when (drover-fetch-wanted-p kind)
+                             (drover--fetched-current)
+                             (let ((sessions (mapcar #'drover--bound-record sessions)))
+                               (if (eq kind 'history)
+                                   (setf (alist-get backend drover--history) sessions)
+                                 (setf (alist-get backend drover--archived) sessions)))
+                             (drover--fetched-changed)
+                             (if (if (eq kind 'history) drover-show-history drover-show-archived)
+                                 (drover-backend-changed backend)
+                               ;; Not shown: the views have nothing to draw, but
+                               ;; what keeps the sessions fetched learns of them.
+                               (drover--schedule-changed)))))))))))))
+
+(defun drover-keep-fetched (kinds &optional age)
+  "Keep the sessions of KINDS fetched from now on, whether lists show them or not.
+KINDS lists `history' and `archived'.  They are fetched from every
+backend that keeps them but those whose last fetch of a kind started
+less than AGE seconds ago, all of them when AGE is nil; then fetched
+again as they would be while lists show them, and never forgotten,
+until Emacs exits: for the search, which offers every session (see
+`drover-known-sessions' with EVERYTHING)."
+  (let ((now (float-time)))
+    (dolist (kind kinds)
+      (unless (memq kind drover--fetch-kept)
+        (push kind drover--fetch-kept))
+      (let ((operation (if (eq kind 'history) :history :archived))
+            (due nil))
+        (dolist (backend (drover-backends))
+          (when (functionp (drover-backend-property backend operation))
+            (let ((started (alist-get (cons kind backend) drover--fetch-started nil nil #'equal)))
+              (unless (and age started (< (- now started) age))
+                (push backend due)))))
+        (when due
+          (drover--fetch kind (nreverse due)))))))
+
+(defun drover-fetch-pending-p (&optional within)
+  "Return non-nil while a fetch of older or archived sessions is awaited.
+Of the backends still registered, and only of those that started less
+than WITHIN seconds ago when WITHIN is given: a backend may never
+answer."
+  (let ((now (float-time)))
+    (seq-some (lambda (pending)
+                (and (assq (cdr pending) drover--backends)
+                     (or (null within)
+                         (< (- now (alist-get pending drover--fetch-started 0 nil #'equal)) within))))
+              drover--fetch-pending)))
 
 (defun drover-history-available-p ()
   "Return non-nil when a registered backend fetches older sessions."
@@ -3974,20 +4065,21 @@ the others fetching all the same."
 (defun drover-history-fetch (&optional backend)
   "Fetch the older sessions of BACKEND, or of every backend that keeps them.
 Each backend's answer replaces what it answered before and redraws the
-views, as long as `drover-show-history' stays set and no later fetch
-started meanwhile."
+views, as long as they are wanted (see `drover-fetch-wanted-p') and no
+later fetch started meanwhile."
   (drover--fetch 'history (and backend (list backend))))
 
 (defun drover-set-show-history (show)
   "Show older sessions in every view when SHOW is non-nil, else hide them.
 Showing them fetches them (see `drover-history-fetch'); hiding them
-forgets them.  Views redraw at once, and again as older sessions
-arrive."
+forgets them, unless they are kept (see `drover-keep-fetched').  Views
+redraw at once, and again as older sessions arrive."
   (setq drover-show-history (and show t))
-  (if drover-show-history
-      (drover-history-fetch)
-    (drover--forget-fetches 'history)
-    (setq drover--history nil))
+  (cond (drover-show-history (drover-history-fetch))
+        ((not (drover-fetch-wanted-p 'history))
+         (drover--forget-fetches 'history)
+         (setq drover--history nil)
+         (drover--fetched-changed)))
   (drover-view-settings-changed))
 
 (defun drover-archived-available-p ()
@@ -4002,20 +4094,23 @@ when drover archived a conversation of a registered backend itself."
 (defun drover-archived-fetch (&optional backend)
   "Fetch the archived sessions of BACKEND, or of every backend that has them.
 Each backend's answer replaces what it answered before and redraws the
-views, as long as `drover-show-archived' stays set and no later fetch
-started meanwhile.  What drover archived itself needs no fetch."
+views, as long as they are wanted (see `drover-fetch-wanted-p') and no
+later fetch started meanwhile.  What drover archived itself needs no
+fetch."
   (drover--fetch 'archived (and backend (list backend))))
 
 (defun drover-set-show-archived (show)
   "Show archived sessions in every view when SHOW is non-nil, else hide them.
 Showing them fetches them (see `drover-archived-fetch'); hiding them
-forgets those fetched.  Views redraw at once, and again as archived
+forgets those fetched, unless they are kept (see
+`drover-keep-fetched').  Views redraw at once, and again as archived
 sessions arrive."
   (setq drover-show-archived (and show t))
-  (if drover-show-archived
-      (drover-archived-fetch)
-    (drover--forget-fetches 'archived)
-    (setq drover--archived nil))
+  (cond (drover-show-archived (drover-archived-fetch))
+        ((not (drover-fetch-wanted-p 'archived))
+         (drover--forget-fetches 'archived)
+         (setq drover--archived nil)
+         (drover--fetched-changed)))
   (drover-view-settings-changed))
 
 (defun drover--forget-fetched (session)
@@ -4028,7 +4123,8 @@ sessions arrive."
                                             (cdr entry))))
                         fetched)))
       (setq drover--history (forget drover--history)
-            drover--archived (forget drover--archived)))))
+            drover--archived (forget drover--archived))
+      (drover--fetched-changed))))
 
 (defun drover-take-in-again (keys)
   "Take in anew the records of the sessions KEYS, as drover takes records in.
@@ -4054,6 +4150,8 @@ kept, their backends' views drawn anew."
                         fetched)))
       (setq drover--history (again drover--history)
             drover--archived (again drover--archived)))
+    (when refetched
+      (drover--fetched-changed))
     (dolist (key keys)
       (when (drover-index-session key)
         (drover-backend-changed (car key) (cdr key))))
@@ -4696,6 +4794,7 @@ changed (see `drover-backend-changed')."
               ((seq-find (lambda (record) (equal (drover-session-id record) id)) records)))
     (setf (alist-get backend drover--archived)
           (seq-remove (lambda (record) (equal (drover-session-id record) id)) records))
+    (drover--fetched-changed)
     (drover-backend-changed backend)
     t))
 

@@ -862,16 +862,6 @@ the prefix of the other's, which would hide it."
     (transient-remove-suffix 'drover-dispatch 'ignore)
     (transient-remove-suffix 'drover-dispatch 'ignore-error)))
 
-(ert-deftest drover-keys-test-search-menu-keys ()
-  "The search's menu has the list menu's keys, for the same commands, none twice."
-  (require 'drover-search)
-  (should-not (drover-keys-test-conflicts 'drover-search-menu))
-  (let ((entries (drover-keys-test-defined-keys 'drover-dispatch)))
-    (pcase-dolist (`(,key ,command . ,_) (drover-keys-test-defined-keys 'drover-search-menu))
-      (unless (eq command 'drover-search-resume)
-        (ert-info (key)
-          (should (equal (cadr (assoc key entries)) command)))))))
-
 (ert-deftest drover-keys-test-dispatch-commands ()
   "Each key of the menu runs the command of the shared key tables."
   (dolist (entry '(("j" . drover-next) ("B" . drover-bury-quiet-sessions) ("b" . drover-select)
@@ -1315,11 +1305,9 @@ shows, so they apply only there."
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-view "V")) :command)
               'transient-quit-one))
   ;; q closes every menu of drover's, as C-g does.
-  (require 'drover-search)
   (require 'drover-prompt)
   (require 'drover-usage-report)
-  (dolist (menu '(drover-dispatch drover-view drover-search-menu drover-usage-menu
-                  drover-prompt-options-menu))
+  (dolist (menu '(drover-dispatch drover-view drover-usage-menu drover-prompt-options-menu))
     (ert-info ((symbol-name menu))
       (should (equal (assoc "q" (mapcar (lambda (entry) (list (car entry) (cadr entry)))
                                         (drover-keys-test-defined-keys menu)))
@@ -1652,44 +1640,20 @@ table's title, the names one column in."
               (should (= (length (delete-dups starts)) halves))
               (should (seq-find (lambda (line) (string-search "=p drover" line)) lines)))))))))
 
-(ert-deftest drover-keys-test-search-menu-fields ()
-  "The menu of the search shares the rows of the fields, their filters alone.
-The columns, the sort, the grouping and follow mode do not scope a search."
-  (require 'drover-search)
-  (drover-keys-test-with nil
-    (with-temp-buffer
-      (let ((dispatch (progn (setq-local drover-view-p t)
-                             (drover-keys-test-row-keys 'drover-dispatch))))
-        (kill-local-variable 'drover-view-p)
-        ;; The host's row shows no filter until other hosts are known.
-        (should (equal (delq nil (drover-keys-test-row-keys 'drover-search-menu))
-                       (delq nil (mapcar (lambda (row) (seq-remove (lambda (key) (string-prefix-p "-" key)) row))
-                                         dispatch))))
-        (let ((keys (mapcan #'cdr (drover-keys-test-keys 'drover-search-menu))))
-          (should-not (seq-find (lambda (key) (string-prefix-p "-" key)) keys))
-          (dolist (key '("= o" "= r" "= g"))
-            (should-not (member key keys)))
-          (should (equal (seq-take keys 4) '("RET" "= u" "= O" "= z"))))
-        ;; Drawn, the table has no column of columns.
-        (let ((lines (drover-keys-test-render-menu 'drover-search-menu 160)))
-          (should (string-match-p "\\`Search +Field +Filter\\'" (car lines)))
-          (should-not (seq-find (lambda (line) (string-search "Column" line)) lines)))))))
-
 (defconst drover-keys-test-menu-heights
   '((view 160 16) (view 240 13) (prompt-list 160 18) (prompt-list 240 14)
-    (elsewhere 160 10) (elsewhere 240 10) (view-menu 160 8) (search 160 7))
+    (elsewhere 160 10) (elsewhere 240 10) (view-menu 160 8))
   "The most lines each menu takes, where, as wide: (WHERE WIDTH LINES).
 In one of drover's lists, in a prompt buffer with a list in sight, in
-another buffer, and the View and search menus, a session at point
-with a long title.  The menus took 18 and 14 lines in a list at 160 and
-240 columns, 17 and 13 in a prompt buffer and in another buffer, the
-View menu 8, the search's 8.  A prompt buffer with a list in sight
+another buffer, and the View menu, a session at point with a long
+title.  The menus took 18 and 14 lines in a list at 160 and 240
+columns, 17 and 13 in a prompt buffer and in another buffer, the View
+menu 8.  A prompt buffer with a list in sight
 shows the List group's entry opening sessions by number, a line more
 at 160 columns.")
 
 (ert-deftest drover-keys-test-menu-heights ()
   "The menus take few lines: the settings of a field share a row."
-  (require 'drover-search)
   (drover-keys-test-with (list (drover-test-session "s" :status 'working :project "drover"
                                                     :title "Fix the login redirect after the OAuth callback")
                                (drover-test-session "sub" :parent "s"))
@@ -1712,8 +1676,7 @@ at 160 columns.")
                                     (prog1 (lines 'prompt 'drover-dispatch)
                                       (delete-window side))))
                                  ('elsewhere (lines nil 'drover-dispatch))
-                                 ('view-menu (lines 'view 'drover-view))
-                                 ('search (lines 'view 'drover-search-menu)))))
+                                 ('view-menu (lines 'view 'drover-view)))))
                     (should (<= (length lines) bound))
                     (should (<= (apply #'max (mapcar #'string-width lines)) width)))))))
         (kill-buffer list)))))

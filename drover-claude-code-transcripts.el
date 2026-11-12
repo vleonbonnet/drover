@@ -88,7 +88,7 @@
 (require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
   (load "drover-core" nil t))
 
 (declare-function drover-claude-code-ide-fork "drover-claude-code-ide" (session-id directory))
@@ -1335,7 +1335,7 @@ the older ones; the sessions Claude Code runs elsewhere are asked for."
       (when moved
         (dolist (id moved)
           (drover-backend-changed 'claude-code id))
-        (when drover-show-history
+        (when (drover-fetch-wanted-p 'history)
           (drover-history-fetch 'claude-code)))))
   (drover-claude-code-transcripts--ask-agents))
 

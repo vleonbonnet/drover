@@ -3380,7 +3380,7 @@ too, are listed here once it is connected."
     (should-not (drover-remote--wire-match '(:snippet "no session")))))
 
 (ert-deftest drover-remote-test-search-there ()
-  "Searching what was said here searches another host's sessions there, with its own backends, as scoped here."
+  "Searching what was said here searches another host's sessions there, with its own backends, every one."
   (skip-unless (executable-find "rg"))
   (drover-remote-test-with nil
     (drover-remote-test-start-searching dir)
@@ -3397,26 +3397,24 @@ too, are listed here once it is connected."
     ;; As many matches as the search takes, there too.
     (let ((drover-search-text-limit 1))
       (should (= 1 (length (plist-get (drover-remote-test-search "capybara") :sessions)))))
-    ;; Only the sessions offered here are searched there: under a filter
-    ;; on another host, none, nothing asked.
+    ;; Every session is searched there, whatever the list's filter here.
     (let ((drover-filter '(:host (local))))
-      (should-not (plist-get (drover-remote-test-search "capybara") :sessions))
-      (should (= 2 (length (drover-remote-test-calls "search")))))
-    (let ((drover-filter '(:project "beta")))
-      (should-not (plist-get (drover-remote-test-search "capybara") :sessions)))
-    ;; An archived session there is searched while archived ones show here.
+      (should (length= (plist-get (drover-remote-test-search "capybara") :sessions) 2))
+      (should (length= (drover-remote-test-calls "search") 3)))
+    ;; An archived session there is searched too, once fetched, whether
+    ;; archived ones show here or not.
     (drover-remote-test-command "oc-archive" :id "ses_a")
     (drover-remote-test-wait (lambda () (let ((session (drover-remote-test-oc-session "ses_a")))
                                           (or (null session) (drover-session-archived-p session)))))
-    (should-not (member "ses_a" (mapcar #'cadr (drover-remote-test-found (drover-remote-test-search "capybara")))))
-    (drover-set-show-archived t)
-    (unwind-protect
-        (progn
-          (drover-remote-test-wait (lambda () (seq-find (lambda (session)
-                                                          (equal (drover-session-id session) '(opencode . "ses_a")))
-                                                        (drover-known-sessions))))
-          (should (member "ses_a" (mapcar #'cadr (drover-remote-test-found (drover-remote-test-search "capybara"))))))
-      (drover-set-show-archived nil))))
+    (let ((drover-search-fetch-age 0))
+      (drover-search--fetch))
+    (should (drover-remote-test-wait (lambda () (seq-find (lambda (session)
+                                                            (and (equal (drover-session-id session)
+                                                                        '(opencode . "ses_a"))
+                                                                 (drover-session-archived session)))
+                                                          (drover-known-sessions nil t)))))
+    (should-not drover-show-archived)
+    (should (member "ses_a" (mapcar #'cadr (drover-remote-test-found (drover-remote-test-search "capybara")))))))
 
 (ert-deftest drover-remote-test-search-stops-there ()
   "A search typed past, or whose link drops, stops there; one failing there says so."

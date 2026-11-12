@@ -175,6 +175,11 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (drover--history nil)
          (drover-show-archived nil)
          (drover--archived nil)
+         (drover--fetched-serial 0)
+         (drover--fetch-generations nil)
+         (drover--fetch-kept nil)
+         (drover--fetch-started nil)
+         (drover--fetch-pending nil)
          (drover-opencode--archived-ids nil)
          (drover-opencode--refetch-timer nil)
          (drover-opencode--projects nil)
@@ -2102,7 +2107,8 @@ A refusal is told on one line, as a warning, the session staying archived."
 (defmacro drover-opencode-test-with-search (answer &rest body)
   "Run BODY with `opencode-search' stubbed, answering as ANSWER says.
 ANSWER is a function of the arguments' plist, THEN and ELSE, called at
-once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS)."
+once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS).
+The older and archived sessions a search fetches are none, at once."
   (declare (indent 1) (debug t))
   `(let ((calls nil)
          (cancelled 0))
@@ -2110,7 +2116,9 @@ once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS)."
                 (lambda (query &rest arguments)
                   (push (cons query arguments) calls)
                   (funcall ,answer arguments (plist-get arguments :then) (plist-get arguments :else))
-                  (lambda () (cl-incf cancelled)))))
+                  (lambda () (cl-incf cancelled))))
+               ((symbol-function 'opencode-fetch-sessions)
+                (lambda (_query callback &optional _else) (funcall callback nil))))
        ,@body)))
 
 (ert-deftest drover-opencode-test-search ()
@@ -2127,13 +2135,16 @@ once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS)."
                                 (list :session-id "ses_gone" :message-id "msg_1" :snippet "capybara"))
                      '(:next nil :complete t)))
         (drover-search-text "capy\"bara swi" (lambda (found) (setq results found)))
-        ;; Words, quotes dropped, the last a prefix; unarchived sessions only.
+        ;; Words, quotes dropped, the last a prefix; archived sessions too.
         (should (equal (car calls) (list "capy bara swi*" :then (nth 2 (car calls))
-                                         :else (nth 4 (car calls)) :limit 100 :archived nil)))
+                                         :else (nth 4 (car calls)) :limit 100)))
         (should (equal (mapcar (lambda (entry) (list (drover-session-id (car entry)) (nth 1 entry)))
                                (plist-get results :sessions))
                        '(("ses_2" "the capybara swims"))))
         (should (= (plist-get results :outside) 1))
+        ;; Unarchived sessions only, as a scope may ask.
+        (drover-opencode--search "capybara" (list :archived nil :limit 50) #'ignore)
+        (should (equal (cddr (cddr (cdar calls))) '(:limit 50 :archived nil)))
         ;; A project the filter names, archived sessions shown: both searched.
         (let ((drover-filter '(:project "drover"))
               (drover-show-archived t))

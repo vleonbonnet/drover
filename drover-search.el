@@ -21,14 +21,15 @@
 ;;; Commentary:
 
 ;; `drover-search', S in `drover-dispatch', reads a text in the
-;; minibuffer and offers the sessions matching it, those the list would
-;; show, in the list's order, scoped by the view settings the list
-;; shares: `drover-filter', the older and archived sessions, the
-;; subagents shown.  RET opens the session chosen, as RET in the list;
-;; C-l shows its row in the list; C-', or the key of `drover-dispatch',
-;; leaves the minibuffer for a menu of those settings, on the keys the
-;; list's menu gives them, then RET or C-' searches again with what was
-;; typed.
+;; minibuffer and offers the sessions matching it, every one drover
+;; knows: live, archived and older, whatever the list's filter and the
+;; subagents it shows, in the list's order and groups, the live ones
+;; first in each group.  Archived and older sessions are those the
+;; backends fetch: the first search fetches them, and drover keeps them
+;; from then on, fetching them again as lists showing them would (see
+;; `drover-keep-fetched').  RET opens the session chosen, as RET in the
+;; list; C-l shows its row in the list, showing first what the list hid
+;; of it.
 ;;
 ;; A session matches when every word typed is in its title, summary,
 ;; project, branch, or in the texts its backends tell for searching
@@ -50,7 +51,6 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
-(require 'transient)
 (require 'drover-core)
 (require 'drover-ui)
 (require 'drover-keys)
@@ -58,7 +58,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 20))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
   (load "drover-core" nil t))
 
 (declare-function drover-list-reveal "drover-list" (session))
@@ -85,6 +85,19 @@ The backends searching are stopped once they reported that many."
   :type 'natnum
   :group 'drover-search)
 
+(defcustom drover-search-fetch-age 60
+  "Seconds the older and archived sessions fetched serve a search as they are.
+A search offers them too, as the backends fetch them: it fetches them
+again from each backend whose last fetch started longer ago, offering
+those kept meanwhile, the new ones joining as they arrive.  The
+backends' own events, such as a session archived, fetch them again
+whatever this says."
+  :type 'number
+  :group 'drover-search)
+
+(defconst drover-search-fetch-timeout 10
+  "Seconds `drover-search-text' waits at most for sessions being fetched.")
+
 (defconst drover-search-snippet-length 120
   "Characters at most of the snippet of a match a candidate shows.")
 
@@ -110,8 +123,9 @@ The backends searching are stopped once they reported that many."
   (name nil :documentation "The candidate's string, unique among them.")
   (haystack nil :documentation "What words typed are looked for in, downcased.")
   (depth 0 :documentation "How deep it is in its tree, 0 at the top.")
-  (visible nil :documentation "Non-nil when the list shows it, matching or not.")
-  (group nil :documentation "The title of its group in the list, or nil."))
+  (visible nil :documentation "Non-nil when offered with nothing typed.")
+  (group nil :documentation "The title of its group in the list, or nil.")
+  (tier 'live :documentation "Whether it is `live', `archived' or `older'."))
 
 (cl-defstruct (drover-search--state (:constructor drover-search--state-make)
                                     (:copier nil))
@@ -122,6 +136,7 @@ The backends searching are stopped once they reported that many."
   (keys nil :documentation "Hash table of the entries by session key.")
   (engines nil :documentation "Hash table of the entries by engine key.")
   (widths nil :documentation "(TITLE . LOCATION), the columns annotations pad to.")
+  (fetched 0 :documentation "The `drover-fetched-serial' its entries were made at.")
   (minibuffer nil :documentation "The minibuffer reading the search, or nil.")
   (query nil :documentation "The text typed last, trimmed.")
   (words nil :documentation "The words of QUERY, downcased.")
@@ -130,7 +145,10 @@ The backends searching are stopped once they reported that many."
   (text-query nil :documentation "The text the backends were asked for last.")
   (hits nil :documentation "Hash table of the matches of text by session key.
 Each is a plist of :snippet, :count, :backend and :position.")
-  (outside 0 :documentation "Matches naming sessions the search does not offer.")
+  (unresolved nil :documentation "Matches naming sessions it does not offer, newest first.
+Each is (BACKEND . MATCH), MATCH bounded; one whose session arrives later,
+as one fetched, becomes a hit.")
+  (outside 0 :documentation "How many matches are unresolved.")
   (received 0 :documentation "Matches the backends reported in this run.")
   (failed nil :documentation "The backends that failed, an alist (BACKEND . MESSAGE).")
   (delay-timer nil :documentation "The timer asking the backends once typing paused.")
@@ -139,6 +157,8 @@ Each is a plist of :snippet, :count, :backend and :position.")
   (overlay nil :documentation "The overlay telling how the backends search.")
   (starting nil :documentation "Non-nil while the backends are being asked.")
   (asked 0 :documentation "How many backends searched in the latest run.")
+  (awaiting nil :documentation "Non-nil while its end waits for sessions being fetched.")
+  (await-timer nil :documentation "The timer ending that wait.")
   (done nil :documentation "Function called once every backend finished, or nil.
 For `drover-search-text'."))
 
@@ -155,8 +175,7 @@ For `drover-search-text'."))
 
 (defvar drover-search--exit nil
   "What leaving the minibuffer of the search does.
-Nil opens the session chosen, `locate' shows its row in the list,
-`scope' opens the menu of what the search searches.")
+Nil opens the session chosen, `locate' shows its row in the list.")
 
 (defun drover-search--live (&optional state)
   "Return STATE, or the search in progress, when of the current layout, else nil."
@@ -165,14 +184,42 @@ Nil opens the session chosen, `locate' shows its row in the list,
          (drover-layout-current-p state 'drover-search--state)
          state)))
 
+(defun drover-search--states ()
+  "Return the searches in progress: the minibuffer's and `drover-search-text''s."
+  (delq nil (list (drover-search--live) (drover-search--live drover-search--programmatic))))
+
+(defun drover-search--follow-changes ()
+  "Follow the sessions changing while a search is in progress, and only then."
+  (if (drover-search--states)
+      (add-hook 'drover-changed-hook #'drover-search--changed)
+    (remove-hook 'drover-changed-hook #'drover-search--changed)))
+
 ;;;; Candidates
 
-(defun drover-search--sessions ()
-  "Return the sessions a search offers, those lists show, before filtering."
-  (let ((live (drover-index-sessions)))
-    (if (or drover-show-history drover-show-archived)
-        (drover-known-sessions live)
-      live)))
+(defun drover-search--fetch ()
+  "Have the backends fetch the older and archived sessions a search offers.
+Those fetched less than `drover-search-fetch-age' seconds ago serve as
+they are; all are kept for the searches to come (see
+`drover-keep-fetched')."
+  (drover-keep-fetched '(history archived) drover-search-fetch-age))
+
+(defun drover-search--tiers (live)
+  "Return a hash table telling the sessions LIVE are among the live ones."
+  (let ((table (make-hash-table :test #'equal :size (length live))))
+    (dolist (session live)
+      (puthash (drover-session-key session) t table))
+    table))
+
+(defun drover-search--tier (session live)
+  "Return whether SESSION is `live', `archived' or `older'.
+LIVE is the table of `drover-search--tiers'."
+  (cond ((drover-session-archived session) 'archived)
+        ((gethash (drover-session-key session) live) 'live)
+        (t 'older)))
+
+(defun drover-search--rank (tier)
+  "Return where sessions of TIER come in a group, a number."
+  (pcase tier ('live 0) ('archived 1) (_ 2)))
 
 (defun drover-search--texts (session backends)
   "Return the texts the backends tell for searching SESSION, bounded.
@@ -209,23 +256,20 @@ conversations (see :recorded in `drover-register-backend')."
   (and group (drover-group-label (car group) (cdr group))))
 
 (defun drover-search--build (&optional now)
-  "Return a new search over the sessions lists show, at NOW.
-Every session of the trees `drover-filter' keeps is an entry, in the
-order the list shows them: each tree after `drover-view-arrange',
-subagents under their parent, those the list hides marked so."
+  "Return a new search over every session drover knows, at NOW.
+Every session is an entry, live, archived or older, whatever the list's
+filter and the subagents it shows: in the order the list draws them,
+each tree after `drover-view-arrange', subagents under their parent,
+and within each group the trees of live sessions first, then those of
+archived ones, then those of older ones.  The sessions at the top of
+their trees, not subagents, are offered before anything is typed;
+archived ones dimmed."
   (let* ((now (or now (float-time)))
-         (trees (drover-tree (drover-search--sessions)))
-         (kept trees)
-         (visible nil))
-    (if (drover-filter-active-p)
-        (pcase-let ((`(,cut . ,shown) (drover--filter-trees trees drover-filter)))
-          (setq kept cut
-                visible (drover-tree-visible
-                         cut (lambda (node)
-                               (gethash (drover-session-key (drover-node-session node)) shown)))))
-      (setq visible (drover-tree-visible trees)))
-    (let ((shown (make-hash-table :test #'equal))
-          (titles (make-hash-table :test #'equal))
+         (serial (drover-fetched-serial))
+         (live (drover-index-sessions))
+         (tiers (drover-search--tiers live))
+         (trees (drover-tree (drover-known-sessions live t))))
+    (let ((titles (make-hash-table :test #'equal))
           (backends (make-hash-table :test #'eq))
           (entries nil)
           (names (make-hash-table :test #'equal))
@@ -233,9 +277,7 @@ subagents under their parent, those the list hides marked so."
           (engines (make-hash-table :test #'equal))
           (title-width 0)
           (location-width 0))
-      (dolist (session (drover-tree-sessions visible))
-        (puthash (drover-session-key session) t shown))
-      (pcase-dolist (`(,group . ,nodes) (drover-view-arrange kept now))
+      (pcase-dolist (`(,group . ,nodes) (drover-view-arrange trees now))
         (let ((title (drover-search--group-title group)))
           (cl-labels ((walk (node depth)
                         (let* ((session (drover-node-session node))
@@ -243,8 +285,9 @@ subagents under their parent, those the list hides marked so."
                           (unless (gethash key keys)
                             (let ((entry (drover-search--entry-make
                                           :session session :key key :depth depth
-                                          :visible (gethash key shown)
+                                          :visible (and (= depth 0) (null (drover-session-parent session)))
                                           :group title
+                                          :tier (drover-search--tier session tiers)
                                           :haystack (drover-search--haystack
                                                      session (drover-search--texts session backends)))))
                               (puthash key entry keys)
@@ -255,7 +298,10 @@ subagents under their parent, those the list hides marked so."
                               (push entry entries)))
                           (dolist (child (drover-node-children node))
                             (walk child (1+ depth))))))
-            (dolist (node nodes)
+            (dolist (node (seq-sort-by (lambda (node)
+                                         (drover-search--rank
+                                          (drover-search--tier (drover-node-session node) tiers)))
+                                       #'< nodes))
               (walk node 0)))))
       (setq entries (nreverse entries))
       (dolist (entry entries)
@@ -269,6 +315,9 @@ subagents under their parent, those the list hides marked so."
           (while (gethash name names)
             (setq counter (1+ counter)
                   name (format "%s <%d>" base counter)))
+          (when (eq (drover-search--entry-tier entry) 'archived)
+            (setq name (copy-sequence name))
+            (add-face-text-property 0 (length name) 'drover-dim t name))
           (puthash name entry names)
           (setf (drover-search--entry-name entry) name)
           (setq title-width (max title-width (min drover-search-title-width (string-width name)))
@@ -279,6 +328,7 @@ subagents under their parent, those the list hides marked so."
        :stamp (drover-layout 'drover-search--state 'drover-search--entry)
        :entries (vconcat entries) :names names :keys keys :engines engines
        :widths (cons title-width location-width)
+       :fetched serial
        :hits (make-hash-table :test #'equal)))))
 
 (defun drover-search--words (query)
@@ -298,12 +348,11 @@ subagents under their parent, those the list hides marked so."
   "Return the entries of STATE matching QUERY, in the list's order.
 An entry matches when every word of QUERY is in what it tells, or when
 a backend found QUERY in what its session said (see the hits of
-STATE).  A subagent the list hides shows when it matches and no session
-above it does, at the top of a tree of its own or not: the list shows
-such a subagent under a filter only below a parent it lists, while a
-search looks for it.  Without words, the entries the list shows.  It
-allocates nothing but
-the list it returns, as it runs at every key typed."
+STATE).  A subagent shows when it matches and no session above it
+does, at the top of a tree of its own or not, so that a matching parent
+does not bring every subagent of its.  Without words, the sessions at
+the top of their trees.  It allocates nothing but the list it returns,
+as it runs at every key typed."
   (let* ((words (drover-search--words query))
          (hits (drover-search--state-hits state))
          (any-hits (> (hash-table-count hits) 0))
@@ -371,14 +420,14 @@ or by :engine and :id, and :host for a session of another host."
 
 (defun drover-search--scope (state)
   "Return the scope the backends search within for STATE, a plist.
-Its :wanted tells whether the search offers the session of a match;
-its :sessions, a function of a backend, the sessions of that backend
-it offers, for a backend searching elsewhere, as a peer's, to name
-them there."
+Every session, older and archived ones too, unfiltered.  Its :wanted
+tells whether the search offers the session of a match; its :sessions,
+a function of a backend, the sessions of that backend it offers, for a
+backend searching elsewhere, as a peer's, to name them there."
   (let ((link (drover-link state)))
-    (list :filter drover-filter
-          :history drover-show-history
-          :archived drover-show-archived
+    (list :filter nil
+          :history t
+          :archived t
           :limit drover-search-text-limit
           :wanted (lambda (match)
                     (when-let* ((state (drover-linked link)))
@@ -445,6 +494,7 @@ Those failed before in this search are not asked again."
   (setf (drover-search--state-text-query state) query
         (drover-search--state-received state) 0
         (drover-search--state-asked state) 0
+        (drover-search--state-unresolved state) nil
         (drover-search--state-outside state) 0)
   (let ((generation (drover-search--state-generation state))
         (scope (drover-search--scope state)))
@@ -498,23 +548,16 @@ RESULT is a list of matches, the symbol `done', or (:failure MESSAGE)."
                                                               drover-error-length)
                                            "failed")))
    ((listp result)
-    (let ((hits (drover-search--state-hits state))
-          (added nil))
+    (let ((added nil))
       (dolist (match result)
         (when (and (listp match)
                    (< (drover-search--state-received state) drover-search-text-limit))
           (cl-incf (drover-search--state-received state))
           (if-let* ((entry (drover-search--resolve state match)))
-              (let* ((key (drover-search--entry-key entry))
-                     (hit (gethash key hits)))
-                (if hit
-                    (plist-put hit :count (1+ (plist-get hit :count)))
-                  (setq added t)
-                  (puthash key (list :snippet (drover-bound-line (plist-get match :snippet)
-                                                                 drover-search-snippet-length)
-                                     :count 1 :backend backend
-                                     :position (plist-get match :position))
-                           hits)))
+              (when (drover-search--hit state entry backend match)
+                (setq added t))
+            (push (cons backend (drover-search--bound-match match))
+                  (drover-search--state-unresolved state))
             (cl-incf (drover-search--state-outside state)))))
       ;; Enough: the backends stop, what they found staying.
       (when (>= (drover-search--state-received state) drover-search-text-limit)
@@ -523,6 +566,49 @@ RESULT is a list of matches, the symbol `done', or (:failure MESSAGE)."
         (drover-search--refresh-soon state))
       (drover-search--show-status state)
       (drover-search--maybe-done state)))))
+
+(defun drover-search--hit (state entry backend match)
+  "Note in STATE that BACKEND found MATCH in the session of ENTRY.
+A session matched before keeps its first snippet, counting the others.
+Return non-nil when the session was not matched before."
+  (let* ((hits (drover-search--state-hits state))
+         (key (drover-search--entry-key entry))
+         (hit (gethash key hits)))
+    (if hit
+        (progn (plist-put hit :count (1+ (plist-get hit :count)))
+               nil)
+      (puthash key (list :snippet (drover-bound-line (plist-get match :snippet)
+                                                     drover-search-snippet-length)
+                         :count 1 :backend backend
+                         :position (plist-get match :position))
+               hits)
+      t)))
+
+(defun drover-search--bound-match (match)
+  "Return what a search keeps of MATCH, a backend's, bounded."
+  (let ((position (plist-get match :position)))
+    (list :key (plist-get match :key)
+          :engine (plist-get match :engine)
+          :id (plist-get match :id)
+          :host (plist-get match :host)
+          :snippet (drover-bound-line (plist-get match :snippet) drover-search-snippet-length)
+          :position (if (stringp position) (drover-bound-line position) position))))
+
+(defun drover-search--resolve-unresolved (state)
+  "Take into STATE the matches of sessions it offers now, and did not before.
+As a session fetched arrives after what a backend found in it.  Return
+non-nil when a session was matched anew."
+  (let ((left nil)
+        (added nil))
+    (pcase-dolist (`(,backend . ,match) (reverse (drover-search--state-unresolved state)))
+      (if-let* ((entry (drover-search--resolve state match)))
+          (progn
+            (cl-decf (drover-search--state-outside state))
+            (when (drover-search--hit state entry backend match)
+              (setq added t)))
+        (push (cons backend match) left)))
+    (setf (drover-search--state-unresolved state) left)
+    added))
 
 (defun drover-search--fail (state backend message)
   "Note that BACKEND failed to search for STATE, telling MESSAGE once.
@@ -537,14 +623,46 @@ It is not asked again in this search."
   (drover-search--maybe-done state))
 
 (defun drover-search--maybe-done (state)
-  "Call the function waiting for STATE's backends once none runs."
+  "Call the function waiting for STATE's backends once none runs.
+Nor while it waits for sessions being fetched, which matches may name."
   (when (and (null (drover-search--state-runs state))
              (null (drover-search--state-delay-timer state))
              (not (drover-search--state-starting state))
+             (not (drover-search--state-awaiting state))
              (drover-search--state-done state))
     (let ((done (drover-search--state-done state)))
       (setf (drover-search--state-done state) nil)
       (funcall done state))))
+
+(defun drover-search--await-fetch (state)
+  "Have the end of STATE wait for the sessions being fetched, if any.
+At most `drover-search-fetch-timeout' seconds, as a backend may never
+answer."
+  (when (drover-fetch-pending-p drover-search-fetch-timeout)
+    (setf (drover-search--state-awaiting state) t
+          (drover-search--state-await-timer state)
+          (run-with-timer drover-search-fetch-timeout nil #'drover-search--fetch-waited
+                          (drover-link state)))))
+
+(defun drover-search--fetch-waited (link)
+  "End the wait for sessions being fetched of the search LINK holds."
+  (drover-with-reporting "search"
+    (when-let* ((state (drover-linked link))
+                ((drover-search--live state)))
+      (setf (drover-search--state-await-timer state) nil
+            (drover-search--state-awaiting state) nil)
+      (drover-search--rebuild state)
+      (drover-search--maybe-done state))))
+
+(defun drover-search--settle-fetch (state)
+  "End STATE's wait for sessions being fetched once none is."
+  (when (and (drover-search--state-awaiting state)
+             (not (drover-fetch-pending-p drover-search-fetch-timeout)))
+    (when (timerp (drover-search--state-await-timer state))
+      (cancel-timer (drover-search--state-await-timer state)))
+    (setf (drover-search--state-await-timer state) nil
+          (drover-search--state-awaiting state) nil)
+    (drover-search--maybe-done state)))
 
 ;;;; Showing what comes
 
@@ -563,7 +681,10 @@ It is not asked again in this search."
       (drover--refresh-completion (drover-search--state-minibuffer state)))))
 
 (defun drover-search--status-text (state)
-  "Return how the backends search for STATE, for the minibuffer, or nil."
+  "Return how the backends search for STATE, for the minibuffer, or nil.
+How many sessions they found, how many matches name sessions drover
+does not list, whether older or archived sessions are being fetched,
+and which backends failed."
   (let ((parts nil)
         (hits (hash-table-count (drover-search--state-hits state))))
     (cond ((drover-search--state-runs state)
@@ -571,7 +692,9 @@ It is not asked again in this search."
           ((and (drover-search--state-text-query state) (> (drover-search--state-asked state) 0))
            (push (format "%d in text" hits) parts)))
     (when (> (drover-search--state-outside state) 0)
-      (push (format "%d out of scope" (drover-search--state-outside state)) parts))
+      (push (format "%d not listed" (drover-search--state-outside state)) parts))
+    (when (drover-fetch-pending-p drover-search-fetch-timeout)
+      (push "fetching sessions…" parts))
     (pcase-dolist (`(,backend . ,_) (drover-search--state-failed state))
       (push (format "%s failed" (drover-backend-label backend)) parts))
     (and parts (concat "[" (string-join (nreverse parts) ", ") "] "))))
@@ -592,48 +715,77 @@ It is not asked again in this search."
 ;;;; Sessions changing while searching
 
 (defun drover-search--changed ()
-  "Follow the sessions changed in the search in progress.
-On `drover-changed-hook' while a search is in progress.  A session
-changed takes its new record and texts in place, its place staying, so
-that candidates do not move under the user's eyes; sessions coming or
-going, or anything having changed, make the candidates anew in a
-moment (see `drover-search-rebuild-delay')."
+  "Follow the sessions changed in the searches in progress.
+On `drover-changed-hook' while a search is in progress: see
+`drover-search--follow'."
   (drover-with-reporting "search"
-    (when-let* ((state (drover-search--live)))
-      (let ((changed drover-changed-sessions)
-            (keys (drover-search--state-keys state))
-            (backends (make-hash-table :test #'eq))
-            (anew (eq drover-changed-sessions t))
-            (updated nil))
-        (unless anew
-          (dolist (key changed)
-            (let ((entry (gethash key keys))
-                  (record (drover-find (car key) (cdr key))))
-              (cond ((and entry record)
-                     (setf (drover-search--entry-session entry) record
-                           (drover-search--entry-haystack entry)
-                           (drover-search--haystack record (drover-search--texts record backends))
-                           updated t))
-                    ((or entry record) (setq anew t))))))
-        (when (and anew (not (timerp (drover-search--state-rebuild-timer state))))
-          (setf (drover-search--state-rebuild-timer state)
-                (run-with-timer drover-search-rebuild-delay nil #'drover-search--rebuild)))
-        (when updated
-          (drover-search--refresh-soon state))))))
+    (dolist (state (drover-search--states))
+      (drover-search--follow state))))
 
-(defun drover-search--rebuild ()
-  "Make the candidates of the search in progress anew, and show them.
-The text typed and what the backends found stay."
+(defun drover-search--follow (state)
+  "Follow in STATE the sessions `drover-changed-sessions' tells changed.
+A session changed takes its new record and texts in place, its place
+staying, so that candidates do not move under the user's eyes; sessions
+coming or going, the older or archived ones fetched changing, or
+anything having changed, make the candidates anew: in a moment for the
+minibuffer (see `drover-search-rebuild-delay'), at once for
+`drover-search-text'."
+  (let ((changed drover-changed-sessions)
+        (keys (drover-search--state-keys state))
+        (backends (make-hash-table :test #'eq))
+        (anew (or (eq drover-changed-sessions t)
+                  (/= (drover-search--state-fetched state) (drover-fetched-serial))))
+        (updated nil))
+    (unless anew
+      (dolist (key changed)
+        (let ((entry (gethash key keys))
+              (record (drover-find (car key) (cdr key))))
+          (cond ((and entry record)
+                 (setf (drover-search--entry-session entry) record
+                       (drover-search--entry-haystack entry)
+                       (drover-search--haystack record (drover-search--texts record backends))
+                       updated t))
+                ((or entry record) (setq anew t))))))
+    (cond ((not anew))
+          ((eq state drover-search--programmatic)
+           (drover-search--rebuild state))
+          ((not (timerp (drover-search--state-rebuild-timer state)))
+           (setf (drover-search--state-rebuild-timer state)
+                 (run-with-timer drover-search-rebuild-delay nil #'drover-search--rebuild-later
+                                 (drover-link state)))))
+    (when updated
+      (drover-search--refresh-soon state))
+    (drover-search--settle-fetch state)))
+
+(defun drover-search--rebuild-later (link)
+  "Make the candidates of the search LINK holds anew, if still in progress."
   (drover-with-reporting "search"
-    (when-let* ((state (drover-search--live)))
+    (when-let* ((state (drover-linked link))
+                ((drover-search--live state)))
       (setf (drover-search--state-rebuild-timer state) nil)
-      (let ((fresh (drover-search--build)))
-        (setf (drover-search--state-entries state) (drover-search--state-entries fresh)
-              (drover-search--state-names state) (drover-search--state-names fresh)
-              (drover-search--state-keys state) (drover-search--state-keys fresh)
-              (drover-search--state-engines state) (drover-search--state-engines fresh)
-              (drover-search--state-widths state) (drover-search--state-widths fresh)))
-      (drover--refresh-completion (drover-search--state-minibuffer state)))))
+      (drover-search--rebuild state))))
+
+(defun drover-search--rebuild (&optional state)
+  "Make the candidates of STATE, or of the search in progress, anew, and show them.
+The text typed and what the backends found stay; the matches naming
+sessions it did not offer before, which it may now, are taken in."
+  (when-let* ((state (drover-search--live state)))
+    (when (timerp (drover-search--state-rebuild-timer state))
+      (cancel-timer (drover-search--state-rebuild-timer state)))
+    (setf (drover-search--state-rebuild-timer state) nil)
+    (let ((fresh (drover-search--build)))
+      (setf (drover-search--state-entries state) (drover-search--state-entries fresh)
+            (drover-search--state-names state) (drover-search--state-names fresh)
+            (drover-search--state-keys state) (drover-search--state-keys fresh)
+            (drover-search--state-engines state) (drover-search--state-engines fresh)
+            (drover-search--state-widths state) (drover-search--state-widths fresh)
+            (drover-search--state-fetched state) (drover-search--state-fetched fresh)))
+    (when (drover-search--state-unresolved state)
+      (drover-search--resolve-unresolved state))
+    (drover-search--show-status state)
+    (when (buffer-live-p (drover-search--state-minibuffer state))
+      (drover--refresh-completion (drover-search--state-minibuffer state)))
+    (drover-search--settle-fetch state)))
 
 ;;;; Completion
 
@@ -677,10 +829,10 @@ The text typed and what the backends found stay."
 
 (defun drover-search--affixation (names)
   "Return NAMES with their prefixes and suffixes, as the search shows them.
-Before a name, the status of its session, its harness, and an arrow
-for a subagent; after, its project and branch, its host when of another
-host, its age, and the snippet of a match of what was said, else why it
-has its status."
+Before a name, the status of its session, its harness, the archive's
+glyph for an archived session, and an arrow for a subagent; after, its
+project and branch, its host when of another host, its age, and the
+snippet of a match of what was said, else why it has its status."
   (if-let* ((state (drover-search--live)))
       (let* ((widths (drover-search--state-widths state))
              (hits (drover-search--state-hits state))
@@ -696,6 +848,7 @@ has its status."
                  (list name
                        (concat (opencode-session-status-glyph (drover-session-status session)) " "
                                (drover-harness-glyph (drover-session-harness session)) " "
+                               (if (drover-session-archived session) (concat (opencode-archived-glyph) " ") "")
                                (if (> (drover-search--entry-depth entry) 0) (drover-face "↳ " 'drover-dim) ""))
                        (concat (make-string (max 0 (- (car widths) (string-width name))) ?\s)
                                "  "
@@ -776,20 +929,11 @@ As the style `drover-search': the table matches STRING as a whole."
 
 (defvar-keymap drover-search-minibuffer-map
   :doc "Keys of the minibuffer of `drover-search'."
-  "C-l" #'drover-search-locate
-  "C-'" #'drover-search-scope
-  "<remap> <drover-dispatch>" #'drover-search-scope)
-
-(defun drover-search-scope ()
-  "Leave the search for the menu of what it searches, keeping the text typed.
-The menu sets the view settings the list shares, which scope the
-search; its RET, or C-', searches again with the text."
-  (interactive)
-  (setq drover-search--exit 'scope)
-  (exit-minibuffer))
+  "C-l" #'drover-search-locate)
 
 (defun drover-search-locate ()
-  "Show the row of the session chosen in drover's list, rather than open it."
+  "Show the row of the session chosen in drover's list, rather than open it.
+What the list hid of it shows first: see `drover-search--reveal'."
   (interactive)
   (setq drover-search--exit 'locate)
   (let ((command (key-binding (kbd "RET"))))
@@ -801,29 +945,17 @@ search; its RET, or C-', searches again with the text."
   (use-local-map (make-composed-keymap drover-search-minibuffer-map (current-local-map)))
   (drover-search--show-status state))
 
-(defun drover-search--prompt ()
-  "Return the prompt of the search, telling what scopes it.
-That is what the view settings of its menu set: the filter, the older
-and archived sessions shown, and the subagents shown, but the active
-ones, the default."
-  (let ((scope (delq nil (list (drover-filter-description)
-                               (pcase (default-value 'drover-show-subagents)
-                                 ('all "+subagents")
-                                 ('none "-subagents"))
-                               (and drover-show-history "+older")
-                               (and drover-show-archived "+archived")))))
-    (format "Search sessions%s: "
-            (if scope (format " (%s)" (string-join scope ", ")) ""))))
-
 (defun drover-search--finish (state)
   "End STATE: its backends stop, its timers and its overlay go."
   (drover-search--cancel state)
   (dolist (timer (list (drover-search--state-refresh-timer state)
-                       (drover-search--state-rebuild-timer state)))
+                       (drover-search--state-rebuild-timer state)
+                       (drover-search--state-await-timer state)))
     (when (timerp timer)
       (cancel-timer timer)))
   (setf (drover-search--state-refresh-timer state) nil
-        (drover-search--state-rebuild-timer state) nil)
+        (drover-search--state-rebuild-timer state) nil
+        (drover-search--state-await-timer state) nil)
   (when (overlayp (drover-search--state-overlay state))
     (delete-overlay (drover-search--state-overlay state)))
   (setf (drover-search--state-overlay state) nil
@@ -842,31 +974,61 @@ candidate it matches."
     (or (drover-find (drover-session-backend session) (drover-session-id session))
         session)))
 
+(defun drover-search--subagent-hidden-p (session)
+  "Return non-nil when the subagent mode may hide SESSION from the list.
+That is when SESSION is a subagent and the mode shows not every one,
+nor, being `active', SESSION, in the middle of a turn."
+  (and (drover-session-parent session)
+       (pcase (default-value 'drover-show-subagents)
+         ('all nil)
+         ('active (not (drover-session-active-p session)))
+         (_ t))))
+
+(defun drover-search--reveal (session tier)
+  "Show the row of SESSION in drover's list, showing first what hides it there.
+TIER tells whether SESSION is `live', `archived' or `older' (see
+`drover-search--tier').  The search offers every session, whatever the
+list shows: the list shows archived or older sessions from then on when
+SESSION is one, its filter is cleared, and every subagent shows when
+the subagent mode may hide SESSION (see
+`drover-search--subagent-hidden-p')."
+  (when (and (eq tier 'archived) (not drover-show-archived))
+    (drover-set-show-archived t))
+  (when (and (eq tier 'older) (not drover-show-history))
+    (drover-set-show-history t))
+  (when (drover-filter-active-p)
+    (drover-filter-clear))
+  (when (drover-search--subagent-hidden-p session)
+    (drover-set-show-subagents 'all))
+  (drover-list-reveal session))
+
 ;;;###autoload
 (defun drover-search (&optional initial other-window)
   "Search the sessions, and open the one chosen.
-The sessions offered are those the list shows, in its order, scoped by
-the view settings it shares: `drover-filter', the older and archived
-sessions while shown, the subagents shown.  Those matching every word
-typed in their title, summary, project, branch, or texts their backends
-tell, such as the prompts of Claude Code's conversations, show as you
-type; once typing pauses, the backends that can search what was said
-in their conversations, those of `drover-search-sources', add the
-sessions where they found the text, a snippet beside them.
+Every session is offered, live, archived and older, whatever the list
+shows, in the list's order and groups, the live ones first in each
+group.  The archived and older sessions are those the backends fetch:
+the first search fetches them, and drover keeps them from then on (see
+`drover-search-fetch-age').  Those matching every word typed in their
+title, summary, project, branch, or texts their backends tell, such as
+the prompts of Claude Code's conversations, show as you type; once
+typing pauses, the backends that can search what was said in their
+conversations, those of `drover-search-sources', add the sessions
+where they found the text, a snippet beside them.  Subagents show only
+when they match and no session above them does.
 
 RET opens the session chosen as RET in the list does, in another
 window with a prefix argument OTHER-WINDOW;
-\\<drover-search-minibuffer-map>\\[drover-search-locate] shows its row in the list instead.
-\\[drover-search-scope], or the key of `drover-dispatch', leaves for the
-menu of the settings scoping the search, on the keys the list's menu
-gives them, from which RET searches again.  INITIAL is the text to
-start with."
+\\<drover-search-minibuffer-map>\\[drover-search-locate] shows its row in the list instead, showing
+first the archived or older sessions, the filtered ones and the
+subagents, as the list hid it.  INITIAL is the text to start with."
   (interactive (list nil current-prefix-arg))
   (drover-start)
   (when-let* ((state (drover-search--live)))
     (if (buffer-live-p (drover-search--state-minibuffer state))
         (user-error "A search of sessions is in progress")
       (drover-search--finish state)))
+  (drover-search--fetch)
   (let* ((state (drover-search--build))
          ;; No other style: one finding nothing would ask the table for
          ;; other texts than the one typed.
@@ -877,103 +1039,52 @@ start with."
          (input nil)
          (entry nil))
     (setq drover-search--current state)
-    (add-hook 'drover-changed-hook #'drover-search--changed)
+    (drover-search--follow-changes)
     (unwind-protect
         (let ((drover-search--exit nil))
           (setq input (minibuffer-with-setup-hook (lambda () (drover-search--setup state))
-                        (completing-read (drover-search--prompt) #'drover-search--table nil nil
+                        (completing-read "Search sessions: " #'drover-search--table nil nil
                                          initial 'drover-search-history))
-                exit drover-search--exit)
-          (unless (eq exit 'scope)
-            (setq entry (drover-search--chosen state input))))
+                exit drover-search--exit
+                entry (drover-search--chosen state input)))
       (drover-search--finish state)
-      (remove-hook 'drover-changed-hook #'drover-search--changed)
-      (setq drover-search--current nil))
-    (cond ((eq exit 'scope) (drover-search-menu input))
-          ((null entry) (user-error "No session matches %s" input))
-          ((eq exit 'locate) (drover-list-reveal (drover-search--session entry)))
+      (setq drover-search--current nil)
+      (drover-search--follow-changes))
+    (cond ((null entry) (user-error "No session matches %s" input))
+          ((eq exit 'locate) (drover-search--reveal (drover-search--session entry)
+                                                    (drover-search--entry-tier entry)))
           (t (drover-open (drover-search--session entry) other-window)))))
-
-;;;; The menu of what it searches
-
-(defun drover-search--menu-input ()
-  "Return the text the search menu searches again with."
-  (or (transient-scope 'drover-search-menu) ""))
-
-(defun drover-search--menu-description ()
-  "Return the title of the search menu's first group, naming the text."
-  (let ((input (drover-search--menu-input)))
-    (if (string-empty-p input)
-        "Search"
-      (concat "Search " (propertize (drover--menu-value (format "\"%s\"" input) 40)
-                                    'face 'transient-value)))))
-
-(defvar drover-search--menu-keys nil
-  "The keys searching again from the search menu, besides RET.
-C-' and the keys of `drover-dispatch', which open the menu from the
-minibuffer of the search.")
-
-(defun drover-search--menu-return-entries (_children)
-  "Return the entries of the search menu searching again on its other keys.
-See `drover-search--menu-keys'."
-  (transient-parse-suffixes 'drover-search-menu
-                            (mapcar (lambda (key)
-                                      (list (key-description key) "Search" 'drover-search-resume))
-                                    drover-search--menu-keys)))
-
-(defun drover-search-resume ()
-  "Search again, with the text typed before the menu opened."
-  (interactive)
-  (drover-search (drover-search--menu-input)))
-
-(transient-define-prefix drover-search-menu (&optional input)
-  "Choose what the search of sessions searches, then search INPUT again.
-The entries are the view settings of `drover-dispatch' that scope the
-search, on the same keys (`drover--view-columns'): the subagents, older
-and archived sessions shown, and the filter of each field.
-They scope the list too, which shares them.  RET, C-' or the key of
-`drover-dispatch', those leaving the minibuffer for it, search again
-with the text typed."
-  :class 'drover--menu-prefix
-  :refresh-suffixes t
-  [:class drover--menu-flow
-   [:description drover-search--menu-description
-    ("RET" "Search" drover-search-resume)]
-   drover--view-columns]
-  ;; The keys leaving the minibuffer for the menu come back.
-  [:class transient-column
-   :hide always
-   :setup-children drover-search--menu-return-entries]
-  drover--menu-close
-  (interactive)
-  (setq drover-search--menu-keys (delete-dups (cons (kbd "C-'") (drover--dispatch-own-keys))))
-  (transient-setup 'drover-search-menu nil nil :scope (or input "")
-                   :display-action drover-menu-display-action))
 
 ;;;; Without the minibuffer
 
 (defun drover-search-sessions (query)
   "Return the sessions matching QUERY, in the list's order.
 They are those `drover-search' offers as QUERY is typed, before the
-backends search what was said."
+backends search what was said: the older and archived sessions that
+have been fetched among them."
+  (drover-search--fetch)
   (mapcar #'drover-search--entry-session (drover-search-entries (drover-search--build) query)))
 
 (defun drover-search-text (query callback)
   "Search what was said in the sessions for QUERY, then call CALLBACK.
 Every backend of `drover-search-sources' is asked, as `drover-search'
-asks them, at once.  CALLBACK gets a plist, once all of them finished:
-:sessions, a list of (SESSION SNIPPET COUNT) in the list's order;
-:outside, how many matches named sessions the search does not offer;
-:failed, an alist (BACKEND . MESSAGE).  Return a function stopping the
-search, after which CALLBACK is not called.  One search runs at a time:
-a new one stops the one before."
+asks them, at once.  CALLBACK gets a plist, once all of them finished
+and the older and archived sessions being fetched arrived,
+`drover-search-fetch-timeout' seconds at most: :sessions, a list of
+\(SESSION SNIPPET COUNT) in the list's order; :outside, how many matches
+named sessions drover does not list; :failed, an alist (BACKEND .
+MESSAGE).  Return a function stopping the search, after which CALLBACK
+is not called.  One search runs at a time: a new one stops the one
+before."
   (when-let* ((old (drover-search--live drover-search--programmatic)))
     (drover-search--finish old))
+  (drover-search--fetch)
   (let ((state (drover-search--build)))
     (setf (drover-search--state-done state)
           (lambda (state)
             (when (eq state drover-search--programmatic)
-              (setq drover-search--programmatic nil))
+              (setq drover-search--programmatic nil)
+              (drover-search--follow-changes))
             (let ((hits (drover-search--state-hits state))
                   (found nil))
               (seq-doseq (entry (drover-search--state-entries state))
@@ -985,6 +1096,9 @@ a new one stops the one before."
                                       :outside (drover-search--state-outside state)
                                       :failed (drover-search--state-failed state))))))
     (setq drover-search--programmatic state)
+    (drover-search--follow-changes)
+    ;; Before the backends are asked, which may all answer at once.
+    (drover-search--await-fetch state)
     (drover-search--start state (string-trim query))
     ;; Held through a link: the caller keeps it, and Emacs prints it, as
     ;; the server prints a value evaluated, whole otherwise.
@@ -992,7 +1106,8 @@ a new one stops the one before."
       (lambda ()
         (when-let* ((state (drover-linked link)))
           (when (eq drover-search--programmatic state)
-            (setq drover-search--programmatic nil))
+            (setq drover-search--programmatic nil)
+            (drover-search--follow-changes))
           (setf (drover-search--state-done state) nil)
           (drover-search--finish state))))))
 

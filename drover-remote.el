@@ -69,7 +69,7 @@
 (require 'drover-selection)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 24))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
   (load "drover-core" nil t))
 
 (autoload 'drover-wrap-up-session "drover-wrap-up")
@@ -1486,8 +1486,9 @@ STATE is the remote layer's."
 (defun drover-remote--resume (peer)
   "Ask PEER again, connected anew, what a stream ending lost.
 The requests whose stream ended before their answer, the details of the
-sessions lists showed, and the older and archived sessions while lists
-show them, whose answers come in several messages, as when shown."
+sessions lists showed, and the older and archived sessions while they
+are wanted (see `drover-fetch-wanted-p'), whose answers come in several
+messages, as when shown."
   (let ((asks (drover-remote--peer-asks peer)))
     (setf (drover-remote--peer-asks peer) nil)
     (pcase-dolist (`(,message ,callback ,deadline ,timer) asks)
@@ -1496,8 +1497,8 @@ show them, whose answers come in several messages, as when shown."
   (when (car (drover-remote--peer-prefetch peer))
     (drover-remote--prefetch peer nil))
   (let ((backend (drover-remote--peer-backend peer)))
-    (when drover-show-history (drover-history-fetch backend))
-    (when drover-show-archived (drover-archived-fetch backend))))
+    (when (drover-fetch-wanted-p 'history) (drover-history-fetch backend))
+    (when (drover-fetch-wanted-p 'archived) (drover-archived-fetch backend))))
 
 (defun drover-remote--set-state (peer state)
   "Set PEER's STATE, redrawing what tells it when it changes."

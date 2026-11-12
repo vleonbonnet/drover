@@ -75,7 +75,7 @@
 (require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
   (load "drover-core" nil t))
 
 (defcustom drover-codex-program "codex"
@@ -666,7 +666,8 @@ The backend's :session."
   (let ((id (plist-get (or new old) :id)))
     (when id
       (drover-backend-changed 'codex id)
-      (when (and (or (plist-get old :archived) (plist-get new :archived)) drover-show-archived)
+      (when (and (or (plist-get old :archived) (plist-get new :archived))
+                 (drover-fetch-wanted-p 'archived))
         (drover-archived-fetch 'codex)))))
 
 (defun drover-codex-rollouts--looked ()
@@ -711,7 +712,7 @@ conversation.  The backend's :search-text."
 (defun drover-codex-rollouts--search (query scope callback)
   "Search the rollouts for QUERY said in prompts and replies, for CALLBACK.
 Those of the conversations the search offers, as the :wanted of SCOPE
-tells, archived ones while shown, are searched with ripgrep (see
+tells, archived ones included, are searched with ripgrep (see
 `drover-transcript-search'); CALLBACK gets matches naming each
 conversation by its engine and identifier.  The backend's :search."
   (when-let* ((index (drover-codex-rollouts--current-index)))

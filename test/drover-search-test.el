@@ -17,9 +17,10 @@
 
 ;;; Commentary:
 
-;; The search of sessions: what it matches as keys are typed, scoped by
-;; the view settings, in the list's order; the backends searching what
-;; was said, debounced, cancelled, bounded and merged; Claude Code's
+;; The search of sessions: what it matches as keys are typed, every
+;; session, older and archived ones fetched and kept, in the list's
+;; order; the backends searching what was said, debounced, cancelled,
+;; bounded and merged; Claude Code's
 ;; transcripts and Codex's rollouts searched with ripgrep, the real one
 ;; when installed, and scripts standing for it.  The minibuffer is not
 ;; read: the completion table and style are called as a completion UI
@@ -107,7 +108,7 @@ In STATE, by default a search made now."
     (should (equal (drover-search-test-ids "c1") '("c1")))))
 
 (ert-deftest drover-search-test-hidden-subagents ()
-  "A subagent the list hides shows when it matches and no session above it does."
+  "A subagent shows when it matches and no session above it does, whatever the mode."
   (drover-search-test-with
       (list (drover-test-session "p" :title "Parent" :updated 10.0)
             (drover-test-session "s" :title "Child task" :parent "p" :updated 9.0)
@@ -120,18 +121,16 @@ In STATE, by default a search made now."
                             ("p" "Parent") ("s" "Child task") ("q" "Other task") (_ "Other child task")))
                     session)
                   drover-test-sessions))
-    (should (equal (drover-search-test-ids "") '("p" "q")))
-    (should (equal (drover-search-test-ids "child") '("s" "t")))
-    ;; "Other" matches q: its subagent stays hidden, as the list hides it.
-    (should (equal (drover-search-test-ids "other") '("q")))
-    (let ((drover-show-subagents 'all))
-      (should (equal (drover-search-test-ids "") '("p" "s" "q" "t")))
-      (should (equal (drover-search-test-ids "other") '("q" "t"))))))
+    (dolist (mode '(active all none))
+      (ert-info ((format "%s" mode))
+        (let ((drover-show-subagents mode))
+          (should (equal (drover-search-test-ids "") '("p" "q")))
+          (should (equal (drover-search-test-ids "child") '("s" "t")))
+          ;; "Other" matches q: its subagent stays out, q explaining it.
+          (should (equal (drover-search-test-ids "other") '("q"))))))))
 
 (ert-deftest drover-search-test-hidden-orphan ()
-  "A subagent atop a tree of its own, hidden, is found by its words, filter or not.
-Its parent not listed, the list hides it under a filter as without one,
-and the search offers it once it matches."
+  "A subagent atop a tree of its own is found by its words, filter or not."
   (drover-search-test-with
       (list (drover-test-session "a" :title "Alpha" :updated 10.0)
             (drover-test-session "o" :title "Lonely helper" :parent "gone" :status 'idle :updated 9.0))
@@ -162,8 +161,8 @@ and the search offers it once it matches."
                                             (and (equal (drover-session-id session) "b") '("okapi"))))
     (should (equal (drover-search-test-ids "okapi") '("b")))))
 
-(ert-deftest drover-search-test-scoped-by-filter ()
-  "Each member of the filter scopes the search as it scopes the list."
+(ert-deftest drover-search-test-filter-ignored ()
+  "The list's filter, whatever it keeps, leaves the search every session."
   (let ((now (float-time)))
     (drover-search-test-with
         (list (drover-test-session "a" :status 'idle :updated (- now 10) :project "drover" :agent "build"
@@ -175,41 +174,102 @@ and the search offers it once it matches."
       (drover-test-register-simple 'other
                                    (list (drover-session-create :backend 'other :id "o" :title "Session o"
                                                                 :updated (- now 30) :host "core")))
-      (dolist (case `((:project "drover" ("a" "c"))
-                      (:statuses (waiting done) ("b" "c"))
-                      (:agent "plan" ("b"))
-                      (:model "Opus 5.5" ("a" "c"))
-                      (:provider "OpenAI" ("b"))
-                      (:harness other ("o"))
-                      (:host ("core") ("o"))
-                      (:host (local) ("a" "b" "c"))
-                      (:since ,(- now 100) ("a" "b" "o"))
-                      (:search "spy" ("b"))))
-        (pcase-let ((`(,key ,value ,expected) case))
-          (ert-info ((format "%s %S" key value))
-            (let ((drover-filter (list key value)))
-              (should (equal (drover-search-test-ids "") expected))
-              (should (equal (drover-search-test-ids "session") expected))
-              ;; Within the scope only.
-              (should (equal (drover-search-test-ids "session b") (and (member "b" expected) '("b")))))))))))
+      (let ((all (drover-search-test-ids "")))
+        (should (equal (sort all :lessp #'string<) '("a" "b" "c" "o")))
+        (dolist (filter `((:project "drover") (:statuses (waiting done)) (:agent "plan")
+                          (:harness other) (:host ("core")) (:since ,(- now 100)) (:search "spy")))
+          (ert-info ((format "%S" filter))
+            (let ((drover-filter filter))
+              (should (equal (drover-search-test-ids "") all))
+              (should (equal (drover-search-test-ids "session b") '("b")))
+              (let ((scope (drover-search--scope (drover-search--build))))
+                (should-not (plist-get scope :filter))
+                (should (plist-get scope :history))
+                (should (plist-get scope :archived))))))))))
+
+(defun drover-search-test-fetched-ids (query)
+  "Return the identifiers of the sessions QUERY matches, fetched as a search fetches."
+  (mapcar #'drover-session-id (drover-search-sessions query)))
 
 (ert-deftest drover-search-test-older-and-archived ()
-  "Older and archived sessions are searched while the list shows them."
-  (drover-search-test-with (list (drover-test-session "live" :updated 50.0))
-    (drover-register-backend 'fake :label "Fake" :sessions (lambda () drover-test-sessions)
-                             :history (lambda (callback)
-                                        (funcall callback (list (drover-test-session "old" :updated 5.0))))
-                             :archived (lambda (callback)
-                                         (funcall callback (list (drover-test-session "gone" :updated 9.0
-                                                                                      :archived 1.0)))))
-    (should (equal (drover-search-test-ids "session") '("live")))
-    (drover-set-show-history t)
-    (should (equal (drover-search-test-ids "session") '("live" "old")))
-    (drover-set-show-archived t)
-    (should (member "gone" (drover-search-test-ids "session")))
-    (drover-set-show-history nil)
-    (drover-set-show-archived nil)
-    (should (equal (drover-search-test-ids "session") '("live")))))
+  "Older and archived sessions are offered whatever the list shows, the live ones first.
+Fetched for the first search, kept for the next ones, fetched again
+once older than `drover-search-fetch-age', and kept while the list
+shows them and after it hides them."
+  (drover-search-test-with (list (drover-test-session "live" :updated 5.0))
+    (let ((fetches 0)
+          (drover-search-fetch-age 60))
+      (drover-register-backend 'fake :label "Fake" :sessions (lambda () drover-test-sessions)
+                               :history (lambda (callback)
+                                          (cl-incf fetches)
+                                          (funcall callback (list (drover-test-session "old" :updated 50.0))))
+                               :archived (lambda (callback)
+                                           (cl-incf fetches)
+                                           (funcall callback (list (drover-test-session "gone" :updated 9.0
+                                                                                        :archived 1.0)))))
+      ;; Live first, then archived, then older, whatever their activity.
+      (should (equal (drover-search-test-fetched-ids "") '("live" "gone" "old")))
+      (should (equal (drover-search-test-fetched-ids "session") '("live" "gone" "old")))
+      (should (= fetches 2))
+      ;; The list still shows the live session alone.
+      (should (equal (mapcar #'drover-session-id (drover-known-sessions)) '("live")))
+      (should (drover-fetch-wanted-p 'archived))
+      ;; Kept: not fetched again so soon.
+      (should (equal (drover-search-test-fetched-ids "gone") '("gone")))
+      (should (= fetches 2))
+      (let ((drover-search-fetch-age 0))
+        (drover-search-test-fetched-ids "gone")
+        (should (= fetches 4)))
+      ;; The list showing them, then hiding them, they stay kept.
+      (drover-set-show-archived t)
+      (drover-set-show-history t)
+      (drover-set-show-archived nil)
+      (drover-set-show-history nil)
+      (should (equal (drover-search-test-ids "") '("live" "gone" "old")))
+      ;; Grouped by status, the archived in their group, last.
+      (let ((drover-group-by 'status))
+        (should (equal (drover-search-test-ids "") '("live" "old" "gone"))))
+      ;; Marked so before their names, and dimmed.
+      (setq drover-search--current (drover-search--build))
+      (let ((name (drover-search--entry-name
+                   (gethash '(fake . "gone") (drover-search--state-keys drover-search--current)))))
+        (should (string-search (opencode-archived-glyph)
+                               (nth 1 (car (drover-search--affixation (list name))))))
+        (should (memq 'drover-dim (ensure-list (get-text-property 0 'face name))))))))
+
+(ert-deftest drover-search-test-match-before-its-session ()
+  "A match naming a session not fetched yet joins once it arrives.
+`drover-search-text' waits for the sessions being fetched, a while at most."
+  (drover-search-test-with-source (list (drover-test-session "live" :updated 5.0))
+    (let ((answer nil)
+          (result nil))
+      (drover-register-backend 'fake :label "Fake" :sessions (lambda () drover-test-sessions)
+                               :archived (lambda (callback) (setq answer callback)))
+      (drover-search-text "zebra" (lambda (found) (setq result found)))
+      (should (drover-fetch-pending-p))
+      (funcall (nth 1 (car drover-search-test-runs)) (list (list :key '(fake . "gone") :snippet "a zebra")))
+      (funcall (nth 1 (car drover-search-test-runs)) 'done)
+      (should-not result)
+      (should (= (drover-search--state-outside drover-search--programmatic) 1))
+      (should (string-search "1 not listed" (drover-search--status-text drover-search--programmatic)))
+      (should (string-search "fetching" (drover-search--status-text drover-search--programmatic)))
+      (funcall answer (list (drover-test-session "gone" :updated 9.0 :archived 1.0)))
+      (drover-changed-now)
+      (should (equal (mapcar (lambda (found) (drover-session-id (car found))) (plist-get result :sessions))
+                     '("gone")))
+      (should (= (plist-get result :outside) 0))
+      (should-not drover-search--programmatic)
+      (should-not (memq #'drover-search--changed drover-changed-hook))
+      ;; A backend never answering is waited for a while only.
+      (setq result nil)
+      (let ((drover-search-fetch-age 0)
+            (drover-search-fetch-timeout 0.2))
+        (drover-search-text "zebra" (lambda (found) (setq result found)))
+        (funcall (nth 1 (car drover-search-test-runs)) (list (list :key '(fake . "nowhere") :snippet "zebra")))
+        (funcall (nth 1 (car drover-search-test-runs)) 'done)
+        (should-not result)
+        (should (drover-search-test-wait (lambda () result) 3))
+        (should (= (plist-get result :outside) 1))))))
 
 (ert-deftest drover-search-test-sorted-like-the-list ()
   "Candidates come in the order the list draws its sessions, groups included."
@@ -323,43 +383,49 @@ and the search offers it once it matches."
       (drover-search--rebuild)
       (should (equal (drover-search-test-ids "ocelot" state) '("d" "a"))))))
 
+(ert-deftest drover-search-test-follows-fetched ()
+  "Sessions fetched arriving while the minibuffer reads make the candidates anew.
+The index does not hold them: no session changed tells it."
+  (drover-search-test-with (list (drover-test-session "live" :updated 5.0))
+    (let ((answer nil))
+      (drover-register-backend 'fake :label "Fake" :sessions (lambda () drover-test-sessions)
+                               :archived (lambda (callback) (setq answer callback)))
+      (drover-search--fetch)
+      (let ((state (drover-search--build)))
+        (setq drover-search--current state)
+        (drover-search--follow-changes)
+        (funcall answer (list (drover-test-session "gone" :updated 9.0 :archived 1.0)))
+        (drover-changed-now)
+        (should (timerp (drover-search--state-rebuild-timer state)))
+        (should-not (drover-search-test-ids "gone" state))
+        (drover-search--rebuild)
+        (should-not (drover-search--state-rebuild-timer state))
+        (should (equal (drover-search-test-ids "gone" state) '("gone")))))))
+
 ;;;; The command
 
 (ert-deftest drover-search-test-command ()
-  "RET opens the session chosen, C-l shows its row, C-' opens the menu with the text."
+  "RET opens the session chosen, C-l shows its row, showing what the list hid of it."
   (drover-search-test-with (drover-search-test-sessions)
     (let (prompt)
       (cl-letf (((symbol-function 'completing-read)
                  (lambda (string table &rest _)
                    (setq prompt string)
                    (should drover-search--current)
+                   (should (memq #'drover-search--changed drover-changed-hook))
                    (car (all-completions "spyglass" table)))))
         (drover-search)
         (should (equal (car drover-test-calls) '(:open "b" nil)))
         (should-not drover-search--current)
-        (should (equal prompt "Search sessions: "))
-        (let ((drover-filter '(:project "drover")))
-          (drover-search nil)
-          (should (string-search "project drover" prompt)))
-        ;; What the view settings of its menu set, the subagents shown too.
+        (should-not (memq #'drover-search--changed drover-changed-hook))
+        ;; Nothing scopes it.
         (let ((drover-filter '(:project "drover"))
-              (drover-show-subagents 'all)
-              (drover-show-history t)
               (drover-show-archived t))
-          (should (equal (drover-search--prompt)
-                         "Search sessions (project drover, +subagents, +older, +archived): ")))
-        (let ((drover-show-subagents 'none))
-          (should (equal (drover-search--prompt) "Search sessions (-subagents): ")))))
+          (drover-search nil)
+          (should (equal prompt "Search sessions: ")))))
     ;; Nothing matching.
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "nowhere")))
       (should-error (drover-search) :type 'user-error))
-    ;; The menu, with the text typed.
-    (let (menu)
-      (cl-letf (((symbol-function 'completing-read)
-                 (lambda (&rest _) (setq drover-search--exit 'scope) "zeb"))
-                ((symbol-function 'drover-search-menu) (lambda (input) (setq menu input))))
-        (drover-search)
-        (should (equal menu "zeb"))))
     ;; The row in the list.
     (let ((buffer (drover-list--buffer)))
       (unwind-protect
@@ -373,18 +439,45 @@ and the search offers it once it matches."
               (should (equal (drover-session-id (drover-session-at-point)) "c"))))
         (kill-buffer buffer)))))
 
+(ert-deftest drover-search-test-locate-hidden ()
+  "C-l on a session the list hides shows the archived or older ones, clears the filter, shows subagents."
+  (drover-search-test-with (list (drover-test-session "live" :updated 5.0 :project "drover")
+                                 (drover-test-session "kid" :parent "live" :status 'idle :updated 4.0
+                                                      :project "drover"))
+    (drover-register-backend 'fake :label "Fake" :sessions (lambda () drover-test-sessions)
+                             :history (lambda (callback)
+                                        (funcall callback (list (drover-test-session "old" :updated 50.0))))
+                             :archived (lambda (callback)
+                                         (funcall callback (list (drover-test-session "gone" :updated 9.0
+                                                                                      :archived 1.0)))))
+    (let ((buffer (drover-list--buffer)))
+      (unwind-protect
+          (dolist (case '(("gone" drover-show-archived) ("old" drover-show-history) ("kid" nil)))
+            (pcase-let ((`(,id ,setting) case))
+              (ert-info (id)
+                (setq drover-filter '(:project "spyglass"))
+                (setq-default drover-show-subagents 'active)
+                (save-window-excursion
+                  (cl-letf (((symbol-function 'completing-read)
+                             (lambda (_ table &rest _)
+                               (setq drover-search--exit 'locate)
+                               (car (all-completions (concat "session " id) table)))))
+                    (drover-search)
+                    (should (eq (current-buffer) buffer))
+                    (should (equal (drover-session-id (drover-session-at-point)) id))
+                    (should-not drover-filter)
+                    (when setting
+                      (should (symbol-value setting)))
+                    (when (equal id "kid")
+                      (should (eq (default-value 'drover-show-subagents) 'all))))))))
+        (kill-buffer buffer)))))
+
 (ert-deftest drover-search-test-keys ()
-  "S searches; in its minibuffer, C-' and the menu's key open its menu, C-l shows the row."
+  "S searches; in its minibuffer, C-l shows the row, and C-' is left to the user's menu."
   (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch "S")) :command) 'drover-search))
-  (should (eq (keymap-lookup drover-search-minibuffer-map "C-'") #'drover-search-scope))
   (should (eq (keymap-lookup drover-search-minibuffer-map "C-l") #'drover-search-locate))
-  (should (eq (keymap-lookup drover-search-minibuffer-map "<remap> <drover-dispatch>")
-              #'drover-search-scope))
-  ;; From the menu, the keys that left the minibuffer search again.
-  (let ((drover-search--menu-keys (list (kbd "C-'") (kbd "<f19>"))))
-    (should (equal (mapcar (lambda (entry) (list (plist-get (cdr entry) :key) (plist-get (cdr entry) :command)))
-                           (drover-search--menu-return-entries nil))
-                   '(("C-'" drover-search-resume) ("<f19>" drover-search-resume))))))
+  (should-not (keymap-lookup drover-search-minibuffer-map "C-'"))
+  (should-not (fboundp 'drover-search-menu)))
 
 ;;;; Searching what was said
 
@@ -618,9 +711,11 @@ B only in tool calls and results; Codex's A \"axolotl\" in its prompt.
                    (list (list drover-search-test-codex-a "Find the axolotl"))))
     (should-not (drover-search-test-text "in the output"))
     (should-not (drover-search-test-text "grep"))
-    ;; Scoped: a filter leaving Codex out leaves its rollouts unsearched.
+    ;; Unscoped: a filter leaving Codex out of the list leaves its
+    ;; rollouts searched.
     (let ((drover-filter '(:harness claude-code)))
-      (should-not (drover-search-test-text "axolotl")))
+      (should (equal (drover-search-test-text "axolotl")
+                     (list (list drover-search-test-codex-a "Find the axolotl")))))
     ;; Files past what one command takes, as on Windows, are searched by
     ;; the runs after: here a file a run.
     (let ((drover-transcript-search-arguments-limit 10)

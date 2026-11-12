@@ -38,7 +38,7 @@
 ;;   the Field table (`drover--menu-table'): its filter, then its
 ;;   column, on the same letter, such as =m and -m for the model.
 ;;   `drover-view', the View menu, V in the lists, shows them alone,
-;;   on the same keys, and the menu of the search those scoping it.
+;;   on the same keys.
 ;;
 ;; Settings show their value beside their key, and changing one leaves
 ;; the menu open.  The menu has no fixed shape: its groups fill columns
@@ -888,28 +888,19 @@ on a group's heading."
   "Return non-nil while the View menu, `drover-view', is being set up or shown."
   (drover--menu-p 'drover-view))
 
-(defun drover--search-menu-p ()
-  "Return non-nil while the menu of the search, `drover-search-menu', is up.
-Its view settings scope the search, wherever the list is: it has the
-filter's, without the sort, the grouping, follow mode and the columns."
-  (drover--menu-p 'drover-search-menu))
-
 (defun drover-dispatch-view-shown-p ()
   "Return non-nil when the menus may change the settings of drover's views.
 That is while one of drover's views is current, or shows in a window of
 a visible frame: the settings, shared by every view, then apply from any
-buffer, a session buffer included.  The View menu opens in a view only,
-and the menu of the search scopes the search with them."
+buffer, a session buffer included.  The View menu opens in a view only."
   (or (drover--view-menu-p)
-      (drover--search-menu-p)
       (plist-get (drover--scope) :shown)))
 
 (defun drover--dispatch-layout-p ()
   "Return non-nil when the menus may change how the lists lay sessions out.
 That is the sort, the grouping, follow mode and the fields shown,
-wherever the view settings apply but in the menu of the search, which
-they do not scope."
-  (and (drover-dispatch-view-shown-p) (not (drover--search-menu-p))))
+wherever the view settings apply."
+  (drover-dispatch-view-shown-p))
 
 (defun drover--dispatch-foreign-subagents-p ()
   "Return non-nil when =u of the menu acts on a list of another front end.
@@ -1687,14 +1678,14 @@ Before the list is loaded, any field is."
 
 (defmacro drover--define-column-switch (field)
   "Define the infix of the View menu letting the list show FIELD, or not.
-It shows where the list has FIELD, but in the menu of the search."
+It shows where the list has FIELD."
   `(transient-define-infix ,(intern (format "drover-view--column-%s" field)) ()
      ,(format "Let the list show the field `%s', or not." field)
      :class 'drover--column-setting
      :field ',field
      :format " %k %v"
      :chooser #'not
-     :if (lambda () (and (drover--list-field-p ',field) (not (drover--search-menu-p))))))
+     :if (lambda () (drover--list-field-p ',field))))
 
 (drover--define-column-switch goal)
 (drover--define-column-switch attempt)

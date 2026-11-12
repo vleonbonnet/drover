@@ -2338,6 +2338,53 @@ defines Send, and a function failing tells none."
       (drover-set-show-history t)
       (should (= (length drover-test-history-calls) 1)))))
 
+(ert-deftest drover-test-kept-fetched ()
+  "Sessions kept fetched stay whether lists show them or not, lists unchanged."
+  (drover-test-with-backend (list (drover-test-session "live"))
+    (let* ((drover-test-history-calls nil)
+           (backend-changes 0)
+           (runs 0)
+           (serial (drover-fetched-serial))
+           (counter (lambda (&rest _) (cl-incf backend-changes))))
+      (drover-test-register-history)
+      (advice-add 'drover-backend-changed :before counter)
+      (unwind-protect
+          (progn
+            (add-hook 'drover-changed-hook (lambda () (cl-incf runs)))
+            (should-not (drover-fetch-wanted-p 'history))
+            (drover-keep-fetched '(history) 60)
+            (should (drover-fetch-wanted-p 'history))
+            (should-not drover-show-history)
+            (should (length= drover-test-history-calls 1))
+            (should (drover-fetch-pending-p))
+            ;; Asked again so soon, not fetched again; nil fetches anew.
+            (drover-keep-fetched '(history) 60)
+            (should (length= drover-test-history-calls 1))
+            (drover-keep-fetched '(history))
+            (should (length= drover-test-history-calls 2))
+            (funcall (car drover-test-history-calls) (list (drover-test-session "old")))
+            (should-not (drover-fetch-pending-p))
+            (should (> (drover-fetched-serial) serial))
+            ;; Not shown: the views have nothing to draw, the hook runs.
+            (should (= backend-changes 0))
+            (drover-changed-now)
+            (should (= runs 1))
+            (should (equal (drover-test-ids (drover-known-sessions)) '("live")))
+            (should (equal (drover-test-ids (drover-known-sessions nil t)) '("live" "old")))
+            ;; Shown, then hidden, they stay.
+            (drover-set-show-history t)
+            (funcall (car drover-test-history-calls) (list (drover-test-session "old")))
+            (should (> backend-changes 0))
+            (drover-set-show-history nil)
+            (should drover--history)
+            (should (equal (drover-test-ids (drover-known-sessions nil t)) '("live" "old")))
+            ;; A fetch never answered stops counting as pending after a while.
+            (drover-keep-fetched '(history))
+            (should (drover-fetch-pending-p 10))
+            (setf (alist-get '(history . fake) drover--fetch-started nil nil #'equal) (- (float-time) 20))
+            (should-not (drover-fetch-pending-p 10)))
+        (advice-remove 'drover-backend-changed counter)))))
+
 ;;;; Engines of sessions
 
 (ert-deftest drover-test-supports ()

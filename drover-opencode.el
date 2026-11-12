@@ -93,7 +93,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 12))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
   (load "drover-core" nil t))
 
 ;; Recent additions to opencode.el.
@@ -966,7 +966,7 @@ which runs `opencode-state-updated-functions'; the service's event
 fetches the archived sessions again later (see
 `drover-opencode--sessions-moved').  A session the registry does not
 hold tells nothing."
-  (when-let* ((ids (and drover-show-archived drover-opencode--archived-ids)))
+  (when-let* ((ids (and (drover-fetch-wanted-p 'archived) drover-opencode--archived-ids)))
     (dolist (id (if id (list id) (hash-table-keys ids)))
       (when-let* (((gethash id ids))
                   (entry (opencode-state-get id))
@@ -975,26 +975,28 @@ hold tells nothing."
         (drover-archived-left 'opencode id)))))
 
 (defvar drover-opencode--refetch-timer nil
-  "Timer fetching again the older and archived sessions lists show.")
+  "Timer fetching again the older and archived sessions wanted.")
 
 (defun drover-opencode--refetch ()
-  "Fetch again the older and archived sessions lists show, if any."
+  "Fetch again the older and archived sessions wanted, if any.
+See `drover-fetch-wanted-p'."
   (drover-with-reporting "OpenCode fetch"
     (setq drover-opencode--refetch-timer nil)
-    (when drover-show-history
+    (when (drover-fetch-wanted-p 'history)
       (drover-history-fetch 'opencode))
-    (when drover-show-archived
+    (when (drover-fetch-wanted-p 'archived)
       (drover-archived-fetch 'opencode))))
 
 (defun drover-opencode--sessions-moved (_event)
-  "Fetch the older and archived sessions again, after _EVENT, if lists show them.
+  "Fetch the older and archived sessions again, after _EVENT, if wanted.
 _EVENT archived, restored or deleted a session, which moves it between
 the lists the service gives, or reconnected the event stream, after
 which events may have been missed.  Archiving a selection sends a burst
 of events: they are fetched again once, half a second after the last.
 Another host's service's events are that host's drover's."
   (drover-with-reporting "OpenCode events"
-    (when (and (or drover-show-history drover-show-archived) (not (drover-opencode--remote-p)))
+    (when (and (or (drover-fetch-wanted-p 'history) (drover-fetch-wanted-p 'archived))
+               (not (drover-opencode--remote-p)))
       (when (timerp drover-opencode--refetch-timer)
         (cancel-timer drover-opencode--refetch-timer))
       (setq drover-opencode--refetch-timer (run-at-time 0.5 nil #'drover-opencode--refetch)))))
@@ -1751,12 +1753,13 @@ in the message :message-id."
 (defun drover-opencode--search (query scope callback)
   "Search what was said in OpenCode's sessions for QUERY, for CALLBACK.
 Through `opencode-search': the service searches the prompts and
-replies of its sessions, the archived ones only while archived
-sessions show, those of the project the filter of SCOPE names when one
-project bears that name, and gives a page of the best matches.  A
-service without the search, `unsupported', searches nothing and tells
-nothing; one refusing or failing is a failure.  Without
-`opencode-search', nothing is searched.  The backend's :search."
+replies of its sessions, the archived ones unless SCOPE leaves them
+out (:archived nil), those of the project the filter of SCOPE names
+when one project bears that name, and gives a page of the best
+matches.  A service without the search, `unsupported', searches
+nothing and tells nothing; one refusing or failing is a failure.
+Without `opencode-search', nothing is searched.  The backend's
+:search."
   (when-let* (((fboundp 'opencode-search))
               (text (drover-opencode--search-query query)))
     (let ((project (drover-opencode--search-project (plist-get (plist-get scope :filter) :project))))
