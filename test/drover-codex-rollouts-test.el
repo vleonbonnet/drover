@@ -404,12 +404,13 @@ they stay, which is told."
         (should (equal (reverse messages) '("Codex deleted Parent B")))
         (should (equal warnings
                        '("Codex could not delete 1 of the 2 subagent conversations of Parent B: exit status 1")))
-        ;; Without the CLI, they stay, and it is told.
+        ;; Without the CLI, they stay, and it is told, its quotes as the
+        ;; echo area shows them, curved or not.
         (setq warnings nil)
         (let ((drover-codex-program (expand-file-name "no-codex" home)))
           (drover-codex-rollouts-delete-subagents a "Parent A"))
         (should (equal warnings
-                       '("The 3 subagent conversations of Parent A stay: the Codex CLI, `drover-codex-program', deletes them, and is not found")))))))
+                       (list (format-message "The 3 subagent conversations of Parent A stay: the Codex CLI, `drover-codex-program', deletes them, and is not found"))))))))
 
 ;;;; Turns ended and context
 
