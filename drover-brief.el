@@ -25,13 +25,15 @@
 ;; sentences a model wrote on where the whole session stands (see
 ;; `drover-session-brief-session'), so that the last turn, right above,
 ;; reads in its context, else the line it wrote on the last turn and its
-;; recap; lists show the line alone.  This host's sessions show them as
-;; `drover-summary-mode' writes them, another host's as their owner
-;; wrote them.  OpenCode's buffers, of this host's service or another's,
-;; show it through `opencode-session-summary-function', as text,
-;; agent-shell's through an overlay above their prompt; Claude Code's
-;; terminal shows its own recap, and the mirror of another host's shell
-;; the overlay its owner drew.
+;; recap; lists show the line alone.  The user comes back to a session
+;; waiting for an answer to a permission or a question too: the buffer
+;; shows its brief then at the end of its transcript, after the request.
+;; This host's sessions show them as `drover-summary-mode' writes them,
+;; another host's as their owner wrote them.  OpenCode's buffers, of
+;; this host's service or another's, show it through
+;; `opencode-session-summary-function', as text, agent-shell's through an
+;; overlay; Claude Code's terminal shows its own recap, and the mirror of
+;; another host's shell the overlay its owner drew.
 ;;
 ;; A buffer asks for the brief of its session with
 ;; `drover-brief-of-buffer', giving the function that shows it anew,
@@ -50,8 +52,9 @@
   "Whether the buffers of sessions show their briefs above their input.
 A brief is what a model wrote on where a session stands (see
 `drover-session-brief-session' and `drover-summary-mode'): OpenCode's
-and agent-shell's buffers show it while the session is idle.  Claude
-Code's terminal shows a recap of its own."
+and agent-shell's buffers show it while the session is idle, or waits
+for its user to answer a permission or a question.  Claude Code's
+terminal shows a recap of its own."
   :type 'boolean
   :group 'drover
   :set (lambda (symbol value)

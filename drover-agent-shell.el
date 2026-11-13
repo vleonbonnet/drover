@@ -71,9 +71,11 @@
 ;;
 ;; A shell shows the brief of its session (see `drover-brief'), the
 ;; line a model wrote on where it stands, just above its prompt while it
-;; awaits input, as opencode.el's session buffers do: an overlay's
-;; string at the start of the prompt's line, before the labels
-;; agent-shell's chat mode draws there, never text.
+;; awaits input, and at the end of its buffer, after the request, while
+;; its agent waits for a permission or an answer, as opencode.el's
+;; session buffers do: an overlay's string, at the start of the prompt's
+;; line before the labels agent-shell's chat mode draws there, never
+;; text.
 ;;
 ;; `drover' loads this file once agent-shell.el is loaded.
 
@@ -1577,7 +1579,7 @@ agent-shell gives shells (see `drover-agent-shell--follow-title')."
   (remove-hook 'kill-buffer-hook #'drover-agent-shell--killed t)
   (drover-agent-shell--brief-teardown))
 
-;;;; The brief above the prompt
+;;;; The brief above the prompt, or after a request
 
 (defvar-local drover-agent-shell--brief nil
   "The brief of this shell's session as last asked, (LINE . RECAP), or nil.")
@@ -1586,7 +1588,7 @@ agent-shell gives shells (see `drover-agent-shell--follow-title')."
   "Non-nil when the recap of `drover-agent-shell--brief' shows.")
 
 (defvar-local drover-agent-shell--brief-overlay nil
-  "Overlay showing the brief above the prompt as its string, or nil.")
+  "Overlay showing the brief as its string, or nil.")
 
 (defvar-keymap drover-agent-shell-brief-map
   :doc "Keys of the brief above a shell's prompt, which a click unfolds."
@@ -1594,18 +1596,22 @@ agent-shell gives shells (see `drover-agent-shell--follow-title')."
   "<mouse-2>" #'drover-agent-shell-brief-click)
 
 (defun drover-agent-shell--brief-at ()
-  "Return where the brief shows: the start of the live prompt's line, or nil.
-Nil while the shell works, and without a prompt awaiting input."
-  (when-let* ((prompt comint-last-prompt)
-              ((markerp (car-safe prompt)))
-              ((eq (ignore-errors (agent-shell-status)) 'ready))
-              ((ignore-errors (agent-shell--live-input-prompt-p prompt))))
-    (save-excursion
-      (save-restriction
-        (widen)
-        (goto-char (car prompt))
-        (let ((inhibit-field-text-motion t))
-          (line-beginning-position))))))
+  "Return where the brief shows, or nil.
+The start of the live prompt's line while the shell is ready; the end
+of the buffer, after the request, while its agent waits for a permission
+or an answer (see `agent-shell-status'); nil while it works, and
+without a prompt awaiting input."
+  (pcase (ignore-errors (agent-shell-status))
+    ('blocked (without-restriction (point-max)))
+    ('ready
+     (when-let* ((prompt comint-last-prompt)
+                 ((markerp (car-safe prompt)))
+                 ((ignore-errors (agent-shell--live-input-prompt-p prompt))))
+       (save-excursion
+         (without-restriction
+           (goto-char (car prompt))
+           (let ((inhibit-field-text-motion t))
+             (line-beginning-position))))))))
 
 (defun drover-agent-shell--brief-lead (at)
   "Return the newlines the brief shown at AT starts with, after a blank line."
@@ -1615,7 +1621,7 @@ Nil while the shell works, and without a prompt awaiting input."
         (t "")))
 
 (defun drover-agent-shell--brief-place (&rest _)
-  "Keep the brief just above the prompt awaiting input, or nowhere.
+  "Keep the brief where `drover-agent-shell--brief-at' puts it, or nowhere.
 Output and prompts coming and going move it, so this runs after every
 change and before redisplay; without a brief it costs nothing."
   (when drover-agent-shell--brief
@@ -1653,7 +1659,7 @@ change and before redisplay; without a brief it costs nothing."
     (drover-agent-shell--brief-place)))
 
 (defun drover-agent-shell--brief-show (brief &optional anew)
-  "Show BRIEF, (LINE . RECAP) or nil, above the prompt, its recap folded when new.
+  "Show BRIEF, (LINE . RECAP) or nil, its recap folded when new.
 ANEW draws it again even when it is the brief shown, as unfolding does."
   (unless (and (not anew) (equal brief drover-agent-shell--brief))
     (unless (equal brief drover-agent-shell--brief)
@@ -1665,13 +1671,13 @@ ANEW draws it again even when it is the brief shown, as unfolding does."
   (drover-agent-shell--brief-place))
 
 (defun drover-agent-shell--brief-refresh ()
-  "Ask anew the brief of the current shell's session, and show it above its prompt.
+  "Ask anew the brief of the current shell's session, and show it.
 A brief on the whole session shows whole, without a recap to unfold."
   (let ((brief (drover-brief-of-buffer #'drover-agent-shell--brief-refresh)))
     (drover-agent-shell--brief-show (if (stringp brief) (cons brief nil) brief))))
 
 (defun drover-agent-shell-toggle-brief-recap ()
-  "Show or hide the recap below the brief above this shell's prompt."
+  "Show or hide the recap below the brief this shell shows."
   (interactive)
   (unless (cdr drover-agent-shell--brief)
     (user-error "No recap of the last turn to show"))
@@ -1688,7 +1694,7 @@ EVENT is the click."
         (drover-agent-shell-toggle-brief-recap)))))
 
 (defun drover-agent-shell--brief-setup ()
-  "Show the brief of the current shell's session above its prompt."
+  "Show the brief of this shell's session, before its prompt or at its end."
   (add-hook 'after-change-functions #'drover-agent-shell--brief-placed nil t)
   (add-hook 'pre-redisplay-functions #'drover-agent-shell--brief-place-window nil t)
   (drover-agent-shell--brief-refresh))

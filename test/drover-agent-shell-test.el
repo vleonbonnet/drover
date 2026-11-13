@@ -2319,5 +2319,46 @@ One the user named keeps its name."
       (should-not (drover-agent-shell-test-brief-string shell))
       (should-not (gethash shell drover-brief--buffers)))))
 
+(ert-deftest drover-agent-shell-test-brief-after-request ()
+  "A shell whose agent waits for a permission or an answer shows its brief at its end, after the request."
+  (drover-agent-shell-test-with
+    (let* ((drover-brief-function
+            (lambda (record)
+              (if (eq (drover-session-backend record) 'agent-shell)
+                  (let ((copy (copy-sequence record)))
+                    (setf (drover-session-brief copy) "Waiting: approval to run ls")
+                    copy)
+                record)))
+           (drover-brief--buffers (make-hash-table :test #'eq :weakness 'key))
+           (opencode-session-summary-icon "※")
+           (shell (drover-agent-shell-test-shell 'claude-code)))
+      (add-hook 'drover-changed-hook #'drover-brief--changed)
+      (drover-agent-shell-test-initialize shell)
+      (with-current-buffer shell
+        (drover-agent-shell--setup)
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert (propertize "Run ls\n[Allow] [Reject]" 'field 'output)))
+        (setq-local shell-maker--busy t)
+        (map-put! agent-shell--state :tool-calls
+                  (list (cons "tc1" (list (cons :title "Run ls") (cons :permission-request-id 7))))))
+      (drover-changed-now)
+      (with-current-buffer shell
+        (should (eq (agent-shell-status) 'blocked))
+        (should (equal (drover-agent-shell-test-brief-string shell) "\n\n※ Waiting: approval to run ls\n\n"))
+        (should (= (overlay-start drover-agent-shell--brief-overlay) (point-max)))
+        ;; Not text: the buffer is as it was.
+        (should-not (string-search "Waiting:" (buffer-string)))
+        ;; Output written meanwhile goes before it.
+        (let ((inhibit-read-only t))
+          (goto-char (point-max))
+          (insert (propertize "\nStill running.\n" 'field 'output)))
+        (should (= (overlay-start drover-agent-shell--brief-overlay) (point-max)))
+        (should (equal (drover-agent-shell-test-brief-string shell) "\n※ Waiting: approval to run ls\n\n"))
+        ;; Answered, the agent works again: it goes at once.
+        (map-put! agent-shell--state :tool-calls nil)
+        (drover-agent-shell--brief-place)
+        (should-not (drover-agent-shell-test-brief-string shell))))))
+
 (provide 'drover-agent-shell-test)
 ;;; drover-agent-shell-test.el ends here

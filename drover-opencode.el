@@ -2122,7 +2122,8 @@ its last turn, (LINE . RECAP) (see `drover-brief-of-buffer'): of this
 host's session as `drover-summary-mode' writes it, of another host's as
 its owner did.  For `opencode-session-summary-function', which drover
 sets to it when nil, so that session buffers show it just above their
-input while idle, and anew as it changes."
+input while idle, after the request while it waits for the user, and
+anew as it changes."
   (drover-with-reporting "OpenCode brief"
     (drover-brief-of-buffer #'opencode-session-summary-update)))
 
