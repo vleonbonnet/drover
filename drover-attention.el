@@ -23,13 +23,12 @@
 ;; Keeping up with sessions without opening their list:
 ;;
 ;; - `drover-attention-mode' counts the sessions that need you in the
-;;   mode line, as one count after a robot (`drover-attention-glyph'),
-;;   in a colour telling the most urgent of them (`drover-attention-face'),
-;;   as other indicators of the mode line show a count: a symbol, a space
-;;   and the number, their state told by colour.  It counts what lists show
-;;   under `drover-filter' and `drover-show-subagents', and every
-;;   subagent waiting for you in a tree the filter keeps.  mouse-1 on it
-;;   runs `drover-next', mouse-3 chooses a session.
+;;   global status (see `global-status-mode'), as one entry: a robot
+;;   (`drover-attention-glyph') and the count, in the state of the most
+;;   urgent of them.  It counts what lists show under `drover-filter' and
+;;   `drover-show-subagents', and every subagent waiting for you in a
+;;   tree the filter keeps.  mouse-1 on it runs `drover-next', mouse-3
+;;   chooses a session.
 ;; - `drover-next' lines up the sessions to attend to among those lists
 ;;   show: those whose prompt cache expires soonest first, whether they
 ;;   need you or not, then those that need you, then the idle ones with
@@ -47,6 +46,7 @@
 (require 'drover)
 (require 'drover-core)
 (require 'drover-ui)
+(require 'global-status)
 (require 'opencode-look)
 (require 'seq)
 (require 'subr-x)
@@ -61,37 +61,19 @@ Such as \"2/5\" in the echo area: the buffer visited shows the session."
   :type 'boolean
   :group 'drover)
 
-;;;; Mode line
+;;;; The count
 
-;; The count tells its state by colour, as other indicators of a mode
-;; line do; the faces of statuses add the emphasis lists want.
-
-(defface drover-attention-waiting '((t :inherit opencode-attention))
-  "Face of the mode line count when the most urgent status counted is waiting.
-The colour of `opencode-attention', without the weight lists give the
-status of a waiting session to make its row stand out."
-  :group 'drover-faces)
-
-(defface drover-attention-failed '((t :inherit opencode-session-status-failed))
-  "Face of the mode line count when the most urgent status counted is failed."
-  :group 'drover-faces)
-
-(defface drover-attention-done '((t :inherit opencode-session-status-done))
-  "Face of the mode line count when the most urgent status counted is done."
-  :group 'drover-faces)
-
-(defun drover-attention-face (status)
-  "Return the face of the mode line count whose most urgent status is STATUS.
-The count tells its state by colour, as other indicators of the mode
-line do, rather than with the emphasis lists give statuses: waiting,
-failed and done, the statuses needing the user, have faces of their
-own.  Another status, one added to `drover-attention-statuses', takes
-its face in lists."
+(defun drover-attention--state (status)
+  "Return the state of the global status for a count whose most urgent is STATUS.
+A session waiting on a request, or whose turn ended unseen, waits on
+you; one whose turn failed is an alert.  The other statuses count only
+when added to `drover-attention-statuses': a turn under way is busy,
+an idle session quiet."
   (pcase status
-    ('waiting 'drover-attention-waiting)
-    ('failed 'drover-attention-failed)
-    ('done 'drover-attention-done)
-    (_ (opencode-session-status-face status))))
+    ('failed 'alert)
+    ((or 'waiting 'done) 'waiting)
+    ((or 'working 'retrying) 'busy)
+    (_ 'quiet)))
 
 (defvar drover-attention--queue nil
   "Keys of the sessions the round of `drover-next' visits, in order, or nil.
@@ -104,23 +86,6 @@ runs.")
 
 (defvar drover-attention--depth 0
   "The `recursion-depth' of the last press of `drover-next' in its round.")
-
-(defvar drover-attention-mode-line nil
-  "The mode line construct of `drover-attention-mode', or nil.
-It is computed when sessions change, so that drawing the mode line
-costs nothing.")
-;; Without it, the mode line drops the string's faces and mouse bindings.
-(put 'drover-attention-mode-line 'risky-local-variable t)
-
-(defvar-keymap drover-attention-mode-line-map
-  :doc "Mouse bindings of the session counts in the mode line."
-  "<mode-line> <mouse-1>" #'drover-next
-  "<mode-line> <mouse-3>" #'drover-select)
-
-(defvar drover-attention--mode-string-origin nil
-  "What `global-mode-string' was before the mode made it a list holding its count.
-nil when it was already a list, `empty' when it was nil, `string' when
-it was a string; disabling the mode restores it.")
 
 (defun drover-attention--describe (session &optional now)
   "Return one line describing SESSION, for lists of sessions.
@@ -169,35 +134,6 @@ last line says so."
             "\n\nmouse-1: visit live caches first, then these, then idle sessions"
             "\nmouse-3: choose a session")))
 
-(defvar drover-attention--pads (make-hash-table :test #'equal)
-  "Room the glyph of the mode line needs, measured.
-Keys are (GLYPH FACE FONT), FONT being `drover-attention--font-key';
-values are (LEFT . GAP), as `drover-attention--measure' returns them.
-The count is computed whenever sessions change, so the glyph is
-measured once per font and face; a change of fonts empties the table.")
-
-(defun drover-attention--font-key ()
-  "Return what the fonts of the mode line of the selected frame depend on.
-Those are its font and the frame's, not the frame: frames of the same
-fonts draw glyphs alike, and a frame deleted leaves nothing behind."
-  (list (face-font 'mode-line) (frame-parameter nil 'font)))
-
-(defun drover-attention--measure (glyph face)
-  "Return the room GLYPH in FACE needs in the mode line, as (LEFT . GAP).
-LEFT is how far left of its start its ink reaches, 0 when it does not;
-GAP the pixels from its advance to the count after it, when its ink
-reaches past its advance further than a space, else nil, a space being
-enough (see `drover-text-ink-extent').  Both are measured over the face
-`mode-line', in the fonts of the selected frame.  The Nerd Fonts but
-their Mono variants draw icons up to half a cell past their advance,
-which a space of the same font covers, but not always a space of a
-proportional one."
-  (let* ((string (propertize glyph 'face (list face 'mode-line)))
-         (extent (drover-text-ink-extent string))
-         (overflow (- (cdr extent) (drover-text-pixel-width string)))
-         (space (drover-text-pixel-width (propertize " " 'face (list face 'mode-line)))))
-    (cons (max 0 (car extent)) (and (> overflow space) overflow))))
-
 (defvar drover-attention--sessions nil
   "The sessions that need the user, as a hash table by key, or nil.
 They are those of `drover-attention-sessions', kept current as
@@ -235,45 +171,35 @@ See `drover-attention-order'."
       (maphash (lambda (_ session) (push session sessions)) drover-attention--sessions))
     (drover-attention-order (drover-sort sessions) now)))
 
-(defun drover-attention--help-echo (&rest _)
-  "Return the tooltip of the mode line count, from the sessions needing you now.
+(defun drover-attention--help-echo ()
+  "Return the tooltip of the count, from the sessions needing you now.
 It is made when shown, however many the sessions are, rather than on
 every change."
   (drover-with-reporting "mode line tooltip"
     (let ((now (float-time)))
       (drover-attention--help (drover-attention--current now) now))))
 
-(defun drover-attention--format (sessions)
-  "Return the mode line count of SESSIONS, the sessions that need the user.
-It is `drover-attention-glyph', a space and their number, in the face
-`drover-attention-face' gives the most urgent status among them, or nil
-when SESSIONS is empty.
-The space widens, and room is left before the glyph, only where the
-glyph's ink would reach the count or what comes before it (see
-`drover-attention--measure'); the tooltip lists the sessions needing
-the user in the order `drover-next' visits them, when shown (see
-`drover-attention--help-echo')."
-  (when sessions
-    (let* ((face (drover-attention-face
-                  (car (seq-sort-by #'drover-status-rank #'<
-                                    (delete-dups (mapcar #'drover-session-status sessions))))))
-           (glyph drover-attention-glyph)
-           (key (list glyph face (drover-attention--font-key)))
-           (room (or (gethash key drover-attention--pads)
-                     (puthash key (drover-attention--measure glyph face) drover-attention--pads))))
-      (propertize
-       (concat (if (> (car room) 0)
-                   (propertize " " 'display `(space :width (,(car room))))
-                 "")
-               glyph
-               (if (cdr room)
-                   (propertize " " 'display `(space :width (,(cdr room))))
-                 " ")
-               (number-to-string (length sessions)))
-       'face face
-       'help-echo #'drover-attention--help-echo
-       'mouse-face 'mode-line-highlight
-       'local-map drover-attention-mode-line-map))))
+(defun drover-attention--show (sessions)
+  "Show the count of SESSIONS, the sessions that need the user, or hide it.
+The entry `drover' of the global status shows their number, in the
+state of the most urgent status among them (see
+`drover-attention--state'); its tooltip lists them in the order
+`drover-next' visits them, when shown (see
+`drover-attention--help-echo').  The global status draws mode lines
+again only when the number or the state changed."
+  (if sessions
+      (global-status-set 'drover (length sessions)
+                         (drover-attention--state
+                          (car (seq-sort-by #'drover-status-rank #'<
+                                            (delete-dups (mapcar #'drover-session-status sessions)))))
+                         #'drover-attention--help-echo)
+    (global-status-clear 'drover)))
+
+(defun drover-attention--define (&optional icon)
+  "Define the entry `drover' of the global status: its ICON and clicks.
+ICON defaults to `drover-attention-glyph'."
+  (global-status-define 'drover :icon (or icon drover-attention-glyph) :order 60
+                        :mouse-1 #'drover-next :mouse-3 #'drover-select))
 
 (defun drover-attention--active-below-p (key)
   "Return non-nil when session KEY or a subagent below it is mid-turn.
@@ -429,29 +355,18 @@ sessions must be found again, every one; t otherwise."
     t))
 
 (defun drover-attention--update (&optional keys)
-  "Compute the mode line count again, and redraw mode lines if it changed.
+  "Count the sessions needing the user again, and show the count.
 With KEYS, the sessions changed, look at those alone, and those above
 them, or their trees while `drover-filter' is set, when the index can
 tell.  Changes come many times a second while sessions work, most of
-them leaving the count as it was; forcing every mode line of every
-frame to be drawn again costs tens of milliseconds with many windows,
-so only a count that reads otherwise forces it.  Its tooltip is a
-function, made when shown: the string compares alike whatever the
-sessions it lists."
+them leaving the count as it was; the global status draws mode lines
+again only when the count or its state changed.  Its tooltip is a
+function, made when shown, so that the sessions it lists change
+nothing."
   (unless (and keys (drover-attention--current-p) drover-attention--sessions (drover-index-incremental-p)
                (drover-attention--follow keys))
     (drover-attention--recount))
-  (let ((string (drover-attention--format (hash-table-values drover-attention--sessions))))
-    (unless (equal-including-properties string drover-attention-mode-line)
-      (setq drover-attention-mode-line string)
-      (force-mode-line-update t))))
-
-(defun drover-attention--fonts-changed (&rest _)
-  "Measure the glyphs of the mode line again, the fonts having changed.
-For `after-setting-font-hook' and `enable-theme-functions'."
-  (drover-with-reporting "mode line"
-    (clrhash drover-attention--pads)
-    (drover-attention--update)))
+  (drover-attention--show (hash-table-values drover-attention--sessions)))
 
 (defun drover-attention--changed ()
   "Follow a change of sessions, those `drover-changed-sessions' tells."
@@ -460,65 +375,32 @@ For `after-setting-font-hook' and `enable-theme-functions'."
       (cond ((eq changed t) (drover-attention--update))
             (changed (drover-attention--update changed))))))
 
-(defun drover-attention--show ()
-  "Add the counts to `global-mode-string'."
-  (unless (and (listp global-mode-string)
-               (memq 'drover-attention-mode-line global-mode-string))
-    (setq drover-attention--mode-string-origin
-          (cond ((null global-mode-string)
-                 ;; A list starting with a symbol is a conditional.
-                 (setq global-mode-string (list ""))
-                 'empty)
-                ((stringp global-mode-string)
-                 (setq global-mode-string (list global-mode-string))
-                 'string)))
-    (setq global-mode-string (append global-mode-string '(drover-attention-mode-line)))))
-
-(defun drover-attention--hide ()
-  "Remove the counts from `global-mode-string', restoring what it was."
-  (when (listp global-mode-string)
-    (setq global-mode-string (remq 'drover-attention-mode-line global-mode-string))
-    (pcase drover-attention--mode-string-origin
-      ('empty (when (equal global-mode-string '(""))
-                (setq global-mode-string nil)))
-      ('string (when (and (= (length global-mode-string) 1) (stringp (car global-mode-string)))
-                 (setq global-mode-string (car global-mode-string))))))
-  (setq drover-attention--mode-string-origin nil))
-
 ;;;###autoload
 (define-minor-mode drover-attention-mode
-  "Show in the mode line how many sessions need you.
-The mode line holds one count of the sessions whose status is one of
-`drover-attention-statuses' after `drover-attention-glyph' and a space,
-in the face `drover-attention-face' gives the most urgent of them, and
-nothing when no session needs you.  It begins with the glyph: parting
-it from what comes before is the mode line's to do.  It counts the
-sessions lists show under `drover-filter' and
-`drover-show-subagents', and every subagent waiting for you in a tree
-the filter keeps, which blocks its parent (see
-`drover-surfaced-sessions').  Its tooltip lists them in the order
-`drover-next' visits them among themselves; clicking it runs
-`drover-next', which visits live caches first, then them, then idle
-sessions, and clicking it with the right button chooses a session
+  "Show in the global status how many sessions need you.
+The entry `drover' of the global status (see `global-status-mode')
+shows `drover-attention-glyph' and the count of the sessions whose
+status is one of `drover-attention-statuses', in the state of the most
+urgent of them, and nothing when no session needs you.  It counts the
+sessions lists show under `drover-filter' and `drover-show-subagents',
+and every subagent waiting for you in a tree the filter keeps, which
+blocks its parent (see `drover-surfaced-sessions').  Its tooltip lists
+them in the order `drover-next' visits them among themselves; clicking
+it runs `drover-next', which visits live caches first, then them, then
+idle sessions, and clicking it with the right button chooses a session
 \(`drover-select').  Enabling the mode starts the backends."
   :global t
   :group 'drover
   (if drover-attention-mode
       (progn
-        (drover-attention--show)
+        (drover-attention--define)
         (add-hook 'drover-changed-hook #'drover-attention--changed)
-        (add-hook 'after-setting-font-hook #'drover-attention--fonts-changed)
-        (add-hook 'enable-theme-functions #'drover-attention--fonts-changed)
         (drover-start)
         (drover-attention--update))
     (remove-hook 'drover-changed-hook #'drover-attention--changed)
-    (remove-hook 'after-setting-font-hook #'drover-attention--fonts-changed)
-    (remove-hook 'enable-theme-functions #'drover-attention--fonts-changed)
-    (drover-attention--hide)
+    (global-status-remove 'drover)
     (drover-attention--end-round)
-    (setq drover-attention-mode-line nil
-          drover-attention--sessions nil)
-    (force-mode-line-update t)))
+    (setq drover-attention--sessions nil)))
 
 ;;;; Visiting the next session
 
@@ -844,9 +726,16 @@ only sessions whose status began at least that many hours ago."
   nil)
 
 ;; Reloaded with the mode on, count anew: the sessions counted before may
-;; follow other rules.
+;; follow other rules.  A drover older than the global status showed the
+;; count in `global-mode-string' and measured it on font changes: undo both.
 (when (bound-and-true-p drover-attention-mode)
   (drover-with-reporting "mode line"
+    (when (and (consp global-mode-string) (memq 'drover-attention-mode-line global-mode-string))
+      (setq global-mode-string (remq 'drover-attention-mode-line global-mode-string)))
+    (when (fboundp 'drover-attention--fonts-changed)
+      (remove-hook 'after-setting-font-hook #'drover-attention--fonts-changed)
+      (remove-hook 'enable-theme-functions #'drover-attention--fonts-changed))
+    (drover-attention--define)
     (drover-attention--update)))
 
 (provide 'drover-attention)

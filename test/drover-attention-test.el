@@ -23,17 +23,15 @@
 (require 'drover-prompt)
 
 (defmacro drover-attention-test-with (sessions &rest body)
-  "Run BODY with the fake backend serving SESSIONS and the mode's state isolated."
+  "Run BODY with the fake backend serving SESSIONS and the mode's state isolated.
+The count's entry of the global status is removed before and after."
   (declare (indent 1) (debug t))
   `(drover-test-with-backend ,sessions
                              (let ((global-mode-string nil)
                                    ;; Readable glyphs, whatever the defaults.
                                    (opencode-session-status-icons '((waiting . "⚑") (failed . "✗") (done . "✓")
                                                            (retrying . "↻") (working . "◐") (idle . "·")))
-                                   (drover-attention-glyph "☺")
                                    (drover-attention-mode nil)
-                                   (drover-attention-mode-line nil)
-                                   (drover-attention--mode-string-origin nil)
                                    (drover-attention--sessions nil)
                                    (drover-attention--layout nil)
                                    (drover-attention--filter nil)
@@ -43,14 +41,13 @@
                                    (post-command-hook nil)
                                    (drover-attention-statuses '(waiting failed done))
                                    (drover-attention-echo t)
-                                   (drover-attention--pads (make-hash-table :test #'equal))
-                                   (after-setting-font-hook nil)
-                                   (enable-theme-functions nil)
                                    (last-command nil))
+                               (global-status-remove 'drover)
                                (unwind-protect
                                    (progn ,@body)
                                  (when drover-attention-mode
-                                   (drover-attention-mode -1))))))
+                                   (drover-attention-mode -1))
+                                 (global-status-remove 'drover)))))
 
 (defmacro drover-attention-test-messages (&rest body)
   "Run BODY and return the messages it showed, oldest first."
@@ -82,147 +79,131 @@
         (last-command-event ?f))
     (run-hooks 'post-command-hook)))
 
-(defun drover-attention-test-help (string)
-  "Return the tooltip of STRING, the mode line count, as hovering it shows it."
-  (let ((help (get-text-property 1 'help-echo string)))
-    (if (functionp help) (funcall help (selected-window) string 1) help)))
+(defun drover-attention-test-count ()
+  "Return the count as the global status shows it, (COUNT STATE), or nil when hidden."
+  (when-let* ((entry (global-status-entry 'drover)))
+    (list (plist-get entry :value) (plist-get entry :state))))
+
+(defun drover-attention-test-help ()
+  "Return the tooltip of the count, as hovering it shows it."
+  (let ((help (plist-get (global-status-entry 'drover) :help)))
+    (if (functionp help) (funcall help) help)))
 
 (defun drover-attention-test-face-at (string text)
   "Return the face in STRING at the first occurrence of TEXT."
   (get-text-property (string-search text string) 'face string))
 
-;;;; Mode line
+;;;; The count
 
-(ert-deftest drover-attention-test-format-counts ()
-  "One count of every session needing the user, in the face of the most urgent."
+(ert-deftest drover-attention-test-count-of-sessions-needing-you ()
+  "One count of every session needing the user, in the state of the most urgent.
+Its tooltip is made when shown, rather than at every change."
   (drover-attention-test-with (list (drover-test-session "w1" :status 'waiting :since 1.0)
                                     (drover-test-session "d1" :status 'done :since 2.0)
                                     (drover-test-session "w2" :status 'waiting :since 3.0)
                                     (drover-test-session "r" :status 'working)
                                     (drover-test-session "i" :status 'idle))
     (drover-attention-mode 1)
-    (let ((string drover-attention-mode-line))
-      ;; As other indicators: the symbol, one plain space, the count,
-      ;; nothing before.
-      (should (equal (substring-no-properties string) "☺ 3"))
-      (should-not (next-single-property-change 0 'display string))
-      ;; One face over the whole string, the space included, and the
-      ;; whole of it clickable.
-      (dotimes (index (length string))
-        (should (eq (get-text-property index 'face string) 'drover-attention-waiting))
-        (should (eq (get-text-property index 'local-map string) drover-attention-mode-line-map))
-        (should (eq (get-text-property index 'mouse-face string) 'mode-line-highlight))
-        (should (get-text-property index 'help-echo string))))))
+    (should (equal (drover-attention-test-count) '(3 waiting)))
+    (should (equal (plist-get (global-status-entry 'drover) :icon) drover-attention-glyph))
+    (should (eq (plist-get (global-status-entry 'drover) :help) #'drover-attention--help-echo))))
 
-(ert-deftest drover-attention-test-format-most-urgent-face ()
-  "The count takes the face of the most urgent status among those it counts."
+(ert-deftest drover-attention-test-count-takes-most-urgent-state ()
+  "The count takes the state of the most urgent status among those it counts."
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
                                     (drover-test-session "f" :status 'failed))
     (drover-attention-mode 1)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "☺") 'drover-attention-failed))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-failed))
+    (should (equal (drover-attention-test-count) '(2 alert)))
     (setq drover-test-sessions (list (drover-test-session "d" :status 'done)))
     (drover-backend-changed 'fake)
     (drover-changed-now)
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "1") 'drover-attention-done))))
+    (should (equal (drover-attention-test-count) '(1 waiting)))))
 
-(ert-deftest drover-attention-test-face-tells-state-by-colour ()
-  "The count tells its state by colour, without the emphasis lists give statuses.
-Lists make a waiting session's status bold so that its row stands out;
-the count takes its colour, not its weight, as other indicators of the
-mode line tell their state.  A status added to the statuses counted
-keeps its face of lists."
-  (let ((saved (mapcar (lambda (attribute)
-                         (cons attribute (face-attribute 'opencode-attention attribute)))
-                       '(:foreground :weight))))
-    (unwind-protect
-        (progn
-          ;; A theme whose colour of attention carries no weight of its own.
-          (set-face-attribute 'opencode-attention nil :foreground "#F2994A" :weight 'normal)
-          (should (eq (face-attribute 'opencode-session-status-waiting :weight nil t) 'bold))
-          (should (eq (face-attribute (drover-attention-face 'waiting) :weight nil t) 'normal))
-          (should (equal (face-attribute (drover-attention-face 'waiting) :foreground nil t) "#F2994A"))
-          ;; Failed and done: faces of the count's own, of their statuses' look.
-          (dolist (status '(failed done))
-            (let ((face (drover-attention-face status))
-                  (listed (opencode-session-status-face status)))
-              (should (facep face))
-              (should-not (eq face listed))
-              (dolist (attribute '(:foreground :weight :slant))
-                (should (equal (face-attribute face attribute nil t)
-                               (face-attribute listed attribute nil t))))))
-          (should (eq (drover-attention-face 'working) 'opencode-session-status-working)))
-      (apply #'set-face-attribute 'opencode-attention nil
-             (mapcan (lambda (saved) (list (car saved) (cdr saved))) saved)))))
+(ert-deftest drover-attention-test-states ()
+  "A session waiting on a request or ended unseen waits on you; one failed is an alert.
+Statuses counted only once added to `drover-attention-statuses': a turn
+under way is busy, an idle session quiet."
+  (pcase-dolist (`(,status . ,state) '((waiting . waiting) (done . waiting) (failed . alert)
+                                      (working . busy) (retrying . busy) (idle . quiet)))
+    (should (eq (drover-attention--state status) state))))
 
-(ert-deftest drover-attention-test-format-follows-status-order ()
+(ert-deftest drover-attention-test-count-follows-status-order ()
+  "The most urgent status is the first of `drover-status-order'."
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
-                                    (drover-test-session "w" :status 'waiting))
-    (let ((drover-attention-statuses '(done waiting))
-          (drover-status-order '(done waiting failed retrying working idle)))
-      (drover-attention-mode 1)
-      (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-      (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-done)))))
+                                    (drover-test-session "f" :status 'failed))
+    (drover-attention-mode 1)
+    (should (equal (drover-attention-test-count) '(2 alert)))
+    (let ((drover-status-order '(done failed waiting retrying working idle)))
+      (drover-attention--update)
+      (should (equal (drover-attention-test-count) '(2 waiting))))))
 
-(ert-deftest drover-attention-test-format-honours-statuses ()
+(ert-deftest drover-attention-test-count-honours-statuses ()
   (drover-attention-test-with (list (drover-test-session "d" :status 'done)
                                     (drover-test-session "w" :status 'waiting))
     (let ((drover-attention-statuses '(waiting)))
       (drover-attention-mode 1)
-      (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1")))))
+      (should (equal (drover-attention-test-count) '(1 waiting))))))
 
-(ert-deftest drover-attention-test-format-empty ()
+(ert-deftest drover-attention-test-count-hidden-when-none ()
+  "With no session needing the user, the count hides."
   (drover-attention-test-with (list (drover-test-session "r" :status 'working)
                                     (drover-test-session "i" :status 'idle))
     (drover-attention-mode 1)
-    (should-not drover-attention-mode-line)
-    (should (memq 'drover-attention-mode-line global-mode-string))))
+    (should-not (drover-attention-test-count))))
 
 (ert-deftest drover-attention-test-redraws-mode-lines-on-change-only ()
-  "Mode lines are drawn again when the count reads otherwise, and only then.
+  "Mode lines are drawn again when the count or its state changes, and only then.
 Sessions change many times a second while they work, mostly leaving the
-count as it was; forcing every mode line costs tens of milliseconds."
+count as it was; forcing every mode line costs tens of milliseconds.
+The global status draws them, so it is on here."
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0)
                                     (drover-test-session "r" :status 'working :updated 1.0))
-    (drover-attention-mode 1)
-    (let ((forced nil))
-      (cl-letf (((symbol-function 'force-mode-line-update)
-                 (lambda (&optional all) (push all forced))))
-        (cl-flet ((change (id function)
-                    (setq forced nil)
-                    (funcall function (seq-find (lambda (session) (equal (drover-session-id session) id))
-                                                drover-test-sessions))
-                    (drover-backend-changed 'fake id)
-                    (drover-changed-now)))
-          ;; A working session's step: the count stays, nothing is forced.
-          (change "r" (lambda (session) (setf (drover-session-updated session) 2.0)))
-          (should-not forced)
-          ;; The session waiting longer: the same count, in the same face.
-          (change "w" (lambda (session) (setf (drover-session-since session) 0.5)))
-          (should-not forced)
-          ;; Its turn ending unseen: one more, every mode line drawn again.
-          (change "r" (lambda (session) (setf (drover-session-status session) 'done)))
-          (should (equal forced '(t)))
-          (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-          ;; Another status, the count the same, but in another face.
-          (change "w" (lambda (session) (setf (drover-session-status session) 'failed)))
-          (should (equal forced '(t)))
-          (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-failed))
-          ;; Nothing needing the user any more: the count goes.
-          (setq drover-test-sessions nil)
-          (setq forced nil)
-          (drover-backend-changed 'fake)
-          (drover-changed-now)
-          (should (equal forced '(t)))
-          (should-not drover-attention-mode-line)
-          ;; And nothing again: nothing to draw.
-          (setq forced nil)
-          (drover-backend-changed 'fake)
-          (drover-changed-now)
-          (should-not forced))))))
+    (let ((format (default-value 'mode-line-format))
+          (misc-info (default-value 'mode-line-misc-info)))
+      (unwind-protect
+          (progn
+            (global-status-mode 1)
+            (drover-attention-mode 1)
+            (let ((forced nil))
+              (cl-letf (((symbol-function 'force-mode-line-update)
+                         (lambda (&optional all) (push all forced))))
+                (cl-flet ((change (id function)
+                            (setq forced nil)
+                            (funcall function (seq-find (lambda (session) (equal (drover-session-id session) id))
+                                                        drover-test-sessions))
+                            (drover-backend-changed 'fake id)
+                            (drover-changed-now)))
+                  ;; A working session's step: the count stays, nothing is forced.
+                  (change "r" (lambda (session) (setf (drover-session-updated session) 2.0)))
+                  (should-not forced)
+                  ;; The session waiting longer: the same count, in the same state.
+                  (change "w" (lambda (session) (setf (drover-session-since session) 0.5)))
+                  (should-not forced)
+                  ;; Its turn ending unseen: one more, every mode line drawn again.
+                  (change "r" (lambda (session) (setf (drover-session-status session) 'done)))
+                  (should (equal forced '(t)))
+                  (should (equal (drover-attention-test-count) '(2 waiting)))
+                  ;; Another status, the count the same, but in another state.
+                  (change "w" (lambda (session) (setf (drover-session-status session) 'failed)))
+                  (should (equal forced '(t)))
+                  (should (equal (drover-attention-test-count) '(2 alert)))
+                  ;; Nothing needing the user any more: the count goes.
+                  (setq drover-test-sessions nil)
+                  (setq forced nil)
+                  (drover-backend-changed 'fake)
+                  (drover-changed-now)
+                  (should (equal forced '(t)))
+                  (should-not (drover-attention-test-count))
+                  ;; And nothing again: nothing to draw.
+                  (setq forced nil)
+                  (drover-backend-changed 'fake)
+                  (drover-changed-now)
+                  (should-not forced)))))
+        (global-status-mode -1)
+        (set-default 'mode-line-format format)
+        (set-default 'mode-line-misc-info misc-info)))))
 
-(ert-deftest drover-attention-test-format-follows-subagent-mode ()
+(ert-deftest drover-attention-test-count-follows-subagent-mode ()
   "The count is that of what lists show, and of every subagent waiting for the user.
 Those in a tree the filter keeps, whatever the subagent mode."
   (drover-attention-test-with (list (drover-test-session "root" :status 'working)
@@ -232,21 +213,20 @@ Those in a tree the filter keeps, whatever the subagent mode."
                                     (drover-test-session "alone" :status 'done))
     (drover-attention-mode 1)
     ;; Active subagents: those whose turn ended hide, so do not count.
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
+    (should (equal (drover-attention-test-count) '(2 waiting)))
     (drover-set-show-subagents 'all)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 4"))
+    (should (equal (drover-attention-test-count) '(4 waiting)))
     ;; None: the subagent waiting for the user still counts.
     (drover-set-show-subagents 'none)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
-    (should (eq (drover-attention-test-face-at drover-attention-mode-line "2") 'drover-attention-waiting))
-    (let ((help (drover-attention-test-help drover-attention-mode-line)))
+    (should (equal (drover-attention-test-count) '(2 waiting)))
+    (let ((help (drover-attention-test-help)))
       (should (string-match-p "Session asking" help))
       (should-not (string-match-p "Session ended\\|Session broke" help)))
     ;; The filter narrows the count as it narrows lists.
     (drover-set-filter :project "elsewhere")
-    (should-not drover-attention-mode-line)
+    (should-not (drover-attention-test-count))
     (drover-set-filter :project nil)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
+    (should (equal (drover-attention-test-count) '(2 waiting)))))
 
 (ert-deftest drover-attention-test-orphans-follow-subagent-mode ()
   "A subagent whose parent is not listed counts as any subagent does.
@@ -254,14 +234,14 @@ So it does as the count is made anew, and as it follows a change."
   (drover-attention-test-with (list (drover-test-session "alone" :status 'done)
                                     (drover-test-session "ended" :parent "archived" :status 'done))
     (drover-attention-mode 1)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (should (equal (drover-attention-test-count) '(1 waiting)))
     (setq drover-test-sessions (list (drover-test-session "alone" :status 'done)
                                      (drover-test-session "ended" :parent "archived" :status 'failed)))
     (drover-backend-changed 'fake "ended")
     (drover-changed-now)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (should (equal (drover-attention-test-count) '(1 waiting)))
     (drover-set-show-subagents 'all)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
+    (should (equal (drover-attention-test-count) '(2 alert)))))
 
 (ert-deftest drover-attention-test-help-echo-lists-sessions ()
   "The tooltip lists the sessions in the order `drover-next' visits them."
@@ -274,7 +254,7 @@ So it does as the count is made anew, and as it follows a change."
                                                            :cache-expires (+ now 250) :cache-ttl 300)
                                       (drover-test-session "i" :status 'idle))
       (drover-attention-mode 1)
-      (let ((help (drover-attention-test-help drover-attention-mode-line)))
+      (let ((help (drover-attention-test-help)))
         (should (equal (substring-no-properties help)
                        (concat "Sessions that need you, in the order of `drover-next':\n"
                                "  ✓ Session e  cache 4m\n"
@@ -292,211 +272,125 @@ So it does as the count is made anew, and as it follows a change."
                                                              :since (float index)))
                                       (number-sequence 1 25))
     (drover-attention-mode 1)
-    (let ((help (drover-attention-test-help drover-attention-mode-line)))
+    (let ((help (drover-attention-test-help)))
       (should (string-match-p "Session d20\n  … and 5 more\n" help))
       (should-not (string-match-p "Session d21" help)))))
 
-(ert-deftest drover-attention-test-mouse-bindings ()
-  (should (eq (keymap-lookup drover-attention-mode-line-map "<mode-line> <mouse-1>") #'drover-next))
-  (should (eq (keymap-lookup drover-attention-mode-line-map "<mode-line> <mouse-3>") #'drover-select)))
+(ert-deftest drover-attention-test-entry-clicks ()
+  "mouse-1 on the count runs `drover-next', mouse-3 chooses a session."
+  (drover-attention-test-with nil
+    (let ((define (symbol-function 'global-status-define))
+          (defined nil))
+      (cl-letf (((symbol-function 'global-status-define)
+                 (lambda (&rest arguments) (push arguments defined) (apply define arguments))))
+        (drover-attention-mode 1))
+      (should (equal (car defined) `(drover :icon ,drover-attention-glyph :order 60
+                                            :mouse-1 drover-next :mouse-3 drover-select))))))
 
 (ert-deftest drover-attention-test-default-glyph ()
-  "The default glyph is the robot emoji, a plain Unicode symbol as other indicators use."
+  "The default icon is the robot emoji, which the global status draws in colour."
   (let ((glyph (eval (car (get 'drover-attention-glyph 'standard-value)) t)))
     (should (equal glyph "\U0001F916"))
-    (should (eq (get-char-code-property (aref glyph 0) 'general-category) 'So))
+    (unwind-protect
+        (should (global-status-define 'drover-attention-test-glyph :icon glyph))
+      (global-status-remove 'drover-attention-test-glyph))
     (should-not (rassoc glyph (eval (car (get 'opencode-subagent-icons 'standard-value)) t)))))
 
-(ert-deftest drover-attention-test-mode-line-keeps-properties ()
-  ;; The mode line drops the text properties of a variable not risky.
-  ;; `format-mode-line' renders nothing in batch, hence no rendering here.
-  (should (get 'drover-attention-mode-line 'risky-local-variable)))
+(ert-deftest drover-attention-test-glyph-set-shows-at-once ()
+  "Setting the icon while the mode is on shows it; one the global status refuses changes nothing."
+  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting))
+    (drover-attention-mode 1)
+    (let ((glyph drover-attention-glyph)
+          (set (get 'drover-attention-glyph 'custom-set)))
+      (unwind-protect
+          (progn
+            (funcall set 'drover-attention-glyph "\U0001F6F8")
+            (should (equal drover-attention-glyph "\U0001F6F8"))
+            (should (equal (plist-get (global-status-entry 'drover) :icon) "\U0001F6F8"))
+            ;; A symbol drawn as a text glyph: refused, the icon as it was.
+            (should-error (funcall set 'drover-attention-glyph "☺"))
+            (should (equal drover-attention-glyph "\U0001F6F8"))
+            (should (equal (plist-get (global-status-entry 'drover) :icon) "\U0001F6F8")))
+        (set-default 'drover-attention-glyph glyph)))))
 
 (ert-deftest drover-attention-test-updates-on-change ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting))
     (drover-attention-mode 1)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (should (equal (drover-attention-test-count) '(1 waiting)))
     (setq drover-test-sessions (list (drover-test-session "w" :status 'waiting)
                                      (drover-test-session "f" :status 'failed)))
     ;; Nothing changes until backends report it.
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (should (equal (drover-attention-test-count) '(1 waiting)))
     (drover-backend-changed 'fake "f")
     (drover-changed-now)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
+    ;; Waiting ranks before failed in `drover-status-order'.
+    (should (equal (drover-attention-test-count) '(2 waiting)))
     (setq drover-test-sessions (list (drover-test-session "w" :status 'idle)))
     (drover-backend-changed 'fake "w")
     (drover-backend-changed 'fake "f")
     (drover-changed-now)
-    (should-not drover-attention-mode-line)))
+    (should-not (drover-attention-test-count))))
 
-(ert-deftest drover-attention-test-mode-line-not-computed-when-drawn ()
+(ert-deftest drover-attention-test-leaves-global-mode-string ()
+  "The count goes to the global status: `global-mode-string' stays as it was."
+  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting))
+    (dolist (value '(nil "[clock]" ("" display-time-string)))
+      (setq global-mode-string (copy-tree value))
+      (drover-attention-mode 1)
+      (should (equal (drover-attention-test-count) '(1 waiting)))
+      (should (equal global-mode-string value))
+      (drover-attention-mode -1)
+      (should (equal global-mode-string value)))))
+
+(ert-deftest drover-attention-test-reload-over-mode-string-count ()
+  "Reloaded over a drover that showed the count in `global-mode-string', it moves it.
+The older count leaves `global-mode-string', which the global status
+hides, its font hooks go, and the count shows as an entry."
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting))
     (drover-attention-mode 1)
-    ;; The construct is a variable holding a string, nothing to evaluate.
-    (should (equal global-mode-string '("" drover-attention-mode-line)))
-    (should (stringp drover-attention-mode-line))))
-
-;;;; Glyphs' ink
-
-(defvar drover-attention-test-measured nil
-  "Strings the fake font measured the ink of, newest first.")
-
-(defmacro drover-attention-test-with-font (ink &rest body)
-  "Run BODY with text measured in a fake font, every character 10 pixels wide.
-INK is an alist (GLYPH LEFT . RIGHT): the ink of GLYPH reaches LEFT
-pixels left of its start and RIGHT pixels right of it."
-  (declare (indent 1) (debug t))
-  `(let ((drover-attention-test-measured nil)
-         (ink ,ink))
-     (cl-letf (((symbol-function 'drover-text-pixel-width)
-                (lambda (string &rest _) (* 10 (length string))))
-               ((symbol-function 'drover-text-ink-extent)
-                (lambda (string &rest _)
-                  (push string drover-attention-test-measured)
-                  (or (cdr (assoc (substring-no-properties string) ink))
-                      (cons 0 (* 10 (length string)))))))
-       ,@body)))
-
-(defun drover-attention-test-spans (string ink)
-  "Return what the characters of mode line STRING draw, as (START END TEXT).
-Each character not displayed as a space draws its ink, in the fake font
-of `drover-attention-test-with-font' with INK, from START to END in
-pixels; spaces displayed as stretches advance by their width."
-  (let ((x 0) (spans nil))
-    (dotimes (index (length string))
-      (let ((char (substring-no-properties string index (1+ index))))
-        (pcase (get-text-property index 'display string)
-          (`(space :width (,width)) (setq x (+ x width)))
-          (_ (let ((reach (cdr (assoc char ink))))
-               (unless (string-blank-p char)
-                 (push (list (- x (or (car reach) 0)) (+ x (max 10 (or (cdr reach) 0))) char) spans))
-               (setq x (+ x 10)))))))
-    (nreverse spans)))
-
-(ert-deftest drover-attention-test-glyphs-leave-room-for-ink ()
-  "The count never goes under the ink of the glyph, a plain space covering what it can."
-  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0)
-                                    (drover-test-session "d" :status 'done :since 2.0))
-    ;; The robot draws 16 pixels right of its start, past its advance of
-    ;; 10 by less than a space, as FiraCode Nerd Font draws its robots:
-    ;; 1790 units of ink for an advance and a space of 1200.
-    (drover-attention-test-with-font '(("☺" 0 . 16))
-      (drover-attention-mode 1)
-      (let ((string drover-attention-mode-line))
-        (should (equal (substring-no-properties string) "☺ 2"))
-        (should-not (next-single-property-change 0 'display string))
-        (let ((spans (drover-attention-test-spans string ink)))
-          (should (equal spans '((0 16 "☺") (20 30 "2"))))))
-      ;; Measured as the mode line draws: over its face.
-      (should (equal (get-text-property 0 'face (car drover-attention-test-measured))
-                     '(drover-attention-waiting mode-line)))
-      (should (= (length drover-attention-test-measured) 1))
-      ;; Ink reaching 2 pixels left of its start and 25 past its advance,
-      ;; more than a space: room before it, and a space as wide as needed.
-      (setq ink '(("☺" 2 . 35)))
-      (run-hooks 'after-setting-font-hook)
-      (let ((string drover-attention-mode-line))
-        (should (equal (substring-no-properties string) " ☺ 2"))
-        (should (equal (get-text-property 0 'display string) '(space :width (2))))
-        (should (equal (get-text-property 2 'display string) '(space :width (25))))
-        (let ((spans (drover-attention-test-spans string ink)))
-          (should (equal spans '((0 37 "☺") (37 47 "2")))))
-        ;; The room belongs to the count: one face, clicks and tooltip.
-        (dotimes (index (length string))
-          (should (eq (get-text-property index 'face string) 'drover-attention-waiting))
-          (should (eq (get-text-property index 'local-map string) drover-attention-mode-line-map))
-          (should (get-text-property index 'help-echo string)))))))
-
-(ert-deftest drover-attention-test-glyphs-measured-once-per-font ()
-  "The glyph is measured once per font and face, though the count changes often."
-  (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0))
-    (drover-attention-test-with-font '(("☺" 0 . 16))
-      (drover-attention-mode 1)
-      (should (= (length drover-attention-test-measured) 1))
-      (dotimes (_ 3)
-        (setq drover-test-sessions (cons (drover-test-session (format "w%d" (length drover-test-sessions))
-                                                              :status 'waiting :since 2.0)
-                                         drover-test-sessions))
-        (drover-backend-changed 'fake)
-        (drover-changed-now))
-      (should (equal (substring-no-properties drover-attention-mode-line) "☺ 4"))
-      (should (= (length drover-attention-test-measured) 1))
-      ;; In another face, as when the most urgent status changes: once.
-      (dotimes (_ 2)
-        (setq drover-test-sessions (list (drover-test-session "d" :status 'done)))
-        (drover-backend-changed 'fake)
-        (drover-changed-now))
-      (should (= (length drover-attention-test-measured) 2))
-      ;; Another font for the mode line: measured again.
-      (cl-letf (((symbol-function 'face-font) (lambda (&rest _) "-other-font-")))
-        (drover-attention--update))
-      (should (= (length drover-attention-test-measured) 3))
-      ;; A font set, or a theme enabled, measures again, and redraws.
-      (should (memq #'drover-attention--fonts-changed after-setting-font-hook))
-      (should (memq #'drover-attention--fonts-changed enable-theme-functions))
-      (setq ink '(("☺" 0 . 30)))
-      (run-hooks 'after-setting-font-hook)
-      (should (= (length drover-attention-test-measured) 4))
-      (should (equal (get-text-property 1 'display drover-attention-mode-line) '(space :width (20))))
-      (run-hook-with-args 'enable-theme-functions 'some-theme)
-      (should (= (length drover-attention-test-measured) 5))
-      ;; Off, the mode follows fonts no more.
-      (drover-attention-mode -1)
-      (should-not (memq #'drover-attention--fonts-changed after-setting-font-hook))
-      (should-not (memq #'drover-attention--fonts-changed enable-theme-functions)))))
+    (global-status-remove 'drover)
+    (setq global-mode-string (list "" 'drover-attention-mode-line))
+    (let ((after-setting-font-hook nil)
+          (enable-theme-functions nil))
+      (unwind-protect
+          (progn
+            (defalias 'drover-attention--fonts-changed #'ignore)
+            (add-hook 'after-setting-font-hook #'drover-attention--fonts-changed)
+            (add-hook 'enable-theme-functions #'drover-attention--fonts-changed)
+            (load "drover-attention" nil t)
+            (should (equal global-mode-string '("")))
+            (should-not after-setting-font-hook)
+            (should-not enable-theme-functions)
+            (should (equal (drover-attention-test-count) '(1 waiting))))
+        (fmakunbound 'drover-attention--fonts-changed)))))
 
 ;;;; Enabling and disabling
 
-(ert-deftest drover-attention-test-mode-from-nil-mode-string ()
+(ert-deftest drover-attention-test-mode-hooks ()
   (drover-attention-test-with nil
     (drover-attention-mode 1)
-    (should (equal global-mode-string '("" drover-attention-mode-line)))
     (should (memq #'drover-attention--changed drover-changed-hook))
     (drover-attention-mode 1)
-    (should (equal global-mode-string '("" drover-attention-mode-line)))
     (drover-attention-mode -1)
-    (should (null global-mode-string))
-    (should-not (memq #'drover-attention--changed drover-changed-hook))
-    (should-not drover-attention--mode-string-origin)))
-
-(ert-deftest drover-attention-test-mode-from-list-mode-string ()
-  (drover-attention-test-with nil
-    (setq global-mode-string (list "" 'display-time-string))
-    (drover-attention-mode 1)
-    (should (equal global-mode-string '("" display-time-string drover-attention-mode-line)))
-    (drover-attention-mode -1)
-    (should (equal global-mode-string '("" display-time-string)))))
-
-(ert-deftest drover-attention-test-mode-from-string-mode-string ()
-  (drover-attention-test-with nil
-    (setq global-mode-string "[clock]")
-    (drover-attention-mode 1)
-    (should (equal global-mode-string '("[clock]" drover-attention-mode-line)))
-    (drover-attention-mode -1)
-    (should (equal global-mode-string "[clock]"))))
-
-(ert-deftest drover-attention-test-mode-keeps-later-additions ()
-  (drover-attention-test-with nil
-    (drover-attention-mode 1)
-    (setq global-mode-string (append global-mode-string '(other-string)))
-    (drover-attention-mode -1)
-    (should (equal global-mode-string '("" other-string)))))
+    (should-not (memq #'drover-attention--changed drover-changed-hook))))
 
 (ert-deftest drover-attention-test-disable-clears-state ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting))
     (drover-attention-mode 1)
     (drover-next)
-    (should drover-attention-mode-line)
+    (should (drover-attention-test-count))
     (should drover-attention--queue)
     (should (memq #'drover-attention--after-command post-command-hook))
     (drover-attention-mode -1)
-    (should-not drover-attention-mode-line)
+    ;; The entry is gone, not hidden: nothing can show it.
+    (should-not (global-status-entry 'drover))
+    (should-error (global-status-set 'drover 1 'quiet))
     (should-not drover-attention--queue)
     (should-not (memq #'drover-attention--after-command post-command-hook))
-    ;; Changes no longer touch the mode line.
+    ;; Changes no longer touch the global status.
     (drover-backend-changed 'fake)
     (drover-changed-now)
-    (should-not drover-attention-mode-line)))
+    (should-not (global-status-entry 'drover))))
 
 (ert-deftest drover-attention-test-enable-starts-backends ()
   (drover-attention-test-with nil
@@ -517,7 +411,7 @@ pixels; spaces displayed as stretches advance by their width."
     (drover-attention-mode 1)
     (should-not (drover-attention-unload-function))
     (should-not drover-attention-mode)
-    (should (null global-mode-string))))
+    (should-not (global-status-entry 'drover))))
 
 ;;;; Visiting the next session
 
@@ -1405,32 +1299,32 @@ tooltip, made when shown, counts anew, and so does the next change."
   (drover-attention-test-with (list (drover-test-session "a" :status 'waiting :project "p")
                                     (drover-test-session "b" :status 'waiting :project "q"))
     (drover-attention-mode 1)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))
+    (should (equal (drover-attention-test-count) '(2 waiting)))
     (setq drover-filter '(:project "p"))
-    (let ((help (drover-attention-test-help drover-attention-mode-line)))
+    (let ((help (drover-attention-test-help)))
       (should (string-match-p "Session a" help))
       (should-not (string-match-p "Session b" help)))
     (drover-backend-changed 'fake "a")
     (drover-changed-now)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 1"))
+    (should (equal (drover-attention-test-count) '(1 waiting)))
     (setq drover-filter nil)
     (drover-backend-changed 'fake "a")
     (drover-changed-now)
-    (should (equal (substring-no-properties drover-attention-mode-line) "☺ 2"))))
+    (should (equal (drover-attention-test-count) '(2 waiting)))))
 
 (ert-deftest drover-attention-test-help-names-filter ()
   "The tooltip names the filter while one is set, the sessions it lists following it."
   (drover-attention-test-with (list (drover-test-session "a" :status 'waiting :project "p")
                                     (drover-test-session "b" :status 'done :project "q"))
     (drover-attention-mode 1)
-    (should-not (string-match-p "Filter" (drover-attention-test-help drover-attention-mode-line)))
+    (should-not (string-match-p "Filter" (drover-attention-test-help)))
     (drover-set-filter :project "p")
-    (let ((help (drover-attention-test-help drover-attention-mode-line)))
+    (let ((help (drover-attention-test-help)))
       (should (string-match-p "Session a" help))
       (should-not (string-match-p "Session b" help))
       (should (string-match-p "\n\nFilter: project p\n\nmouse-1" help)))
     (drover-set-filter :project nil)
-    (should-not (string-match-p "Filter" (drover-attention-test-help drover-attention-mode-line)))))
+    (should-not (string-match-p "Filter" (drover-attention-test-help)))))
 
 (ert-deftest drover-attention-test-next-skips-filtered ()
   "`drover-next' leaves out the sessions the filter hides, their cache expiring first or not."

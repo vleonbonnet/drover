@@ -21,11 +21,13 @@ SPYGLASS_EL ?= $(HOME)/.emacs.d/elpaca/sources/spyglass
 # checkout.  Without it, the tests calling them through Anvil's
 # dispatcher are skipped.
 ANVIL_EL ?= $(HOME)/.emacs.d/elpaca/sources/anvil
+# global-status, which shows the counts of the mode line: its build.
+GLOBAL_STATUS_EL ?= $(DEPS)/global-status
 # What drover's Package-Requires names, and what those need: a package
 # manager compiles drover with these alone, as elpaca does.
 REQUIRED_PATH = \
   -L $(DEPS)/magit-section -L $(DEPS)/compat -L $(DEPS)/cond-let -L $(DEPS)/llama \
-  -L $(OPENCODE_EL) -L $(DEPS)/transient
+  -L $(OPENCODE_EL) -L $(DEPS)/transient -L $(GLOBAL_STATUS_EL)
 LOAD_PATH = -L . -L test $(REQUIRED_PATH) \
   -L $(AGENT_SHELL_EL) -L $(DEPS)/shell-maker -L $(DEPS)/acp \
   -L $(CLAUDE_CODE_IDE_EL) -L $(DEPS)/websocket -L $(DEPS)/web-server \

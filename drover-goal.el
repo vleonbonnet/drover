@@ -53,8 +53,7 @@
 ;; armed, and come back paused after Emacs restarts; each logs its
 ;; iterations there, bounded.  The list shows a goal by its glyph, the
 ;; follow-ups sent of their limit and how it stands (the field `goal'),
-;; the mode line counts goals running and those ended unseen, and the
-;; heading of a goal's task gets a LOGBOOK note as it ends.  A session
+;; and the heading of a goal's task gets a LOGBOOK note as it ends.  A session
 ;; of another host is that host's to drive: goals run on the host owning
 ;; the session.
 
@@ -170,7 +169,7 @@ They are sent first, before the end of the output."
   :group 'drover)
 
 (defcustom drover-goal-glyph "◎"
-  "Glyph of a goal, in lists and the mode line."
+  "Glyph of a goal, in lists."
   :type 'string
   :group 'drover)
 
@@ -319,7 +318,6 @@ Never over a file that did not read."
     (error (drover-warn "Goals not saved: %s" (drover-error-message err))))
   (when-let* ((session (drover-goal--session goal)))
     (drover-views-changed (list (drover-session-key session))))
-  (drover-goal--mode-line-update)
   (drover-run-hook-reporting 'drover-goal-changed-hook)
   (drover-goal--list-refresh))
 
@@ -1570,37 +1568,6 @@ The value of `drover-list-goal-function'."
             (_ (drover-face (concat drover-goal-glyph " " count) 'default)))
           'help-echo (drover-bound-lines (drover-goal-describe goal) 12)))))))
 
-(defvar drover-goal-mode-line nil
-  "The mode line construct of goals, or nil when no goal shows.")
-(put 'drover-goal-mode-line 'risky-local-variable t)
-
-(defvar-keymap drover-goal-mode-line-map
-  :doc "Keys of the goals in the mode line."
-  "<mode-line> <mouse-1>" #'drover-goal-list)
-
-(defun drover-goal--mode-line-update ()
-  "Compute what the mode line tells of goals again."
-  (let* ((goals (and drover-goal--table (drover-layout-current-p drover-goal--table 'drover-goal--table)
-                     (drover-goal--table-goals drover-goal--table)))
-         (running (seq-count #'drover-goal--active-p goals))
-         (met (seq-count (lambda (goal) (and (eq (plist-get goal :state) 'met) (not (plist-get goal :seen)))) goals))
-         (stuck (seq-count (lambda (goal) (and (memq (plist-get goal :state) '(paused given-up))
-                                               (not (plist-get goal :seen))))
-                           goals))
-         (string (when (> (+ running met stuck) 0)
-                   (propertize
-                    (concat " " drover-goal-glyph
-                            (if (> running 0) (format " %d" running) "")
-                            (if (> met 0) (drover-face (format " ✓%d" met) 'success) "")
-                            (if (> stuck 0) (drover-face (format " !%d" stuck) 'warning) ""))
-                    'help-echo (format "Goals: %d running, %d met, %d paused or given up, unseen; mouse-1 lists them"
-                                       running met stuck)
-                    'mouse-face 'mode-line-highlight
-                    'local-map drover-goal-mode-line-map))))
-    (unless (equal-including-properties string drover-goal-mode-line)
-      (setq drover-goal-mode-line string)
-      (force-mode-line-update t))))
-
 ;;;; The list of goals
 
 (defconst drover-goal--list-buffer "*drover goals*"
@@ -1676,35 +1643,14 @@ The value of `drover-list-goal-function'."
   (dolist (goal (drover-goal--goals))
     (setf (plist-get goal :seen) t))
   (condition-case nil (drover-goal--save) (error nil))
-  (drover-goal--mode-line-update)
   (drover-goal--list-refresh)
   (pop-to-buffer drover-goal--list-buffer))
 
 ;;;; The mode
 
-(defvar drover-goal--mode-string-origin nil
-  "What `global-mode-string' was before goals joined it.")
-
-(defun drover-goal--show ()
-  "Add the goals to `global-mode-string'."
-  (unless (and (listp global-mode-string) (memq 'drover-goal-mode-line global-mode-string))
-    (setq drover-goal--mode-string-origin
-          (cond ((null global-mode-string) (setq global-mode-string (list "")) 'empty)
-                ((stringp global-mode-string) (setq global-mode-string (list global-mode-string)) 'string)))
-    (setq global-mode-string (append global-mode-string '(drover-goal-mode-line)))))
-
-(defun drover-goal--hide ()
-  "Remove the goals from `global-mode-string', restoring what it was."
-  (when (listp global-mode-string)
-    (setq global-mode-string (remq 'drover-goal-mode-line global-mode-string))
-    (pcase drover-goal--mode-string-origin
-      ('empty (when (equal global-mode-string '("")) (setq global-mode-string nil)))
-      ('string (when (and (= (length global-mode-string) 1) (stringp (car global-mode-string)))
-                 (setq global-mode-string (car global-mode-string)))))))
-
 ;;;###autoload
 (define-minor-mode drover-goal-mode
-  "Follow the goals of sessions, show them in lists and the mode line.
+  "Follow the goals of sessions, and show them in lists.
 The goals are read, those that ran before Emacs restarted paused; see
 `drover-goal'."
   :global t
@@ -1714,14 +1660,11 @@ The goals are read, those that ran before Emacs restarted paused; see
         (drover-with-reporting "goals" (drover-goal-load))
         (add-hook 'drover-changed-hook #'drover-goal--turn-check)
         (add-hook 'drover-schedule-changed-hook #'drover-goal--schedule-changed)
-        (setq drover-list-goal-function #'drover-goal--list-text)
-        (drover-goal--show)
-        (drover-goal--mode-line-update))
+        (setq drover-list-goal-function #'drover-goal--list-text))
     (remove-hook 'drover-changed-hook #'drover-goal--turn-check)
     (remove-hook 'drover-schedule-changed-hook #'drover-goal--schedule-changed)
     (when (eq drover-list-goal-function #'drover-goal--list-text)
-      (setq drover-list-goal-function nil))
-    (drover-goal--hide))
+      (setq drover-list-goal-function nil)))
   (when (fboundp 'drover-view-settings-changed)
     (drover-view-settings-changed)))
 
@@ -1751,6 +1694,11 @@ shows them."
     (when (eq (timer--function timer) 'drover-goal--poll)
       (cancel-timer timer)))
   nil)
+
+;; A drover older than the global status showed goals in
+;; `global-mode-string', which the global status hides: take them out.
+(when (and (consp global-mode-string) (memq 'drover-goal-mode-line global-mode-string))
+  (setq global-mode-string (remq 'drover-goal-mode-line global-mode-string)))
 
 (provide 'drover-goal)
 ;;; drover-goal.el ends here

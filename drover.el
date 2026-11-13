@@ -6,7 +6,7 @@
 ;; Maintainer: Valentin Leon <valentin@leon.click>
 ;; Keywords: tools, llm, convenience
 ;; Version: 0.2.0
-;; Package-Requires: ((emacs "31.1") (magit-section "4.0") (transient "0.13") (opencode "2.1.0"))
+;; Package-Requires: ((emacs "31.1") (magit-section "4.0") (transient "0.13") (opencode "2.1.0") (global-status "0.1.0"))
 ;; URL: https://github.com/vleonbonnet/drover
 
 ;; This program is free software; you can redistribute it and/or modify

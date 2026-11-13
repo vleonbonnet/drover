@@ -219,8 +219,6 @@ the queue and the state are fresh, nothing shown, no mode turned on."
       (should (eq (drover-goal-test-settled goal 'met 'sending 'given-up) 'met))
       (should (string-match-p "sh check.sh pass" (plist-get goal :reason)))
       (should (string-match-p "✓ 1/5" (drover-goal--list-text (car drover-test-sessions) 'column)))
-      (drover-goal--mode-line-update)
-      (should (string-match-p "✓1" drover-goal-mode-line))
       (with-temp-buffer
         (insert-file-contents (drover-goal-log-file goal))
         (should (string-match-p "FAIL test_login" (buffer-string)))

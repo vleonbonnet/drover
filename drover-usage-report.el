@@ -27,7 +27,7 @@
 ;; sections; then where each cost comes from.  Its menu,
 ;; `drover-usage-menu', V there, sets what it totals on the families of
 ;; keys of the list's menu: = for options.  `drover-usage-mode-line-mode'
-;; shows today's cost in the mode line.
+;; shows today's cost in the global status (see `global-status-mode').
 
 ;;; Code:
 
@@ -38,6 +38,7 @@
 (require 'transient)
 (require 'drover-core)
 (require 'drover-ui)
+(require 'global-status)
 (require 'drover-keys)
 (require 'drover-usage)
 
@@ -383,51 +384,72 @@ As (VALUE . LABEL)."
 
 ;;;; The mode line
 
-(defvar drover-usage--mode-line ""
-  "What the mode line shows of today's usage.")
+(defvar drover-usage-mode-line-mode)
 
-(defvar drover-usage--mode-line-help nil
-  "The tooltip of `drover-usage--mode-line', made as shown.")
+(defcustom drover-usage-mode-line-icon "\U0001F4B8" ; money with wings
+  "Icon of today's cost in the global status.
+`drover-usage-mode-line-mode' shows it and the cost.  It is one emoji
+drawn in colour, as `global-status-define' requires of every icon."
+  :type 'string
+  :initialize #'custom-initialize-default
+  ;; Shown first: an icon the global status refuses leaves the value as it was.
+  :set (lambda (symbol value)
+         (when (bound-and-true-p drover-usage-mode-line-mode)
+           (drover-usage--mode-line-define value))
+         (set-default-toplevel-value symbol value))
+  :group 'drover-usage)
+
+(defun drover-usage--mode-line-define (&optional icon)
+  "Define the entry `drover-usage' of the global status: its ICON and click.
+ICON defaults to `drover-usage-mode-line-icon'."
+  (global-status-define 'drover-usage :icon (or icon drover-usage-mode-line-icon) :order 65
+                        :mouse-1 #'drover-usage))
 
 (defun drover-usage--mode-line-update ()
-  "Compute what the mode line shows of today's usage again."
+  "Show today's cost in the global status again, or hide it when nothing was used.
+The entry is quiet: a cost is to know, not to act on.  Its tooltip
+breaks the day down by harness."
   (when (bound-and-true-p drover-usage-mode-line-mode)
     (let* ((report (drover-usage-report 'today 'harness nil))
-           (total (plist-get report :total))
-           (text (if (zerop (drover-usage-sum-tokens total)) "" (drover-usage-format-short total))))
-      (setq drover-usage--mode-line-help
-            (drover-bound-lines
-             (string-join (cons (concat "Today: " (drover-usage-format-sum total))
-                                (mapcar (pcase-lambda (`(,_value ,label ,sum ,_items))
-                                          (concat label ": " (drover-usage-format-sum sum)))
-                                        (plist-get report :groups)))
-                          "\n")))
-      (unless (equal text (substring-no-properties drover-usage--mode-line))
-        (setq drover-usage--mode-line
-              (if (string-empty-p text)
-                  ""
-                (propertize text 'help-echo (lambda (&rest _) drover-usage--mode-line-help)
-                            'mouse-face 'mode-line-highlight
-                            'local-map (make-mode-line-mouse-map 'mouse-1 #'drover-usage))))
-        (force-mode-line-update t)))))
+           (total (plist-get report :total)))
+      (if (zerop (drover-usage-sum-tokens total))
+          (global-status-clear 'drover-usage)
+        (global-status-set
+         'drover-usage (drover-usage-format-short total) 'quiet
+         (drover-bound-lines
+          (string-join (cons (concat "Today: " (drover-usage-format-sum total))
+                             (mapcar (pcase-lambda (`(,_value ,label ,sum ,_items))
+                                       (concat label ": " (drover-usage-format-sum sum)))
+                                     (plist-get report :groups)))
+                       "\n")))))))
 
 (defun drover-usage--mode-line-follow ()
-  "Follow the usage changed, for the mode line; on `drover-usage-changed-hook'."
+  "Follow the usage changed, for the global status; on `drover-usage-changed-hook'."
   (drover-usage--mode-line-update))
 
 ;;;###autoload
 (define-minor-mode drover-usage-mode-line-mode
-  "Show in the mode line what agents cost today; a click shows the report."
+  "Show in the global status what agents cost today; a click shows the report.
+The entry `drover-usage' of the global status (see `global-status-mode')
+shows `drover-usage-mode-line-icon' and today's cost."
   :global t
   :group 'drover-usage
   (if drover-usage-mode-line-mode
       (progn
         (drover-usage-start)
-        (add-to-list 'global-mode-string '(:eval drover-usage--mode-line) t)
+        (drover-usage--mode-line-define)
         (add-hook 'drover-usage-changed-hook #'drover-usage--mode-line-follow)
         (drover-usage--mode-line-update))
-    (setq global-mode-string (delete '(:eval drover-usage--mode-line) global-mode-string))
-    (remove-hook 'drover-usage-changed-hook #'drover-usage--mode-line-follow)))
+    (remove-hook 'drover-usage-changed-hook #'drover-usage--mode-line-follow)
+    (global-status-remove 'drover-usage)))
+
+;; A drover older than the global status showed the cost in
+;; `global-mode-string', which the global status hides: show it as an entry.
+(when (bound-and-true-p drover-usage-mode-line-mode)
+  (when (consp global-mode-string)
+    (setq global-mode-string (delete '(:eval drover-usage--mode-line) global-mode-string)))
+  (drover-usage--mode-line-define)
+  (drover-usage--mode-line-update))
 
 (provide 'drover-usage-report)
 ;;; drover-usage-report.el ends here

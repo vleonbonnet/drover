@@ -554,6 +554,34 @@ they are, it is priced anew, and views told."
     (dolist (key '("=d" "=g" "=b" "=o" "=p" "=H" "=h" "=m" "=v" "=c" "g"))
       (should (transient-get-suffix 'drover-usage-menu key)))))
 
+;;;; The mode line
+
+(ert-deftest drover-usage-test-mode-line ()
+  "Today's cost shows as a quiet entry of the global status, its tooltip by harness.
+Nothing used today shows no entry; turned off, the mode removes it."
+  (drover-usage-test-with
+    (unwind-protect
+        (progn
+          (drover-usage-mode-line-mode 1)
+          (should (memq #'drover-usage--mode-line-follow drover-usage-changed-hook))
+          (should-not (global-status-entry 'drover-usage))
+          (drover-usage-test-claude (float-time))
+          (drover-usage-scan)
+          (drover-usage--mode-line-update)
+          (let ((entry (global-status-entry 'drover-usage))
+                (total (plist-get (drover-usage-report 'today 'harness nil) :total)))
+            (should (equal (plist-get entry :icon) drover-usage-mode-line-icon))
+            (should (equal (plist-get entry :value)
+                           (substring-no-properties (drover-usage-format-short total))))
+            (should (eq (plist-get entry :state) 'quiet))
+            (should (string-match-p "\\`Today: .*\nClaude Code: " (plist-get entry :help))))
+          (drover-usage-mode-line-mode -1)
+          (should-not (global-status-entry 'drover-usage))
+          (should-not (memq #'drover-usage--mode-line-follow drover-usage-changed-hook)))
+      (when drover-usage-mode-line-mode
+        (drover-usage-mode-line-mode -1))
+      (global-status-remove 'drover-usage))))
+
 ;;;; The list
 
 (ert-deftest drover-usage-test-list ()

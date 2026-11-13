@@ -81,17 +81,20 @@ icon keeps its width as the host comes and goes."
   "Face of the lines a session removed, as its changes count them."
   :group 'drover-faces)
 
+(declare-function drover-attention--define "drover-attention" (&optional icon))
+
 (defcustom drover-attention-glyph "\U0001F916" ; robot face
-  "Glyph before the count of sessions needing you, in the mode line.
-`drover-attention-mode' shows it, a space and the count, in the face
-`drover-attention-face' gives the most urgent status counted.  The robot
-emoji by default, a plain
-Unicode symbol as other indicators of the mode line use, such as mail
-counts.  A Nerd Font icon suits a mode line of Nerd Font icons, such as
-\"\\U000F16A4\" (nf-md-robot_excited_outline): an icon whose ink
-reaches past its advance further than a space is given room to keep it
-off the count."
+  "Icon of the count of sessions needing you, in the global status.
+`drover-attention-mode' shows it and the count, in the state of the
+most urgent status counted.  It is one emoji drawn in colour, as
+`global-status-define' requires of every icon: the robot by default."
   :type 'string
+  :initialize #'custom-initialize-default
+  ;; Shown first: an icon the global status refuses leaves the value as it was.
+  :set (lambda (symbol value)
+         (when (bound-and-true-p drover-attention-mode)
+           (drover-attention--define value))
+         (set-default-toplevel-value symbol value))
   :group 'drover)
 
 (defcustom drover-host-icon "\U000F048D" ; nf-md-server_network
