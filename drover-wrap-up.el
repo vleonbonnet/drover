@@ -42,7 +42,10 @@
 ;; `drover-wrap-up-keyword', or by ending it with a question.  A turn
 ;; failing or interrupted keeps it open too, its cleanup unfinished.
 ;; Kept open, the session is restored from the archive, its buffer kept,
-;; and a warning tells why.
+;; and a warning tells why.  Restored meanwhile, by the user or another
+;; client, it is no longer wrapped up, and a message says so;
+;; `drover-wrap-up-under-way-p' tells code that restores sessions which
+;; to leave archived.
 ;;
 ;; Wrap-ups under way are kept in `drover-state-directory', so that one
 ;; of a session running without its buffer is followed to its end after
@@ -239,6 +242,15 @@ Never over a file that did not read; a failure is warned of."
 (defun drover-wrap-up--find (id)
   "Return the wrap-up of the conversation ID under way, or nil."
   (seq-find (lambda (entry) (equal (plist-get entry :id) id)) (drover-wrap-up--entries)))
+
+;;;###autoload
+(defun drover-wrap-up-under-way-p (engine id)
+  "Return non-nil while the conversation ID of ENGINE is being wrapped up.
+ENGINE is a symbol, such as `opencode', and ID the engine's own
+identifier of the conversation.  Its session is archived as its cleanup's
+turn begins, and a restore meanwhile calls the wrap-up off: code that
+restores archived sessions starting a turn leaves this one archived."
+  (and (drover-wrap-up--find (format "%s/%s" engine id)) t))
 
 (defun drover-wrap-up--set (entry &rest properties)
   "Set PROPERTIES of ENTRY, a plist of keys and values, and save the wrap-ups."
@@ -791,10 +803,16 @@ or when its status changed and it did something since."
      ((not (drover-session-archived-p record))
       ;; Restored by the user, or by a prompt sent: no longer wrapped up.
       ;; A backend may tell the archive a moment after it confirmed it.
-      (if (or (plist-get entry :archived)
-              (> (- (float-time) (or (plist-get entry :archived-at) 0)) drover-wrap-up--archive-grace))
-          (drover-wrap-up--drop entry)
-        (when (plist-get entry :lost) (drover-wrap-up--set entry :lost nil))))
+      (cond
+       ((plist-get entry :archived)
+        (drover-wrap-up--drop entry)
+        (drover-message "The wrap-up of %s is called off: it was restored from the archive" title)
+        (drover-wrap-up--tell entry "The wrap-up of %s is called off: it was restored from the archive"))
+       ((> (- (float-time) (or (plist-get entry :archived-at) 0)) drover-wrap-up--archive-grace)
+        (drover-wrap-up--drop entry)
+        (drover-warn "The wrap-up of %s is called off: it never showed archived" title)
+        (drover-wrap-up--tell entry "The wrap-up of %s is called off: it never showed archived"))
+       ((plist-get entry :lost) (drover-wrap-up--set entry :lost nil))))
      ((and (plist-get entry :runs-in-buffer) (not (drover-session-buffer record)))
       (drover-wrap-up--drop entry)
       (drover-message "The buffer of %s closed before its wrap-up ended; it stays archived" title))
