@@ -380,13 +380,20 @@ SESSION cannot be wrapped up."
 
 ;;;; What drover attributes to a session
 
+(defconst drover-wrap-up--system-temporary-directories
+  '("/tmp/" "/private/tmp/" "/var/folders/" "/private/var/folders/")
+  "Temporary directories of the system whatever the environment says.
+macOS's own, where its per-user temporary directories are, and /tmp.")
+
 (defun drover-wrap-up--temporary-directories ()
-  "Return the temporary directories of this host, canonical, with a slash."
+  "Return the temporary directories of this host, canonical, with a slash.
+Those the variable `temporary-file-directory' and the environment name, and
+`drover-wrap-up--system-temporary-directories'."
   (delete-dups
    (mapcar (lambda (directory) (file-name-as-directory (drover-task-canonical directory)))
            (seq-filter (lambda (directory) (and (stringp directory) (not (string-empty-p directory))))
-                       (list temporary-file-directory (getenv "TMPDIR") (getenv "TEMP") (getenv "TMP")
-                             "/tmp/" "/private/tmp/" "/var/folders/" "/private/var/folders/")))))
+                       (append (list temporary-file-directory (getenv "TMPDIR") (getenv "TEMP") (getenv "TMP"))
+                               drover-wrap-up--system-temporary-directories)))))
 
 (defun drover-wrap-up--under-p (file directory)
   "Return non-nil when FILE is DIRECTORY or under it, both canonical."

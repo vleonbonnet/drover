@@ -571,6 +571,9 @@ PROPERTIES are those of its record as the turn ends."
                                               "GIT_COMMITTER_NAME=Test" "GIT_COMMITTER_EMAIL=test@example.com")
                                         process-environment))
            (abbreviated-home-dir nil)
+           ;; The fixture's home is under the system's own temporary
+           ;; directories, such as macOS's /var/folders/: they are not its.
+           (drover-wrap-up--system-temporary-directories nil)
            (repo (expand-file-name "repo/" home))
            (temporary-file-directory (file-name-as-directory (expand-file-name "tmp" home)))
            (files (list "notes/a.md" "notes/deep/b.md" "scratch/c.txt" "repo/in-repo.txt"
