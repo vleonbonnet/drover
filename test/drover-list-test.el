@@ -9716,8 +9716,10 @@ sidebar's buffer in an ordinary window, never."
                (lambda (&optional window)
                  (gethash (window-normalize-window window) fringes '(8 8 nil nil))))
               ((symbol-function 'set-window-fringes)
-               (lambda (window left right &rest rest)
-                 (push (cons (window-normalize-window window) rest) set)
+               ;; Native code calls it through a trampoline, which passes
+               ;; every optional argument: named, they compare alike.
+               (lambda (window left &optional right outside-margins persistent)
+                 (push (list (window-normalize-window window) outside-margins persistent) set)
                  (puthash (window-normalize-window window) (list left right nil nil) fringes))))
       (drover-list-test-with (drover-list-test-side-sample)
         (pcase-let ((`(,_first ,second) (drover-list-test--main)))
@@ -9737,7 +9739,7 @@ sidebar's buffer in an ordinary window, never."
                              (eq (window-parameter side 'no-delete-other-windows) t)
                              (window-preserved-size side t)
                              ;; On the window alone, not persistently.
-                             (equal set (list (list side))))))
+                             (equal set (list (list side nil nil))))))
               (should (set-up-p))
               ;; Drawn anew.
               (older)
