@@ -373,6 +373,8 @@ PROPERTIES are those of its record as the turn ends."
     (drover-wrap-up-test-turn)
     (should-not (drover-wrap-up-test-entry))
     (should (buffer-live-p drover-wrap-up-test-buffer))
+    (should (member "The wrap-up of Session s1 is called off: it was restored from the archive"
+                    drover-wrap-up-test-messages))
     (should-not drover-wrap-up-test-warnings)))
 
 (ert-deftest drover-wrap-up-test-refusals ()
@@ -470,6 +472,47 @@ PROPERTIES are those of its record as the turn ends."
     (drover-wrap-up-test-turn)
     (should (drover-wrap-up-test-ended))
     (should (member "Wrapped up Session s1" drover-wrap-up-test-messages))))
+
+(ert-deftest drover-wrap-up-test-service-restored-as-the-turn-begins ()
+  "A session another client restores as its cleanup begins: called off, and told.
+`drover-wrap-up-under-way-p' tells such a client to leave it archived."
+  (drover-wrap-up-test-with 'service
+    (should-not (drover-wrap-up-under-way-p 'wrapfake "conv-1"))
+    (drover-wrap-up (drover-wrap-up-test-record))
+    (drover-wrap-up-test-take)
+    (should (drover-wrap-up-test-state 'watching))
+    (drover-wrap-up--changed)
+    (should (drover-wrap-up-under-way-p 'wrapfake "conv-1"))
+    (should-not (drover-wrap-up-under-way-p 'wrapfake "conv-2"))
+    (should-not (drover-wrap-up-under-way-p 'other "conv-1"))
+    ;; Restored by the service's other client, as the turn starts.
+    (setq drover-wrap-up-test-archived nil)
+    (drover-wrap-up-test-session :status 'working :since (+ (float-time) 1) :updated (+ (float-time) 1))
+    (drover-wrap-up--changed)
+    (should-not (drover-wrap-up-test-entry))
+    (should-not (drover-wrap-up-under-way-p 'wrapfake "conv-1"))
+    (should (member "The wrap-up of Session s1 is called off: it was restored from the archive"
+                    drover-wrap-up-test-messages))
+    (should-not (member "Wrapped up Session s1" drover-wrap-up-test-messages))
+    (should-not drover-wrap-up-test-warnings)))
+
+(ert-deftest drover-wrap-up-test-service-never-shown-archived ()
+  "A session its backend never shows archived, past the grace, is called off with a warning."
+  (drover-wrap-up-test-with 'service
+    ;; Confirmed, never told.
+    (setf (plist-get (alist-get 'fake drover--backends) :archive)
+          (lambda (_session then _else) (funcall then)))
+    (drover-wrap-up (drover-wrap-up-test-record))
+    (drover-wrap-up-test-take)
+    (should (drover-wrap-up-test-state 'watching))
+    (drover-wrap-up--changed)
+    (should (drover-wrap-up-test-entry))
+    (setf (plist-get (drover-wrap-up-test-entry) :archived-at)
+          (- (float-time) drover-wrap-up--archive-grace 1))
+    (drover-wrap-up--changed)
+    (should-not (drover-wrap-up-test-entry))
+    (should (equal drover-wrap-up-test-warnings
+                   '("The wrap-up of Session s1 is called off: it never showed archived")))))
 
 ;;;; Across Emacs sessions
 
