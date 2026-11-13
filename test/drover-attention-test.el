@@ -789,19 +789,65 @@ The commands typing the name are M-x's, judged as it ends."
       (should (equal (drover-attention-test-opened) '("a" "b" "a"))))))
 
 (ert-deftest drover-attention-test-keys-first-press-on-shown ()
-  "A round begins with its first session, though it shows already."
-  (drover-attention-test-with-keys '("a" "b" "c")
-    (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "a"))
-    ;; The menu clears the echo area as it opens and closes.
-    (should (equal (remove "" (drover-attention-test-messages (drover-attention-test-keys "<f19> j")))
-                   '("1/3")))
-    (should (equal (drover-attention-test-opened) '("a")))
-    (drover-attention-test-keys "<f19> j")
-    (should (equal (drover-attention-test-opened) '("a" "b"))))
+  "A round begins with its second session when the first shows already."
+  (dolist (keys '("<f19> j" "<f18>"))
+    (drover-attention-test-with-keys '("a" "b" "c")
+      (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "a"))
+      ;; The menu clears the echo area as it opens and closes.
+      (should (equal (list keys (remove "" (drover-attention-test-messages (drover-attention-test-keys keys))))
+                     (list keys '("2/3"))))
+      (should (equal (drover-attention-test-opened) '("b")))
+      (drover-attention-test-keys (concat keys " " keys))
+      (should (equal (list keys (drover-attention-test-opened)) (list keys '("b" "c" "a"))))))
   ;; Alone, it is visited again.
   (drover-attention-test-with-keys '("a")
     (drover-attention-test-keys "<f19> j <f19> j")
     (should (equal (drover-attention-test-opened) '("a" "a")))))
+
+(ert-deftest drover-attention-test-keys-first-press-on-shown-waiting ()
+  "The first session shown is passed even when it waits for you."
+  (drover-attention-test-with-keys '(("a" :status waiting
+                                      :requests ((:kind permission :summary "Edit emacs.org")))
+                                     "b")
+    (set-window-buffer (selected-window) (drover-attention-test-shown-buffer "a"))
+    (drover-attention-test-keys "<f18> <f18>")
+    (should (equal (drover-attention-test-opened) '("b" "a")))))
+
+(ert-deftest drover-attention-test-keys-first-press-on-shown-elsewhere ()
+  "The first session shows only in the window sessions show in, as its own buffer."
+  ;; Shown in another window: not where the round shows sessions.
+  (drover-attention-test-with-keys '("a" "b")
+    (let ((other (split-window (selected-window))))
+      (unwind-protect
+          (progn
+            (set-window-buffer other (drover-attention-test-shown-buffer "a"))
+            (drover-attention-test-keys "<f18>")
+            (should (equal (drover-attention-test-opened) '("a"))))
+        (delete-window other))))
+  ;; A list's row of it is no view of it.
+  (drover-attention-test-with-keys '("a" "b")
+    (let ((list (get-buffer-create " *drover-attention-test list*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer list
+              (setq-local drover-view-p t)
+              (setq-local drover-session-at-point-function (lambda () (drover-find 'shown "a"))))
+            (set-window-buffer (selected-window) list)
+            (drover-attention-test-keys "<f18>")
+            (should (equal (drover-attention-test-opened) '("a"))))
+        (kill-buffer list))))
+  ;; A buffer telling it as its own, as the view of a session of another host.
+  (drover-attention-test-with-keys '("a" "b")
+    (let ((view (get-buffer-create " *drover-attention-test view*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer view
+              (setq-local drover-session-at-point-function (lambda () (drover-find 'shown "a"))))
+            (set-window-buffer (selected-window) view)
+            (drover-attention-test-keys "<f18>")
+            (should (equal (drover-attention-test-opened) '("b"))))
+        (kill-buffer view)))))
+
 
 (ert-deftest drover-attention-test-keys-skips-gone ()
   (drover-attention-test-with-keys '("a" "b" "c")
@@ -937,6 +983,18 @@ The commands typing the name are M-x's, judged as it ends."
           (drover-attention-test-keys "<f18>")
           (should (equal (drover-attention-test-opened) '("a" "b" "c")))
           (should (eq (window-buffer main) (drover-attention-test-shown-buffer "c"))))))))
+
+(ert-deftest drover-attention-test-keys-first-press-on-shown-from-prompt ()
+  "From the prompt's side window, the first session shown where sessions show is passed."
+  (drover-attention-test-with-keys '("a" "b" "c")
+    (drover-attention-test-with-prompt
+      (let ((main (selected-window)))
+        (set-window-buffer main (drover-attention-test-shown-buffer "a"))
+        (drover-attention-test-with-side prompt
+          (select-window side)
+          (drover-attention-test-keys "<f18>")
+          (should (equal (drover-attention-test-opened) '("b")))
+          (should (eq (window-buffer main) (drover-attention-test-shown-buffer "b"))))))))
 
 (ert-deftest drover-attention-test-keys-subagent-through-root ()
   "A subagent waiting is visited through the top of its tree, by its cache, once."

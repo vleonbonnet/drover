@@ -34,9 +34,10 @@
 ;;   need you or not, then those that need you, then the idle ones with
 ;;   a buffer, then the other idle ones, each as the list shows them
 ;;   (`drover-visit-order'), a subagent waiting for you through the top
-;;   of its tree, and visits the first; each press after it visits the
-;;   next of that queue, the last followed by the first, until a
-;;   command other than `drover-next' runs, as `undo' chains.
+;;   of its tree, and visits the first, or the second when the first
+;;   shows already; each press after it visits the next of that queue,
+;;   the last followed by the first, until a command other than
+;;   `drover-next' runs, as `undo' chains.
 ;; - `drover-select' chooses any session with completion, whatever the
 ;;   filter, grouped by status, those needing you first, in the order
 ;;   `drover-next' visits them among themselves.
@@ -516,13 +517,31 @@ They are among those `drover-filter' keeps, but with UNFILTERED."
                                       (not (drover-session-active-p session)))))
                            (drover-surfaced-sessions nil unfiltered))))
 
+(defun drover-attention--shows-p (window session)
+  "Return non-nil when WINDOW shows SESSION already.
+WINDOW shows SESSION's buffer (see `drover-session-buffer'), or a buffer
+telling SESSION as its own (see `drover-session-at-point-function'),
+such as the view of a session of another host, or its conversation in
+another front end.  The session at point of a list is merely its row,
+and does not count."
+  (let ((buffer (window-buffer window)))
+    (or (eq buffer (drover-session-buffer session))
+        (when-let* ((shown (with-current-buffer buffer
+                             (and (not (drover-session-list-p))
+                                  (drover-session-at-point t)))))
+          (or (equal (drover-session-key shown) (drover-session-key session))
+              (when-let* ((engine (drover-session-engine-key session)))
+                (equal (drover-session-engine-key shown) engine)))))))
+
 (defun drover-attention--start (window)
   "Begin a round of `drover-next', visiting its first session in WINDOW.
 The round's queue is the sessions of `drover-attention--round-sessions',
 in the order as it stands (see `drover-visit-order'), a tree once (see
-`drover-attention--targets'); its first is visited even when WINDOW
-shows it already.  With none to visit, the echo area says so, and how
-many the filter hides, if it hides some."
+`drover-attention--targets').  When WINDOW shows its first already (see
+`drover-attention--shows-p'), the round begins with the second, the
+first coming last, whatever the first's status; alone, it is visited
+again.  With none to visit, the echo area says so, and how many the
+filter hides, if it hides some."
   (let ((targets (drover-attention--targets (drover-visit-order (drover-attention--round-sessions)))))
     (if (null targets)
         (let ((hidden (and (drover-filter-active-p)
@@ -533,7 +552,8 @@ many the filter hides, if it hides some."
             (message "No session to visit")))
       (setq drover-attention--queue (mapcar #'drover-session-key targets))
       (add-hook 'post-command-hook #'drover-attention--after-command)
-      (drover-attention--visit (car targets) 0 window))))
+      (let ((position (if (and (cdr targets) (drover-attention--shows-p window (car targets))) 1 0)))
+        (drover-attention--visit (nth position targets) position window)))))
 
 (defun drover-attention--advance (window)
   "Visit the session after the one last visited in the round, in WINDOW.
@@ -554,8 +574,9 @@ of the round is gone."
 ;;;###autoload
 (defun drover-next ()
   "Visit the next session to attend to, in the selected window.
-A first press lines up the sessions and visits the first, even the
-session shown.  First come those whose prompt cache lives, whether
+A first press lines up the sessions and visits the first, or the
+second when the first shows already, whatever its status, the first
+then coming last.  First come those whose prompt cache lives, whether
 they need you or not, the one to expire soonest first, so that a turn
 sent to it reuses it; then those that need you; then the idle ones
 with a buffer; then the other idle ones, which their backends may
