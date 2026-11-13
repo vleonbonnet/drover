@@ -1181,7 +1181,18 @@ viewport does."
       (unless (memq kind drover-agent-shell--quiet-events)
         (drover-backend-changed 'agent-shell drover-agent-shell--id))
       (when (memq kind drover-agent-shell--model-events)
-        (drover-agent-shell--models-changed)))))
+        (drover-agent-shell--models-changed))
+      (when (eq kind 'input-submitted)
+        (drover-agent-shell--sent-text (map-elt data :prompt))))))
+
+(defun drover-agent-shell--sent-text (text)
+  "Note TEXT, a prompt the user submitted to the current shell.
+Only what a command of the user's submits, as for
+`drover-agent-shell--handed-back': not a prompt drover submits, nor one
+agent-shell takes from its queue."
+  (when (and this-command (not drover-agent-shell--submitting) (stringp text))
+    (when-let* ((session (drover-agent-shell--buffer-session)))
+      (drover-note-sent-text session text (current-buffer)))))
 
 (defun drover-agent-shell--end-activity ()
   "Note that the turn of the current shell ended now."

@@ -192,6 +192,7 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (opencode-session-buffer-functions nil)
          (opencode-catalog-changed-functions nil)
          (opencode-handed-back-functions nil)
+         (opencode-input-sent-functions nil)
          (opencode-session-buffers (make-hash-table :test #'equal))
          (drover-opencode-test-entries ,entries)
          (drover-opencode-test-calls nil)
@@ -1769,6 +1770,20 @@ the user looks at; an answer another host gives here does not count."
                        `(("ses_1" prompt front-end nil)
                          ("ses_2" answer front-end ,(buffer-name (nth 0 buffers)))
                          ("ses_2" answer front-end nil))))))))
+
+(ert-deftest drover-opencode-test-input-sent ()
+  "Input the user sends from a session buffer is told with its text and start."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (drover-start)
+    (should (memq #'drover-opencode--input-sent opencode-input-sent-functions))
+    (drover-opencode-test-with-buffers '("")
+      (let ((noted nil))
+        (cl-letf (((symbol-function 'drover-note-sent-text)
+                   (lambda (session text &optional buffer start)
+                     (push (list (drover-session-id session) text (eq buffer (nth 0 buffers)) start) noted))))
+          (with-current-buffer (nth 0 buffers)
+            (run-hook-with-args 'opencode-input-sent-functions 'prompt "see thread" 12)))
+        (should (equal noted '(("ses_1" "see thread" t 12))))))))
 
 (ert-deftest drover-opencode-test-archive-closes-buffer ()
   "Archiving closes the session's buffer once the service took it, mid-turn too.

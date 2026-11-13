@@ -1084,6 +1084,15 @@ answer another host gives here is that host's (see
                                          (derived-mode-p 'opencode-session-mode))
                                        acting)))))))
 
+(defun drover-opencode--input-sent (_kind text start)
+  "Note TEXT, input the user sent from the current session buffer at START.
+For `opencode-input-sent-functions', in the command that sent it; a
+session of another host's service is that host's drover's."
+  (drover-with-reporting "OpenCode input sent"
+    (unless (drover-opencode--remote-p)
+      (when-let* ((session (drover-opencode--buffer-session)))
+        (drover-note-sent-text session text (current-buffer) start)))))
+
 (defun drover-opencode--start ()
   "Follow the registry, session buffers, catalogs and projects; bootstrap it.
 The registry does not change when a session's buffer opens or closes,
@@ -1093,6 +1102,7 @@ yet views show what sessions run by their catalogs."
   (add-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (add-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
   (add-hook 'opencode-handed-back-functions #'drover-opencode--handed-back)
+  (add-hook 'opencode-input-sent-functions #'drover-opencode--input-sent)
   (opencode-events-register "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-register "server.connected" #'drover-opencode--projects-changed)
   (dolist (type drover-opencode--moving-events)
@@ -2202,6 +2212,7 @@ OpenCode buffers lose drover's keys."
   (remove-hook 'opencode-session-buffer-functions #'drover-opencode--updated)
   (remove-hook 'opencode-catalog-changed-functions #'drover-opencode--catalog-changed)
   (remove-hook 'opencode-handed-back-functions #'drover-opencode--handed-back)
+  (remove-hook 'opencode-input-sent-functions #'drover-opencode--input-sent)
   (opencode-events-unregister "project.updated" #'drover-opencode--projects-changed)
   (opencode-events-unregister "server.connected" #'drover-opencode--projects-changed)
   (dolist (type drover-opencode--moving-events)

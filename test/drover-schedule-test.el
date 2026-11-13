@@ -763,6 +763,283 @@ drawn.  Buffers of sessions BODY makes are killed."
       (should (equal (plist-get job :after) "plain"))
       (should (= 1 (drover-schedule-fire "plain"))))))
 
+;;;; Watches
+
+(defmacro drover-schedule-test-replies (&rest body)
+  "Run BODY with the event `reply' defined: it repeats, takes a thread, lives an hour.
+Its requests and releases go to `asked' and `released', the threads its
+:read returns come from `threads', and :followed is non-nil for the
+threads of `followed'."
+  (declare (indent 0) (debug t))
+  `(let ((asked nil) (released nil) (threads nil) (followed nil))
+     (ignore threads followed)
+     (drover-schedule-define-trigger
+      'reply "Slack reply"
+      :read (lambda () (pop threads))
+      :request (lambda (thread) (push thread asked) (concat "reply:" thread))
+      :release (lambda (key) (push key released))
+      :describe (lambda (thread) (concat "thread " thread))
+      :recognize (lambda (text)
+                   (let ((found nil) (start 0))
+                     (while (string-match "thread-\\([0-9]+\\)" text start)
+                       (push (concat "T" (match-string 1 text)) found)
+                       (setq start (match-end 0)))
+                     (nreverse found)))
+      :followed (lambda (_session thread) (member thread followed))
+      :prompt (lambda (thread) (concat "Automated notice: replies in " thread))
+      :repeat t
+      :lifetime 3600)
+     ,@body))
+
+(defun drover-schedule-test-notices (watch)
+  "Return the prompts delivered for WATCH, the newest first."
+  (seq-filter (lambda (job) (equal (plist-get job :watch) (plist-get watch :id))) (drover-schedule--jobs)))
+
+(ert-deftest drover-schedule-test-watch-fired ()
+  "A watch is sent a copy on each event and goes on waiting, across restarts."
+  (drover-schedule-test-state
+    (drover-schedule-test-replies
+      (let ((watch (drover-schedule-add-after-trigger (drover-schedule-test-target) 'reply "Look" nil "T1")))
+        (should (drover-schedule-job-valid-p watch))
+        (should (equal asked '("T1")))
+        (should (equal (plist-get watch :after) "reply:T1"))
+        (should (eq (plist-get watch :repeat) t))
+        (should (< (abs (- (plist-get watch :expires) (+ (plist-get watch :created) 3600))) 1))
+        ;; Its lifetime's timer, nothing due.
+        (should (gethash (plist-get watch :id) (drover-schedule--timers)))
+        (should (equal (drover-schedule--when watch) "on each Slack reply: thread T1"))
+        (should (equal (drover-schedule--status-text watch) "watching"))
+        (should (= 1 (drover-schedule-fire "reply:T1" nil "2 new replies")))
+        (should (drover-schedule--waiting-p watch))
+        (should (= (plist-get watch :fired) 1))
+        (should (equal (drover-schedule--status-text watch) "watching, 1 sent"))
+        (let ((notices (drover-schedule-test-notices watch)))
+          (should (length= notices 1))
+          (should (equal (plist-get (car notices) :prompt) "Look\n\n2 new replies"))
+          (should (eq (plist-get (car notices) :hidden) t))
+          (should (eq (plist-get (car notices) :status) 'pending)))
+        ;; Before the copy went, the next event joins it.
+        (drover-schedule-fire "reply:T1" nil "1 new reply")
+        (let ((notices (drover-schedule-test-notices watch)))
+          (should (length= notices 1))
+          (should (equal (plist-get (car notices) :prompt) "Look\n\n2 new replies\n1 new reply"))
+          (setf (plist-get (car notices) :status) 'sent)
+          (drover-schedule--save))
+        (drover-schedule-test-reload)
+        (let ((watch (drover-schedule--job (plist-get watch :id))))
+          (should (drover-schedule--waiting-p watch))
+          (should (gethash (plist-get watch :id) (drover-schedule--timers)))
+          (drover-schedule-fire "reply:T1" nil "3 new replies")
+          (should (length= (drover-schedule-test-notices watch) 2))
+          (should-not released)
+          ;; Cancelled, it withdraws its request.
+          (drover-schedule-cancel watch)
+          (should (equal released '("reply:T1")))
+          (should-not (gethash (plist-get watch :id) (drover-schedule--timers))))))))
+
+(ert-deftest drover-schedule-test-watch-ends ()
+  "A watch quiet past its lifetime ends; retried, it waits again."
+  (drover-schedule-test-state
+    (drover-schedule-test-replies
+      (let ((watch (drover-schedule-add-after-trigger (drover-schedule-test-target) 'reply "Look" nil "T1")))
+        ;; A watch sent since waits on.
+        (setf (plist-get watch :expires) (+ (float-time) 60))
+        (drover-schedule--expire (plist-get watch :id))
+        (should (drover-schedule--waiting-p watch))
+        (should (gethash (plist-get watch :id) (drover-schedule--timers)))
+        (setf (plist-get watch :expires) (- (float-time) 1))
+        (drover-schedule--expire (plist-get watch :id))
+        (should (eq (plist-get watch :status) 'cancelled))
+        (should (equal (plist-get watch :error) "Ended: no Slack reply in 1 hour"))
+        (should (equal released '("reply:T1")))
+        (drover-schedule-retry-job watch)
+        (should (drover-schedule--waiting-p watch))
+        (should (equal asked '("T1" "T1")))
+        (should (> (plist-get watch :expires) (+ (float-time) 3500)))
+        (should (gethash (plist-get watch :id) (drover-schedule--timers)))
+        ;; Sent now, it goes on waiting.
+        (should-error (drover-schedule-retry-job watch))
+        (drover-schedule-retry-job watch t)
+        (should (drover-schedule--waiting-p watch))
+        (should (equal (plist-get (car (drover-schedule-test-notices watch)) :prompt) "Look"))
+        ;; An event that will not happen ends it too.
+        (drover-schedule-fire "reply:T1" "dismissed")
+        (should (eq (plist-get watch :status) 'cancelled))
+        (should-not (gethash (plist-get watch :id) (drover-schedule--timers)))))))
+
+(ert-deftest drover-schedule-test-watch-validity ()
+  "A watch waits for an event, never due; its argument is text."
+  (drover-schedule-test-state
+    (drover-schedule-test-replies
+      (let ((watch (drover-schedule-add-after-trigger (drover-schedule-test-target) 'reply "Look" nil "T1")))
+        (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence watch) :due 1.0)))
+        (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence watch) :argument 'T1)))
+        (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence watch) :repeat 'yes)))
+        (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence watch) :fired -1))))
+      ;; An event taking an argument needs one.
+      (should-error (drover-schedule-add-after-trigger (drover-schedule-test-target) 'reply "Look")))))
+
+(ert-deftest drover-schedule-test-watch-reading ()
+  "An event taking an argument is read on each, its argument then; peers are not offered it."
+  (drover-schedule-test-state
+    (drover-schedule-test-with-restarts
+      (drover-schedule-test-replies
+        (should (equal (drover-schedule-triggers) '((opencode-restart . "OpenCode restart")
+                                                     (emacs-restart . "Emacs restart"))))
+        (should (assq 'reply (drover-schedule-triggers t)))
+        (should (eq (drover-schedule-test-parse "on each Slack reply") 'reply))
+        (should (eq (drover-schedule-test-parse "on every slack reply") 'reply))
+        (should (equal (drover-schedule-describe 'reply (current-time)) "on each Slack reply"))
+        (let (table)
+          (setq threads '("T7"))
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (_prompt collection &rest _) (setq table collection) "on each Slack reply")))
+            (let ((chosen (drover-schedule-read-when)))
+              (should (eq (car chosen) 'reply))
+              (should (equal (nth 3 chosen) "T7"))
+              (should (equal (drover-schedule-default-prompt chosen) "Automated notice: replies in T7"))
+              (let ((watch (drover-schedule-enqueue (drover-schedule-test-target) chosen "Look")))
+                (should (equal (plist-get watch :argument) "T7")))))
+          (should (member "on each Slack reply" (all-completions "" table))))
+        ;; Nothing read refuses.
+        (setq threads nil)
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "on each Slack reply")))
+          (should-error (drover-schedule-read-when) :type 'user-error))
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "  ")))
+          (should (equal (drover-schedule-read-prompt "Default") "Default"))
+          (should-error (drover-schedule-read-prompt) :type 'user-error))))))
+
+;;;; Watches from the list
+
+(ert-deftest drover-schedule-test-new-from-list ()
+  "+ schedules for a session chosen, its event's argument and prompt read, empty for the event's own."
+  (drover-schedule-test-state
+    (drover-schedule-test-replies
+      (drover-schedule-test-session)
+      (drover-schedule-test-buffer)
+      (setq threads '("T3"))
+      (cl-letf (((symbol-function 'drover-prompt-read-target)
+                 (lambda (_prompt &rest keys)
+                   (should (plist-get keys :existing-only))
+                   (should (plist-get keys :archived))
+                   (drover-find 'fake "fixture")))
+                ((symbol-function 'completing-read) (lambda (&rest _) "on each Slack reply"))
+                ((symbol-function 'read-string)
+                 (lambda (prompt &rest _)
+                   (should (string-match-p "empty for \"Automated notice: replies in T3\"" prompt))
+                   "")))
+        (drover-schedule-new))
+      (let ((watch (car (drover-schedule--jobs))))
+        (should (equal (plist-get watch :argument) "T3"))
+        (should (equal (plist-get watch :prompt) "Automated notice: replies in T3"))
+        (should (drover-schedule--waiting-p watch))))))
+
+;;;; Offers
+
+(defmacro drover-schedule-test-offering (answers &rest body)
+  "Run BODY with the fixture's session and buffer, y-or-n-p answering ANSWERS in turn.
+The questions asked go to `questions', newest first."
+  (declare (indent 1) (debug t))
+  `(drover-schedule-test-state
+     (drover-schedule-test-replies
+       (let ((session (drover-schedule-test-session))
+             (buffer (drover-schedule-test-buffer))
+             (answers ,answers)
+             (questions nil))
+         (ignore session buffer)
+         (cl-letf (((symbol-function 'y-or-n-p)
+                    (lambda (question)
+                      (push question questions)
+                      (let ((answer (pop answers)))
+                        (if (eq answer 'quit) (signal 'quit nil) answer)))))
+           ,@body)))))
+
+(ert-deftest drover-schedule-test-offer-accepted ()
+  "A prompt naming a thread new to the session offers to watch it, once."
+  (drover-schedule-test-offering '(t)
+    (with-current-buffer buffer
+      (insert "earlier: thread-5\n"))
+    (let ((session (drover-find 'fake "fixture")))
+      (drover-note-sent-text session "Asked the team in thread-9 and thread-5" buffer)
+      (should (equal questions '("Tell Session fixture of each Slack reply: thread T9? ")))
+      (let ((watch (car (drover-schedule--jobs))))
+        (should (equal (plist-get watch :argument) "T9"))
+        (should (eq (plist-get watch :repeat) t))
+        (should (equal (plist-get watch :prompt) "Automated notice: replies in T9"))
+        (should (equal (plist-get watch :link) "agent-session:claude-code/fixture-session"))
+        (should (equal (plist-get watch :title) (buffer-name buffer))))
+      ;; Watched now, and offered: neither asks again.
+      (setq questions nil)
+      (drover-note-sent-text session "thread-9 again" buffer)
+      (should-not questions)
+      ;; Offers survive Emacs.
+      (setq drover-schedule--offers-file nil)
+      (should (drover-schedule--offered-p "agent-session:claude-code/fixture-session" 'reply "T9")))))
+
+(ert-deftest drover-schedule-test-offer-declined-and-skipped ()
+  "Declined, an offer is not made again; one followed, mentioned or of another host, never."
+  (drover-schedule-test-offering '(nil)
+    (let ((session (drover-find 'fake "fixture")))
+      (drover-note-sent-text session "see thread-1" buffer)
+      (should (length= questions 1))
+      (should-not (drover-schedule--jobs))
+      (drover-note-sent-text session "see thread-1" buffer)
+      (should (length= questions 1))
+      ;; Followed otherwise.
+      (setq followed '("T2"))
+      (drover-note-sent-text session "see thread-2" buffer)
+      (should (length= questions 1))
+      ;; Mentioned before the prompt's start, not after it.
+      (with-current-buffer buffer
+        (insert "said thread-3\n")
+        (let ((start (point)))
+          (insert "see thread-4 and thread-3")
+          (drover-note-sent-text session "see thread-4 and thread-3" buffer start)))
+      (should (length= questions 2))
+      (should (string-search "thread T4" (car questions)))
+      ;; Without its start, before where the prompt shows last.
+      (with-current-buffer buffer
+        (insert "\nsee thread-6\n"))
+      (drover-note-sent-text session "see thread-6" buffer)
+      (should (length= questions 3))
+      ;; Asking nobody, nothing is offered.
+      (let ((inhibit-interaction t))
+        (drover-note-sent-text session "see thread-7" buffer))
+      (should (length= questions 3))
+      (setf (drover-session-host (car drover-test-sessions)) "core")
+      (drover-note-sent-text (drover-find 'fake "fixture") "see thread-8" buffer)
+      (should (length= questions 3)))))
+
+(ert-deftest drover-schedule-test-offer-quit ()
+  "A question quit stops the offers, never the caller."
+  (drover-schedule-test-offering '(quit)
+    (let ((after nil)
+          (drover-sent-text-functions (list #'drover-schedule-offer (lambda (&rest _) (push t after)))))
+      (should (functionp (drover-note-sent-text (drover-find 'fake "fixture") "thread-1 thread-2" buffer)))
+      (should (length= questions 1))
+      (should-not after)
+      (should-not (drover-schedule--jobs)))))
+
+(ert-deftest drover-schedule-test-offer-new-session ()
+  "A prompt starting a session asks then, and watches once the session tells its conversation."
+  (drover-schedule-test-offering '(t)
+    (let ((later (drover-note-sent-text nil "investigate thread-4" nil)))
+      (should (equal questions '("Tell the new session of each Slack reply: thread T4? ")))
+      (should-not (drover-schedule--jobs))
+      (funcall later (drover-find 'fake "fixture"))
+      (should (equal (plist-get (car (drover-schedule--jobs)) :argument) "T4")))))
+
+(ert-deftest drover-schedule-test-session-target ()
+  "A session without a buffer is scheduled for through its record, when its backend takes prompts."
+  (drover-schedule-test-state
+    (let ((session (drover-schedule-test-session :directory temporary-file-directory)))
+      (should (equal (drover-schedule-session-target session)
+                     (list :link "agent-session:claude-code/fixture-session" :backend 'fake
+                           :directory (file-name-as-directory (expand-file-name temporary-file-directory))
+                           :title (drover-session-display-title session))))
+      (setf (drover-session-host session) "core")
+      (should-error (drover-schedule-session-target session) :type 'user-error))))
+
 ;;;; Delivery
 
 (ert-deftest drover-schedule-test-delivery ()
@@ -1259,6 +1536,7 @@ backends does nothing."
                     (should (eq (keymap-lookup drover-schedule-list-mode-map "k") #'drover-schedule-cancel))
                     (should (eq (keymap-lookup drover-schedule-list-mode-map "r") #'drover-schedule-retry))
                     (should (eq (keymap-lookup drover-schedule-list-mode-map "RET") #'drover-schedule-inspect))
+                    (should (eq (keymap-lookup drover-schedule-list-mode-map "+") #'drover-schedule-new))
                     (should (string-match-p "after the turn of Scheduler fixture" (buffer-string)))
                     (cl-letf (((symbol-function 'drover-schedule--at-point) (lambda () job)))
                       (drover-schedule-inspect)

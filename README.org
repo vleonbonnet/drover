@@ -757,10 +757,11 @@ A link may name the host a conversation runs on, =agent-session://HOST/ENGINE/ID
 | =5:30pm=, =17:30=, =evening=                     | today, or tomorrow once past                                            |
 | =when turn ends=                              | once the session's running turn ends, offered first while one runs     |
 | =after LABEL=                                 | after an event your configuration defines (below)                      |
+| =on each LABEL=                               | on each such event, for one that repeats (below)                        |
 
 =RET= takes what you typed, never a candidate it completes to. The prompts wait in =scheduled-prompts.eld= of =drover-state-directory=, survive the session's buffer and Emacs, and =drover-schedule-restore= arms them again, run once Emacs started, after your session buffers are restored, such as with =(add-hook 'after-init-hook #'drover-schedule-restore 95)=: those that fell due meanwhile go then; scheduling or listing them arms them too. At delivery, the session's buffer, or its front end resuming the conversation, shows in a new frame (=drover-schedule-display-function=); the prompt is submitted once the session takes it without touching a draft: an empty input box, an idle shell, a loaded OpenCode session. A session archived is restored first (see [[*Archived sessions][Archived sessions]]); one that cannot be fails the prompt, nothing sent. Sent means submitted to the front end, not answered; a submission Emacs stopped in the middle of is kept as interrupted, since whether it went out is not known. =drover-schedule-wait-seconds= (600) bounds the wait.
 
-=C-' #= (=drover-schedule-list=) lists them: =k= cancels one, =r= retries one that failed or sends now one still waiting, =RET= shows it whole.
+=C-' #= (=drover-schedule-list=) lists them: =+= schedules one for a session chosen there, archived ones included, =k= cancels one, =r= retries one that failed or sends now one still waiting, =RET= shows it whole.
 
 
 A peer telling it may schedule prompts for this host's sessions, as the Android client does (=drover-remote.el=, see =doc/remote.org=, The phone, as built): this queue keeps them and delivers them out of every window, and the peer follows the queue, cancels and retries its prompts.
@@ -778,6 +779,26 @@ Your configuration may define events prompts wait for, such as a restart, and te
 #+end_src
 
 =after Emacs restart= is then offered and read; =drover-schedule-waiting-count= tells how many prompts wait for a key. =drover-schedule-former-files= takes in the queue of an earlier configuration once, renaming its file with =.migrated= appended.
+
+** Watches
+
+An event may concern something, such as the Slack thread whose replies are the event, and may repeat. A prompt waiting for such an event is a watch: it is sent on each, out of every window, restoring an archived session first, and goes on waiting until you cancel it with =k= or it stays quiet past the event's lifetime. =r= sends a watch a copy now, or has one ended wait again.
+
+#+begin_src emacs-lisp
+  (drover-schedule-define-trigger 'slack-reply "Slack reply"
+    :read #'my-read-thread            ; what a watch scheduled with + concerns
+    :request #'my-watch-thread        ; called with the thread, returns a key
+    :release #'my-unwatch-thread      ; called with the key once nothing waits
+    :recognize #'my-threads-in        ; the threads a text names, each spelled one way
+    :describe #'my-thread-name        ; how lists name a thread
+    :prompt "Automated notice: replies in the thread you were told of."
+    :repeat t
+    :lifetime (* 7 86400))            ; ends after a week without a reply
+  ;; On each reply, what happened follows the watch's prompt:
+  (drover-schedule-fire key nil "2 new replies since 11:01, from Ana, Raj.")
+#+end_src
+
+=on each Slack reply= is then offered, the thread read next. A prompt you send naming a thread the session neither watches nor mentioned before, from drover's prompt, an OpenCode session's buffer or an agent-shell shell, asks once whether to watch it: =Tell Fix the login redirect of each Slack reply: #team thread? (y or n)=. A yes schedules the event's =:prompt=; either answer is remembered for the conversation, in =schedule-offers.eld=. =:followed= leaves out what a session is told of otherwise. Claude Code terminals tell drover no text: schedule their watches with =+=. Copies a watch sends wait while one before has not gone yet: the next event's text joins it.
 
 * Engines
 

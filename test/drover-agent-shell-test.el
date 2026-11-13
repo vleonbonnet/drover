@@ -1584,6 +1584,23 @@ or dismissed, nor what runs out of a command, nor drover's own send."
                        (t answer front-end ,(buffer-name shell))
                        (t prompt front-end nil)))))))
 
+(ert-deftest drover-agent-shell-test-sent-text ()
+  "A prompt the user submits is told with its text; one drover or the queue submits is not."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code))
+          (noted nil))
+      (cl-letf (((symbol-function 'drover-note-sent-text)
+                 (lambda (session text &optional buffer start)
+                   (push (list (eq (drover-session-buffer session) shell) text (eq buffer shell) start) noted)))
+                ((symbol-function 'agent-shell-insert)
+                 (lambda (&rest _) (drover-agent-shell-test-emit shell 'input-submitted :prompt "sent"))))
+        (let ((this-command nil))
+          (drover-agent-shell-test-emit shell 'input-submitted :prompt "queued"))
+        (let ((this-command 'shell-maker-submit))
+          (drover-agent-shell-test-emit shell 'input-submitted :prompt "typed")
+          (drover-agent-shell--submit shell "sent")))
+      (should (equal noted '((t "typed" t nil)))))))
+
 (ert-deftest drover-agent-shell-test-status-ended-turns ()
   "A turn ending unseen is done or failed until seen; a cancelled one is not."
   (drover-agent-shell-test-with

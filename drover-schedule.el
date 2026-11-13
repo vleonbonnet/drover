@@ -45,7 +45,16 @@
 ;; is unknown.
 ;;
 ;; `drover-schedule-list' (# in `drover-dispatch') lists the prompts: k
-;; cancels one, r retries it or sends it now, RET shows it whole.
+;; cancels one, r retries it or sends it now, RET shows it whole, +
+;; schedules one for a session chosen there.
+;;
+;; An event may concern something, its argument, such as the Slack
+;; thread whose replies are the event, and may repeat: a prompt waiting
+;; for such an event, a watch, is sent on each, out of every window, and
+;; goes on waiting until cancelled or quiet past the event's lifetime.
+;; A prompt the user sends that names such an argument the session
+;; neither waits for nor mentioned before is offered to wait for it,
+;; asked once per conversation (`drover-schedule-offer').
 
 ;;; Code:
 
@@ -140,7 +149,7 @@ list redraws.  Its functions run out of a command, reported briefly.")
 (defun drover-schedule--stray-timers ()
   "Cancel the timers of scheduled prompts no queue knows any more."
   (dolist (timer timer-list)
-    (when (memq (timer--function timer) '(drover-schedule--run drover-schedule--poll))
+    (when (memq (timer--function timer) '(drover-schedule--run drover-schedule--poll drover-schedule--expire))
       (cancel-timer timer))))
 
 (defun drover-schedule--state ()
@@ -222,6 +231,13 @@ The file is read again then, and its timers armed anew."
              ((plist-get job :turn) (eq (plist-get job :turn) t))
              (t (and (stringp (plist-get job :after))
                      (plist-get job :trigger) (symbolp (plist-get job :trigger)))))
+       (or (null (plist-get job :argument)) (stringp (plist-get job :argument)))
+       (memq (plist-get job :repeat) '(nil t))
+       ;; A watch waits for its event, and is never due itself.
+       (or (null (plist-get job :repeat))
+           (and (null (plist-get job :due)) (stringp (plist-get job :after))))
+       (or (null (plist-get job :expires)) (numberp (plist-get job :expires)))
+       (or (null (plist-get job :fired)) (natnump (plist-get job :fired)))
        (memq (plist-get job :status) drover-schedule--statuses)))
 
 (defun drover-schedule--model-in (model)
@@ -371,15 +387,17 @@ left as it is, and nothing is scheduled."
 (defun drover-schedule--start ()
   "Read the queue, then arm the timers of its pending prompts anew.
 Overdue prompts go out at once; a prompt waiting for a turn that ended
-meanwhile too.  Signal an error when the queue does not read."
+meanwhile too; a watch quiet past its lifetime ends.  Signal an error
+when the queue does not read."
   (drover-schedule-load)
   (add-hook 'drover-changed-hook #'drover-schedule--turn-check)
   (let ((timers (drover-schedule--timers)))
     (maphash (lambda (_ timer) (cancel-timer timer)) timers)
     (clrhash timers)
     (dolist (job (drover-schedule--jobs))
-      (when (and (eq (plist-get job :status) 'pending) (plist-get job :due))
-        (drover-schedule--arm job))))
+      (when (eq (plist-get job :status) 'pending)
+        (cond ((plist-get job :due) (drover-schedule--arm job))
+              ((plist-get job :expires) (drover-schedule--arm-expiry job))))))
   ;; A turn may have ended while Emacs was away: its session, once listed idle, gets the prompt.
   (when (seq-some #'drover-schedule--turn-waiting-p (drover-schedule--jobs))
     (drover-start)
@@ -405,16 +423,42 @@ that does not read is reported, not signalled."
 
 (defun drover-schedule-define-trigger (name label &rest properties)
   "Let prompts wait for event NAME, a symbol, which LABEL names.
-LABEL reads after \"after the next\", such as \"Emacs restart\"; the time
-\"after LABEL\" is offered when scheduling.  PROPERTIES is a plist of:
+LABEL reads after \"after the next\" or \"on each\", such as \"Emacs
+restart\" or \"Slack reply\"; the time \"after LABEL\" is offered when
+scheduling, \"on each LABEL\" for an event that repeats.  PROPERTIES is
+a plist of:
 
- :request  Function of no argument asking for the event to happen, as
-           a prompt is scheduled to wait for it, and returning a KEY, a
-           string telling what was asked for: `drover-schedule-fire'
-           with KEY releases the prompts.  Without it, KEY is NAME's
-           name.
- :release  Function of KEY called once no prompt waits for it any more,
-           cancelled or sent at once, to withdraw what :request asked.
+ :request    Function asking for the event to happen, as a prompt is
+             scheduled to wait for it, and returning a KEY, a string
+             telling what was asked for: `drover-schedule-fire' with KEY
+             releases the prompts.  It takes the prompt's ARGUMENT when
+             the event takes one (:read), no argument otherwise.
+             Without it, KEY is the ARGUMENT, or NAME's name.
+ :release    Function of KEY called once no prompt waits for it any
+             more, cancelled, sent at once or ended, to withdraw what
+             :request asked.
+ :read       Function of no argument reading, in a command, what the
+             event concerns, its ARGUMENT, a string such as the link to
+             a thread whose replies are the event.  With it, each prompt
+             waiting for NAME has an argument, and peers schedule none
+             (see `drover-schedule-triggers').
+ :describe   Function of an ARGUMENT returning how lists name it, on a
+             line; by default the ARGUMENT itself.
+ :recognize  Function of a TEXT returning the ARGUMENTS it names, each
+             spelled one way however TEXT spells it: a prompt the user
+             sends naming one is offered to wait for it (see
+             `drover-schedule-offer').
+ :followed   Function of a SESSION and an ARGUMENT returning non-nil when
+             SESSION is told of that event otherwise: no offer is made.
+ :prompt     The prompt an offer accepted schedules, a string or a
+             function of the ARGUMENT returning one; an empty prompt
+             read when scheduling stands for it.
+ :repeat     Non-nil for an event that recurs, such as a reply: a prompt
+             waiting for it, a watch, is sent on each, a copy delivered
+             through `drover-schedule-deliver' out of every window, and
+             goes on waiting until cancelled.
+ :lifetime   Seconds a watch goes on waiting after it was scheduled or
+             last sent; past them, it ends.  Nil, until cancelled.
 
 Defining NAME again replaces its label and properties and keeps its
 place."
@@ -429,15 +473,41 @@ place."
   "Forget event NAME; the prompts waiting for it go on waiting."
   (setq drover-schedule--triggers (assq-delete-all name drover-schedule--triggers)))
 
-(defun drover-schedule-triggers ()
-  "Return the events prompts may wait for, as (NAME . LABEL), in order."
-  (mapcar (lambda (entry) (cons (car entry) (plist-get (cdr entry) :label)))
-          drover-schedule--triggers))
+(defun drover-schedule--trigger-get (trigger property)
+  "Return PROPERTY of event TRIGGER, nil when it is not defined."
+  (plist-get (alist-get trigger drover-schedule--triggers) property))
+
+(defun drover-schedule-triggers (&optional all)
+  "Return the events prompts may wait for, as (NAME . LABEL), in order.
+Those taking an argument (:read of `drover-schedule-define-trigger'),
+which only the user here can tell, are left out unless ALL is non-nil."
+  (seq-keep (lambda (entry)
+              (when (or all (not (plist-get (cdr entry) :read)))
+                (cons (car entry) (plist-get (cdr entry) :label))))
+            drover-schedule--triggers))
 
 (defun drover-schedule--trigger-label (trigger)
   "Return the label of event TRIGGER, its name when undefined."
-  (or (plist-get (alist-get trigger drover-schedule--triggers) :label)
+  (or (drover-schedule--trigger-get trigger :label)
       (symbol-name trigger)))
+
+(defun drover-schedule--describe-argument (trigger argument)
+  "Return how lists name ARGUMENT of event TRIGGER, on a line, or nil without one."
+  (when argument
+    (drover-bound-line
+     (or (when-let* ((describe (drover-schedule--trigger-get trigger :describe))
+                     ((functionp describe)))
+           (let ((text (drover-with-reporting "event description" (funcall describe argument))))
+             (and (stringp text) (not (string-blank-p text)) text)))
+         argument))))
+
+(defun drover-schedule--event-text (job)
+  "Return when JOB, waiting for an event, goes, as lists and messages tell it."
+  (let* ((trigger (plist-get job :trigger))
+         (argument (drover-schedule--describe-argument trigger (plist-get job :argument))))
+    (concat (if (plist-get job :repeat) "on each " "after the next ")
+            (drover-schedule--trigger-label trigger)
+            (and argument (concat ": " argument)))))
 
 (defun drover-schedule--waiting-p (job &optional key)
   "Return non-nil when JOB waits for an event, the one of KEY when given."
@@ -455,10 +525,14 @@ It reads nothing: before the queue was read, none."
                  (drover-schedule--queue-jobs drover-schedule--queue))
     0))
 
-(defun drover-schedule--request (trigger)
-  "Ask for event TRIGGER to happen, and return the key it was asked by."
-  (let* ((request (plist-get (alist-get trigger drover-schedule--triggers) :request))
-         (key (if (functionp request) (funcall request) (symbol-name trigger))))
+(defun drover-schedule--request (trigger &optional argument)
+  "Ask for event TRIGGER to happen, and return the key it was asked by.
+ARGUMENT is what it concerns, for an event that takes one."
+  (let* ((request (drover-schedule--trigger-get trigger :request))
+         (takes (drover-schedule--trigger-get trigger :read))
+         (key (cond ((not (functionp request)) (or argument (symbol-name trigger)))
+                    (takes (funcall request argument))
+                    (t (funcall request)))))
     (unless (stringp key)
       (error "The request of %s returned no key" (drover-schedule--trigger-label trigger)))
     key))
@@ -468,18 +542,38 @@ It reads nothing: before the queue was read, none."
   (let ((key (plist-get job :after)))
     (unless (or (null key)
                 (seq-some (lambda (other) (drover-schedule--waiting-p other key)) (drover-schedule--jobs)))
-      (when-let* ((release (plist-get (alist-get (plist-get job :trigger) drover-schedule--triggers)
-                                      :release))
+      (when-let* ((release (drover-schedule--trigger-get (plist-get job :trigger) :release))
                   ((functionp release)))
         (funcall release key)))))
 
-(defun drover-schedule-fire (key &optional cancelled)
+(defun drover-schedule--forget-timer (job)
+  "Cancel the timer of JOB, a due prompt's or a watch's lifetime, if any."
+  (let ((timers (drover-schedule--timers)))
+    (when-let* ((timer (gethash (plist-get job :id) timers)))
+      (cancel-timer timer))
+    (remhash (plist-get job :id) timers)))
+
+(defun drover-schedule--with-text (prompt text)
+  "Return PROMPT followed by TEXT, telling what happened, when TEXT is a string."
+  (if (and (stringp text) (not (string-blank-p text)))
+      (concat prompt "\n\n" (string-trim text))
+    prompt))
+
+(defun drover-schedule-fire (key &optional cancelled text)
   "Release the prompts waiting for the event of KEY, which happened.
-They are sent now; with CANCELLED, the event will not happen, and they
-are cancelled instead, CANCELLED telling why when a string, such as
-\"dismissed\".  Return how many prompts were released."
+They are sent now, followed by TEXT, a string telling what happened,
+when non-nil.  A watch, a prompt waiting for an event that repeats, is
+sent a copy instead, and goes on waiting (see :repeat of
+`drover-schedule-define-trigger'); while that copy has not gone yet, as
+another prompt goes to its conversation, the next event's TEXT joins
+it rather than send another.  With CANCELLED, the event will not
+happen, and they are cancelled instead, CANCELLED telling why when a
+string, such as \"dismissed\".  Return how many prompts were released."
   (drover-schedule-load)
-  (let ((waiting (seq-filter (lambda (job) (drover-schedule--waiting-p job key)) (drover-schedule--jobs))))
+  (let* ((waiting (seq-filter (lambda (job) (drover-schedule--waiting-p job key)) (drover-schedule--jobs)))
+         (watches (seq-filter (lambda (job) (plist-get job :repeat)) waiting))
+         (once (seq-remove (lambda (job) (plist-get job :repeat)) waiting))
+         (now (float-time)))
     (when waiting
       (dolist (job waiting)
         (if cancelled
@@ -487,12 +581,101 @@ are cancelled instead, CANCELLED telling why when a string, such as
                   (plist-get job :error) (format "The %s it waited for was %s"
                                                  (drover-schedule--trigger-label (plist-get job :trigger))
                                                  (if (stringp cancelled) cancelled "called off")))
-          (setf (plist-get job :due) (float-time))))
+          (if (plist-get job :repeat)
+              (setf (plist-get job :fired) (1+ (or (plist-get job :fired) 0))
+                    (plist-get job :sent-at) now
+                    (plist-get job :expires) (drover-schedule--expiry job now))
+            (setf (plist-get job :prompt) (drover-schedule--with-text (plist-get job :prompt) text)
+                  (plist-get job :due) now))))
       (drover-schedule--save)
-      (unless cancelled
-        (mapc #'drover-schedule--arm waiting))
+      (if cancelled
+          (mapc #'drover-schedule--forget-timer watches)
+        (mapc #'drover-schedule--arm once)
+        (dolist (job watches)
+          (drover-schedule--arm-expiry job)
+          (drover-schedule--notify job text)))
       (drover-schedule--refresh))
     (length waiting)))
+
+;;;; Watches
+
+(defun drover-schedule--expiry (job &optional since)
+  "Return when watch JOB ends, quiet since SINCE, by default its creation, or nil.
+Nil when its event has no lifetime (:lifetime of
+`drover-schedule-define-trigger')."
+  (when-let* ((lifetime (drover-schedule--trigger-get (plist-get job :trigger) :lifetime))
+              ((numberp lifetime)))
+    (+ (or since (plist-get job :created) (float-time)) lifetime)))
+
+(defun drover-schedule--arm-expiry (job)
+  "Arm the timer ending watch JOB once quiet past its lifetime, if it has one."
+  (when-let* ((expires (plist-get job :expires)))
+    (let ((id (plist-get job :id))
+          (timers (drover-schedule--timers)))
+      (when-let* ((timer (gethash id timers)))
+        (cancel-timer timer))
+      (puthash id (run-at-time (max 0 (- expires (float-time))) nil #'drover-schedule--expire id)
+               timers))))
+
+(defun drover-schedule--span (seconds)
+  "Return SECONDS as days, hours or minutes, such as \"7 days\"."
+  (let ((seconds (round seconds)))
+    (pcase-let ((`(,unit ,size) (cond ((and (>= seconds 86400) (zerop (% seconds 86400))) '("day" 86400))
+                                      ((and (>= seconds 3600) (zerop (% seconds 3600))) '("hour" 3600))
+                                      (t '("minute" 60)))))
+      (let ((count (max 1 (round seconds size))))
+        (format "%d %s%s" count unit (if (= count 1) "" "s"))))))
+
+(defun drover-schedule--expire (id)
+  "End the watch ID once quiet past its lifetime.
+From its timer: a watch sent since, or whose end moved, is armed again."
+  (drover-with-reporting "scheduled prompt"
+    (remhash id (drover-schedule--timers))
+    (when-let* ((job (drover-schedule--job id))
+                ((drover-schedule--waiting-p job))
+                (expires (plist-get job :expires)))
+      (if (< (float-time) expires)
+          (drover-schedule--arm-expiry job)
+        (drover-schedule--status
+         job 'cancelled
+         (format "Ended: no %s in %s" (drover-schedule--trigger-label (plist-get job :trigger))
+                 (drover-schedule--span (or (drover-schedule--trigger-get (plist-get job :trigger) :lifetime)
+                                            (- expires (or (plist-get job :sent-at) (plist-get job :created)
+                                                           expires))))))
+        (drover-message "Scheduled prompt ended — %s: %s" (plist-get job :title) (plist-get job :error))
+        (drover-schedule--release job)))))
+
+(defun drover-schedule--job-target (job)
+  "Return the target of JOB, as `drover-schedule-target' does, with its options."
+  (list :link (plist-get job :link) :backend (plist-get job :backend)
+        :directory (plist-get job :directory) :title (plist-get job :title)
+        :options (plist-get job :options)))
+
+(defun drover-schedule--notify (watch text)
+  "Send a copy of the prompt of WATCH, followed by TEXT, out of every window.
+While the copy sent last has not gone, TEXT joins it instead."
+  (let ((pending (seq-find (lambda (job)
+                             (and (equal (plist-get job :watch) (plist-get watch :id))
+                                  (eq (plist-get job :status) 'pending)))
+                           (drover-schedule--jobs))))
+    (cond
+     ((null pending)
+      (drover-schedule-deliver (drover-schedule--job-target watch)
+                               (drover-schedule--with-text (plist-get watch :prompt) text)
+                               :hidden t :origin "watch" :watch (plist-get watch :id)))
+     ((and (stringp text) (not (string-blank-p text)))
+      (setf (plist-get pending :prompt) (concat (plist-get pending :prompt) "\n" (string-trim text)))
+      (drover-schedule--save)))))
+
+(defun drover-schedule--rewatch (job)
+  "Have JOB, a watch cancelled, ended or failed, wait for its event again.
+Its event is asked for anew, as when it was scheduled."
+  (let ((key (drover-schedule--request (plist-get job :trigger) (plist-get job :argument))))
+    (setf (plist-get job :after) key
+          (plist-get job :expires) (drover-schedule--expiry job (float-time)))
+    (drover-schedule--status job 'pending)
+    (drover-schedule--arm-expiry job)
+    job))
 
 ;;;; Waiting for a turn to end
 
@@ -598,18 +781,31 @@ scheduled a moment ago goes at once."
                     (format-time-string "%a %F %R %Z" time) (plist-get job :title))
     job))
 
-(defun drover-schedule-add-after-trigger (target trigger prompt &optional instruction)
+(defun drover-schedule-add-after-trigger (target trigger prompt &optional instruction argument)
   "Schedule PROMPT for TARGET after the next event TRIGGER, asking for it.
 See `drover-schedule-add' for TARGET and INSTRUCTION, and
-`drover-schedule-define-trigger' for TRIGGER.  Return the prompt."
+`drover-schedule-define-trigger' for TRIGGER.  ARGUMENT is what the
+event concerns, needed when it takes one (:read).  For an event that
+repeats, the prompt is a watch, sent on each (:repeat).  Return the
+prompt."
   (unless (and (stringp prompt) (not (string-blank-p prompt)))
     (error "Need a nonempty prompt"))
-  (let* ((key (drover-schedule--request trigger))
-         (job (drover-schedule--new-job target prompt instruction :after key :trigger trigger)))
+  (when (and (drover-schedule--trigger-get trigger :read)
+             (not (and (stringp argument) (not (string-blank-p argument)))))
+    (error "The %s needs what it concerns" (drover-schedule--trigger-label trigger)))
+  (let* ((argument (and (drover-schedule--trigger-get trigger :read) argument))
+         (key (drover-schedule--request trigger argument))
+         (repeat (and (drover-schedule--trigger-get trigger :repeat) t))
+         (job (apply #'drover-schedule--new-job target prompt instruction :after key :trigger trigger
+                     (append (and argument (list :argument argument))
+                             (and repeat (list :repeat t :fired 0))))))
+    (when repeat
+      (setq job (plist-put job :expires (drover-schedule--expiry job))))
     (drover-schedule--push job (lambda () (drover-schedule--release job)))
+    (drover-schedule--arm-expiry job)
     (drover-schedule--refresh)
-    (drover-message "Scheduled %S after the next %s — %s" (drover-schedule--prompt-line prompt)
-                    (drover-schedule--trigger-label trigger) (plist-get job :title))
+    (drover-message "Scheduled %S %s — %s" (drover-schedule--prompt-line prompt)
+                    (drover-schedule--event-text job) (plist-get job :title))
     job))
 
 (defun drover-schedule-add-after-turn (target prompt &optional instruction)
@@ -628,10 +824,24 @@ See `drover-schedule-add' for TARGET and INSTRUCTION.  Return the prompt."
 (defun drover-schedule-enqueue (target chosen text)
   "Schedule TEXT for TARGET when CHOSEN tells, and return the prompt.
 CHOSEN is what `drover-schedule-read-when' returns."
-  (pcase-let ((`(,when ,input ,read-at) chosen))
+  (pcase-let ((`(,when ,input ,read-at ,argument) chosen))
     (cond ((eq when 'turn-end) (drover-schedule-add-after-turn target text input))
-          ((symbolp when) (drover-schedule-add-after-trigger target when text input))
+          ((symbolp when) (drover-schedule-add-after-trigger target when text input argument))
           (t (drover-schedule-add target when text input read-at)))))
+
+(defun drover-schedule-default-prompt (chosen)
+  "Return the prompt an empty one stands for when CHOSEN tells when, or nil.
+CHOSEN is what `drover-schedule-read-when' returns: the :prompt of its
+event, if any (see `drover-schedule-define-trigger')."
+  (pcase-let ((`(,when ,_input ,_read-at ,argument) chosen))
+    (when (and when (symbolp when) (not (eq when 'turn-end)))
+      (drover-schedule--trigger-prompt when argument))))
+
+(defun drover-schedule--trigger-prompt (trigger argument)
+  "Return the :prompt of event TRIGGER for ARGUMENT, or nil."
+  (let* ((prompt (drover-schedule--trigger-get trigger :prompt))
+         (text (if (functionp prompt) (funcall prompt argument) prompt)))
+    (and (stringp text) (not (string-blank-p text)) text)))
 
 ;;;; Prompts other modules deliver
 
@@ -758,8 +968,11 @@ DAY is a string a DAY of `drover-schedule-parse-time' matched; CLOCK is
   (downcase (string-trim (replace-regexp-in-string "[ \t\n]+" " " text))))
 
 (defun drover-schedule--trigger-named (text)
-  "Return the event TEXT, normalized, names as \"after [the [next]] LABEL\", or nil."
-  (when (string-match "\\`after \\(?:the \\(?:next \\)?\\)?\\(.+\\)\\'" text)
+  "Return the event TEXT, normalized, names, or nil.
+As \"after [the [next]] LABEL\", or \"on each LABEL\" or \"on every
+LABEL\"."
+  (when (or (string-match "\\`after \\(?:the \\(?:next \\)?\\)?\\(.+\\)\\'" text)
+            (string-match "\\`on \\(?:each\\|every\\) \\(.+\\)\\'" text))
     (let ((label (match-string 1 text)))
       (car (seq-find (lambda (entry)
                        (equal (drover-schedule--normalize (plist-get (cdr entry) :label)) label))
@@ -768,7 +981,8 @@ DAY is a string a DAY of `drover-schedule-parse-time' matched; CLOCK is
 (defun drover-schedule-parse-time (text now &optional zone)
   "Return when TEXT asks a prompt to be sent, relative to NOW, or nil.
 The result is a time, or the name of an event of
-`drover-schedule-define-trigger', read \"after [the [next]] LABEL\".
+`drover-schedule-define-trigger', read \"after [the [next]] LABEL\" or
+\"on each LABEL\".
 TEXT is \"in N UNIT\" with minutes, hours, days or weeks; \"[on] DAY
 \[[at] TIME]\", \"[at] TIME [[on] DAY]\" or \"tonight\", DAY being today,
 tomorrow, a weekday or a month/day[/year] date and TIME 9am, 5:30pm,
@@ -816,7 +1030,8 @@ An explicit day can be past; the caller refuses it.  ZONE is as for
   "Describe WHEN, `turn-end', an event or a time, for a reader at NOW in ZONE."
   (pcase when
     ('turn-end "after the running turn")
-    ((pred symbolp) (format "after the next %s" (drover-schedule--trigger-label when)))
+    ((pred symbolp) (format (if (drover-schedule--trigger-get when :repeat) "on each %s" "after the next %s")
+                            (drover-schedule--trigger-label when)))
     (_ (format-time-string (if (= (decoded-time-year (decode-time when zone))
                                   (decoded-time-year (decode-time now zone)))
                                "%a %-d %b %H:%M"
@@ -871,17 +1086,21 @@ An explicit day can be past; the caller refuses it.  ZONE is as for
   "Return the times offered, the end of the running turn first with TURN."
   (append (and turn '("when turn ends"))
           drover-schedule-candidates
-          (mapcar (lambda (entry) (concat "after " (plist-get (cdr entry) :label)))
+          (mapcar (lambda (entry)
+                    (concat (if (plist-get (cdr entry) :repeat) "on each " "after ")
+                            (plist-get (cdr entry) :label)))
                   drover-schedule--triggers)))
 
 (defun drover-schedule-read-when (&optional turn)
-  "Read when to send a prompt; return (WHEN INPUT READ-AT).
+  "Read when to send a prompt; return (WHEN INPUT READ-AT ARGUMENT).
 WHEN is `turn-end', an event of `drover-schedule-define-trigger' or a
 future time, INPUT the text it was read from and READ-AT the time it
-was read at.  TURN non-nil offers \"when turn ends\" first, for a
-session whose turn runs.  What the input resolves to shows as it is
-typed; RET takes the input as typed, never a candidate it completes to.
-Input that is not a time, or a time past, is refused and read again."
+was read at.  ARGUMENT is what the event concerns, read then by its
+:read, for an event taking one, else nil.  TURN non-nil offers \"when
+turn ends\" first, for a session whose turn runs.  What the input
+resolves to shows as it is typed; RET takes the input as typed, never a
+candidate it completes to.  Input that is not a time, or a time past,
+is refused and read again."
   (let* ((candidates (drover-schedule--candidates turn))
          (drover-schedule--turn turn)
          (drover-schedule--default (car candidates))
@@ -920,17 +1139,34 @@ Input that is not a time, or a time past, is refused and read again."
                           (format "cannot read “%s” as a time" (drover-bound-line input 60)))))
          ((and (not (symbolp when)) (not (time-less-p now when)))
           (setq problem (format "%s is past" (drover-schedule-describe when now))))
-         (t (setq result (list when input now))))))
+         (t (setq result (list when input now (drover-schedule--read-argument when)))))))
     result))
+
+(defun drover-schedule--read-argument (when)
+  "Return what the event WHEN concerns, read by its :read, or nil.
+Nil for a time, the end of a turn, or an event taking no argument;
+signal a `user-error' when what is read is empty."
+  (when-let* (((and (symbolp when) (not (eq when 'turn-end))))
+              (read (drover-schedule--trigger-get when :read))
+              ((functionp read)))
+    (let ((argument (funcall read)))
+      (unless (and (stringp argument) (not (string-blank-p argument)))
+        (user-error "The %s needs what it concerns" (drover-schedule--trigger-label when)))
+      argument)))
 
 ;;;; Scheduling
 
-(defun drover-schedule-read-prompt ()
-  "Read the prompt to schedule, nothing being written where it was asked for."
-  (let ((text (read-string "Prompt to send: ")))
-    (when (string-blank-p text)
-      (user-error "Prompt is empty"))
-    (string-trim text)))
+(defun drover-schedule-read-prompt (&optional default)
+  "Read the prompt to schedule, nothing being written where it was asked for.
+DEFAULT, a string or nil, is what an empty prompt stands for, shown
+in the question."
+  (let ((text (read-string (if default
+                               (format "Prompt to send (empty for %S): "
+                                       (drover-bound-line (drover-schedule--prompt-line default) 60))
+                             "Prompt to send: "))))
+    (cond ((not (string-blank-p text)) (string-trim text))
+          (default default)
+          (t (user-error "Prompt is empty")))))
 
 (defun drover-schedule-target (&optional buffer)
   "Return where a prompt scheduled from BUFFER goes, the current buffer by default.
@@ -960,7 +1196,34 @@ While its turn runs, its end is offered first."
          (target (drover-schedule-target))
          (chosen (drover-schedule-read-when
                   (and session (memq (drover-session-status session) '(working retrying)) t))))
-    (drover-schedule-enqueue target chosen (drover-schedule-read-prompt))))
+    (drover-schedule-enqueue target chosen (drover-schedule-read-prompt (drover-schedule-default-prompt chosen)))))
+
+(defun drover-schedule-session-target (session)
+  "Return where a prompt scheduled for SESSION goes, as `drover-schedule-target'.
+SESSION's live buffer tells, when it has one; otherwise its record, for
+a session archived, which delivery restores, through a backend taking
+prompts.  Signal a `user-error' for a session of another host, whose
+prompts its host schedules, one no front end here takes prompts for, or
+one whose conversation's identifier is not known yet."
+  (let ((buffer (drover-session-buffer session))
+        (title (drover-session-display-title session)))
+    (cond
+     ((drover-session-host session)
+      ;; The queue is this host's, and delivers through this host's front ends.
+      (user-error "%s runs on %s: prompts are scheduled on the host running the session"
+                  title (drover-host-label (drover-session-host session))))
+     ((buffer-live-p buffer) (drover-schedule-target buffer))
+     ((not (drover-supports-p session :submit))
+      (user-error "%s has no front end here taking prompts: open it first" title))
+     (t
+      (let ((conversation (or (drover-links-conversation session)
+                              (user-error "%s does not know its conversation's identifier yet" title)))
+            (directory (or (drover-session-directory session)
+                           (user-error "%s tells no directory" title))))
+        (list :link (drover-links-link conversation)
+              :backend (drover-session-backend session)
+              :directory (file-name-as-directory (expand-file-name directory))
+              :title (drover-bound-line (format "%s" title))))))))
 
 (defun drover-schedule--from-prompt ()
   "Schedule drover's prompt for an existing session.
@@ -975,17 +1238,14 @@ instead.  A prompt with attachments is refused: the queue keeps text."
          (_ (when (plist-get content :attachments)
               (user-error "A prompt with attachments cannot be scheduled: send it, or delete their labels")))
          (session (drover-prompt-read-target "Schedule for session: " :existing-only t :options-menu t))
-         (buffer (or (drover-session-buffer session)
-                     ;; The queue is this host's, and delivers through this host's front ends.
-                     (when (drover-session-host session)
-                       (user-error "%s runs on %s: prompts are scheduled on the host running the session"
-                                   (drover-session-display-title session)
-                                   (drover-host-label (drover-session-host session))))
-                     (user-error "%s has no live buffer" (drover-session-display-title session))))
-         (target (drover-schedule-target buffer))
+         (_ (unless (or (drover-session-buffer session) (drover-session-host session))
+              (user-error "%s has no live buffer" (drover-session-display-title session))))
+         (target (drover-schedule-session-target session))
          (chosen (drover-schedule-read-when
                   (and (memq (drover-session-status session) '(working retrying)) t)))
-         (text (if content (plist-get content :text) (drover-schedule-read-prompt)))
+         (text (if content
+                   (plist-get content :text)
+                 (drover-schedule-read-prompt (drover-schedule-default-prompt chosen))))
          (options (drover-prompt-explicit-options prompt)))
     (drover-prompt-options-for session options t)
     (drover-schedule-enqueue
@@ -1014,6 +1274,190 @@ When it goes is read then (see `drover-schedule-read-when')."
      ((and action (not (eq action 'drover-schedule-prompt)) (commandp action))
       (call-interactively action))
      (t (drover-schedule--from-session)))))
+
+;;;; Offering to wait for what a prompt names
+
+(defconst drover-schedule--offers-version 1
+  "Version of the file of offers made.")
+
+(defconst drover-schedule-offers-limit 2000
+  "Offers the file of offers keeps, the newest.")
+
+(defvar drover-schedule--offers nil
+  "Offers made, each (LINK TRIGGER ARGUMENT TIME), the newest first.
+LINK names the conversation, TRIGGER the event and ARGUMENT what it
+concerns, offered at TIME, whatever the answer.")
+
+(defvar drover-schedule--offers-file nil
+  "The file `drover-schedule--offers' was read from, or nil before.")
+
+(defun drover-schedule-offers-file ()
+  "Return the file keeping the offers made."
+  (expand-file-name "schedule-offers.eld" drover-state-directory))
+
+(defun drover-schedule--offer-valid-p (offer)
+  "Return non-nil when OFFER is an offer as the file of offers holds them."
+  (and (proper-list-p offer) (length= offer 4)
+       (stringp (nth 0 offer)) (nth 1 offer) (symbolp (nth 1 offer))
+       (stringp (nth 2 offer)) (numberp (nth 3 offer))))
+
+(defun drover-schedule--offers ()
+  "Return the offers made, read once from their file.
+A file that does not read is told of, and offers start afresh."
+  (let ((file (drover-schedule-offers-file)))
+    (unless (equal file drover-schedule--offers-file)
+      (setq drover-schedule--offers
+            (condition-case err
+                (seq-filter #'drover-schedule--offer-valid-p
+                            (drover-read-data file drover-schedule--offers-version :offers))
+              (error (drover-warn "Offers to wait for events read anew: %s: %s"
+                                  (abbreviate-file-name file) (drover-error-message err))
+                     nil))
+            drover-schedule--offers-file file))
+    drover-schedule--offers))
+
+(defun drover-schedule--offered-p (link trigger argument)
+  "Return non-nil when waiting for TRIGGER on ARGUMENT was offered for LINK."
+  (seq-some (lambda (offer)
+              (and (equal (nth 0 offer) link) (eq (nth 1 offer) trigger) (equal (nth 2 offer) argument)))
+            (drover-schedule--offers)))
+
+(defun drover-schedule--note-offer (link trigger argument)
+  "Note that waiting for TRIGGER on ARGUMENT was offered for LINK, and save it."
+  (setq drover-schedule--offers
+        (seq-take (cons (list link trigger argument (float-time)) (drover-schedule--offers))
+                  drover-schedule-offers-limit))
+  (drover-write-data (drover-schedule-offers-file) "Offers to wait for events"
+                     drover-schedule--offers-version :offers drover-schedule--offers))
+
+(defun drover-schedule--recognized (trigger text)
+  "Return the arguments of event TRIGGER that TEXT names, without repeats."
+  (let ((recognize (drover-schedule--trigger-get trigger :recognize)))
+    (when (functionp recognize)
+      (seq-uniq (seq-filter (lambda (argument) (and (stringp argument) (not (string-blank-p argument))))
+                            (funcall recognize text))))))
+
+(defun drover-schedule--earlier-text (buffer start text)
+  "Return what BUFFER held before TEXT, sent from or to it, began at START.
+Without START, before the last place TEXT's first line shows, else the
+whole buffer; nil without a live BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (without-restriction
+        (let* ((line (string-trim (car (split-string text "\n" t "[ \t]+"))))
+               (probe (string-limit line 80))
+               (end (cond ((and (natnump start) (<= start (point-max))) start)
+                          ((and (not (string-empty-p probe))
+                                (save-excursion (goto-char (point-max))
+                                                (search-backward probe nil t))))
+                          (t (point-max)))))
+          (buffer-substring-no-properties (point-min) end))))))
+
+(defun drover-schedule--watching-p (link trigger argument)
+  "Return non-nil when a prompt of LINK waits for TRIGGER on ARGUMENT."
+  (seq-some (lambda (job)
+              (and (equal (plist-get job :link) link) (eq (plist-get job :trigger) trigger)
+                   (equal (plist-get job :argument) argument) (drover-schedule--waiting-p job)))
+            (drover-schedule--jobs)))
+
+(defun drover-schedule--offer-candidates (session text buffer start)
+  "Return the events TEXT, sent to SESSION, names, as (TRIGGER . ARGUMENT).
+Those to offer waiting for: for a SESSION known, those it waits for
+already, was offered, is told of otherwise (:followed), or mentioned in
+BUFFER before START are left out (see `drover-schedule--earlier-text')."
+  (let ((found (mapcan (lambda (entry)
+                         (mapcar (lambda (argument) (cons (car entry) argument))
+                                 (drover-schedule--recognized (car entry) text)))
+                       drover-schedule--triggers)))
+    (if (or (null found) (null session))
+        found
+      (when-let* (((not (drover-session-host session)))
+                  (conversation (drover-links-conversation session))
+                  (link (drover-links-link conversation)))
+        (drover-schedule-load)
+        (let ((earlier (make-hash-table :test #'eq))
+              (buffer (or buffer (drover-session-buffer session))))
+          (seq-filter
+           (pcase-lambda (`(,trigger . ,argument))
+             (and (not (drover-schedule--watching-p link trigger argument))
+                  (not (drover-schedule--offered-p link trigger argument))
+                  (not (when-let* ((followed (drover-schedule--trigger-get trigger :followed))
+                                   ((functionp followed)))
+                         (funcall followed session argument)))
+                  (not (member argument
+                               (with-memoization (gethash trigger earlier)
+                                 (when-let* ((before (drover-schedule--earlier-text buffer start text)))
+                                   (drover-schedule--recognized trigger before)))))))
+           found))))))
+
+(defun drover-schedule--offer-question (title trigger argument)
+  "Ask whether to have the session TITLE told of event TRIGGER on ARGUMENT."
+  (y-or-n-p (format "Tell %s %s%s? "
+                    (drover-bound-line (format "%s" title) 60)
+                    (if (drover-schedule--trigger-get trigger :repeat) "of each " "after the next ")
+                    (concat (drover-schedule--trigger-label trigger)
+                            (when-let* ((described (drover-schedule--describe-argument trigger argument)))
+                              (concat ": " described))))))
+
+(defun drover-schedule--accept (session trigger argument)
+  "Have SESSION wait for event TRIGGER on ARGUMENT, with the event's prompt."
+  (drover-schedule-add-after-trigger
+   (drover-schedule-session-target session) trigger
+   (or (drover-schedule--trigger-prompt trigger argument)
+       (format "The %s you were told of happened: %s" (drover-schedule--trigger-label trigger) argument))
+   "offered as a prompt named it" argument))
+
+(defconst drover-schedule--accept-wait 120
+  "Seconds a session a prompt started may take to tell its conversation.")
+
+(defun drover-schedule--accept-started (session accepted &optional deadline)
+  "Have SESSION, which a prompt started, wait for the events ACCEPTED.
+ACCEPTED are (TRIGGER . ARGUMENT).  A session not knowing its
+conversation yet is looked at again every two seconds, until DEADLINE,
+by default `drover-schedule--accept-wait' seconds from now."
+  (let* ((deadline (or deadline (+ (float-time) drover-schedule--accept-wait)))
+         (record (or (drover-find (drover-session-backend session) (drover-session-id session)) session)))
+    (cond
+     ((drover-links-conversation record)
+      (pcase-dolist (`(,trigger . ,argument) accepted)
+        (drover-with-reporting "scheduled prompt offered"
+          (drover-schedule--accept record trigger argument)
+          (drover-schedule--note-offer (drover-links-link (drover-links-conversation record))
+                                       trigger argument))))
+     ((< (float-time) deadline)
+      (run-at-time 2 nil (lambda ()
+                           (drover-with-reporting "scheduled prompt offered"
+                             (drover-schedule--accept-started record accepted deadline)))))
+     (t (drover-warn "%s told no conversation: wait for its events from the list of scheduled prompts (+)"
+                     (drover-session-display-title record))))))
+
+(defun drover-schedule-offer (session text &optional buffer start)
+  "Offer to have SESSION told of the events TEXT, sent to it, names.
+TEXT is a prompt the user sends; for `drover-sent-text-functions', in
+the command sending it.  An event
+whose :recognize finds arguments in TEXT is offered for each, once per
+conversation, unless SESSION waits for it already, is told of it
+otherwise (:followed), or BUFFER mentioned it before START (see
+`drover-schedule-define-trigger').  A yes schedules the event's
+:prompt, a watch for an event that repeats.  For SESSION nil, one TEXT
+starts, the question is asked now, and the function returned schedules
+what was accepted once the session started."
+  (when-let* ((candidates (drover-schedule--offer-candidates session text buffer start)))
+    (if session
+        (pcase-dolist (`(,trigger . ,argument) candidates)
+          (let ((link (drover-links-link (drover-links-conversation session)))
+                (yes (drover-schedule--offer-question (drover-session-display-title session) trigger argument)))
+            (drover-schedule--note-offer link trigger argument)
+            (when yes
+              (drover-schedule--accept session trigger argument))))
+      (let ((accepted (seq-filter (pcase-lambda (`(,trigger . ,argument))
+                                    (drover-schedule--offer-question "the new session" trigger argument))
+                                  candidates)))
+        (when accepted
+          (lambda (started)
+            (drover-schedule--accept-started started accepted)))))))
+
+(add-hook 'drover-sent-text-functions #'drover-schedule-offer)
 
 ;;;; Delivering
 
@@ -1249,7 +1693,14 @@ From the prompt's timer."
   (cond ((plist-get job :due)
          (format-time-string "%F %R %Z" (seconds-to-time (plist-get job :due))))
         ((plist-get job :turn) (format "after the turn of %s" (plist-get job :title)))
-        (t (format "after %s" (drover-schedule--trigger-label (plist-get job :trigger))))))
+        (t (drover-schedule--event-text job))))
+
+(defun drover-schedule--status-text (job)
+  "Return the status of JOB as the list shows it: a watch waiting is watching."
+  (if (and (plist-get job :repeat) (drover-schedule--waiting-p job))
+      (let ((fired (or (plist-get job :fired) 0)))
+        (if (> fired 0) (format "watching, %d sent" fired) "watching"))
+    (symbol-name (plist-get job :status))))
 
 (defun drover-schedule--refresh ()
   "Draw the list of scheduled prompts again, if it exists, without displaying it.
@@ -1261,7 +1712,7 @@ From the prompt's timer."
             (mapcar (lambda (job)
                       (list (plist-get job :id)
                             (vector (drover-schedule--when job)
-                                    (symbol-name (plist-get job :status))
+                                    (drover-schedule--status-text job)
                                     (drover-bound-line (plist-get job :title))
                                     (drover-schedule--prompt-line (plist-get job :prompt)))))
                     (sort (copy-sequence (drover-schedule--jobs))
@@ -1297,8 +1748,16 @@ waiting for it."
 (defun drover-schedule-retry-job (job &optional now)
   "Retry JOB, a failed, interrupted or cancelled scheduled prompt, at once.
 One still waiting for an event or for the end of a turn is sent now
-instead, with NOW only.  Signal an error when JOB can be neither."
+instead, with NOW only.  A watch waiting is sent a copy now and goes on
+waiting; one cancelled, ended or failed waits for its event again.
+Signal an error when JOB can be neither."
   (cond
+   ((and (plist-get job :repeat) (drover-schedule--waiting-p job))
+    (unless now (error "This prompt waits for each %s" (drover-schedule--trigger-label (plist-get job :trigger))))
+    (drover-schedule--notify job nil)
+    (drover-schedule--refresh))
+   ((and (plist-get job :repeat) (memq (plist-get job :status) '(failed interrupted cancelled)))
+    (drover-schedule--rewatch job))
    ((drover-schedule--waiting-p job)
     (unless now (error "This prompt waits for the %s" (drover-schedule--trigger-label (plist-get job :trigger))))
     (setf (plist-get job :due) (float-time))
@@ -1321,10 +1780,15 @@ instead, with NOW only.  Signal an error when JOB can be neither."
 (defun drover-schedule-retry ()
   "Retry the failed, interrupted or cancelled prompt at point now.
 A prompt still waiting for an event, or for the end of a turn, is sent
-now instead."
+now instead.  A watch waiting is sent a copy, and goes on waiting; one
+cancelled or ended waits for its event again."
   (interactive)
   (let ((job (drover-schedule--at-point)))
     (cond
+     ((and (plist-get job :repeat) (drover-schedule--waiting-p job))
+      (when (y-or-n-p (format "Send a copy now, still waiting for each %s? "
+                              (drover-schedule--trigger-label (plist-get job :trigger))))
+        (drover-schedule-retry-job job t)))
      ((drover-schedule--waiting-p job)
       (when (y-or-n-p (format "Send now instead of after the %s? "
                               (drover-schedule--trigger-label (plist-get job :trigger))))
@@ -1360,12 +1824,13 @@ now instead."
                         (string-join
                          (delq nil (list (when-let* ((due (plist-get job :due)))
                                            (format-time-string "%F %T %Z" (seconds-to-time due)))
-                                         (when-let* ((trigger (plist-get job :trigger)))
-                                           (format "after the next %s" (drover-schedule--trigger-label trigger)))
+                                         (when (plist-get job :trigger)
+                                           (drover-schedule--event-text job))
                                          (when (plist-get job :turn)
                                            (format "after the turn of %s" (plist-get job :title)))))
                          ", ")
-                        (plist-get job :status)
+                        (concat (drover-schedule--status-text job)
+                                (drover-schedule--watch-facts job))
                         (if-let* ((options (plist-get job :options)))
                             (format "Options: %s\n" (drover-schedule--describe-options options))
                           "")
@@ -1373,16 +1838,48 @@ now instead."
       (special-mode)
       (pop-to-buffer (current-buffer)))))
 
+(defun drover-schedule--watch-facts (job)
+  "Return what the list's details tell of JOB, a watch, after its status, or \"\"."
+  (if (not (plist-get job :repeat))
+      ""
+    (concat
+     (when-let* ((sent (plist-get job :sent-at)))
+       (format "; last sent %s" (format-time-string "%F %R %Z" (seconds-to-time sent))))
+     (when-let* (((drover-schedule--waiting-p job))
+                 (expires (plist-get job :expires)))
+       (format "; ends %s unless sent before" (format-time-string "%F %R %Z" (seconds-to-time expires))))
+     (when-let* ((argument (plist-get job :argument)))
+       (format "\nEvent: %s" argument)))))
+
+(defun drover-schedule-new ()
+  "Schedule a prompt for a session chosen, then when, then the prompt.
+The sessions with a live buffer are offered, and the archived ones, which
+delivery restores (see `drover-prompt-read-target').  When it goes is
+read as for any prompt (see `drover-schedule-read-when'), an event's
+argument then, such as the thread a watch waits for replies in; an empty
+prompt stands for the event's own (see `drover-schedule-define-trigger')."
+  (interactive)
+  (drover-schedule--start)
+  (let* ((session (drover-prompt-read-target "Schedule for session: " :existing-only t :archived t))
+         (_ (unless (drover-session-p session)
+              (user-error "Choose a session")))
+         (target (drover-schedule-session-target session))
+         (chosen (drover-schedule-read-when
+                  (and (memq (drover-session-status session) '(working retrying)) t))))
+    (drover-schedule-enqueue target chosen (drover-schedule-read-prompt (drover-schedule-default-prompt chosen)))))
+
 (defvar-keymap drover-schedule-list-mode-map
   :doc "Keymap of `drover-schedule-list-mode'."
   :parent tabulated-list-mode-map
   "k" #'drover-schedule-cancel
   "r" #'drover-schedule-retry
+  "+" #'drover-schedule-new
   "RET" #'drover-schedule-inspect)
 
 (define-derived-mode drover-schedule-list-mode tabulated-list-mode "Scheduled prompts"
-  "The scheduled prompts: k cancels, r retries, RET shows the prompt, g refreshes."
-  (setq tabulated-list-format [("Time" 32 t) ("Status" 12 t) ("Session" 48 t) ("Prompt" 0 t)])
+  "The scheduled prompts.
++ schedules one, k cancels, r retries, RET shows one, g refreshes."
+  (setq tabulated-list-format [("Time" 40 t) ("Status" 12 t) ("Session" 48 t) ("Prompt" 0 t)])
   (add-hook 'tabulated-list-revert-hook #'drover-schedule--refresh nil t)
   (tabulated-list-init-header))
 
@@ -1399,6 +1896,7 @@ now instead."
 (defun drover-schedule-unload-function ()
   "Stop the timers of scheduled prompts, which stay in their file."
   (remove-hook 'drover-changed-hook #'drover-schedule--turn-check)
+  (remove-hook 'drover-sent-text-functions #'drover-schedule-offer)
   (when (drover-schedule--queue-p drover-schedule--queue)
     (ignore-errors
       (maphash (lambda (_ timer) (cancel-timer timer)) (drover-schedule--queue-timers drover-schedule--queue))))

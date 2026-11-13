@@ -2297,6 +2297,33 @@ a failed send, and the other sends, tell nothing."
       (accept-process-output nil 0.05)
       (should-not sent))))
 
+(ert-deftest drover-prompt-test-sent-text ()
+  "The prompt's send tells its text, where the session's buffer ended before it.
+To a session started, the functions' answers apply once it started; a
+failed send to a session tells nothing."
+  (drover-prompt-test-with
+    (let* ((told nil)
+           (drover-sent-text-functions
+            (list (lambda (session text buffer start)
+                    (push (list (and session (drover-session-id session)) text
+                                (and buffer (buffer-name buffer)) start)
+                          told)
+                    (unless session
+                      (lambda (started) (push (list :started (drover-session-id started)) told))))))
+           (drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake session"))))
+      (with-current-buffer (drover-prompt-test--register 'shown "Shown" :send #'ignore)
+        (insert "earlier"))
+      (with-current-buffer (drover-prompt-test--prompt "see the thread")
+        (drover-prompt-test-choosing (lambda (_) "Shown")
+          (drover-prompt-submit)))
+      (should (equal told '(("Shown" "see the thread" "Shown" 8))))
+      (setq told nil)
+      (with-current-buffer (drover-prompt-test--prompt "Do it")
+        (setq default-directory "/")
+        (drover-prompt-test-choosing (lambda (_) "[New Fake session…]")
+          (drover-prompt-submit)))
+      (should (equal (reverse told) '((nil "Do it" nil nil) (:started "new-0")))))))
+
 (ert-deftest drover-prompt-test-display-new ()
   "A session the prompt starts shows in no window when `drover-prompt-display-new' is nil.
 It starts hidden, and takes its prompt in no window when started later,
