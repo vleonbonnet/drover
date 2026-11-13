@@ -259,6 +259,32 @@ stops neither the others nor the next session."
                                 (mapc (lambda (entry) (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry)))) buffers)
                                 (kill-buffer acting)))))
 
+(ert-deftest drover-test-sent-text ()
+  "Text the user sent is told to each function; an error or a quit never reaches the sender.
+For a session not known yet, what the functions return applies once it
+started; asking nobody, nothing is told."
+  (let* ((told nil)
+         (drover-sent-text-functions
+          (list (lambda (&rest _) (error "Broken"))
+                (lambda (session text _buffer _start)
+                  (push (list session text) told)
+                  (lambda (started) (push (list :started started) told))))))
+    (cl-letf (((symbol-function 'drover-report-failure) #'ignore))
+      (funcall (drover-note-sent-text 'known "hello") 'ignored)
+      (should (equal told '((known "hello"))))
+      (setq told nil)
+      (funcall (drover-note-sent-text nil "start") 'new)
+      (should (equal (reverse told) '((nil "start") (:started new))))
+      (setq told nil)
+      (let ((inhibit-interaction t))
+        (drover-note-sent-text 'known "hello"))
+      (drover-note-sent-text 'known " ")
+      (should-not told)
+      (let ((drover-sent-text-functions (list (lambda (&rest _) (signal 'quit nil))
+                                              (lambda (&rest _) (push 'after told)))))
+        (should (functionp (drover-note-sent-text 'known "hello"))))
+      (should-not told))))
+
 (ert-deftest drover-test-recap ()
   "A recap comes from the backend once; a missing or failing :recap is a failure."
   (drover-test-with-backend nil

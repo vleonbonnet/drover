@@ -943,6 +943,27 @@ restart of the host's remote layer, its counters rising."
             (ert-info ((format "%S" bad))
               (should (cadr (drover-remote--wait peer bad 10))))))))))
 
+(ert-deftest drover-remote-test-watch-travels ()
+  "A watch travels as waiting on each event, what it concerns told; peers are not offered such events."
+  (require 'drover-schedule)
+  (let ((drover-schedule--triggers nil))
+    (drover-schedule-define-trigger 'emacs-restart "Emacs restart")
+    (drover-schedule-define-trigger 'reply "Slack reply" :read #'ignore :repeat t
+                                    :describe (lambda (thread) (concat "thread " thread)))
+    (let (answer)
+      (drover-remote--on-triggers (lambda (reply) (setq answer reply)))
+      (should (equal (plist-get answer :tr) [(:n "emacs-restart" :l "Emacs restart")])))
+    (let ((job (list :id "J" :link "agent-session:claude-code/x" :backend 'fake :directory "/" :title "T"
+                     :prompt "Look" :after "reply:T1" :trigger 'reply :argument "T1" :repeat t
+                     :due nil :status 'pending)))
+      (cl-letf (((symbol-function 'drover-index-sessions) #'ignore))
+        (should (equal (plist-get (drover-remote--wire-job job) :w)
+                       '(:after "Slack reply" :tr "reply" :ea t :ar "thread T1")))
+        (should (equal (plist-get (drover-remote--wire-job (list :trigger 'emacs-restart :after "k" :prompt "p"
+                                                                 :status 'pending))
+                                  :w)
+                       '(:after "Emacs restart" :tr "emacs-restart")))))))
+
 (ert-deftest drover-remote-test-viewer-units ()
   "A viewer is told by its configuration or its capabilities, and kept out of views."
   (drover-remote-test-owning nil

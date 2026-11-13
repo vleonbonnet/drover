@@ -6503,6 +6503,50 @@ own: their turns wait on it."
           (push (drover-session-buffer record) found))))
     (seq-uniq (seq-filter #'buffer-live-p (append (nreverse found) buffers)))))
 
+;;;; Text the user sent
+
+(defvar drover-sent-text-functions nil
+  "Functions called with (SESSION TEXT BUFFER START) as the user sends TEXT.
+TEXT is what the user wrote and sent to SESSION, from drover's prompt
+or the session's front end; BUFFER is SESSION's buffer, or nil, and
+START where TEXT begins in it, nil when unknown.  SESSION is nil for a
+session TEXT starts, not known yet: a function may then return a
+function, called with the session once it started.
+
+They run in the command that sent TEXT, so that they may ask the user;
+a quit stops the functions left, never the send, and an error of one
+does not stop the others.  Nothing runs while `inhibit-interaction' is
+non-nil, as for another host or an agent: TEXT is not the user's.
+Scheduled prompts read it to offer watching what TEXT names (see
+`drover-schedule-define-trigger').")
+
+(defun drover-note-sent-text (session text &optional buffer start)
+  "Run `drover-sent-text-functions' for TEXT the user sent to SESSION.
+BUFFER and START are as the functions get them.  Front ends call this,
+in the command that sent TEXT, for what the user sends in their own
+buffers, and drover's prompt for what it sends.  Return a function of
+one argument, the session started, which calls what the functions
+returned for SESSION nil; for another SESSION, it does nothing."
+  (let ((later nil))
+    (when (and (stringp text) (not (string-blank-p text)) (not inhibit-interaction))
+      (condition-case nil
+          (run-hook-wrapped 'drover-sent-text-functions
+                            (lambda (function)
+                              (let ((result (drover-with-reporting (if (symbolp function)
+                                                                       (symbol-name function)
+                                                                     "sent text")
+                                              (funcall function session text buffer start))))
+                                (when (and (null session) (functionp result))
+                                  (push result later)))
+                              nil))
+        ;; The text is sent: a question quit answers no.
+        (quit nil)))
+    (setq later (nreverse later))
+    (lambda (started)
+      (dolist (function later)
+        (drover-with-reporting "sent text"
+          (funcall function started))))))
+
 (defun drover-pending-prompts (session)
   "Return how many pending prompts of SESSION its backend can withdraw, maybe 0.
 They are prompts sent to SESSION that it has not taken yet, as those

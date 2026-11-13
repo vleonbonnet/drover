@@ -1523,7 +1523,9 @@ turn then, unless the prompt waits on a request SESSION awaits (see
        (message "Discarded; the prompt is in the kill ring"))
       (_
        (drover-unarchive-to-send session)
-       (let ((finish (drover-prompt--begin-send buffer)))
+       (let ((finish (drover-prompt--begin-send buffer))
+             (start (and (buffer-live-p target)
+                         (with-current-buffer target (without-restriction (point-max))))))
          (drover-prompt-apply-options
           session explicit
           (lambda ()
@@ -1536,7 +1538,9 @@ turn then, unless the prompt waits on a request SESSION awaits (see
               (funcall finish)))
           (lambda (reason)
             (funcall finish)
-            (drover-warn "%s; prompt not sent" reason))))))))
+            (drover-warn "%s; prompt not sent" reason)))
+         ;; Everything before START was said before this prompt.
+         (drover-note-sent-text session text target start))))))
 
 (defun drover-prompt--begin-send (buffer)
   "Mark prompt BUFFER as sending and return a function clearing that state."
@@ -1590,7 +1594,9 @@ the prompt once delivered, if it is still unchanged."
                                 (and hidden (list :hidden t)))))
              (text (plist-get content :text))
              (settled nil)
-             (finish (drover-prompt--begin-send buffer)))
+             (finish (drover-prompt--begin-send buffer))
+             ;; Asked now, in the command; what is accepted applies once the session started.
+             (started (drover-note-sent-text nil text)))
         (condition-case err
             (drover-prompt--hiding
              hidden
@@ -1607,7 +1613,8 @@ the prompt once delivered, if it is still unchanged."
                                      (drover-prompt--deliver session nil text nil (plist-get content :attachments))))
                               (when (drover-prompt--unchanged-p content buffer)
                                 (drover-prompt-consume content buffer))
-                              (drover-prompt--sent session t))))
+                              (drover-prompt--sent session t)
+                              (funcall started session))))
                         (lambda (reason)
                           (unless settled
                             (setq settled t)
