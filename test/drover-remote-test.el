@@ -1743,6 +1743,40 @@ leading back to what holds it would print it again from each."
                              ;; Sessions of the agent are offered to the prompt, without buffers.
                              (should (assoc (drover-remote-test-session "s0") (drover-prompt--target-sessions))))))
 
+(defun drover-remote-test-archived (id)
+  "Return this host's record of the agent's archived session ID, once fetched."
+  (drover-keep-fetched '(archived))
+  (let ((found nil))
+    (drover-remote-test-wait
+     (lambda () (setq found (seq-find (lambda (session) (equal (drover-session-id session) (cons 'fake id)))
+                                      (drover-archived-sessions)))))
+    found))
+
+(ert-deftest drover-remote-test-send-to-archived ()
+  "The prompt offers another host's archived session, which its host takes though its own lists never fetched it."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 1)
+    (drover-remote-test-synced 1)
+    (let ((gone (drover-remote-test-archived "gone1")))
+      (should (drover-archived-takes-prompt-p gone))
+      (should (assoc gone (drover-prompt--archived-targets (drover-prompt--target-sessions))))
+      (funcall (drover-backend-property 'remote:agent :send) gone "Back to it" nil)
+      (drover-remote-test-wait (lambda () (drover-remote-test-calls "send")))
+      (should (equal (car (drover-remote-test-calls "send")) '("send" "gone1" "Back to it"))))))
+
+(ert-deftest drover-remote-test-send-to-archived-older-owner ()
+  "Another host's archived sessions take no prompt from here when its drover does not take one for them."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir "DROVER_AGENT_CAPS=actions,bye,grant")
+    (drover-remote-test-command "sessions" :n 1)
+    (drover-remote-test-synced 1)
+    (let ((gone (drover-remote-test-archived "gone1")))
+      (should (drover-supports-p (drover-remote-test-session "s0") :send))
+      (should-not (drover-archived-takes-prompt-p gone))
+      (should (string-match-p "older drover" (drover-remote--refusal (drover-remote--peer "agent") gone "send")))
+      (should-not (drover-prompt--archived-targets (drover-prompt--target-sessions))))))
+
 (ert-deftest drover-remote-test-build-and-go-there ()
   "Build switches another host's session to its build agent there, then sends Go ahead."
   (drover-remote-test-with nil

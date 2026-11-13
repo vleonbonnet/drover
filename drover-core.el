@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 28
+(defconst drover-core-generation 29
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -2021,7 +2021,10 @@ as `drover-model' describes them: explicit choices (:agent :model
              argument, the list of their data, in order; only then.
              A session drover archived is restored before (see
              `drover-unarchive-to-send'); one its backend archived, the
-             backend restores as it sends, telling a refusal so.
+             backend restores as it sends, telling a refusal so, and
+             opens it when archiving closed its buffer: the prompt's
+             picker offers such a session without a buffer (see
+             `drover-archived-takes-prompt-p').
  :options    Function of a SESSION returning what it runs now, as a
              plist (:model MODEL :variant VARIANT), or nil.  It is
              called for every session a picker offers, so it must be
@@ -4754,6 +4757,24 @@ on one line, why SESSION cannot be restored (see
                   (drover-bound-line (drover-session-display-title session)) refusal))
     (drover-unarchive-session session)
     t))
+
+(defun drover-archived-takes-prompt-p (session &optional operation)
+  "Return non-nil when SESSION, archived, may be sent a prompt through OPERATION.
+OPERATION is :send, the default, or :submit, which its backend must
+perform on SESSION.  A session of another host may as its host allows
+\(see `drover-supports-p').  One of this host may while its buffer is
+live, drover restoring first what it archived itself (see
+`drover-unarchive-to-send'); without a buffer, only when its backend
+archived it, as such a backend restores and opens a session as it takes
+a prompt (see :send in `drover-register-backend').  A front end whose
+session drover archived needs its buffer, gone, to take a prompt."
+  (and (drover-supports-p session (or operation :send))
+       (or (drover-session-host session)
+           (drover-session-buffer session)
+           (and (drover-session-archived session)
+                (not (drover--archive-entry session))
+                (drover--native-archive-p session)))
+       t))
 
 (defun drover-archived-conversation (key)
   "Return a session standing for the conversation of engine KEY drover archived.

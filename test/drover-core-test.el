@@ -2647,6 +2647,35 @@ Its engine is `claude-code', its engine identifier \"conv-ID\"."
       (let ((native (drover-test-session "n" :archived 1.0 :engine 'claude-code :engine-id "conv-n")))
         (should-not (drover-unarchive-to-send native))))))
 
+(ert-deftest drover-test-archived-takes-prompt ()
+  "An archived session takes a prompt with its buffer, or without one when its backend archived it."
+  (let ((buffer (generate-new-buffer " shown a"))
+        (sessions (list (drover-test-shown "a") (drover-test-shown "b"))))
+    (unwind-protect
+        (drover-test-with-shown sessions
+          (setf (alist-get 'shown drover--backends)
+                (append (list :send #'ignore :submit #'ignore
+                              :buffer (lambda (session) (and (equal (drover-session-id session) "a") buffer)))
+                        (alist-get 'shown drover--backends)))
+          (drover-archive (drover-find 'shown "a"))
+          (drover-archive (drover-find 'shown "b"))
+          ;; Drover archived both: only the one whose buffer is open takes one.
+          (let ((a (drover-archived-conversation '(claude-code . "conv-a")))
+                (b (drover-archived-conversation '(claude-code . "conv-b"))))
+            (should (drover-archived-takes-prompt-p a))
+            (should (drover-archived-takes-prompt-p a :submit))
+            (should-not (drover-archived-takes-prompt-p b)))
+          ;; Its backend archived it: without a buffer, as that backend opens it.
+          (let ((native (drover-test-session "n" :archived 1.0)))
+            (should (drover-archived-takes-prompt-p native))
+            ;; The fake backend has no :submit.
+            (should-not (drover-archived-takes-prompt-p native :submit)))
+          ;; Told archived by a backend without an archive of its own: not without a buffer.
+          (should-not (drover-archived-takes-prompt-p (drover-test-shown "c" :archived 1.0)))
+          ;; Another host's, as its host allows.
+          (should (drover-archived-takes-prompt-p (drover-test-shown "r" :archived 1.0 :host "core"))))
+      (kill-buffer buffer))))
+
 (ert-deftest drover-test-unarchive-confirmed ()
   "A backend confirming restores has the record fetched as archived forgotten once it took."
   (drover-test-with-backend nil

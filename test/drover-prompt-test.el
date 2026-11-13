@@ -1805,6 +1805,134 @@ of a frame stays."
       (should (equal (nreverse keymaps)
                      '(drover-prompt-options-menu nil drover-prompt-options-menu))))))
 
+(defun drover-prompt-test--give-archived (fetch)
+  "Give the fake backend :archived, calling FETCH with each callback."
+  (apply #'drover-register-backend 'fake :archived fetch (alist-get 'fake drover--backends)))
+
+(defmacro drover-prompt-test-picking (answer &rest body)
+  "Run BODY with `completing-read' as a minibuffer would read, answering ANSWER.
+Each read runs the setup hook in a buffer of its own, standing for the
+minibuffer, and ANSWER, a function of no argument, there, which returns
+the name chosen; the exit hook runs then.  In ANSWER, `(offered)'
+returns the names offered, those the predicate keeps, in their order,
+and `picker-metadata' the completion metadata."
+  (declare (indent 1) (debug t))
+  `(let ((picker-collection nil)
+         (picker-predicate nil))
+     (cl-flet ((offered () (all-completions "" picker-collection picker-predicate))
+               (picker-metadata () (completion-metadata "" picker-collection picker-predicate)))
+       (ignore #'offered #'picker-metadata)
+       (cl-letf (((symbol-function 'completing-read)
+                  (lambda (_prompt collection &optional predicate &rest _)
+                    (setq picker-collection collection
+                          picker-predicate predicate)
+                    (with-temp-buffer
+                      (use-local-map (make-sparse-keymap))
+                      (run-hooks 'minibuffer-setup-hook)
+                      (prog1 (funcall ,answer)
+                        (run-hooks 'minibuffer-exit-hook))))))
+         ,@body))))
+
+(ert-deftest drover-prompt-test-picker-archived ()
+  "C-z offers the archived sessions taking prompts, last, and hides them again; a new picker hides them."
+  (drover-prompt-test-with
+    (let ((drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake")))
+          (opencode-archived-icon "A")
+          (fetched 0)
+          (rounds nil)
+          (status nil))
+      (drover-prompt-test--session "a")
+      (drover-prompt-test--give-archived
+       (lambda (callback)
+         (cl-incf fetched)
+         (funcall callback (list (drover-test-session "older" :archived 50.0)
+                                 (drover-test-session "newer" :archived 100.0)
+                                 ;; Subagents are not offered.
+                                 (drover-test-session "kid" :archived 100.0 :parent "newer")
+                                 ;; Nor is a session offered already.
+                                 (drover-test-session "a" :archived 10.0)))))
+      (drover-prompt-test-picking
+          (lambda ()
+            (should (eq (key-binding (kbd "C-z")) #'drover-prompt-toggle-archived))
+            (push (offered) rounds)
+            (drover-prompt-toggle-archived)
+            (push (offered) rounds)
+            (push (overlay-get drover-prompt--minibuffer-overlay 'after-string) status)
+            (let ((annotate (completion-metadata-get (picker-metadata) 'annotation-function)))
+              (should (string-match-p " A \\[Fake\\]" (substring-no-properties
+                                                       (funcall annotate "Session newer")))))
+            (should (memq 'drover-dim (ensure-list (get-text-property 0 'face (car (last (offered)))))))
+            (drover-prompt-toggle-archived)
+            (push (offered) rounds)
+            (push (and drover-prompt--minibuffer-overlay
+                       (overlay-get drover-prompt--minibuffer-overlay 'after-string))
+                  status)
+            (drover-prompt-toggle-archived)
+            "Session newer")
+        (should (equal (drover-session-id (drover-prompt-read-target "To: " :archived t)) "newer"))
+        (should (equal (nreverse rounds)
+                       '(("session a" "[New Fake…]")
+                         ("session a" "[New Fake…]" "Session newer" "Session older")
+                         ("session a" "[New Fake…]"))))
+        (should (equal (mapcar (lambda (text) (and text (substring-no-properties text))) (nreverse status))
+                       '(" [archived: shown]" nil)))
+        ;; Fetched once: kept, and fresh enough when shown again.
+        (should (= fetched 1))
+        ;; Gone with its minibuffer, nothing follows the sessions changing.
+        (should-not drover-prompt--archived-pickers)
+        (should-not (memq #'drover-prompt--archived-changed drover-changed-hook)))
+      ;; A new picker hides them.
+      (setq rounds nil)
+      (drover-prompt-test-picking
+          (lambda () (push (offered) rounds) "session a")
+        (drover-prompt-read-target "To: " :archived t)
+        (should (equal rounds '(("session a" "[New Fake…]")))))
+      ;; A picker not asked to offers none, and has no key for them.
+      (drover-prompt-test-picking
+          (lambda ()
+            (should-not (eq (key-binding (kbd "C-z")) #'drover-prompt-toggle-archived))
+            (should-error (drover-prompt-toggle-archived) :type 'user-error)
+            "session a")
+        (drover-prompt-read-target "To: ")))))
+
+(ert-deftest drover-prompt-test-picker-archived-arriving ()
+  "Archived sessions arriving while the picker shows them join it; the minibuffer says they are fetched."
+  (drover-prompt-test-with
+    (let ((callbacks nil)
+          (rounds nil)
+          (status nil))
+      (drover-prompt-test--session "a")
+      (drover-prompt-test--give-archived (lambda (callback) (push callback callbacks)))
+      (drover-prompt-test-picking
+          (lambda ()
+            (drover-prompt-toggle-archived)
+            (push (offered) rounds)
+            (push (substring-no-properties (overlay-get drover-prompt--minibuffer-overlay 'after-string)) status)
+            (should (memq #'drover-prompt--archived-changed drover-changed-hook))
+            (funcall (car callbacks) (list (drover-test-session "gone" :archived 5.0)))
+            ;; As `drover-changed-hook' runs.
+            (drover-prompt--archived-changed)
+            (push (offered) rounds)
+            (push (substring-no-properties (overlay-get drover-prompt--minibuffer-overlay 'after-string)) status)
+            "Session gone")
+        (should (equal (drover-session-id (drover-prompt-read-target "To: " :archived t)) "gone"))
+        (should (equal (nreverse rounds) '(("session a") ("session a" "Session gone"))))
+        (should (equal (nreverse status) '(" [archived: fetching…]" " [archived: shown]")))))))
+
+(ert-deftest drover-prompt-test-send-to-archived ()
+  "Sent to an archived session without a buffer, the prompt goes through its backend, which opens it."
+  (drover-prompt-test-with
+    (drover-prompt-test--give-archived
+     (lambda (callback) (funcall callback (list (drover-test-session "gone" :archived 5.0)))))
+    (drover-prompt-test--session "a")
+    (with-current-buffer (drover-prompt-buffer t)
+      (insert "Go on")
+      (drover-prompt-test-picking
+          (lambda () (drover-prompt-toggle-archived) "Session gone")
+        (drover-prompt-submit)))
+    (should (member '(:send "gone" "Go on" fake-token) drover-test-calls))
+    (should (string-empty-p (with-current-buffer (drover-prompt-buffer t) (buffer-string))))))
+
 (ert-deftest drover-prompt-test-picker-shows-choices ()
   "The picker's minibuffer shows what the prompt runs, and follows the choices made there."
   (drover-prompt-test-with

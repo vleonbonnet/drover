@@ -69,7 +69,7 @@
 (require 'drover-selection)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 29))
   (load "drover-core" nil t))
 
 (autoload 'drover-wrap-up-session "drover-wrap-up")
@@ -331,7 +331,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up")
+    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -377,7 +377,11 @@ turns from its engines (see `drover-changes'), for those a peer shows
 records (:changes, the lines added and removed and the files) and the
 files in their recaps (:files); \"wrap-up\": it wraps its sessions up
 for its peers (action `wrap-up', see `drover-wrap-up'), telling the
-peer that asked how each ended in a message `note'.")
+peer that asked how each ended in a message `note'; \"send-archived\":
+it takes a prompt (action `send', and `options' before it) for the
+archived sessions it sent the peer (message `fetched'), whether or not
+its own lists fetched them, offering it (:ops) only for those that may
+take one (see `drover-archived-takes-prompt-p').")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -532,7 +536,12 @@ DONE nil: VALUE lists the replies awaiting it; t: VALUE is its outcome.")
 Each a plist: :buffer, :key, the session's, :viewers, the peers that
 asked, as (LINK . NAME), LINK their connection's `drover-link', and
 :timer, unsharing it once no peer mirrors it.")
-  (network nil :documentation "This host's network addresses at the last look, and when, as (TIME . ADDRESSES)."))
+  (network nil :documentation "This host's network addresses at the last look, and when, as (TIME . ADDRESSES).")
+  (served (make-hash-table :test #'equal)
+          :documentation "The archived sessions this host last sent its peers, by source.
+Each source, \"drover\" or a backend's name, holds a hash table of its
+records by key, those its last answer to a fetch held (see
+`drover-remote--served-archived')."))
 
 (drover-note-layout 'drover-remote--peer 'drover-remote--sub 'drover-remote--state)
 
@@ -813,7 +822,10 @@ greys out what its access forbids, and this host checks it again."
                  (and (drover-supports-p record :delete) "delete")
                  (and (drover-supports-p record :rename) "rename")
                  (and (drover-supports-p record :requests) (drover-supports-p record :answer) "answer")
-                 (and (drover-supports-p record :submit) "send")
+                 (and (if (drover-session-archived-p record)
+                          (drover-archived-takes-prompt-p record :submit)
+                        (drover-supports-p record :submit))
+                      "send")
                  (and (drover-supports-p record :apply-options) "options")
                  (and (drover-wrap-up-p record) "wrap-up"))))))
 
@@ -2303,6 +2315,10 @@ Without SESSION and ACTION, why it takes no action at all."
    ((and action (not (drover-remote--allows-p (or (drover-remote--peer-granted peer) 'read) action)))
     (format "%s grants this host %s access" (drover-remote--label peer)
             (or (drover-remote--peer-granted peer) "read")))
+   ((and session (member action '("send" "options")) (drover-session-archived session)
+         (not (drover-remote--capable-p peer "send-archived")))
+    (format "%s runs an older drover, which sends no prompt to its archived sessions: update it"
+            (drover-remote--label peer)))
    ((and session action
          (let ((ops (gethash (drover-session-id session) (drover-remote--peer-ops peer) 'unknown)))
            (and (listp ops) (not (member action ops)))))
@@ -2896,7 +2912,8 @@ now, or drover-schedule is not there."
 A session listed, else one of the older or archived sessions fetched,
 else drover's own archive; for restoring or deleting, a record of the
 backend's own archive is made from KEY, the backends acting by
-identifier."
+identifier; for sending a prompt, or the options before it, an archived
+session this host sent its peers (see `drover-remote--served-archived')."
   (when-let* ((key)
               (backend (car key))
               ((memq backend (drover-backends)))
@@ -2904,6 +2921,8 @@ identifier."
     (or (drover-index-session key)
         (seq-find (lambda (record) (equal (drover-session-key record) key))
                   (append (drover--fetched-sessions 'history) (drover--fetched-sessions 'archived)))
+        (and (member action '("send" "options"))
+             (drover-remote--served-archived key))
         (and (member action '("unarchive" "delete"))
              (or (seq-find (lambda (record) (equal (drover-session-key record) key))
                            (let ((drover--archived nil)) (drover-archived-sessions)))
@@ -2938,13 +2957,16 @@ prompt sent waits, queued.  Nothing shows a window nor asks."
       ("rename" (drover-backend-call record :rename (plist-get args :title)) (then))
       ("send"
        (let* ((options (or (plist-get args :agent) (plist-get args :model) (plist-get args :variant)))
+              (closed (and (drover-session-archived-p record)
+                           (not (drover-archived-takes-prompt-p record :submit))))
               ;; Its turn running, the prompt waits for it to end, in this
               ;; host's queue of prompts, saved: never typed over a turn nor lost.
-              (queued (and (drover-supports-p record :submit)
+              (queued (and (drover-supports-p record :submit) (not closed)
                            (drover-remote--queue-prompt record args drover-remote--acting-peer))))
          (cond
           ((not (drover-supports-p record :submit))
            (else "it takes no prompt from another host"))
+          (closed (else "it is archived, and its front end takes no prompt without its buffer"))
           ((stringp queued) (else queued))
           (queued (funcall settle 'queued (cdr queued)))
           ((not options)
@@ -3956,6 +3978,28 @@ needing one for its peer goes to spyglass's parking frame."
 
 ;;;; Older and archived sessions
 
+(defun drover-remote--serve-archived (source records)
+  "Note RECORDS as the archived sessions of SOURCE this host sends its peers.
+SOURCE is \"drover\", for drover's own archive, or a backend's name.
+Its records replace those it answered before: a peer offering one sends
+a prompt to it, which this host takes whether or not its own lists
+fetched the archived sessions (see `drover-remote--served-archived')."
+  (when-let* ((state (drover-remote--current)))
+    (let ((table (make-hash-table :test #'equal :size (max 1 (length records)))))
+      (dolist (record records)
+        (puthash (drover-session-key record) record table))
+      (puthash source table (drover-remote--state-served state)))))
+
+(defun drover-remote--served-archived (key)
+  "Return the record of archived session KEY this host last sent its peers, or nil."
+  (when-let* ((state (drover-remote--current)))
+    (catch 'found
+      (maphash (lambda (_source table)
+                 (when-let* ((record (gethash key table)))
+                   (throw 'found record)))
+               (drover-remote--state-served state))
+      nil)))
+
 (defun drover-remote--serve-fetch (connection kind generation)
   "Send CONNECTION's peer the sessions of KIND, \"history\" or \"archived\".
 Each backend of this host keeping them answers when it can, possibly
@@ -3968,6 +4012,8 @@ drover's own archive answers first, as source \"drover\"."
                        (records (seq-filter #'drover-remote--local-p sessions))
                        (chunks (or (seq-partition records drover-remote-batch) (list nil)))
                        (count (length chunks)))
+                  (when (equal kind "archived")
+                    (drover-remote--serve-archived source records))
                   (seq-do-indexed
                    (lambda (chunk index)
                      (drover-remote--send
