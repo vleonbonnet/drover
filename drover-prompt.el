@@ -247,6 +247,15 @@ this host's, for its links and attachments.")
 (defvar-local drover-prompt-host-directory nil
   "Directory of `drover-prompt-host' a new session of the prompt starts in.")
 
+(defvar drover-prompt-context-functions nil
+  "Functions naming where context quoted from a buffer comes from.
+Each is called with no argument in the buffer, point where the context
+was taken, and returns the line quoted context begins with, such as
+\"From Slack message LINK\", or nil to let the next one tell.  For
+buffers whose lines name nothing an agent can open, where the fallback
+is \"From buffer NAME line N\"; a file's buffer, and a session's own,
+are named by drover.")
+
 (defvar drover-prompt-remote-functions nil
   "How the prompt starts sessions on other hosts, or nil when it cannot.
 `drover-remote-mode' sets it, a plist of functions:
@@ -1252,7 +1261,8 @@ its line; several are the items of a list under theirs."
   "Return the Org context of BUFFER at point: a link, then REGION quoted.
 The link names the file and line at point; in the buffer of a session,
 the session, by its link (see `drover-session-link'), else its title;
-otherwise the buffer and line.  REGION, a string or nil, goes in a code
+otherwise what `drover-prompt-context-functions' tell, else the buffer
+and line.  REGION, a string or nil, goes in a code
 block of LANGUAGE, escaped so that no line of it ends the block or opens
 a heading, without the blank lines around it, and from a terminal
 without trailing spaces."
@@ -1270,6 +1280,7 @@ without trailing spaces."
                                  (format "\"%s\"" (replace-regexp-in-string
                                                    "[\n\r\t]+" " "
                                                    (format "%s" (drover-session-display-title session)))))))
+                    ((drover-prompt--context-header))
                     (t (format "From buffer %s line %d" (buffer-name) line))))
            (terminal (derived-mode-p 'vterm-mode 'term-mode 'eat-mode 'ghostel-mode 'comint-mode))
            ;; Whitespace after the last newline goes too, as when a
@@ -1285,6 +1296,17 @@ without trailing spaces."
                   (format ":\n#+begin_src %s\n%s\n#+end_src\n\n"
                           language (org-escape-code-in-string region))
                 "\n\n")))))
+
+(defun drover-prompt--context-header ()
+  "Return the line `drover-prompt-context-functions' name this buffer by, or nil.
+A function failing is reported and passed over; what one returns is
+taken on one line."
+  (when-let* ((header (run-hook-wrapped 'drover-prompt-context-functions
+                                        (lambda (function)
+                                          (let ((value (drover-with-reporting "context header"
+                                                         (save-excursion (funcall function)))))
+                                            (and (stringp value) (not (string-blank-p value)) value))))))
+    (drover-bound-line (replace-regexp-in-string "[\n\r\t]+" " " header))))
 
 (defun drover-prompt--buffer-own-session (buffer)
   "Return the session whose own buffer BUFFER is, or nil.

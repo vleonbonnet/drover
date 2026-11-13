@@ -1027,7 +1027,7 @@ Engines read their local state with the helpers of =drover-model=: =drover-read-
 
 The prompt knows no backend and no engine by name.  It sends through optional backend operations and resolves what a new session runs through the engines.
 
-Context quoted from a session's own buffer, the session at point whose buffer it is (not a list of another front end, whose row tells a session too), names the session by its Org link (=drover-session-link=), else its title, instead of =From buffer NAME line N=.  The buffer of a session is named after its title, which read as the subject of the prompt: OpenCode titled new sessions after the session quoted rather than after what was asked.  Its line numbers belonged to a rendering the agent cannot open, where the link opens the conversation.
+Context quoted from a session's own buffer, the session at point whose buffer it is (not a list of another front end, whose row tells a session too), names the session by its Org link (=drover-session-link=), else its title, instead of =From buffer NAME line N=.  The buffer of a session is named after its title, which read as the subject of the prompt: OpenCode titled new sessions after the session quoted rather than after what was asked.  Its line numbers belonged to a rendering the agent cannot open, where the link opens the conversation.  Other buffers whose lines name nothing the agent can open are named by =drover-prompt-context-functions= when one answers, as the configuration names a Slack buffer by the permalink of the message at point, which an agent reads with its Slack tools and which a watch recognizes (see [[*Watches][Watches]]); a function failing is reported and passed over, and what one answers is taken on one bounded line.
 
 ** Backend operations
 

@@ -156,6 +156,21 @@ names of the latest call, and `metadata' its completion metadata."
                              (drover-prompt-format-context (current-buffer) "\n  \n$ ls   \na \n  "
                                                            "console")))))
 
+(ert-deftest drover-prompt-test-context-named-by-functions ()
+  "A buffer `drover-prompt-context-functions' name is quoted from that; a failing one is passed over."
+  (with-temp-buffer
+    (insert "one\ntwo")
+    (let ((drover-prompt-context-functions
+           (list (lambda () (error "Broken"))
+                 (lambda () nil)
+                 (lambda () (format "From message\nat line %d" (line-number-at-pos))))))
+      (cl-letf (((symbol-function 'drover-report-failure) #'ignore))
+        (should (equal (drover-prompt-format-context (current-buffer) nil "text")
+                       "From message at line 2\n\n"))))
+    (let ((drover-prompt-context-functions (list #'ignore)))
+      (should (equal (drover-prompt-format-context (current-buffer) nil "text")
+                     (format "From buffer %s line 2\n\n" (buffer-name)))))))
+
 (ert-deftest drover-prompt-test-fence-outgrows-backticks ()
   "Backtick fences inside a block cannot close its Markdown fence."
   (should (equal (drover-prompt-to-markdown
