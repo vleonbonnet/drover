@@ -405,17 +405,32 @@ ICON defaults to `drover-usage-mode-line-icon'."
   (global-status-define 'drover-usage :icon (or icon drover-usage-mode-line-icon) :order 65
                         :mouse-1 #'drover-usage))
 
+(defun drover-usage--mode-line-value (sum)
+  "Return what SUM billed as the global status shows it, or nil.
+The priced cost in whole dollars, such as \"$74\", then a ? when some
+priced usage had no price.  What a subscription included is left out:
+the tooltip tells it.  Nil when the priced cost rounds to no dollar and
+every price was known."
+  (when (drover-usage-sum-priced sum)
+    (let ((dollars (round (drover-usage-sum-cost sum)))
+          (unpriced (drover-usage-sum-unpriced sum)))
+      (and (or (> dollars 0) unpriced)
+           (concat (format "$%d" dollars) (and unpriced "?"))))))
+
 (defun drover-usage--mode-line-update ()
-  "Show today's cost in the global status again, or hide it when nothing was used.
-The entry is quiet: a cost is to know, not to act on.  Its tooltip
-breaks the day down by harness."
+  "Show what agents billed today in the global status again, or hide it.
+The entry shows the priced cost alone, in whole dollars, and is hidden
+while that is none (see `drover-usage--mode-line-value').  It is quiet:
+a cost is to know, not to act on.  Its tooltip breaks the day down by
+harness, with what a subscription included."
   (when (bound-and-true-p drover-usage-mode-line-mode)
     (let* ((report (drover-usage-report 'today 'harness nil))
-           (total (plist-get report :total)))
-      (if (zerop (drover-usage-sum-tokens total))
+           (total (plist-get report :total))
+           (value (drover-usage--mode-line-value total)))
+      (if (not value)
           (global-status-clear 'drover-usage)
         (global-status-set
-         'drover-usage (drover-usage-format-short total) 'quiet
+         'drover-usage value 'quiet
          (drover-bound-lines
           (string-join (cons (concat "Today: " (drover-usage-format-sum total))
                              (mapcar (pcase-lambda (`(,_value ,label ,sum ,_items))
@@ -429,9 +444,10 @@ breaks the day down by harness."
 
 ;;;###autoload
 (define-minor-mode drover-usage-mode-line-mode
-  "Show in the global status what agents cost today; a click shows the report.
+  "Show in the global status what agents billed today; a click shows the report.
 The entry `drover-usage' of the global status (see `global-status-mode')
-shows `drover-usage-mode-line-icon' and today's cost."
+shows `drover-usage-mode-line-icon' and today's priced cost in whole
+dollars.  What a subscription included shows in its tooltip alone."
   :global t
   :group 'drover-usage
   (if drover-usage-mode-line-mode

@@ -556,25 +556,54 @@ they are, it is priced anew, and views told."
 
 ;;;; The mode line
 
+(ert-deftest drover-usage-test-mode-line-value ()
+  "The global status shows the priced cost in whole dollars, never what a subscription included."
+  (should (equal (drover-usage--mode-line-value (drover-usage-sum-make :priced t :cost 73.72)) "$74"))
+  (should (equal (drover-usage--mode-line-value (drover-usage-sum-make :priced t :cost 0.6)) "$1"))
+  (should (equal (drover-usage--mode-line-value
+                  (drover-usage-sum-make :priced t :cost 22.98 :included t :value 54.22))
+                 "$23"))
+  ;; Less than half a dollar billed: nothing to show.
+  (should-not (drover-usage--mode-line-value (drover-usage-sum-make :priced t :cost 0.4)))
+  ;; A subscription alone billed nothing.
+  (should-not (drover-usage--mode-line-value (drover-usage-sum-make :included t :value 54.22)))
+  (should-not (drover-usage--mode-line-value (drover-usage-sum-make)))
+  ;; Usage without a price: the amount is a floor, even below a dollar.
+  (should (equal (drover-usage--mode-line-value (drover-usage-sum-make :priced t :cost 12.3 :unpriced t))
+                 "$12?"))
+  (should (equal (drover-usage--mode-line-value (drover-usage-sum-make :priced t :cost 0.1 :unpriced t))
+                 "$0?")))
+
 (ert-deftest drover-usage-test-mode-line ()
-  "Today's cost shows as a quiet entry of the global status, its tooltip by harness.
-Nothing used today shows no entry; turned off, the mode removes it."
+  "What agents billed today shows as a quiet entry of the global status, its tooltip by harness.
+Less than half a dollar billed today shows no entry, nor usage a
+subscription included; turned off, the mode removes it."
   (drover-usage-test-with
     (unwind-protect
-        (progn
+        (let ((now (float-time)))
           (drover-usage-mode-line-mode 1)
           (should (memq #'drover-usage--mode-line-follow drover-usage-changed-hook))
           (should-not (global-status-entry 'drover-usage))
-          (drover-usage-test-claude (float-time))
-          (drover-usage-scan)
+          ;; Under a cent of priced usage: no entry.
+          (let ((file (drover-usage-test-claude now)))
+            (drover-usage-scan)
+            (drover-usage--mode-line-update)
+            (should-not (global-status-entry 'drover-usage))
+            ;; Included by a subscription, a dollar more bills nothing.
+            (let ((drover-usage-billing '((claude-code nil included))))
+              (drover-fixture-claude-append
+               file (drover-usage-test-reply drover-usage-test-a (expand-file-name "work/alpha/" home)
+                                             (- now 5) "msg_8" '(:input 0 :output 40000)))
+              (drover-usage-scan)
+              (drover-usage--mode-line-update)
+              (should-not (global-status-entry 'drover-usage))))
+          ;; Priced, that dollar shows, without its cents.
           (drover-usage--mode-line-update)
-          (let ((entry (global-status-entry 'drover-usage))
-                (total (plist-get (drover-usage-report 'today 'harness nil) :total)))
+          (let ((entry (global-status-entry 'drover-usage)))
             (should (equal (plist-get entry :icon) drover-usage-mode-line-icon))
-            (should (equal (plist-get entry :value)
-                           (substring-no-properties (drover-usage-format-short total))))
+            (should (equal (plist-get entry :value) "$1"))
             (should (eq (plist-get entry :state) 'quiet))
-            (should (string-match-p "\\`Today: .*\nClaude Code: " (plist-get entry :help))))
+            (should (string-match-p "\\`Today: \\$1\\.01 .*\nClaude Code: " (plist-get entry :help))))
           (drover-usage-mode-line-mode -1)
           (should-not (global-status-entry 'drover-usage))
           (should-not (memq #'drover-usage--mode-line-follow drover-usage-changed-hook)))
