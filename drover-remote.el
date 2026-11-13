@@ -5902,7 +5902,11 @@ rather than asked again."
                       drover-remote--catalogs))
            (dolist (callback (reverse waiting))
              (drover-with-reporting "remote catalogs"
-               (funcall callback data error)))))
+               (funcall callback data error)))
+           ;; A target picker open shows what the host offers now.
+           (when (and data (fboundp 'drover-prompt-hosts-told))
+             (drover-with-reporting "remote catalogs"
+               (drover-prompt-hosts-told)))))
        (+ (float-time) drover-remote-catalog-timeout drover-remote-request-timeout)
        t))))
 
