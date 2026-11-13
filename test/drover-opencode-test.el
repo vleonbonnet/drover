@@ -2620,7 +2620,8 @@ quotes the buffer's text."
          (gpt5 (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-5.5"))
          (sol (drover-opencode-fixtures-catalog-model defaults "openai" "gpt-6.1-sol-fast"))
          (pickle (drover-opencode-fixtures-catalog-model defaults "opencode" "big-pickle"))
-         (opencode-last-model nil))
+         (opencode-last-model nil)
+         (opencode-project-picks nil))
     (should (equal (drover-opencode--resolve defaults nil nil nil)
                    (list :agent "build" :model pickle :variant nil)))
     (setq opencode-last-model '((id . "gpt-5.5") (providerID . "openai") (variant . "low")))
@@ -2647,7 +2648,8 @@ catalog nothing proves it unavailable."
   (let* ((defaults (drover-opencode-fixtures-defaults "build"))
          (pickle (drover-opencode-fixtures-catalog-model defaults "opencode" "big-pickle"))
          (gone '((id . "claude-opus-5-5") (providerID . "ai-gateway-anthropic") (variant . "high")))
-         (opencode-last-model gone))
+         (opencode-last-model gone)
+         (opencode-project-picks nil))
     (should (equal (drover-opencode--resolve defaults nil nil nil)
                    (list :agent "build" :model pickle :variant nil)))
     (should (equal opencode-last-model gone))
@@ -2685,6 +2687,44 @@ changes it."
         (answer)
         (should (equal opencode-last-model '((id . "claude-sonnet-5-5") (providerID . "anthropic"))))
         (should (eq (plist-get (drover-opencode--resolve defaults nil nil nil) :model) sonnet))))))
+
+(ert-deftest drover-opencode-test-project-provider ()
+  "A new session runs the model chosen last, on the provider chosen last in its project.
+Copilot spells Claude Opus 5.5 claude-opus-5.5, Anthropic claude-opus-5-5:
+drover tells opencode.el they are one model, as its prompt groups them."
+  (skip-unless (fboundp 'opencode-last-pick))
+  (let* ((root (file-name-as-directory (make-temp-file "drover-projects-" t)))
+         (drover (file-name-as-directory (expand-file-name "drover" root)))
+         (aegis (file-name-as-directory (expand-file-name "aegis" root)))
+         (opencode-last-model nil)
+         (opencode-project-picks nil)
+         (in-drover (append (list :directory drover) (drover-opencode-fixtures-defaults "build")))
+         (in-aegis (append (list :directory aegis) (drover-opencode-fixtures-defaults "build")))
+         (copilot (drover-opencode-fixtures-catalog-model in-drover "github-copilot" "claude-opus-5.5"))
+         (anthropic (drover-opencode-fixtures-catalog-model in-aegis "anthropic" "claude-opus-5-5")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'opencode-catalog)
+                   (lambda (kind &optional _directory)
+                     (and (eq kind 'model) drover-opencode-fixtures-models))))
+          (make-directory drover t)
+          (make-directory aegis t)
+          (should (eq opencode-model-identity-function #'drover-opencode--model-identity))
+          (opencode-record-pick '((id . "claude-opus-5.5") (providerID . "github-copilot")) drover)
+          (opencode-record-pick '((id . "claude-opus-5-5") (providerID . "anthropic") (variant . "high")) aegis)
+          (should (equal (drover-opencode--resolve in-aegis nil nil nil)
+                         (list :agent "build" :model anthropic :variant 'high)))
+          (should (equal (drover-opencode--resolve in-drover nil nil nil)
+                         (list :agent "build" :model copilot :variant 'high)))
+          ;; An effort Copilot does not offer gives its default.
+          (opencode-record-pick '((id . "claude-opus-5-5") (providerID . "anthropic") (variant . "max")) aegis)
+          (should (equal (drover-opencode--resolve in-drover nil nil nil)
+                         (list :agent "build" :model copilot
+                               :variant (drover-model-default-variant copilot))))
+          ;; Without defaults yet, the prompt's directory names the project.
+          (let ((default-directory drover))
+            (should (equal (drover-model-provider-id (plist-get (drover-opencode--resolve nil nil nil nil) :model))
+                           "github-copilot"))))
+      (delete-directory root t))))
 
 (defmacro drover-opencode-test-with-service (&rest body)
   "Run BODY with every OpenCode catalog fetch and request recorded, never sent.
@@ -2962,6 +3002,7 @@ newest first."
   `(drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
      (let ((buffer (generate-new-buffer " *opencode session*"))
            (opencode-last-model nil)
+           (opencode-project-picks nil)
            posts pending warnings)
        (unwind-protect
            (cl-flet ((answer ()
@@ -3410,6 +3451,7 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
   `(drover-opencode-test-with nil
      (let ((new-buffer (generate-new-buffer " *new opencode session*"))
            (opencode-last-model nil)
+           (opencode-project-picks nil)
            created warnings results)
        (unwind-protect
            (cl-letf (((symbol-function 'opencode-catalog-fetch)

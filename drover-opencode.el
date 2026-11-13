@@ -314,10 +314,20 @@ The agent catalog is waited for, as `drover-opencode--catalog-wait' does."
 
 ;;;;; Defaults
 
-(defun drover-opencode--last-pick (&optional catalog)
+(defun drover-opencode--model-identity (model)
+  "Return the model MODEL stands for, whichever provider serves it.
+MODEL is an OpenCode model reference or catalog entry.  The identity is
+`drover-selection-id''s, which the prompt groups offerings by, so that
+Copilot's claude-opus-5.5 and a gateway's claude-opus-5-5 are one model.
+`opencode-model-identity-function' while the engine is registered."
+  (drover-selection-id (drover-model-create :provider-id (alist-get 'providerID model)
+                                            :id (alist-get 'id model))))
+
+(defun drover-opencode--last-pick (&optional catalog directory)
   "Return (MODEL . VARIANT), the model and variant picked last in opencode.el.
-New opencode.el sessions start from `opencode-last-model', the model
-chosen last for a session, by a switch or a session created on it; a
+New opencode.el sessions in DIRECTORY start from `opencode-last-pick':
+the model chosen last for a session, by a switch or a session created
+on it, served by the provider chosen last in DIRECTORY's project; a
 prompt sent chooses none.  It is read live, so that a pick made since
 the defaults were fetched counts.  MODEL is resolved against CATALOG as
 `drover-opencode--ref-model' does.  VARIANT is a symbol, nil for the
@@ -325,7 +335,9 @@ model's default; it is dropped only when CATALOG proves MODEL lacks it.
 Nil when no model was picked, or when CATALOG, not empty, lacks MODEL,
 as while its provider is down: opencode.el then leaves the model to
 the service too (see `opencode-new-session-model')."
-  (when-let* ((ref opencode-last-model)
+  (when-let* ((ref (if (fboundp 'opencode-last-pick)
+                       (drover-opencode--call-local #'opencode-last-pick directory)
+                     opencode-last-model))
               (model (drover-opencode--ref-model ref catalog))
               ((or (null catalog) (memq model catalog))))
     (let ((variant (drover-opencode--ref-variant ref)))
@@ -335,17 +347,18 @@ the service too (see `opencode-new-session-model')."
                      (assq variant (drover-model-variants model)))
                  variant)))))
 
-(defun drover-opencode--defaults-from (agents models providers default-model)
-  "Return the defaults data the catalogs of one directory give.
+(defun drover-opencode--defaults-from (agents models providers default-model &optional directory)
+  "Return the defaults data the catalogs of DIRECTORY give.
 AGENTS, MODELS and PROVIDERS are its agent, model and provider
 catalogs, and DEFAULT-MODEL the model info a session without a model
-runs, or nil.  The plist holds :agent, the agent a session without one
-runs, which the service lists first among those a session can run;
-:agents, an alist mapping each agent pinning a model to (MODEL
+runs, or nil.  The plist holds :directory; :agent, the agent a session
+without one runs, which the service lists first among those a session
+can run; :agents, an alist mapping each agent pinning a model to (MODEL
 . VARIANT); :default-model; and :catalog, the models as `drover-model'
 records, against which the last pick is resolved."
   (let ((catalog (drover-opencode--catalog-models models providers)))
-    (list :agent (alist-get 'id (seq-find #'opencode-agent-selectable-p agents))
+    (list :directory directory
+          :agent (alist-get 'id (seq-find #'opencode-agent-selectable-p agents))
           :agents (delq nil
                         (mapcar (lambda (agent)
                                   (when-let* ((ref (alist-get 'model agent))
@@ -374,7 +387,7 @@ CALLBACK is then never called.  The engine's :defaults."
                       ;; Called from a process filter: report rather than signal.
                       (condition-case err
                           (funcall callback (drover-opencode--defaults-from
-                                             agents models providers default-model))
+                                             agents models providers default-model directory))
                         (error (drover-warn "Could not read the OpenCode defaults of %s: %s"
                                             (abbreviate-file-name directory)
                                             (drover-error-message err)))))))
@@ -398,8 +411,9 @@ when not made.  This is what a new opencode.el session does with them:
 the agent chosen, else the default one; the model chosen, else the one
 the agent pins, else the last pick (`drover-opencode--last-pick'), the
 model chosen last for a session, in drover's prompt or in opencode.el,
-whatever sessions prompts went to since, else the service's default
-model.  A last pick the catalog lacks, its provider down, is skipped.
+whatever sessions prompts went to since, served by the provider chosen
+last in the project of the defaults' directory, else the service's
+default model.  A last pick the catalog lacks, its provider down, is skipped.
 The variant chosen wins; else a model
 chosen runs its own default variant, since the variant an agent pins
 belongs to the agent's model; else a pinned model runs its pinned
@@ -409,7 +423,8 @@ variant, the last pick its own; else the model's default.  The engine's
          (pin (cdr (assoc agent (plist-get defaults :agents))))
          (pin-model (car pin))
          (last-pick (and (not model) (not pin-model)
-                         (drover-opencode--last-pick (plist-get defaults :catalog))))
+                         (drover-opencode--last-pick (plist-get defaults :catalog)
+                                                     (plist-get defaults :directory))))
          (effective (or model pin-model (car last-pick) (plist-get defaults :default-model)))
          (variant (or variant
                       (and (not model) pin-model (cdr pin))
@@ -472,7 +487,10 @@ notes.  The engine's :changes."
      (eq scope 'session))))
 
 (defun drover-opencode--register-engine ()
-  "Register the `opencode' engine and its catalog as a model source."
+  "Register the `opencode' engine and its catalog as a model source.
+opencode.el then tells one model served by two providers as the prompt
+does (`drover-opencode--model-identity')."
+  (setq opencode-model-identity-function #'drover-opencode--model-identity)
   (apply #'drover-register-engine 'opencode
          (drover-opencode--localize
           (list :label "OpenCode"
@@ -492,6 +510,8 @@ notes.  The engine's :changes."
   "Undo `drover-opencode--register-engine'.
 Other front ends may run the engine too, such as agent-shell, whose
 model sources then stay, with the engine's label and build agent alone."
+  (when (eq opencode-model-identity-function #'drover-opencode--model-identity)
+    (setq opencode-model-identity-function #'opencode-model-identity))
   (drover-unregister-model-source 'opencode #'drover-opencode--catalog-source)
   (if (drover-engine-model-sources 'opencode)
       (drover-register-engine 'opencode :label "OpenCode" :build-agent "build")

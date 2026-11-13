@@ -5410,7 +5410,11 @@ read local files alone (:volatile).  It tells its agents, its models
 and what a session started without a choice runs."
   (let* ((ready (or (consp answer) (drover-engine-property engine :volatile)))
          (resolved (drover-with-reporting "remote catalogs"
-                     (drover-engine-resolve engine (car-safe answer) nil nil nil)))
+                     ;; Before the defaults come, the directory still names its project.
+                     (let ((default-directory (if (and (stringp directory) (file-directory-p directory))
+                                                  (file-name-as-directory directory)
+                                                default-directory)))
+                       (drover-engine-resolve engine (car-safe answer) nil nil nil))))
          (agents (when-let* ((function (and ready (drover-engine-property engine :agents))))
                    (drover-with-reporting "remote catalogs" (funcall function directory))))
          (models (drover-with-reporting "remote catalogs"
