@@ -1648,7 +1648,10 @@ starts it through its own backend, with the options chosen in BUFFER
 and CONTENT's text, waited for: CONTENT then leaves the prompt and the
 session opens here, an OpenCode session in a full buffer through its
 host, a terminal or a shell mirrored, unless `drover-prompt-display-new'
-is nil.  When it does not start, a `user-error' says why and the prompt
+is nil.  A model, provider or effort chosen is resolved against what
+the host offers in that directory, waited for
+`drover-prompt-host-timeout' seconds at most when not told yet.  When it
+does not start, a `user-error' says why and the prompt
 stays.  Attachments, files of this host, go as their labels in the text."
   (let* ((host (plist-get target :host))
          (label (or (plist-get target :host-label) (drover-prompt--host-label host)))
@@ -1663,6 +1666,12 @@ stays.  Attachments, files of this host, go as their labels in the text."
       (setq drover-prompt-host host
             drover-prompt-host-directory directory)
       (force-mode-line-update))
+    ;; A model, provider or effort chosen is resolved against what the
+    ;; host offers in that directory, which it may not have told yet.
+    (when (and (seq-some (lambda (key) (plist-get (drover-prompt-explicit-options buffer) key))
+                         '(:model :provider :variant))
+               (not (drover-prompt--host-engines host directory drover-prompt-host-timeout)))
+      (user-error "%s did not tell its models in %s; the prompt stays" label directory))
     (let* ((resolved (drover-prompt--resolve target nil (drover-prompt-explicit-options buffer) buffer))
            (_ (when-let* ((why (plist-get resolved :failure))) (user-error "%s" why)))
            (options (append (plist-get resolved :options)

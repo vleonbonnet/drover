@@ -1736,6 +1736,52 @@ of a frame stays."
           (should-error (drover-prompt-submit) :type 'user-error)))
       (should (equal (with-current-buffer (drover-prompt-buffer) (buffer-string)) "Again")))))
 
+(ert-deftest drover-prompt-test-other-host-models-awaited ()
+  "A model chosen for another host's new session waits for that host's models there; never told, the prompt stays."
+  (drover-prompt-test-with
+    (let* ((deep (drover-test-model "deep" :provider-id "acme" :name "Deep"))
+           (target (list :host "core" :host-label "Core" :backend 'fake :engine 'fake :label "Fake session"))
+           (tells t)
+           (told nil)
+           (waited nil)
+           (started nil)
+           (drover-prompt-host-timeout 3)
+           (drover-prompt-remote-functions
+            (list :targets (lambda (&optional _wait) (list target))
+                  :hosts (lambda () '(("core" . "Core")))
+                  :label (lambda (_host) "Core")
+                  ;; Told once waited for, as an answer still coming, then kept.
+                  :catalog (lambda (_host _local directory &optional wait)
+                             (when wait
+                               (push wait waited)
+                               (setq told tells))
+                             (and directory told
+                                  (list :engines (list (list 'fake :models (list deep)
+                                                             :default (list :agent "build" :model deep))))))
+                  :default-directory (lambda (&rest _) "/work/")
+                  :start (lambda (_host _target directory _text options _later)
+                           (setq started (list directory (drover-model-id (plist-get options :model))))
+                           (list :key '(fake . "n1") :title "Started"))
+                  :open (lambda (&rest _) nil))))
+      (cl-letf (((symbol-function 'drover-prompt-read-target) (lambda (&rest _) target)))
+        (with-current-buffer (drover-prompt-buffer t)
+          (insert "Go")
+          (setq drover-prompt-host "core"
+                drover-prompt-host-directory "/work/"
+                ;; The logical choice, which the host resolves to its own model.
+                drover-prompt-picked-model (drover-model-create :id "acme/deep" :name "Deep")
+                drover-prompt-model-selection t)
+          (setq tells nil)
+          (should (string-match-p "Core did not tell its models in /work/"
+                                  (cadr (should-error (drover-prompt-submit) :type 'user-error))))
+          (should (equal (buffer-string) "Go"))
+          (should-not started)
+          (setq tells t
+                waited nil)
+          (drover-prompt-submit))
+        (should (equal waited '(3)))
+        (should (equal started '("/work/" "deep")))))))
+
 (ert-deftest drover-prompt-test-target-annotation ()
   "Candidates show their status, backend and engine, what they would run, directory and summary."
   (drover-prompt-test-with

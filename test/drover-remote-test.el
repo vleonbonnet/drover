@@ -4117,13 +4117,14 @@ too, are listed here once it is connected."
                 (drover-remote-catalog "agent" nil fail 10)
                 (should (equal (plist-get (drover-prompt-effective-options) :agent) "build"))
                 (should (equal (drover-model-id (plist-get (drover-prompt-effective-options) :model)) "fast-1"))
-                ;; Its agents and models offered, that host's.
+                ;; Its agents and models offered, that host's: the choice is
+                ;; the logical model, which the host resolves to its own.
                 (cl-letf (((symbol-function 'completing-read)
                            (lambda (_prompt collection &rest _)
                              (seq-find (lambda (candidate) (string-match-p "Deep 2" candidate))
                                        (all-completions "" collection)))))
                   (drover-prompt-choose-model))
-                (should (equal (drover-model-id drover-prompt-picked-model) "deep-2"))
+                (should (equal (drover-model-id drover-prompt-picked-model) "fakeco/deep-2"))
                 (setq drover-prompt-host-directory work))
               ;; Started: the prompt taken, the session opened.
               (save-window-excursion
@@ -4131,7 +4132,8 @@ too, are listed here once it is connected."
                   (drover-prompt-submit))
                 (should-not (buffer-live-p buffer))
                 (should (equal (drover-remote-test-calls "prompt") '(("prompt" "new1" "Hello from the prompt"))))
-                (should (string-match-p "deep-2" (nth 2 (car (last (drover-remote-test-calls "create"))))))
+                ;; Started there on the native model, as that host names it.
+                (should (string-match-p "\\`fake [^ ]+ deep-2 " (nth 2 (car (last (drover-remote-test-calls "create"))))))
                 (let ((mirror (window-buffer (selected-window))))
                   (should (equal (buffer-local-value 'drover-remote--mirror-kind mirror) "terminal"))
                   (kill-buffer mirror)))))
