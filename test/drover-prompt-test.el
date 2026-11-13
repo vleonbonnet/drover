@@ -1939,9 +1939,10 @@ and `picker-metadata' the completion metadata."
                        '(" [archived: shown]" nil)))
         ;; Fetched once: kept, and fresh enough when shown again.
         (should (= fetched 1))
-        ;; Gone with its minibuffer, nothing follows the sessions changing.
-        (should-not drover-prompt--archived-pickers)
-        (should-not (memq #'drover-prompt--archived-changed drover-changed-hook)))
+        ;; Gone with its minibuffer, nothing follows the sessions or models changing.
+        (should-not drover-prompt--pickers)
+        (should-not (memq #'drover-prompt--archived-changed drover-changed-hook))
+        (should-not (memq #'drover-prompt--pickers-changed drover-models-changed-hook)))
       ;; A new picker hides them.
       (setq rounds nil)
       (drover-prompt-test-picking
@@ -1979,6 +1980,90 @@ and `picker-metadata' the completion metadata."
         (should (equal (drover-session-id (drover-prompt-read-target "To: " :archived t)) "gone"))
         (should (equal (nreverse rounds) '(("session a") ("session a" "Session gone"))))
         (should (equal (nreverse status) '(" [archived: fetching…]" " [archived: shown]")))))))
+
+(ert-deftest drover-prompt-test-picker-follows-hosts ()
+  "A host not told yet is offered, saying so; once it tells, it is resolved, and new sessions told later join."
+  (drover-prompt-test-with
+    (let* ((deep (drover-test-model "deep" :provider-id "acme" :name "Deep"))
+           (fast (drover-test-model "fast" :provider-id "acme" :name "Fast"))
+           (core (list :host "core" :host-label "Core" :backend 'fake :engine 'fake :label "Fake session"))
+           (edge (list :host "edge" :host-label "Edge" :backend 'fake :engine 'fake :label "Fake session"))
+           (hosts (list core))
+           ;; The models each host told, by host; a host absent has told none.
+           (offers nil)
+           (rounds nil)
+           (refreshed 0)
+           (drover-completion-refresh-functions (list (lambda () (cl-incf refreshed))))
+           (drover-prompt-remote-functions
+            (list :targets (lambda (&optional _wait) hosts)
+                  :hosts (lambda () '(("core" . "Core") ("edge" . "Edge")))
+                  :label (lambda (host) (capitalize host))
+                  :catalog (lambda (host _local directory &optional _wait)
+                             (when-let* ((directory)
+                                         (models (alist-get host offers nil nil #'equal)))
+                               (list :engines (list (list 'fake :models models
+                                                          :default (list :model (car models)))))))
+                  :default-directory (lambda (&rest _) "/work/"))))
+      (with-current-buffer (drover-prompt-buffer t)
+        (setq drover-prompt-picked-model (drover-model-create :id "acme/deep" :name "Deep")
+              drover-prompt-model-selection t))
+      (drover-prompt-test-picking
+          (lambda ()
+            (push (offered) rounds)
+            (let ((annotate (completion-metadata-get (picker-metadata) 'annotation-function)))
+              (should (string-search "what it runs not told yet"
+                                     (funcall annotate "[New Fake session on Core…]"))))
+            ;; Told it offers no such model: hidden.
+            (setf (alist-get "core" offers nil nil #'equal) (list fast))
+            (drover-prompt-hosts-told)
+            (should (= refreshed 1))
+            (push (offered) rounds)
+            ;; Told it does, and another host told its new sessions.
+            (setf (alist-get "core" offers nil nil #'equal) (list fast deep))
+            (setq hosts (list core edge))
+            (drover-prompt-hosts-told)
+            (push (offered) rounds)
+            (let ((annotate (completion-metadata-get (picker-metadata) 'annotation-function)))
+              (should (string-search "Deep" (funcall annotate "[New Fake session on Core…]"))))
+            "[New Fake session on Core…]")
+        (should (equal (drover-prompt-read-target "To: ") core)))
+      (should (equal (nreverse rounds)
+                     '(("[New Fake session on Core…]")
+                       nil
+                       ("[New Fake session on Core…]" "[New Fake session on Edge…]"))))
+      ;; Without a picker open, a host telling does nothing.
+      (should-not drover-prompt--pickers)
+      (drover-prompt-hosts-told)
+      (should (= refreshed 2)))))
+
+(ert-deftest drover-prompt-test-picker-follows-models ()
+  "Models arriving while the picker is open show the new sessions they let honor the choices."
+  (drover-prompt-test-with
+    (drover-test-with-state
+     (let* ((drover-prompt-new-targets '((:backend fake :engine fake :feature drover :label "Fake")))
+            (deep (drover-test-model "deep" :provider-id "acme" :name "Deep"))
+            (models nil)
+            (source (lambda (_directory) models))
+            (refreshed 0)
+            (drover-completion-refresh-functions (list (lambda () (cl-incf refreshed))))
+            (rounds nil))
+       (drover-test-register-engine 'fake)
+       (drover-register-model-source 'fake source)
+       (with-current-buffer (drover-prompt-buffer t)
+         (setq drover-prompt-picked-model (drover-model-create :id "acme/deep" :name "Deep")
+               drover-prompt-model-selection t))
+       (drover-prompt-test-picking
+           (lambda ()
+             (push (offered) rounds)
+             (setq models (list deep))
+             (drover-models-changed 'fake)
+             ;; The completion interface shows them.
+             (should (= refreshed 1))
+             (push (offered) rounds)
+             "[New Fake…]")
+         (drover-prompt-read-target "To: "))
+       (should (equal (nreverse rounds) '(nil ("[New Fake…]"))))
+       (should-not (memq #'drover-prompt--pickers-changed drover-models-changed-hook))))))
 
 (ert-deftest drover-prompt-test-send-to-archived ()
   "Sent to an archived session without a buffer, the prompt goes through its backend, which opens it."

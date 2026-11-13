@@ -282,7 +282,11 @@ are named by drover.")
             a `user-error'.
  :open      Of a host's NAME, that answer and HIDDEN, opening the
             session, unless HIDDEN is non-nil, and returning its
-            record once listed, else nil.")
+            record once listed, else nil.
+
+The functions answer at once, asking a host what it has not told yet;
+once a host answered, `drover-remote-mode' calls
+`drover-prompt-hosts-told', so that a target picker open shows it.")
 
 (defvar-local drover-prompt--defaults nil
   "Defaults data of the engines, as an alist (ENGINE . DEFAULTS).
@@ -307,12 +311,15 @@ other comes in order.")
 (defvar-local drover-prompt--minibuffer-overlay nil
   "Overlay showing, in the target picker's minibuffer, what the prompt runs.")
 
-(defvar-local drover-prompt--archived-update nil
+(defvar-local drover-prompt--picker-update nil
   "Function making the target picker's candidates anew, in its minibuffer, or nil.
-Set where the picker offers the archived sessions (see
-`drover-prompt-toggle-archived'): called with SHOWN, it takes the
-archived sessions in among the candidates when SHOWN is non-nil, else
-leaves them out.")
+Called with no argument in the minibuffer, it reads the new sessions of
+other hosts again, as hosts tell them, and takes the archived sessions
+in while `drover-prompt--archived-shown' says so.")
+
+(defvar-local drover-prompt--archived-offered nil
+  "Non-nil where the target picker offers the archived sessions.
+See `drover-prompt-toggle-archived'.")
 
 (defvar-local drover-prompt--archived-shown nil
   "Non-nil while the target picker's minibuffer offers the archived sessions.")
@@ -320,10 +327,11 @@ leaves them out.")
 (defvar-local drover-prompt--archived-serial nil
   "The `drover-fetched-serial' at which the picker last took archived sessions in.")
 
-(defvar drover-prompt--archived-pickers nil
-  "The minibuffers of the target pickers offering the archived sessions.
-While one does, `drover-prompt--archived-changed' is on
-`drover-changed-hook'.")
+(defvar drover-prompt--pickers nil
+  "The minibuffers of the target pickers open.
+While one is, `drover-prompt--archived-changed' is on
+`drover-changed-hook', and `drover-prompt--pickers-changed' on
+`drover-models-changed-hook'.")
 
 (defconst drover-prompt-archived-fetch-age 60
   "Seconds the archived sessions fetched serve the target picker as they are.
@@ -2352,22 +2360,36 @@ an archived session.  Each NAME carries its target as its
         (add-session session buffer t)))
     (nreverse candidates)))
 
+(defun drover-prompt--host-untold-p (target buffer)
+  "Return non-nil when TARGET waits for its host to tell what it offers.
+TARGET is a candidate of the target picker.  It does for a new session
+of another host that has not told yet where a session of the prompt
+BUFFER starts there, or what its engines offer in that directory: both
+are asked meanwhile, and the host's answer shows the picker's candidates
+again (see `drover-prompt-hosts-told')."
+  (when-let* (((not (drover-session-p target)))
+              (host (plist-get target :host)))
+    (let ((directory (and (buffer-live-p buffer) (drover-prompt--host-default-directory host buffer))))
+      (not (and directory (drover-prompt--host-engines host directory))))))
+
 (defun drover-prompt--annotator (candidates)
   "Return the annotation function of the target picker's CANDIDATES.
 An annotation shows the status of a session, after it the archive's
 glyph for an archived one, its backend and engine, the model and
 variant it would run with the prompt's choices, computed anew each time
-so that choices made in the picker show, its directory and why it has
-its status."
+so that choices made in the picker show, or that its host has not told
+yet what it offers, its directory and why it has its status."
   (let ((width (apply #'max 0 (mapcar (lambda (candidate) (string-width (car candidate)))
                                       candidates))))
     (lambda (name)
       (when-let* ((entry (cdr (assoc name candidates))))
         (let* ((target (plist-get entry :target))
                (session (and (drover-session-p target) target))
-               (options (drover-prompt--options-label
-                         (drover-prompt--entry-options target (plist-get entry :current)
-                                                       (drover-prompt-buffer))))
+               (prompt (drover-prompt-buffer))
+               (options (if (drover-prompt--host-untold-p target prompt)
+                            (propertize "what it runs not told yet" 'face 'drover-dim)
+                          (drover-prompt--options-label
+                           (drover-prompt--entry-options target (plist-get entry :current) prompt))))
                (directory (plist-get entry :directory))
                (summary (and session (drover-session-summary session))))
           (concat (make-string (max 0 (- width (string-width name))) ?\s)
@@ -2385,29 +2407,43 @@ its status."
                        (concat "  " (propertize summary 'face 'completions-annotations)))))))))
 
 (defun drover-prompt--target-predicate (candidates)
-  "Return the predicate keeping CANDIDATES that can honor the prompt's choices."
+  "Return the predicate keeping CANDIDATES that can honor the prompt's choices.
+A new session of another host that has not told yet what it offers is
+kept, as it may (see `drover-prompt--host-untold-p'): sending to it
+waits for what it offers."
   (lambda (candidate)
     (let* ((name (if (consp candidate) (car candidate) candidate))
            (entry (cdr (assoc name candidates)))
            (target (plist-get entry :target))
            (prompt (drover-prompt-buffer))
            (options (drover-prompt-explicit-options prompt)))
-      (not (plist-get (drover-prompt--resolve target (plist-get entry :current) options prompt) :failure)))))
+      (or (drover-prompt--host-untold-p target prompt)
+          (not (plist-get (drover-prompt--resolve target (plist-get entry :current) options prompt)
+                          :failure))))))
 
-(defun drover-prompt--setup-picker (keymaps &optional update)
+(defun drover-prompt--setup-picker (keymaps &optional update archived)
   "Set up the minibuffer of the target picker, with KEYMAPS over its own keys.
 KEYMAPS is a keymap, a list of them, or nil for none.  UPDATE, a
-function of SHOWN making the candidates anew with the archived sessions
-or without them, offers them (see `drover-prompt-toggle-archived'); the
-picker opens without them.  The minibuffer shows what the prompt runs."
+function of no argument making the candidates anew (see
+`drover-prompt--picker-update'), is called as what the picker offers
+changes: the models engines offer (see `drover-models-changed'), what
+other hosts tell (see `drover-prompt-hosts-told'), the archived sessions
+fetched.  ARCHIVED non-nil offers the archived sessions (see
+`drover-prompt-toggle-archived'); the picker opens without them.  The
+minibuffer shows what the prompt runs."
   (when keymaps
     (use-local-map (make-composed-keymap keymaps (current-local-map))))
   (setq-local drover-prompt--picker t)
-  (setq-local drover-prompt--archived-update update)
+  (setq-local drover-prompt--picker-update update)
+  (setq-local drover-prompt--archived-offered (and archived t))
   (setq-local drover-prompt--archived-shown nil)
   (add-hook 'minibuffer-exit-hook #'drover-prompt--remove-minibuffer-overlay nil t)
   (when update
-    (add-hook 'minibuffer-exit-hook #'drover-prompt--archived-exit nil t))
+    (add-hook 'minibuffer-exit-hook #'drover-prompt--picker-exit nil t)
+    (unless (memq (current-buffer) drover-prompt--pickers)
+      (push (current-buffer) drover-prompt--pickers))
+    (add-hook 'drover-changed-hook #'drover-prompt--archived-changed)
+    (add-hook 'drover-models-changed-hook #'drover-prompt--pickers-changed))
   (drover-prompt--update-minibuffer (drover-prompt-buffer)))
 
 (defvar drover--archive-checking)
@@ -2451,65 +2487,85 @@ seconds ago, and keeps them fetched from then on, as a search does (see
 and those arriving join the candidates.  A session chosen is restored
 from the archive as it is sent the prompt."
   (interactive)
-  (unless drover-prompt--archived-update
+  (unless drover-prompt--archived-offered
     (user-error "This picker offers no archived session"))
   (let ((minibuffer (current-buffer)))
     (setq drover-prompt--archived-shown (not drover-prompt--archived-shown))
-    (if (not drover-prompt--archived-shown)
-        (drover-prompt--archived-forget minibuffer)
-      (unless (memq minibuffer drover-prompt--archived-pickers)
-        (push minibuffer drover-prompt--archived-pickers))
-      (add-hook 'drover-changed-hook #'drover-prompt--archived-changed)
+    (when drover-prompt--archived-shown
       (drover-keep-fetched '(archived) drover-prompt-archived-fetch-age)
       (when (drover-fetch-pending-p drover-prompt-archived-fetch-timeout)
         ;; A backend may never answer: the minibuffer stops saying it fetches.
         (run-with-timer drover-prompt-archived-fetch-timeout nil
-                        #'drover-prompt--archived-refresh minibuffer)))
-    (drover-prompt--archived-refresh minibuffer)))
+                        #'drover-prompt--picker-refresh minibuffer)))
+    (drover-prompt--picker-refresh minibuffer)))
 
-(defun drover-prompt--archived-refresh (minibuffer)
+(defun drover-prompt--picker-refresh (minibuffer)
   "Make the candidates of the target picker in MINIBUFFER anew, and show them.
 They take the archived sessions in, or leave them out, as the picker
 shows them or not; its minibuffer says how they are fetched.  Nothing
 happens once MINIBUFFER is gone, or no longer a picker."
   (drover-with-reporting "prompt picker"
     (when (and (buffer-live-p minibuffer)
-               (buffer-local-value 'drover-prompt--archived-update minibuffer))
+               (buffer-local-value 'drover-prompt--picker-update minibuffer))
       (with-current-buffer minibuffer
         (setq drover-prompt--archived-serial (drover-fetched-serial))
-        (funcall drover-prompt--archived-update drover-prompt--archived-shown)
+        (funcall drover-prompt--picker-update)
         (drover-prompt--update-minibuffer (drover-prompt-buffer))
         (drover--refresh-completion minibuffer)))))
 
+(defun drover-prompt--pickers-changed (&rest _)
+  "Make the candidates of the target pickers open anew, and show them.
+On `drover-models-changed-hook' while a picker is open, and as other
+hosts tell what they offer (see `drover-prompt-hosts-told')."
+  (drover-with-reporting "prompt picker"
+    (dolist (minibuffer (copy-sequence drover-prompt--pickers))
+      (if (buffer-live-p minibuffer)
+          (drover-prompt--picker-refresh minibuffer)
+        (drover-prompt--picker-forget minibuffer)))))
+
+(defun drover-prompt-hosts-told ()
+  "Show the target pickers' candidates anew, a host having told what it offers.
+`drover-remote-mode' calls it once another host answered what it
+starts, where and with which models: a new session of that host the
+picker kept while it had not told (see `drover-prompt--host-untold-p')
+is resolved then, and hidden when it cannot honor the prompt's choices,
+and the new sessions of a host that told them since the picker opened
+join it."
+  (when drover-prompt--pickers
+    (drover-prompt--pickers-changed)))
+
 (defun drover-prompt--archived-changed ()
   "Take the archived sessions fetched anew in the pickers showing them.
-On `drover-changed-hook' while a picker shows them: a picker whose
-archived sessions were taken in before those fetched changed (see
-`drover-fetched-serial') makes its candidates anew."
+On `drover-changed-hook' while a picker is open: a picker showing them,
+whose archived sessions were taken in before those fetched changed (see
+`drover-fetched-serial'), makes its candidates anew."
   (drover-with-reporting "prompt picker"
-    (dolist (minibuffer (copy-sequence drover-prompt--archived-pickers))
-      (if (not (and (buffer-live-p minibuffer)
-                    (buffer-local-value 'drover-prompt--archived-shown minibuffer)))
-          (drover-prompt--archived-forget minibuffer)
-        (unless (eql (buffer-local-value 'drover-prompt--archived-serial minibuffer)
-                     (drover-fetched-serial))
-          (drover-prompt--archived-refresh minibuffer))))))
+    (dolist (minibuffer (copy-sequence drover-prompt--pickers))
+      (cond ((not (buffer-live-p minibuffer)) (drover-prompt--picker-forget minibuffer))
+            ((and (buffer-local-value 'drover-prompt--archived-shown minibuffer)
+                  (not (eql (buffer-local-value 'drover-prompt--archived-serial minibuffer)
+                            (drover-fetched-serial))))
+             (drover-prompt--picker-refresh minibuffer))))))
 
-(defun drover-prompt--archived-forget (minibuffer)
-  "Stop following the archived sessions fetched for the picker in MINIBUFFER.
+(defun drover-prompt--picker-forget (minibuffer)
+  "Stop following what the target picker in MINIBUFFER offers.
 The last picker forgotten takes `drover-prompt--archived-changed' off
-`drover-changed-hook'."
-  (setq drover-prompt--archived-pickers (delq minibuffer drover-prompt--archived-pickers))
-  (unless drover-prompt--archived-pickers
-    (remove-hook 'drover-changed-hook #'drover-prompt--archived-changed)))
+`drover-changed-hook', and `drover-prompt--pickers-changed' off
+`drover-models-changed-hook'."
+  (setq drover-prompt--pickers (delq minibuffer drover-prompt--pickers))
+  (unless drover-prompt--pickers
+    (remove-hook 'drover-changed-hook #'drover-prompt--archived-changed)
+    (remove-hook 'drover-models-changed-hook #'drover-prompt--pickers-changed)))
 
-(defun drover-prompt--archived-exit ()
-  "Forget the archived sessions of the target picker of the current minibuffer.
-On `minibuffer-exit-hook', locally: the next picker hides them."
+(defun drover-prompt--picker-exit ()
+  "Forget the target picker of the current minibuffer.
+On `minibuffer-exit-hook', locally: the next picker hides the archived
+sessions."
   (drover-with-reporting "prompt picker"
     (setq drover-prompt--archived-shown nil
-          drover-prompt--archived-update nil)
-    (drover-prompt--archived-forget (current-buffer))))
+          drover-prompt--archived-offered nil
+          drover-prompt--picker-update nil)
+    (drover-prompt--picker-forget (current-buffer))))
 
 (defun drover-prompt--preselected (sessions)
   "Return the session of SESSIONS the prompt was set to go to, or nil.
@@ -2594,17 +2650,21 @@ See `drover-prompt-read-target'."
                                       (cycle-sort-function . identity)
                                       (annotation-function . ,(lambda (name) (funcall annotate name))))
                          (complete-with-action action names string predicate))))
-              (update (and (plist-get keys :archived)
-                           (lambda (shown)
-                             (setq candidates (drover-prompt--candidates
-                                               sessions targets
-                                               (and shown (drover-prompt--archived-targets sessions)))
-                                   names (mapcar #'car candidates)
-                                   annotate (drover-prompt--annotator candidates)
-                                   predicate (drover-prompt--target-predicate candidates)))))
+              (update (lambda ()
+                        ;; Other hosts' as told now, those told since joining.
+                        (setq targets (unless existing-only
+                                        (append (drover-prompt--new-targets) (drover-prompt--remote :targets)))
+                              candidates (drover-prompt--candidates
+                                          sessions targets
+                                          (and drover-prompt--archived-shown
+                                               (drover-prompt--archived-targets sessions)))
+                              names (mapcar #'car candidates)
+                              annotate (drover-prompt--annotator candidates)
+                              predicate (drover-prompt--target-predicate candidates))))
+              (archived (plist-get keys :archived))
               (keymaps (delq nil (list (and (or targets (plist-get keys :options-menu)) drover-prompt-target-map)
-                                       (and update drover-prompt-archived-map))))
-              (choice (minibuffer-with-setup-hook (lambda () (drover-prompt--setup-picker keymaps update))
+                                       (and archived drover-prompt-archived-map))))
+              (choice (minibuffer-with-setup-hook (lambda () (drover-prompt--setup-picker keymaps update archived))
                         (completing-read prompt table
                                          (lambda (candidate) (funcall predicate candidate))
                                          t))))

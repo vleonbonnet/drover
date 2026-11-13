@@ -4105,6 +4105,19 @@ too, are listed here once it is connected."
                                   (drover-prompt--candidates nil (drover-prompt--remote :targets)))))
         (kill-buffer buffer)))))
 
+(ert-deftest drover-remote-test-catalog-told-to-prompt ()
+  "Another host answering what it starts in a directory has the prompt's pickers show it anew."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (let ((work (drover-remote-test-mkdir "work"))
+          (told 0))
+      (cl-letf (((symbol-function 'drover-prompt-hosts-told) (lambda () (cl-incf told))))
+        ;; Asked without waiting, as the target picker asks.
+        (should-not (drover-remote-catalog "agent" nil work))
+        (drover-remote-test-wait (lambda () (> told 0)))
+        (should (= told 1))
+        (should (drover-remote-catalog "agent" nil work))))))
+
 (ert-deftest drover-remote-test-new-from-prompt ()
   "The prompt offers another host's new sessions: one that does not start keeps the prompt, one that does takes it and opens."
   (skip-unless (drover-remote-test--ptys-p))
