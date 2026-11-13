@@ -353,8 +353,8 @@ AGENTS, MODELS and PROVIDERS are its agent, model and provider
 catalogs, and DEFAULT-MODEL the model info a session without a model
 runs, or nil.  The plist holds :directory; :agent, the agent a session
 without one runs, which the service lists first among those a session
-can run; :agents, an alist mapping each agent pinning a model to (MODEL
-. VARIANT); :default-model; and :catalog, the models as `drover-model'
+can run; :agents, an alist mapping each agent pinning a model to
+\(MODEL . VARIANT); :default-model; and :catalog, the models as `drover-model'
 records, against which the last pick is resolved."
   (let ((catalog (drover-opencode--catalog-models models providers)))
     (list :directory directory
