@@ -30,12 +30,13 @@
 ;;   tree the filter keeps.  mouse-1 on it runs `drover-next', mouse-3
 ;;   chooses a session.
 ;; - `drover-next' lines up the sessions to attend to among those lists
-;;   show: those whose prompt cache expires soonest first, whether they
-;;   need you or not, then those that need you, then the idle ones with
-;;   a buffer, then the other idle ones, each as the list shows them
-;;   (`drover-visit-order'), a subagent waiting for you through the top
-;;   of its tree, and visits the first, or the second when the first
-;;   shows already; each press after it visits the next of that queue,
+;;   show: open buffers first, then closed sessions.  Each tier visits
+;;   live caches soonest to expire first, then sessions needing you,
+;;   then idle sessions, each in list order (`drover-visit-order').
+;;   A subagent waiting for you ranks by the buffer and cache at the top
+;;   of its tree, which is visited for it.  The first press visits the
+;;   first session, or the second when the first shows already.
+;;   Each press after it visits the next of that queue,
 ;;   the last followed by the first, until a command other than
 ;;   `drover-next' runs, as `undo' chains.
 ;; - `drover-select' chooses any session with completion, whatever the
@@ -119,9 +120,8 @@ caches as they stand at NOW.  It names `drover-attention--help-sessions'
 sessions at most, and how many more: Emacs measures a tooltip whole to
 show it.  While `drover-filter' is set, a line names it: the count, the
 sessions listed and those `drover-next' visits are those it keeps.
-Clicking it runs `drover-next', whose round may begin with an idle
-session whose cache expires sooner, and goes on to idle sessions: the
-last line says so."
+Clicking it runs `drover-next', which also visits idle sessions.
+The last lines explain the buffer tiers and their order."
   (let ((count (length sessions))
         (filter (drover-filter-description nil now)))
     (concat "Sessions that need you, in the order of `drover-next':"
@@ -132,7 +132,8 @@ last line says so."
             (and (> count drover-attention--help-sessions)
                  (format "\n  … and %d more" (- count drover-attention--help-sessions)))
             (and filter (concat "\n\nFilter: " filter))
-            "\n\nmouse-1: visit live caches first, then these, then idle sessions"
+            "\n\nmouse-1: visit open buffers first, then closed sessions"
+            "\n  Each tier: live caches, then needing you, then idle"
             "\nmouse-3: choose a session")))
 
 (defvar drover-attention--sessions nil
@@ -387,8 +388,9 @@ sessions lists show under `drover-filter' and `drover-show-subagents',
 and every subagent waiting for you in a tree the filter keeps, which
 blocks its parent (see `drover-surfaced-sessions').  Its tooltip lists
 them in the order `drover-next' visits them among themselves; clicking
-it runs `drover-next', which visits live caches first, then them, then
-idle sessions, and clicking it with the right button chooses a session
+it runs `drover-next', which visits open buffers first, then closed
+sessions.  Each tier visits live caches, then sessions needing you,
+then idle sessions.  Clicking with the right button chooses a session
 \(`drover-select').  Enabling the mode starts the backends."
   :global t
   :group 'drover
@@ -576,17 +578,18 @@ of the round is gone."
   "Visit the next session to attend to, in the selected window.
 A first press lines up the sessions and visits the first, or the
 second when the first shows already, whatever its status, the first
-then coming last.  First come those whose prompt cache lives, whether
-they need you or not, the one to expire soonest first, so that a turn
-sent to it reuses it; then those that need you; then the idle ones
-with a buffer; then the other idle ones, which their backends may
-resume to show them.  Each comes in the order the list and the sidebar
-show them, as `drover-group-by' and `drover-sort-by' arrange them (see
-`drover-visit-order').  Sessions in the middle of a turn are left out,
+then coming last.  Sessions with a live buffer come before those
+without one, whether that buffer is shown or not.  Both tiers use the
+same order: live prompt caches, soonest to expire first, then sessions
+needing you, then idle sessions.  Equal expiries put sessions needing
+you before idle ones.  Otherwise, each follows list order, as
+`drover-group-by' and `drover-sort-by' arrange them (see
+`drover-visit-order').  Backends may resume closed sessions to show
+them.  Sessions in the middle of a turn are left out,
 and so are those `drover-filter' hides, and subagents, but one waiting
 for you in a tree the filter keeps, which is visited through the top
-of its tree, where you answer it and whose cache it ranks by, the tree
-coming once.
+of its tree, where you answer it.  Its buffer and cache decide the
+subagent's rank, and the tree comes once.
 
 Each press after it visits the next session of that queue, the first
 again after the last, for as long as nothing but this command runs
@@ -594,8 +597,9 @@ between presses, as `undo' chains: from a key of its own, the mode line
 or `drover-dispatch', whose menu is part of the press (see
 `drover-attention--chains-p').  Any other command ends the round, and
 the next press lines sessions up anew.  What happens to sessions
-meanwhile leaves the queue as it is: statuses changing, caches renewed
-or expiring, sessions coming to need you.  A session gone is passed
+meanwhile leaves the queue as it is: buffers opening or closing,
+statuses changing, caches renewed or expiring, sessions coming to
+need you.  A session gone is passed
 over; one that fails to open is told on one line, and the next press
 goes on past it.  With every session in the middle of a turn or
 hidden by the filter, there is none to visit, and the echo area says

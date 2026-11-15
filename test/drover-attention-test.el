@@ -261,7 +261,8 @@ So it does as the count is made anew, and as it follows a change."
                                "  ⚑ Session w  drover:main  permit: bash: make\n"
                                "  ✓ Session d\n"
                                "\n"
-                               "mouse-1: visit live caches first, then these, then idle sessions\n"
+                               "mouse-1: visit open buffers first, then closed sessions\n"
+                               "  Each tier: live caches, then needing you, then idle\n"
                                "mouse-3: choose a session")))
         (should (eq (drover-attention-test-face-at help "cache 4m") 'drover-dim))))))
 
@@ -876,10 +877,10 @@ The commands typing the name are M-x's, judged as it ends."
                                     (drover-attention-test-keys (string-join (make-list 3 keys) " "))))
                        '("2/3" "3/3" "1/3")))
         (should (equal (list keys (drover-attention-test-opened)) (list keys '("a" "b" "c" "a"))))
-        ;; The next round takes them as they stand.
-        (drover-attention-test-keys (concat "<f17> " keys " " keys))
+        ;; The next round puts d, still closed, after the open buffers.
+        (drover-attention-test-keys (concat "<f17> " (string-join (make-list 4 keys) " ")))
         (should (equal (list keys (drover-attention-test-opened))
-                       (list keys '("a" "b" "c" "a" "d" "c"))))
+                       (list keys '("a" "b" "c" "a" "c" "b" "a" "d"))))
         (kill-buffer (drover-attention-test-shown-buffer "d"))))))
 
 (ert-deftest drover-attention-test-keys-session-shown-late ()
@@ -1058,45 +1059,93 @@ session working does not count, the session being left out."
       (should (equal (drover-attention-test-opened) '("i" "c2" "c1" "w" "root" "x" "d1" "i"))))))
 
 (ert-deftest drover-attention-test-next-tiers ()
-  "A round visits live caches, then sessions needing the user, then open idle ones, then the others.
-Each in the order lists draw them; a session whose cache lives comes by
-its cache, whatever else it is; a session working never comes, its
-cache live or not."
+  "Open buffers come first, each tier using cache, attention, then list order.
+An expired cache counts as none.  Working sessions are left out.
+Buffer changes affect the next round, not the queue already started."
   (let ((now (float-time))
-        (buffers (list (generate-new-buffer " *open1*") (generate-new-buffer " *open2*"))))
+        (sessions nil)
+        (buffers nil)
+        (expected nil))
     (unwind-protect
-        (drover-attention-test-with
-            (list (drover-test-session "closed1" :status 'idle :updated 90.0)
-                  (drover-test-session "open1" :status 'idle :updated 80.0)
-                  (drover-test-session "done1" :status 'done :since 70.0 :updated 70.0)
-                  (drover-test-session "closed2" :status 'idle :updated 60.0)
-                  (drover-test-session "open2" :status 'idle :updated 50.0)
-                  (drover-test-session "done2" :status 'done :since 40.0 :updated 40.0)
-                  (drover-test-session "cached-idle" :status 'idle :updated 30.0
-                                       :cache-expires (+ now 100) :cache-ttl 300)
-                  (drover-test-session "cached-done" :status 'done :since 20.0 :updated 20.0
-                                       :cache-expires (+ now 200) :cache-ttl 300)
-                  (drover-test-session "busy" :status 'working :updated 10.0
-                                       :cache-expires (+ now 50) :cache-ttl 300))
-          (let ((drover-group-by nil)
-                (drover-sort-by 'updated)
-                (drover-sort-descending t)
-                (open `(("open1" . ,(car buffers)) ("open2" . ,(cadr buffers)))))
+        (progn
+          (dolist (tier '("open" "closed"))
+            (pcase-dolist (`(,name ,status ,updated ,remaining)
+                           '(("idle1" idle 90 nil) ("expired" idle 80 -10)
+                             ("idle2" idle 70 nil) ("cached-done" done 60 200)
+                             ("cached-idle" idle 50 100) ("done" done 30 nil)
+                             ("waiting" waiting 20 nil) ("tied-done" done 10 100)
+                             ("busy" working 100 50)))
+              (let ((id (concat tier "-" name)))
+                (push (drover-test-session id :status status :updated (float updated)
+                                           :cache-expires (and remaining (+ now remaining))
+                                           :cache-ttl 300)
+                      sessions)
+                (when (equal tier "open")
+                  (push (cons id (generate-new-buffer (concat " *" id "*"))) buffers))))
+            (setq expected
+                  (append expected
+                          (mapcar (lambda (name) (concat tier "-" name))
+                                  '("tied-done" "cached-idle" "cached-done" "done" "waiting"
+                                    "idle1" "expired" "idle2")))))
+          (drover-attention-test-with sessions
+            (let ((drover-group-by nil)
+                  (drover-sort-by 'updated)
+                  (drover-sort-descending t)
+                  (open buffers))
+              (apply #'drover-register-backend
+                     'fake
+                     :buffer (lambda (session) (alist-get (drover-session-id session) open nil nil #'equal))
+                     (alist-get 'fake drover--backends))
+              (should (equal (drover-attention-test-ids
+                              (drover-visit-order (drover-attention--round-sessions) now))
+                             expected))
+              (should (equal (drover-attention-test-ids
+                              (drover-attention-order (drover-attention-sessions) now))
+                             '("open-tied-done" "open-cached-done" "open-done" "open-waiting"
+                               "closed-tied-done" "closed-cached-done" "closed-done" "closed-waiting")))
+              (drover-next)
+              (setq open (list (cons "closed-idle1" (cdar buffers))))
+              (dotimes (_ (length expected))
+                (drover-attention-test-press))
+              (should (equal (drover-attention-test-opened) (append expected (list (car expected)))))
+              (drover-attention-test-other-command)
+              (drover-next)
+              (should (equal (car drover-attention--queue) '(fake . "closed-idle1")))
+              (should (equal (car (last (drover-attention-test-opened))) "closed-idle1")))))
+      (mapc (lambda (entry) (kill-buffer (cdr entry))) buffers))))
+
+(ert-deftest drover-attention-test-order-subagent-by-root-buffer ()
+  "A waiting subagent ranks by its root's buffer, never its own.
+The root is visited once even when two subagents wait."
+  (let ((now (float-time))
+        (buffer (generate-new-buffer " *root-buffer-test*")))
+    (unwind-protect
+        (pcase-dolist (`(,open ,remaining ,expected)
+                       '((("root") nil ("root" "other"))
+                         (("root" "other") 100 ("root" "other"))
+                         (("other") 100 ("other" "root"))))
+          (drover-attention-test-with
+              (list (drover-test-session "root" :status 'working
+                                         :cache-expires (and remaining (+ now remaining)) :cache-ttl 300)
+                    (drover-test-session "asking" :parent "root" :status 'waiting)
+                    (drover-test-session "asking-too" :parent "root" :status 'waiting)
+                    (drover-test-session "other" :status 'done
+                                         :cache-expires (+ now 200) :cache-ttl 300))
             (apply #'drover-register-backend
                    'fake
-                   :buffer (lambda (session) (cdr (assoc (drover-session-id session) open)))
+                   :buffer (lambda (session)
+                             (and (or (drover-session-parent session)
+                                      (member (drover-session-id session) open))
+                                  buffer))
                    (alist-get 'fake drover--backends))
             (should (equal (drover-attention-test-ids
-                            (drover-visit-order (drover-attention--round-sessions) now))
-                           '("cached-idle" "cached-done" "done1" "done2" "open1" "open2"
-                             "closed1" "closed2")))
+                            (drover-attention--targets
+                             (drover-attention-order (drover-attention-sessions) now)))
+                           expected))
             (drover-next)
-            (dotimes (_ 7)
-              (drover-attention-test-press))
-            (should (equal (drover-attention-test-opened)
-                           '("cached-idle" "cached-done" "done1" "done2" "open1" "open2"
-                             "closed1" "closed2")))))
-      (mapc #'kill-buffer buffers))))
+            (drover-attention-test-press)
+            (should (equal (drover-attention-test-opened) expected))))
+      (kill-buffer buffer))))
 
 (ert-deftest drover-attention-test-next-tree-once ()
   "An idle session whose subagent waits for the user comes once, as that subagent does."

@@ -34,12 +34,12 @@
 ;; not a front end is loaded (see `drover-transcript-engines'), and
 ;; resumed as they open, in claude-code-ide or agent-shell, loaded then
 ;; if need be.  `drover-attention-mode' shows how many sessions need you in
-;; the mode line and `drover-next' visits sessions in turn: those whose
-;; prompt cache expires soonest, then those needing you, then the idle
-;; ones; `drover-list'
-;; lists every session in a window, and `drover-list-side' in a sidebar
-;; beside your work, both at once if you like, each laid out for its
-;; window's width.
+;; the mode line.  `drover-next' visits open buffers first, then closed
+;; sessions.  Each tier visits live caches soonest to expire first,
+;; then sessions needing you, then idle sessions.
+;; `drover-list' lists every session in a window, and `drover-list-side'
+;; in a sidebar beside your work, both at once if you like, each laid
+;; out for its window's width.
 ;; `drover-prompt-dwim' writes a prompt with context from where you work,
 ;; for any session or a new one of any engine (see `drover-model'), and
 ;; `drover-schedule-prompt' sends it later (see `drover-schedule').  Org

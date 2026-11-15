@@ -2870,15 +2870,16 @@ lives then."
 
 (defun drover-visit-order (sessions &optional now)
   "Return SESSIONS in the order `drover-next' visits them.
-First come those with a live prompt cache at NOW, the current time by
-default, whether they need the user or not, the cache to expire
-soonest first: a turn sent while it lives reuses it.  A cache is live
-as lists show it (see `drover-attention-cache'): a subagent's never
-is, but a subagent waiting for the user has the cache of the top of
-its tree, which answering it resumes.  Then come the sessions needing
-the user, then those with a buffer, which show at once, then the
-others, which their backends may have to resume to show.  Each of
-these comes in the order lists draw them (see `drover-view-groups'),
+First come sessions with a live buffer, shown or not, then those
+without one (see `drover-session-buffer').  Both tiers use the same
+order: live prompt caches at NOW, soonest to expire first, then
+sessions needing the user, then idle sessions.  NOW defaults to the
+current time.  A subagent waiting for the user takes the buffer and
+cache of the top of its tree (see `drover-attention-target').  A cache
+is live as lists show it (see `drover-attention-cache').  Within each
+tier, equal cache expiries put sessions needing the user before idle
+ones, then follow list order, as sessions without a cache do.
+List order is the order lists draw them (see `drover-view-groups'),
 as `drover-group-by' groups them and `drover-sort-by' sorts them, each
 subagent under its parent: a subagent lists hide comes in the place
 they would draw it, its tree ranking as it would rank with it shown,
@@ -2887,8 +2888,7 @@ order lists would draw it without the filter (see
 `drover--view-positions').  But a subagent waiting for the user that the
 filter leaves out of a tree it keeps comes in the place of the top of
 that tree, which is visited for it (see `drover-attention-target'): its
-tree ranks as lists draw it, without it.  Caches expiring alike come
-as the sessions without a cache do."
+tree ranks as lists draw it, without it."
   (when sessions
     (let ((now (or now (float-time)))
           (keys (make-hash-table :test #'equal))
@@ -2908,11 +2908,9 @@ as the sessions without a cache do."
                                            (stand-in (and target own (>= own filtered)
                                                           (gethash target positions))))
                                       (list session
+                                            (if (drover-session-buffer (drover-attention-target session)) 0 1)
                                             expires
-                                            ;; A buffer is asked for only of the sessions it ranks.
-                                            (cond ((drover-session-attention-p session) 0)
-                                                  ((or expires (drover-session-buffer session)) 1)
-                                                  (t 2))
+                                            (if (drover-session-attention-p session) 0 1)
                                             (cond ((and stand-in (< stand-in filtered)) stand-in)
                                                   (own)
                                                   (t most-positive-fixnum)))))
@@ -2921,9 +2919,10 @@ as the sessions without a cache do."
         ;; SESSIONS.
         (mapcar #'car
                 (sort keyed
-                      (pcase-lambda (`(,_ ,expires-a ,tier-a ,position-a)
-                                     `(,_ ,expires-b ,tier-b ,position-b))
-                        (cond ((and expires-a expires-b (/= expires-a expires-b))
+                      (pcase-lambda (`(,_ ,buffer-a ,expires-a ,tier-a ,position-a)
+                                     `(,_ ,buffer-b ,expires-b ,tier-b ,position-b))
+                        (cond ((/= buffer-a buffer-b) (< buffer-a buffer-b))
+                              ((and expires-a expires-b (/= expires-a expires-b))
                                (< expires-a expires-b))
                               ((and expires-a (not expires-b)) t)
                               ((and expires-b (not expires-a)) nil)
@@ -2933,11 +2932,11 @@ as the sessions without a cache do."
 (defun drover-attention-order (sessions &optional now)
   "Return SESSIONS, sessions needing the user, in the order to visit them.
 That is their order in `drover-visit-order' at NOW, the current time by
-default: first those with a live prompt cache, the cache to expire
-soonest first, then the others in the order lists draw them.  The mode
-line's tooltip lists them in it, `drover-select' offers them in it, and
-`drover-next' visits them in it, among the idle sessions its round
-takes too."
+default: sessions with a live buffer first, then those without one.
+Within each tier, live caches come first, soonest to expire first,
+then the others in list order.  Equal expiries follow list order too.
+The mode line's tooltip and `drover-select' use this order.
+`drover-next' visits them in this order among the idle sessions too."
   (drover-visit-order sessions now))
 
 (defun drover-find (backend id)
