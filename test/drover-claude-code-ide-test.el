@@ -979,7 +979,27 @@ late, give none."
           (press ?a)
           (should-not (work nil))
           (press 'return)
-          (should-not (work nil 10)))))))
+          (should-not (work nil 10))
+          ;; Typed in a peer's mirror: noted with that peer, which is told.
+          (cl-flet ((typed (kind value)
+                      (with-current-buffer terminal
+                        (let ((drover-input-peer "reaver"))
+                          (run-hook-with-args 'drover-peer-input-functions kind value)))))
+            (cl-letf (((symbol-function 'drover-note-handed-off)
+                       (lambda (_session how origin &optional _buffer)
+                         (push (list drover-input-peer how origin) noted))))
+              (typed 'string "1")
+              (should (equal (work '(("" :state blocked :kind permission))) '(("reaver" answer front-end))))
+              (typed 'key "RET")
+              (should (equal (work '(("" :state done))) '(("reaver" prompt front-end))))
+              ;; Typed on after RET there: nothing.
+              (typed 'key "RET")
+              (typed 'string "x")
+              (should-not (work '(("" :state done))))
+              ;; Typed here after a peer's RET: this host's own.
+              (typed 'key "RET")
+              (press 'return)
+              (should (equal (work '(("" :state done))) '((nil prompt front-end)))))))))))
 
 (ert-deftest drover-claude-code-ide-test-resumed-conversation ()
   "A terminal resuming a conversation shows it as old as its newest message.

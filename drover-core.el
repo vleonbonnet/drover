@@ -6467,6 +6467,28 @@ Each value is (PENDING . GO): PENDING the holds not released yet, GO
 non-nil once one of them let the handoff go (see
 `drover-hold-handed-off').")
 
+(defvar drover-input-peer nil
+  "The name of the peer whose user typed the input applied now, or nil.
+Drover's remote layer binds it while it applies to a buffer of this
+host the input a peer's mirror of the buffer sends.  A handoff noted
+meanwhile is that peer's user's (see `drover-note-handed-off').  A
+backend noting a handoff later, from what such input did, binds it
+again to the peer it noted with the input.")
+
+(defvar drover-peer-input-functions nil
+  "Functions called with (KIND VALUE) before a peer's input applies here.
+Called in the buffer the input goes to, with `drover-input-peer' bound:
+KIND `string' and VALUE the text typed, or KIND `key' and VALUE a key
+in `key-description' form, such as \"RET\".  A front end telling its
+handoffs from the keys typed, as claude-code-ide's terminals, notes
+them here, keys a peer types running no command of this host's.")
+
+(defvar drover-handed-off-relay-function nil
+  "Function telling a peer of a handoff its user gave here, or nil.
+Called with (PEER SESSION HOW): PEER the name of the peer whose user
+typed (see `drover-input-peer'), SESSION this host's and HOW as
+`drover-handed-off-functions' gets it.  Drover's remote layer sets it.")
+
 (defun drover--tell-handed-off-soon ()
   "Tell of the handoffs noted once the current command ended."
   (unless (timerp drover--handed-off-timer)
@@ -6479,15 +6501,23 @@ the buffer the user acted from, when it may be other than SESSION's.
 The functions run once the current command ended; a session reported
 again before is told of once, as first reported, with BUFFER added.
 Front ends call this for what the user gives a session in its own
-buffers."
-  (when session
+buffers.  While `drover-input-peer' names a peer, the user who gave it
+is that peer's, which is told instead, through
+`drover-handed-off-relay-function': nothing is noted here."
+  (cond
+   ((null session))
+   (drover-input-peer
+    (when drover-handed-off-relay-function
+      (drover-with-reporting "telling a peer of a turn handed back"
+        (funcall drover-handed-off-relay-function drover-input-peer session how))))
+   (t
     (let* ((key (drover-session-key session))
            (entry (assoc key drover--handed-off))
            (buffers (and (buffer-live-p buffer) (list buffer))))
       (if entry
           (setf (nth 2 entry) (seq-uniq (append (nth 2 entry) buffers)))
         (push (list key session buffers how origin) drover--handed-off))
-      (drover--tell-handed-off-soon))))
+      (drover--tell-handed-off-soon)))))
 
 (defun drover-hold-handed-off (session)
   "Hold the handoff of SESSION until the function returned is called.

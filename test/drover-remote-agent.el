@@ -124,6 +124,9 @@
 (defvar drover-remote-agent--terminals (make-hash-table :test #'equal)
   "The buffers of the fake sessions running terminals, by identifier.")
 
+(defvar drover-remote-agent--handed nil
+  "What \"hands-on-ret\" saw, latest first: lists (\"typed\" PEER ID) and (\"here\" ID HOW).")
+
 (defvar drover-remote-agent--hold nil
   "Non-nil while confirmations are held; then the functions confirming, newest first.")
 
@@ -621,6 +624,25 @@ noted, and their cancellations."
          (funcall reply (list :ok t))))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("hands-on-ret"
+       ;; Terminal ID tells, as a claude-code-ide terminal does, that RET
+       ;; typed in a peer's mirror hands its session its turn; the peer
+       ;; typing and the handoffs told here are kept, for "handed".
+       (let ((id (plist-get args :id)))
+         (setq drover-remote-agent--handed nil)
+         (add-hook 'drover-handed-off-functions
+                   (lambda (session _buffers how _origin)
+                     (push (list "here" (drover-session-id session) (symbol-name how)) drover-remote-agent--handed)))
+         (with-current-buffer (gethash id drover-remote-agent--terminals)
+           (add-hook 'drover-peer-input-functions
+                     (lambda (kind value)
+                       (when (and (eq kind 'key) (equal value "RET"))
+                         (push (list "typed" (or drover-input-peer :false) id) drover-remote-agent--handed)
+                         (drover-note-handed-off (gethash id drover-remote-agent--sessions) 'prompt 'front-end)))
+                     nil t))
+         (funcall reply (list :ok t))))
+      ("handed"
+       (funcall reply (list :handed (vconcat (mapcar #'vconcat (reverse drover-remote-agent--handed))))))
       ("summaries"
        ;; Summaries written as turns end, by a stand-in model.
        (require 'drover-summary)

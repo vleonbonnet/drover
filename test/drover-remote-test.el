@@ -2745,14 +2745,15 @@ behind, it hands it nothing, said so; refused, nothing either."
         (should-not told)))))
 
 (ert-deftest drover-remote-test-mirror-hands-off ()
-  "RET typed in a mirror hands its session its turn once the turn starts there.
-A prompt from a turn ended, an answer from a request; a key typed after
-RET, or a turn running already, hands nothing."
+  "A turn the user hands a session typing in its mirror is told here, not on its host.
+The host knows the input came from this host's mirror, and sends the
+handoff here, where the mirror goes as the session's buffer."
   (skip-unless (drover-remote-test--ptys-p))
   (drover-remote-test-with nil
     (drover-remote-test-start-full dir)
     (drover-remote-test-command "sessions" :n 2)
     (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-command "hands-on-ret" :id "s1")
     (drover-remote-test-synced 2)
     (save-window-excursion
       (delete-other-windows)
@@ -2761,41 +2762,18 @@ RET, or a turn running already, hands nothing."
              (drover--handed-off nil)
              (drover--handed-off-timer nil)
              (drover-handed-off-functions
-              (list (lambda (session buffers how _origin)
-                      (push (list (cdr (drover-session-id session)) how (and (memq mirror buffers) t)) told)))))
+              (list (lambda (session buffers how origin)
+                      (push (list (cdr (drover-session-id session)) how origin (and (memq mirror buffers) t))
+                            told)))))
         (drover-remote-test-live mirror)
-        (cl-flet ((status (name)
-                    (drover-remote-test-command "change" :ids ["s1"] :status name :now t)
-                    (drover-remote-test-wait (lambda () (eq (drover-session-status (drover-remote-test-session "s1"))
-                                                            (intern name)))))
-                  (key (keys)
-                    (with-current-buffer mirror
-                      (cl-letf (((symbol-function 'this-command-keys-vector) (lambda () keys)))
-                        (drover-remote--mirror-note-key)))))
-          (status "idle")
-          ;; Typed on after RET: no turn of RET's.
-          (key [return])
-          (key [?a])
-          (status "working")
-          (drover-remote-test-settle 0.3)
-          (should-not told)
-          (status "idle")
-          (key [return])
-          (status "working")
-          (drover-remote-test-wait (lambda () told))
-          (should (equal told '(("s1" prompt t))))
-          (setq told nil)
-          (status "waiting")
-          (key [?1])
-          (status "working")
-          (drover-remote-test-wait (lambda () told))
-          (should (equal told '(("s1" answer t))))
-          ;; Working already: RET queues nothing seen as a turn.
-          (setq told nil)
-          (key [return])
-          (status "retrying")
-          (drover-remote-test-settle 0.3)
-          (should-not told))
+        (spyglass-mirror-send-string "go on" mirror)
+        (spyglass-mirror-send-key "RET" mirror)
+        (drover-remote-test-wait (lambda () told))
+        (should (equal told '(("s1" prompt front-end t))))
+        ;; There, typed by this host, and told of nowhere but here.
+        (drover-remote-test-settle 0.3)
+        (should (equal (plist-get (drover-remote-test-command "handed") :handed)
+                       (vector (vector "typed" drover-host "s1"))))
         (kill-buffer mirror)))))
 
 (ert-deftest drover-remote-test-agent-shell-keys ()

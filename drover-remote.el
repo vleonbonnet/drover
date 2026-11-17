@@ -128,6 +128,7 @@
 (defvar spyglass-share-state-functions)
 (defvar spyglass-mirror-state-functions)
 (defvar spyglass-input-function)
+(defvar spyglass-input-connection)
 (defvar spyglass-key-commands)
 (defvar spyglass-mirror-mode-line-function)
 (declare-function spyglass-default-input "ext:spyglass-owner" (kind value))
@@ -332,7 +333,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits")
+    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -385,7 +386,11 @@ its own lists fetched them, offering it (:ops) only for those that may
 take one (see `drover-archived-takes-prompt-p'); \"waits\": the answer to
 an action `send' tells, by session, whether the session waited on a
 request of the user's as the prompt went (:waits), so that the peer
-leaves its buffers shown (see `drover-hold-handed-off').")
+leaves its buffers shown (see `drover-hold-handed-off'); \"handed\": it
+takes a message `handed', the key of a session of the peer and how the
+turn went (prompt or answer), which the peer sends as its user's input
+in a mirror of the session hands it its turn (see
+`drover-input-peer').")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1809,7 +1814,6 @@ finds those."
      (t (dolist (key keys)
           (drover-backend-changed backend key))))
     (drover-remote--seen-mirrors peer keys)
-    (drover-remote--mirror-handed peer keys)
     (drover-remote--close-archived-mirrors peer keys)
     (drover-remote--oc-archived peer keys)))
 
@@ -3820,9 +3824,47 @@ through the shell's own command interrupting, comint's by default."
 (defun drover-remote--share-input (kind value)
   "Apply a peer's input of KIND and VALUE in the current buffer, shared with it.
 As the buffer's input function, or spyglass's default, applies it, no
-window of this host's taken meanwhile."
-  (drover-quietly
-    (funcall (or spyglass-input-function #'spyglass-default-input) kind value)))
+window of this host's taken meanwhile.  The peer whose user typed it,
+known by the connection it came on (`spyglass-input-connection'), is
+`drover-input-peer' meanwhile, and `drover-peer-input-functions' are told
+of it first: a turn the input hands the session is told to that peer,
+whose mirror is where the user acted, not here."
+  (let ((drover-input-peer (drover-remote--input-peer)))
+    (when drover-input-peer
+      (drover-run-hook-reporting 'drover-peer-input-functions kind value))
+    (drover-quietly
+      (funcall (or spyglass-input-function #'spyglass-default-input) kind value))))
+
+(defun drover-remote--input-peer ()
+  "Return the name of the peer whose input applies to the current buffer, or nil.
+The viewer of its share on the connection the input came on."
+  (when-let* ((connection (bound-and-true-p spyglass-input-connection))
+              (share (spyglass-share-of (current-buffer))))
+    (drover-remote--share-viewer (spyglass-share-id share) connection)))
+
+(defun drover-remote--relay-handed-off (name session how)
+  "Tell the peer NAME that SESSION, this host's, has its turn, given as HOW.
+For `drover-handed-off-relay-function': the peer's user gave it, typing
+in its mirror of SESSION's buffer, so that the peer buries its mirror as
+it buries a buffer of its own.  A peer not telling \"handed\" is told
+nothing."
+  (when-let* ((peer (drover-remote--peer name))
+              ((drover-remote--capable-p peer "handed"))
+              (connection (drover-remote--peer-connection peer)))
+    (drover-remote--event peer 'mirror "handed %s its turn, typed there" (drover-session-display-title session))
+    (drover-remote--send connection (list :t "handed"
+                                          :key (vector (symbol-name (drover-session-backend session))
+                                                       (drover-session-id session))
+                                          :how (symbol-name how)))))
+
+(defun drover-remote--on-handed (peer message)
+  "Note the handoff PEER tells in MESSAGE, given in a mirror of PEER's session.
+The user typed it here, in the mirror, which goes with the session's
+buffers here (see `drover-note-handed-off')."
+  (when-let* ((key (drover-remote--key (plist-get message :key)))
+              (how (pcase (plist-get message :how) ("prompt" 'prompt) ("answer" 'answer)))
+              (session (drover-remote--peer-session peer key)))
+    (drover-note-handed-off session how 'front-end)))
 
 (defun drover-remote--unsent (buffer text)
   "Tell the peers mirroring BUFFER the TEXT it held unsent as it closes.
@@ -6343,6 +6385,7 @@ when of that peer, opened here once started.  For
     (when (featurep 'drover-remote-push)
       (drover-remote-push-foreground peer (eq (plist-get message :on) t))))
    ((equal type "unsent") (drover-remote--on-unsent peer message))
+   ((equal type "handed") (drover-remote--on-handed peer message))
    ((equal type "note")
     (when-let* ((text (drover-remote--line (plist-get message :text) 300)))
       (drover-remote--event peer 'note "%s" text)
@@ -6957,16 +7000,6 @@ Nil in a buffer that mirrors none.")
 (defvar-local drover-remote--seen-sent 0
   "When the session the current mirror shows was last marked seen from here.")
 
-(defvar-local drover-remote--keyed nil
-  "The user's last key in this mirror that may give its session its turn, or nil.
-A list (TIME KEY STATUS): KEY `return' or `digit', STATUS the session's
-then (see `drover-remote--mirror-note-key').")
-
-(defconst drover-remote--handed-wait 10
-  "Seconds after a key in a mirror within which its session's turn is the key's.
-Its owner reads a terminal's status late, a Claude terminal's every few
-seconds, then tells it after its changes settle.")
-
 (defvar-local drover-remote--reopens 0
   "Times the current mirror was opened anew since it was last live.")
 
@@ -7420,63 +7453,11 @@ there on SESSION, through PEER."
       (setq-local drover-session-at-point-function #'drover-remote--shown-session)
       (setq-local drover-remote--mirror-kind kind)
       (setq-local spyglass-mirror-mode-line-function #'drover-remote--mirror-mode-line)
-      (add-hook 'pre-command-hook #'drover-remote--mirror-note-key nil t)
       (add-hook 'kill-buffer-hook #'drover-remote--mirror-killed nil t))
     (puthash (drover-session-id session) mirror (drover-remote--peer-mirrors peer))
     (drover-remote--event peer 'mirror "mirroring the %s of %s%s" kind title
                           (if (eq (plist-get reply :input) t) "" ", read only"))
     mirror))
-
-(defun drover-remote--mirror-note-key ()
-  "Note a key the user presses in the current mirror, for the turn it may give.
-For `pre-command-hook', local to mirrors.  The owner tells no prompt
-submitted nor request answered through a mirror, only its session's
-status: RET pressed alone while the session does not work may submit a
-prompt or answer a request, a digit pressed alone while it waits on the
-user answer one, so those are noted with the status, and the turn
-starting soon after is the one they gave (see
-`drover-remote--mirror-handed').  Any other key the mirror binds forgets
-it, the user typing on there; keys bound elsewhere, as those selecting
-another window, leave it."
-  (drover-with-reporting "remote mirror keys"
-    (let* ((keys (this-command-keys-vector))
-           (key (and (length= keys 1) (aref keys 0)))
-           (status (when-let* ((session (drover-remote--shown-session)))
-                     (drover-session-status session))))
-      (cond ((and (memq key '(return kp-enter ?\r))
-                  (memq status '(idle done failed waiting)))
-             (setq drover-remote--keyed (list (float-time) 'return status)))
-            ((and (characterp key) (<= ?1 key ?9) (eq status 'waiting))
-             (setq drover-remote--keyed (list (float-time) 'digit status)))
-            ((and drover-remote--keyed (drover-remote--mirror-key-p keys))
-             (setq drover-remote--keyed nil))))))
-
-(defun drover-remote--mirror-key-p (keys)
-  "Return non-nil when KEYS run a command of the current buffer's own keymap.
-Directly, or through a remapping, as a mirror forwards printing keys."
-  (when-let* ((map (current-local-map)))
-    (or (commandp (lookup-key map keys))
-        (when-let* ((command (key-binding keys t t))
-                    ((symbolp command)))
-          (command-remapping command nil (list map))))))
-
-(defun drover-remote--mirror-handed (peer keys)
-  "Note the turns the user's keys in the mirrors of PEER's sessions KEYS gave.
-A session whose turn starts within `drover-remote--handed-wait' seconds
-of a key noted in its mirror (see `drover-remote--mirror-note-key') has
-its turn from it: an answer when it waited on the user, else a prompt."
-  (when (> (hash-table-count (drover-remote--peer-mirrors peer)) 0)
-    (dolist (key keys)
-      (when-let* ((buffer (gethash key (drover-remote--peer-mirrors peer)))
-                  ((buffer-live-p buffer))
-                  (keyed (buffer-local-value 'drover-remote--keyed buffer)))
-        (if (> (- (float-time) (car keyed)) drover-remote--handed-wait)
-            (with-current-buffer buffer (setq drover-remote--keyed nil))
-          (when-let* ((session (drover-remote--peer-session peer key))
-                      ((memq (drover-session-status session) '(working retrying))))
-            (with-current-buffer buffer (setq drover-remote--keyed nil))
-            (drover-note-handed-off session (if (eq (nth 2 keyed) 'waiting) 'answer 'prompt)
-                                    'front-end buffer)))))))
 
 (defun drover-remote--mirror-killed ()
   "Forget the mirror of the buffer being killed: its session runs on there.
@@ -8440,6 +8421,7 @@ are then told what changed while it was stopped (see
     (add-hook 'spyglass-error-functions #'drover-remote--spyglass-error)
     (add-hook 'spyglass-share-state-functions #'drover-remote--share-event)
     (add-hook 'drover-unsent-functions #'drover-remote--unsent)
+    (setq drover-handed-off-relay-function #'drover-remote--relay-handed-off)
     (add-hook 'spyglass-mirror-state-functions #'drover-remote--mirror-state)
     (setf (drover-remote--state-network state) (cons (float-time) (drover-remote--network)))
     ;; One, whatever remote layer made it before.
@@ -8524,6 +8506,8 @@ starts again at once: its peers keep this host's sessions meanwhile."
   (cancel-function-timers #'drover-remote--look-out)
   (remove-hook 'spyglass-share-state-functions #'drover-remote--share-event)
   (remove-hook 'drover-unsent-functions #'drover-remote--unsent)
+  (when (eq drover-handed-off-relay-function #'drover-remote--relay-handed-off)
+    (setq drover-handed-off-relay-function nil))
   (remove-hook 'spyglass-mirror-state-functions #'drover-remote--mirror-state)
   (remove-hook 'kill-emacs-hook #'drover-remote--kill-emacs)
   (setq drover-hosts-function nil

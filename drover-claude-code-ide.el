@@ -657,13 +657,21 @@ own."
 
 (defvar-local drover-claude-code-ide--keyed nil
   "The user's last key in this terminal that may give the CLI its turn, or nil.
-A cons (TIME . KEY), KEY `return' or `digit' (see
-`drover-claude-code-ide--note-key').")
+A list (TIME KEY PEER): KEY `return' or `digit', PEER the name of the
+peer whose user typed it in a mirror, else nil (see
+`drover-claude-code-ide--note-key' and
+`drover-claude-code-ide--note-peer-input').")
 
 (defconst drover-claude-code-ide--handed-wait 3
   "Seconds after a key within which work the CLI starts is the turn it gave.
 The status interval is added (see `drover-claude-code-ide-status-interval'):
 a status read from the process records comes that late.")
+
+(defun drover-claude-code-ide--note (key)
+  "Note KEY, `return' or `digit', typed in the current terminal now; nil forgets.
+The peer whose user typed it, if any, is noted with it (see
+`drover-input-peer')."
+  (setq-local drover-claude-code-ide--keyed (and key (list (float-time) key drover-input-peer))))
 
 (defun drover-claude-code-ide--note-key ()
   "Note a key the user presses in the current terminal, for the turn it may give.
@@ -678,30 +686,49 @@ keys of a longer sequence, as drover's prompt's, are not the
 terminal's: drover tells of its own sends."
   (drover-with-reporting "Claude terminal keys"
     (let* ((keys (this-command-keys-vector))
-           (key (and (= (length keys) 1) (aref keys 0))))
+           (key (and (length= keys 1) (aref keys 0))))
       (cond ((memq key '(return kp-enter ?\r))
-             (setq-local drover-claude-code-ide--keyed (cons (float-time) 'return)))
+             (drover-claude-code-ide--note 'return))
             ((and (characterp key) (<= ?1 key ?9))
-             (setq-local drover-claude-code-ide--keyed (cons (float-time) 'digit)))
+             (drover-claude-code-ide--note 'digit))
             ((and drover-claude-code-ide--keyed (current-local-map)
                   (commandp (lookup-key (current-local-map) keys)))
-             (setq-local drover-claude-code-ide--keyed nil))))))
+             (drover-claude-code-ide--note nil))))))
+
+(defun drover-claude-code-ide--note-peer-input (kind value)
+  "Note input of KIND and VALUE a peer's user typed in the current terminal.
+For `drover-peer-input-functions', local to terminals: what a mirror
+sends runs no command here, so `drover-claude-code-ide--note-key' never
+sees it.  RET, or a digit alone, is noted as that function notes it,
+with the peer, which is told of the turn it gives; any other input
+forgets it, the user going on typing there."
+  (drover-with-reporting "Claude terminal keys"
+    (drover-claude-code-ide--note
+     (pcase kind
+       ('key (and (member value '("RET" "<return>" "<kp-enter>")) 'return))
+       ('string (cond ((member value '("\r" "\n")) 'return)
+                      ((and (length= value 1) (<= ?1 (aref value 0) ?9)) 'digit)))))))
 
 (defun drover-claude-code-ide--note-handed-back (before now)
   "Note the turn the user's last key gave the current terminal's session, if any.
 Its state goes from BEFORE to working at NOW.  From a request, RET or a
 digit answered it; otherwise RET submitted a prompt.  The session is
-told of from a timer, out of the status being read."
+told of from a timer, out of the status being read, to the peer whose
+user typed the key when one did (see `drover-input-peer')."
   (when-let* ((keyed drover-claude-code-ide--keyed)
+              ;; As an older drover noted it, (TIME . KEY): gone soon.
+              ((consp (cdr keyed)))
               ((<= (- now (car keyed))
                    (+ drover-claude-code-ide--handed-wait (or drover-claude-code-ide-status-interval 0))))
-              ((or (eq before 'blocked) (eq (cdr keyed) 'return))))
+              ((or (eq before 'blocked) (eq (nth 1 keyed) 'return))))
     (setq-local drover-claude-code-ide--keyed nil)
-    (drover-claude-code-ide--later
-     (current-buffer) 0
-     (lambda ()
-       (when-let* ((session (drover-claude-code-ide--buffer-session)))
-         (drover-note-handed-off session (if (eq before 'blocked) 'answer 'prompt) 'front-end))))))
+    (let ((peer (nth 2 keyed)))
+      (drover-claude-code-ide--later
+       (current-buffer) 0
+       (lambda ()
+         (when-let* ((session (drover-claude-code-ide--buffer-session)))
+           (let ((drover-input-peer peer))
+             (drover-note-handed-off session (if (eq before 'blocked) 'answer 'prompt) 'front-end))))))))
 
 (defun drover-claude-code-ide--note-work (before state now)
   "Note work beginning or ending in the current terminal at NOW.
@@ -1948,6 +1975,7 @@ With several, the most recently used."
     (setq-local drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
     (add-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed nil t)
     (add-hook 'pre-command-hook #'drover-claude-code-ide--note-key nil t)
+    (add-hook 'drover-peer-input-functions #'drover-claude-code-ide--note-peer-input nil t)
     (drover-claude-code-ide--watch-status)
     (drover-backend-changed 'claude-code-ide)))
 
@@ -1956,7 +1984,8 @@ With several, the most recently used."
   (when (eq drover-session-at-point-function #'drover-claude-code-ide--buffer-session)
     (kill-local-variable 'drover-session-at-point-function))
   (remove-hook 'kill-buffer-hook #'drover-claude-code-ide--terminal-killed t)
-  (remove-hook 'pre-command-hook #'drover-claude-code-ide--note-key t))
+  (remove-hook 'pre-command-hook #'drover-claude-code-ide--note-key t)
+  (remove-hook 'drover-peer-input-functions #'drover-claude-code-ide--note-peer-input t))
 
 (defun drover-claude-code-ide--hooks ()
   "Return the hooks the backend follows, as (HOOK . FUNCTION)."

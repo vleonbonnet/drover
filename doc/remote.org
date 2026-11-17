@@ -104,6 +104,7 @@ On the =drover= channel, headers are JSON, as spyglass's are; texts with faces u
 | =jobs=      | owner  | the scheduled prompts, sent on subscription and as the queue changes                                                                              |
 | =svc=       | owner  | how to reach its OpenCode service: the port, the password, the service's identifier and process, to a peer of full access only (see below)        |
 | =bye=       | both   | the channel ends: the peer's configuration dropped this host                                                                                      |
+| =handed=    | owner  | a session's key and how its turn went (=prompt= or =answer=), its user having typed it in the viewer's mirror: the viewer buries the mirror       |
 
 ** Records on the wire
 
@@ -965,7 +966,7 @@ The owner performs =send=.  Its session running its agent in its buffer (=:runs-
 
 The owner reads, before it sends, whether the session waits on a request of the user's, a permission or a question (status =waiting=); the prompt then waits behind the request, in the owner's queue or, for OpenCode, in the service's inbox.  It answers =:waits=, true or false by session, beside =:out= and =:queued= (capability =waits=).  The viewer holds the session's handoff as its =:send= goes (=drover-hold-handed-off=), and lets it go once the owner took the prompt, unless it waits so: its buffers here stay shown, the user still having to answer, and its echo says so (=… on Core waits on a request: the prompt goes once it is settled=).  A refusal or a failure drops the handoff too.  An older owner tells no =:waits=: a prompt it took hands its session the turn, as before.
 
-A mirror tells the viewer nothing of what its keys gave: the viewer notes RET, or a digit while the session waits on the user, and the session's record coming back at work within ten seconds is the turn they gave, an answer when it waited (see [[file:design.org::*Sessions handed their turn][Sessions handed their turn]] in design.org).
+A turn the user hands a session typing in its mirror is the owner's front end's to tell, as for what is typed in its own buffer.  The owner applies the mirror's input knowing the peer that typed it (=drover-input-peer=, from spyglass's =spyglass-input-connection=), and sends that peer, rather than noting it, a message =handed=: the session's key and how, =prompt= or =answer= (capability =handed=).  The peer notes it as given in its own front end, and buries its mirror, never the owner its own buffer (see [[file:design.org::*Sessions handed their turn][Sessions handed their turn]] in design.org).
 
 ** Tests
 

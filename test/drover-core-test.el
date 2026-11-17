@@ -321,6 +321,29 @@ parent's buffer whose auto-bury is off stays as its subagent's goes."
                                   (kill-buffer other)
                                   (delete-directory drover-state-directory t))))))
 
+(ert-deftest drover-test-handed-off-relayed ()
+  "A handoff given by a peer's user, typing here in its mirror, is told to that peer alone."
+  (drover-test-with-backend (list (drover-test-session "a"))
+                            (let* ((told nil)
+                                   (relayed nil)
+                                   (drover--handed-off nil)
+                                   (drover--handed-off-timer nil)
+                                   (drover-handed-off-functions
+                                    (list (lambda (session _buffers how _origin) (push (list (drover-session-id session) how) told))))
+                                   (drover-handed-off-relay-function
+                                    (lambda (peer session how) (push (list peer (drover-session-id session) how) relayed))))
+                              (let ((drover-input-peer "reaver"))
+                                (drover-note-handed-off (drover-find 'fake "a") 'answer 'front-end))
+                              (accept-process-output nil 0.05)
+                              (should-not told)
+                              (should (equal relayed '(("reaver" "a" answer))))
+                              ;; Without a remote layer, nothing either.
+                              (let ((drover-input-peer "reaver")
+                                    (drover-handed-off-relay-function nil))
+                                (drover-note-handed-off (drover-find 'fake "a") 'prompt 'front-end))
+                              (accept-process-output nil 0.05)
+                              (should-not told))))
+
 (ert-deftest drover-test-handed-off-held ()
   "A handoff a backend holds waits for it: told once let go, dropped otherwise."
   (drover-test-with-backend (list (drover-test-session "a") (drover-test-session "b"))
