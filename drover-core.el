@@ -6461,6 +6461,17 @@ SESSION gave it, BUFFERS those the reports named.")
 (defvar drover--handed-off-timer nil
   "Timer telling `drover-handed-off-functions' of `drover--handed-off', or nil.")
 
+(defvar drover--handed-off-holds (make-hash-table :test #'equal)
+  "Handoffs waiting for a backend to confirm a send, by session key.
+Each value is (PENDING . GO): PENDING the holds not released yet, GO
+non-nil once one of them let the handoff go (see
+`drover-hold-handed-off').")
+
+(defun drover--tell-handed-off-soon ()
+  "Tell of the handoffs noted once the current command ended."
+  (unless (timerp drover--handed-off-timer)
+    (setq drover--handed-off-timer (run-at-time 0 nil #'drover--tell-handed-off))))
+
 (defun drover-note-handed-off (session how origin &optional buffer)
   "Note that SESSION has its turn back, given as HOW from ORIGIN.
 HOW and ORIGIN are as `drover-handed-off-functions' gets them; BUFFER is
@@ -6476,19 +6487,61 @@ buffers."
       (if entry
           (setf (nth 2 entry) (seq-uniq (append (nth 2 entry) buffers)))
         (push (list key session buffers how origin) drover--handed-off))
-      (unless (timerp drover--handed-off-timer)
-        (setq drover--handed-off-timer (run-at-time 0 nil #'drover--tell-handed-off))))))
+      (drover--tell-handed-off-soon))))
+
+(defun drover-hold-handed-off (session)
+  "Hold the handoff of SESSION until the function returned is called.
+A backend whose sends are confirmed later, as another host confirms
+them, calls this as it sends: a handoff of SESSION noted meanwhile (see
+`drover-note-handed-off') is told only once the function is called with
+non-nil, and dropped when it is called with nil, the prompt refused, or
+waiting on a request SESSION awaits.  With several holds, the handoff
+waits for them all, and goes when one of them let it.  The function
+acts once."
+  (let* ((key (drover-session-key session))
+         (hold (or (gethash key drover--handed-off-holds) (cons 0 nil)))
+         (released nil))
+    (cl-incf (car hold))
+    (puthash key hold drover--handed-off-holds)
+    (lambda (go)
+      (unless released
+        (setq released t)
+        (when (eq (gethash key drover--handed-off-holds) hold)
+          (cl-decf (car hold))
+          (when go
+            (setcdr hold t))
+          ;; Told or dropped once the command ended, a note coming after in it.
+          (when (<= (car hold) 0)
+            (drover--tell-handed-off-soon)))))))
 
 (defun drover--tell-handed-off ()
-  "Run `drover-handed-off-functions' for the sessions `drover--handed-off' holds."
+  "Run `drover-handed-off-functions' for the sessions `drover--handed-off' holds.
+A session whose handoff a backend holds waits for it; one whose holds
+were all released without letting it go is dropped (see
+`drover-hold-handed-off').  Each session told of has its buffers buried
+then, as `drover-bury-handed-off' says."
   (drover-with-reporting "turn handed back"
-    (let ((entries (reverse drover--handed-off)))
+    (let ((entries (reverse drover--handed-off))
+          (held nil))
       (setq drover--handed-off nil
             drover--handed-off-timer nil)
-      (pcase-dolist (`(,key ,session ,buffers ,how ,origin) entries)
-        (drover-run-hook-reporting 'drover-handed-off-functions
-                                   session (drover--handed-off-buffers session key buffers how)
-                                   how origin)))))
+      (pcase-dolist ((and entry `(,key ,session ,buffers ,how ,origin)) entries)
+        (let ((hold (gethash key drover--handed-off-holds)))
+          (cond
+           ((and hold (> (car hold) 0)) (push entry held))
+           ((and hold (not (cdr hold))))
+           (t
+            (let ((found (drover--handed-off-buffers session key buffers how)))
+              (drover-run-hook-reporting 'drover-handed-off-functions session found how origin)
+              (drover-with-reporting "burying a session handed its turn"
+                (drover--bury-handed-off session found)))))))
+      (let ((settled nil))
+        (maphash (lambda (key hold) (when (<= (car hold) 0) (push key settled)))
+                 drover--handed-off-holds)
+        (dolist (key settled)
+          (remhash key drover--handed-off-holds)))
+      ;; Noted while the functions ran: after these, in order.
+      (setq drover--handed-off (append drover--handed-off held)))))
 
 (defun drover--handed-off-buffers (session key buffers how)
   "Return the live buffers of SESSION, whose key is KEY, then BUFFERS.
@@ -6501,6 +6554,128 @@ own: their turns wait on it."
         (when-let* ((record (drover-index-session parent)))
           (push (drover-session-buffer record) found))))
     (seq-uniq (seq-filter #'buffer-live-p (append (nreverse found) buffers)))))
+
+;;;; Burying sessions handed their turn
+
+(defcustom drover-bury-handed-off nil
+  "Non-nil to bury the buffers of a session once it has its turn.
+A session given what it waited for, a prompt or the answer to a request
+\(see `drover-handed-off-functions'), leaves nothing to do in its
+buffers until its turn ends.  Each window of the selected frame showing
+one of them then shows what it showed before, and the buffer goes to
+the end of the buffer list, as `bury-buffer' puts it.  A session whose
+auto-bury is off keeps its buffers shown (see `drover-toggle-auto-bury'),
+and so does a prompt left waiting on a request the session awaits."
+  :type 'boolean
+  :group 'drover)
+
+(defconst drover--auto-bury-version 1
+  "Version of the format of the file of the sessions kept shown.")
+
+(defconst drover-auto-bury-limit 1000
+  "How many conversations with auto-bury off are remembered, the newest.")
+
+(defvar drover--auto-bury-off nil
+  "Conversations whose buffers stay shown once handed their turns, or nil.
+A hash table of their keys (see `drover--auto-bury-key') to when auto-bury
+was turned off, read from `drover-auto-bury-file' the first time.")
+
+(defvar drover--auto-bury-warned nil
+  "Non-nil once a problem with the file of sessions kept shown was reported.")
+
+(defun drover-auto-bury-file ()
+  "Return the file of the sessions kept shown, in `drover-state-directory'."
+  (expand-file-name "auto-bury.eld" drover-state-directory))
+
+(defun drover--auto-bury-key (session)
+  "Return the key of SESSION's auto-bury: its conversation's, else its own.
+Its conversation's names it in any front end, and after its buffer
+closes; a session of another host's is that host's conversation."
+  (format "%S" (or (drover-session-engine-key session) (drover-session-key session))))
+
+(defun drover--auto-bury-warn (format-string &rest args)
+  "Report a problem with the file of sessions kept shown, once per session.
+FORMAT-STRING and ARGS are as for `format-message'."
+  (unless drover--auto-bury-warned
+    (setq drover--auto-bury-warned t)
+    (apply #'drover-warn format-string args)))
+
+(defun drover--auto-bury-table ()
+  "Return the table of conversations kept shown, read the first time."
+  (or drover--auto-bury-off
+      (let ((table (make-hash-table :test #'equal)))
+        (condition-case err
+            (dolist (entry (drover-read-data (drover-auto-bury-file) drover--auto-bury-version :sessions))
+              (pcase entry
+                (`(,(and key (pred stringp)) ,(and time (pred numberp)))
+                 (puthash key time table))))
+          (error (drover--auto-bury-warn "Ignoring the sessions kept shown in %s: %s"
+                                         (abbreviate-file-name (drover-auto-bury-file))
+                                         (drover-error-message err))))
+        (setq drover--auto-bury-off table))))
+
+(defun drover--auto-bury-save ()
+  "Write the conversations kept shown, the newest `drover-auto-bury-limit'."
+  (let ((entries nil))
+    (maphash (lambda (key time) (push (list key time) entries)) (drover--auto-bury-table))
+    (setq entries (seq-take (sort entries :key #'cadr :reverse t) drover-auto-bury-limit))
+    (condition-case err
+        (drover-write-data (drover-auto-bury-file) "Sessions whose buffers stay shown"
+                           drover--auto-bury-version :sessions entries)
+      (error (drover--auto-bury-warn "Could not remember the sessions kept shown in %s: %s"
+                                     (abbreviate-file-name (drover-auto-bury-file))
+                                     (drover-error-message err))))))
+
+(defun drover-auto-bury-p (session)
+  "Return non-nil when SESSION's buffers are buried once it has its turn.
+That is unless the user turned its auto-bury off (see
+`drover-toggle-auto-bury'), whether `drover-bury-handed-off' is on or
+not."
+  (not (gethash (drover--auto-bury-key session) (drover--auto-bury-table))))
+
+(defun drover-set-auto-bury (session on)
+  "Bury SESSION's buffers once it has its turn when ON, else keep them shown.
+The choice is remembered for SESSION's conversation, across Emacs
+sessions."
+  (let ((key (drover--auto-bury-key session))
+        (table (drover--auto-bury-table)))
+    (unless (eq (not on) (and (gethash key table) t))
+      (if on
+          (remhash key table)
+        (puthash key (float-time) table))
+      (drover--auto-bury-save))))
+
+(defun drover-toggle-auto-bury (session)
+  "Toggle whether SESSION's buffers are buried once it has its turn.
+With auto-bury on, the default, a prompt sent to SESSION or a request of
+it answered puts its buffers away (see `drover-bury-handed-off'); off,
+they stay, to go on talking with SESSION.  The choice is SESSION's
+conversation's, remembered across Emacs sessions.  Interactively,
+SESSION is the session at point."
+  (interactive (list (drover-session-at-point)))
+  (let ((on (not (drover-auto-bury-p session))))
+    (drover-set-auto-bury session on)
+    (message "%s: auto-bury %s%s" (drover-session-display-title session) (if on "on" "off")
+             (if drover-bury-handed-off "" " (`drover-bury-handed-off' is off)"))))
+
+(defun drover--bury-handed-off (session buffers)
+  "Bury BUFFERS of SESSION, handed its turn, as `drover-bury-handed-off' says.
+Nothing is buried when it is off, or SESSION's auto-bury is (see
+`drover-auto-bury-p'), and a buffer of another session whose auto-bury
+is off is left, such as a parent's whose subagent's request was
+answered.  Each window of the selected frame showing one of BUFFERS
+shows what it showed before, and the buffer goes to the end of the
+buffer list."
+  (when (and drover-bury-handed-off (drover-auto-bury-p session))
+    (dolist (buffer buffers)
+      (when (and (buffer-live-p buffer)
+                 (let ((own (drover-buffer-session buffer)))
+                   (or (null own) (drover-auto-bury-p own))))
+        (dolist (window (get-buffer-window-list buffer 'nomini))
+          (with-selected-window window
+            ;; Without an argument, it leaves the selected window too.
+            (bury-buffer)))
+        (bury-buffer buffer)))))
 
 ;;;; Text the user sent
 

@@ -259,6 +259,108 @@ stops neither the others nor the next session."
                                 (mapc (lambda (entry) (when (buffer-live-p (cdr entry)) (kill-buffer (cdr entry)))) buffers)
                                 (kill-buffer acting)))))
 
+(ert-deftest drover-test-bury-handed-off ()
+  "A session handed its turn has its buffers buried, unless its auto-bury is off.
+Off, the choice is its conversation's, kept across Emacs sessions; a
+parent's buffer whose auto-bury is off stays as its subagent's goes."
+  (drover-test-with-backend (drover-test-asking-family)
+                            (let* ((buffers (mapcar (lambda (id) (cons id (generate-new-buffer (concat "buffer " id))))
+                                                    '("root" "mid" "deep" "own")))
+                                   (other (generate-new-buffer "other"))
+                                   (drover-state-directory (make-temp-file "drover-auto-bury" t))
+                                   (drover--auto-bury-off nil)
+                                   (drover--handed-off nil)
+                                   (drover--handed-off-timer nil)
+                                   (drover-handed-off-functions nil)
+                                   (drover-bury-handed-off t))
+                              (cl-flet ((shown (id) (get-buffer-window (alist-get id buffers nil nil #'equal)))
+                                        (show (id) (switch-to-buffer other)
+                                          (switch-to-buffer (alist-get id buffers nil nil #'equal))))
+                                (unwind-protect
+                                    (save-window-excursion
+                                      (delete-other-windows)
+                                      (apply #'drover-register-backend 'fake
+                                             :buffer (lambda (session) (alist-get (drover-session-id session) buffers nil nil #'equal))
+                                             (alist-get 'fake drover--backends))
+                                      (dolist (entry buffers)
+                                        (with-current-buffer (cdr entry)
+                                          (setq-local drover-session-at-point-function
+                                                      (let ((id (car entry))) (lambda () (drover-find 'fake id))))))
+                                      ;; On by default: buried, the window showing what it showed before.
+                                      (should (drover-auto-bury-p (drover-find 'fake "own")))
+                                      (show "own")
+                                      (drover-note-handed-off (drover-find 'fake "own") 'prompt 'drover)
+                                      (accept-process-output nil 0.05)
+                                      (should-not (shown "own"))
+                                      (should (eq (window-buffer) other))
+                                      ;; Off: kept shown, the choice remembered from its file.
+                                      (drover-set-auto-bury (drover-find 'fake "own") nil)
+                                      (setq drover--auto-bury-off nil)
+                                      (should-not (drover-auto-bury-p (drover-find 'fake "own")))
+                                      (show "own")
+                                      (drover-note-handed-off (drover-find 'fake "own") 'prompt 'drover)
+                                      (accept-process-output nil 0.05)
+                                      (should (shown "own"))
+                                      ;; Toggled on again.
+                                      (let ((inhibit-message t))
+                                        (drover-toggle-auto-bury (drover-find 'fake "own")))
+                                      (should (drover-auto-bury-p (drover-find 'fake "own")))
+                                      ;; An answer from the parent, whose auto-bury is off: the parent stays.
+                                      (drover-set-auto-bury (drover-find 'fake "root") nil)
+                                      (show "root")
+                                      (drover-note-handed-off (drover-find 'fake "deep") 'answer 'front-end)
+                                      (accept-process-output nil 0.05)
+                                      (should (shown "root"))
+                                      ;; The setting off, nothing is buried.
+                                      (let ((drover-bury-handed-off nil))
+                                        (show "own")
+                                        (drover-note-handed-off (drover-find 'fake "own") 'prompt 'drover)
+                                        (accept-process-output nil 0.05)
+                                        (should (shown "own"))))
+                                  (mapc (lambda (entry) (kill-buffer (cdr entry))) buffers)
+                                  (kill-buffer other)
+                                  (delete-directory drover-state-directory t))))))
+
+(ert-deftest drover-test-handed-off-held ()
+  "A handoff a backend holds waits for it: told once let go, dropped otherwise."
+  (drover-test-with-backend (list (drover-test-session "a") (drover-test-session "b"))
+                            (let* ((told nil)
+                                   (drover--handed-off nil)
+                                   (drover--handed-off-timer nil)
+                                   (drover--handed-off-holds (make-hash-table :test #'equal))
+                                   (drover-handed-off-functions
+                                    (list (lambda (session _buffers how _origin) (push (list (drover-session-id session) how) told))))
+                                   (a (drover-find 'fake "a"))
+                                   (b (drover-find 'fake "b")))
+                              ;; Let go later, as another host confirms a send.
+                              (let ((release (drover-hold-handed-off a)))
+                                (drover-note-handed-off a 'prompt 'drover)
+                                (drover-note-handed-off b 'prompt 'drover)
+                                (accept-process-output nil 0.05)
+                                (should (equal told '(("b" prompt))))
+                                (funcall release t)
+                                (funcall release nil)
+                                (accept-process-output nil 0.05)
+                                (should (equal told '(("a" prompt) ("b" prompt)))))
+                              ;; Dropped: the prompt waits on a request.
+                              (setq told nil)
+                              (let ((release (drover-hold-handed-off a)))
+                                (drover-note-handed-off a 'prompt 'drover)
+                                (accept-process-output nil 0.05)
+                                (funcall release nil)
+                                (accept-process-output nil 0.05)
+                                (should-not told))
+                              ;; Refused at once, before the note: dropped too.
+                              (funcall (drover-hold-handed-off a) nil)
+                              (drover-note-handed-off a 'prompt 'drover)
+                              (accept-process-output nil 0.05)
+                              (should-not told)
+                              (should (zerop (hash-table-count drover--handed-off-holds)))
+                              ;; Unheld again.
+                              (drover-note-handed-off a 'prompt 'drover)
+                              (accept-process-output nil 0.05)
+                              (should (equal told '(("a" prompt)))))))
+
 (ert-deftest drover-test-sent-text ()
   "Text the user sent is told to each function; an error or a quit never reaches the sender.
 For a session not known yet, what the functions return applies once it

@@ -2703,6 +2703,101 @@ See `drover-remote-test-opened'."
         (should (equal (car kill-ring) "not over the turn"))
         (should-not (drover-remote-test-calls "send"))))))
 
+(ert-deftest drover-remote-test-send-hands-off-once-taken ()
+  "A prompt sent to another host's session hands it its turn once taken there.
+Sent while it waits on a request of the user's, which the prompt waits
+behind, it hands it nothing, said so; refused, nothing either."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir "DROVER_AGENT_LINKABLE=1")
+    (drover-remote-test-command "sessions" :n 4)
+    (drover-remote-test-synced 4)
+    (should (eq (drover-session-status (drover-remote-test-session "s3")) 'waiting))
+    (should (eq (drover-session-status (drover-remote-test-session "s2")) 'done))
+    (let* ((told nil)
+           (messages nil)
+           (drover--handed-off nil)
+           (drover--handed-off-timer nil)
+           (drover-handed-off-functions
+            (list (lambda (session _buffers how _origin) (push (list (cdr (drover-session-id session)) how) told)))))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format-string &rest args)
+                   (when format-string (push (apply #'format format-string args) messages)))))
+        (dolist (id '("s3" "s2"))
+          (let ((session (drover-remote-test-session id)))
+            ;; As the prompt sends: the backend's :send, then the handoff noted.
+            (funcall (drover-backend-property 'remote:agent :send) session "Go on" nil)
+            (drover-note-handed-off session 'prompt 'drover)))
+        ;; Held until the owner answers.
+        (accept-process-output nil 0.05)
+        (should-not told)
+        (drover-remote-test-wait (lambda () told))
+        (drover-remote-test-wait (lambda () (seq-some (lambda (text) (string-match-p "waits on a request" text))
+                                                      messages)))
+        (drover-remote-test-settle 0.5)
+        (should (equal told '(("s2" prompt))))
+        ;; Refused: nothing handed.
+        (setq told nil)
+        (let ((drover-remote-prompt-limit 3)
+              (session (drover-remote-test-session "s0")))
+          (funcall (drover-backend-property 'remote:agent :send) session "Too long" nil)
+          (drover-note-handed-off session 'prompt 'drover))
+        (drover-remote-test-settle 0.3)
+        (should-not told)))))
+
+(ert-deftest drover-remote-test-mirror-hands-off ()
+  "RET typed in a mirror hands its session its turn once the turn starts there.
+A prompt from a turn ended, an answer from a request; a key typed after
+RET, or a turn running already, hands nothing."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-command "terminal" :id "s1")
+    (drover-remote-test-synced 2)
+    (save-window-excursion
+      (delete-other-windows)
+      (let* ((mirror (drover-remote-test-open "s1"))
+             (told nil)
+             (drover--handed-off nil)
+             (drover--handed-off-timer nil)
+             (drover-handed-off-functions
+              (list (lambda (session buffers how _origin)
+                      (push (list (cdr (drover-session-id session)) how (and (memq mirror buffers) t)) told)))))
+        (drover-remote-test-live mirror)
+        (cl-flet ((status (name)
+                    (drover-remote-test-command "change" :ids ["s1"] :status name :now t)
+                    (drover-remote-test-wait (lambda () (eq (drover-session-status (drover-remote-test-session "s1"))
+                                                            (intern name)))))
+                  (key (keys)
+                    (with-current-buffer mirror
+                      (cl-letf (((symbol-function 'this-command-keys-vector) (lambda () keys)))
+                        (drover-remote--mirror-note-key)))))
+          (status "idle")
+          ;; Typed on after RET: no turn of RET's.
+          (key [return])
+          (key [?a])
+          (status "working")
+          (drover-remote-test-settle 0.3)
+          (should-not told)
+          (status "idle")
+          (key [return])
+          (status "working")
+          (drover-remote-test-wait (lambda () told))
+          (should (equal told '(("s1" prompt t))))
+          (setq told nil)
+          (status "waiting")
+          (key [?1])
+          (status "working")
+          (drover-remote-test-wait (lambda () told))
+          (should (equal told '(("s1" answer t))))
+          ;; Working already: RET queues nothing seen as a turn.
+          (setq told nil)
+          (key [return])
+          (status "retrying")
+          (drover-remote-test-settle 0.3)
+          (should-not told))
+        (kill-buffer mirror)))))
+
 (ert-deftest drover-remote-test-agent-shell-keys ()
   "A real agent-shell's keys, as a peer's mirror runs them: its submit, its override, drover's interrupt."
   (skip-unless (and (drover-remote-test--available-p) (require 'agent-shell nil t)))

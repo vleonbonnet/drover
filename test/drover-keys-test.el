@@ -149,6 +149,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
                             ("<tab>" . drover-build-and-go)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
+                            ("w" . drover-toggle-auto-bury)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive-toggle)
                             ("Z" . drover-wrap-up) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
@@ -877,7 +878,8 @@ the prefix of the other's, which would hide it."
                    ("k" . drover-prompt-clear)
                    ("i" . drover-prompt-attach) ("/" . drover-prompt-slash)
                    ("@" . drover-prompt-mention) ("t" . drover-prompt-revert)
-                   ("T" . drover-prompt-revert-cancel) ("y" . drover-prompt-copy-block)))
+                   ("T" . drover-prompt-revert-cancel) ("y" . drover-prompt-copy-block)
+                   ("w" . drover-toggle-auto-bury)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
                 (cdr entry))))
   ;; The view settings, the View menu's.

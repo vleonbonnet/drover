@@ -1769,7 +1769,28 @@ the user looks at; an answer another host gives here does not count."
         (should (equal (reverse noted)
                        `(("ses_1" prompt front-end nil)
                          ("ses_2" answer front-end ,(buffer-name (nth 0 buffers)))
-                         ("ses_2" answer front-end nil))))))))
+                         ("ses_2" answer front-end nil))))
+        ;; In a buffer of another host's service, the session the remote
+        ;; layer tells it shows; for an answer from another buffer, that one's.
+        (setq noted nil)
+        (cl-letf (((symbol-function 'drover-note-handed-off)
+                   (lambda (session how origin &optional buffer)
+                     (push (list (drover-session-id session) how origin (and buffer (buffer-name buffer)))
+                           noted)))
+                  ((symbol-function 'drover-opencode--remote-p) (lambda () t)))
+          (save-window-excursion
+            (with-current-buffer (nth 0 buffers)
+              (setq-local drover-session-at-point-function
+                          (lambda () (drover-session-create :backend 'remote:core :id '(opencode . "ses_r")))))
+            (set-window-buffer (selected-window) (nth 0 buffers))
+            (with-current-buffer (nth 0 buffers)
+              (opencode-handed-back 'prompt))
+            (with-current-buffer (nth 1 buffers)
+              (setq-local drover-session-at-point-function nil)
+              (opencode-handed-back 'question))))
+        (should (equal (reverse noted)
+                       `(((opencode . "ses_r") prompt front-end nil)
+                         ((opencode . "ses_r") answer front-end ,(buffer-name (nth 0 buffers))))))))))
 
 (ert-deftest drover-opencode-test-input-sent ()
   "Input the user sends from a session buffer is told with its text and start."

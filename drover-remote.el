@@ -332,7 +332,7 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived")
+    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -382,7 +382,10 @@ peer that asked how each ended in a message `note'; \"send-archived\":
 it takes a prompt (action `send', and `options' before it) for the
 archived sessions it sent the peer (message `fetched'), whether or not
 its own lists fetched them, offering it (:ops) only for those that may
-take one (see `drover-archived-takes-prompt-p').")
+take one (see `drover-archived-takes-prompt-p'); \"waits\": the answer to
+an action `send' tells, by session, whether the session waited on a
+request of the user's as the prompt went (:waits), so that the peer
+leaves its buffers shown (see `drover-hold-handed-off').")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -1806,6 +1809,7 @@ finds those."
      (t (dolist (key keys)
           (drover-backend-changed backend key))))
     (drover-remote--seen-mirrors peer keys)
+    (drover-remote--mirror-handed peer keys)
     (drover-remote--close-archived-mirrors peer keys)
     (drover-remote--oc-archived peer keys)))
 
@@ -2343,18 +2347,20 @@ owner's leave for SESSION; the others, recaps and previews, apply."
         (drover-remote--refusal peer session action)
       (format "%s is not a peer" name))))
 
-(defun drover-remote--act (name action session args then else)
+(defun drover-remote--act (name action session args then else &optional waited)
   "Have the peer NAME perform ACTION on SESSION, with ARGS, a plist.
 THEN is called with no argument once the owner did, ELSE with a line
 once it refused or failed, at most one of them once; for ACTION `send',
 THEN gets a line instead when the owner queued the prompt, telling why
-it waits.  Actions asked
-together go in few requests, the next time Emacs is idle: acting on
-thousands of sessions costs a few requests."
+it waits, and WAITED, when given, is called with no argument just before
+THEN when the owner tells the prompt went while SESSION waited on a
+request of the user's.  Actions asked together go in few requests, the
+next time Emacs is idle: acting on thousands of sessions costs a few
+requests."
   (let ((peer (drover-remote--peer name)))
     (if-let* ((refusal (if peer (drover-remote--refusal peer session action) (format "%s is not a peer" name))))
         (funcall else refusal)
-      (push (list action (drover-session-id session) args then else) (drover-remote--peer-outbox peer))
+      (push (list action (drover-session-id session) args then else waited) (drover-remote--peer-outbox peer))
       (unless (drover-remote--peer-flusher peer)
         (setf (drover-remote--peer-flusher peer)
               (run-at-time 0 nil (let ((link (drover-link peer)))
@@ -2371,7 +2377,7 @@ thousands of sessions costs a few requests."
     (when (drover-remote--peer-flusher peer)
       (cancel-timer (drover-remote--peer-flusher peer))
       (setf (drover-remote--peer-flusher peer) nil))
-    (pcase-dolist (`(,_action ,_key ,_args ,_then ,else) outbox)
+    (pcase-dolist (`(,_action ,_key ,_args ,_then ,else . ,_) outbox)
       (drover-with-reporting "remote actions"
         (funcall else why)))))
 
@@ -2411,12 +2417,17 @@ request is asked again after its stream ended."
                   (and args (list :args args)))
      (lambda (reply error)
        (let ((out (and (null error) (plist-get reply :out)))
-             (queued (and (null error) (equal action "send") (plist-get reply :queued))))
+             (queued (and (null error) (equal action "send") (plist-get reply :queued)))
+             (waits (and (null error) (equal action "send") (plist-get reply :waits))))
          (seq-do-indexed
           (lambda (entry index)
             (let ((outcome (and (vectorp out) (< index (length out)) (aref out index)))
                   (why (and (vectorp queued) (< index (length queued))
                             (drover-remote--line (aref queued index) 300))))
+              (when (and (eq outcome t) (functionp (nth 5 entry))
+                         (vectorp waits) (length> waits index) (eq (aref waits index) t))
+                (drover-with-reporting "remote actions"
+                  (funcall (nth 5 entry))))
               (drover-with-reporting "remote actions"
                 (cond ((and (eq outcome t) why) (funcall (nth 3 entry) why))
                       ((eq outcome t) (funcall (nth 3 entry)))
@@ -2445,20 +2456,34 @@ It takes a session, THEN and ELSE, as the operations that confirm do."
   "Have the peer NAME submit TEXT as a prompt of SESSION, for the proxy's :send.
 The owner submits it through its backend, as it delivers a scheduled
 prompt, or queues it while the session cannot take it, which is told;
-attachments, files of this host, do not travel."
+attachments, files of this host, do not travel.  SESSION has its turn
+only once the owner took the prompt, unless the owner tells it went
+while SESSION waited on a request of the user's, which the prompt waits
+behind (see `drover-hold-handed-off')."
   (let ((title (drover-session-display-title session))
-        (label (drover-host-label name)))
+        (label (drover-host-label name))
+        (release (drover-hold-handed-off session)))
     (if (> (length text) drover-remote-prompt-limit)
-        (drover-warn "The prompt for %s is longer than %d characters, which go to another host at most; it is in the kill ring"
-                     title drover-remote-prompt-limit)
-      (drover-remote--act name "send" session (list :text (substring-no-properties text))
-                          (lambda (&optional queued)
-                            (if queued
-                                (drover-message "%s on %s queued the prompt: %s" title label queued)
-                              (drover-message "%s took the prompt" title)))
-                          (lambda (message)
-                            (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
-                                         title message))))))
+        (progn
+          (funcall release nil)
+          (drover-warn "The prompt for %s is longer than %d characters, which go to another host at most; it is in the kill ring"
+                       title drover-remote-prompt-limit))
+      (let ((waited nil))
+        (drover-remote--act name "send" session (list :text (substring-no-properties text))
+                            (lambda (&optional queued)
+                              (funcall release (not waited))
+                              (cond
+                               (waited
+                                (drover-message "%s on %s waits on a request: the prompt goes once it is settled"
+                                                title label))
+                               (queued
+                                (drover-message "%s on %s queued the prompt: %s" title label queued))
+                               (t (drover-message "%s took the prompt" title))))
+                            (lambda (message)
+                              (funcall release nil)
+                              (drover-warn "%s did not take the prompt: %s; it is in the kill ring"
+                                           title message))
+                            (lambda () (setq waited t)))))))
 
 (defun drover-remote--submit (name session text then else)
   "Have the peer NAME submit TEXT as a prompt of SESSION, then call THEN, or ELSE.
@@ -2824,6 +2849,7 @@ answered with its outcome rather than performed twice."
                                 :keys (vconcat (mapcar #'drover-remote--key keys))
                                 :out (make-vector (length keys) nil)
                                 :queued (make-vector (length keys) nil)
+                                :waits (make-vector (length keys) nil)
                                 :pending (make-vector (length keys) nil)
                                 :next 0 :left (length keys)
                                 :deadline (+ (float-time) drover-remote-action-timeout)))))
@@ -2933,7 +2959,9 @@ session this host sent its peers (see `drover-remote--served-archived')."
 (defun drover-remote--perform (action args record settle)
   "Perform ACTION with ARGS on RECORD, this host's, then call SETTLE.
 SETTLE takes t, or nil and a line, or `queued' and a line telling why a
-prompt sent waits, queued.  Nothing shows a window nor asks."
+prompt sent waits, queued; for a prompt, a third argument, non-nil when
+RECORD waited on a request of the user's as it went, which the prompt
+then waits behind.  Nothing shows a window nor asks."
   (cl-flet ((then () (funcall settle t))
             (else (message) (funcall settle nil (or (drover-bound-line (format "%s" message)) "refused"))))
     (pcase action
@@ -2958,6 +2986,9 @@ prompt sent waits, queued.  Nothing shows a window nor asks."
       ("rename" (drover-backend-call record :rename (plist-get args :title)) (then))
       ("send"
        (let* ((options (or (plist-get args :agent) (plist-get args :model) (plist-get args :variant)))
+              ;; Read before sending: the prompt goes behind the request.
+              (waits (eq (drover-session-status record) 'waiting))
+              (sent (lambda (&rest _) (funcall settle t nil waits)))
               (closed (and (drover-session-archived-p record)
                            (not (drover-archived-takes-prompt-p record :submit))))
               ;; Its turn running, the prompt waits for it to end, in this
@@ -2969,10 +3000,10 @@ prompt sent waits, queued.  Nothing shows a window nor asks."
            (else "it takes no prompt from another host"))
           (closed (else "it is archived, and its front end takes no prompt without its buffer"))
           ((stringp queued) (else queued))
-          (queued (funcall settle 'queued (cdr queued)))
+          (queued (funcall settle 'queued (cdr queued) waits))
           ((not options)
            (drover-unarchive-to-send record)
-           (drover-backend-call record :submit (plist-get args :text) #'then
+           (drover-backend-call record :submit (plist-get args :text) sent
                                 (lambda (message &rest _) (else message))))
           (t
            ;; Its options first, as the prompt applies them before sending.
@@ -2980,7 +3011,7 @@ prompt sent waits, queued.  Nothing shows a window nor asks."
             record args
             (lambda (_ok &optional _message)
               (drover-unarchive-to-send record)
-              (drover-backend-call record :submit (plist-get args :text) #'then
+              (drover-backend-call record :submit (plist-get args :text) sent
                                    (lambda (message &rest _) (else message)))))))))
       ("wrap-up"
        (condition-case err
@@ -3031,7 +3062,7 @@ all its sessions settled, or failed past its deadline."
             (plist-put task :next (1+ index))
             (cl-incf (drover-remote--state-flight state))
             (aset (plist-get task :pending) index t)
-            (let ((settle (lambda (ok &optional message)
+            (let ((settle (lambda (ok &optional message waits)
                             (when (aref (plist-get task :pending) index)
                               (aset (plist-get task :pending) index nil)
                               (let ((state (drover-linked link)))
@@ -3041,6 +3072,9 @@ all its sessions settled, or failed past its deadline."
                                   (when-let* (((eq ok 'queued))
                                               (queued (plist-get task :queued)))
                                     (aset queued index (or message "queued")))
+                                  (when-let* (((and ok waits))
+                                              (told (plist-get task :waits)))
+                                    (aset told index t))
                                   (plist-put task :left (1- (plist-get task :left))))
                                 (when (eq state (drover-remote--current))
                                   (drover-remote--run-soon state)))))))
@@ -3544,13 +3578,18 @@ knows.  No file names, nothing of what they hold."
 (defun drover-remote--finish-task (state task)
   "Answer TASK, done, to whoever asked it, and keep its outcome in STATE.
 The answer is (:out OUTCOMES), and :queued, a line or false by session,
-when a prompt sent waits in this host's queue rather than went in."
+when a prompt sent waits in this host's queue rather than went in, and
+:waits, true or false by session, when a prompt went while its session
+waited on a request of the user's."
   (setf (drover-remote--state-tasks state) (delq task (drover-remote--state-tasks state)))
   (let* ((out (vconcat (mapcar (lambda (outcome) (or outcome "failed")) (plist-get task :out))))
          (queued (plist-get task :queued))
+         (waits (plist-get task :waits))
          (answer (append (list :out out)
                          (and (vectorp queued) (seq-some #'identity queued)
-                              (list :queued (vconcat (mapcar (lambda (why) (or why :false)) queued))))))
+                              (list :queued (vconcat (mapcar (lambda (why) (or why :false)) queued))))
+                         (and (vectorp waits) (seq-some #'identity waits)
+                              (list :waits (vconcat (mapcar (lambda (waited) (if waited t :false)) waits))))))
          (entry (gethash (plist-get task :id) (drover-remote--state-outcomes state)))
          (replies (cdr entry)))
     (puthash (plist-get task :id) (cons t answer) (drover-remote--state-outcomes state))
@@ -6918,6 +6957,16 @@ Nil in a buffer that mirrors none.")
 (defvar-local drover-remote--seen-sent 0
   "When the session the current mirror shows was last marked seen from here.")
 
+(defvar-local drover-remote--keyed nil
+  "The user's last key in this mirror that may give its session its turn, or nil.
+A list (TIME KEY STATUS): KEY `return' or `digit', STATUS the session's
+then (see `drover-remote--mirror-note-key').")
+
+(defconst drover-remote--handed-wait 10
+  "Seconds after a key in a mirror within which its session's turn is the key's.
+Its owner reads a terminal's status late, a Claude terminal's every few
+seconds, then tells it after its changes settle.")
+
 (defvar-local drover-remote--reopens 0
   "Times the current mirror was opened anew since it was last live.")
 
@@ -7371,11 +7420,63 @@ there on SESSION, through PEER."
       (setq-local drover-session-at-point-function #'drover-remote--shown-session)
       (setq-local drover-remote--mirror-kind kind)
       (setq-local spyglass-mirror-mode-line-function #'drover-remote--mirror-mode-line)
+      (add-hook 'pre-command-hook #'drover-remote--mirror-note-key nil t)
       (add-hook 'kill-buffer-hook #'drover-remote--mirror-killed nil t))
     (puthash (drover-session-id session) mirror (drover-remote--peer-mirrors peer))
     (drover-remote--event peer 'mirror "mirroring the %s of %s%s" kind title
                           (if (eq (plist-get reply :input) t) "" ", read only"))
     mirror))
+
+(defun drover-remote--mirror-note-key ()
+  "Note a key the user presses in the current mirror, for the turn it may give.
+For `pre-command-hook', local to mirrors.  The owner tells no prompt
+submitted nor request answered through a mirror, only its session's
+status: RET pressed alone while the session does not work may submit a
+prompt or answer a request, a digit pressed alone while it waits on the
+user answer one, so those are noted with the status, and the turn
+starting soon after is the one they gave (see
+`drover-remote--mirror-handed').  Any other key the mirror binds forgets
+it, the user typing on there; keys bound elsewhere, as those selecting
+another window, leave it."
+  (drover-with-reporting "remote mirror keys"
+    (let* ((keys (this-command-keys-vector))
+           (key (and (length= keys 1) (aref keys 0)))
+           (status (when-let* ((session (drover-remote--shown-session)))
+                     (drover-session-status session))))
+      (cond ((and (memq key '(return kp-enter ?\r))
+                  (memq status '(idle done failed waiting)))
+             (setq drover-remote--keyed (list (float-time) 'return status)))
+            ((and (characterp key) (<= ?1 key ?9) (eq status 'waiting))
+             (setq drover-remote--keyed (list (float-time) 'digit status)))
+            ((and drover-remote--keyed (drover-remote--mirror-key-p keys))
+             (setq drover-remote--keyed nil))))))
+
+(defun drover-remote--mirror-key-p (keys)
+  "Return non-nil when KEYS run a command of the current buffer's own keymap.
+Directly, or through a remapping, as a mirror forwards printing keys."
+  (when-let* ((map (current-local-map)))
+    (or (commandp (lookup-key map keys))
+        (when-let* ((command (key-binding keys t t))
+                    ((symbolp command)))
+          (command-remapping command nil (list map))))))
+
+(defun drover-remote--mirror-handed (peer keys)
+  "Note the turns the user's keys in the mirrors of PEER's sessions KEYS gave.
+A session whose turn starts within `drover-remote--handed-wait' seconds
+of a key noted in its mirror (see `drover-remote--mirror-note-key') has
+its turn from it: an answer when it waited on the user, else a prompt."
+  (when (> (hash-table-count (drover-remote--peer-mirrors peer)) 0)
+    (dolist (key keys)
+      (when-let* ((buffer (gethash key (drover-remote--peer-mirrors peer)))
+                  ((buffer-live-p buffer))
+                  (keyed (buffer-local-value 'drover-remote--keyed buffer)))
+        (if (> (- (float-time) (car keyed)) drover-remote--handed-wait)
+            (with-current-buffer buffer (setq drover-remote--keyed nil))
+          (when-let* ((session (drover-remote--peer-session peer key))
+                      ((memq (drover-session-status session) '(working retrying))))
+            (with-current-buffer buffer (setq drover-remote--keyed nil))
+            (drover-note-handed-off session (if (eq (nth 2 keyed) 'waiting) 'answer 'prompt)
+                                    'front-end buffer)))))))
 
 (defun drover-remote--mirror-killed ()
   "Forget the mirror of the buffer being killed: its session runs on there.

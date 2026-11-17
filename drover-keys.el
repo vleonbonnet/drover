@@ -686,6 +686,7 @@ other lists."
   "E" #'drover-edit-pending-prompt
   "K" #'drover-interrupt
   "s" #'drover-mark-seen
+  "w" #'drover-toggle-auto-bury
   "u" #'drover-open-parent
   "c" #'drover-open-subagent
   "r" #'drover-rename
@@ -2288,6 +2289,17 @@ when it has some."
   (when-let* ((session (drover-dispatch-session :edit-pending)))
     (> (drover-pending-prompts session) 0)))
 
+(defun drover--dispatch-auto-bury-description ()
+  "Return the description of the auto-bury toggle in the dispatch menu.
+Whether the buffers of the session at point are buried once it has its
+turn follows it, highlighted when on (see `drover-toggle-auto-bury')."
+  (concat "Auto-bury "
+          (if-let* ((session (drover-dispatch-session)))
+              (if (drover-auto-bury-p session)
+                  (propertize "on" 'face 'transient-value)
+                (propertize "off" 'face 'transient-inactive-value))
+            "")))
+
 (defun drover--dispatch-archive-description ()
   "Return the description of the archive's toggle in the dispatch menu.
 \"Unarchive\" when it restores the sessions it acts on, as
@@ -2609,7 +2621,11 @@ session chosen for it, else to one asked for, unshown."
            ("K" "Interrupt" drover-interrupt
             :inapt-if-not (lambda () (drover-dispatch-selection :interrupt #'drover--running-p)))
            ("s" "Mark seen" drover-mark-seen
-            :inapt-if-not (lambda () (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p)))]
+            :inapt-if-not (lambda () (drover-dispatch-selection :mark-seen #'drover--ended-unseen-p)))
+           ;; A setting of the session at point: the menu stays, showing it.
+           ("w" drover--dispatch-auto-bury-description drover-toggle-auto-bury :transient t
+            :if (lambda () drover-bury-handed-off)
+            :inapt-if-not drover-dispatch-session)]
           [:advice* drover--dispatch-in-list
                     ("+" "New session" drover-new-session
                      :inapt-if-not (lambda () (and (or (drover-dispatch-list-p) (drover-dispatch-session))

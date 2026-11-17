@@ -1080,19 +1080,25 @@ For `opencode-handed-back-functions': KIND `permission' or `question' is
 an answer, given in this buffer or in place, from another; the buffer
 of the selected window, the user's acting from it, goes with it when it
 is a session buffer.  A prompt or a command is sent from this buffer.
-A session of another host's service is that host's drover's, and an
-answer another host gives here is that host's (see
+In a buffer of another host's service, the session is the one drover's
+remote layer tells the buffer shows, else, for an answer given from
+another buffer, the one that buffer shows, as a parent's whose subagent
+asked.  An answer another host gives here is that host's (see
 `drover-opencode--answer')."
   (drover-with-reporting "OpenCode turn handed back"
-    (unless (or drover-opencode--answering (drover-opencode--remote-p))
-      (when-let* ((session (drover-opencode--buffer-session)))
-        (let ((acting (window-buffer (selected-window))))
+    (unless drover-opencode--answering
+      (let* ((acting (window-buffer (selected-window)))
+             (other (and (not (eq acting (current-buffer)))
+                         (with-current-buffer acting
+                           (derived-mode-p 'opencode-session-mode))
+                         acting))
+             (session (if (drover-opencode--remote-p)
+                          (or (drover-session-at-point t)
+                              (and other (with-current-buffer other (drover-session-at-point t))))
+                        (drover-opencode--buffer-session))))
+        (when session
           (drover-note-handed-off session (if (memq kind '(permission question)) 'answer 'prompt)
-                                  'front-end
-                                  (and (not (eq acting (current-buffer)))
-                                       (with-current-buffer acting
-                                         (derived-mode-p 'opencode-session-mode))
-                                       acting)))))))
+                                  'front-end other))))))
 
 (defun drover-opencode--input-sent (_kind text start)
   "Note TEXT, input the user sent from the current session buffer at START.
