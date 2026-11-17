@@ -189,6 +189,14 @@ The engine reads when a session last changed there."
   :type 'file
   :group 'drover)
 
+(defcustom drover-opencode-accept-thinking-loss nil
+  "When non-nil, unattended OpenCode submissions consent to stale-thinking loss.
+When nil, scheduled prompts, wrap-ups and `/goal' commands follow the
+session's normal stale-thinking check and fail instead of discarding
+earlier thinking unasked."
+  :type 'boolean
+  :group 'drover)
+
 (defun drover-opencode-model (info providers)
   "Return the `drover-model' of INFO, an entry of OpenCode's model catalog.
 PROVIDERS is the provider catalog, naming the provider and giving the
@@ -1578,8 +1586,8 @@ so the buffer needs only be loaded and connected.  The backend's
 (defun drover-opencode--submit (session text then else)
   "Send TEXT as a prompt of SESSION now, then call THEN, or ELSE with a message.
 TEXT goes literally, a leading slash included, past any draft, and shows
-once delivered.  It consents to the service replacing stale thinking with
-its text, since no one is there to be asked.  A session without a
+once delivered.  Stale-thinking consent follows
+`drover-opencode-accept-thinking-loss'.  A session without a
 buffer, as one archiving closed, is opened first, not shown, as
 `drover-opencode--send' opens it; an archived session is restored by
 opencode.el first.  When nothing was sent, the session not opened or
@@ -1594,7 +1602,7 @@ not restored, ELSE gets a second argument, t.  The backend's :submit."
        session
        (lambda ()
          (opencode-session-send
-          text :show t :accept-thinking-loss t
+          text :show t :accept-thinking-loss drover-opencode-accept-thinking-loss
           :then (lambda (_item) (settle then))
           :else (lambda (error)
                   (if (drover-opencode--restore-refused-p error)
@@ -1823,7 +1831,7 @@ prompt is submitted.  The backend's :goal-command."
        (lambda ()
          (opencode-session-command
           "goal" (if (eq action 'set) text (symbol-name action))
-          :accept-thinking-loss t
+          :accept-thinking-loss drover-opencode-accept-thinking-loss
           :then (lambda (_) (settle then))
           :else (lambda (error) (settle else (opencode-error-describe error)))))
        (lambda (message) (settle else message))))))

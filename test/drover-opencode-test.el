@@ -3698,7 +3698,7 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
         (should (equal reported "No OpenCode session ses_gone: HTTP 404"))))))
 
 (ert-deftest drover-opencode-test-scheduled-prompt ()
-  "A scheduled prompt goes out literally and shown, consenting to drop stale thinking."
+  "A scheduled prompt goes out literally and shown, respecting `drover-opencode-accept-thinking-loss'."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
     (let ((session (drover-opencode-test-session "ses_1"))
           (ready nil))
@@ -3710,22 +3710,24 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
                          "the session is not loaded or not connected to OpenCode"))
           (setq ready t)
           (should-not (drover-opencode--blocker session)))
-        (dolist (success '(t nil))
-          (let (outcome)
-            (cl-letf (((symbol-function 'opencode-session-send)
-                       (lambda (text &rest arguments)
-                         (should (equal text "/literal prompt"))
-                         (should (plist-get arguments :show))
-                         (should (plist-get arguments :accept-thinking-loss))
-                         (if success
-                             (funcall (plist-get arguments :then) nil)
-                           (funcall (plist-get arguments :else) "Connection lost"))))
-                      ((symbol-function 'opencode-error-describe) #'identity)
-                      ((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "Never asks"))))
-              (drover-opencode--submit session "/literal prompt"
-                                       (lambda () (setq outcome 'sent))
-                                       (lambda (message) (setq outcome message))))
-            (should (equal outcome (if success 'sent "Connection lost")))))))
+        (dolist (accept '(nil t))
+          (let ((drover-opencode-accept-thinking-loss accept))
+            (dolist (success '(t nil))
+              (let (outcome)
+                (cl-letf (((symbol-function 'opencode-session-send)
+                           (lambda (text &rest arguments)
+                             (should (equal text "/literal prompt"))
+                             (should (plist-get arguments :show))
+                             (should (eq (plist-get arguments :accept-thinking-loss) accept))
+                             (if success
+                                 (funcall (plist-get arguments :then) nil)
+                               (funcall (plist-get arguments :else) "Connection lost"))))
+                          ((symbol-function 'opencode-error-describe) #'identity)
+                          ((symbol-function 'y-or-n-p) (lambda (&rest _) (ert-fail "Never asks"))))
+                  (drover-opencode--submit session "/literal prompt"
+                                           (lambda () (setq outcome 'sent))
+                                           (lambda (message) (setq outcome message))))
+                (should (equal outcome (if success 'sent "Connection lost")))))))))
     (cl-letf (((symbol-function 'opencode-state-ready-p) #'always))
       (should (funcall (drover-backend-property 'opencode :ready))))))
 
