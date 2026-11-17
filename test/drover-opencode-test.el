@@ -3731,5 +3731,24 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
     (cl-letf (((symbol-function 'opencode-state-ready-p) #'always))
       (should (funcall (drover-backend-property 'opencode :ready))))))
 
+(ert-deftest drover-opencode-test-goal-thinking-policy ()
+  "Goal commands use the unattended policy without opening a consent prompt."
+  (drover-opencode-test-with-session
+    (dolist (accept '(t nil))
+      (let ((drover-opencode-accept-thinking-loss accept)
+            sent)
+        (cl-letf (((symbol-function 'opencode-session-command)
+                   (lambda (name arguments &rest options)
+                     (should (equal name "goal"))
+                     (should (equal arguments "finish the task"))
+                     (should (eq (plist-get options :accept-thinking-loss) accept))
+                     (funcall (plist-get options :then) nil)))
+                  ((symbol-function 'y-or-n-p)
+                   (lambda (&rest _) (ert-fail "No unattended consent prompt"))))
+          (drover-opencode--goal-command session 'set "finish the task"
+                                         (lambda () (setq sent t))
+                                         (lambda (message) (ert-fail message)))
+          (should sent))))))
+
 (provide 'drover-opencode-test)
 ;;; drover-opencode-test.el ends here

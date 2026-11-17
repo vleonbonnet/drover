@@ -189,11 +189,13 @@ The engine reads when a session last changed there."
   :type 'file
   :group 'drover)
 
-(defcustom drover-opencode-accept-thinking-loss nil
+(defcustom drover-opencode-accept-thinking-loss t
   "When non-nil, unattended OpenCode submissions consent to stale-thinking loss.
-When nil, scheduled prompts, wrap-ups and `/goal' commands follow the
-session's normal stale-thinking check and fail instead of discarding
-earlier thinking unasked."
+Scheduled prompts, wrap-ups and `/goal' commands can then continue
+without an interactive decision.  The server omits stale thinking for
+Claude and retains readable text where the destination supports it.
+When nil, those submissions stop when the server detects stale thinking.
+Interactive prompts still use their normal preflight and consent checks."
   :type 'boolean
   :group 'drover)
 
