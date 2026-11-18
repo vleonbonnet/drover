@@ -1249,14 +1249,15 @@ The backend's :delete, which confirms (:delete-confirms)."
 
 (defun drover-opencode--describe-requests ()
   "Return the requests the session of the current buffer waits on, as data.
-As the backend's :requests tells them."
+As the backend's :requests tells them.  A permission's detail is the
+line saying why it asks, see `opencode-permission-why'."
   (append
    (mapcar (lambda (permission)
              (list :id (plist-get permission :id) :kind 'permission
                    :title (drover-bound-line (format "%s" (or (plist-get permission :title)
                                                               (plist-get permission :action) "")))
-                   :detail (drover-bound-text (and (stringp (plist-get permission :detail))
-                                                   (plist-get permission :detail)))
+                   :detail (drover-bound-text (and (stringp (plist-get permission :why))
+                                                   (plist-get permission :why)))
                    :choices '("once" "always" "reject")))
            opencode-pending-permissions)
    (mapcar (lambda (entry)

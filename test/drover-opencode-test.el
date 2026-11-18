@@ -3188,7 +3188,7 @@ Return a function telling how many times the backend called back."
                            (options ((label . "A") (value . "a"))))))))
       (with-current-buffer buffer
         (setq-local opencode-pending-permissions
-                    (list (list :id "per_1" :action "shell" :title "Shell command: ls" :detail "ls -la")))
+                    (list (list :id "per_1" :action "shell" :title "Shell command: ls" :why "rule \"ls *\": ls -la")))
         (setq-local opencode-pending-forms
                     (list (list :id "form_1" :form form :index 0 :answers (make-vector 2 nil)))))
       (cl-letf (((symbol-function 'opencode--sync-requests)
@@ -3200,6 +3200,7 @@ Return a function telling how many times the backend called back."
         (should (equal (mapcar (lambda (request) (plist-get request :id)) requests) '("per_1" "form_1")))
         (should (equal (plist-get (car requests) :choices) '("once" "always" "reject")))
         (should (equal (plist-get (car requests) :title) "Shell command: ls"))
+        (should (equal (plist-get (car requests) :detail) "rule \"ls *\": ls -la"))
         (let ((fields (plist-get (cadr requests) :fields)))
           (should (equal (mapcar (lambda (field) (plist-get field :options)) fields) '(("Left" "Right") ("A"))))
           (should-not (plist-get (car fields) :custom))
