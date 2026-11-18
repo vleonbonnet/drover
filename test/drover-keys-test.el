@@ -149,7 +149,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
                             ("<tab>" . drover-build-and-go)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
-                            ("w" . drover-toggle-auto-bury)
+                            ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
                             ("r" . drover-rename) ("x" . drover-delete) ("z" . drover-archive-toggle)
                             ("Z" . drover-wrap-up) ("g" . drover-refresh) ("+" . drover-new-session) ("v" . drover-peek)
@@ -754,7 +754,7 @@ which lists show too."
     ("Prompt runs" ("a" "m" "P" "e" "d"))
     ("Input" ("RET"))
     ("Conversation" ("C" "f" "H" "."))
-    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G")))
+    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G" "!")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.
 Neither the view settings, which apply while a list is in sight, nor the
 prompt keys editing or reading a prompt buffer show there.")
@@ -879,7 +879,7 @@ the prefix of the other's, which would hide it."
                    ("i" . drover-prompt-attach) ("/" . drover-prompt-slash)
                    ("@" . drover-prompt-mention) ("t" . drover-prompt-revert)
                    ("T" . drover-prompt-revert-cancel) ("y" . drover-prompt-copy-block)
-                   ("w" . drover-toggle-auto-bury)))
+                   ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)))
     (should (eq (plist-get (cdr (transient-get-suffix 'drover-dispatch (car entry))) :command)
                 (cdr entry))))
   ;; The view settings, the View menu's.
@@ -1114,7 +1114,7 @@ a list in a window.")
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "C" "f"
-                               "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "G")
+                               "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "G" "!")
                              drover-keys-test-view-keys
                              '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "1" "RET")))))
     ;; Off a session, only what needs none.
@@ -1231,7 +1231,7 @@ Drover's view settings apply only while one of drover's views shows."
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d"
                        "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T" "C" "f" "." "O"
-                       "o" "K" "+" "g" "r" "x" "z" "G"))))))
+                       "o" "K" "+" "g" "r" "x" "z" "G" "!"))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-from-list ()
   "In a list, the session's settings apply to its buffer, its prompt does not.

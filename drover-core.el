@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 29
+(defconst drover-core-generation 30
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -743,7 +743,10 @@ another host carries its owner's.")
   (brief-session nil :documentation "A few sentences on where the whole session stands, or nil.
 Written with BRIEF: what the session set out to do, what is done and
 what comes next, which its buffer shows above its input, so that the
-last turn reads in its context (see `drover-brief-of-buffer')."))
+last turn reads in its context (see `drover-brief-of-buffer').")
+  (notify nil :documentation "Non-nil when the user chose to be notified of the session's conversation.
+As kept for it (see `drover-notify-chosen-p'); a session of another
+host carries its owner's choice."))
 
 (drover-note-layout 'drover-session)
 
@@ -823,8 +826,9 @@ and `drover-text-limit' characters, its brief to a line, its recap to
 to as many lines and `drover-brief-session-limit' characters.  RECORD
 itself when within those, and of all the slots of a `drover-session'
 now (see `drover--whole-record'), unless `drover-brief-function' gives
-it a brief (see `drover--briefed') or `drover-changes-function' what it
-changed (see `drover--with-changes')."
+it a brief (see `drover--briefed'), `drover-changes-function' what it
+changed (see `drover--with-changes') or the user chose otherwise of its
+notifications (see `drover--with-notify')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -874,7 +878,7 @@ changed (see `drover--with-changes')."
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (drover--with-changes (drover--briefed (or copy record))))))
+      (drover--with-notify (drover--with-changes (drover--briefed (or copy record)))))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -925,6 +929,26 @@ Its record is as that host last told it; see `drover-session-stale'."
 (defun drover-session-attention-p (session)
   "Return non-nil when SESSION needs the user."
   (memq (drover-session-status session) drover-attention-statuses))
+
+(defun drover-session-need-signature (session)
+  "Return what tells how SESSION needs the user, a short string.
+Its status, and the kinds and summaries of its first requests: a
+notification of it is told again when this changes, and only then."
+  (string-limit
+   (string-join (cons (symbol-name (drover-session-status session))
+                      (mapcar (lambda (request)
+                                (format "%s:%s" (plist-get request :kind)
+                                        (drover-bound-line (or (plist-get request :summary) "") 80)))
+                              (seq-take (drover-session-requests session) 4)))
+                "|")
+   400))
+
+(defun drover-own-session-p (session)
+  "Return non-nil when SESSION is of a backend of this host's own.
+Not of another host, nor of a proxy of one: this host tells of those
+alone, to its peers, its phones and its desktop."
+  (and (null (drover-session-host session))
+       (not (drover-backend-property (drover-session-backend session) :remote))))
 
 (defun drover-session-active-p (session)
   "Return non-nil when SESSION is in the middle of a turn.
@@ -3600,6 +3624,18 @@ them: no parent, or one not listed."
   "Return the keys of the subagents of the session KEY in the index, unordered."
   (gethash key (drover--index-children (drover-index))))
 
+(defun drover-index-listed-p (key record)
+  "Return non-nil when RECORD, of KEY in the index, is its conversation's listed.
+Records of several backends showing one conversation are listed once,
+as `drover-sessions' merges them: what tells of the conversation tells
+of that record alone, rather than once per front end."
+  (let ((engine-key (drover-session-engine-key record)))
+    (or (null engine-key)
+        (let ((keys (gethash engine-key (drover--index-engines (drover-index)))))
+          (or (null (cdr keys))
+              (eq (car key)
+                  (drover--preferred-backend (seq-keep #'drover-index-session keys))))))))
+
 (defun drover-index-root (key)
   "Return the key of the session at the top of the tree of session KEY."
   (let ((parents (drover--index-parents (drover-index)))
@@ -5485,6 +5521,22 @@ Drover's views are lists, and so are the buffers where
 `drover-session-keys-mode' is on, the lists of other front ends."
   (or drover-view-p (bound-and-true-p drover-session-keys-mode)))
 
+(defun drover-window-shows-session-p (window session)
+  "Return non-nil when WINDOW shows SESSION.
+WINDOW shows SESSION's buffer (see `drover-session-buffer'), or a buffer
+telling SESSION as its own (see `drover-session-at-point-function'),
+such as the view of a session of another host, or its conversation in
+another front end.  The session at point of a list is merely its row,
+and does not count."
+  (let ((buffer (window-buffer window)))
+    (or (eq buffer (drover-session-buffer session))
+        (when-let* ((shown (with-current-buffer buffer
+                             (and (not (drover-session-list-p))
+                                  (drover-session-at-point t)))))
+          (or (equal (drover-session-key shown) (drover-session-key session))
+              (when-let* ((engine (drover-session-engine-key session)))
+                (equal (drover-session-engine-key shown) engine)))))))
+
 (defvar-local drover-selected-sessions-function nil
   "Function of no argument returning the sessions the user selected, or nil.
 A list of sessions sets it to return those its active region selects,
@@ -6590,6 +6642,80 @@ own: their turns wait on it."
           (push (drover-session-buffer record) found))))
     (seq-uniq (seq-filter #'buffer-live-p (append (nreverse found) buffers)))))
 
+;;;; Choices kept by conversation
+
+;; Some choices of the user's are a session's own, remembered for its
+;; conversation across Emacs sessions: whether its buffers are buried as
+;; it has its turn, and whether the user is notified of it.  Each is a
+;; table of the conversations it was made for, read from a file of
+;; `drover-state-directory' the first time, and written whole, the
+;; newest kept, whenever it changes.  A choice is described by a plist:
+;; :variable, the variable holding its table, nil until read; :file, its
+;; file; :key-p, the predicate its keys satisfy; :what, what its file
+;; holds, for warnings; :description, for the file's comment; :limit,
+;; how many conversations are kept.
+
+(defconst drover--choices-version 1
+  "Version of the format of the files of choices kept by conversation.")
+
+(defvar drover--choices-warned nil
+  "The files of choices a problem with was reported, once per Emacs session.")
+
+(defun drover--conversation-key (session)
+  "Return the key of SESSION's conversation: its engine key, else its own.
+Its conversation's names it in any front end, and after its buffer
+closes; a session of another host's is that host's conversation (see
+`drover-session-engine-key')."
+  (or (drover-session-engine-key session) (drover-session-key session)))
+
+(defun drover--choices-warn (choice format-string &rest args)
+  "Report a problem with the file of CHOICE, once per Emacs session.
+FORMAT-STRING and ARGS are as for `format-message'."
+  (let ((file (plist-get choice :file)))
+    (unless (member file drover--choices-warned)
+      (push file drover--choices-warned)
+      (apply #'drover-warn format-string args))))
+
+(defun drover--choices-table (choice)
+  "Return the table of the conversations CHOICE was made for, read the first time.
+A file that does not read is reported once, and the table starts empty."
+  (let ((variable (plist-get choice :variable)))
+    (or (symbol-value variable)
+        (let ((table (make-hash-table :test #'equal))
+              (file (plist-get choice :file))
+              (key-p (plist-get choice :key-p)))
+          (condition-case err
+              (dolist (entry (drover-read-data file drover--choices-version :sessions))
+                (pcase entry
+                  (`(,key ,(and time (pred numberp)))
+                   (when (funcall key-p key)
+                     (puthash key time table)))))
+            (error (drover--choices-warn choice "Ignoring %s in %s: %s" (plist-get choice :what)
+                                         (abbreviate-file-name file) (drover-error-message err))))
+          (set variable table)))))
+
+(defun drover--choices-save (choice)
+  "Write the conversations CHOICE was made for, the newest of its limit."
+  (let ((file (plist-get choice :file))
+        (entries nil))
+    (maphash (lambda (key time) (push (list key time) entries)) (drover--choices-table choice))
+    (setq entries (seq-take (sort entries :key #'cadr :reverse t) (plist-get choice :limit)))
+    (condition-case err
+        (drover-write-data file (plist-get choice :description) drover--choices-version :sessions entries)
+      (error (drover--choices-warn choice "Could not remember %s in %s: %s" (plist-get choice :what)
+                                   (abbreviate-file-name file) (drover-error-message err))))))
+
+(defun drover--choices-set (choice key made)
+  "Note that CHOICE was MADE for the conversation KEY, or not.
+Write its file when that changed it, and return non-nil then."
+  (let ((table (drover--choices-table choice)))
+    (unless (eq (not made) (not (gethash key table)))
+      (if made
+          (puthash key (float-time) table)
+        (remhash key table))
+      (drover--choices-save choice)
+      t)))
+
 ;;;; Burying sessions handed their turn
 
 (defcustom drover-bury-handed-off nil
@@ -6604,9 +6730,6 @@ and so does a prompt left waiting on a request the session awaits."
   :type 'boolean
   :group 'drover)
 
-(defconst drover--auto-bury-version 1
-  "Version of the format of the file of the sessions kept shown.")
-
 (defconst drover-auto-bury-limit 1000
   "How many conversations with auto-bury off are remembered, the newest.")
 
@@ -6615,70 +6738,33 @@ and so does a prompt left waiting on a request the session awaits."
 A hash table of their keys (see `drover--auto-bury-key') to when auto-bury
 was turned off, read from `drover-auto-bury-file' the first time.")
 
-(defvar drover--auto-bury-warned nil
-  "Non-nil once a problem with the file of sessions kept shown was reported.")
-
 (defun drover-auto-bury-file ()
   "Return the file of the sessions kept shown, in `drover-state-directory'."
   (expand-file-name "auto-bury.eld" drover-state-directory))
 
 (defun drover--auto-bury-key (session)
-  "Return the key of SESSION's auto-bury: its conversation's, else its own.
-Its conversation's names it in any front end, and after its buffer
-closes; a session of another host's is that host's conversation."
-  (format "%S" (or (drover-session-engine-key session) (drover-session-key session))))
+  "Return the key of SESSION's auto-bury: its conversation's, printed.
+See `drover--conversation-key'."
+  (format "%S" (drover--conversation-key session)))
 
-(defun drover--auto-bury-warn (format-string &rest args)
-  "Report a problem with the file of sessions kept shown, once per session.
-FORMAT-STRING and ARGS are as for `format-message'."
-  (unless drover--auto-bury-warned
-    (setq drover--auto-bury-warned t)
-    (apply #'drover-warn format-string args)))
-
-(defun drover--auto-bury-table ()
-  "Return the table of conversations kept shown, read the first time."
-  (or drover--auto-bury-off
-      (let ((table (make-hash-table :test #'equal)))
-        (condition-case err
-            (dolist (entry (drover-read-data (drover-auto-bury-file) drover--auto-bury-version :sessions))
-              (pcase entry
-                (`(,(and key (pred stringp)) ,(and time (pred numberp)))
-                 (puthash key time table))))
-          (error (drover--auto-bury-warn "Ignoring the sessions kept shown in %s: %s"
-                                         (abbreviate-file-name (drover-auto-bury-file))
-                                         (drover-error-message err))))
-        (setq drover--auto-bury-off table))))
-
-(defun drover--auto-bury-save ()
-  "Write the conversations kept shown, the newest `drover-auto-bury-limit'."
-  (let ((entries nil))
-    (maphash (lambda (key time) (push (list key time) entries)) (drover--auto-bury-table))
-    (setq entries (seq-take (sort entries :key #'cadr :reverse t) drover-auto-bury-limit))
-    (condition-case err
-        (drover-write-data (drover-auto-bury-file) "Sessions whose buffers stay shown"
-                           drover--auto-bury-version :sessions entries)
-      (error (drover--auto-bury-warn "Could not remember the sessions kept shown in %s: %s"
-                                     (abbreviate-file-name (drover-auto-bury-file))
-                                     (drover-error-message err))))))
+(defun drover--auto-bury-choice ()
+  "Return the description of auto-bury's choices, for `drover--choices-table'."
+  (list :variable 'drover--auto-bury-off :file (drover-auto-bury-file) :key-p #'stringp
+        :what "the sessions kept shown" :description "Sessions whose buffers stay shown"
+        :limit drover-auto-bury-limit))
 
 (defun drover-auto-bury-p (session)
   "Return non-nil when SESSION's buffers are buried once it has its turn.
 That is unless the user turned its auto-bury off (see
 `drover-toggle-auto-bury'), whether `drover-bury-handed-off' is on or
 not."
-  (not (gethash (drover--auto-bury-key session) (drover--auto-bury-table))))
+  (not (gethash (drover--auto-bury-key session) (drover--choices-table (drover--auto-bury-choice)))))
 
 (defun drover-set-auto-bury (session on)
   "Bury SESSION's buffers once it has its turn when ON, else keep them shown.
 The choice is remembered for SESSION's conversation, across Emacs
 sessions."
-  (let ((key (drover--auto-bury-key session))
-        (table (drover--auto-bury-table)))
-    (unless (eq (not on) (and (gethash key table) t))
-      (if on
-          (remhash key table)
-        (puthash key (float-time) table))
-      (drover--auto-bury-save))))
+  (drover--choices-set (drover--auto-bury-choice) (drover--auto-bury-key session) (not on)))
 
 (defun drover-toggle-auto-bury (session)
   "Toggle whether SESSION's buffers are buried once it has its turn.
@@ -6711,6 +6797,157 @@ buffer list."
             ;; Without an argument, it leaves the selected window too.
             (bury-buffer)))
         (bury-buffer buffer)))))
+
+;;;; Notifications
+
+;; The user chooses which sessions notify them as they come to need
+;; them, on this host's desktop (`drover-notify-mode') and on the phones
+;; it pushes to (`drover-remote-push'): none by default, since the count
+;; of the mode line and the list tell already.  The choice is a tree's,
+;; made at its top, its subagents going with it, and remembered for its
+;; conversation.  A session of another host is notified by its owner, who
+;; keeps the choice: a record carries it (the slot `notify'), and turning
+;; it on or off is an action the owner performs (`:set-notify').
+
+(defconst drover-notify-limit 1000
+  "How many conversations notifying the user are remembered, the newest.")
+
+(defvar drover--notify-on nil
+  "Conversations notifying the user as they come to need the user, or nil.
+A hash table of their keys (see `drover--conversation-key') to when
+notifications were turned on, read from `drover-notify-file' the first
+time.")
+
+(defvar drover--notify-copies (make-hash-table :test #'eq :weakness 'key)
+  "Records given the choice of their notifications, each mapped to (ON . COPY).
+The same record and choice give the same copy, so that records listed
+again compare alike.")
+
+(defun drover-notify-file ()
+  "Return the file of the sessions notifying you, in `drover-state-directory'."
+  (expand-file-name "notify.eld" drover-state-directory))
+
+(defun drover--notify-key-p (value)
+  "Return non-nil when VALUE, read from `drover-notify-file', is a key."
+  (and (consp value) (symbolp (car value))
+       (or (stringp (cdr value)) (integerp (cdr value)))))
+
+(defun drover--notify-choice ()
+  "Return the description of notifications' choices, see `drover--choices-table'."
+  (list :variable 'drover--notify-on :file (drover-notify-file) :key-p #'drover--notify-key-p
+        :what "the sessions notifying you" :description "Sessions notifying the user as they need the user"
+        :limit drover-notify-limit))
+
+(defun drover--notify-root (session)
+  "Return the session at the top of SESSION's tree, whose notifications it follows.
+SESSION itself when the index does not hold it."
+  (let ((key (drover-session-key session)))
+    (if (drover-index-session key)
+        (let ((seen nil)
+              (parent nil))
+          ;; Guarded: a cycle of parents would never end.
+          (while (and (setq parent (drover-index-parent key)) (not (member parent seen)))
+            (push key seen)
+            (setq key parent))
+          (or (drover-index-session key) session))
+      session)))
+
+(defun drover-notify-chosen-p (session)
+  "Return non-nil when the user chose to be notified of SESSION's conversation.
+As kept for this host's sessions (see `drover-set-notify'); a session of
+another host tells its owner's choice (see `drover-session-notify')."
+  (if (drover-session-host session)
+      (and (drover-session-notify session) t)
+    (and (gethash (drover--conversation-key session) (drover--choices-table (drover--notify-choice))) t)))
+
+(defun drover-notify-p (session)
+  "Return non-nil when SESSION notifies the user as it comes to need the user.
+That is when the user chose so for the top of its tree, a subagent
+going with its parent (see `drover-toggle-notify'): none does by
+default.  It is this host's desktop that tells (`drover-notify-mode'),
+and the phones it pushes to (`drover-remote-push')."
+  (drover-notify-chosen-p (drover--notify-root session)))
+
+(defun drover--with-notify (record)
+  "Return RECORD, or a copy telling whether its conversation notifies the user.
+The slot `notify' of a record of this host follows the choice kept (see
+`drover-notify-chosen-p'), in a copy made once per record and choice;
+a record of another host tells its owner's."
+  (if (or (not (drover-session-p record)) (drover-session-host record))
+      record
+    (let ((on (drover-notify-chosen-p record)))
+      (if (eq on (and (drover-session-notify record) t))
+          record
+        (let ((made (gethash record drover--notify-copies)))
+          (if (and made (eq (car made) on))
+              (cdr made)
+            (let ((copy (copy-sequence record)))
+              (setf (drover-session-notify copy) on)
+              (puthash record (cons on copy) drover--notify-copies)
+              copy)))))))
+
+(defun drover-notify-settable-p (session)
+  "Return non-nil when the user may choose whether SESSION notifies them.
+Always for a session of this host; for one of another host, when its
+owner performs the action for this host now (see `drover-supports-p')."
+  (let ((root (drover--notify-root session)))
+    (or (null (drover-session-host root))
+        (drover-supports-p root :set-notify))))
+
+(defun drover--notify-conversation-keys (session)
+  "Return the keys of the live sessions showing SESSION's conversation.
+Its own, and those of the other front ends showing it."
+  (let ((engine-key (drover-session-engine-key session)))
+    (or (and engine-key (gethash engine-key (drover--index-engines (drover-index))))
+        (list (drover-session-key session)))))
+
+(defun drover-set-notify (session on &optional then else)
+  "Have SESSION notify the user as it comes to need the user when ON, else not.
+The choice is the top of SESSION's tree's, whose subagents go with it,
+remembered for its conversation across Emacs sessions.  Of a session of
+another host, its owner keeps the choice and is asked to make it: THEN
+is called with no argument once it did, ELSE with a line once it
+refused or failed.  Of a session of this host, THEN is called at once."
+  (let ((root (drover--notify-root session)))
+    (cond
+     ((null (drover-session-host root))
+      (when (drover--choices-set (drover--notify-choice) (drover--conversation-key root) on)
+        ;; Records take the choice in, served to peers; the tree's
+        ;; subagents, whose records do not change, follow it too.
+        (drover-take-in-again (drover--notify-conversation-keys root))
+        (when (drover-index-session (drover-session-key root))
+          (drover-views-changed (mapcar #'drover-session-key
+                                        (drover-index-tree-sessions (drover-session-key root))))))
+      (when then (funcall then)))
+     (t
+      (condition-case err
+          ;; It tells why its owner takes no such action now.
+          (drover-backend-call root :set-notify (and on t) (or then #'ignore)
+                               (or else (lambda (message)
+                                          (drover-warn "Could not turn notifications %s for %s: %s"
+                                                       (if on "on" "off") (drover-session-display-title root)
+                                                       message))))
+        (user-error (if else
+                        (funcall else (drover-error-message err))
+                      (signal (car err) (cdr err)))))))))
+
+(defun drover-toggle-notify (session)
+  "Toggle whether SESSION notifies you as it comes to need you.
+Notified, a session waiting on a request, whose turn failed or ended
+unseen tells you on the desktop (see `drover-notify-mode') and on the
+phones this host pushes to; off, the default, only the list and the
+count of the mode line tell.  The choice is the top of SESSION's
+tree's, its subagents going with it, remembered for its conversation
+across Emacs sessions; a session of another host's owner keeps it.
+Interactively, SESSION is the session at point."
+  (interactive (list (drover-session-at-point)))
+  (let* ((root (drover--notify-root session))
+         (on (not (drover-notify-chosen-p root)))
+         (title (drover-session-display-title root)))
+    (drover-set-notify root on
+                       (lambda () (message "%s: notifications %s" title (if on "on" "off")))
+                       (lambda (why)
+                         (message "%s: notifications not turned %s: %s" title (if on "on" "off") why)))))
 
 ;;;; Text the user sent
 

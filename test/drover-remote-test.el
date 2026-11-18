@@ -675,6 +675,8 @@ restart of the host's remote layer, its counters rising."
       (should (member "push" (drover-remote--peer-caps (drover-remote--peer "agent"))))
       (drover-remote-test-command "sessions" :n 3)
       (drover-remote-test-synced 3)
+      ;; Only the sessions notifying the user are pushed.
+      (drover-remote-test-command "notify" :ids ["s0" "s1" "s2"])
       (pcase-let ((`(,reply ,error) (drover-remote--wait (drover-remote--peer "agent") (list :op "push" :set set) 10)))
         (should-not error)
         (should (eq (plist-get reply :ok) t)))
@@ -1763,6 +1765,25 @@ leading back to what holds it would print it again from each."
                              (should (equal (nth 2 (car (drover-remote-test-calls "send"))) "Hello there"))
                              ;; Sessions of the agent are offered to the prompt, without buffers.
                              (should (assoc (drover-remote-test-session "s0") (drover-prompt--target-sessions))))))
+
+(ert-deftest drover-remote-test-notify ()
+  "Another host keeps the choice of its sessions' notifications: asked there, told back."
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (drover-remote-test-command "sessions" :n 2)
+    (drover-remote-test-synced 2)
+    (let ((session (drover-remote-test-session "s1")))
+      (should-not (drover-notify-p session))
+      (should (drover-notify-settable-p session))
+      (drover-set-notify session t)
+      (drover-remote-test-wait (lambda () (drover-notify-p (drover-remote-test-session "s1"))))
+      (should (drover-notify-p (drover-remote-test-session "s1")))
+      (should-not (drover-notify-p (drover-remote-test-session "s0")))
+      ;; Nothing kept here.
+      (should (zerop (hash-table-count (drover--choices-table (drover--notify-choice)))))
+      (drover-set-notify (drover-remote-test-session "s1") nil)
+      (drover-remote-test-wait (lambda () (not (drover-notify-p (drover-remote-test-session "s1")))))
+      (should-not (drover-notify-p (drover-remote-test-session "s1"))))))
 
 (defun drover-remote-test-archived (id)
   "Return this host's record of the agent's archived session ID, once fetched."

@@ -294,27 +294,22 @@ A file that does not read is told once and never written over."
 
 (defun drover-remote-push--signature (record)
   "Return what a phone is told of RECORD changing, a short string.
-Its status, and the kinds and summaries of its requests."
-  (string-limit
-   (mapconcat #'identity
-              (cons (symbol-name (drover-session-status record))
-                    (mapcar (lambda (request)
-                              (format "%s:%s" (plist-get request :kind)
-                                      (drover-bound-line (or (plist-get request :summary) "") 80)))
-                            (seq-take (drover-session-requests record) 4)))
-              "|")
-   400))
+Its status, and the kinds and summaries of its requests (see
+`drover-session-need-signature')."
+  (drover-session-need-signature record))
 
 (defun drover-remote-push--needing (key)
   "Return the record of this host's session KEY when it needs the user, else nil.
 A session of this host's own backends, served to peers, whose status
-needs the user, and at the top of its tree or waiting itself."
+needs the user, at the top of its tree or waiting itself, and notifying
+the user, as the user chose for its tree (see `drover-notify-p')."
   (when-let* ((served (drover-remote--served key))
               (record (car served))
               ((not (drover-session-stale record)))
               ((memq (drover-session-status record) drover-attention-statuses))
               ((or (eq (drover-session-status record) 'waiting)
-                   (and (null (drover-session-parent record)) (null (cdr served))))))
+                   (and (null (drover-session-parent record)) (null (cdr served)))))
+              ((drover-notify-p record)))
     record))
 
 (defun drover-remote-push--follow (state keys)

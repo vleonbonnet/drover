@@ -88,7 +88,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 24))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -687,6 +687,7 @@ other lists."
   "K" #'drover-interrupt
   "s" #'drover-mark-seen
   "w" #'drover-toggle-auto-bury
+  "!" #'drover-toggle-notify
   "u" #'drover-open-parent
   "c" #'drover-open-subagent
   "r" #'drover-rename
@@ -2300,6 +2301,17 @@ turn follows it, highlighted when on (see `drover-toggle-auto-bury')."
                 (propertize "off" 'face 'transient-inactive-value))
             "")))
 
+(defun drover--dispatch-notify-description ()
+  "Return the description of the notifications' toggle in the dispatch menu.
+Whether the session at point notifies you as it comes to need you
+follows it, highlighted when on (see `drover-toggle-notify')."
+  (concat "Notify "
+          (if-let* ((session (drover-dispatch-session)))
+              (if (drover-notify-p session)
+                  (propertize "on" 'face 'transient-value)
+                (propertize "off" 'face 'transient-inactive-value))
+            "")))
+
 (defun drover--dispatch-archive-description ()
   "Return the description of the archive's toggle in the dispatch menu.
 \"Unarchive\" when it restores the sessions it acts on, as
@@ -2640,7 +2652,10 @@ session chosen for it, else to one asked for, unshown."
                                                                          (drover-unarchivable-p session))))))
                     ("Z" "Wrap up" drover-wrap-up
                      :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-wrap-up-p)))
-                    ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)]
+                    ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)
+                    ;; A setting of the session at point: the menu stays, showing it.
+                    ("!" drover--dispatch-notify-description drover-toggle-notify :transient t
+                     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-notify-settable-p)))]
           drover--view-columns
           ;; Only while the menu acts on one of drover's lists, here or in
           ;; another window.  Moving stays in the menu, which follows the new

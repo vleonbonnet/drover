@@ -70,7 +70,7 @@
 (require 'drover-selection)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 29))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
   (load "drover-core" nil t))
 
 (autoload 'drover-wrap-up-session "drover-wrap-up")
@@ -799,6 +799,8 @@ identifier cannot travel."
         (put :brief-session (drover-remote--plain (drover-session-brief-session record)))
         ;; Read here, from this host's engines (see `drover-changes').
         (put :changes (drover-remote--encode-totals (drover-session-changes record)))
+        ;; Kept here: this host notifies of its sessions, desktop and phones.
+        (put :notify (and (drover-session-notify record) t))
         (put :ops (drover-remote--record-ops record))
         (put :set (drover-remote--record-settable record)))
       (nreverse out))))
@@ -840,7 +842,9 @@ greys out what its access forbids, and this host checks it again."
                         (drover-supports-p record :submit))
                       "send")
                  (and (drover-supports-p record :apply-options) "options")
-                 (and (drover-wrap-up-p record) "wrap-up"))))))
+                 (and (drover-wrap-up-p record) "wrap-up")
+                 ;; Its choice of notifications, which this host keeps.
+                 "notify")))))
 
 (defconst drover-remote--options
   '(("agent" . :agent) ("model" . :model) ("variant" . :variant))
@@ -1002,6 +1006,7 @@ minus this host's.  Nil when DATA names no session."
         :brief-recap (let ((recap (plist-get data :brief-recap)))
                        (and (stringp recap) (drover-bound-text recap drover-brief-recap-lines)))
         :changes (drover-remote--decode-totals (plist-get data :changes))
+        :notify (eq (plist-get data :notify) t)
         :brief-session (let ((story (plist-get data :brief-session)))
                          (and (stringp story)
                               (drover-bound-text story drover-brief-recap-lines drover-brief-session-limit))))))))
@@ -1010,26 +1015,17 @@ minus this host's.  Nil when DATA names no session."
 
 (defun drover-remote--local-p (record)
   "Return non-nil when RECORD is a session of a backend of this host's own.
-A host serves only those: nothing learnt from a peer goes to another."
-  (and (null (drover-session-host record))
-       (not (drover-backend-property (drover-session-backend record) :remote))))
-
-(defun drover-remote--keeper-p (key record)
-  "Return non-nil when RECORD, of KEY, is the record listed of its conversation.
-Records of several backends showing one conversation are listed once,
-as `drover-sessions' merges them: the others are not served."
-  (let ((engine-key (drover-session-engine-key record)))
-    (or (null engine-key)
-        (let ((keys (gethash engine-key (drover--index-engines (drover-index)))))
-          (or (null (cdr keys))
-              (eq (car key)
-                  (drover--preferred-backend (delq nil (mapcar #'drover-index-session keys)))))))))
+A host serves only those: nothing learnt from a peer goes to another
+\(see `drover-own-session-p')."
+  (drover-own-session-p record))
 
 (defun drover-remote--served (key)
-  "Return what this host serves of session KEY, (RECORD . PARENT-KEY), or nil."
+  "Return what this host serves of session KEY, (RECORD . PARENT-KEY), or nil.
+Of the records of several backends showing one conversation, the one
+listed alone is served (see `drover-index-listed-p')."
   (when-let* ((record (drover-index-session key))
-              ((drover-remote--local-p record))
-              ((drover-remote--keeper-p key record)))
+              ((drover-own-session-p record))
+              ((drover-index-listed-p key record)))
     (cons record (drover-index-parent key))))
 
 (defun drover-remote--tomb (state key rev)
@@ -1973,7 +1969,7 @@ last drops the sessions it did not list."
 
 (defconst drover-remote--actions
   '("interrupt" "mark-seen" "archive" "unarchive" "delete" "rename" "answer" "send" "options"
-    "wrap-up")
+    "wrap-up" "notify")
   "The actions on its sessions a host performs for its peers.")
 
 (defun drover-remote--note-ops (peer key data)
@@ -2310,7 +2306,7 @@ PENDING maps the owner's keys to the kinds asked, as
     (:unarchive . "unarchive") (:delete . "delete") (:rename . "rename")
     (:respond . "answer") (:send . "send") (:submit . "send")
     (:requests . "answer") (:answer . "answer") (:apply-options . "options")
-    (:wrap-up . "wrap-up"))
+    (:wrap-up . "wrap-up") (:set-notify . "notify"))
   "The operations of a peer's proxy forwarded to the owner, by action.")
 
 (defun drover-remote--refusal (peer &optional session action)
@@ -2336,7 +2332,10 @@ Without SESSION and ACTION, why it takes no action at all."
          (let ((ops (gethash (drover-session-id session) (drover-remote--peer-ops peer) 'unknown)))
            (and (listp ops) (not (member action ops)))))
     (format "%s does not %s" (drover-remote--label peer)
-            (if (equal action "wrap-up") "wrap it up" (concat action " it"))))))
+            (pcase action
+              ("wrap-up" "wrap it up")
+              ("notify" "keep a choice of notifications for it")
+              (_ (concat action " it")))))))
 
 (defun drover-remote--supports (name session operation)
   "Return non-nil when the peer NAME takes OPERATION on SESSION now.
@@ -2780,6 +2779,9 @@ A string tells why they do not fit."
     (pcase action
       ("rename" (let ((title (drover-remote--line (plist-get args :title))))
                   (if title (list :title title) "no title")))
+      ("notify" (if (memq (plist-get args :on) '(t :false))
+                    (list :on (eq (plist-get args :on) t))
+                  "neither on nor off"))
       ("send" (let ((text (plist-get args :text))
                     (options (drover-remote--check-options args nil)))
                 (cond
@@ -2992,6 +2994,7 @@ then waits behind.  Nothing shows a window nor asks."
          (drover--unarchive-step record (lambda (ok &optional value) (if ok (then) (else value))))))
       ("delete" (drover--delete-step record (lambda (ok &optional value) (if ok (then) (else value)))))
       ("rename" (drover-backend-call record :rename (plist-get args :title)) (then))
+      ("notify" (drover-set-notify record (plist-get args :on)) (then))
       ("send"
        (let* ((options (or (plist-get args :agent) (plist-get args :model) (plist-get args :variant)))
               ;; Read before sending: the prompt goes behind the request.
@@ -6670,6 +6673,9 @@ CALLBACK gets (REPLY ERROR) once."
      :wrap-up (drover-remote--confirming name "wrap-up")
      :wrap-up-confirms t
      :rename (lambda (session title) (drover-remote--rename name session title))
+     ;; The owner notifies of its sessions, and keeps the choice.
+     :set-notify (lambda (session on then else)
+                   (drover-remote--act name "notify" session (list :on (if on t :false)) then else))
      :respond (lambda (session) (drover-remote--respond name session))
      :send (lambda (session text token &optional attachments)
              (drover-remote--send-prompt name session text token attachments))

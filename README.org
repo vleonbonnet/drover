@@ -90,6 +90,14 @@ A value a former option was given before drover loaded goes to opencode.el's whe
 - =drover-mark-all-seen= marks every Done and Failed session seen after confirming how many (=drover-catch-up-statuses=); with a numeric prefix argument, only those that ended at least that many hours ago. Useful to start from a clean slate, or after a day away.
 - =drover-bury-quiet-sessions=, =B= in the menu, puts away the buffers of the sessions that do not need you, idle, working or retrying, leaving at hand those that do (see [[*Global keys][Global keys]]).
 
+** Notifications
+
+=!= (=drover-toggle-notify=) chooses which sessions notify you as they come to need you. None does by default: the count and the list already show every session that needs you. The choice belongs to the top of a tree, so a subagent's requests follow its parent. Drover keeps it for the conversation, in =notify.eld= of =drover-state-directory=, and the menu shows =Notify on= or =off= beside the key. A session of another host is notified by that host, which keeps the choice: =!= asks that host to change it.
+
+=drover-notify-mode= shows these notifications on this host's desktop. Turn it on as drover starts, for instance with =(add-hook 'drover-start-hook #'drover-notify-mode)=. A session is told once it waits on a request, its turn failed or its turn ended unseen, and it stayed so for =drover-notify-delay= seconds (1 by default). It is not told while you look at it, nor for what needed you before you turned the choice or the mode on. Its notification goes once it no longer needs you, seen or answered. The phones this host pushes to get the same sessions (see [[*Pushes to a phone][Pushes to a phone]]).
+
+=drover-notify-function= shows a notification. By default it uses the notifications of the operating system, through opencode.el's. Your own function gets a plist: the session, its status, a title, a line on why it needs you, the buffer you answer it in, and a form that opens the session, for a click. It returns a function that removes the notification. Drover tells of the sessions of every front end, so turn the front ends' own notifications off, such as opencode.el's with =(setq opencode-notification-os-filter nil)=.
+
 * Keys
 
 Drover binds no global key. Its commands are gathered in one menu, =drover-dispatch=; bind it to a key you can reach from anywhere, for instance:
@@ -115,7 +123,7 @@ Sessions        Task                       Input                 Session        
  L Side list     W Worktrees                / Slash command       R Review         z Archive          status     =s any                 -k cache
  p Project                                  @ Mention             A Answer         Z Wrap up          agent      =a any     -a shown    -s summary
  S Search       Prompt runs                 y Copy block          K Interrupt      G Goal             model      =m any     -m shown    -$ cost
- $ Usage         a Agent plan                                     s Mark seen                         provider   =v any     -v shown    -g goal
+ $ Usage         a Agent plan                                     s Mark seen      ! Notify off       provider   =v any     -v shown    -g goal
                  m Model Opus 5.5          Conversation           w Auto-bury on                      harness    =H any     -H shown    -# attempt
 Prompt           e Effort max               t Revert here        View                                 host                  -h shown
  " Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
@@ -145,6 +153,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =K= | =drover-interrupt=         | interrupt its turn, after confirmation                         |
 | =s= | =drover-mark-seen=         | mark its ended turn seen                                       |
 | =w= | =drover-toggle-auto-bury=  | keep its buffers shown once it has its turn, or bury them again (see =drover-bury-handed-off=) |
+| =!= | =drover-toggle-notify=     | have it notify you as it comes to need you, or stop (see [[*Notifications][Notifications]]) |
 | =u= | =drover-open-parent=       | open its parent session                                        |
 | =c= | =drover-open-subagent=     | pick one of its subagent sessions and open it                  |
 | =r= | =drover-rename=            | rename it                                                      |
@@ -851,7 +860,7 @@ A peer with =:viewer= owns no sessions, as the Android client: this host serves 
 
 ** Pushes to a phone
 
-While a phone is not connected, this host pushes it what needs the user, through UnifiedPush: the phone hands it an endpoint, a topic of a push server such as ntfy, and a key; this host posts its own sessions coming to need the user and leaving it, sealed with that key, so that nothing of the conversations reaches the push server in clear.  It holds what is new while the user types in this Emacs (=drover-remote-push-hold=, 120 s, a peer's =:push-hold= first), and pushes nothing while the phone is in front.
+While a phone is not connected, this host pushes it what needs the user, through UnifiedPush: the phone hands it an endpoint, a topic of a push server such as ntfy, and a key; this host posts its own sessions coming to need the user and leaving it, sealed with that key, so that nothing of the conversations reaches the push server in clear.  It holds what is new while the user types in this Emacs (=drover-remote-push-hold=, 120 s, a peer's =:push-hold= first), and pushes nothing while the phone is in front.  Only the sessions that notify you are pushed (see [[*Notifications][Notifications]]).
 
 #+begin_src emacs-lisp
   (setq drover-remote-push-endpoints '("https://ntfy.example/")

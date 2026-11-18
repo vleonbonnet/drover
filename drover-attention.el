@@ -54,7 +54,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 27))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
@@ -519,28 +519,12 @@ They are among those `drover-filter' keeps, but with UNFILTERED."
                                       (not (drover-session-active-p session)))))
                            (drover-surfaced-sessions nil unfiltered))))
 
-(defun drover-attention--shows-p (window session)
-  "Return non-nil when WINDOW shows SESSION already.
-WINDOW shows SESSION's buffer (see `drover-session-buffer'), or a buffer
-telling SESSION as its own (see `drover-session-at-point-function'),
-such as the view of a session of another host, or its conversation in
-another front end.  The session at point of a list is merely its row,
-and does not count."
-  (let ((buffer (window-buffer window)))
-    (or (eq buffer (drover-session-buffer session))
-        (when-let* ((shown (with-current-buffer buffer
-                             (and (not (drover-session-list-p))
-                                  (drover-session-at-point t)))))
-          (or (equal (drover-session-key shown) (drover-session-key session))
-              (when-let* ((engine (drover-session-engine-key session)))
-                (equal (drover-session-engine-key shown) engine)))))))
-
 (defun drover-attention--start (window)
   "Begin a round of `drover-next', visiting its first session in WINDOW.
 The round's queue is the sessions of `drover-attention--round-sessions',
 in the order as it stands (see `drover-visit-order'), a tree once (see
 `drover-attention--targets').  When WINDOW shows its first already (see
-`drover-attention--shows-p'), the round begins with the second, the
+`drover-window-shows-session-p'), the round begins with the second, the
 first coming last, whatever the first's status; alone, it is visited
 again.  With none to visit, the echo area says so, and how many the
 filter hides, if it hides some."
@@ -554,7 +538,7 @@ filter hides, if it hides some."
             (message "No session to visit")))
       (setq drover-attention--queue (mapcar #'drover-session-key targets))
       (add-hook 'post-command-hook #'drover-attention--after-command)
-      (let ((position (if (and (cdr targets) (drover-attention--shows-p window (car targets))) 1 0)))
+      (let ((position (if (and (cdr targets) (drover-window-shows-session-p window (car targets))) 1 0)))
         (drover-attention--visit (nth position targets) position window)))))
 
 (defun drover-attention--advance (window)

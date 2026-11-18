@@ -39,12 +39,16 @@
 
 (defmacro drover-remote-push-test-with (sessions &rest body)
   "Run BODY as the host `core' serving SESSIONS, pushes posted to a stand-in.
-`idle' is how long this Emacs has been idle, in seconds."
+`idle' is how long this Emacs has been idle, in seconds.  Every session
+notifies the user while `notify-all' is non-nil, as it is at first;
+otherwise those the user chose (see `drover-notify-p')."
   (declare (indent 1) (debug t))
   `(progn
      (skip-unless (drover-remote-push-available-p))
      (drover-test-with-backend ,sessions
-       (let* ((dir (file-name-as-directory (make-temp-file "drover-push-test" t)))
+       (let* ((notify-all t)
+              (chosen (symbol-function 'drover-notify-p))
+              (dir (file-name-as-directory (make-temp-file "drover-push-test" t)))
               (drover-state-directory dir)
               (drover-host "core")
               (drover-remote--state (drover-remote--state-make :epoch "e1"))
@@ -64,13 +68,15 @@
                  (funcall callback drover-remote-push-test--status)))
               (drover-remote-push--state nil))
          (ignore idle)
-         (unwind-protect
-             (progn
-               (drover-index)
-               (drover-remote-push-start)
-               ,@body)
-           (drover-remote-push-stop)
-           (delete-directory dir t))))))
+         (cl-letf (((symbol-function 'drover-notify-p)
+                    (lambda (session) (or notify-all (funcall chosen session)))))
+           (unwind-protect
+               (progn
+                 (drover-index)
+                 (drover-remote-push-start)
+                 ,@body)
+             (drover-remote-push-stop)
+             (delete-directory dir t)))))))
 
 (defun drover-remote-push-test--peer (name &rest properties)
   "Return a peer NAME with PROPERTIES in the remote layer's state."
@@ -230,6 +236,43 @@
                               (string-to-number (mapconcat (lambda (b) (format "%02x" b)) (substring bytes 4 12) "") 16)))
                           drover-remote-push-test--sent)))
         (should (equal seqs (sort (copy-sequence seqs) #'>)))))))
+
+(ert-deftest drover-remote-push-test-notified-alone ()
+  "Only the sessions the user chose to be notified of are pushed.
+A subagent goes with the top of its tree.  Turned off, the phone is
+told the session left what needs the user."
+  (drover-remote-push-test-with (list (drover-test-session "a" :status 'idle :engine 'fake :engine-id "a")
+                                      (drover-test-session "b" :status 'idle))
+    (setq notify-all nil)
+    (let ((phone (drover-remote-push-test--peer "adept" :viewer t)))
+      (drover-remote-push-test--register phone)
+      (drover-remote-push-test--settle nil 0.3)
+      (should (null drover-remote-push-test--sent))
+      ;; Off, the default: nothing is pushed, whatever needs the user.
+      (drover-remote-push-test--change
+       (list (drover-test-session "a" :status 'done :since 100.0 :engine 'fake :engine-id "a")
+             (drover-test-session "b" :status 'done :since 100.0)
+             (drover-test-session "c" :status 'waiting :parent "a"
+                                  :requests '((:kind question :summary "Which?")))))
+      (drover-remote-push-test--settle nil 0.3)
+      (should (null drover-remote-push-test--sent))
+      ;; On for a's tree: a and its subagent waiting are pushed, not b.
+      (drover-set-notify (drover-index-session '(fake . "c")) t)
+      (drover-changed-now)
+      (should (drover-remote-push-test--pushes-after 0))
+      (let ((push (drover-remote-push-test--last)))
+        (should (= (plist-get push :n) 2))
+        (should (equal (sort (mapcar (lambda (e) (cadr (plist-get e :k))) (plist-get push :e)) #'string<)
+                       '("a" "c"))))
+      ;; Kept for its conversation, in the file of notifications.
+      (should (equal (mapcar #'car (drover-read-data (drover-notify-file) 1 :sessions)) '((fake . "a"))))
+      ;; Off again: the phone is told they no longer need the user.
+      (drover-set-notify (drover-index-session '(fake . "a")) nil)
+      (drover-changed-now)
+      (should (drover-remote-push-test--pushes-after 1))
+      (let ((push (drover-remote-push-test--last)))
+        (should (equal (plist-get push :r) "clear"))
+        (should (= (plist-get push :n) 0))))))
 
 (ert-deftest drover-remote-push-test-hold ()
   "What is new waits while the user types here; what leaves goes at once."

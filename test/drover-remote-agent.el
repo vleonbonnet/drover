@@ -610,6 +610,14 @@ noted, and their cancellations."
                                          :requests (list (list :kind 'permission :summary "ls"))))))
        (drover-changed-now)
        (funcall reply (list :ok t)))
+      ("notify"
+       ;; Sessions notifying the user, on its desktop and its phones.
+       (drover-changed-now)
+       (seq-doseq (id (plist-get args :ids))
+         (when-let* ((record (drover-index-session (cons 'fake id))))
+           (drover-set-notify record t)))
+       (drover-changed-now)
+       (funcall reply (list :ok t)))
       ("review-set"
        ;; The changes the fake engine tells of each conversation: a file
        ;; whose patch adds LINES lines, naming the conversation and the

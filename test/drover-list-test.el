@@ -2624,7 +2624,7 @@ Of their keys, only g is a session key, and it refreshes either way."
                           (should (eq theirs #'revert-buffer))
                         (should-not (commandp theirs)))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "<tab>" "E" "K" "s" "w" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "<tab>" "E" "K" "s" "w" "!" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.
