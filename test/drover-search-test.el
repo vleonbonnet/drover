@@ -727,6 +727,46 @@ B only in tool calls and results; Codex's A \"axolotl\" in its prompt.
                        (list (list drover-search-test-claude-a "The narwhal agrees: done.")))))
       (should (> runs 2)))))
 
+(ert-deftest drover-search-test-ripgrep-skips-added-context ()
+  "What the engines add to a conversation as the user is not what was said.
+Claude Code's requests recorded whole, holding CLAUDE.md, and its notes;
+Codex's context and the instructions of AGENTS.md: none matches, nor
+hides what the conversation said after it."
+  (skip-unless (executable-find "rg"))
+  (drover-search-test-with-transcripts
+    (let ((claude-a (drover-fixture-claude-file drover-search-test-claude-a directory))
+          (claude-b (drover-fixture-claude-file drover-search-test-claude-b directory))
+          (codex-a (drover-fixture-codex-file drover-search-test-codex-a (+ start 30))))
+      (drover-fixture-claude-append
+       claude-b
+       (drover-fixture-claude-request drover-search-test-claude-b "user"
+                                      "<system-reminder>\nContents of CLAUDE.md: the wombat homelab</system-reminder>")
+       (drover-fixture-claude-request drover-search-test-claude-b "assistant" "The wombat homelab, as told.")
+       (drover-fixture-claude-user drover-search-test-claude-b directory (+ start 40)
+                                   "Base directory for this skill: the wombat skill" :meta t))
+      (drover-fixture-claude-append
+       claude-a
+       (drover-fixture-claude-user drover-search-test-claude-a directory (+ start 40)
+                                   "<local-command-caveat>Caveat: the dingo</local-command-caveat>" :meta t)
+       (drover-fixture-claude-user drover-search-test-claude-a directory (+ start 41) "Feed the dingo now"))
+      (drover-fixture-claude-append
+       codex-a
+       (drover-fixture-codex-message (+ start 40) "user"
+                                     "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nthe wombat homelab\n</INSTRUCTIONS>")
+       (drover-fixture-codex-message (+ start 40) "user" "\n<environment_context>the dingo</environment_context>")
+       (drover-fixture-codex-message (+ start 41) "user" "Walk the dingo")
+       (drover-fixture-codex-message (+ start 42) "assistant" "The dingo walked."))
+      (drover-transcript-scan drover-claude-code-transcripts--index)
+      (drover-transcript-scan drover-codex-rollouts--index)
+      (should-not (drover-search-test-text "wombat"))
+      (should-not (drover-search-test-text "environment"))
+      (let ((found (drover-search-test-text "dingo")))
+        (should (length= found 2))
+        (should (equal (assoc drover-search-test-claude-a found)
+                       (list drover-search-test-claude-a "Feed the dingo now")))
+        (should (equal (assoc drover-search-test-codex-a found)
+                       (list drover-search-test-codex-a "Walk the dingo")))))))
+
 (ert-deftest drover-search-test-ripgrep-huge-lines ()
   "A line of 500 kB, a match at its end, gives a snippet bounded."
   (skip-unless (executable-find "rg"))
@@ -778,7 +818,7 @@ B only in tool calls and results; Codex's A \"axolotl\" in its prompt.
         (let ((drover-transcript-ripgrep
                (drover-search-test-script
                 home
-                (format "for f in \"$@\"; do case \"$f\" in *%s*) printf '%%s\\0' \"$f\"; sleep 0.05; printf '7:the \\\\\"walrus\\\\\" said\\n';; esac; done"
+                (format "for f in \"$@\"; do case \"$f\" in *%s*) printf '%%s\\0' \"$f\"; sleep 0.05; printf '7:\\tthe \\\\\"walrus\\\\\" said\\n';; esac; done"
                         drover-search-test-claude-a))))
           (should (equal (drover-search-test-text "walrus")
                          (list (list drover-search-test-claude-a "the \"walrus\" said")))))))))

@@ -1099,10 +1099,13 @@ a generic icon and NAME, as OpenCode's sessions show it, and
 ;; prints only the snippet around it, a capture group, which its
 ;; default engine finds in linear time.  Tool calls, their results, the
 ;; API requests recorded whole and the engines' own records begin
-;; otherwise, and are not searched.  It runs as a process of Emacs's
-;; own rather than through `drover-command-run', whose commands give
-;; their output once ended and in files: matches stream as found, and
-;; a search typed on is stopped at once.
+;; otherwise, and are not searched.  What the engines add to a
+;; conversation as the user, as their notes and the instructions of
+;; AGENTS.md, begins as a prompt does: an optional group of the
+;; expression marks it, and its match is dropped.  It runs as a process
+;; of Emacs's own rather than through `drover-command-run', whose
+;; commands give their output once ended and in files: matches stream as
+;; found, and a search typed on is stopped at once.
 
 (defcustom drover-transcript-ripgrep "rg"
   "The ripgrep program searching what was said in conversations, or nil.
@@ -1114,10 +1117,13 @@ prompts alone (see `drover-search')."
 (defconst drover-transcript-search-context 60
   "Characters of a snippet around a match, before it and after it.")
 
-(defconst drover-transcript-search-per-file 1
-  "Lines at most a search takes of one file.
-A session shows one snippet: more would spend the matches a search
-takes on the conversations found first.")
+(defconst drover-transcript-search-lines-per-file 10
+  "Lines at most ripgrep gives of one file.
+A file gives one match, its first line not marked skipped (see
+`drover-transcript-search-regexp'): a session shows one snippet, and
+more would spend the matches a search takes on the conversations found
+first.  The lines after the first are for those skipped, as a note the
+engine added before what the conversation said.")
 
 (defconst drover-transcript-search-query-limit 100
   "Characters at most of a text searched for.")
@@ -1172,20 +1178,31 @@ quote and a backslash as a JSON string has them, escaped too."
                      (t (string char))))
              string ""))
 
-(defun drover-transcript-search-regexp (starts query)
+(defun drover-transcript-search-regexp (starts query &optional skip)
   "Return the regular expression finding QUERY in strings STARTS begin.
 STARTS are expressions of ripgrep's default engine matching what comes
-before the text of a prompt or reply, its opening quote included.  The
-group `s' is the snippet: the first match of QUERY in that text, case
-ignored, with `drover-transcript-search-context' characters around it.
-Words of QUERY match across any blanks, as escaped in JSON."
+before the text of a prompt or reply, its opening quote included; one
+of them may end in an optional group `p' matching how a text the
+engine added begins, as its context.  The group `s' is the snippet:
+the first match of QUERY in that text, case ignored, with
+`drover-transcript-search-context' characters around it.  Words of
+QUERY match across any blanks, as escaped in JSON.  SKIP, an
+expression, marks the record as one the engine added when it follows
+the text on its line, in the optional group `a'.  A match of `p' or `a'
+is dropped (see `drover-transcript-search-replacement')."
   (let* ((unit "(?:[^\"\\\\]|\\\\.)")
          (words (split-string (substring query 0 (min (length query) drover-transcript-search-query-limit))
                               "[ \t\n\r]+" t))
          (text (mapconcat #'drover-transcript--rust-quote words "(?:[ \\t]|\\\\[nrt])+"))
          (context (format "%s{0,%d}" unit drover-transcript-search-context)))
-    (format "(?:%s)%s*?(?P<s>%s(?i:%s)%s)"
-            (string-join starts "|") unit context text context)))
+    (concat (format "(?:%s)%s*?(?P<s>%s(?i:%s)%s)"
+                    (string-join starts "|") unit context text context)
+            (and skip (format "(?:.*?(?P<a>%s))?" skip)))))
+
+(defconst drover-transcript-search-replacement "${p}${a}\t${s}"
+  "What ripgrep prints of a match: the marks of a text skipped, a tab, the snippet.
+A JSON string holds no tab, so the first one ends the marks; a group the
+expression lacks prints nothing (see `drover-transcript-search-regexp').")
 
 (defun drover-transcript-decode-json (string)
   "Return STRING, a piece of a JSON string, with its escapes decoded.
@@ -1257,20 +1274,21 @@ holds the process running in its car."
     (process-put process 'drover-next (list program arguments (cdr batches) current))
     (setcar current process)))
 
-(defun drover-transcript-search (files starts query callback &optional limit)
+(defun drover-transcript-search (files starts query callback &optional limit skip)
   "Search FILES for QUERY said in prompts and replies, for CALLBACK.
 FILES is a list of (FILE ID UPDATED), the conversation ID each records
 and when it was last active, the newest searched first: as many at once
 as one command takes, then the next ones (see
 `drover-transcript-search-arguments-limit').  STARTS are what comes
-before the text of a prompt or reply in a record (see
-`drover-transcript-search-regexp').  CALLBACK gets lists of matches,
-plists of :id, :snippet, the text around the match, bounded and
-decoded, and :position, its line in the file, as ripgrep finds them, at
-most `drover-transcript-search-per-file' lines of a file and LIMIT
-matches in all; then `done', or (:failure MESSAGE).  Return a function
-stopping the search, after which CALLBACK is not called; nil when there
-is nothing to search or no ripgrep, and CALLBACK is never called."
+before the text of a prompt or reply in a record, and SKIP what follows
+it in a record the engine added (see `drover-transcript-search-regexp').
+CALLBACK gets lists of matches, plists of :id, :snippet, the text
+around the match, bounded and decoded, and :position, its line in the
+file, as ripgrep finds them, one a file at most, of the first of its
+lines not skipped, and LIMIT matches in all; then `done', or (:failure
+MESSAGE).  Return a function stopping the search, after which CALLBACK
+is not called; nil when there is nothing to search or no ripgrep, and
+CALLBACK is never called."
   (let ((program (and files (not (string-blank-p query)) (drover-transcript--ripgrep))))
     (when program
       (pcase-let ((`(,table . ,batches) (drover-transcript--search-files files))
@@ -1278,10 +1296,10 @@ is nothing to search or no ripgrep, and CALLBACK is never called."
         (drover-transcript--search-start
          program (list "--no-config" "--no-messages" "--color" "never"
                        "--no-heading" "--with-filename" "--null" "--line-number"
-                       "--only-matching" "--replace" "${s}"
-                       "--max-count" (number-to-string drover-transcript-search-per-file)
+                       "--only-matching" "--replace" drover-transcript-search-replacement
+                       "--max-count" (number-to-string drover-transcript-search-lines-per-file)
                        "--max-columns" "2000" "--max-columns-preview"
-                       "-e" (drover-transcript-search-regexp starts query) "--")
+                       "-e" (drover-transcript-search-regexp starts query skip) "--")
          table batches callback (or limit most-positive-fixnum) current)
         (lambda ()
           (when-let* ((process (car current)))
@@ -1291,7 +1309,9 @@ is nothing to search or no ripgrep, and CALLBACK is never called."
 
 (defun drover-transcript--search-line (process line)
   "Return the match LINE of PROCESS tells, a plist, or nil when it tells none.
-A line not of a match, an error of ripgrep, is kept for the end."
+A line not of a match, an error of ripgrep, is kept for the end.  A
+match marked skipped, or of a file that gave one, tells none: the file
+of a match given leaves the table of PROCESS."
   (let ((null (string-search "\0" line)))
     (if (not (and null
                   (eq (string-match "[0-9]+:" line (1+ null)) (1+ null))))
@@ -1301,14 +1321,19 @@ A line not of a match, an error of ripgrep, is kept for the end."
                          (cons (drover-bound-line line drover-error-length)
                                (process-get process 'drover-errors))))
           nil)
-      (when-let* ((id (gethash (substring line 0 null) (process-get process 'drover-ids))))
-        (list :id id
-              :position (string-to-number (substring line (1+ null) (1- (match-end 0))))
-              :snippet (drover-bound-line
-                        (drover-transcript-decode-json
-                         (substring line (match-end 0)
-                                    (min (length line) (+ (match-end 0) (* 8 drover-transcript-search-context)))))
-                        (* 3 drover-transcript-search-context)))))))
+      (let* ((ids (process-get process 'drover-ids))
+             (file (substring line 0 null))
+             (tab (string-search "\t" line (match-end 0))))
+        (when-let* (((eq tab (match-end 0)))
+                    (id (gethash file ids)))
+          (remhash file ids)
+          (list :id id
+                :position (string-to-number (substring line (1+ null) (1- (match-end 0))))
+                :snippet (drover-bound-line
+                          (drover-transcript-decode-json
+                           (substring line (1+ tab)
+                                      (min (length line) (+ tab 1 (* 8 drover-transcript-search-context)))))
+                          (* 3 drover-transcript-search-context))))))))
 
 (defun drover-transcript--search-deliver (process matches)
   "Give MATCHES, in order, to the callback of PROCESS, within its limit.

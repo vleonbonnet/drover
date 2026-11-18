@@ -1528,10 +1528,21 @@ elsewhere; answering, one waiting there.  The backend's :supports."
 ;;;; Searching
 
 (defconst drover-claude-code-transcripts--text-starts
-  '("\"role\":\"(?:user|assistant)\",\"content\":(?:\"|\\[\\{\"type\":\"text\",\"text\":\")")
+  '("\"type\":\"user\",(?:\"[A-Za-z]+\":\"[^\"\\\\]*\",)*\"message\":\\{\"role\":\"user\",\"content\":(?:\"|\\[\\{\"type\":\"text\",\"text\":\")"
+    "\"type\":\"message\",\"role\":\"assistant\",\"content\":(?:\"|\\[\\{\"type\":\"text\",\"text\":\")")
   "What begins the text of a prompt or reply in a transcript, for ripgrep.
-A message's role, then its content: a string, or a block of text first.
-Tool calls, tool results and thinking begin otherwise.")
+A record of the user, then its message's role and content, a string or
+a block of text first; a message of the assistant, its type then its
+role and content.  Tool calls, tool results and thinking begin
+otherwise, and so do the requests Claude Code records whole
+\(api-request-blob), their messages without a record's type before them
+nor a type of their own: the first holds the instructions of CLAUDE.md
+the CLI gives the model, as the user's.")
+
+(defconst drover-claude-code-transcripts--text-skip "\"isMeta\":true"
+  "What follows the text of a record Claude Code added as the user, for ripgrep.
+Its notes (isMeta), such as the caveat of a local command, the reminders
+it gives the model and the text of a skill invoked.")
 
 (defun drover-claude-code-transcripts--search-text (session)
   "Return the first and last prompts of the conversation of SESSION, or nil.
@@ -1566,7 +1577,8 @@ its engine and identifier.  The backend's :search."
                                (mapcar (lambda (match) (append (list :engine 'claude-code) match))
                                        result)
                              result)))
-       (plist-get scope :limit)))))
+       (plist-get scope :limit)
+       drover-claude-code-transcripts--text-skip))))
 
 ;;;; Installing
 

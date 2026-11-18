@@ -124,6 +124,14 @@ As the API requests Claude Code records."
         (setq left (- left size))))
     lines))
 
+(defun drover-fixture-claude-request (id role text)
+  "Return a message of ROLE saying TEXT of an API request of conversation ID.
+As Claude Code 2.1.316 records a request whole: the first message of
+the user holds the instructions of CLAUDE.md the CLI gives the model."
+  (drover-fixture-line :type "api-request-blob" :sessionId id
+                       :hash (secure-hash 'sha256 (concat id role text))
+                       :message (list :role role :content (vector (list :type "text" :text text)))))
+
 (cl-defun drover-fixture-claude (id directory &key (start 1790000000.0) (prompt "Fix the login redirect")
                                     (reply "The redirect keeps the page.") ai-title custom-title
                                     (model "claude-opus-5-5") effort (mode "default") (entrypoint "cli")
@@ -417,6 +425,16 @@ the tokens counted and what it tells the model as the developer."
   "Return an event of TYPE Codex records at TIME, with MEMBERS, a plist."
   (drover-fixture-line :timestamp (drover-fixture-time time) :type "event_msg"
                        :payload (append (list :type type) members)))
+
+(defun drover-fixture-codex-message (time role text)
+  "Return a message of ROLE saying TEXT Codex records at TIME, as a turn's item.
+With its identifier, as Codex 0.165 records it, and no event beside it."
+  (drover-fixture-line :timestamp (drover-fixture-time time) :type "response_item"
+                       :payload (list :type "message" :id (format "msg_%d" (truncate time)) :role role
+                                      :content (vector (list :type (if (equal role "assistant")
+                                                                       "output_text"
+                                                                     "input_text")
+                                                             :text text)))))
 
 (cl-defun drover-fixture-codex-tokens (time &key (input 30000) (cached 20000) (output 400) window)
   "Return the count of tokens Codex records at TIME of its last request.

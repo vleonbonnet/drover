@@ -693,12 +693,15 @@ The backend's :session."
 ;;;; Searching
 
 (defconst drover-codex-rollouts--text-starts
-  '("\"type\":\"(?:user_message|agent_message)\",\"message\":\""
-    "\"type\":\"message\",(?:\"id\":\"[^\"]*\",)?\"role\":\"(?:user|assistant)\",\"content\":\\[\\{\"type\":\"(?:input_text|output_text)\",\"text\":\"")
+  '("(?:\"type\":\"user_message\",\"message\":\"|\"type\":\"message\",(?:\"id\":\"[^\"]*\",)?\"role\":\"user\",\"content\":\\[\\{\"type\":\"input_text\",\"text\":\")(?P<p>(?:[ \\t]|\\\\[nrt])*(?:<[a-z_]|# AGENTS\\.md instructions))?"
+    "\"type\":\"agent_message\",\"message\":\"|\"type\":\"message\",(?:\"id\":\"[^\"]*\",)?\"role\":\"assistant\",\"content\":\\[\\{\"type\":\"output_text\",\"text\":\"")
   "What begins the text of a prompt or reply in a rollout, for ripgrep.
 The events of a prompt or reply, and the messages of the user or the
 assistant of a turn's items, as Codex records them: tool calls, their
-outputs and reasoning begin otherwise.")
+outputs and reasoning begin otherwise.  The group `p' marks a message
+of the user Codex added itself, its context and the instructions of
+AGENTS.md, as `drover-codex--context-regexp' tells them (see
+`drover-transcript-search-regexp').")
 
 (defun drover-codex-rollouts--search-text (session)
   "Return the first prompt of the conversation of SESSION, or nil.
