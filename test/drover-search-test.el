@@ -107,6 +107,49 @@ In STATE, by default a search made now."
     (should (equal (drover-search-test-ids "drover session") '("c" "a")))
     (should (equal (drover-search-test-ids "c1") '("c1")))))
 
+(ert-deftest drover-search-test-query-what-sessions-tell ()
+  "Phrases, OR, exclusion, groups and fields apply to what sessions tell."
+  (drover-search-test-with (cons (drover-test-session "r" :status 'idle :updated 50.0 :project "drover"
+                                                      :host "core")
+                                 (drover-search-test-sessions))
+    (should (equal (drover-search-test-ids "\"zebra tests\"") '("b")))
+    (should-not (drover-search-test-ids "\"tests zebra\""))
+    (should (equal (drover-search-test-ids "\"zebra   CROSSING\"") '("c")))
+    (should (equal (drover-search-test-ids "spyglass OR sidebar") '("b" "c")))
+    (should (equal (drover-search-test-ids "zebra (spyglass OR main)") '("b")))
+    ;; What a session tells excludes it; telling nothing of a word, what
+    ;; was said in it decides, as the backends search it.
+    (should-not (drover-search-test-ids "zebra -tests"))
+    (should-not (drover-search-test-ids "-spyglass"))
+    ;; Fields of the record.
+    (should (equal (drover-search-test-ids "project:drover") '("c" "a" "r")))
+    (should (equal (drover-search-test-ids "project:drover -branch:main") '("c" "r")))
+    (should (equal (drover-search-test-ids "status:wait") '("b")))
+    (should (equal (drover-search-test-ids "host:core") '("r")))
+    (should (equal (drover-search-test-ids "host:local project:spy") '("b")))
+    (should (equal (drover-search-test-ids "zebra project:drover") '("c")))
+    (should (equal (drover-search-test-ids "archived:no harness:fake status:done") '("c")))
+    (should-not (drover-search-test-ids "archived:yes"))
+    ;; Fields inside OR cannot apply: nothing, and the status says why.
+    (should-not (drover-search-test-ids "(project:drover OR zebra)"))
+    (let ((state (drover-search--build)))
+      (setf (drover-search--state-query state) "zebra OR project:drover")
+      (should (string-match-p "fields such as project:drover apply to the whole query"
+                              (drover-search--status-text state))))))
+
+(ert-deftest drover-search-test-query-with-hits ()
+  "What the backends found joins what sessions tell, unless they exclude it."
+  (drover-search-test-with (drover-search-test-sessions)
+    (let ((state (drover-search--build)))
+      (puthash '(fake . "a") (list :snippet "the okapi" :count 1) (drover-search--state-hits state))
+      (puthash '(fake . "b") (list :snippet "" :count 1) (drover-search--state-hits state))
+      (should (equal (drover-search-test-ids "okapi" state) '("b" "a")))
+      ;; b tells of tests: excluded, whatever was said.
+      (should (equal (drover-search-test-ids "okapi -tests" state) '("a")))
+      (should (equal (drover-search-test-ids "okapi project:drover" state) '("a")))
+      ;; c tells of zebra itself.
+      (should (equal (drover-search-test-ids "zebra OR okapi" state) '("b" "c" "a"))))))
+
 (ert-deftest drover-search-test-hidden-subagents ()
   "A subagent shows when it matches and no session above it does, whatever the mode."
   (drover-search-test-with
@@ -506,7 +549,8 @@ The index does not hold them: no session changed tells it."
       (drover-search-test-candidates query))
     (should-not drover-search-test-runs)
     (should (drover-search-test-wait (lambda () drover-search-test-runs)))
-    (should (equal (mapcar #'car drover-search-test-runs) '("zebr")))
+    ;; The word typed last is a prefix, as it is being typed.
+    (should (equal (mapcar #'car drover-search-test-runs) '("zebr*")))
     ;; Matches arrive, the candidates follow.
     (let ((first (car drover-search-test-runs)))
       (funcall (nth 1 first) (list (list :key '(fake . "a") :snippet "a zebra said")))
@@ -519,7 +563,7 @@ The index does not hold them: no session changed tells it."
       (funcall (nth 1 first) (list (list :key '(fake . "c1") :snippet "zebra")))
       (should-not (gethash '(fake . "c1") (drover-search--state-hits drover-search--current)))
       (should (drover-search-test-wait (lambda () (= (length drover-search-test-runs) 2))))
-      (should (equal (car (car drover-search-test-runs)) "zebra"))
+      (should (equal (car (car drover-search-test-runs)) "zebra*"))
       ;; A text the match lacks forgets it.
       (drover-search-test-candidates "zebu")
       (should-not (gethash '(fake . "a") (drover-search--state-hits drover-search--current)))
@@ -766,6 +810,26 @@ hides what the conversation said after it."
                        (list drover-search-test-claude-a "Feed the dingo now")))
         (should (equal (assoc drover-search-test-codex-a found)
                        (list drover-search-test-codex-a "Walk the dingo")))))))
+
+(ert-deftest drover-search-test-ripgrep-whole-conversations ()
+  "A query of several terms holds of a conversation as a whole: words of different messages, OR, exclusion."
+  (skip-unless (executable-find "rg"))
+  (drover-search-test-with-transcripts
+    (let ((ids (lambda (query) (sort (mapcar #'car (drover-search-test-text query)) #'string<))))
+      ;; Claude Code's A said quokka in its prompt, narwhal in its reply.
+      (should (equal (drover-search-test-text "quokka narwhal")
+                     (list (list drover-search-test-claude-a "Teach the quokka to say \"hello\""))))
+      (should (equal (drover-search-test-text "narwhal \"the QUOKKA\"")
+                     (list (list drover-search-test-claude-a "The narwhal agrees: done."))))
+      (should-not (drover-search-test-text "quokka -narwhal"))
+      (should-not (drover-search-test-text "\"quokka narwhal\""))
+      (should (equal (funcall ids "quokka OR axolotl")
+                     (sort (list drover-search-test-claude-a drover-search-test-codex-a) #'string<)))
+      (should (equal (funcall ids "(quokka OR axolotl) -teach")
+                     (list drover-search-test-codex-a)))
+      ;; Excluded alone: those lacking it, B having said it in tool calls only.
+      (should (equal (funcall ids "-narwhal")
+                     (sort (list drover-search-test-claude-b drover-search-test-codex-a) #'string<))))))
 
 (ert-deftest drover-search-test-ripgrep-huge-lines ()
   "A line of 500 kB, a match at its end, gives a snippet bounded."

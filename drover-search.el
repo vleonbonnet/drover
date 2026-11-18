@@ -31,16 +31,23 @@
 ;; list; C-l shows its row in the list, showing first what the list hid
 ;; of it.
 ;;
-;; A session matches when every word typed is in its title, summary,
-;; project, branch, or in the texts its backends tell for searching
+;; A session matches when it holds what the text typed asks, read as a
+;; query (see drover-query.el): words and "quoted phrases" it must all
+;; hold, OR between them for either, a leading - to exclude a term or
+;; group, parentheses to group, and fields of its record, such as
+;; project:drover or -status:idle, that apply to the whole query.  A
+;; term holds when anything of the session holds it: its title, summary,
+;; project, branch, or the texts its backends tell for searching
 ;; (:search-text), such as the first and last prompts of a Claude Code
-;; conversation: that much is in memory, matched as each key is typed.
-;; Backends may search more, what was said in their conversations, with
-;; :search: once typing pauses, each is asked in the background, the
-;; run before cancelled; the sessions their matches name join those
-;; offered, a snippet of the match in their annotation.  Claude Code's
-;; transcripts and Codex's rollouts are searched with ripgrep (see
-;; `drover-transcript-search').
+;; conversation, which are in memory, matched as each key is typed; or
+;; what was said in it, which backends search with :search once typing
+;; pauses, each asked in the background, the run before cancelled.
+;; Each evaluates the query over each of its conversations as a whole;
+;; the sessions their matches name join those offered, a snippet of the
+;; match in their annotation, unless what the session tells excludes
+;; them.  Claude Code's transcripts and Codex's rollouts are searched
+;; with ripgrep (see `drover-transcript-search'), OpenCode's sessions by
+;; its service.
 ;;
 ;; The candidates work with any completion UI: a completion table
 ;; matched by a completion style of its own, `drover-search', which the
@@ -56,6 +63,7 @@
 (require 'drover-keys)
 (require 'drover-model)
 (require 'opencode-look)
+(require 'drover-query)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
@@ -74,8 +82,9 @@ Each key typed cancels the search running and starts the wait anew."
   :group 'drover-search)
 
 (defcustom drover-search-text-minimum 3
-  "Characters a search needs before the backends search what was said.
-Shorter, it matches what the list tells of sessions alone."
+  "Characters of words a search needs before the backends search what was said.
+Those of the words and phrases it looks for, its fields and operators
+not counted.  Shorter, it matches what the list tells of sessions alone."
   :type 'natnum
   :group 'drover-search)
 
@@ -139,10 +148,13 @@ whatever this says."
   (fetched 0 :documentation "The `drover-fetched-serial' its entries were made at.")
   (minibuffer nil :documentation "The minibuffer reading the search, or nil.")
   (query nil :documentation "The text typed last, trimmed.")
-  (words nil :documentation "The words of QUERY, downcased.")
+  (words nil :documentation "The words of what QUERY looks for, downcased, to highlight.")
+  (parsed-query nil :documentation "The text PARSED is the reading of.")
+  (parsed nil :documentation "The reading of PARSED-QUERY, see `drover-search--parsed'.")
+  (typing t :documentation "Non-nil when its query is typed, its last word a prefix.")
   (generation 0 :documentation "The number of the latest run of the backends.")
   (runs nil :documentation "The backends searching, an alist (BACKEND . CANCEL).")
-  (text-query nil :documentation "The text the backends were asked for last.")
+  (text-query nil :documentation "The query the backends were asked for last, as written for them.")
   (hits nil :documentation "Hash table of the matches of text by session key.
 Each is a plist of :snippet, :count, :backend and :position.")
   (unresolved nil :documentation "Matches naming sessions it does not offer, newest first.
@@ -331,29 +343,76 @@ archived ones dimmed."
        :fetched serial
        :hits (make-hash-table :test #'equal)))))
 
-(defun drover-search--words (query)
-  "Return the words of QUERY, downcased."
-  (split-string (downcase (or query "")) "[ \t\n]+" t))
+(defun drover-search--parsed (state query)
+  "Return QUERY read as a query (see `drover-query-parse').
+As typed, the word it ends in a prefix, unless STATE is searched by a
+program.  The reading is kept in STATE for the next time it is asked,
+its fields' values made what `drover-search--filter-p' matches."
+  (let ((query (or query "")))
+    (unless (equal query (drover-search--state-parsed-query state))
+      (let ((parsed (drover-query-parse query (drover-search--state-typing state))))
+        (setf (drover-search--state-parsed state)
+              (plist-put parsed :filters
+                         (mapcar (pcase-lambda (`(,name ,value ,negated))
+                                   (list name (regexp-quote (downcase value)) negated))
+                                 (plist-get parsed :filters)))
+              (drover-search--state-parsed-query state) query)))
+    (drover-search--state-parsed state)))
 
-(defun drover-search--match-p (entry words)
-  "Return non-nil when every one of WORDS is in what ENTRY tells."
-  (let ((haystack (drover-search--entry-haystack entry))
-        (match t))
-    (while (and match words)
-      (setq match (string-search (car words) haystack)
-            words (cdr words)))
-    (and match t)))
+(defun drover-search--filter-p (session filter)
+  "Return non-nil when SESSION passes FILTER, (NAME REGEXP NEGATED).
+NAME is one of `drover-query-fields', REGEXP what its value must
+contain, case ignored, but for `status', which it must begin, and
+`archived', yes or no.  NEGATED inverts it."
+  (pcase-let ((`(,name ,regexp ,negated) filter))
+    (let* ((case-fold-search t)
+           (holds
+            (pcase name
+              ("harness" (let ((harness (drover-session-harness session)))
+                           (or (string-match-p regexp (symbol-name harness))
+                               (string-match-p regexp (drover-harness-name harness)))))
+              ("project" (when-let* ((project (drover-session-view-project session)))
+                           (string-match-p regexp project)))
+              ("branch" (when-let* ((branch (drover-session-branch session)))
+                          (string-match-p regexp branch)))
+              ("host" (let ((host (drover-session-host session)))
+                        (or (and (null host) (string-match-p regexp "local"))
+                            (string-match-p regexp (drover-host-label host)))))
+              ("status" (eq (string-match-p regexp (symbol-name (drover-session-status session))) 0))
+              ("archived" (eq (and (drover-session-archived-p session) t)
+                              (and (string-match-p "\\`\\(?:yes\\|y\\|true\\|t\\|1\\)\\'" regexp) t))))))
+      (if negated (not holds) (and holds t)))))
+
+(defun drover-search--admits-p (entry parsed)
+  "Return what ENTRY's session tells of PARSED, read as by `drover-search--parsed'.
+Nil when it cannot match: a field filters it out, or what it tells
+excludes it; t when what it tells matches; `unknown' when what was said
+in it decides, as the backends search it."
+  (let ((session (drover-search--entry-session entry))
+        (filters (plist-get parsed :filters))
+        (passes t))
+    (while (and filters passes)
+      (setq passes (drover-search--filter-p session (car filters))
+            filters (cdr filters)))
+    (and passes
+         (if-let* ((expression (plist-get parsed :expression)))
+             (drover-query-in expression (drover-search--entry-haystack entry))
+           t))))
 
 (defun drover-search-entries (state query)
   "Return the entries of STATE matching QUERY, in the list's order.
-An entry matches when every word of QUERY is in what it tells, or when
-a backend found QUERY in what its session said (see the hits of
-STATE).  A subagent shows when it matches and no session above it
-does, at the top of a tree of its own or not, so that a matching parent
-does not bring every subagent of its.  Without words, the sessions at
-the top of their trees.  It allocates nothing but the list it returns,
-as it runs at every key typed."
-  (let* ((words (drover-search--words query))
+QUERY is read as `drover-query-parse' tells: an entry matches when its
+session passes the query's fields, and what its session tells matches
+the rest, or might and a backend found the session matching in what was
+said (see the hits of STATE).  A subagent shows when it matches and no
+session above it does, at the top of a tree of its own or not, so that
+a matching parent does not bring every subagent of its.  Without a
+query, the sessions at the top of their trees; with one it cannot read,
+none.  It allocates nothing but the list it returns, as it runs at every
+key typed."
+  (let* ((parsed (drover-search--parsed state query))
+         (blank (not (or (plist-get parsed :expression) (plist-get parsed :filters))))
+         (failed (plist-get parsed :error))
          (hits (drover-search--state-hits state))
          (any-hits (> (hash-table-count hits) 0))
          (entries (drover-search--state-entries state))
@@ -361,14 +420,15 @@ as it runs at every key typed."
          (matched (make-vector 64 nil))
          (index 0)
          (result nil))
-    (while (< index count)
+    (while (and (< index count) (not failed))
       (let ((entry (aref entries index)))
-        (if (null words)
+        (if blank
             (when (drover-search--entry-visible entry)
               (push entry result))
           (let* ((depth (min 63 (drover-search--entry-depth entry)))
-                 (match (or (drover-search--match-p entry words)
-                            (and any-hits (gethash (drover-search--entry-key entry) hits) t)))
+                 (admits (drover-search--admits-p entry parsed))
+                 (match (or (eq admits t)
+                            (and admits any-hits (gethash (drover-search--entry-key entry) hits) t)))
                  (above nil)
                  (level 0))
             (while (and (not above) (< level depth))
@@ -379,6 +439,15 @@ as it runs at every key typed."
               (push entry result)))))
       (setq index (1+ index)))
     (nreverse result)))
+
+(defun drover-search--text (state query)
+  "Return what the backends search for QUERY, typed in STATE, a string.
+The query without its fields, written as `drover-query-string' does;
+empty when it holds no term or cannot be read."
+  (let ((parsed (drover-search--parsed state query)))
+    (if (plist-get parsed :error)
+        ""
+      (drover-query-string (plist-get parsed :expression)))))
 
 (defun drover-search--candidates (query)
   "Return the names of the candidates of the search in progress for QUERY.
@@ -448,36 +517,51 @@ backend searching elsewhere, as a peer's, to name them there."
     (cancel-timer (drover-search--state-delay-timer state))
     (setf (drover-search--state-delay-timer state) nil)))
 
-(defun drover-search--keep-hits (state query)
-  "Keep the hits of STATE whose snippets hold QUERY, a text typed further.
-Those no longer matching are forgotten."
-  (let ((hits (drover-search--state-hits state))
-        (needle (downcase query))
+(defun drover-search--keep-hits (state text)
+  "Keep the hits of STATE whose snippets hold TEXT, a query typed further.
+TEXT is written for the backends.  When it is terms all held side by
+side, a hit whose snippet holds each stays, so that typing a word on
+does not blank what the shorter one found; the others are forgotten,
+all of them for any other query."
+  (let* ((expression (plist-get (drover-query-parse text) :expression))
+         (terms (pcase expression
+                  (`(term . ,_) (list expression))
+                  (`(and . ,items) (and (seq-every-p (lambda (item) (eq (car item) 'term)) items) items))))
+         (hits (drover-search--state-hits state))
         (gone nil))
     (maphash (lambda (key hit)
-               (unless (and (not (string-empty-p needle))
-                            (string-search needle (downcase (or (plist-get hit :snippet) ""))))
-                 (push key gone)))
+               (let ((snippet (downcase (or (plist-get hit :snippet) ""))))
+                 (unless (and terms (seq-every-p (lambda (term) (drover-query-term-in term snippet)) terms))
+                   (push key gone))))
              hits)
     (dolist (key gone)
       (remhash key hits))))
 
 (defun drover-search--typed (state query)
-  "Note that QUERY is typed for STATE, asking the backends anew once it pauses."
+  "Note that QUERY is typed for STATE, asking the backends anew once it pauses.
+They are asked for what QUERY looks for in what was said, its fields
+left out (see `drover-search--text'), once that changed."
   (let ((query (string-trim (or query ""))))
     (unless (equal query (drover-search--state-query state))
       (setf (drover-search--state-query state) query
-            (drover-search--state-words state) (drover-search--words query))
-      (unless (equal query (drover-search--state-text-query state))
+            (drover-search--state-words state)
+            (drover-query-words (plist-get (drover-search--parsed state query) :expression)))
+      (let ((text (drover-search--text state query)))
+        (unless (equal text (drover-search--state-text-query state))
         (drover-search--cancel state)
-        (drover-search--keep-hits state query)
+          (drover-search--keep-hits state text)
         (setf (drover-search--state-text-query state) nil)
-        (when (and (>= (length query) drover-search-text-minimum) (drover-search-sources))
+          (when (and (>= (apply #'+ (mapcar (lambda (term) (length (drover-query-term-text term)))
+                                            (drover-query-terms
+                                             (plist-get (drover-search--parsed state query) :expression))))
+                         drover-search-text-minimum)
+                     (not (string-empty-p text))
+                     (drover-search-sources))
           (let ((generation (drover-search--state-generation state)))
             (setf (drover-search--state-delay-timer state)
                   (run-with-timer drover-search-delay nil
-                                  #'drover-search--start-later generation))))
-        (drover-search--show-status state)))))
+                                    #'drover-search--start-later generation))))))
+      (drover-search--show-status state))))
 
 (defun drover-search--start-later (generation)
   "Ask the backends for the search in progress, unless typed on since GENERATION."
@@ -485,13 +569,16 @@ Those no longer matching are forgotten."
     (when-let* ((state (drover-search--live)))
       (when (= generation (drover-search--state-generation state))
         (setf (drover-search--state-delay-timer state) nil)
-        (drover-search--start state (drover-search--state-query state))))))
+        (drover-search--start state (drover-search--text state (drover-search--state-query state)))))))
 
-(defun drover-search--start (state query)
-  "Ask every backend searching what was said for QUERY, for STATE.
-Those failed before in this search are not asked again."
+(defun drover-search--start (state text)
+  "Ask every backend searching what was said for TEXT, for STATE.
+TEXT is a query as `drover-query-string' writes it, without fields:
+each backend evaluates it over each of its conversations.  Those failed
+before in this search are not asked again; none is asked for an empty
+TEXT."
   (drover-search--cancel state)
-  (setf (drover-search--state-text-query state) query
+  (setf (drover-search--state-text-query state) text
         (drover-search--state-received state) 0
         (drover-search--state-asked state) 0
         (drover-search--state-unresolved state) nil
@@ -499,14 +586,14 @@ Those failed before in this search are not asked again."
   (let ((generation (drover-search--state-generation state))
         (scope (drover-search--scope state)))
     (setf (drover-search--state-starting state) t)
-    (dolist (backend (drover-search-sources))
+    (dolist (backend (and (not (string-empty-p text)) (drover-search-sources)))
       (unless (assq backend (drover-search--state-failed state))
         ;; Listed first, so that a backend answering at once, before it
         ;; returns, ends its run.
         (let ((run (list backend)))
           (push run (drover-search--state-runs state))
           (let ((cancel (condition-case err
-                            (funcall (drover-backend-property backend :search) query scope
+                            (funcall (drover-backend-property backend :search) text scope
                                      (drover-search--receiver state generation backend))
                           (error (drover-search--fail state backend (drover-error-message err))
                                  nil))))
@@ -682,11 +769,13 @@ answer."
 
 (defun drover-search--status-text (state)
   "Return how the backends search for STATE, for the minibuffer, or nil.
-How many sessions they found, how many matches name sessions drover
-does not list, whether older or archived sessions are being fetched,
-and which backends failed."
+Why the query typed cannot be read, how many sessions they found, how
+many matches name sessions drover does not list, whether older or
+archived sessions are being fetched, and which backends failed."
   (let ((parts nil)
         (hits (hash-table-count (drover-search--state-hits state))))
+    (when-let* ((failure (plist-get (drover-search--parsed state (drover-search--state-query state)) :error)))
+      (push failure parts))
     (cond ((drover-search--state-runs state)
            (push (if (> hits 0) (format "%d in text, searching…" hits) "searching text…") parts))
           ((and (drover-search--state-text-query state) (> (drover-search--state-asked state) 0))
@@ -863,7 +952,8 @@ snippet of a match of what was said, else why it has its status."
                                                          now)
                                                         3 nil t)
                                             'drover-dim)
-                               (cond (hit (concat "  " (drover-search--snippet hit words)))
+                               (cond ((and hit (not (string-empty-p (or (plist-get hit :snippet) ""))))
+                                      (concat "  " (drover-search--snippet hit words)))
                                      (summary
                                       (concat "  " (propertize (or (drover-bound-line
                                                                     summary drover-search-snippet-length)
@@ -1009,13 +1099,20 @@ Every session is offered, live, archived and older, whatever the list
 shows, in the list's order and groups, the live ones first in each
 group.  The archived and older sessions are those the backends fetch:
 the first search fetches them, and drover keeps them from then on (see
-`drover-search-fetch-age').  Those matching every word typed in their
-title, summary, project, branch, or texts their backends tell, such as
-the prompts of Claude Code's conversations, show as you type; once
-typing pauses, the backends that can search what was said in their
-conversations, those of `drover-search-sources', add the sessions
-where they found the text, a snippet beside them.  Subagents show only
-when they match and no session above them does.
+`drover-search-fetch-age').  The text typed is a query: words and
+\"quoted phrases\" a session must all hold, OR between them for
+either, a leading - excluding a term or group, parentheses grouping,
+and fields of the session's record applying to the whole query:
+harness:, project:, branch:, host: (local for this host's), status:
+and archived: yes or no, such as project:drover -status:idle.  Those
+matching by their title, summary, project, branch, or texts their
+backends tell, such as the prompts of Claude Code's conversations,
+show as you type; once typing pauses, the backends that can search
+what was said in their conversations, those of
+`drover-search-sources', add the sessions where they found the query
+held, its words in any of their prompts or replies, a snippet beside
+them.  Subagents show only when they match and no session above them
+does.
 
 RET opens the session chosen as RET in the list does, in another
 window with a prefix argument OTHER-WINDOW;
@@ -1067,28 +1164,33 @@ have been fetched among them."
 
 (defun drover-search-text (query callback)
   "Search what was said in the sessions for QUERY, then call CALLBACK.
-Every backend of `drover-search-sources' is asked, as `drover-search'
-asks them, at once.  CALLBACK gets a plist, once all of them finished
-and the older and archived sessions being fetched arrived,
-`drover-search-fetch-timeout' seconds at most: :sessions, a list of
-\(SESSION SNIPPET COUNT) in the list's order; :outside, how many matches
-named sessions drover does not list; :failed, an alist (BACKEND .
-MESSAGE).  Return a function stopping the search, after which CALLBACK
+QUERY is read as `drover-search' reads it, its last word whole.  Every
+backend of `drover-search-sources' is asked, as `drover-search' asks
+them, at once; the sessions their matches name are those the query's
+fields and what they tell do not exclude.  CALLBACK gets a plist, once
+all of them finished and the older and archived sessions being fetched
+arrived, `drover-search-fetch-timeout' seconds at most: :sessions, a
+list of (SESSION SNIPPET COUNT) in the list's order; :outside, how
+many matches named sessions drover does not list; :failed, an alist
+\(BACKEND . MESSAGE).  Return a function stopping the search, after which CALLBACK
 is not called.  One search runs at a time: a new one stops the one
 before."
   (when-let* ((old (drover-search--live drover-search--programmatic)))
     (drover-search--finish old))
   (drover-search--fetch)
   (let ((state (drover-search--build)))
-    (setf (drover-search--state-done state)
+    (setf (drover-search--state-typing state) nil
+          (drover-search--state-done state)
           (lambda (state)
             (when (eq state drover-search--programmatic)
               (setq drover-search--programmatic nil)
               (drover-search--follow-changes))
             (let ((hits (drover-search--state-hits state))
+                  (parsed (drover-search--parsed state (string-trim query)))
                   (found nil))
               (seq-doseq (entry (drover-search--state-entries state))
-                (when-let* ((hit (gethash (drover-search--entry-key entry) hits)))
+                (when-let* ((hit (gethash (drover-search--entry-key entry) hits))
+                            ((drover-search--admits-p entry parsed)))
                   (push (list (drover-search--entry-session entry) (plist-get hit :snippet)
                               (plist-get hit :count))
                         found)))
@@ -1099,7 +1201,7 @@ before."
     (drover-search--follow-changes)
     ;; Before the backends are asked, which may all answer at once.
     (drover-search--await-fetch state)
-    (drover-search--start state (string-trim query))
+    (drover-search--start state (drover-search--text state (string-trim query)))
     ;; Held through a link: the caller keeps it, and Emacs prints it, as
     ;; the server prints a value evaluated, whole otherwise.
     (let ((link (drover-link state)))

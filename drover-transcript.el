@@ -50,6 +50,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'drover-core)
+(require 'drover-query)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
@@ -1279,18 +1280,37 @@ holds the process running in its car."
 FILES is a list of (FILE ID UPDATED), the conversation ID each records
 and when it was last active, the newest searched first: as many at once
 as one command takes, then the next ones (see
-`drover-transcript-search-arguments-limit').  STARTS are what comes
+`drover-transcript-search-arguments-limit').  QUERY is read as
+`drover-query-parse' tells, over each conversation as a whole: a term
+holds when one of its prompts or replies holds it, its words in order
+across any blanks, as a substring, case ignored.  STARTS are what comes
 before the text of a prompt or reply in a record, and SKIP what follows
 it in a record the engine added (see `drover-transcript-search-regexp').
 CALLBACK gets lists of matches, plists of :id, :snippet, the text
-around the match, bounded and decoded, and :position, its line in the
-file, as ripgrep finds them, one a file at most, of the first of its
-lines not skipped, and LIMIT matches in all; then `done', or (:failure
-MESSAGE).  Return a function stopping the search, after which CALLBACK
-is not called; nil when there is nothing to search or no ripgrep, and
-CALLBACK is never called."
-  (let ((program (and files (not (string-blank-p query)) (drover-transcript--ripgrep))))
+around the match of the first term held, bounded and decoded, and
+:position, its line in the file, one a file at most, and LIMIT matches
+in all; then `done', or (:failure MESSAGE).  A conversation matching
+only by what it lacks has an empty snippet and no position.  A query of
+one term streams its matches as ripgrep finds them; any other searches
+each term, ripgrep in a process of each, then tells the conversations
+matching, the newest first.  Return a function stopping the search,
+after which CALLBACK is not called; nil when there is nothing to search
+or no ripgrep, and CALLBACK is never called."
+  (let* ((parsed (drover-query-parse query))
+         (expression (and (not (plist-get parsed :error)) (plist-get parsed :expression)))
+         (program (and files expression (drover-transcript--ripgrep))))
     (when program
+      (if-let* ((term (drover-query-single-term expression)))
+          (drover-transcript--search-run program files starts (drover-query-term-text term) skip
+                                         callback (or limit most-positive-fixnum))
+        (drover-transcript--search-terms program files starts expression skip callback
+                                         (or limit most-positive-fixnum))))))
+
+(defun drover-transcript--search-run (program files starts text skip callback limit)
+  "Search FILES for TEXT with PROGRAM, ripgrep, for CALLBACK.
+TEXT is words matched in order across any blanks; STARTS, SKIP,
+CALLBACK and LIMIT are as `drover-transcript-search' takes them.
+Return the function stopping it."
       (pcase-let ((`(,table . ,batches) (drover-transcript--search-files files))
                   (current (list nil)))
         (drover-transcript--search-start
@@ -1299,13 +1319,73 @@ CALLBACK is never called."
                        "--only-matching" "--replace" drover-transcript-search-replacement
                        "--max-count" (number-to-string drover-transcript-search-lines-per-file)
                        "--max-columns" "2000" "--max-columns-preview"
-                       "-e" (drover-transcript-search-regexp starts query skip) "--")
-         table batches callback (or limit most-positive-fixnum) current)
+                   "-e" (drover-transcript-search-regexp starts text skip) "--")
+     table batches callback limit current)
         (lambda ()
           (when-let* ((process (car current)))
             (process-put process 'drover-callback nil)
             (when (process-live-p process)
-              (delete-process process))))))))
+          (delete-process process))))))
+
+(defun drover-transcript--search-terms (program files starts expression skip callback limit)
+  "Search FILES for EXPRESSION, a query of several terms, for CALLBACK.
+Each term of EXPRESSION is searched in every file, in a run of PROGRAM,
+ripgrep, of its own, all at once; once each ended, the conversations
+EXPRESSION holds of, the newest first, go to CALLBACK, LIMIT at most,
+each with the snippet of the first term it holds that a matching one
+holds rather than lacks.  A run failing fails the search, the others
+stopped.  STARTS, SKIP and CALLBACK are as `drover-transcript-search'
+takes them.  Return the function stopping it."
+  (let* ((terms (drover-query-terms expression))
+         (found (make-hash-table :test #'equal))
+         (left (length terms))
+         (cancels nil)
+         (ended nil))
+    (cl-labels
+        ((stop ()
+           (setq ended t)
+           (dolist (cancel cancels)
+             (funcall cancel)))
+         (finish ()
+           (setq ended t)
+           (let ((positives (drover-query-positives expression))
+                 (matches nil))
+             (dolist (file (sort (copy-sequence files) :key (lambda (file) (or (nth 2 file) 0)) :reverse t))
+               (let ((held (gethash (nth 1 file) found)))
+                 (when (and (length< matches limit)
+                            (drover-query-evaluate
+                             expression (lambda (term) (assoc (drover-query-term-key term) held))))
+                   (let ((hit (seq-some (lambda (term) (alist-get (drover-query-term-key term) held nil nil #'equal))
+                                        positives)))
+                     (push (list :id (nth 1 file)
+                                 :snippet (or (plist-get hit :snippet) "")
+                                 :position (plist-get hit :position))
+                           matches)))))
+             (when matches
+               (funcall callback (nreverse matches)))
+             (funcall callback 'done)))
+         (receiver (term)
+           (lambda (result)
+             (unless ended
+               (cond
+                ((eq result 'done)
+                 (when (zerop (cl-decf left))
+                   (finish)))
+                ((and (consp result) (eq (car result) :failure))
+                 (stop)
+                 (funcall callback result))
+                ((listp result)
+                 (dolist (match result)
+                   (let ((id (plist-get match :id)))
+                     (push (cons (drover-query-term-key term) match) (gethash id found))))))))))
+      (dolist (term terms)
+        (unless ended
+          (push (drover-transcript--search-run program files starts (drover-query-term-text term) skip
+                                               (receiver term) most-positive-fixnum)
+                cancels)))
+      (lambda ()
+        (unless ended
+          (stop))))))
 
 (defun drover-transcript--search-line (process line)
   "Return the match LINE of PROCESS tells, a plist, or nil when it tells none.

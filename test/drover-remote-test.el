@@ -3584,6 +3584,19 @@ too, are listed here once it is connected."
       (should-not (plist-get result :failed))
       (should-not (drover-remote-test-calls "search")))))
 
+(ert-deftest drover-remote-test-search-phrase-peer ()
+  "A peer whose drover searches a phrase is sent a query of one term, and no other, saying why."
+  (skip-unless (executable-find "rg"))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-searching dir "DROVER_AGENT_CAPS=actions,bye,grant,mirror,opencode,search")
+    (let ((result (drover-remote-test-search "\"the capybara\"")))
+      (should (member "ses_a" (mapcar #'cadr (drover-remote-test-found result))))
+      (should (member '("search" "the capybara" :false) (drover-remote-test-calls "search"))))
+    (let ((result (drover-remote-test-search "capybara -swims")))
+      (should-not (plist-get result :sessions))
+      (should (string-match-p "older drover" (alist-get 'remote:agent (plist-get result :failed))))
+      (should (length= (drover-remote-test-calls "search") 1)))))
+
 ;;;; Cloning a conversation to another host
 
 (ert-deftest drover-remote-test-clone-rewrite ()

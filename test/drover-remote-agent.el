@@ -476,11 +476,13 @@ directory named \"fail\"; in one named \"slow\", a second later."
 (defun drover-remote-agent--oc-search (query scope callback)
   "Search the fake OpenCode service's messages for QUERY, for CALLBACK.
 A stand-in of drover's OpenCode backend's :search, as it answers
-through `opencode-search': later, a match per session naming it by its
+through `opencode-search-sessions', QUERY evaluated over each session's
+messages: later, a match per session naming it by its
 key, the archived sessions only while SCOPE says they show; the calls
 noted, and their cancellations."
   (push (vector "search" query :false) drover-remote-agent--calls)
-  (let* ((needle (downcase query))
+  (let* ((expression (plist-get (drover-query-parse query) :expression))
+         (positives (drover-query-positives expression))
          (timer (run-at-time
                  drover-remote-agent--search-delay nil
                  (lambda ()
@@ -491,10 +493,15 @@ noted, and their cancellations."
                          (when (and (or (plist-get scope :archived)
                                         (not (gethash id drover-remote-agent--oc-archived)))
                                     (funcall (plist-get scope :wanted) (list :key (cons 'opencode id))))
-                           (when-let* ((found (seq-find (lambda (entry) (string-search needle (downcase (cdr entry))))
-                                                        (drover-remote-agent--oc-texts id))))
-                             (push (list :key (cons 'opencode id) :snippet (cdr found) :position (car found))
-                                   matches))))
+                           (let* ((texts (drover-remote-agent--oc-texts id))
+                                  (holding (lambda (term)
+                                             (seq-find (lambda (entry)
+                                                         (drover-query-term-in term (downcase (cdr entry))))
+                                                       texts))))
+                             (when (and expression (drover-query-evaluate expression holding))
+                               (let ((found (seq-some holding positives)))
+                                 (push (list :key (cons 'opencode id) :snippet (cdr found) :position (car found))
+                                       matches))))))
                        (funcall callback (nreverse matches))
                        (funcall callback 'done)))))))
     (lambda ()

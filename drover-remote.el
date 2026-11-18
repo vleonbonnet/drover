@@ -66,6 +66,7 @@
 (require 'drover-core)
 (require 'drover-ui)
 (require 'drover-model)
+(require 'drover-query)
 (require 'drover-selection)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
@@ -333,7 +334,8 @@ that a peer running an older drover keeps working without it.")
 
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
-    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed")
+    "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed"
+    "search-query")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -390,7 +392,9 @@ leaves its buffers shown (see `drover-hold-handed-off'); \"handed\": it
 takes a message `handed', the key of a session of the peer and how the
 turn went (prompt or answer), which the peer sends as its user's input
 in a mirror of the session hands it its turn (see
-`drover-input-peer').")
+`drover-input-peer'); \"search-query\": the text of a request `search'
+is a query, as `drover-query-parse' reads it, which it evaluates over
+each of its sessions as a whole, rather than a phrase.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -4239,10 +4243,20 @@ to its sessions SCOPE's search offers here (see :sessions in
 archived ones when they show, and sends its matches as they come.
 Return the function telling it to stop; nil, searching nothing, when
 the peer is not connected, runs a drover that does not search for
-others, or the search offers none of its sessions."
+others, or the search offers none of its sessions.  QUERY is read as
+`drover-query-parse' tells; a peer whose drover predates queries
+\(\"search-query\") searches a phrase: only a QUERY of one term held
+is sent it, and any other signals, saying why."
   (when-let* ((peer (drover-remote--peer name))
               ((eq (drover-remote--peer-state peer) 'open))
               ((drover-remote--capable-p peer "search"))
+              (query (if (drover-remote--capable-p peer "search-query")
+                         query
+                       (let ((expression (plist-get (drover-query-parse query) :expression)))
+                         (if-let* ((term (drover-query-single-term expression)))
+                             (drover-query-term-text term)
+                           (error "%s runs an older drover, which searches one word or phrase"
+                                  (drover-remote--label peer))))))
               (connection (drover-remote--peer-connection peer))
               (offered (plist-get scope :sessions))
               ((functionp offered))

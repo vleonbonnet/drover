@@ -40,7 +40,8 @@
 ;; its prompt actions (`drover-prompt-define').  opencode.el lists no
 ;; sessions of its own: drover's list does, and drover's search
 ;; (`drover-search') searches what was said in its sessions through
-;; `opencode-search', once opencode.el offers it.  RET anywhere in the
+;; `opencode-search-sessions', or `opencode-search' with an older
+;; service, once opencode.el offers them.  RET anywhere in the
 ;; transcript of a session buffer quotes its line or the region in
 ;; drover's prompt, as `drover-prompt-dwim' does, without what the
 ;; transcript hides (`drover-opencode-quote-old-input', for
@@ -87,6 +88,7 @@
 (require 'drover-core)
 (require 'drover-keys)
 (require 'drover-model)
+(require 'drover-query)
 (require 'drover-selection)
 (require 'opencode)
 (require 'seq)
@@ -1759,22 +1761,11 @@ unknown.  The backend's :options."
 ;;;; Searching what was said
 
 (declare-function opencode-search "opencode-sessions" (query &rest arguments))
+(declare-function opencode-search-sessions "opencode-sessions" (query &rest arguments))
 
 (defconst drover-opencode-search-limit 100
-  "Matches at most one search of OpenCode's messages asks the service.
+  "Matches at most one search of OpenCode's sessions asks the service.
 The most a page holds: the search asks one page, the best matches first.")
-
-(defun drover-opencode--search-query (query)
-  "Return QUERY, typed in drover's search, as `opencode-search' takes it.
-Its words, all of which a message must hold, quotes and stars dropped
-so that a word typed cannot make the query invalid; the last one
-matches as a prefix, as typing is in progress."
-  (let ((words (split-string (replace-regexp-in-string "[\"*]" " " query) "[ \t\n]+" t)))
-    (when words
-      (let ((last (car (last words))))
-        (when (string-match-p "[[:alnum:]]\\'" last)
-          (setcar (last words) (concat last "*"))))
-      (string-join words " "))))
 
 (defun drover-opencode--search-project (name)
   "Return the identifier of the one project of the service named NAME, or nil.
@@ -1789,7 +1780,8 @@ Nil too when several projects bear that name."
 (defun drover-opencode--search-match (match)
   "Return the match of drover's search MATCH of `opencode-search' tells, or nil.
 MATCH names a session by :session-id, with a :snippet around the match
-in the message :message-id."
+in the message :message-id, both absent for a session matching only by
+what it lacks."
   (when-let* (((listp match))
               (id (plist-get match :session-id))
               ((stringp id)))
@@ -1799,29 +1791,61 @@ in the message :message-id."
 
 (defun drover-opencode--search (query scope callback)
   "Search what was said in OpenCode's sessions for QUERY, for CALLBACK.
-Through `opencode-search': the service searches the prompts and
-replies of its sessions, the archived ones unless SCOPE leaves them
-out (:archived nil), those of the project the filter of SCOPE names
-when one project bears that name, and gives a page of the best
-matches.  A service without the search, `unsupported', searches
-nothing and tells nothing; one refusing or failing is a failure.
-Without `opencode-search', nothing is searched.  The backend's
-:search."
+QUERY is read as `drover-query-parse' tells, over each session as a
+whole, which the service evaluates itself (`opencode-search-sessions'):
+its prompts and replies, in the archived sessions unless SCOPE leaves
+them out (:archived nil), in those of the project the filter of SCOPE
+names when one project bears that name, a page of the best matching
+sessions.  A service older than that route searches by message
+\\(`opencode-search'), a QUERY of one term held, and fails any other,
+saying it predates it; one without any search searches nothing and
+tells nothing; one refusing or failing is a failure.  Without
+`opencode-search', nothing is searched.  The backend's :search."
   (when-let* (((fboundp 'opencode-search))
-              (text (drover-opencode--search-query query)))
-    (let ((project (drover-opencode--search-project (plist-get (plist-get scope :filter) :project))))
-      (apply #'opencode-search text
+              (parsed (drover-query-parse query))
+              ((not (plist-get parsed :error)))
+              (expression (plist-get parsed :expression)))
+    (let* ((project (drover-opencode--search-project (plist-get (plist-get scope :filter) :project)))
+           (arguments (append (list :limit (min drover-opencode-search-limit
+                                                (or (plist-get scope :limit) drover-opencode-search-limit)))
+                              (and (not (plist-get scope :archived)) (list :archived nil))
+                              (and project (list :project project))))
+           (cancel nil)
+           (fell-back nil)
+           (by-message
+            (lambda ()
+              (setq fell-back t)
+              (if-let* ((term (drover-query-single-term expression)))
+                  (setq cancel (drover-opencode--search-by (drover-query-string term) #'opencode-search
+                                                           arguments callback nil))
+                (funcall callback (list :failure "the OpenCode service predates searching whole sessions: update it"))))))
+      (if (fboundp 'opencode-search-sessions)
+          (let ((sessions (drover-opencode--search-by (drover-query-string expression) #'opencode-search-sessions
+                                                      arguments callback (lambda () (funcall by-message)))))
+            ;; Unless it answered at once, the search by message following.
+            (unless fell-back
+              (setq cancel sessions)))
+        (funcall by-message))
+      (lambda ()
+        (setq by-message #'ignore)
+        (when (functionp cancel)
+          (funcall cancel))))))
+
+(defun drover-opencode--search-by (text search arguments callback unsupported)
+  "Search for TEXT with SEARCH and ARGUMENTS, telling CALLBACK.
+SEARCH is `opencode-search' or `opencode-search-sessions'.  A service
+without it calls UNSUPPORTED when non-nil, else tells CALLBACK it is
+done.  Return the function cancelling it."
+  (apply search text
              :then (lambda (matches _info)
-                     (funcall callback (delq nil (mapcar #'drover-opencode--search-match matches)))
+                 (funcall callback (seq-keep #'drover-opencode--search-match matches))
                      (funcall callback 'done))
              :else (lambda (reason message)
-                     (funcall callback (if (eq reason 'unsupported)
-                                           'done
-                                         (list :failure (format "%s" message)))))
-             :limit (min drover-opencode-search-limit
-                         (or (plist-get scope :limit) drover-opencode-search-limit))
-             (append (and (not (plist-get scope :archived)) (list :archived nil))
-                     (and project (list :project project)))))))
+                 (cond ((not (eq reason 'unsupported))
+                        (funcall callback (list :failure (format "%s" message))))
+                       (unsupported (funcall unsupported))
+                       (t (funcall callback 'done))))
+         arguments))
 
 (defun drover-opencode--goal-command (session action text then else)
   "Run the service's /goal in SESSION, then call THEN, or ELSE with a message.

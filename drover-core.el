@@ -1951,26 +1951,31 @@ optional.
              prompts; it is called for every session as a search
              starts, the backend's own and those of the engines it
              records (see :recorded), so it must answer at once.
- :search     Function of a QUERY, a SCOPE and a CALLBACK searching what
-             was said in the backend's sessions for QUERY, in the
-             background: it must never wait.  SCOPE is a plist of
-             :filter, `drover-filter', :history and :archived, whether
-             older and archived sessions show, :limit, the most matches
-             taken, :wanted, a function of a match returning
-             non-nil when its session is among those the search
-             offers, and :sessions, a function of a backend returning
-             the sessions of that backend the search offers, in the
-             list's order, as a peer's backend sends them to the peer
-             searching for it.  CALLBACK takes a list of matches, any number of
-             times, then the symbol `done', or (:failure MESSAGE);
-             each match a plist naming its session by :key, its
-             `drover-session-key', or by :engine and :id, the engine's
-             identifier, with :host for a session of another host, and
-             telling the :snippet of text around the match, bounded by
-             drover, and its :position, if known.  It returns a
-             function of no argument stopping the search, after which
-             CALLBACK need not be called, or nil when it searches
-             nothing and never calls CALLBACK.
+ :search     Function of a QUERY, a SCOPE and a CALLBACK searching
+             what was said in the backend's sessions for QUERY, in the
+             background: it must never wait.  QUERY is a string read
+             by `drover-query-parse', without fields, which the
+             backend evaluates over each of its sessions as a whole: a
+             term holds when any prompt or reply holds it.  SCOPE is a
+             plist of :filter, `drover-filter', :history and
+             :archived, whether older and archived sessions show,
+             :limit, the most matches taken, :wanted, a function of a
+             match returning non-nil when its session is among those
+             the search offers, and :sessions, a function of a backend
+             returning the sessions of that backend the search offers,
+             in the list's order, as a peer's backend sends them to
+             the peer searching for it.  CALLBACK takes a list of
+             matches, any number of times, then the symbol `done', or
+             (:failure MESSAGE); each match a plist naming its session
+             by :key, its `drover-session-key', or by :engine and :id,
+             the engine's identifier, with :host for a session of
+             another host, and telling the :snippet of text around the
+             match of a term held, bounded by drover, and its
+             :position, if known, neither for a session matching only
+             by what it lacks.  It returns a function of no argument
+             stopping the search, after which CALLBACK need not be
+             called, or nil when it searches nothing and never calls
+             CALLBACK.
 
 The prompt (`drover-prompt') sends to sessions and starts them through
 the following operations, all optional.  Callbacks are called at most

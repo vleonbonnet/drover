@@ -2141,69 +2141,102 @@ A refusal is told on one line, as a warning, the session staying archived."
 ;;;; Searching what was said
 
 (defmacro drover-opencode-test-with-search (answer &rest body)
-  "Run BODY with `opencode-search' stubbed, answering as ANSWER says.
-ANSWER is a function of the arguments' plist, THEN and ELSE, called at
-once; the calls go to `calls', newest first, as (QUERY . ARGUMENTS).
-The older and archived sessions a search fetches are none, at once."
+  "Run BODY with `opencode-search' and `opencode-search-sessions' stubbed.
+ANSWER is a function of the route, `messages' or `sessions', the
+arguments' plist, THEN and ELSE, called at once; the calls go to
+`calls', newest first, as (ROUTE QUERY . ARGUMENTS), and each search
+cancelled to `cancelled'.  The older and archived sessions a search
+fetches are none, at once."
   (declare (indent 1) (debug t))
   `(let ((calls nil)
-         (cancelled 0))
-     (cl-letf (((symbol-function 'opencode-search)
-                (lambda (query &rest arguments)
-                  (push (cons query arguments) calls)
-                  (funcall ,answer arguments (plist-get arguments :then) (plist-get arguments :else))
-                  (lambda () (cl-incf cancelled))))
-               ((symbol-function 'opencode-fetch-sessions)
-                (lambda (_query callback &optional _else) (funcall callback nil))))
-       ,@body)))
+         (cancelled nil))
+     (cl-flet ((stub (route)
+                 (lambda (query &rest arguments)
+                   (push (cons route (cons query arguments)) calls)
+                   (funcall ,answer route arguments (plist-get arguments :then) (plist-get arguments :else))
+                   (lambda () (push route cancelled)))))
+       (cl-letf (((symbol-function 'opencode-search) (stub 'messages))
+                 ((symbol-function 'opencode-search-sessions) (stub 'sessions))
+                 ((symbol-function 'opencode-fetch-sessions)
+                  (lambda (_query callback &optional _else) (funcall callback nil))))
+         ,@body))))
 
 (ert-deftest drover-opencode-test-search ()
-  "The OpenCode backend searches what was said through `opencode-search', scoped."
+  "The OpenCode backend has the service evaluate the whole query over each session, scoped."
   (drover-opencode-test-with (list (list :id "ses_1" :created 10.0 :updated 20.0)
                                    (list :id "ses_2" :created 10.0 :updated 30.0))
     (let ((drover-opencode--projects '(((id . "prj_drover") (name . "drover") (worktree . "/w/drover"))
                                        ((id . "prj_other") (name . "other") (worktree . "/w/other"))))
           (results nil))
       (drover-opencode-test-with-search
-          (lambda (_arguments then _else)
+          (lambda (_route _arguments then _else)
             (funcall then (list (list :session-id "ses_2" :message-id "msg_9" :role 'user
                                       :snippet (propertize "the capybara swims" 'face 'opencode-search-match))
+                                (list :session-id "ses_1")
                                 (list :session-id "ses_gone" :message-id "msg_1" :snippet "capybara"))
                      '(:next nil :complete t)))
-        (drover-search-text "capy\"bara swi" (lambda (found) (setq results found)))
-        ;; Words, quotes dropped, the last a prefix; archived sessions too.
-        (should (equal (car calls) (list "capy bara swi*" :then (nth 2 (car calls))
-                                         :else (nth 4 (car calls)) :limit 100)))
+        (drover-search-text "capybara -otter (\"swims fast\" OR dive" (lambda (found) (setq results found)))
+        ;; The query as the service reads it; archived sessions too.
+        (pcase-let ((`(,route ,query . ,arguments) (car calls)))
+          (should (eq route 'sessions))
+          (should (equal query "capybara -otter (\"swims fast\" OR dive)"))
+          (should (equal (plist-get arguments :limit) 100))
+          (should-not (plist-member arguments :archived)))
         (should (equal (mapcar (lambda (entry) (list (drover-session-id (car entry)) (nth 1 entry)))
                                (plist-get results :sessions))
-                       '(("ses_2" "the capybara swims"))))
+                       '(("ses_2" "the capybara swims") ("ses_1" nil))))
         (should (= (plist-get results :outside) 1))
         ;; Unarchived sessions only, as a scope may ask.
         (drover-opencode--search "capybara" (list :archived nil :limit 50) #'ignore)
-        (should (equal (cddr (cddr (cdar calls))) '(:limit 50 :archived nil)))
+        (should (equal (nthcdr 6 (car calls)) '(:limit 50 :archived nil)))
         ;; A project the filter names, archived sessions shown: both searched.
         (let ((drover-filter '(:project "drover"))
               (drover-show-archived t))
           (drover-opencode--search "capybara" (list :filter drover-filter :archived t :limit 50) #'ignore)
-          (should (equal (cddr (cddr (cdar calls))) '(:limit 50 :project "prj_drover"))))
-        (should-not (drover-opencode--search "\"*" nil #'ignore))))
+          (should (equal (nthcdr 6 (car calls)) '(:limit 50 :project "prj_drover"))))
+        ;; Nothing searchable, or fields the service cannot read: nothing asked.
+        (setq calls nil)
+        (should-not (drover-opencode--search "\"*" nil #'ignore))
+        (should-not (drover-opencode--search "(project:x OR y)" nil #'ignore))
+        (should-not calls)))
+    ;; A service predating whole sessions searches one term by message,
+    ;; and fails any other query, saying why.
+    (let ((outcome nil))
+      (drover-opencode-test-with-search
+          (lambda (route _arguments then else)
+            (if (eq route 'sessions)
+                (funcall else 'unsupported "No route")
+              (funcall then (list (list :session-id "ses_1" :message-id "msg_2" :snippet "a capybara"))
+                       '(:next nil :complete t))))
+        (let ((cancel (drover-opencode--search "\"capy bara\"" nil (lambda (result) (push result outcome)))))
+          (should (equal (mapcar (lambda (call) (list (car call) (cadr call))) calls)
+                         '((messages "\"capy bara\"") (sessions "\"capy bara\""))))
+          (should (equal (reverse outcome)
+                         '(((:key (opencode . "ses_1") :snippet "a capybara" :position "msg_2")) done)))
+          (funcall cancel)
+          (should (equal cancelled '(messages))))
+        (setq outcome nil)
+        (drover-opencode--search "capybara -otter" nil (lambda (result) (push result outcome)))
+        (should (equal (list (caar calls) (cadar calls) (nthcdr 6 (car calls)))
+                       '(sessions "capybara -otter" (:limit 100 :archived nil))))
+        (should (string-match-p "predates" (cadr (car outcome))))))
     ;; A service without the search tells nothing; one failing, once.
     (let ((results nil)
           (messages nil))
       (cl-letf (((symbol-function 'message)
                  (lambda (format &rest args) (push (apply #'format-message format args) messages))))
         (drover-opencode-test-with-search
-            (lambda (_arguments _then else) (funcall else 'unsupported "No route"))
+            (lambda (_route _arguments _then else) (funcall else 'unsupported "No route"))
           (drover-search-text "capybara" (lambda (found) (setq results found)))
           (should results)
           (should-not (plist-get results :failed))
           (should-not messages))
         (drover-opencode-test-with-search
-            (lambda (_arguments _then else) (funcall else 'failed (concat "Broken " (make-string 100000 ?x))))
+            (lambda (_route _arguments _then else) (funcall else 'failed (concat "Broken " (make-string 100000 ?x))))
           (setq results nil)
           (drover-search-text "capybara" (lambda (found) (setq results found)))
           (should (equal (mapcar #'car (plist-get results :failed)) '(opencode)))
-          (should (= (length messages) 1))
+          (should (length= messages 1))
           (should (< (length (car messages)) 400)))))
     ;; Without `opencode-search', nothing is searched.
     (cl-letf (((symbol-function 'opencode-search) nil))
