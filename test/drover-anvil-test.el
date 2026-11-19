@@ -200,6 +200,72 @@ CALLER is the identifier of a fake session, or nil for none named."
       (setq drover-anvil-scratch-directories (list other))
       (should (drover-anvil--tool-send "fake/theirs" "Go on")))))
 
+(defun drover-anvil-test-prompts (&rest arguments)
+  "Return the answer of drover-prompts called with ARGUMENTS, parsed."
+  (drover-anvil-test-json (apply #'drover-anvil--tool-prompts arguments)))
+
+(ert-deftest drover-anvil-test-prompts ()
+  "The prompts of every host, narrowed by host and pages, cut, and within the scope of reading."
+  (require 'drover-prompts)
+  (drover-anvil-test-with (list (drover-test-session "me" :status 'working)) "me"
+    (let* ((project (drover-anvil-test-project))
+           (other (drover-anvil-test-project "other"))
+           (drover-host "reaver")
+           (asked nil)
+           (prompts (list (list :engine 'opencode :id "ses_1" :time 1.0e9 :text "Mine, in the project"
+                                :directory (expand-file-name "sub/" project) :title "Here")
+                          (list :engine 'opencode :id "ses_2" :time 1.1e9 :text (make-string 100 ?o)
+                                :directory other)
+                          (list :engine 'claude-code :id "abc" :time 1.2e9 :text "On Core" :host "core"
+                                :directory "c:/work/")))
+           (hosts (list (list :host nil :label "Reaver" :status 'ok :count 2 :cut 0)
+                        (list :host "core" :label "Core" :status 'ok :count 1 :cut 0
+                              :failures '((codex . "unreadable"))))))
+      (setf (drover-session-directory (car drover-test-sessions)) project)
+      (drover-backend-changed 'fake)
+      (cl-letf (((symbol-function 'drover-prompts-gather)
+                 (lambda (since until callback &optional _seconds)
+                   (push (list since until) asked)
+                   (funcall callback (list :prompts prompts :hosts hosts))
+                   #'ignore)))
+        (let* ((answer (drover-anvil-test-prompts "2026-11-12T09:00:00-0800" "1795366800"))
+               (first (car (alist-get 'prompts answer))))
+          (should (equal (car asked) (list (float-time (encode-time (iso8601-parse "2026-11-12T09:00:00-0800")))
+                                           1795366800.0)))
+          (should (= (alist-get 'count answer) 3))
+          (should (equal (mapcar (lambda (prompt) (alist-get 'host prompt)) (alist-get 'prompts answer))
+                         '("reaver" "reaver" "core")))
+          (should (equal (alist-get 'link first) "agent-session://reaver/opencode/ses_1"))
+          (should (equal (alist-get 'title first) "Here"))
+          (should (equal (alist-get 'engine (nth 2 (alist-get 'prompts answer))) "claude-code"))
+          (should (equal (alist-get 'failures (nth 1 (alist-get 'hosts answer)))
+                         '(((engine . "codex") (message . "unreadable"))))))
+        ;; The default period: the seven days before now.
+        (drover-anvil-test-prompts)
+        (should (< (abs (- (nth 1 (car asked)) (float-time))) 5))
+        (should (< (abs (- (- (nth 1 (car asked)) (nth 0 (car asked))) (* 7 86400))) 1))
+        ;; One host's, a page of them, their texts cut.
+        (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
+                               (alist-get 'prompts (drover-anvil-test-prompts nil nil "Core")))
+                       '("abc")))
+        (should (equal (mapcar (lambda (host) (alist-get 'host host))
+                               (alist-get 'hosts (drover-anvil-test-prompts nil nil "local")))
+                       '("reaver")))
+        (let ((page (drover-anvil-test-prompts nil nil nil 1 1 30)))
+          (should (eq (alist-get 'truncated page) t))
+          (should (equal (alist-get 'session (car (alist-get 'prompts page))) "ses_2"))
+          (should (length= (alist-get 'text (car (alist-get 'prompts page))) 31))
+          (should (= (alist-get 'cut (car (alist-get 'prompts page))) 100)))
+        ;; Reading the caller's project alone: this host's prompts there.
+        (setf (alist-get 'read drover-anvil-permissions) 'project)
+        (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
+                               (alist-get 'prompts (drover-anvil-test-prompts)))
+                       '("ses_1")))
+        (setf (alist-get 'read drover-anvil-permissions) nil)
+        (should-error (drover-anvil--tool-prompts))
+        (setf (alist-get 'read drover-anvil-permissions) 'any)
+        (should-error (drover-anvil--tool-prompts "1795366800" "1795000000"))))))
+
 (ert-deftest drover-anvil-test-never-the-caller-nor-above ()
   "No tool acts on the caller nor on a session above it, nor waits for them."
   (drover-anvil-test-with (list (drover-test-session "top" :status 'working)

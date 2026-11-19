@@ -4413,5 +4413,48 @@ too, are listed here once it is connected."
           (should (= (drover-usage-sum-output sum) 100))
           (should (< (abs (- (drover-usage-sum-cost sum) cost)) 1e-9)))))))
 
+;;;; Prompts
+
+(ert-deftest drover-remote-test-prompts ()
+  "A peer reads the prompts its user sent from its own engines, and sends them as asked."
+  (require 'drover-prompts)
+  (drover-remote-test-with nil
+    (let* ((claude (expand-file-name "agent-claude" dir))
+           (directory (expand-file-name "work/alpha/" dir))
+           (now (float-time))
+           (id drover-remote-test--usage-id)
+           ;; This host's own homes are empty.
+           (drover-claude-code-home (expand-file-name "viewer-claude" dir))
+           (drover-prompts-engines '(claude-code))
+           (drover-prompts-ignore-regexps nil)
+           (drover-prompts-ignore-directories nil)
+           (result nil))
+      (let ((drover-claude-code-home claude))
+        (let ((file (drover-fixture-claude id directory :start (- now 100) :prompt "Fix the login redirect")))
+          (drover-fixture-claude-append file (drover-fixture-claude-user id directory (- now 50) "Now add a test"))))
+      (with-environment-variables (("DROVER_AGENT_CLAUDE" claude))
+        (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+      (should (equal (drover-remote-prompts-hosts) '(("agent" "agent" ready))))
+      (drover-prompts-gather (- now 3600) (+ now 60) (lambda (value) (setq result value)) 30)
+      (drover-remote-test-wait (lambda () result) 40)
+      (should result)
+      (should (equal (mapcar (lambda (prompt) (list (plist-get prompt :host) (plist-get prompt :engine)
+                                                    (plist-get prompt :id) (plist-get prompt :text)))
+                             (plist-get result :prompts))
+                     `(("agent" claude-code ,id "Fix the login redirect")
+                       ("agent" claude-code ,id "Now add a test"))))
+      (should (equal (plist-get (car (plist-get result :prompts)) :directory) directory))
+      (should (equal (mapcar (lambda (host) (list (plist-get host :host) (plist-get host :status) (plist-get host :count)))
+                             (plist-get result :hosts))
+                     '((nil ok 0) ("agent" ok 2)))))))
+
+(ert-deftest drover-remote-test-prompts-old-peer ()
+  "A peer whose drover reads no prompts is told so, and not asked."
+  (require 'drover-prompts)
+  (drover-remote-test-with nil
+    (with-environment-variables (("DROVER_AGENT_OLD" "1"))
+      (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+    (should (equal (drover-remote-prompts-hosts) '(("agent" "agent" old))))))
+
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

@@ -406,51 +406,59 @@ file is read backward a window at a time, in slices from timers.
 Return a function stopping the reading."
   (let* ((engine (drover-session-engine session))
          (function (and engine (drover-conversation--reader engine :entries)))
-         (file (and function (drover-conversation-file session)))
-         (stopped nil))
+         (file (and function (drover-conversation-file session))))
     (if (not file)
         (progn (funcall callback (list :failure (if function "its conversation is not recorded here"
                                                   "its engine records nothing drover reads")))
                #'ignore)
-      (let* ((size (file-attribute-size (file-attributes file)))
-             (generation (drover-conversation-generation file))
-             (end (if before (min size (max 0 before)) (drover-conversation--whole-end file size)))
-             (state (list :file file :function function :directory (drover-session-directory session)
-                          :wanted (max 1 (min drover-conversation-page-limit
-                                              (or count drover-conversation-page-size)))
-                          ;; The line being read ends at the newline before END;
-                          ;; BUFFER holds the bytes from START to it.
-                          :start (max 0 (1- end)) :buffer "" :long nil
-                          :entries nil :count 0 :scanned 0 :first end :done (<= end 0))))
-        (cl-labels
-            ((finish ()
-               (unless stopped
-                 (setq stopped t)
-                 (let ((entries (plist-get state :entries))
-                       (from (plist-get state :first)))
-                   ;; Within the bound of a reply, the oldest dropped.
-                   (while (and (cdr entries)
-                               (> (length (json-serialize (vconcat entries) :null-object nil :false-object :false))
-                                  drover-conversation-reply-bytes))
-                     (setq entries (cdr entries)
-                           from (string-to-number (plist-get (car entries) :i))))
-                   (drover-with-reporting "conversation"
-                     (funcall callback (list :g (or generation :false) :sz size :from from :more (> from 0)
-                                             :to end :e (vconcat entries)))))))
-             (step ()
-               (unless stopped
-                 (condition-case err
-                     (let ((until (+ (float-time) drover-conversation-slice)))
-                       (while (and (not (plist-get state :done)) (< (float-time) until))
-                         (drover-conversation--back state))
-                       (if (plist-get state :done)
-                           (finish)
-                         (run-at-time 0 nil (lambda () (drover-with-reporting "conversation" (step))))))
-                   (error (setq stopped t)
-                          (drover-with-reporting "conversation"
-                            (funcall callback (list :failure (drover-error-message err)))))))))
-          (step)
-          (lambda () (setq stopped t)))))))
+      (drover-conversation-page-file file function (drover-session-directory session) before count callback))))
+
+(defun drover-conversation-page-file (file function directory before count callback)
+  "Read COUNT entries FUNCTION makes of the records of FILE before byte BEFORE.
+FUNCTION is called with each record, an alist, and DIRECTORY, and
+returns its entries, plists without :i, as an engine's :entries in
+`drover-conversation-readers'.  BEFORE and CALLBACK are as for
+`drover-conversation-page'.  Return a function stopping the reading."
+  (let* ((stopped nil)
+         (size (file-attribute-size (file-attributes file)))
+         (generation (drover-conversation-generation file))
+         (end (if before (min size (max 0 before)) (drover-conversation--whole-end file size)))
+         (state (list :file file :function function :directory directory
+                      :wanted (max 1 (min drover-conversation-page-limit
+                                          (or count drover-conversation-page-size)))
+                      ;; The line being read ends at the newline before END;
+                      ;; BUFFER holds the bytes from START to it.
+                      :start (max 0 (1- end)) :buffer "" :long nil
+                      :entries nil :count 0 :scanned 0 :first end :done (<= end 0))))
+    (cl-labels
+        ((finish ()
+           (unless stopped
+             (setq stopped t)
+             (let ((entries (plist-get state :entries))
+                   (from (plist-get state :first)))
+               ;; Within the bound of a reply, the oldest dropped.
+               (while (and (cdr entries)
+                           (length> (json-serialize (vconcat entries) :null-object nil :false-object :false)
+                                    drover-conversation-reply-bytes))
+                 (setq entries (cdr entries)
+                       from (string-to-number (plist-get (car entries) :i))))
+               (drover-with-reporting "conversation"
+                 (funcall callback (list :g (or generation :false) :sz size :from from :more (> from 0)
+                                         :to end :e (vconcat entries)))))))
+         (step ()
+           (unless stopped
+             (condition-case err
+                 (let ((until (+ (float-time) drover-conversation-slice)))
+                   (while (and (not (plist-get state :done)) (< (float-time) until))
+                     (drover-conversation--back state))
+                   (if (plist-get state :done)
+                       (finish)
+                     (run-at-time 0 nil (lambda () (drover-with-reporting "conversation" (step))))))
+               (error (setq stopped t)
+                      (drover-with-reporting "conversation"
+                        (funcall callback (list :failure (drover-error-message err)))))))))
+      (step)
+      (lambda () (setq stopped t)))))
 
 (defun drover-conversation--whole-end (file size)
   "Return where the whole lines of FILE end, FILE of SIZE bytes.

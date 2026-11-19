@@ -79,6 +79,7 @@
 (defvar drover-claude-code-agents-interval)
 (defvar drover-codex-home)
 (defvar drover-codex-history-days)
+(defvar drover-prompts-engines)
 (defvar drover-summary-delay)
 (defvar drover-summary-catch-up)
 (defvar drover-summary-generate-function)
@@ -1096,6 +1097,10 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
       (require 'drover-codex)
       (setq drover-codex-home (if (equal codex "here") (expand-file-name "codex" dir) codex)
             drover-codex-history-days nil))
+    ;; Its prompts are read from the homes it was given alone, never
+    ;; the user's OpenCode database.
+    (setq drover-prompts-engines (append (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
+                                         (and (getenv "DROVER_AGENT_CODEX") '(codex))))
     (spyglass-register-channel "drover-test" #'ignore :request #'drover-remote-agent--command)
     (drover-remote-mode 1)
     (drover-remote-agent--say "READY %s %s" drover-host spyglass-registration-file)
