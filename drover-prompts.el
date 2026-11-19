@@ -129,16 +129,32 @@ LENGTH is its whole length when cut, else nil."
             (cons (concat (substring text 0 drover-prompts-text-limit) "…") (length text))
           (cons text nil))))))
 
+(defvar drover-prompts--truenames (make-hash-table :test #'equal)
+  "The true names of the directories looked at, by name as given.
+Made anew as each reading starts, so that each directory is resolved
+once a reading.")
+
+(defun drover-prompts--names (directory)
+  "Return the names of DIRECTORY, as given and as its true name, as directories.
+An engine may record a directory by its true name, past a symbolic
+link, or as it was given."
+  (let* ((given (file-name-as-directory (expand-file-name directory)))
+         (true (with-memoization (gethash given drover-prompts--truenames)
+                 (file-name-as-directory (file-truename given)))))
+    (if (equal given true) (list given) (list given true))))
+
 (defun drover-prompts--under-p (directory roots)
   "Return non-nil when DIRECTORY is one of ROOTS or below one.
-Names compare as this host compares them, ignoring case on Windows."
+Names compare as this host compares them, ignoring case on Windows,
+by the names as given and by their true names."
   (and (stringp directory)
-       (let ((directory (file-name-as-directory (expand-file-name directory)))
+       (let ((names (drover-prompts--names directory))
              (ignore-case (memq system-type '(windows-nt ms-dos cygwin))))
          (seq-some (lambda (root)
                      (and (stringp root)
-                          (string-prefix-p (file-name-as-directory (expand-file-name root)) directory
-                                           ignore-case)))
+                          (seq-some (lambda (prefix)
+                                      (seq-some (lambda (name) (string-prefix-p prefix name ignore-case)) names))
+                                    (drover-prompts--names root))))
                    roots))))
 
 (defun drover-prompts--ignored-p (text directory)
@@ -412,6 +428,7 @@ oldest were left out past `drover-prompts-limit'; :failures, a list of
 read.  The files and the database are read in slices from timers.
 Return a function stopping the reading."
   (drover-prompts--check-period since until)
+  (setq drover-prompts--truenames (make-hash-table :test #'equal))
   (let* ((prompts nil)
          (failures nil)
          (stop nil)

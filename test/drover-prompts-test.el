@@ -153,6 +153,26 @@ SINCE and UNTIL default to the period of the tests, a day from its base."
         (sqlite-close db))
       (should (equal (drover-prompts-test-texts (drover-prompts-test-collect)) '("Mine to keep"))))))
 
+(ert-deftest drover-prompts-test-ignored-through-a-link ()
+  "A directory left out through a symbolic link leaves out the sessions its true name records."
+  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (drover-prompts-test-with
+    (let* ((db (drover-prompts-test-oc-db))
+           (base drover-prompts-test--base)
+           (true (expand-file-name "documents/automation/" home))
+           (link (expand-file-name "local" home))
+           (drover-prompts-ignore-directories (list (expand-file-name "local/automation/" home))))
+      (make-directory true t)
+      (make-symbolic-link (expand-file-name "documents" home) link)
+      (unwind-protect
+          (progn
+            (drover-prompts-test-oc-session db "ses_a" nil home "Mine")
+            (drover-prompts-test-oc-session db "ses_b" nil (file-truename true) "Its")
+            (drover-prompts-test-oc-message db "msg_1" "ses_a" "user" (+ base 1) "Mine to keep")
+            (drover-prompts-test-oc-message db "msg_2" "ses_b" "user" (+ base 2) "Recorded by its true name"))
+        (sqlite-close db))
+      (should (equal (drover-prompts-test-texts (drover-prompts-test-collect)) '("Mine to keep"))))))
+
 ;;;; Claude Code and Codex
 
 (defconst drover-prompts-test--claude "5a1e2b3c-4d5e-4f60-8a7b-9c0d1e2f3a4b"
