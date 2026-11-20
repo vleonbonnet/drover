@@ -3774,6 +3774,8 @@ warnings of drover, newest first, `results' what THEN and ELSE got, as
                              (should (equal text "/literal prompt"))
                              (should (plist-get arguments :show))
                              (should (eq (plist-get arguments :accept-thinking-loss) accept))
+                             ;; Code deciding for the user tells a submitted prompt from one typed.
+                             (should (equal (plist-get arguments :metadata) '((drover . ((submitted . t))))))
                              (if success
                                  (funcall (plist-get arguments :then) nil)
                                (funcall (plist-get arguments :else) "Connection lost"))))

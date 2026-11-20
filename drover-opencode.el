@@ -1594,15 +1594,23 @@ so the buffer needs only be loaded and connected.  The backend's
           "the session is not loaded or not connected to OpenCode"))
     "the session has no buffer"))
 
+(defconst drover-opencode-submitted-metadata '((drover . ((submitted . t))))
+  "Metadata of the prompts `drover-opencode--submit' sends.
+They come from an agent, a schedule or another host, never from the
+user typing in this session, which code deciding on the user's behalf,
+such as a plugin approving what the user's last prompt asked, can tell
+from the stored message: {\"drover\": {\"submitted\": true}}.")
+
 (defun drover-opencode--submit (session text then else)
   "Send TEXT as a prompt of SESSION now, then call THEN, or ELSE with a message.
 TEXT goes literally, a leading slash included, past any draft, and shows
-once delivered.  Stale-thinking consent follows
-`drover-opencode-accept-thinking-loss'.  A session without a
-buffer, as one archiving closed, is opened first, not shown, as
-`drover-opencode--send' opens it; an archived session is restored by
-opencode.el first.  When nothing was sent, the session not opened or
-not restored, ELSE gets a second argument, t.  The backend's :submit."
+once delivered, with `drover-opencode-submitted-metadata'.
+Stale-thinking consent follows `drover-opencode-accept-thinking-loss'.
+A session without a buffer, as one archiving closed, is opened first,
+not shown, as `drover-opencode--send' opens it; an archived session is
+restored by opencode.el first.  When nothing was sent, the session not
+opened or not restored, ELSE gets a second argument, t.  The backend's
+:submit."
   (let ((settled nil))
     (cl-flet ((settle (function &rest arguments)
                 (unless settled
@@ -1614,6 +1622,7 @@ not restored, ELSE gets a second argument, t.  The backend's :submit."
        (lambda ()
          (opencode-session-send
           text :show t :accept-thinking-loss drover-opencode-accept-thinking-loss
+          :metadata (copy-tree drover-opencode-submitted-metadata)
           :then (lambda (_item) (settle then))
           :else (lambda (error)
                   (if (drover-opencode--restore-refused-p error)
