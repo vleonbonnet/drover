@@ -335,7 +335,7 @@ that a peer running an older drover keeps working without it.")
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
     "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed"
-    "search-query" "prompts")
+    "search-query" "prompts" "permissions")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -396,7 +396,10 @@ in a mirror of the session hands it its turn (see
 is a query, as `drover-query-parse' reads it, which it evaluates over
 each of its sessions as a whole, rather than a phrase; \"prompts\": it
 reads the prompts its user sent its sessions over a period from its
-own engines (request `prompts', see `drover-prompts') and sends them.")
+own engines (request `prompts', see `drover-prompts') and sends them;
+\"permissions\": it reads the permission prompts its agents gave over a
+period from its ledger (request `permissions', see
+`drover-permissions') and sends them.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -6481,6 +6484,7 @@ message `chg'."
         ("new" (drover-remote--on-new state peer message reply))
         ("usage" (drover-remote--on-usage message reply))
         ("prompts" (drover-remote--on-prompts message reply))
+        ("permissions" (drover-remote--on-permissions message reply))
         ("task" (drover-remote--on-task peer message reply))
         ("opts" (drover-remote--on-opts peer key reply))
         ("jobs" (drover-remote--on-jobs connection message reply))
@@ -6602,25 +6606,49 @@ This host reads its own (see `drover-prompts-remote-answer')."
                                         (funcall reply value error))))
     (error (funcall reply nil (drover-error-message err)))))
 
-(defun drover-remote-prompts-hosts ()
+(declare-function drover-permissions-remote-answer "drover-permissions" (message reply))
+
+(defun drover-remote--on-permissions (message reply)
+  "Answer a peer's MESSAGE asking this host's permission prompts, through REPLY.
+This host reads its own ledger (see `drover-permissions-remote-answer')."
+  (require 'drover-permissions)
+  (condition-case err
+      (drover-permissions-remote-answer message
+                                        (lambda (value &optional error)
+                                          (drover-with-reporting "remote permissions"
+                                            (funcall reply value error))))
+    (error (funcall reply nil (drover-error-message err)))))
+
+(defun drover-remote-capable-hosts (capability)
   "Return the peers owning sessions, as (NAME LABEL STATE), in order.
-STATE is `ready' for a peer connected whose drover reads its prompts,
-`old' for one whose drover does not, `offline' for one not connected."
+STATE is `ready' for a peer connected whose drover has CAPABILITY,
+such as \"prompts\", `old' for one whose drover has not, `offline' for
+one not connected."
   (mapcar (lambda (peer)
             (list (drover-remote--peer-name peer) (drover-remote--label peer)
                   (cond ((not (eq (drover-remote--peer-state peer) 'open)) 'offline)
-                        ((drover-remote--capable-p peer "prompts") 'ready)
+                        ((drover-remote--capable-p peer capability) 'ready)
                         (t 'old))))
           (seq-remove #'drover-remote--viewer-p (drover-remote--peers))))
 
-(defun drover-remote-ask-prompts (name request callback seconds)
-  "Ask the peer NAME for the prompts REQUEST tells, for CALLBACK, within SECONDS.
+(defun drover-remote-prompts-hosts ()
+  "Return the peers, as `drover-remote-capable-hosts' tells them for prompts."
+  (drover-remote-capable-hosts "prompts"))
+
+(defun drover-remote-ask (name op request callback seconds)
+  "Ask the peer NAME the request OP of REQUEST, for CALLBACK, within SECONDS.
+OP is a request a peer reads a period with, such as \"prompts\";
 REQUEST is a plist of :since and :until, float times; CALLBACK gets
 \(REPLY ERROR) once."
   (if-let* ((peer (drover-remote--peer name)))
-      (drover-remote--request peer (append (list :op "prompts") request) callback
+      (drover-remote--request peer (append (list :op op) request) callback
                               (+ (float-time) seconds) t)
     (funcall callback nil (format "%s is not a peer" name))))
+
+(defun drover-remote-ask-prompts (name request callback seconds)
+  "Ask the peer NAME for the prompts REQUEST tells, for CALLBACK, within SECONDS.
+See `drover-remote-ask'."
+  (drover-remote-ask name "prompts" request callback seconds))
 
 (defun drover-remote--request-handler (connection message reply)
   "Answer MESSAGE, a request of CONNECTION's peer, through REPLY, or its error."

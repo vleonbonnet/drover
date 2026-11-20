@@ -4456,5 +4456,49 @@ too, are listed here once it is connected."
       (drover-remote-test-connect (drover-remote-test-start-agent dir)))
     (should (equal (drover-remote-prompts-hosts) '(("agent" "agent" old))))))
 
+;;;; Permission prompts
+
+(ert-deftest drover-remote-test-permissions ()
+  "A peer reads the permission prompts of its own ledger, and sends them as asked."
+  (require 'drover-permissions)
+  (drover-remote-test-with nil
+    (let* ((ledger (file-name-as-directory (expand-file-name "agent-permissions" dir)))
+           (now (float-time))
+           (at (lambda (time) (format-time-string "%FT%T.%3NZ" time t)))
+           ;; This host's own ledger is empty.
+           (drover-permissions-directory (expand-file-name "viewer-permissions/" dir))
+           (drover-permissions-engines '(opencode))
+           (result nil))
+      (make-directory ledger t)
+      (with-temp-file (expand-file-name "opencode.jsonl" ledger)
+        (insert (json-serialize `((v . 1) (time . ,(funcall at (- now 60))) (event . "asked") (session . "ses_a")
+                                  (request . "per_1") (action . "shell") (resources . ["git push"])))
+                "\n"
+                (json-serialize `((v . 1) (time . ,(funcall at (- now 50))) (event . "replied") (session . "ses_a")
+                                  (request . "per_1") (reply . "always")))
+                "\n"))
+      (with-environment-variables (("DROVER_AGENT_PERMISSIONS" ledger))
+        (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+      (should (equal (drover-remote-capable-hosts "permissions") '(("agent" "agent" ready))))
+      (drover-permissions-gather (- now 3600) (+ now 60) (lambda (value) (setq result value)) 30)
+      (drover-remote-test-wait (lambda () result) 40)
+      (should (equal (mapcar (lambda (prompt) (list (plist-get prompt :host) (plist-get prompt :id)
+                                                    (plist-get prompt :action) (plist-get prompt :reply)
+                                                    (plist-get prompt :resources)))
+                             (plist-get result :permissions))
+                     '(("agent" "ses_a" "shell" "always" ("git push")))))
+      (should (equal (mapcar (lambda (host) (list (plist-get host :host) (plist-get host :status) (plist-get host :count)))
+                             (plist-get result :hosts))
+                     '((nil ok 0) ("agent" ok 1)))))))
+
+(ert-deftest drover-remote-test-permissions-old-peer ()
+  "A peer whose drover reads no permission prompts is told so, and not asked."
+  (require 'drover-permissions)
+  (drover-remote-test-with nil
+    (with-environment-variables (("DROVER_AGENT_CAPS" "prompts"))
+      (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+    (should (equal (drover-remote-capable-hosts "permissions") '(("agent" "agent" old))))
+    (should (equal (drover-remote-prompts-hosts) '(("agent" "agent" ready))))))
+
 (provide 'drover-remote-test)
 ;;; drover-remote-test.el ends here

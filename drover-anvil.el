@@ -1478,6 +1478,105 @@ MCP Parameters:
            (note . ,(format "This session gets the prompt after the next %s; the user may cancel it among the scheduled prompts"
                             (cdr entry)))))))))
 
+;;;; Permission prompts
+
+(declare-function drover-permissions-gather "drover-permissions" (since until callback &optional seconds))
+(defvar drover-permissions-limit)
+
+(defun drover-anvil--titles ()
+  "Return the titles of the sessions drover knows, by (HOST ENGINE ID).
+HOST is nil for this host's, ENGINE a symbol, ID the conversation's."
+  (let ((titles (make-hash-table :test #'equal)))
+    (dolist (session (drover-index-sessions))
+      (when-let* ((engine (drover-session-engine session))
+                  (id (drover-session-engine-id session)))
+        (puthash (list (drover-session-host session) engine id)
+                 (drover-session-display-title session) titles)))
+    titles))
+
+(defun drover-anvil--permission-data (prompt titles)
+  "Return PROMPT, as `drover-permissions-gather' tells it, as data.
+TITLES are the sessions' titles, as `drover-anvil--titles' tells them."
+  (let ((host (or (plist-get prompt :host) drover-host))
+        (engine (symbol-name (plist-get prompt :engine))))
+    (drover-anvil--compact
+     `((host . ,(drover-anvil--line host 100))
+       (engine . ,engine)
+       (session . ,(plist-get prompt :id))
+       (link . ,(format "agent-session://%s/%s/%s" host engine (plist-get prompt :id)))
+       (title . ,(drover-anvil--line (gethash (list (plist-get prompt :host) (plist-get prompt :engine)
+                                                    (plist-get prompt :id))
+                                              titles)
+                                     160))
+       (directory . ,(and (plist-get prompt :directory)
+                          (drover-anvil--line (abbreviate-file-name (plist-get prompt :directory)) 300)))
+       (time . ,(drover-anvil--time (plist-get prompt :time)))
+       (action . ,(plist-get prompt :action))
+       (resources . ,(and (plist-get prompt :resources) (vconcat (plist-get prompt :resources))))
+       (rules . ,(and (plist-get prompt :rules) (vconcat (plist-get prompt :rules))))
+       (reply . ,(plist-get prompt :reply))
+       (message . ,(plist-get prompt :message))
+       (plugin . ,(plist-get prompt :plugin))))))
+
+(defun drover-anvil--tool-permissions (&optional since until host offset limit)
+  "Return the permission prompts agents gave from SINCE to UNTIL, on every host.
+Each is what the agent asked, the rules that asked, and the user's
+reply, read from the ledger each host's harnesses append to; HOST,
+OFFSET and LIMIT narrow the answer, as the parameters below tell.
+
+MCP Parameters:
+  since - Start of the period, seconds since the epoch or ISO 8601;
+      seven days before its end by default
+  until - End of the period, seconds since the epoch or ISO 8601; now
+      by default
+  host - \"local\" for this host's prompts, or a host's name; every
+      host's by default
+  offset - (integer) Prompts to skip, oldest first, 0 by default
+  limit - (integer) Prompts answered at most, 1000 by default"
+  (drover-start)
+  (require 'drover-permissions)
+  (let* ((caller (drover-anvil--caller))
+         (scope (drover-anvil--scope 'read))
+         (until (float (or (drover-anvil--read-time until) (float-time))))
+         (since (float (or (drover-anvil--read-time since) (- until (* 7 86400)))))
+         (offset (if (natnump offset) offset 0))
+         (limit (max 1 (min drover-permissions-limit (if (natnump limit) limit 1000))))
+         (stop nil))
+    (unless scope
+      (drover-anvil--log "drover-permissions" caller nil "refused" "read allowed nowhere")
+      (drover-anvil--refuse "drover-anvil-permissions allows no read"))
+    (unless (< since until)
+      (drover-anvil--refuse "The period ends before it starts"))
+    (let ((id (drover-anvil--job
+               "drover-permissions" caller nil :seconds (+ drover-prompts-timeout 30)
+               :finally (lambda (_id) (when stop (funcall stop))))))
+      (condition-case err
+          (setq stop
+                (drover-permissions-gather
+                 since until
+                 (lambda (result)
+                   (let* ((prompts (seq-filter (lambda (prompt)
+                                                 (and (drover-anvil--host-match-p (plist-get prompt :host) host)
+                                                      (drover-anvil--prompt-allowed-p scope caller prompt)))
+                                               (plist-get result :permissions)))
+                          (page (seq-take (nthcdr offset prompts) limit))
+                          (titles (drover-anvil--titles)))
+                     (drover-anvil--done
+                      id `((outcome . ,(format "%d permission prompts" (length prompts)))
+                           (since . ,(drover-anvil--time since))
+                           (until . ,(drover-anvil--time until))
+                           (count . ,(length prompts))
+                           (offset . ,offset)
+                           (truncated . ,(and (> (length prompts) (+ offset limit)) t))
+                           (hosts . ,(drover-anvil--hosts-data
+                                      (seq-filter (lambda (entry)
+                                                    (drover-anvil--host-match-p (plist-get entry :host) host))
+                                                  (plist-get result :hosts))))
+                           (permissions . ,(vconcat (mapcar (lambda (prompt) (drover-anvil--permission-data prompt titles))
+                                                            page)))))))))
+        (error (drover-anvil--fail id (drover-error-message err))))
+      (drover-anvil--answer id))))
+
 ;;;; Jobs' answers
 
 (defun drover-anvil--tool-job (job)
@@ -1528,6 +1627,9 @@ MCP Parameters:
     (drover-anvil--tool-prompts
      :id "drover-prompts" :read-only t
      :description "Return the prompts the user sent agents over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, conversation, its link, title, directory, time and text.  Subagents' prompts, programs' and what engines add as the user are left out.  For reviews of how the user works with agents.")
+    (drover-anvil--tool-permissions
+     :id "drover-permissions" :read-only t
+     :description "Return the permission prompts agents gave the user over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, session, its link and title, directory, time, the action asked and its resources, the rules that asked, and the reply (once, always, reject; passed when a plugin let it go unasked; allowed or reject for Claude Code; unknown when never answered).  For reviews of how the user works with agents.")
     (drover-anvil--tool-job
      :id "drover-job" :read-only t
      :description "Return the answer of a job another drover tool answered with, for clients that cannot wait for answers."))

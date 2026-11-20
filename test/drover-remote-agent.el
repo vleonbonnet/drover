@@ -37,7 +37,8 @@
 ;; no pty, or a comint buffer, which its backend shares as front ends'
 ;; terminals and shells are; opening a session without one starts one,
 ;; as a front end resuming a conversation would, displayed as front ends
-;; display them.  DROVER_AGENT_UNSHARE is `drover-remote-unshare-delay'.
+;; display them.  DROVER_AGENT_UNSHARE is `drover-remote-unshare-delay',
+;; DROVER_AGENT_PERMISSIONS `drover-permissions-directory'.
 ;; With DROVER_AGENT_OPENCODE set, it runs a fake OpenCode service
 ;; (test/drover-fake-opencode.el), which opencode.el finds as its
 ;; service, and a backend `opencode' of its sessions, which drover's
@@ -1062,6 +1063,9 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
       (setq drover-remote-capabilities (split-string caps "," t)))
     (when-let* ((delay (getenv "DROVER_AGENT_UNSHARE")))
       (setq drover-remote-unshare-delay (string-to-number delay)))
+    (when-let* ((ledger (getenv "DROVER_AGENT_PERMISSIONS")))
+      (require 'drover-permissions)
+      (setq drover-permissions-directory ledger))
     (when-let* ((dial (getenv "DROVER_AGENT_DIAL")))
       (setq drover-remote-peers (mapcar (lambda (entry) (append entry (list :dial t :local dial)))
                                         drover-remote-peers)))

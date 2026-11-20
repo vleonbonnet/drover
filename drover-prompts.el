@@ -556,6 +556,9 @@ MESSAGE tells the period, :since and :until, float times."
 
 ;;;; Every host's
 
+(declare-function drover-remote-prompts-hosts "drover-remote" ())
+(declare-function drover-remote-ask-prompts "drover-remote" (name request callback seconds))
+
 (defun drover-prompts-gather (since until callback &optional seconds)
   "Read the prompts the user sent from SINCE to UNTIL, of this host and its peers.
 Each host reads its own; a peer has SECONDS, by default
@@ -567,9 +570,30 @@ connected, `old' for one whose drover reads no prompts), :count, :cut,
 :failures and :message.  Return a function stopping the reading, after
 which CALLBACK is not called."
   (drover-prompts--check-period since until)
+  (drover-prompts-gather-hosts
+   :prompts #'drover-prompts-collect
+   (and (fboundp 'drover-remote-prompts-hosts) #'drover-remote-prompts-hosts)
+   #'drover-remote-ask-prompts #'drover-prompts--decode
+   since until callback seconds))
+
+(defun drover-prompts-gather-hosts (key collect hosts ask decode since until callback &optional seconds)
+  "Read what COLLECT reads from SINCE to UNTIL, on this host and its peers.
+KEY names the list read, such as :prompts.  COLLECT is called with
+SINCE, UNTIL and a callback of a plist holding KEY's list, :cut and
+:failures, and returns a function stopping it.  HOSTS, nil or a
+function, returns the peers as (NAME LABEL STATE), STATE `ready' for
+one to ask; ASK, called with a peer's NAME, a plist of :since and
+:until, a callback of (REPLY ERROR) and SECONDS, asks it; DECODE turns
+its REPLY and NAME into the plist COLLECT gives.  A peer has SECONDS,
+by default `drover-prompts-timeout', to answer.  CALLBACK gets, once, a
+plist of KEY, every host's list, oldest by :time first, each item with
+its :host, nil for this one, and :hosts, as `drover-prompts-gather'
+tells.  Return a function stopping the reading, after which CALLBACK
+is not called."
   (let* ((seconds (or seconds drover-prompts-timeout))
+         (what (substring (symbol-name key) 1))
          ;; By host, nil for this one: (STATUS . PROPERTIES), in order.
-         (hosts (list (list nil 'pending :label (drover-host-label nil))))
+         (entries (list (list nil 'pending :label (drover-host-label nil))))
          (stops nil)
          (finished nil)
          (timer nil))
@@ -579,57 +603,54 @@ which CALLBACK is not called."
              (setq finished t)
              (when timer (cancel-timer timer))
              (dolist (function stops)
-               (drover-with-reporting "prompts" (funcall function)))))
+               (drover-with-reporting what (funcall function)))))
          (settle (host status &rest properties)
-           (when-let* ((entry (assoc host hosts))
+           (when-let* ((entry (assoc host entries))
                        ((eq (nth 1 entry) 'pending)))
              (setcdr entry (cons status (append properties (cddr entry))))
-             (unless (seq-some (lambda (entry) (eq (nth 1 entry) 'pending)) hosts)
+             (unless (seq-some (lambda (entry) (eq (nth 1 entry) 'pending)) entries)
                (finish))))
+         (settle-result (host result)
+           (settle host 'ok :items (plist-get result key) :cut (plist-get result :cut)
+                   :failures (plist-get result :failures)))
          (finish ()
            (unless finished
              (stop)
-             (let ((prompts nil)
+             (let ((items nil)
                    (told nil))
-               (pcase-dolist (`(,host ,status . ,properties) hosts)
+               (pcase-dolist (`(,host ,status . ,properties) entries)
                  (let ((late (eq status 'pending)))
-                   (setq prompts (append (plist-get properties :prompts) prompts))
+                   (setq items (append (plist-get properties :items) items))
                    (push (list :host host :label (plist-get properties :label)
                                :status (if late 'failed status)
-                               :count (length (plist-get properties :prompts))
+                               :count (length (plist-get properties :items))
                                :cut (or (plist-get properties :cut) 0)
                                :failures (plist-get properties :failures)
                                :message (or (plist-get properties :message)
                                             (and late (format "did not answer within %d seconds" seconds))))
                          told)))
-               (drover-with-reporting "prompts"
+               (drover-with-reporting what
                  (funcall callback
-                          (list :prompts (sort prompts :key (lambda (prompt) (plist-get prompt :time)) :in-place t)
+                          (list key (sort items :key (lambda (item) (plist-get item :time)) :in-place t)
                                 :hosts (nreverse told))))))))
-      (when (fboundp 'drover-remote-prompts-hosts)
-        (pcase-dolist (`(,name ,label ,state) (drover-remote-prompts-hosts))
-          (setq hosts (append hosts (list (list name (if (eq state 'ready) 'pending state) :label label))))))
-      (setq timer (run-at-time seconds nil (lambda () (drover-with-reporting "prompts" (finish)))))
+      (when hosts
+        (pcase-dolist (`(,name ,label ,state) (funcall hosts))
+          (setq entries (append entries (list (list name (if (eq state 'ready) 'pending state) :label label))))))
+      (setq timer (run-at-time seconds nil (lambda () (drover-with-reporting what (finish)))))
       (condition-case err
-          (push (drover-prompts-collect
-                 since until
-                 (lambda (result)
-                   (settle nil 'ok :prompts (plist-get result :prompts) :cut (plist-get result :cut)
-                           :failures (plist-get result :failures))))
+          (push (funcall collect since until (lambda (result) (settle-result nil result)))
                 stops)
         (error (settle nil 'failed :message (drover-error-message err))))
-      (pcase-dolist (`(,name ,status . ,_) hosts)
+      (pcase-dolist (`(,name ,status . ,_) entries)
         (when (and name (eq status 'pending))
-          (drover-remote-ask-prompts
-           name (list :since since :until until)
-           (lambda (reply error)
-             (drover-with-reporting "prompts"
-               (if error
-                   (settle name 'failed :message error)
-                 (let ((result (drover-prompts--decode reply name)))
-                   (settle name 'ok :prompts (plist-get result :prompts) :cut (plist-get result :cut)
-                           :failures (plist-get result :failures))))))
-           seconds)))
+          (funcall ask
+                   name (list :since since :until until)
+                   (lambda (reply error)
+                     (drover-with-reporting what
+                       (if error
+                           (settle name 'failed :message error)
+                         (settle-result name (funcall decode reply name)))))
+                   seconds)))
       #'stop)))
 
 (provide 'drover-prompts)

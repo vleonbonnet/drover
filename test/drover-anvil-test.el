@@ -69,22 +69,23 @@
 CALLER is the identifier of a fake session, or nil for none named."
   (declare (indent 2) (debug t))
   `(drover-test-with-backend ,sessions
-     (drover-test-with-state
-       (let ((drover-anvil-callers '(drover-anvil-test-caller))
-             (anvil-server-request-meta (and ,caller (list (cons 'fake.session ,caller))))
-             (drover-anvil-permissions (default-value 'drover-anvil-permissions))
-             (drover-anvil-scratch-directories nil)
-             (drover-anvil-create-harnesses '(fake))
-             (drover-anvil-log-file nil)
-             (drover-anvil--jobs (make-hash-table :test #'equal))
-             (drover-anvil--started (make-hash-table :test #'equal))
-             (drover-anvil--waits (make-hash-table :test #'equal))
-             (drover-anvil--sent (make-hash-table :test #'equal))
-             (drover-anvil-test-requests nil)
-             (drover-anvil-test-blocker nil)
-             (drover-anvil-test-queued nil))
-         (drover-anvil-test--register-agent-operations)
-         ,@body))))
+                             (drover-test-with-state
+                              (let ((drover-anvil-callers '(drover-anvil-test-caller))
+                                    (anvil-server-request-meta (and ,caller (list (cons 'fake.session ,caller))))
+                                    ;; A copy, which a test may change in place.
+                                    (drover-anvil-permissions (copy-tree (default-value 'drover-anvil-permissions)))
+                                    (drover-anvil-scratch-directories nil)
+                                    (drover-anvil-create-harnesses '(fake))
+                                    (drover-anvil-log-file nil)
+                                    (drover-anvil--jobs (make-hash-table :test #'equal))
+                                    (drover-anvil--started (make-hash-table :test #'equal))
+                                    (drover-anvil--waits (make-hash-table :test #'equal))
+                                    (drover-anvil--sent (make-hash-table :test #'equal))
+                                    (drover-anvil-test-requests nil)
+                                    (drover-anvil-test-blocker nil)
+                                    (drover-anvil-test-queued nil))
+                                (drover-anvil-test--register-agent-operations)
+                                ,@body))))
 
 (defun drover-anvil-test-json (text)
   "Return TEXT, a tool's answer, parsed."
@@ -265,6 +266,51 @@ CALLER is the identifier of a fake session, or nil for none named."
         (should-error (drover-anvil--tool-prompts))
         (setf (alist-get 'read drover-anvil-permissions) 'any)
         (should-error (drover-anvil--tool-prompts "1795366800" "1795000000"))))))
+
+(ert-deftest drover-anvil-test-permissions ()
+  "The permission prompts of every host, with their sessions' titles, narrowed by host and within the scope of reading."
+  (require 'drover-permissions)
+  (drover-anvil-test-with (list (drover-test-session "me" :status 'working :engine 'opencode :engine-id "ses_1"
+                                                     :title "Session me"))
+      "me"
+    (let* ((project (drover-anvil-test-project))
+           (drover-host "reaver")
+           (prompts (list (list :engine 'opencode :id "ses_1" :time 1.0e9 :action "slack_send_message"
+                                :reply "passed" :plugin "slack-send-ask" :directory project)
+                          (list :engine 'opencode :id "ses_2" :time 1.1e9 :action "shell" :reply "once"
+                                :resources '("git push") :rules '("shell git push* ask") :directory "/elsewhere/")
+                          (list :engine 'claude-code :id "abc" :time 1.2e9 :action "Bash" :reply "reject"
+                                :host "core" :directory "c:/work/")))
+           (hosts (list (list :host nil :label "Reaver" :status 'ok :count 2 :cut 0)
+                        (list :host "core" :label "Core" :status 'ok :count 1 :cut 0))))
+      (setf (drover-session-directory (car drover-test-sessions)) project)
+      (drover-backend-changed 'fake)
+      (cl-letf (((symbol-function 'drover-permissions-gather)
+                 (lambda (_since _until callback &optional _seconds)
+                   (funcall callback (list :permissions prompts :hosts hosts))
+                   #'ignore)))
+        (let* ((answer (drover-anvil-test-json (drover-anvil--tool-permissions)))
+               (listed (alist-get 'permissions answer)))
+          (should (= (alist-get 'count answer) 3))
+          (should (equal (mapcar (lambda (prompt) (list (alist-get 'host prompt) (alist-get 'action prompt)
+                                                        (alist-get 'reply prompt)))
+                                 listed)
+                         '(("reaver" "slack_send_message" "passed") ("reaver" "shell" "once") ("core" "Bash" "reject"))))
+          (should (equal (alist-get 'link (car listed)) "agent-session://reaver/opencode/ses_1"))
+          (should (equal (alist-get 'title (car listed)) "Session me"))
+          (should (equal (alist-get 'plugin (car listed)) "slack-send-ask"))
+          (should (equal (alist-get 'resources (nth 1 listed)) '("git push")))
+          (should (equal (alist-get 'rules (nth 1 listed)) '("shell git push* ask"))))
+        (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
+                               (alist-get 'permissions (drover-anvil-test-json (drover-anvil--tool-permissions nil nil "core"))))
+                       '("abc")))
+        ;; Reading the caller's project alone: this host's prompts there.
+        (setf (alist-get 'read drover-anvil-permissions) 'project)
+        (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
+                               (alist-get 'permissions (drover-anvil-test-json (drover-anvil--tool-permissions))))
+                       '("ses_1")))
+        (setf (alist-get 'read drover-anvil-permissions) nil)
+        (should-error (drover-anvil--tool-permissions))))))
 
 (ert-deftest drover-anvil-test-never-the-caller-nor-above ()
   "No tool acts on the caller nor on a session above it, nor waits for them."
