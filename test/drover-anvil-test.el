@@ -330,6 +330,80 @@ CALLER is the identifier of a fake session, or nil for none named."
         ;; Reading goes on.
         (should (drover-anvil--tool-session "fake/a" :json-false))))))
 
+;;;; Following up
+
+(defvar drover-anvil-test-requested 0
+  "How many times the OpenCode restart was asked for.")
+
+(defmacro drover-anvil-test-with-schedule (&rest body)
+  "Run BODY with an empty prompt queue, the events of restarts defined, and a watch.
+The OpenCode restart asks for itself under the key \"oc-restart\",
+noted in `drover-anvil-test-requested'."
+  (declare (indent 0) (debug t))
+  `(progn
+     (require 'drover-schedule)
+     (drover-test-with-engines
+      (drover-test-register-engine 'opencode :directory #'ignore)
+      (let ((drover-schedule--queue (drover-schedule--queue-make :loaded t))
+            (drover-schedule--triggers nil)
+            (drover-schedule-former-files nil)
+            (drover-schedule-display-function #'ignore)
+            (drover-anvil-test-requested 0))
+        (drover-schedule-define-trigger 'opencode-restart "OpenCode restart"
+                                        :request (lambda ()
+                                                   (cl-incf drover-anvil-test-requested)
+                                                   "oc-restart"))
+        (drover-schedule-define-trigger 'emacs-restart "Emacs restart")
+        (drover-schedule-define-trigger 'reply "reply" :repeat t)
+        (unwind-protect
+            (cl-letf (((symbol-function 'drover-schedule--refresh) #'ignore))
+              ,@body)
+          (maphash (lambda (_ timer) (cancel-timer timer))
+                   (drover-schedule--queue-timers drover-schedule--queue)))))))
+
+(ert-deftest drover-anvil-test-follow-up-scheduled ()
+  "The caller's prompt waits for the event it names, which is asked for, and the call is logged."
+  (drover-anvil-test-with (list (drover-test-session "me" :status 'working :engine 'opencode
+                                                     :engine-id "ses_me" :directory temporary-file-directory))
+      "me"
+    (drover-anvil-test-with-schedule
+      (let ((answer (drover-anvil-test-json
+                     (drover-anvil--tool-after "opencode-restart" "Retry the Reynard tests."))))
+        (should (equal (alist-get 'outcome answer) "scheduled"))
+        (should (equal (alist-get 'event answer) "opencode-restart"))
+        (should (equal (alist-get 'key answer) "fake/me"))
+        (let ((job (car (drover-schedule--jobs))))
+          (should (equal (plist-get job :id) (alist-get 'id answer)))
+          (should (equal (plist-get job :after) "oc-restart"))
+          (should (eq (plist-get job :trigger) 'opencode-restart))
+          (should (equal (plist-get job :prompt) "Retry the Reynard tests."))
+          (should (equal (plist-get job :link) "agent-session:opencode/ses_me"))
+          (should (eq (plist-get job :backend) 'fake))))
+      (should (= drover-anvil-test-requested 1))
+      (should (seq-find (lambda (line) (string-match-p "drover-session-after\tcaller=fake/me\tsession=fake/me\tacting\tafter opencode-restart, 24 characters" line))
+                        (drover-anvil-test-log)))
+      ;; It is sent once the event happens, as the user's scheduled prompts are.
+      (should (= (drover-schedule-fire "oc-restart") 1)))))
+
+(ert-deftest drover-anvil-test-follow-up-refused ()
+  "No follow-up waits for an unknown or repeating event, for an unknown caller, or against the user's permissions."
+  (drover-anvil-test-with (list (drover-test-session "me" :status 'working :engine 'opencode
+                                                     :engine-id "ses_me" :directory temporary-file-directory))
+      "me"
+    (drover-anvil-test-with-schedule
+      (let ((err (should-error (drover-anvil--tool-after "reply" "Again"))))
+        (should (string-match-p "No event reply; drover knows opencode-restart (OpenCode restart), emacs-restart (Emacs restart)\\'"
+                                (cadr err))))
+      (should-error (drover-anvil--tool-after "opencode-restart" ""))
+      (let ((drover-anvil-permissions '((follow-up . nil))))
+        (should (string-match-p "allows no follow-up"
+                                (cadr (should-error (drover-anvil--tool-after "opencode-restart" "Retry"))))))
+      (let ((anvil-server-request-meta nil))
+        (should (string-match-p "caller is unknown"
+                                (cadr (should-error (drover-anvil--tool-after "opencode-restart" "Retry"))))))
+      (should-not (drover-schedule--jobs))
+      (should (= drover-anvil-test-requested 0)))))
+
 ;;;; Reading
 
 (ert-deftest drover-anvil-test-read-with-recap-and-requests ()

@@ -20,8 +20,9 @@
 ;; MCP tools, served by Anvil, through which agents list, read, start,
 ;; prompt, wait on, answer, interrupt and archive the sessions drover
 ;; knows, of every harness and host, through drover's operations as
-;; the user's commands do: `drover-anvil-enable' registers them with
-;; Anvil, `drover-anvil-disable' removes them.
+;; the user's commands do, and have their own session prompted after
+;; an event such as a restart: `drover-anvil-enable' registers them
+;; with Anvil, `drover-anvil-disable' removes them.
 ;;
 ;; What an agent may do is the user's to say, `drover-anvil-permissions',
 ;; action by action: on any session, on those of the caller's project,
@@ -76,11 +77,12 @@
   '((list . any) (read . any) (wait . any)
     (create . project) (send . project)
     (interrupt . own) (archive . own)
-    (answer-question . own) (answer-permission . nil))
+    (answer-question . own) (answer-permission . nil)
+    (follow-up . self))
   "What agents may do through the tools, by action.
 Each entry is (ACTION . SCOPE).  ACTION is one of `list', `read',
-`wait', `create', `send', `interrupt', `archive', `answer-question'
-and `answer-permission'.  SCOPE is:
+`wait', `create', `send', `interrupt', `archive', `answer-question',
+`answer-permission' and `follow-up'.  SCOPE is:
 
  `any'      any session, of any host;
  `project'  the sessions of this host running in the caller's project,
@@ -89,18 +91,23 @@ and `answer-permission'.  SCOPE is:
             directories;
  `own'      the sessions the caller started through the tools, and its
             subagents;
+ `self'     for `follow-up' alone, the caller itself;
  nil        none.
 
 An action not listed is allowed nowhere.  Whatever the scope, no tool
 acts on the caller itself nor on the sessions above it, whose turns
-wait for its own, and a caller its client does not name may only do
-what applies to `any' session."
+wait for its own, but `follow-up', which has drover prompt the caller
+after an event (`drover-session-after'), once its turn is long over;
+and a caller its client does not name may only do what applies to
+`any' session, so it has no follow-up."
   :type '(alist :key-type (choice (const list) (const read) (const wait) (const create) (const send)
                                   (const interrupt) (const archive)
-                                  (const answer-question) (const answer-permission))
+                                  (const answer-question) (const answer-permission)
+                                  (const follow-up))
                 :value-type (choice (const :tag "Any session" any)
                                     (const :tag "The caller's project" project)
                                     (const :tag "Started by the caller" own)
+                                    (const :tag "The caller itself, for follow-up" self)
                                     (const :tag "None" nil)))
   :group 'drover-anvil)
 
@@ -1405,6 +1412,72 @@ MCP Parameters:
         (error (drover-anvil--fail id (drover-error-message err))))
       (drover-anvil--answer id))))
 
+;;;; Following up
+
+(declare-function drover-schedule-triggers "drover-schedule" (&optional all))
+(declare-function drover-schedule--trigger-get "drover-schedule" (trigger property))
+(declare-function drover-schedule-session-target "drover-schedule" (session))
+(declare-function drover-schedule-add-after-trigger "drover-schedule"
+                  (target trigger prompt &optional instruction argument))
+
+(defun drover-anvil--follow-up-events ()
+  "Return the events a follow-up may wait for, as (NAME . LABEL), in order.
+They are those of `drover-schedule-triggers' that do not repeat: a watch
+would prompt the caller on each, and one taking an argument only the
+user can tell."
+  (seq-remove (lambda (entry) (drover-schedule--trigger-get (car entry) :repeat))
+              (drover-schedule-triggers)))
+
+(defun drover-anvil--tool-after (event prompt)
+  "Have drover send PROMPT to the calling session after the next EVENT.
+EVENT names an event drover knows, such as a restart of the service
+the caller's tools come from: the follow-up waits for it as a prompt
+the user scheduled does, asking for it, and the user sees it among the
+scheduled prompts.  For a step that needs the event, so that the
+session carries on once it happened.
+
+MCP Parameters:
+  event - The event, by name, such as opencode-restart or emacs-restart;
+      a name drover does not know is refused with those it knows
+  prompt - The prompt the session gets then, Markdown, such as which
+      step to retry"
+  (drover-start)
+  (require 'drover-schedule)
+  (let* ((caller (drover-anvil--caller))
+         (record (and caller (drover-index-session caller)))
+         (events (drover-anvil--follow-up-events))
+         (entry (seq-find (lambda (entry) (equal (symbol-name (car entry)) event)) events))
+         (prompt (drover-anvil--prompt prompt)))
+    (cond
+     ((not (eq (drover-anvil--scope 'follow-up) 'self))
+      (drover-anvil--log "drover-session-after" caller caller "refused" "follow-up allowed nowhere")
+      (drover-anvil--refuse "drover-anvil-permissions allows no follow-up"))
+     ((null record)
+      (drover-anvil--log "drover-session-after" caller nil "refused" "unknown caller")
+      (drover-anvil--refuse "The caller is unknown: its client names no session drover knows, so none can be followed up"))
+     ((null entry)
+      (drover-anvil--refuse "No event %s; drover knows %s" (drover-bound-line (format "%s" event) 60)
+                            (if events
+                                (mapconcat (lambda (entry) (format "%s (%s)" (car entry) (cdr entry))) events ", ")
+                              "none"))))
+    (let ((target (condition-case err
+                      (drover-schedule-session-target record)
+                    (user-error
+                     (drover-anvil--log "drover-session-after" caller caller "refused" (error-message-string err))
+                     (drover-anvil--refuse "%s" (error-message-string err))))))
+      (drover-anvil--log-or-refuse "drover-session-after" caller caller
+                                   (format "after %s, %s" (car entry) (drover-anvil--prompt-note prompt)))
+      (let ((job (drover-quietly
+                   (drover-schedule-add-after-trigger target (car entry) prompt
+                                                      (concat "after the next " (cdr entry))))))
+        (drover-anvil--json
+         `((outcome . "scheduled")
+           (event . ,(symbol-name (car entry)))
+           (key . ,(drover-anvil-key-string record))
+           (id . ,(plist-get job :id))
+           (note . ,(format "This session gets the prompt after the next %s; the user may cancel it among the scheduled prompts"
+                            (cdr entry)))))))))
+
 ;;;; Jobs' answers
 
 (defun drover-anvil--tool-job (job)
@@ -1449,6 +1522,9 @@ MCP Parameters:
     (drover-anvil--tool-archive
      :id "drover-session-archive"
      :description "Archive a session, closing its buffer; its conversation stays.  By default only the sessions the caller started.")
+    (drover-anvil--tool-after
+     :id "drover-session-after"
+     :description "Have drover send a prompt to your own session after the next event it knows, such as opencode-restart or emacs-restart.  Use it when a step needs that event, such as tools that load only once the service restarts, then end your turn: the session carries on once it happened.  It asks for the event, as a prompt the user schedules does, and the user can cancel it.")
     (drover-anvil--tool-prompts
      :id "drover-prompts" :read-only t
      :description "Return the prompts the user sent agents over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, conversation, its link, title, directory, time and text.  Subagents' prompts, programs' and what engines add as the user are left out.  For reviews of how the user works with agents.")
