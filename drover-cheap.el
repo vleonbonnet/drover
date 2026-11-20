@@ -94,10 +94,13 @@
   "The kind of this host, choosing the providers it may use and their order.
 A key of `drover-cheap-provider-orders': `mongodb' for a host of
 MongoDB's, which uses MongoDB's AI providers alone, `personal' for one
-of the user's own, which prefers what costs least.  Set it per host,
-in its configuration: it is not guessed."
+of the user's own, which prefers what costs least, `aiur' for a host of
+the homelab, whose models all go through its LiteLLM proxy, by the
+aliases it serves per job, such as agent-cheap.  Set it per host, in
+its configuration: it is not guessed."
   :type '(choice (const :tag "A MongoDB host: MongoDB's AI providers alone" mongodb)
                  (const :tag "A personal host: subscriptions, MongoDB's AI, then APIs" personal)
+                 (const :tag "A homelab host: the LiteLLM proxy's aliases alone" aiur)
                  (symbol :tag "Another key of `drover-cheap-provider-orders'"))
   :group 'drover-cheap)
 
@@ -107,6 +110,7 @@ in its configuration: it is not guessed."
     (fireworks :id "\\`fireworks-ai\\'")
     (prodsec :id "\\`prodsec-gateway\\'")
     (mongodb-ai :id "\\`\\(?:ai-gateway-\\(?:anthropic\\|openai\\|misc\\)\\|prodsec-gateway\\)\\'")
+    (litellm :id "\\`litellm\\'")
     (subscription :auth (subscription))
     (api :auth (api plugin)))
   "Classes of providers, which `drover-cheap-provider-orders' orders.
@@ -124,7 +128,8 @@ defaults name MongoDB's providers, as the Grove plugin and the
 MongoDB relay name them: the Grove gateway's providers by wire format
 \(`grove-bedrock'), Fireworks, the ProdSec gateway, and the Grove
 gateway's and the ProdSec gateway's as the relay serves them to
-another host (`mongodb-ai')."
+another host (`mongodb-ai'), and the homelab's LiteLLM proxy, as the
+OpenCode configuration of a homelab host names it (`litellm')."
   :type '(alist :key-type (symbol :tag "Class")
                 :value-type (plist :options ((:id regexp)
                                              (:auth (repeat (choice (const subscription) (const api)
@@ -133,7 +138,8 @@ another host (`mongodb-ai')."
 
 (defcustom drover-cheap-provider-orders
   '((mongodb github-copilot grove-bedrock fireworks prodsec)
-    (personal subscription mongodb-ai api))
+    (personal subscription mongodb-ai api)
+    (aiur litellm))
   "The classes of providers each kind of host uses, in its order of preference.
 Each entry is (KIND . CLASSES), KIND a value of
 `drover-cheap-host-kind', CLASSES keys of `drover-cheap-provider-classes'.
@@ -152,7 +158,8 @@ to Secateur, which a session chooses explicitly."
   :group 'drover-cheap)
 
 (defcustom drover-cheap-families
-  '((haiku :family "\\`claude-haiku\\'" :id "claude-haiku")
+  '((alias :id "\\`agent-cheap\\'")
+    (haiku :family "\\`claude-haiku\\'" :id "claude-haiku")
     (luna :family "\\`gpt-luna\\'" :id "\\`gpt-[0-9.]+-luna\\(?:-\\|\\'\\)")
     (open-weight :family "\\`\\(?:deepseek\\|glm\\)-flash\\'" :id "\\(?:deepseek\\|glm\\)[-0-9a-z.]*-flash"))
   "Tiers of cheap models, best first.
@@ -161,8 +168,10 @@ the family the catalog gives it matches :family, or, for a model of no
 family, when its identifier matches :id, both downcased.  A tier may
 take several families, as `open-weight' takes DeepSeek's and GLM's
 flash models.  Within a tier, the newer version of a family comes
-first, then the model released last.  The defaults are Anthropic's
-Haiku, OpenAI's Luna, then the flash models of DeepSeek and GLM.  A
+first, then the model released last.  The defaults are the alias a
+LiteLLM proxy serves for cheap jobs, agent-cheap, which names no
+family, then Anthropic's Haiku, OpenAI's Luna, then the flash models of
+DeepSeek and GLM.  A
 tier ranks models of the same currency and class of provider: see
 `drover-cheap-versions' and `drover-cheap-provider-orders'."
   :type '(alist :key-type (symbol :tag "Tier")

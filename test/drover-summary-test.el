@@ -713,7 +713,10 @@ SLOTS is a plist of slot names as keywords and values."
                        ((providerID . "openai") (id . "gpt-6-luna") (variant . "low")))
                       ((:model "github-copilot/claude-haiku-4.5" :provider-id "github-copilot"
                                :id "claude-haiku-4.5" :variants ("high" "max"))
-                       ((providerID . "github-copilot") (id . "claude-haiku-4.5")))))
+                       ((providerID . "github-copilot") (id . "claude-haiku-4.5")))
+                      ;; A homelab host's cheap model, the LiteLLM proxy's alias, of no variant.
+                      ((:model "litellm/agent-cheap" :provider-id "litellm" :id "agent-cheap" :variants nil)
+                       ((providerID . "litellm") (id . "agent-cheap")))))
         (setq cheap (car case) requests nil results nil)
         (drover-summary-opencode-generate "the prompt" (lambda (result) (push result results)))
         (should (equal results `((:text "Done: it works" :model ,(plist-get (car case) :model)))))

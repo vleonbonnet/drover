@@ -1,0 +1,50 @@
+#!/bin/sh
+# drover-health-check - a Nomad or Consul script check of drover in an Emacs daemon.
+#
+# Usage: drover-health-check [-s SOCKET] [-t SECONDS]
+#
+# It asks the Emacs serving SOCKET (emacsclient's -s: a name, or a
+# file name), the default server otherwise, for `drover-health', and
+# waits SECONDS (5) at most.  It prints the line Emacs answered, and
+# exits as script checks expect: 0 for ok, 1 for degraded (a warning),
+# 2 for failed, an error, or no answer in time (critical).
+#
+# EMACSCLIENT names the client program, emacsclient by default;
+# DROVER_HEALTH_SOCKET and DROVER_HEALTH_TIMEOUT give the defaults of
+# -s and -t.
+
+socket=${DROVER_HEALTH_SOCKET:-}
+seconds=${DROVER_HEALTH_TIMEOUT:-5}
+client=${EMACSCLIENT:-emacsclient}
+
+while getopts s:t: option; do
+  case $option in
+    s) socket=$OPTARG ;;
+    t) seconds=$OPTARG ;;
+    *) echo "Usage: $0 [-s SOCKET] [-t SECONDS]" >&2; exit 2 ;;
+  esac
+done
+
+case $seconds in
+  ''|*[!0-9]*) echo "failed: -t takes whole seconds, not $seconds"; exit 2 ;;
+esac
+
+set -- --timeout="$seconds" \
+  --eval "(if (require 'drover-headless nil t) (drover-health) \"failed: drover-headless is not installed\")"
+[ -n "$socket" ] && set -- -s "$socket" "$@"
+
+# emacsclient's own timeout covers a server that accepts and never answers;
+# timeout(1), where there is one, also covers a connection that hangs.
+if command -v timeout > /dev/null 2>&1; then
+  out=$(timeout -k 1 "$((seconds + 1))" "$client" "$@" 2>&1)
+else
+  out=$("$client" "$@" 2>&1)
+fi
+status=$?
+echo "$out"
+[ "$status" -eq 0 ] || exit 2
+case $out in
+  '"ok:'*) exit 0 ;;
+  '"degraded:'*) exit 1 ;;
+  *) exit 2 ;;
+esac

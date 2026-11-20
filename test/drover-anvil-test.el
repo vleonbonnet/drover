@@ -450,6 +450,125 @@ noted in `drover-anvil-test-requested'."
       (should-not (drover-schedule--jobs))
       (should (= drover-anvil-test-requested 0)))))
 
+;;;; Scheduling
+
+(ert-deftest drover-anvil-test-schedule ()
+  "An agent schedules a prompt for a session of its project, its own included, once or recurring, hidden."
+  (let ((project nil))
+    (drover-anvil-test-with nil "me"
+      (setq project (drover-anvil-test-project))
+      (setq drover-test-sessions
+            (list (drover-test-session "me" :status 'working :engine 'opencode :engine-id "ses_me" :directory project)
+                  (drover-test-session "peer" :engine 'opencode :engine-id "ses_peer" :directory project)))
+      (drover-anvil-test-with-schedule
+        (let ((answer (drover-anvil-test-json
+                       (drover-anvil--tool-schedule "fake/peer" "Write the brief." "every weekday 7:00"))))
+          (should (equal (alist-get 'outcome answer) "scheduled"))
+          (should (equal (alist-get 'key answer) "fake/peer"))
+          (should (string-prefix-p "every weekday at 07:00, next " (alist-get 'when answer)))
+          (should (alist-get 'next answer))
+          (let ((job (drover-schedule--job (alist-get 'id answer))))
+            (should (equal (plist-get job :every) '(:days (1 2 3 4 5) :at (7 . 0))))
+            (should (eq (plist-get job :hidden) t))
+            (should (equal (plist-get job :by) "agent fake/me"))
+            (should (equal (plist-get job :link) "agent-session:opencode/ses_peer"))))
+        ;; Its own session, though its turn runs: the prompt goes once it is over.
+        (let ((answer (drover-anvil-test-json
+                       (drover-anvil--tool-schedule "fake/me" "Check the deploy." "2099-01-01T07:00:00Z"))))
+          (should (equal (alist-get 'outcome answer) "scheduled"))
+          (should (= (plist-get (drover-schedule--job (alist-get 'id answer)) :due)
+                     (float-time (encode-time (iso8601-parse "2099-01-01T07:00:00Z"))))))
+        (let ((answer (drover-anvil-test-json (drover-anvil--tool-schedule "fake/me" "Go on." "after OpenCode restart"))))
+          (should (equal (alist-get 'outcome answer) "scheduled"))
+          (should (= drover-anvil-test-requested 1)))
+        (should (seq-find (lambda (line) (string-match-p "drover-schedule\tcaller=fake/me\tsession=fake/peer\tacting\tevery weekday 7:00, 16 characters" line))
+                          (drover-anvil-test-log)))
+        (should (length= (drover-schedule--jobs) 3))))))
+
+(ert-deftest drover-anvil-test-schedule-refused ()
+  "No prompt is scheduled out of the caller's scope, for an unreadable or past time, nor for another host."
+  (let ((project nil) (elsewhere nil))
+    (drover-anvil-test-with nil "me"
+      (setq project (drover-anvil-test-project)
+            elsewhere (drover-anvil-test-project "elsewhere"))
+      (setq drover-test-sessions
+            (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me" :directory project)
+                  (drover-test-session "other" :engine 'opencode :engine-id "ses_other" :directory elsewhere)
+                  (drover-test-session "far" :engine 'opencode :engine-id "ses_far" :directory project :host "core")))
+      (drover-anvil-test-with-schedule
+        (should (string-match-p "allows schedule only on the sessions of the caller's project"
+                                (cadr (should-error (drover-anvil--tool-schedule "fake/other" "Hi" "in 1h")))))
+        (dolist (case '(("soon" "cannot read “soon” as a time") ("2001-01-01T00:00:00Z" "is past")
+                        ("every day 7:00 Mars/Olympus_Mons" "no time zone Mars/Olympus_Mons here")
+                        ("" "Tell when")))
+          (should (string-search (cadr case)
+                                 (cadr (should-error (drover-anvil--tool-schedule "fake/me" "Hi" (car case)))))))
+        (should-error (drover-anvil--tool-schedule "fake/me" "" "in 1h"))
+        (let ((drover-anvil-permissions '((schedule . self))))
+          (should (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))
+          (should (string-match-p "only on the caller itself"
+                                  (cadr (should-error (drover-anvil--tool-schedule "fake/other" "Hi" "in 1h"))))))
+        (let ((anvil-server-request-meta nil))
+          (should (string-match-p "caller is unknown"
+                                  (cadr (should-error (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))))))
+        (let ((drover-anvil-permissions '((schedule . nil))))
+          (should (string-match-p "allows no schedule"
+                                  (cadr (should-error (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))))))
+        (should (string-match-p "only on the sessions of the caller's project"
+                                (cadr (should-error (drover-anvil--tool-schedule "fake/far" "Hi" "in 1h")))))
+        (let ((drover-anvil-permissions '((schedule . any))))
+          (should (string-match-p "runs on core"
+                                  (cadr (should-error (drover-anvil--tool-schedule "fake/far" "Hi" "in 1h"))))))
+        (should (length= (drover-schedule--jobs) 1))))))
+
+(ert-deftest drover-anvil-test-fire ()
+  "An agent fires an event by name only where the user allows it; the prompts waiting go, with what happened."
+  (drover-anvil-test-with (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me"
+                                                     :directory temporary-file-directory))
+      "me"
+    (drover-anvil-test-with-schedule
+      (drover-schedule-add-after-trigger (drover-schedule-session-target (car drover-test-sessions))
+                                         'emacs-restart "Verify the restart.")
+      (should (string-match-p "allows no fire" (cadr (should-error (drover-anvil--tool-fire "emacs-restart")))))
+      (setf (alist-get 'fire drover-anvil-permissions) 'any)
+      (should (string-match-p "No event weekly; drover knows opencode-restart (OpenCode restart)"
+                              (cadr (should-error (drover-anvil--tool-fire "weekly")))))
+      (let ((answer (drover-anvil-test-json (drover-anvil--tool-fire "emacs-restart" "Restarted at 3:00"))))
+        (should (equal answer '((outcome . "fired") (event . "emacs-restart") (released . 1)))))
+      (should (equal (plist-get (car (drover-schedule--jobs)) :prompt) "Verify the restart.\n\nRestarted at 3:00"))
+      (drover-schedule-add-after-trigger (drover-schedule-session-target (car drover-test-sessions))
+                                         'emacs-restart "Never.")
+      (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-fire "emacs-restart" nil t)))
+                     "cancelled"))
+      (should (seq-find (lambda (line) (string-match-p "drover-schedule-fire\tcaller=fake/me\tsession=-\tdone\t1 released" line))
+                        (drover-anvil-test-log))))))
+
+(ert-deftest drover-anvil-test-scheduled ()
+  "The list tells each prompt's session, when, status and who scheduled it, within the caller's read scope."
+  (let ((project nil) (elsewhere nil))
+    (drover-anvil-test-with nil "me"
+      (setq project (drover-anvil-test-project)
+            elsewhere (drover-anvil-test-project "elsewhere"))
+      (setq drover-test-sessions
+            (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me" :directory project)
+                  (drover-test-session "other" :engine 'opencode :engine-id "ses_other" :directory elsewhere)))
+      (drover-anvil-test-with-schedule
+        (drover-anvil--tool-schedule "fake/me" "Brief." "every day 7:00")
+        (drover-schedule-add (drover-schedule-session-target (cadr drover-test-sessions))
+                             (time-add (current-time) 3600) "Theirs.")
+        (let ((answer (drover-anvil-test-json (drover-anvil--tool-scheduled))))
+          (should (= (alist-get 'count answer) 2))
+          (let ((mine (seq-find (lambda (job) (equal (alist-get 'key job) "fake/me")) (alist-get 'scheduled answer))))
+            (should (equal (alist-get 'status mine) "recurring"))
+            (should (equal (alist-get 'by mine) "agent fake/me"))
+            (should (string-prefix-p "every day at 07:00, next " (alist-get 'when mine)))
+            (should (equal (alist-get 'prompt mine) "Brief."))))
+        (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled "fake/other")))))
+        (should (= 0 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil "sent")))))
+        ;; Reading the caller's project alone: the other session's prompt is left out.
+        (setf (alist-get 'read drover-anvil-permissions) 'project)
+        (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled)))))))))
+
 ;;;; Reading
 
 (ert-deftest drover-anvil-test-read-with-recap-and-requests ()

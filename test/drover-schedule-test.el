@@ -1586,5 +1586,402 @@ prompt or a delivery leading back to the queue would print it all again."
          200 (list (cons "a prompt" job)
                    (cons "a delivery" (gethash (plist-get job :id) (drover-schedule--active)))))))))
 
+;;;; A host with no graphical terminal
+
+(ert-deftest drover-schedule-test-display-headless ()
+  "With no graphical terminal, as in batch or on a daemon, delivery opens no frame."
+  (should-not (drover-schedule-graphic-terminal))
+  (should (eq (drover-schedule-display-default nil "Title") 'hidden))
+  (should (eq (drover-schedule-display-frame nil "Title") 'hidden))
+  (should (eq (default-value 'drover-schedule-display-function) #'drover-schedule-display-default))
+  (drover-schedule-test-state
+    (drover-schedule-test-session)
+    (let* ((buffer (drover-schedule-test-buffer))
+           (job (drover-schedule-test-job))
+           (frames (frame-list))
+           (windows (mapcar #'window-buffer (window-list)))
+           (drover-schedule-display-function #'drover-schedule-display-default)
+           run)
+      (drover-schedule--run (plist-get job :id))
+      (setq run (gethash (plist-get job :id) (drover-schedule--active)))
+      (should (plist-get run :hidden))
+      (should-not (plist-get run :window))
+      (should (eq (plist-get run :buffer) buffer))
+      (drover-schedule--poll job run)
+      (should (equal (cadr (car drover-schedule-test-submitted)) "check"))
+      (should (equal (frame-list) frames))
+      (should (equal (mapcar #'window-buffer (window-list)) windows))
+      ;; Nothing of it is saved: the next delivery asks the display again.
+      (should-not (plist-get job :hidden)))))
+
+(ert-deftest drover-schedule-test-display-hidden-resume ()
+  "A conversation resumed while no terminal is graphical resumes out of every window."
+  (drover-schedule-test-state
+    (let ((drover--resumers nil)
+          (drover--resumer-properties nil)
+          (actions nil)
+          (drover-schedule-display-function #'drover-schedule-display-default))
+      (drover-schedule-test-session)
+      (drover-register-resumer 'claude-code 'fake
+                               (lambda (_id _directory)
+                                 (push (list display-buffer-overriding-action inhibit-interaction) actions)
+                                 (drover-schedule-test-buffer)))
+      (let ((job (drover-schedule-test-job)))
+        (drover-schedule--run (plist-get job :id))
+        (should (equal actions '(((display-buffer-no-window (allow-no-window . t)) t))))
+        (should (eq (plist-get job :status) 'waiting))))))
+
+(ert-deftest drover-schedule-test-display-graphic ()
+  "With a graphical terminal, the default makes a frame there, whichever terminal is selected."
+  (let ((made nil))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional display) (eq display 'screen)))
+              ((symbol-function 'terminal-list) (lambda () (list (frame-terminal) 'screen)))
+              ((symbol-function 'make-frame) (lambda (parameters) (push parameters made) (selected-frame)))
+              ((symbol-function 'make-frame-visible) #'ignore))
+      (should (eq (drover-schedule-graphic-terminal) 'screen))
+      (should (eq (drover-schedule-display-default nil "Fix it") (selected-window))))
+    (should (equal made '(((name . "Scheduled: Fix it") (terminal . screen)))))))
+
+;;;; Recurring prompts
+
+(defun drover-schedule-test-run-at (every after &optional anchor)
+  "Return the run of EVERY after AFTER, from ANCHOR, as \"Day YYYY-MM-DD HH:MM\" in the test zone."
+  (when-let* ((run (drover-schedule-next-run every (float-time after) (and anchor (float-time anchor))
+                                             drover-schedule-test-zone)))
+    (format-time-string "%a %F %R" (seconds-to-time run) drover-schedule-test-zone)))
+
+(ert-deftest drover-schedule-test-parse-recurrence ()
+  "Intervals, days and times read as recurrences; anything else is nil rather than a guess."
+  (dolist (case '(("every 30m" (:interval 1800)) ("every 2 hours" (:interval 7200))
+                  ("every hour" (:interval 3600)) ("Every  90 minutes" (:interval 5400))
+                  ("every minute" (:interval 60))
+                  ("every day 7:00" (:days (0 1 2 3 4 5 6) :at (7 . 0)))
+                  ("every day at 7am" (:days (0 1 2 3 4 5 6) :at (7 . 0)))
+                  ("daily at 18:30" (:days (0 1 2 3 4 5 6) :at (18 . 30)))
+                  ("daily" (:days (0 1 2 3 4 5 6) :at (9 . 0)))
+                  ("every morning" (:days (0 1 2 3 4 5 6) :at (9 . 0)))
+                  ("every weekday 9am" (:days (1 2 3 4 5) :at (9 . 0)))
+                  ("every weekend at noon" (:days (0 6) :at (12 . 0)))
+                  ("every mon,wed,fri 18:00" (:days (1 3 5) :at (18 . 0)))
+                  ("every Monday and Thursday at 8:15am" (:days (1 4) :at (8 . 15)))
+                  ("every tue thu" (:days (2 4) :at (9 . 0)))
+                  ("every sundays evening" (:days (0) :at (18 . 0)))
+                  ("every day 7:00 UTC" (:days (0 1 2 3 4 5 6) :at (7 . 0) :zone "UTC"))
+                  ("every day 7:00 in utc" (:days (0 1 2 3 4 5 6) :at (7 . 0) :zone "UTC"))
+                  ("every day 7:00 EST5EDT,M3.2.0,M11.1.0"
+                   (:days (0 1 2 3 4 5 6) :at (7 . 0) :zone "EST5EDT,M3.2.0,M11.1.0"))))
+    (should (equal (drover-schedule-parse-recurrence (car case)) (list :every (cadr case))))
+    (should (drover-schedule-recurrence-valid-p (cadr case)))
+    ;; The time grammar reads them too.
+    (should (equal (drover-schedule-parse-time (car case) (drover-schedule-test-now) drover-schedule-test-zone)
+                   (list :every (cadr case)))))
+  (dolist (text '("every" "every 0m" "every 30s" "every 2 days" "every fortnight" "every day 25:00"
+                  "every day 13pm" "every 30m UTC" "every someday" "every day at" "every mon, funday"
+                  "each day" "every day 7:00 Mars/Olympus_Mons" "in 30m" "tomorrow 7:00"))
+    (should-not (drover-schedule-parse-recurrence text)))
+  (dolist (every '((:interval 30) (:interval 60.5) (:interval 3600 :days (1)) (:days nil :at (9 . 0))
+                   (:days (7) :at (9 . 0)) (:days (1 1) :at (9 . 0)) (:days (1) :at (24 . 0))
+                   (:days (1) :at (9 . 0) :zone "../../etc/passwd") (:days (1))))
+    (should-not (drover-schedule-recurrence-valid-p every))))
+
+(ert-deftest drover-schedule-test-recurrence-zones ()
+  "A zone this system does not know is refused, named; IANA names need the zone files."
+  (should (drover-schedule-zone-known-p "UTC"))
+  (should (drover-schedule-zone-known-p "EST5EDT,M3.2.0,M11.1.0"))
+  (should-not (drover-schedule-zone-known-p "Mars/Olympus_Mons"))
+  (should-not (drover-schedule-zone-known-p "../zoneinfo/UTC"))
+  (should (equal (drover-schedule--split-zone "every day 7:00 Mars/Olympus_Mons")
+                 '("every day 7:00" :unknown "Mars/Olympus_Mons")))
+  (should (equal (drover-schedule--split-zone "every mon,wed,fri") '("every mon,wed,fri")))
+  (should (equal (drover-schedule--unreadable "every day 7:00 Mars/Olympus_Mons")
+                 "no time zone Mars/Olympus_Mons here"))
+  (let ((drover-schedule-zoneinfo-directories nil))
+    (with-environment-variables (("TZDIR" nil))
+      (should-not (drover-schedule-zone-known-p "America/New_York"))))
+  (let ((zoneinfo (seq-find (lambda (directory) (file-regular-p (expand-file-name "America/New_York" directory)))
+                            drover-schedule-zoneinfo-directories)))
+    (skip-unless zoneinfo)
+    (should (drover-schedule-zone-known-p "America/New_York"))
+    (should (equal (drover-schedule-parse-recurrence "every weekday 9am America/New_York")
+                   '(:every (:days (1 2 3 4 5) :at (9 . 0) :zone "America/New_York"))))
+    ;; 9:00 in New York is 14:00 UTC in winter.
+    (should (equal (format-time-string "%F %R" (seconds-to-time
+                                                (drover-schedule-next-run
+                                                 '(:days (1 2 3 4 5) :at (9 . 0) :zone "America/New_York")
+                                                 (float-time (encode-time '(0 0 12 1 12 2026 nil nil t)))))
+                                       t)
+                   "2026-12-01 14:00"))))
+
+(ert-deftest drover-schedule-test-next-run ()
+  "Clock times keep their hour across DST, skip a day lacking them; intervals count from their anchor."
+  (let ((now (drover-schedule-test-now)))
+    (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (7 . 0)) now) "Sun 2026-11-01 07:00"))
+    (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (15 . 0)) now) "Sat 2026-10-31 15:00"))
+    ;; Strictly after: a run at the very time is the next day's.
+    (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (14 . 0)) now) "Sun 2026-11-01 14:00"))
+    (should (equal (drover-schedule-test-run-at '(:days (1 2 3 4 5) :at (9 . 0)) now) "Mon 2026-11-02 09:00"))
+    (should (equal (drover-schedule-test-run-at '(:days (1 3 5) :at (18 . 0)) (drover-schedule-test-now 18 2 11))
+                   "Wed 2026-11-04 18:00"))
+    ;; The zone of the recurrence wins over the reader's.
+    (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (7 . 0) :zone "UTC") now)
+                   "Sun 2026-11-01 02:00"))
+    ;; 2:30 does not exist on 14 March 2027 in the test zone: the next day's.
+    (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (2 . 30)) (drover-schedule-test-now 12 13 3 2027))
+                   "Mon 2027-03-15 02:30"))
+    (let ((anchor (drover-schedule-test-now 14)))
+      (should (equal (drover-schedule-test-run-at '(:interval 1800) (time-add anchor 2700) anchor)
+                     "Sat 2026-10-31 15:00"))
+      (should (equal (drover-schedule-test-run-at '(:interval 1800) anchor anchor) "Sat 2026-10-31 14:30"))
+      ;; Elapsed time: an hour across the fall change reads 1:00 twice.
+      (should (equal (drover-schedule-test-run-at '(:interval 3600) (drover-schedule-test-now 1 1 11) nil)
+                     "Sun 2026-11-01 01:00")))))
+
+(ert-deftest drover-schedule-test-describe-recurrence ()
+  "Recurrences read as they were asked, the next run after them."
+  (dolist (case '(((:interval 1800) "every 30 minutes") ((:interval 3600) "every hour")
+                  ((:interval 7200) "every 2 hours") ((:interval 60) "every minute")
+                  ((:days (0 1 2 3 4 5 6) :at (7 . 0)) "every day at 07:00")
+                  ((:days (1 2 3 4 5) :at (9 . 0)) "every weekday at 09:00")
+                  ((:days (0 6) :at (10 . 30)) "every Saturday and Sunday at 10:30")
+                  ((:days (1 3 5) :at (18 . 0) :zone "UTC") "every Monday, Wednesday and Friday at 18:00 UTC")
+                  ((:days (4) :at (8 . 5)) "every Thursday at 08:05")))
+    (should (equal (drover-schedule-describe-recurrence (car case)) (cadr case))))
+  (should (equal (drover-schedule-describe '(:every (:days (1 2 3 4 5) :at (9 . 0)))
+                                           (drover-schedule-test-now) drover-schedule-test-zone)
+                 "every weekday at 09:00, next Mon 2 Nov 09:00")))
+
+(defun drover-schedule-test-recurring (every &optional prompt)
+  "Schedule PROMPT, \"brief\" by default, for the fixture's target at each run of EVERY."
+  (drover-schedule-add-recurring (drover-schedule-test-target) every (or prompt "brief")))
+
+(defun drover-schedule-test-copies (job)
+  "Return the copies JOB, a recurring prompt, sent, the newest first."
+  (seq-filter (lambda (other) (equal (plist-get other :recurrence) (plist-get job :id))) (drover-schedule--jobs)))
+
+(defun drover-schedule-test-due (job seconds-ago)
+  "Make the recurring prompt JOB due SECONDS-AGO, its runs counting from then, and run its timer."
+  (let ((due (- (float-time) seconds-ago)))
+    (setf (plist-get job :due) due (plist-get job :created) due)
+    (drover-schedule--run (plist-get job :id))))
+
+(ert-deftest drover-schedule-test-recurring-fires ()
+  "A recurring prompt sends a copy at each run and stays due at its next, across restarts."
+  (drover-schedule-test-state
+    (let ((job (drover-schedule-test-recurring '(:interval 1800))))
+      (should (drover-schedule-job-valid-p job))
+      (should (< (abs (- (plist-get job :due) (+ (plist-get job :created) 1800))) 1))
+      (should (gethash (plist-get job :id) (drover-schedule--timers)))
+      (should (equal (drover-schedule--status-text job) "recurring"))
+      (should (string-prefix-p "every 30 minutes, next " (drover-schedule--when job)))
+      (drover-schedule-test-due job 1)
+      (let ((copies (drover-schedule-test-copies job)))
+        (should (length= copies 1))
+        (should (equal (plist-get (car copies) :prompt) "brief"))
+        (should (equal (plist-get (car copies) :origin) "recurring"))
+        (should (eq (plist-get (car copies) :status) 'pending))
+        (should (equal (plist-get (car copies) :link) (plist-get job :link))))
+      (should (eq (plist-get job :status) 'pending))
+      (should (= (plist-get job :fired) 1))
+      (should (> (plist-get job :due) (float-time)))
+      (should (gethash (plist-get job :id) (drover-schedule--timers)))
+      (should (equal (drover-schedule--status-text job) "recurring, 1 sent"))
+      ;; Its copy not gone yet, the next run is skipped rather than stacked.
+      (drover-schedule-test-due job 1)
+      (should (length= (drover-schedule-test-copies job) 1))
+      (should (= (plist-get job :skipped) 1))
+      (should (equal (drover-schedule--status-text job) "recurring, 1 sent, 1 skipped"))
+      (setf (plist-get (car (drover-schedule-test-copies job)) :status) 'sent)
+      (drover-schedule--save)
+      (drover-schedule-test-reload)
+      (let ((job (drover-schedule--job (plist-get job :id))))
+        (should (eq (plist-get job :status) 'pending))
+        (should (equal (plist-get job :every) '(:interval 1800)))
+        (should (gethash (plist-get job :id) (drover-schedule--timers)))
+        (drover-schedule-test-due job 1)
+        (should (length= (drover-schedule-test-copies job) 2))
+        (should (= (plist-get job :fired) 2))))))
+
+(ert-deftest drover-schedule-test-recurring-catch-up ()
+  "Runs missed are skipped, but for one copy as the option says; a late timer is on time."
+  (dolist (case '((t 1 3) (nil 0 4) (600 0 4) (3600 1 3)))
+    (drover-schedule-test-state
+      (let ((drover-schedule-recurrence-catch-up (nth 0 case))
+            (job (drover-schedule-test-recurring '(:interval 3600))))
+        ;; Four runs fell due, the latest half an hour ago.
+        (drover-schedule-test-due job (+ (* 3 3600) 1800))
+        (should (length= (drover-schedule-test-copies job) (nth 1 case)))
+        (should (= (plist-get job :skipped) (nth 2 case)))
+        (should (< (abs (- (plist-get job :due) (+ (float-time) 1800))) 2)))))
+  (drover-schedule-test-state
+    (let ((drover-schedule-recurrence-catch-up nil)
+          (job (drover-schedule-test-recurring '(:interval 3600))))
+      ;; The latest run a minute ago: its timer came late, not missed.
+      (drover-schedule-test-due job (+ 3600 60))
+      (should (length= (drover-schedule-test-copies job) 1))
+      (should (= (plist-get job :skipped) 1)))))
+
+(ert-deftest drover-schedule-test-recurring-restored-overdue ()
+  "A recurring prompt overdue as the queue is read again catches up once, then keeps its runs."
+  (drover-schedule-test-state
+    (let* ((job (drover-schedule-test-recurring '(:interval 3600)))
+           (due (- (float-time) (* 5 3600) 1800)))
+      (setf (plist-get job :due) due (plist-get job :created) due)
+      (drover-schedule--save)
+      (drover-schedule-test-reload)
+      (let ((job (drover-schedule--job (plist-get job :id))))
+        (should (gethash (plist-get job :id) (drover-schedule--timers)))
+        ;; As its timer, armed at once, fires.
+        (drover-schedule--run (plist-get job :id))
+        (should (length= (drover-schedule-test-copies job) 1))
+        (should (= (plist-get job :skipped) 5))
+        (should (> (plist-get job :due) (float-time)))))))
+
+(ert-deftest drover-schedule-test-recurring-copies-pruned ()
+  "Only the newest copies that went stay in the queue."
+  (drover-schedule-test-state
+    (let ((drover-schedule-recurrence-keep 2)
+          (job (drover-schedule-test-recurring '(:interval 1800))))
+      (dotimes (_ 4)
+        (drover-schedule-test-due job 1)
+        (setf (plist-get (car (drover-schedule-test-copies job)) :status) 'sent))
+      (drover-schedule-test-due job 1)
+      (let ((copies (drover-schedule-test-copies job)))
+        (should (length= copies 3))
+        (should (eq (plist-get (car copies) :status) 'pending))
+        (should (= (seq-count (lambda (copy) (eq (plist-get copy :status) 'sent)) copies) 2))))))
+
+(ert-deftest drover-schedule-test-recurring-retry-and-cancel ()
+  "r sends a copy now and recurs on; k cancels; retried, it recurs from its next run, nothing caught up."
+  (drover-schedule-test-state
+    (let ((job (drover-schedule-test-recurring '(:days (0 1 2 3 4 5 6) :at (7 . 0)))))
+      (should-error (drover-schedule-retry-job job))
+      (drover-schedule-retry-job job t)
+      (should (length= (drover-schedule-test-copies job) 1))
+      (should (eq (plist-get job :status) 'pending))
+      (should-error (drover-schedule-retry-job job t))
+      (cl-letf (((symbol-function 'drover-schedule--at-point) (lambda () job))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (prompt) (should (equal prompt "Send a copy now, still recurring every day at 07:00? ")) nil)))
+        (drover-schedule-retry))
+      (drover-schedule-cancel job)
+      (should (eq (plist-get job :status) 'cancelled))
+      (should-not (gethash (plist-get job :id) (drover-schedule--timers)))
+      (should (equal (drover-schedule--when job) "every day at 07:00"))
+      (setf (plist-get job :due) (- (float-time) (* 3 86400)))
+      (drover-schedule-retry-job job)
+      (should (eq (plist-get job :status) 'pending))
+      (should (> (plist-get job :due) (float-time)))
+      (should (< (plist-get job :due) (+ (float-time) 86401)))
+      (should (gethash (plist-get job :id) (drover-schedule--timers))))))
+
+(ert-deftest drover-schedule-test-recurring-validity ()
+  "A recurring prompt is due, waits for no event, and keeps a recurrence of a known shape."
+  (drover-schedule-test-state
+    (let ((job (drover-schedule-test-recurring '(:interval 1800))))
+      (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence job) :every '(:interval 5))))
+      (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence job) :skipped -1)))
+      (should-not (drover-schedule-job-valid-p (plist-put (copy-sequence job) :recurrence 'id)))
+      (should-not (drover-schedule-job-valid-p (plist-put (plist-put (copy-sequence job) :due nil)
+                                                          :turn t))))
+    (should-error (drover-schedule-test-recurring '(:days (1) :at (9 . 0) :zone "Mars/Olympus_Mons")))
+    (should-error (drover-schedule-test-recurring '(:interval 1800) " "))
+    (should-error (drover-schedule-test-recurring '(:interval 10)))))
+
+(ert-deftest drover-schedule-test-recurring-read ()
+  "The reader takes a recurrence, shows its next run, and the list says when it goes."
+  (drover-schedule-test-state
+    (let ((now (current-time)))
+      (should (string-match-p "\\`→ every weekday at 09:00, next "
+                              (drover-schedule--preview-text "every weekday 9am")))
+      (should (equal (substring-no-properties (drover-schedule--preview-text "every day 7:00 Mars/Olympus_Mons"))
+                     "not a time"))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "every mon,wed,fri 18:00")))
+        (let* ((chosen (drover-schedule-read-when))
+               (job (drover-schedule-enqueue (drover-schedule-test-target) chosen "standup")))
+          (should (equal (car chosen) '(:every (:days (1 3 5) :at (18 . 0)))))
+          (should (equal (plist-get job :every) '(:days (1 3 5) :at (18 . 0))))
+          (should (equal (plist-get job :instruction) "every mon,wed,fri 18:00"))
+          (should (time-less-p now (seconds-to-time (plist-get job :due))))
+          (should (string-prefix-p "every Monday, Wednesday and Friday at 18:00, next "
+                                   (drover-schedule--when job))))))
+    (let ((prompts nil) (inputs '("every day 7:00 Mars/Olympus_Mons" "every hour")))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt &rest _) (push prompt prompts) (pop inputs))))
+        (should (equal (car (drover-schedule-read-when)) '(:every (:interval 3600)))))
+      (should (equal (car prompts) "Send when (no time zone Mars/Olympus_Mons here): ")))))
+
+;;;; Callers nobody watches
+
+(ert-deftest drover-schedule-test-when-text ()
+  "Text is read as the reader reads it, without asking; why it reads as nothing is said."
+  (drover-schedule-test-with-restarts
+    (let ((now (current-time)))
+      (should (eq (car (drover-schedule-when "when turn ends" now)) 'turn-end))
+      (should (eq (car (drover-schedule-when "after Emacs restart" now)) 'emacs-restart))
+      (should (equal (car (drover-schedule-when "every 30m" now)) '(:every (:interval 1800))))
+      (should (time-equal-p (car (drover-schedule-when "in 2h" now)) (time-add now 7200)))
+      (should (equal (cdr (drover-schedule-when " in 2h " now)) (list "in 2h" now nil)))
+      (dolist (case '(("" "No time given") ("soon" "cannot read “soon” as a time")
+                      ("11/4/2020" "Wed 4 Nov 2020 09:00 is past")
+                      ("every day 7:00 Mars/Olympus_Mons" "no time zone Mars/Olympus_Mons here")))
+        (should (equal (cadr (should-error (drover-schedule-when (car case) now) :type 'user-error))
+                       (cadr case)))))))
+
+(ert-deftest drover-schedule-test-session-named ()
+  "A session is named by its conversation's link or its key; another host's or none is refused."
+  (drover-schedule-test-state
+    (let ((session (drover-schedule-test-session)))
+      (should (equal (drover-session-key (drover-schedule-session-named "agent-session:claude-code/fixture-session"))
+                     (drover-session-key session)))
+      (should (equal (drover-session-key (drover-schedule-session-named "fake/fixture"))
+                     (drover-session-key session)))
+      (should (equal (drover-session-key (drover-schedule-session-named
+                                          (format "agent-session://%s/claude-code/fixture-session" drover-host)))
+                     (drover-session-key session)))
+      (dolist (name '("agent-session:claude-code/nope" "fake/nope" "nobackend/fixture" "fixture" nil))
+        (should-error (drover-schedule-session-named name) :type 'user-error))
+      (should (string-match-p "runs on core"
+                              (cadr (should-error (drover-schedule-session-named
+                                                   "agent-session://core/claude-code/fixture-session")
+                                                  :type 'user-error)))))))
+
+(ert-deftest drover-schedule-test-for-session ()
+  "A caller with no buffer schedules once, at a time, recurring or after an event; asking nobody."
+  (drover-schedule-test-state
+    (drover-schedule-test-events
+      (let ((session (drover-schedule-test-session)))
+        (drover-schedule-test-buffer)
+        (let ((job (drover-schedule-for-session session "every weekday 7:00" "brief" '(:hidden t :by "agent"))))
+          (should (equal (plist-get job :every) '(:days (1 2 3 4 5) :at (7 . 0))))
+          (should (eq (plist-get job :hidden) t))
+          (should (equal (plist-get job :by) "agent"))
+          (should (gethash (plist-get job :id) (drover-schedule--timers))))
+        (let ((job (drover-schedule-for-session session "in 90m" "check")))
+          (should (< (abs (- (plist-get job :due) (+ (float-time) 5400))) 2)))
+        (let ((job (drover-schedule-for-session session "after later event" "go on")))
+          (should (equal (plist-get job :after) "later:key"))
+          (should (= asked 1)))
+        (should-error (drover-schedule-for-session session "whenever" "x") :type 'user-error)
+        (should-error (drover-schedule-for-session session "in 1h" "  ") :type 'user-error)
+        (should (length= (drover-schedule--jobs) 3))))))
+
+(ert-deftest drover-schedule-test-fire-event ()
+  "An event fired by its name releases every prompt waiting for it, or those of one argument."
+  (drover-schedule-test-state
+    (drover-schedule-test-replies
+      (drover-schedule-define-trigger 'nightly "nightly backup")
+      (drover-schedule-add-after-trigger (drover-schedule-test-target) 'nightly "check the backup")
+      (drover-schedule-add-after-trigger (drover-schedule-test-target) 'reply "Look" nil "T1")
+      (drover-schedule-add-after-trigger (drover-schedule-test-target) 'reply "Look again" nil "T2")
+      (should (eq (drover-schedule-trigger-named "nightly") 'nightly))
+      (should-not (drover-schedule-trigger-named "weekly"))
+      (should (= 1 (drover-schedule-fire-event 'nightly nil "done at 3:00")))
+      (should (= 0 (drover-schedule-fire-event 'nightly)))
+      (should (= 1 (drover-schedule-fire-event 'reply nil "a reply" "T2")))
+      (should (= 2 (drover-schedule-fire-event 'reply nil "replies")))
+      (should (equal (plist-get (seq-find (lambda (job) (eq (plist-get job :trigger) 'nightly)) (drover-schedule--jobs))
+                                :prompt)
+                     "check the backup\n\ndone at 3:00")))))
+
 (provide 'drover-schedule-test)
 ;;; drover-schedule-test.el ends here

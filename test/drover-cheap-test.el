@@ -481,6 +481,74 @@ settings hold a key; :activation."
                    ;; Outdated, last.
                    "ai-gateway-anthropic/claude-haiku-4-5"))))
 
+;;;; A homelab host
+
+(defconst drover-cheap-test-aiur-providers
+  (list (drover-cheap-test-provider "opencode" :key t)
+        (drover-cheap-test-provider "litellm" :integration :none :key t)
+        (drover-cheap-test-provider "openai" :activation "auto"))
+  "The providers of Aiur's service: the LiteLLM proxy, as its configuration defines it.")
+
+(defun drover-cheap-test-alias (id)
+  "Return the catalog entry of the LiteLLM alias ID: no family, date nor variant."
+  (seq-remove (lambda (entry) (eq (car entry) 'variants)) (drover-cheap-test-model "litellm" id nil nil)))
+
+(defconst drover-cheap-test-aiur-models
+  (list (drover-cheap-test-alias "agent-main")
+        (drover-cheap-test-alias "agent-goal")
+        (drover-cheap-test-alias "agent-cheap")
+        (drover-cheap-test-alias "embed")
+        (drover-cheap-test-model "litellm" "claude-haiku-5-5" "claude-haiku" "2026-10-07")
+        (drover-cheap-test-model "opencode" "deepseek-v4.1-flash-free" "deepseek-flash" "2026-09-09" :cost 0)
+        (drover-cheap-test-model "openai" "gpt-6-luna" "gpt-luna" "2026-09-21" :cost nil))
+  "The models of Aiur's service: LiteLLM's aliases per job, one model it also serves, and others.")
+
+(ert-deftest drover-cheap-test-aiur-host ()
+  "A homelab host takes the LiteLLM proxy's alias for cheap jobs, and nothing outside the proxy."
+  (let ((models drover-cheap-test-aiur-models)
+        (providers drover-cheap-test-aiur-providers)
+        (integrations '(((id . "openai") (connections . (((method . "oauth"))))))))
+    ;; The alias before a model the proxy names, the proxy alone though ChatGPT is signed in.
+    (should (equal (drover-cheap-test-resolve 'aiur models providers integrations) "litellm/agent-cheap litellm"))
+    (should (equal (drover-cheap-test-chain 'aiur models providers integrations) '("litellm/agent-cheap")))
+    (let ((cheap (drover-cheap-resolve models providers (drover-cheap-integration-auths integrations) 'aiur)))
+      (should (eq (plist-get cheap :tier) 'alias))
+      (should-not (plist-get cheap :variants))
+      (should-not (plist-get cheap :outdated)))
+    ;; Without the alias, the proxy's Haiku; without the proxy, none.
+    (should (equal (drover-cheap-test-resolve 'aiur (drover-cheap-test-without models "opencode")
+                                              providers integrations)
+                   "litellm/agent-cheap litellm"))
+    (should (equal (drover-cheap-test-resolve
+                    'aiur (seq-remove (lambda (model) (equal (alist-get 'id model) "agent-cheap")) models)
+                    providers integrations)
+                   "litellm/claude-haiku-5-5 litellm"))
+    (should-not (drover-cheap-test-resolve 'aiur (drover-cheap-test-without models "litellm") providers integrations))
+    (should (string-search "litellm (aiur host)" (drover-cheap-none-reason 'aiur)))
+    ;; The other kinds of hosts keep their providers: a personal host takes ChatGPT's login first.
+    (should (equal (drover-cheap-test-resolve 'personal models providers integrations) "openai/gpt-6-luna subscription"))
+    (should-not (drover-cheap-test-resolve 'mongodb models providers integrations))))
+
+(ert-deftest drover-cheap-test-aiur-generate ()
+  "On a homelab host, small requests go to the LiteLLM alias, with no variant it does not offer."
+  (let ((bodies nil)
+        (results nil)
+        (drover-cheap--former-path nil)
+        (drover-cheap-variant "low"))
+    (cl-letf (((symbol-function 'opencode-service-read-registration)
+               (lambda () (list :url "http://127.0.0.1:1" :password "x" :pid (emacs-pid))))
+              ((symbol-function 'drover-model-cheap-fetch)
+               (lambda (callback)
+                 (funcall callback (drover-cheap-resolve drover-cheap-test-aiur-models drover-cheap-test-aiur-providers
+                                                         nil 'aiur))))
+              ((symbol-function 'opencode-request)
+               (lambda (_method _path &rest arguments)
+                 (push (alist-get 'model (plist-get arguments :body)) bodies)
+                 (funcall (plist-get arguments :then) '((data (text . "Done: brief sent")))))))
+      (drover-cheap-generate "Summarize" nil (lambda (result) (push result results))))
+    (should (equal bodies '(((providerID . "litellm") (id . "agent-cheap")))))
+    (should (equal (plist-get (car results) :model) "litellm/agent-cheap"))))
+
 (ert-deftest drover-cheap-test-ties-and-exclusions ()
   "Ties of a day go to the edition not premium, the cheaper, the shorter; some models never."
   (let ((providers (list (drover-cheap-test-provider "api" :key t)))

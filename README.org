@@ -458,6 +458,8 @@ Every cheap model a usable provider offers is ranked: a model of a tier of =drov
 
 The model is the first, and the chain the best model of each provider, in that order (=drover-cheap-chain=): what makes a model unavailable, a quota, a login, an outage, is mostly its provider's. On a MongoDB host signed in to Copilot, such as Reaver, that is Copilot's Haiku 5.5, then the Grove gateway's Luna 6 and DeepSeek V4.1, then Fireworks' DeepSeek V4.1, never its spot capacity, then the ProdSec gateway's Haiku 5.5, the gateway's Haiku 4.5, outdated, last; on a personal one signed in to ChatGPT, such as Core, ChatGPT's Luna 6, before the Haiku 5.5 the relay serves, since the provider comes first, then the tier, then the relay's Luna and DeepSeek, then OpenCode's free DeepSeek.
 
+An =aiur= host is a host of the homelab, whose models all go through its LiteLLM proxy. Its OpenCode configuration names the proxy as the provider =litellm= (=drover-cheap-provider-classes=), and the proxy serves an alias per job, such as =agent-cheap=. Such a host uses the proxy alone, and its cheap model is the alias =agent-cheap= (the tier =alias= of =drover-cheap-families=, first of all tiers), so that summaries and titles run there too. Without the alias, it takes the best model the proxy names, such as Haiku. The proxy's fallback chains, keys and budgets stay in its own configuration: drover sends no variant to an alias that offers none. Set =drover-cheap-host-kind= to =aiur= in that host's configuration.
+
 =drover-cheap-generate= has the cheap model write what a prompt asks, through OpenCode's stateless generation, the instructions it is given folded before the prompt, since the route takes a prompt alone, at =drover-cheap-variant= (=low=) when the model offers it, waiting =drover-cheap-request-timeout= seconds. A model unavailable, out of quota or not signed in, a provider failing or not answering in time, leave the next of the chain to answer, =drover-cheap-attempts= models at most (4); content a provider refused or a request found invalid would fail with any model, and is told at once. It calls its function once, with the text and the model that wrote it, or why none did, and returns a function cancelling the request.
 
 =drover-cheap-title-mode= has OpenCode title its sessions with the cheap model too, rather than the small model it picks from the session's provider, or the free one Copilot offers for titles. It names the cheap model, at =drover-cheap-variant=, for OpenCode's title agent in a configuration file of the service's own, =opencode.json= in its global configuration directory (=drover-cheap-title-file=), which the service reads beside =opencode.jsonc=, whose settings win, and reloads as it changes. The file is written again as the cheap model changes, and deleted once no cheap model resolves or the mode is turned off, OpenCode then titling sessions as it does by default; a file holding anything else is left alone, which is said once. A title the cheap model fails to write is written by the session's own model, as OpenCode does. Each host names its own.
@@ -785,21 +787,43 @@ A link may name the host a conversation runs on, =agent-session://HOST/ENGINE/ID
 
 =C-' S-RET= (=drover-schedule-prompt=) in the prompt asks for a running session, then when, and sends the prompt, or its region, then: with its independent agent, model, provider and effort choices, resolved again at delivery. An incompatible choice is refused when scheduling; a switch refused at delivery fails the job without sending. In an OpenCode session buffer it schedules the input, cleared once scheduled; in another session's buffer it reads the prompt. When is read locally, never by a model, what it resolves to showing as you type, and unreadable or past input asked again:
 
-| You type                                      | It means                                                                |
-|-----------------------------------------------+-------------------------------------------------------------------------|
-| =in 90m=, =in 2 hours=, =in 3d=, =in 1 week=   | after that long; days and weeks keep the time of day across a DST change |
-| =tomorrow=, =monday 5pm=, =11/4 2pm=, =tonight= | the next such day, 9:00 when no time is given, =tonight= at 21:00       |
-| =5:30pm=, =17:30=, =evening=                     | today, or tomorrow once past                                            |
-| =when turn ends=                              | once the session's running turn ends, offered first while one runs     |
-| =after LABEL=                                 | after an event your configuration defines (below)                      |
-| =on each LABEL=                               | on each such event, for one that repeats (below)                        |
+| You type                                            | It means                                                                  |
+|-----------------------------------------------------+---------------------------------------------------------------------------|
+| =in 90m=, =in 2 hours=, =in 3d=, =in 1 week=        | after that long; days and weeks keep the time of day across a DST change  |
+| =tomorrow=, =monday 5pm=, =11/4 2pm=, =tonight=     | the next such day, 9:00 when no time is given, =tonight= at 21:00         |
+| =5:30pm=, =17:30=, =evening=                        | today, or tomorrow once past                                              |
+| =when turn ends=                                    | once the session's running turn ends, offered first while one runs        |
+| =after LABEL=                                       | after an event your configuration defines (below)                         |
+| =on each LABEL=                                     | on each such event, for one that repeats (below)                          |
+| =every day 7:00=, =daily at 18:30=, =every morning= | each day at that time, 9:00 when no time is given (see [[*Recurring prompts][Recurring prompts]]) |
+| =every weekday 9am=, =every mon,wed,fri 18:00=      | on those days at that time; =weekend= and day names work too              |
+| =every 30m=, =every 2 hours=                        | at that interval, counted from when you scheduled it                      |
+| =every day 7:00 Europe/Paris=, =... in UTC=         | the time read in that zone rather than in this host's zone                |
 
-=RET= takes what you typed, never a candidate it completes to. The prompts wait in =scheduled-prompts.eld= of =drover-state-directory=, survive the session's buffer and Emacs, and =drover-schedule-restore= arms them again, run once Emacs started, after your session buffers are restored, such as with =(add-hook 'after-init-hook #'drover-schedule-restore 95)=: those that fell due meanwhile go then; scheduling or listing them arms them too. At delivery, the session's buffer, or its front end resuming the conversation, shows in a new frame (=drover-schedule-display-function=); the prompt is submitted once the session takes it without touching a draft: an empty input box, an idle shell, a loaded OpenCode session. A session archived is restored first (see [[*Archived sessions][Archived sessions]]); one that cannot be fails the prompt, nothing sent. Sent means submitted to the front end, not answered; a submission Emacs stopped in the middle of is kept as interrupted, since whether it went out is not known. =drover-schedule-wait-seconds= (600) bounds the wait.
+=RET= takes what you typed, never a candidate it completes to. The prompts wait in =scheduled-prompts.eld= of =drover-state-directory=, survive the session's buffer and Emacs, and =drover-schedule-restore= arms them again, run once Emacs started, after your session buffers are restored, such as with =(add-hook 'after-init-hook #'drover-schedule-restore 95)=: those that fell due meanwhile go then; scheduling or listing them arms them too. At delivery, the session's buffer, or its front end resuming the conversation, shows in a new frame (=drover-schedule-display-function=). When no terminal of this Emacs is graphical, as on a daemon, no frame is made and the prompt is delivered out of every window (see [[*A host nobody sits at][A host nobody sits at]]). The prompt is submitted once the session takes it without touching a draft: an empty input box, an idle shell, a loaded OpenCode session. A session archived is restored first (see [[*Archived sessions][Archived sessions]]); one that cannot be fails the prompt, nothing sent. Sent means submitted to the front end, not answered; a submission Emacs stopped in the middle of is kept as interrupted, since whether it went out is not known. =drover-schedule-wait-seconds= (600) bounds the wait.
 
 =C-' #= (=drover-schedule-list=) lists them: =+= schedules one for a session chosen there, archived ones included, =k= cancels one, =r= retries one that failed or sends now one still waiting, =RET= shows it whole.
 
 
 A peer telling it may schedule prompts for this host's sessions, as the Android client does (=drover-remote.el=, see =doc/remote.org=, The phone, as built): this queue keeps them and delivers them out of every window, and the peer follows the queue, cancels and retries its prompts.
+** Recurring prompts
+
+A prompt scheduled with =every= recurs. It stays in the queue, due at its next run, and sends a copy of itself at each run, until you cancel it with =k=. Each copy goes through the queue as any prompt, so a copy waits while the session cannot take it. The list shows when the prompt recurs, its next run, and how many copies it sent.
+
+A clock time keeps its hour across a change of daylight saving time. A day that does not have the time, such as 2:30 on the day clocks spring forward, has no run. A time zone must be one this system knows: =UTC=, =GMT=, POSIX rules such as =EST5EDT,M3.2.0,M11.1.0=, or an IANA name that the zone files hold (=drover-schedule-zoneinfo-directories=). An unknown zone is refused, because the C library would read it as UTC without saying so.
+
+Runs missed while Emacs did not run, or while the machine slept, are never sent one by one. =drover-schedule-recurrence-catch-up= decides what happens to them:
+
+| Value         | What happens                                                                        |
+|---------------+-------------------------------------------------------------------------------------|
+| =t= (default) | one copy goes for all of them, once Emacs runs again                                |
+| a number      | that one copy goes only when the latest missed run is at most that many seconds old |
+| =nil=         | no copy goes; the prompt waits for its next run                                     |
+
+A run whose copy before has not gone yet is skipped too, rather than stacked. A timer that fires up to two minutes late is on time. The list counts the runs skipped. The queue keeps the newest copies that went or failed, =drover-schedule-recurrence-keep= (5) of them, and removes the older ones.
+
+=r= on a recurring prompt sends a copy now and keeps the schedule. =r= on one you cancelled has it recur again from its next run, with nothing caught up.
+
 ** Events
 
 Your configuration may define events prompts wait for, such as a restart, and tell drover when they happen:
@@ -868,7 +892,7 @@ A front end also fits its buffers into the keys. A list of sessions sets =drover
   (drover-remote-mode 1)
 #+end_src
 
-A peer with =:viewer= owns no sessions, as the Android client: this host serves it its sessions, never subscribes to it, and lists it in no group, column nor filter; =:heartbeat= gives its connections heartbeats of their own, (INTERVAL . TIMEOUT), and =:resume= how long a connection it made waits for it to come back, its mirrors resuming, a phone closing its streams when its application leaves the screen.
+A peer's =:access= says what it may do with this host's sessions: =read=, =act= (all but deleting), =full=, or =none=, which serves it nothing while this host still views it (see [[*Aiur and its peers][Aiur and its peers]]). A peer with =:viewer= owns no sessions, as the Android client: this host serves it its sessions, never subscribes to it, and lists it in no group, column nor filter; =:heartbeat= gives its connections heartbeats of their own, (INTERVAL . TIMEOUT), and =:resume= how long a connection it made waits for it to come back, its mirrors resuming, a phone closing its streams when its application leaves the screen.
 
 ** Pushes to a phone
 
@@ -910,6 +934,114 @@ Drover never lets an error of its own, out of a command, reach Emacs's reporting
 =DEPS= names the directory holding the dependencies, elpaca's builds directory by default, and =OPENCODE_EL=, =AGENT_SHELL_EL= and =CLAUDE_CODE_IDE_EL= the checkouts of opencode.el, agent-shell and claude-code-ide the backends are built and tested against, such as =make test OPENCODE_EL=../opencode.el= for a worktree of opencode.el: drover draws with its look, so a change to it is tested with drover's. =make bench= compiles a copy of =OPENCODE_EL='s sources, as an installed opencode.el is, so that the look costs what it costs the user. Tests use a fake backend and fake engines, or stub the front ends; they never touch a running Emacs or OpenCode service, nor read the agents' own configuration.
 
 
+* A host nobody sits at
+
+Drover runs in an Emacs daemon of a server, such as the homelab's Emacs on Aiur. Nobody sits at such a host, so nothing there may open a frame or wait for an answer. =drover-headless= adds what a supervisor and scripts call through emacsclient: a health check, and entry points to schedule prompts and fire events.
+
+#+begin_src emacs-lisp
+  (require 'drover-headless)
+  (setopt drover-host "aiur"
+          drover-cheap-host-kind 'aiur)
+  (add-hook 'after-init-hook #'drover-schedule-restore 95)
+#+end_src
+
+** Deliveries open no frame
+
+The default =drover-schedule-display-function=, =drover-schedule-display-default=, makes a frame only when a terminal of this Emacs is graphical. When no terminal is graphical, it returns =hidden=, and the prompt is delivered out of every window, as a prompt another host scheduled is. =drover-schedule-display-frame= falls back the same way, so a configuration that calls it from its own display function works on a daemon too. A daemon that a graphical emacsclient frame joins later makes frames again for the deliveries after that.
+
+** Health
+
+=drover-health= answers at once with one line, without waiting on anything. The line starts with =ok:=, =degraded:= or =failed:=, then the time it took and each check, those not ok first:
+
+#+begin_example
+  "ok: 0.4 ms; emacs answers; queue 3 pending, 1 recurring; timers ticked 12s ago; opencode running, pid 4242"
+  "failed: 0.3 ms; emacs failed waits on a question in the minibuffer: Delete the session?; queue 3 pending; ..."
+#+end_example
+
+That Emacs answers at all tells that it reads its input. The first call arms the heartbeat timer. A check that signals fails with its error on the line, and =drover-health= itself never signals. =drover-health-checks= chooses the other checks:
+
+| Check      | Fails when                                                                                                                                                    | Status           |
+|------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------+------------------|
+| =emacs=    | Emacs waits on a question in the minibuffer, or is in a recursive edit such as the debugger                                                                   | failed           |
+| =queue=    | the queue of scheduled prompts does not read; its file exists but =drover-schedule-restore= never ran                                                         | failed; degraded |
+| =timers=   | the heartbeat timer missed three ticks of =drover-health-heartbeat= (30 s), or a prompt due more than =drover-health-late= (120 s) ago has no timer firing it | failed           |
+| =opencode= | this host's OpenCode service does not run                                                                                                                     | degraded         |
+| =peers=    | a host of =drover-health-peers= is not connected (not checked by default)                                                                                     | degraded         |
+
+*** The script check
+
+=etc/drover-health-check= runs the check for a Nomad or Consul script check. It calls =drover-health= through =emacsclient= with =--timeout=, under =timeout(1)= where there is one, prints the line, and exits 0 for =ok=, 1 for =degraded=, and 2 for =failed=, an error, or no answer in time. Script checks read 0 as passing, 1 as warning and any other status as critical. =-s= names the daemon's socket, =-t= the seconds to wait (5); =EMACSCLIENT=, =DROVER_HEALTH_SOCKET= and =DROVER_HEALTH_TIMEOUT= set the defaults.
+
+#+begin_src hcl
+  task "emacs" {
+    driver = "exec"
+    # The daemon serves an absolute socket, which the check names.
+    config {
+      command = "emacs"
+      args    = ["--fg-daemon=/local/emacs/server"]
+    }
+    service {
+      name     = "drover"
+      provider = "consul"
+      check {
+        name     = "drover health"
+        type     = "script"
+        command  = "/local/drover/etc/drover-health-check"
+        args     = ["-s", "/local/emacs/server", "-t", "5"]
+        interval = "60s"
+        timeout  = "10s"
+      }
+    }
+  }
+#+end_src
+
+The script runs inside the task, so =emacsclient= and the socket must be there. Give the check's =timeout= a few seconds more than =-t=, so that the script, not Nomad, reports a daemon that does not answer.
+
+** Scripts
+
+These functions schedule prompts and fire events for a script, through =emacsclient --eval=. They show no window and ask nothing: a question signals. A failure is one line, which =emacsclient= prints after =*ERROR*:=, exiting 1.
+
+| Function                    | Does                                                                                                                                                                                             |
+|-----------------------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =drover-external-schedule=  | Schedules a prompt for a session, named by its link or its key =BACKEND/ID=, when a text such as =every day 7:00= tells; =:by= names the script, =:hidden= (=t=) delivers it out of every window |
+| =drover-external-fire=      | Tells drover an event happened, by name, with =:text= telling what happened, or =:cancelled=; an event nothing waits for releases nothing, and is no error                                       |
+| =drover-external-scheduled= | Lists the prompts pending, a line each, the next due first; with an argument, every prompt                                                                                                       |
+
+#+begin_src sh
+  emacsclient -s /local/emacs/server --eval \
+    '(drover-external-schedule "agent-session:opencode/ses_123" "every day 7:00 America/Los_Angeles" "Write my morning brief." :by "nomad brief")'
+  emacsclient -s /local/emacs/server --eval '(drover-external-fire "nightly-backup" :text "Done at 03:12, 41 GB.")'
+#+end_src
+
+** Aiur and its peers
+
+The homelab's Emacs is the peer =aiur= of the other hosts (see [[*Other hosts][Other hosts]]). It is always on, so the other hosts dial it, and it dials none of them: Reaver and Core sleep, and the phone comes and goes. Each host's configuration lists =aiur=, and Aiur's lists them. Add =("aiur" . "Aiur")= to =drover-host-labels= on every host.
+
+Reaver is a MongoDB host, and work data must not reach the personal agent. So Reaver grants Aiur the access =none=: Reaver serves Aiur no subscription and no request, while Reaver still lists and acts on Aiur's sessions. Aiur lists Reaver as a =:viewer=, so that it never subscribes to Reaver either.
+
+#+begin_src emacs-lisp
+  ;; On Aiur: the others dial it.
+  (setopt drover-remote-peers
+          '(("reaver" :viewer t :access full)
+            ("core" :access full)
+            ("adept" :viewer t :access full :heartbeat (15 . 60) :resume 300)))
+  ;; On Reaver: dial Aiur through myssh; Aiur gets nothing of Reaver's.
+  (add-to-list 'drover-remote-peers '("aiur" :dial t :program "myssh" :access none))
+  ;; On Core: dial Aiur with MSYS's ssh and its agent.
+  (add-to-list 'drover-remote-peers
+               '("aiur" :dial t :program "/usr/bin/ssh" :args ("-o" "IdentityAgent=~/.ssh/agent.sock") :access read))
+#+end_src
+
+*** How each host reaches Aiur
+
+| From   | Reaches Aiur through                                                                            | Aiur may do with its sessions |
+|--------+-------------------------------------------------------------------------------------------------+-------------------------------|
+| Reaver | =myssh aiur=, its SSH configuration naming Aiur's host                                          | nothing (=none=)              |
+| Core   | MSYS's =/usr/bin/ssh= with =-o IdentityAgent=~/.ssh/agent.sock=, as it reaches Reaver           | list and read them (=read=)   |
+| Adept  | the drover app, by SSH through the homelab's WireGuard, with its key restricted to the listener | nothing: it owns no sessions  |
+
+Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and opens a stream to its listener on 127.0.0.1 (see =doc/remote.org=, Security). So the daemon's host needs an SSH server for the user who runs Emacs, and the dialing hosts' keys in its =authorized_keys=, restricted as =doc/remote.org= recommends. =M-x drover-remote-check= on each host runs the SSH command as the connection will, and tells what fails.
+
 * Agents
 
 =drover-anvil= gives agents, through [[https://github.com/zawatton/anvil.el][Anvil]]'s MCP server in your Emacs, the sessions you have, of every harness and host: they list and read them, start sessions and prompt them, wait for their turns to end, answer their questions, interrupt and archive them, and read the prompts you sent.  =drover-anvil-enable= registers the tools with Anvil:
@@ -920,20 +1052,23 @@ Drover never lets an error of its own, out of a command, reach Emacs's reporting
     (drover-anvil-enable))
 #+end_src
 
-| Tool                       | Does                                                                                                        |
-|----------------------------+-------------------------------------------------------------------------------------------------------------|
-| =drover-sessions=          | Lists the sessions, the most urgent first, filtered by status, harness, project, host and attention         |
-| =drover-session=           | Reads one: where it stands, its model, the recap of its last turn, what its pending requests ask            |
-| =drover-session-create=    | Starts a session, unseen, with a harness, directory, model, effort, agent and first prompt; returns its key |
-| =drover-session-send=      | Sends a session a prompt, as its front end delivers prompts: OpenCode queues or steers the running turn     |
-| =drover-session-wait=      | Waits until a session's turn ends or it needs you, with a timeout; Emacs never waits, the call does         |
-| =drover-session-answer=    | Answers a pending question or permission, or dismisses it                                                   |
-| =drover-session-interrupt= | Stops a session's running turn                                                                              |
-| =drover-session-archive=   | Archives a session                                                                                          |
-| =drover-prompts=           | Returns the prompts you sent over a period, every host's, oldest first (see [[*Prompts][Prompts]])                        |
-| =drover-job=               | Returns the answer of a job a tool answered with, for clients that cannot wait                              |
+| Tool                       | Does                                                                                                                |
+|----------------------------+---------------------------------------------------------------------------------------------------------------------|
+| =drover-sessions=          | Lists the sessions, the most urgent first, filtered by status, harness, project, host and attention                 |
+| =drover-session=           | Reads one: where it stands, its model, the recap of its last turn, what its pending requests ask                    |
+| =drover-session-create=    | Starts a session, unseen, with a harness, directory, model, effort, agent and first prompt; returns its key         |
+| =drover-session-send=      | Sends a session a prompt, as its front end delivers prompts: OpenCode queues or steers the running turn             |
+| =drover-session-wait=      | Waits until a session's turn ends or it needs you, with a timeout; Emacs never waits, the call does                 |
+| =drover-session-answer=    | Answers a pending question or permission, or dismisses it                                                           |
+| =drover-session-interrupt= | Stops a session's running turn                                                                                      |
+| =drover-session-archive=   | Archives a session                                                                                                  |
+| =drover-schedule=          | Has drover send a session a prompt later: once, recurring, after its turn or after an event (see [[*Scheduled prompts][Scheduled prompts]]) |
+| =drover-schedule-fire=     | Tells drover an event happened, by name, which sends the prompts waiting for it, or cancels them                    |
+| =drover-scheduled=         | Lists the scheduled prompts: when each goes, its status, its session and who scheduled it                           |
+| =drover-prompts=           | Returns the prompts you sent over a period, every host's, oldest first (see [[*Prompts][Prompts]])                                |
+| =drover-job=               | Returns the answer of a job a tool answered with, for clients that cannot wait                                      |
 
-What agents may do is yours to say, =drover-anvil-permissions=, action by action: on any session, on those of the caller's project (its repository, worktrees included), on those the caller started, or never.  By default they read every session and wait on any, start and prompt sessions of their own project, interrupt, archive and answer the questions of the sessions they started, and answer no permission.  The caller is the session whose agent calls, as its client names it (OpenCode does); one not named may do only what applies to any session.  No tool acts on the caller itself, nor on a session whose turn waits for the caller's, nor waits for one waiting for it.  Every call is logged in =anvil.log= of =drover-state-directory= (=drover-anvil-log-file=), and an action that cannot be logged is not taken.  Agents start sessions of the harnesses of =drover-anvil-create-harnesses=, OpenCode's by default, which start without showing.
+What agents may do is yours to say, =drover-anvil-permissions=, action by action: on any session, on those of the caller's project (its repository, worktrees included), on those the caller started, or never.  By default they read every session and wait on any, start and prompt sessions of their own project, interrupt, archive and answer the questions of the sessions they started, and answer no permission.  The caller is the session whose agent calls, as its client names it (OpenCode does); one not named may do only what applies to any session.  No tool acts on the caller itself, nor on a session whose turn waits for the caller's, nor waits for one waiting for it.  Every call is logged in =anvil.log= of =drover-state-directory= (=drover-anvil-log-file=), and an action that cannot be logged is not taken.  The action =schedule= takes the same scopes, plus =self= for the caller alone; by default agents schedule prompts for the sessions of their own project, their own session included, since the prompt goes once the caller's turn is over.  A prompt an agent schedules joins your queue, where you see and cancel it, and is delivered out of every window.  The action =fire= takes =any= or nil, nil by default: an event releases prompts of any session.  Agents start sessions of the harnesses of =drover-anvil-create-harnesses=, OpenCode's by default, which start without showing.
 * License
 
 GPL-3.0-or-later. Copyright Valentin Leon.

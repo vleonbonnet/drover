@@ -102,6 +102,7 @@
 (declare-function drover-schedule-load "drover-schedule" ())
 (declare-function drover-schedule-add "drover-schedule" (target time prompt &optional instruction reference-time))
 (declare-function drover-schedule-add-after-turn "drover-schedule" (target prompt &optional instruction))
+(declare-function drover-schedule-describe-recurrence "drover-schedule" (every))
 (declare-function drover-schedule-deliver "drover-schedule" (target prompt &rest properties))
 (declare-function drover-schedule-target "drover-schedule" (&optional buffer))
 (declare-function drover-schedule-add-after-trigger "drover-schedule" (target trigger prompt &optional instruction argument))
@@ -198,7 +199,10 @@ NAME is the host's name, its `drover-host' there.  PROPERTIES is a plist:
                 Emacs of this host.
  :access        What it may do with this host's sessions: `read', to
                 list and read them; `act', to act on them too, but
-                delete them; `full', to delete them too.
+                delete them; `full', to delete them too; `none',
+                nothing: no subscription nor request is served it,
+                while this host may still view and act on its sessions,
+                for a host this one's sessions must not reach.
  :aliases       Other names of it, in links.
  :directories   Where its conversations go when cloned here: an alist
                 (THEIRS . OURS) of directories, a directory of its
@@ -635,9 +639,11 @@ anew, and peers greet each other again."
                          (drover-remote--peer-name peer)))))
 
 (defun drover-remote--access (peer)
-  "Return what PEER may do with this host's sessions: `read', `act' or `full'."
+  "Return what PEER may do with this host's sessions, a symbol.
+One of `none', `read', `act' and `full'; `read' when its configuration
+names none of them."
   (let ((access (plist-get (drover-remote--peer-properties peer) :access)))
-    (if (memq access '(read act full)) access 'read)))
+    (if (memq access '(none read act full)) access 'read)))
 
 (defun drover-remote--viewer-p (peer)
   "Return non-nil when PEER owns no sessions, as a phone.
@@ -3360,7 +3366,10 @@ A view of the peer's queue of scheduled prompts it follows (request
                    :v (if (and (plist-get options :variant) (symbolp (plist-get options :variant)))
                           (symbol-name (plist-get options :variant))
                         :false))
-          :w (cond ((plist-get job :due) (list :at (plist-get job :due)))
+          :w (cond ((plist-get job :due)
+                    (append (list :at (plist-get job :due))
+                            (when-let* ((every (plist-get job :every)))
+                              (list :ev (drover-schedule-describe-recurrence every)))))
                    ((plist-get job :turn) (list :turn t))
                    (t (append (list :after (drover-schedule--trigger-label (plist-get job :trigger))
                                     :tr (if (symbolp (plist-get job :trigger)) (symbol-name (plist-get job :trigger)) ""))
@@ -6378,6 +6387,10 @@ when of that peer, opened here once started.  For
     (unless (plist-get (gethash connection (drover-remote--state-hellos state)) :asked)
       (puthash connection (list :asked t) (drover-remote--state-hellos state))
       (drover-remote--hello connection t)))
+   ((and (eq (drover-remote--access peer) 'none) (member type '("sub" "pre" "chg")))
+    ;; Nothing of this host's sessions reaches it; its requests are refused alike.
+    (when (equal type "sub")
+      (drover-remote--event peer 'serve "serving it nothing: its access is none")))
    ((equal type "sub") (drover-remote--subscribe state connection peer message))
    ((equal type "ack") (drover-remote--acked state connection message))
    ((equal type "pre") (drover-remote--on-prefetch message))
@@ -6391,7 +6404,7 @@ when of that peer, opened here once started.  For
    ((equal type "grant")
     (let ((access (plist-get message :access)))
       (setf (drover-remote--peer-granted peer)
-            (and (member access '("read" "act" "full")) (intern access)))
+            (and (member access '("none" "read" "act" "full")) (intern access)))
       ;; What it starts, asked now for the prompt's targets.
       (drover-remote--catalog-forget (drover-remote--peer-name peer))
       (when (and (eq connection (drover-remote--peer-connection peer))

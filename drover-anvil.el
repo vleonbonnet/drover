@@ -20,8 +20,9 @@
 ;; MCP tools, served by Anvil, through which agents list, read, start,
 ;; prompt, wait on, answer, interrupt and archive the sessions drover
 ;; knows, of every harness and host, through drover's operations as
-;; the user's commands do, and have their own session prompted after
-;; an event such as a restart: `drover-anvil-enable' registers them
+;; the user's commands do, have their own session prompted after an
+;; event such as a restart, schedule prompts for later, once or
+;; recurring, and fire events: `drover-anvil-enable' registers them
 ;; with Anvil, `drover-anvil-disable' removes them.
 ;;
 ;; What an agent may do is the user's to say, `drover-anvil-permissions',
@@ -78,11 +79,14 @@
     (create . project) (send . project)
     (interrupt . own) (archive . own)
     (answer-question . own) (answer-permission . nil)
-    (follow-up . self))
+    (follow-up . self) (schedule . project) (fire . nil))
   "What agents may do through the tools, by action.
 Each entry is (ACTION . SCOPE).  ACTION is one of `list', `read',
 `wait', `create', `send', `interrupt', `archive', `answer-question',
-`answer-permission' and `follow-up'.  SCOPE is:
+`answer-permission', `follow-up', `schedule', having drover prompt a
+session later, once, recurring or after an event (`drover-schedule'),
+and `fire', telling drover an event happened, which releases the
+prompts waiting for it, of any session.  SCOPE is:
 
  `any'      any session, of any host;
  `project'  the sessions of this host running in the caller's project,
@@ -91,23 +95,25 @@ Each entry is (ACTION . SCOPE).  ACTION is one of `list', `read',
             directories;
  `own'      the sessions the caller started through the tools, and its
             subagents;
- `self'     for `follow-up' alone, the caller itself;
+ `self'     for `follow-up' and `schedule', the caller itself;
  nil        none.
+
+`fire' takes `any' or nil: an event concerns no one session.
 
 An action not listed is allowed nowhere.  Whatever the scope, no tool
 acts on the caller itself nor on the sessions above it, whose turns
-wait for its own, but `follow-up', which has drover prompt the caller
-after an event (`drover-session-after'), once its turn is long over;
-and a caller its client does not name may only do what applies to
-`any' session, so it has no follow-up."
+wait for its own, but `follow-up' and `schedule', which have drover
+prompt a session later, once its turn is long over; and a caller its
+client does not name may only do what applies to `any' session, so it
+has no follow-up."
   :type '(alist :key-type (choice (const list) (const read) (const wait) (const create) (const send)
                                   (const interrupt) (const archive)
                                   (const answer-question) (const answer-permission)
-                                  (const follow-up))
+                                  (const follow-up) (const schedule) (const fire))
                 :value-type (choice (const :tag "Any session" any)
                                     (const :tag "The caller's project" project)
                                     (const :tag "Started by the caller" own)
-                                    (const :tag "The caller itself, for follow-up" self)
+                                    (const :tag "The caller itself, for follow-up and schedule" self)
                                     (const :tag "None" nil)))
   :group 'drover-anvil)
 
@@ -174,7 +180,7 @@ with the suffix .1, over the one before, and a new one begins."
   :group 'drover-anvil)
 
 (defconst drover-anvil-actions
-  '(list read wait create send interrupt archive answer-question answer-permission)
+  '(list read wait create send interrupt archive answer-question answer-permission follow-up schedule fire)
   "The actions of `drover-anvil-permissions'.")
 
 ;;;; Text and data
@@ -384,7 +390,8 @@ That is a session CALLER started, or one below it or below CALLER."
     ('any t)
     ('project (and (null (drover-session-host session))
                    (drover-anvil--in-project-p caller (drover-session-directory session))))
-    ('own (drover-anvil--own-p caller (drover-session-key session)))))
+    ('own (drover-anvil--own-p caller (drover-session-key session)))
+    ('self (and caller (equal caller (drover-session-key session))))))
 
 (defun drover-anvil--refusal (action caller session)
   "Return why the session CALLER may not ACTION SESSION, or nil when it may."
@@ -392,19 +399,24 @@ That is a session CALLER started, or one below it or below CALLER."
     (cond
      ((null scope)
       (format "drover-anvil-permissions allows no %s" action))
-     ((and (not (memq action '(list read)))
+     ;; A prompt scheduled goes once the turn is over: it waits for nothing.
+     ((and (not (memq action '(list read schedule)))
            (drover-anvil--busy-with-caller-p caller (drover-session-key session)))
       (if (equal caller (drover-session-key session))
           "a session cannot do this to itself"
         "this session's turn waits for the caller's, which would wait for itself"))
      ((and (null caller) (not (eq scope 'any)))
-      (format "the caller is unknown, and drover-anvil-permissions allows %s only on %s sessions"
-              action (if (eq scope 'own) "the caller's own" "the caller's project's")))
+      (format "the caller is unknown, and drover-anvil-permissions allows %s only on %s"
+              action (pcase scope
+                       ('own "the caller's own sessions")
+                       ('self "the caller itself")
+                       (_ "the caller's project's sessions"))))
      ((not (drover-anvil--in-scope-p scope caller session))
       (format "drover-anvil-permissions allows %s only on %s" action
-              (if (eq scope 'own)
-                  "the sessions the caller started, and its subagents"
-                "the sessions of the caller's project, on this host"))))))
+              (pcase scope
+                ('own "the sessions the caller started, and its subagents")
+                ('self "the caller itself")
+                (_ "the sessions of the caller's project, on this host")))))))
 
 (defun drover-anvil--check (tool action caller session)
   "Refuse TOOL's ACTION on SESSION unless the session CALLER may do it.
@@ -1478,6 +1490,181 @@ MCP Parameters:
            (note . ,(format "This session gets the prompt after the next %s; the user may cancel it among the scheduled prompts"
                             (cdr entry)))))))))
 
+;;;; Scheduling
+
+(declare-function drover-schedule-when "drover-schedule" (text &optional now))
+(declare-function drover-schedule-for-session "drover-schedule"
+                  (session text prompt &optional properties argument))
+(declare-function drover-schedule-describe "drover-schedule" (when now &optional zone))
+(declare-function drover-schedule-trigger-named "drover-schedule" (name))
+(declare-function drover-schedule-fire-event "drover-schedule" (trigger &optional cancelled text argument))
+(declare-function drover-schedule-session-named "drover-schedule" (name))
+(declare-function drover-schedule-load "drover-schedule" ())
+(declare-function drover-schedule--jobs "drover-schedule" ())
+(declare-function drover-schedule--when "drover-schedule" (job))
+(declare-function drover-schedule--status-text "drover-schedule" (job))
+
+(defconst drover-anvil--iso-time-regexp
+  "\\`\\(?:[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T\\|[0-9]\\{9,\\}\\(?:\\.[0-9]+\\)?\\'\\)"
+  "Regexp of a time as ISO 8601 or seconds since the epoch, as agents tell times.")
+
+(defun drover-anvil--when (when)
+  "Return WHEN, as an agent tells it, as `drover-schedule-for-session' takes it.
+The text the user's scheduling reads, or an ISO 8601 time or seconds
+since the epoch, as a time.  Refuse what reads as neither."
+  (unless (and (stringp when) (not (string-blank-p when)) (length< when 200))
+    (drover-anvil--refuse "Tell when, such as in 90m, tomorrow 7:00, every day 7:00 or an ISO 8601 time"))
+  (if-let* (((string-match-p drover-anvil--iso-time-regexp (string-trim when)))
+            (time (drover-anvil--read-time (string-trim when))))
+      (seconds-to-time time)
+    (condition-case err
+        (progn (drover-schedule-when when) when)
+      (user-error (drover-anvil--refuse "%s" (error-message-string err))))))
+
+(defun drover-anvil--by (caller)
+  "Return how a prompt the session CALLER schedules names who scheduled it."
+  (if caller (concat "agent " (drover-anvil--key-of caller)) "agent"))
+
+(defun drover-anvil--tool-schedule (key prompt when &optional argument)
+  "Have drover send PROMPT to the session KEY later.
+Once, recurring, or after an event: WHEN tells when, as the user's own
+scheduling reads it; ARGUMENT is what an event taking one concerns.
+The prompt joins the user's scheduled prompts, who sees and may cancel
+it, survives restarts, and is delivered out of every window.  For a
+session of this host; the caller may name its own.
+
+MCP Parameters:
+  key - The session's key, as drover-sessions tells it
+  prompt - The prompt it gets then, Markdown
+  when - When it goes: \"in 90m\", \"tomorrow 7:00\", \"monday 5pm\",
+      \"every day 7:00\", \"every weekday 9am Europe/Paris\", \"every
+      mon,wed,fri 18:00\", \"every 30m\", \"when turn ends\", \"after
+      LABEL\" of an event drover knows, or an ISO 8601 time
+  argument - What the event concerns, for an event that takes one"
+  (drover-start)
+  (require 'drover-schedule)
+  (let* ((caller (drover-anvil--caller))
+         (session (drover-anvil--session key))
+         (key (drover-session-key session))
+         (prompt (drover-anvil--prompt prompt)))
+    (drover-anvil--check "drover-schedule" 'schedule caller session)
+    (let ((when (drover-anvil--when when))
+          (argument (and (stringp argument) (not (string-blank-p argument)) (drover-bound-line argument 2000))))
+      (drover-anvil--log-or-refuse "drover-schedule" caller key
+                                   (format "%s, %s" (if (stringp when) (drover-bound-line when 80)
+                                                      (drover-anvil--time (float-time when)))
+                                           (drover-anvil--prompt-note prompt)))
+      (let ((job (condition-case err
+                     (drover-quietly
+                       (drover-schedule-for-session session when prompt
+                                                    (list :hidden t :by (drover-anvil--by caller))
+                                                    argument))
+                   (error
+                    (drover-anvil--log "drover-schedule" caller key "refused" (drover-error-message err))
+                    (drover-anvil--refuse "%s" (drover-error-message err))))))
+        (drover-anvil--log "drover-schedule" caller key "done" (plist-get job :id))
+        (drover-anvil--json
+         `((outcome . "scheduled")
+           (id . ,(plist-get job :id))
+           (key . ,(drover-anvil--key-of key))
+           (when . ,(drover-anvil--line (drover-schedule--when job) 200))
+           (next . ,(drover-anvil--time (plist-get job :due)))
+           (note . "The user sees it among the scheduled prompts, and may cancel it")))))))
+
+(defun drover-anvil--tool-fire (event &optional text cancelled argument)
+  "Tell drover the event EVENT happened, releasing the prompts waiting for it.
+TEXT, what happened, follows each prompt released; CANCELLED tells the
+event will not happen, cancelling them instead; ARGUMENT releases only
+the prompts waiting for the event on it.
+
+MCP Parameters:
+  event - The event's name, such as opencode-restart
+  text - What happened, which follows each prompt released
+  cancelled - (boolean) true when the event will not happen: the
+      prompts waiting for it are cancelled
+  argument - What the event concerns, to release only the prompts
+      waiting for the event on it"
+  (require 'drover-schedule)
+  (let* ((caller (drover-anvil--caller))
+         (trigger (progn (drover-schedule-load) (drover-schedule-trigger-named event)))
+         (cancelled (drover-anvil--true-p cancelled))
+         (text (and (stringp text) (not (string-blank-p text)) (drover-bound-text text 40 4000)))
+         (argument (and (stringp argument) (not (string-blank-p argument)) argument)))
+    (unless (eq (drover-anvil--scope 'fire) 'any)
+      (drover-anvil--log "drover-schedule-fire" caller nil "refused" "fire allowed nowhere")
+      (drover-anvil--refuse "drover-anvil-permissions allows no fire"))
+    (unless trigger
+      (drover-anvil--refuse "No event %s; drover knows %s" (drover-bound-line (format "%s" event) 60)
+                            (or (mapconcat (lambda (entry) (format "%s (%s)" (car entry) (cdr entry)))
+                                           (drover-schedule-triggers t) ", ")
+                                "none")))
+    (drover-anvil--log-or-refuse "drover-schedule-fire" caller nil
+                                 (format "%s%s" trigger (if cancelled ", cancelled" "")))
+    (let ((count (drover-quietly (drover-schedule-fire-event trigger cancelled text argument))))
+      (drover-anvil--log "drover-schedule-fire" caller nil "done" (format "%d released" count))
+      (drover-anvil--json
+       `((outcome . ,(if cancelled "cancelled" "fired"))
+         (event . ,(symbol-name trigger))
+         (released . ,count))))))
+
+(defun drover-anvil--job-session (job)
+  "Return the live session the scheduled prompt JOB goes to, or nil."
+  (condition-case nil
+      (drover-schedule-session-named (plist-get job :link))
+    (user-error nil)))
+
+(defun drover-anvil--tool-scheduled (&optional key status limit)
+  "List the prompts scheduled for later, the newest first.
+KEY, STATUS and LIMIT narrow the list, as the parameters below tell.
+
+MCP Parameters:
+  key - A session's key, whose prompts alone to list
+  status - Statuses to keep, comma-separated, among pending, opening,
+      waiting, sending, sent, failed, interrupted and cancelled
+  limit - (integer) Prompts listed at most, 50 by default"
+  (drover-start)
+  (require 'drover-schedule)
+  (drover-schedule-load)
+  (let* ((caller (drover-anvil--caller))
+         (scope (drover-anvil--scope 'read))
+         (only (and (stringp key) (not (string-empty-p key)) (drover-anvil--session key)))
+         (statuses (drover-anvil--split status))
+         (limit (max 1 (min 200 (if (natnump limit) limit 50))))
+         (by (drover-anvil--by caller))
+         (jobs (seq-filter
+                (lambda (job)
+                  (let ((session (drover-anvil--job-session job)))
+                    (and (or (null statuses) (member (symbol-name (plist-get job :status)) statuses))
+                         (or (null only) (and session (equal (drover-session-key session) (drover-session-key only))))
+                         (or (eq scope 'any)
+                             (equal (plist-get job :by) by)
+                             (and session scope (drover-anvil--in-scope-p scope caller session))))))
+                (sort (drover-schedule--jobs) :key (lambda (job) (or (plist-get job :created) 0)) :reverse t))))
+    (unless scope
+      (drover-anvil--log "drover-scheduled" caller nil "refused" "read allowed nowhere")
+      (drover-anvil--refuse "drover-anvil-permissions allows no read"))
+    (drover-anvil--log "drover-scheduled" caller nil "done" (format "%d listed" (length jobs)))
+    (drover-anvil--json
+     `((count . ,(length jobs))
+       (scheduled
+        . ,(vconcat
+            (mapcar (lambda (job)
+                      (let ((session (drover-anvil--job-session job)))
+                        (drover-anvil--compact
+                         `((id . ,(plist-get job :id))
+                           (key . ,(and session (drover-anvil-key-string session)))
+                           (link . ,(drover-anvil--line (plist-get job :link) 300))
+                           (title . ,(drover-anvil--line (plist-get job :title) 160))
+                           (when . ,(drover-anvil--line (drover-schedule--when job) 200))
+                           (status . ,(drover-schedule--status-text job))
+                           (prompt . ,(drover-anvil--line (plist-get job :prompt) 300))
+                           (by . ,(drover-anvil--line (plist-get job :by) 200))
+                           (created . ,(drover-anvil--time (plist-get job :created)))
+                           (sent_at . ,(drover-anvil--time (plist-get job :sent-at)))
+                           (error . ,(drover-anvil--line (plist-get job :error) 300))))))
+                    (seq-take jobs limit))))
+       (truncated . ,(and (> (length jobs) limit) t))))))
+
 ;;;; Permission prompts
 
 (declare-function drover-permissions-gather "drover-permissions" (since until callback &optional seconds))
@@ -1624,6 +1811,15 @@ MCP Parameters:
     (drover-anvil--tool-after
      :id "drover-session-after"
      :description "Have drover send a prompt to your own session after the next event it knows, such as opencode-restart or emacs-restart.  Use it when a step needs that event, such as tools that load only once the service restarts, then end your turn: the session carries on once it happened.  It asks for the event, as a prompt the user schedules does, and the user can cancel it.")
+    (drover-anvil--tool-schedule
+     :id "drover-schedule"
+     :description "Have drover send a session a prompt later: once (in 90m, tomorrow 7:00, an ISO 8601 time), recurring (every day 7:00, every weekday 9am Europe/Paris, every 30m), once its running turn ends, or after an event drover knows.  It joins the user's scheduled prompts, survives restarts, and the user may cancel it.  Allowed where the user's policy allows, by default the sessions of the caller's project, the caller's own included.")
+    (drover-anvil--tool-fire
+     :id "drover-schedule-fire"
+     :description "Tell drover an event happened, by name, releasing the prompts waiting for it, with what happened; or that it will not happen, cancelling them.  Allowed nowhere unless the user's policy allows it.")
+    (drover-anvil--tool-scheduled
+     :id "drover-scheduled" :read-only t
+     :description "List the prompts scheduled for later, the newest first: when each goes, recurring or not, its status, its session, who scheduled it.")
     (drover-anvil--tool-prompts
      :id "drover-prompts" :read-only t
      :description "Return the prompts the user sent agents over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, conversation, its link, title, directory, time and text.  Subagents' prompts, programs' and what engines add as the user are left out.  For reviews of how the user works with agents.")

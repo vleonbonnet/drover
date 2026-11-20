@@ -964,7 +964,46 @@ restart of the host's remote layer, its counters rising."
         (should (equal (plist-get (drover-remote--wire-job (list :trigger 'emacs-restart :after "k" :prompt "p"
                                                                  :status 'pending))
                                   :w)
-                       '(:after "Emacs restart" :tr "emacs-restart")))))))
+                       '(:after "Emacs restart" :tr "emacs-restart")))
+        ;; A recurring prompt travels as due at its next run, how it recurs told.
+        (should (equal (plist-get (drover-remote--wire-job (list :due 100.0 :every '(:days (1 2 3 4 5) :at (9 . 0))
+                                                                 :prompt "p" :status 'pending))
+                                  :w)
+                       '(:at 100.0 :ev "every weekday at 09:00")))))))
+
+(ert-deftest drover-remote-test-access-none ()
+  "A peer of access none is served nothing: no subscription, prefetch nor request; one of read is."
+  (drover-remote-test-owning (list (drover-test-session "s1"))
+    (let ((peer (drover-remote-test--peer state "aiur"))
+          (replies nil)
+          (prefetched nil))
+      (setf (drover-remote--peer-properties peer) '(:access none))
+      (puthash 'conn (list :peer "aiur") (drover-remote--state-hellos state))
+      (should (eq (drover-remote--access peer) 'none))
+      (cl-letf (((symbol-function 'drover-prefetch) (lambda (&rest arguments) (push arguments prefetched))))
+        (drover-remote--dispatch state 'conn peer "sub" (list :epoch nil :rev nil))
+        (drover-remote--dispatch state 'conn peer "pre" (list :keys [["fake" "s1"]]))
+        (drover-remote--dispatch state 'conn peer "chg" (list :keys [["fake" "s1"]])))
+      (should (zerop (hash-table-count (drover-remote--state-subs state))))
+      (should-not prefetched)
+      (should-not (seq-find (lambda (entry) (member (plist-get (cdr entry) :t) '("snap" "up"))) sent))
+      (dolist (op '("jobs" "requests" "prompts" "push" "triggers"))
+        (drover-remote--answer 'conn (list :op op :key ["fake" "s1"])
+                               (lambda (&rest answer) (push (cons op answer) replies))))
+      (should (length= replies 5))
+      (dolist (reply replies)
+        (should (equal (cdr reply) '(nil "not allowed"))))
+      (should (seq-find (lambda (event) (string-search "serving it nothing" (nth 2 event)))
+                        (drover-remote--peer-history peer)))
+      ;; Read access is served.
+      (setf (drover-remote--peer-properties peer) '(:access read))
+      (drover-remote--dispatch state 'conn peer "sub" (list :epoch nil :rev nil))
+      (should (= 1 (hash-table-count (drover-remote--state-subs state))))))
+  ;; The peer told none takes it, and so asks to start nothing.
+  (let ((peer (drover-remote--peer-make :name "reaver")))
+    (drover-remote--dispatch (drover-remote--state-make) 'conn peer "grant" (list :access "none"))
+    (should (eq (drover-remote--peer-granted peer) 'none))
+    (should-not (drover-remote--allows-p 'none "send"))))
 
 (ert-deftest drover-remote-test-viewer-units ()
   "A viewer is told by its configuration or its capabilities, and kept out of views."

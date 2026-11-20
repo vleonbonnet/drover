@@ -55,6 +55,14 @@
 ;; A prompt the user sends that names such an argument the session
 ;; neither waits for nor mentioned before is offered to wait for it,
 ;; asked once per conversation (`drover-schedule-offer').
+;;
+;; A prompt may recur, "every day 7:00" or "every 30m"
+;; (`drover-schedule-parse-recurrence'): it stays due at its next run,
+;; and sends a copy at each, the runs missed while Emacs did not run
+;; skipped but for one (`drover-schedule-recurrence-catch-up').  Callers
+;; with no buffer, agents and scripts, schedule through
+;; `drover-schedule-for-session'.  Where no terminal is graphical, as on
+;; a daemon, deliveries open no frame (`drover-schedule-display-default').
 
 ;;; Code:
 
@@ -90,13 +98,43 @@ of `drover-schedule-define-trigger' last."
   :type '(repeat string)
   :group 'drover)
 
-(defcustom drover-schedule-display-function #'drover-schedule-display-frame
+(defcustom drover-schedule-display-function #'drover-schedule-display-default
   "Function showing the session a scheduled prompt goes to, as it is delivered.
 It is called with the session's live BUFFER, or nil when its front end
 must resume it first, and the prompt's TITLE, and returns the window the
 session is to show in: the resumed session opens there, with that
-window selected."
+window selected.  It may return the symbol `hidden' instead: the
+prompt is then delivered out of every window, as a prompt another host
+scheduled is.  The default makes a frame when a terminal is graphical,
+and delivers hidden otherwise, as on a daemon nobody opened a
+graphical frame of."
   :type 'function
+  :group 'drover)
+
+(defcustom drover-schedule-recurrence-catch-up t
+  "Whether a recurring prompt catches up the runs it missed, and how.
+Runs are missed while Emacs does not run or the machine sleeps.  Nil
+sends none of them; t sends one copy for all of them, once Emacs runs
+again; a number of seconds sends that one copy only when the latest run
+missed is at most that old.  Missed runs are never sent one by one."
+  :type '(choice (const :tag "One copy for all of them" t)
+                 (const :tag "None" nil)
+                 (number :tag "One copy, when the latest is at most this old"))
+  :group 'drover)
+
+(defcustom drover-schedule-recurrence-keep 5
+  "Copies of each recurring prompt the queue keeps once they went or failed.
+Older ones are removed as the next is sent."
+  :type 'natnum
+  :group 'drover)
+
+(defcustom drover-schedule-zoneinfo-directories
+  '("/usr/share/zoneinfo" "/usr/lib/zoneinfo" "/usr/share/lib/zoneinfo")
+  "Directories holding the system's time zone files, by IANA name.
+A recurring prompt naming a zone such as Europe/Paris is refused unless
+one of them, or the directory of the environment variable TZDIR, holds
+it: an unknown zone would silently read as UTC."
+  :type '(repeat directory)
   :group 'drover)
 
 (defcustom drover-schedule-former-files nil
@@ -238,6 +276,12 @@ The file is read again then, and its timers armed anew."
            (and (null (plist-get job :due)) (stringp (plist-get job :after))))
        (or (null (plist-get job :expires)) (numberp (plist-get job :expires)))
        (or (null (plist-get job :fired)) (natnump (plist-get job :fired)))
+       ;; A recurring prompt is due at its next run, and waits for no event.
+       (or (null (plist-get job :every))
+           (and (drover-schedule-recurrence-valid-p (plist-get job :every))
+                (plist-get job :due) (null (plist-get job :repeat))))
+       (or (null (plist-get job :skipped)) (natnump (plist-get job :skipped)))
+       (or (null (plist-get job :recurrence)) (stringp (plist-get job :recurrence)))
        (memq (plist-get job :status) drover-schedule--statuses)))
 
 (defun drover-schedule--model-in (model)
@@ -827,6 +871,8 @@ CHOSEN is what `drover-schedule-read-when' returns."
   (pcase-let ((`(,when ,input ,read-at ,argument) chosen))
     (cond ((eq when 'turn-end) (drover-schedule-add-after-turn target text input))
           ((symbolp when) (drover-schedule-add-after-trigger target when text input argument))
+          ((drover-schedule-recurrence-p when)
+           (drover-schedule-add-recurring target (plist-get when :every) text input))
           (t (drover-schedule-add target when text input read-at)))))
 
 (defun drover-schedule-default-prompt (chosen)
@@ -978,11 +1024,17 @@ LABEL\"."
                        (equal (drover-schedule--normalize (plist-get (cdr entry) :label)) label))
                      drover-schedule--triggers)))))
 
+(defun drover-schedule--time-re ()
+  "Return the regexp of a time of day, as `drover-schedule--clock' reads it."
+  (concat "\\(?:[0-9]\\{1,2\\}\\(?::[0-9]\\{2\\}\\)? ?[ap]m\\|[0-9]\\{1,2\\}:[0-9]\\{2\\}\\|"
+          (regexp-opt (mapcar #'car drover-schedule-day-parts)) "\\)"))
+
 (defun drover-schedule-parse-time (text now &optional zone)
   "Return when TEXT asks a prompt to be sent, relative to NOW, or nil.
-The result is a time, or the name of an event of
+The result is a time, the name of an event of
 `drover-schedule-define-trigger', read \"after [the [next]] LABEL\" or
-\"on each LABEL\".
+\"on each LABEL\", or a recurrence, (:every EVERY), read \"every ...\"
+\(see `drover-schedule-parse-recurrence').
 TEXT is \"in N UNIT\" with minutes, hours, days or weeks; \"[on] DAY
 \[[at] TIME]\", \"[at] TIME [[on] DAY]\" or \"tonight\", DAY being today,
 tomorrow, a weekday or a month/day[/year] date and TIME 9am, 5:30pm,
@@ -993,12 +1045,13 @@ day alone means 9:00, a time alone today, or tomorrow once past.  Case
 and spacing do not matter; anything else is nil rather than a guess.
 An explicit day can be past; the caller refuses it.  ZONE is as for
 `decode-time', the local zone when nil."
-  (let* ((text (drover-schedule--normalize text))
-         (time-re (concat "\\(?:[0-9]\\{1,2\\}\\(?::[0-9]\\{2\\}\\)? ?[ap]m\\|[0-9]\\{1,2\\}:[0-9]\\{2\\}\\|"
-                          (regexp-opt (mapcar #'car drover-schedule-day-parts)) "\\)"))
+  (let* ((recurrence (drover-schedule-parse-recurrence text))
+         (text (drover-schedule--normalize text))
+         (time-re (drover-schedule--time-re))
          (day-re (concat "\\(?:today\\|tomorrow\\|" (regexp-opt (mapcar #'car drover-schedule--weekdays))
                          "\\|[0-9]\\{1,2\\}/[0-9]\\{1,2\\}\\(?:/[0-9]\\{4\\}\\)?\\)")))
     (cond
+     (recurrence)
      ((drover-schedule--trigger-named text))
      ((string-match (concat "\\`in \\([0-9]+\\|an?\\) ?"
                             "\\(m\\|mins?\\|minutes?\\|h\\|hrs?\\|hours?\\|d\\|days?\\|w\\|wks?\\|weeks?\\)\\'")
@@ -1027,16 +1080,355 @@ An explicit day can be past; the caller refuses it.  ZONE is as for
                 (drover-schedule--on-day "tomorrow" clock now zone))))))))))
 
 (defun drover-schedule-describe (when now &optional zone)
-  "Describe WHEN, `turn-end', an event or a time, for a reader at NOW in ZONE."
-  (pcase when
-    ('turn-end "after the running turn")
-    ((pred symbolp) (format (if (drover-schedule--trigger-get when :repeat) "on each %s" "after the next %s")
-                            (drover-schedule--trigger-label when)))
-    (_ (format-time-string (if (= (decoded-time-year (decode-time when zone))
-                                  (decoded-time-year (decode-time now zone)))
-                               "%a %-d %b %H:%M"
-                             "%a %-d %b %Y %H:%M")
-                           when zone))))
+  "Describe WHEN, for a reader at NOW in ZONE.
+WHEN is `turn-end', an event, a recurrence or a time."
+  (cl-flet ((at (time)
+              (format-time-string (if (= (decoded-time-year (decode-time time zone))
+                                         (decoded-time-year (decode-time now zone)))
+                                      "%a %-d %b %H:%M"
+                                    "%a %-d %b %Y %H:%M")
+                                  time zone)))
+    (pcase when
+      ('turn-end "after the running turn")
+      ((pred symbolp) (format (if (drover-schedule--trigger-get when :repeat) "on each %s" "after the next %s")
+                              (drover-schedule--trigger-label when)))
+      ((pred drover-schedule-recurrence-p)
+       (let* ((every (plist-get when :every))
+              (next (drover-schedule-next-run every (float-time now) (float-time now) zone)))
+         (concat (drover-schedule-describe-recurrence every)
+                 (if next (concat ", next " (at (seconds-to-time next))) ", never"))))
+      (_ (at when)))))
+
+(defun drover-schedule--past-p (when now)
+  "Return non-nil when WHEN is a time past NOW.
+WHEN is as `drover-schedule-parse-time' returns it."
+  (and when (not (symbolp when)) (not (drover-schedule-recurrence-p when))
+       (not (time-less-p now when))))
+
+(defun drover-schedule--unreadable (input)
+  "Say why INPUT, which reads as no time, does not, on a line."
+  (pcase (cdr (drover-schedule--split-zone input))
+    (`(:unknown ,zone) (format "no time zone %s here" (drover-bound-line zone 60)))
+    (_ (format "cannot read “%s” as a time" (drover-bound-line input 60)))))
+
+;;;; Recurring prompts
+
+(defconst drover-schedule--day-sets
+  '(("day" 0 1 2 3 4 5 6) ("days" 0 1 2 3 4 5 6)
+    ("weekday" 1 2 3 4 5) ("weekdays" 1 2 3 4 5)
+    ("weekend" 0 6) ("weekends" 0 6))
+  "Words naming sets of days, with their `decode-time' numbers.")
+
+(defconst drover-schedule--day-names
+  ["Sunday" "Monday" "Tuesday" "Wednesday" "Thursday" "Friday" "Saturday"]
+  "Names of days, by their `decode-time' numbers.")
+
+(defconst drover-schedule--minimum-interval 60
+  "Seconds between two runs of a recurring prompt, at least.")
+
+(defconst drover-schedule--recurrence-tolerance 120
+  "Seconds a run of a recurring prompt may come late, and still be on time.
+A timer comes late while Emacs is busy; past this, the run was missed,
+as when the machine slept, and `drover-schedule-recurrence-catch-up'
+decides.")
+
+(defconst drover-schedule--recurrence-runs-limit 10000
+  "Runs of a recurring prompt counted at most, as those missed are.")
+
+(defconst drover-schedule--posix-zone-regexp
+  (let ((offset "[-+]?[0-9]\\{1,2\\}\\(?::[0-9]\\{2\\}\\)\\{0,2\\}")
+        (name "\\(?:[A-Za-z]\\{3,\\}\\|<[A-Za-z0-9+-]\\{3,\\}>\\)")
+        (rule "M[0-9]\\{1,2\\}\\.[1-5]\\.[0-6]\\(?:/[0-9]\\{1,3\\}\\(?::[0-9]\\{2\\}\\)\\{0,2\\}\\)?"))
+    (concat "\\`" name offset "\\(?:" name "\\(?:" offset "\\)?\\(?:," rule "," rule "\\)?\\)?\\'"))
+  "Regexp of a time zone as POSIX TZ rules tell it.
+Such as EST5EDT,M3.2.0,M11.1.0.")
+
+(defconst drover-schedule--iana-zone-regexp
+  "\\`[A-Za-z][A-Za-z0-9_+-]*\\(?:/[A-Za-z0-9_+-]+\\)+\\'"
+  "Regexp of the name of an IANA time zone, such as America/Los_Angeles.")
+
+(defun drover-schedule--zone-shape-p (zone)
+  "Return non-nil when ZONE, a string, has the shape of a time zone.
+UTC or GMT, POSIX TZ rules, or the name of an IANA zone."
+  (and (stringp zone)
+       (or (member zone '("UTC" "GMT"))
+           (string-match-p drover-schedule--posix-zone-regexp zone)
+           (string-match-p drover-schedule--iana-zone-regexp zone))
+       t))
+
+(defun drover-schedule-zone-known-p (zone)
+  "Return non-nil when ZONE names a time zone this system reads as such.
+UTC, GMT and POSIX TZ rules always; an IANA name when the system's time
+zone files hold it (see `drover-schedule-zoneinfo-directories'):
+otherwise the C library would read it as UTC, saying nothing."
+  (and (drover-schedule--zone-shape-p zone)
+       (or (not (string-match-p drover-schedule--iana-zone-regexp zone))
+           (seq-some (lambda (directory)
+                       (and (stringp directory) (not (string-empty-p directory))
+                            (file-regular-p (expand-file-name zone directory))))
+                     (cons (getenv "TZDIR") drover-schedule-zoneinfo-directories)))
+       t))
+
+(defun drover-schedule--split-zone (text)
+  "Return (REST . ZONE) of TEXT, ZONE the time zone its last word names.
+The word may follow \"in\", and keeps its case.  ZONE is nil when the
+last word names none, and (:unknown WORD) when it has the shape of one
+this system does not know (see `drover-schedule-zone-known-p')."
+  (let ((text (string-trim text)))
+    (if (string-match "\\(?:[ \t\n]+in\\)?[ \t\n]+\\([^ \t\n]+\\)\\'" text)
+        (let* ((word (match-string 1 text))
+               (rest (substring text 0 (match-beginning 0)))
+               (zone (if (member (upcase word) '("UTC" "GMT")) (upcase word) word)))
+          (cond ((not (drover-schedule--zone-shape-p zone)) (cons text nil))
+                ;; A word of letters alone, of no digit nor slash, is no zone but UTC's or GMT's.
+                ((and (not (member zone '("UTC" "GMT"))) (not (string-match-p "[0-9/]" zone)))
+                 (cons text nil))
+                ((drover-schedule-zone-known-p zone) (cons rest zone))
+                (t (cons rest (list :unknown word)))))
+      (cons text nil))))
+
+(defun drover-schedule--days (text)
+  "Return the sorted `decode-time' numbers of the days TEXT names, or nil.
+A set, such as day, weekday or weekend, or weekdays by name, separated
+by commas, spaces or \"and\", plural or not."
+  (or (alist-get text drover-schedule--day-sets nil nil #'equal)
+      (let ((words (split-string text "\\(?: *, *\\| and \\| \\)+" t))
+            (days nil))
+        (and words
+             (catch 'unknown
+               (dolist (word words)
+                 (push (or (alist-get word drover-schedule--weekdays nil nil #'equal)
+                           (and (string-suffix-p "s" word)
+                                (alist-get (substring word 0 -1) drover-schedule--weekdays nil nil #'equal))
+                           (throw 'unknown nil))
+                       days))
+               (sort (delete-dups days) #'<))))))
+
+(defun drover-schedule-parse-recurrence (text)
+  "Return the recurrence TEXT asks for, (:every EVERY), or nil.
+TEXT is \"every N UNIT\", minutes or hours, at least a minute apart,
+counted from when the prompt is scheduled: \"every 30m\", \"every 2
+hours\", \"every hour\"; or \"every DAYS [[at] TIME] [[in] ZONE]\",
+\"daily\" standing for \"every day\".  DAYS is day, weekday, weekend,
+or weekdays by name, such as \"mon,wed,fri\" or \"monday and
+thursday\"; TIME is as for `drover-schedule-parse-time', 9:00 when not
+given, alone meaning every day (\"every morning\").  ZONE, a time zone
+this system knows, such as UTC, Europe/Paris or POSIX TZ rules, reads
+TIME there rather than in the local zone (see
+`drover-schedule-zone-known-p').  EVERY is (:interval SECONDS), or
+\(:days DAYS :at (HOUR . MINUTE)) with :zone ZONE when given.  Case and
+spacing do not matter, but ZONE's; anything else is nil."
+  (pcase-let* ((`(,rest . ,zone) (drover-schedule--split-zone text))
+               (rest (drover-schedule--normalize rest))
+               (rest (if (string-match "\\`daily\\(\\'\\| \\)" rest)
+                         (concat "every day" (substring rest 5))
+                       rest)))
+    (cond
+     ((consp zone) nil)
+     ((string-match "\\`every \\(?:\\([0-9]+\\) ?\\)?\\(m\\|mins?\\|minutes?\\|h\\|hrs?\\|hours?\\)\\'" rest)
+      (let ((seconds (* (if (match-string 1 rest) (string-to-number (match-string 1 rest)) 1)
+                        (if (eq (aref (match-string 2 rest) 0) ?h) 3600 60))))
+        (and (>= seconds drover-schedule--minimum-interval) (null zone)
+             (list :every (list :interval seconds)))))
+     ((string-match "\\`every \\(.+\\)\\'" rest)
+      (let* ((body (match-string 1 rest))
+             (timed (string-match (concat "\\(?:\\`\\| \\)\\(?:at \\)?\\(" (drover-schedule--time-re) "\\)\\'")
+                                  body))
+             (time-text (and timed (match-string 1 body)))
+             (days-text (if timed (string-trim (substring body 0 timed)) body))
+             (clock (if timed (drover-schedule--clock time-text) '(9 . 0)))
+             (days (if (string-empty-p days-text)
+                       (and timed '(0 1 2 3 4 5 6))
+                     (drover-schedule--days days-text))))
+        (and clock days
+             (list :every (append (list :days days :at clock) (and zone (list :zone zone))))))))))
+
+(defun drover-schedule-recurrence-p (when)
+  "Return non-nil when WHEN is a recurrence.
+See `drover-schedule-parse-recurrence'."
+  (and (consp when) (eq (car when) :every)))
+
+(defun drover-schedule-recurrence-valid-p (every)
+  "Return non-nil when EVERY is a recurrence as the queue holds it.
+See `drover-schedule-parse-recurrence'."
+  (and (plistp every)
+       (let ((interval (plist-get every :interval))
+             (days (plist-get every :days))
+             (at (plist-get every :at))
+             (zone (plist-get every :zone)))
+         (if interval
+             (and (natnump interval) (>= interval drover-schedule--minimum-interval)
+                  (null days) (null at) (null zone))
+           (and (proper-list-p days) days
+                (seq-every-p (lambda (day) (and (natnump day) (< day 7))) days)
+                (= (length days) (length (delete-dups (copy-sequence days))))
+                (consp at) (natnump (car at)) (< (car at) 24) (natnump (cdr at)) (< (cdr at) 60)
+                (or (null zone) (drover-schedule--zone-shape-p zone)))))
+       t))
+
+(defun drover-schedule-next-run (every after &optional anchor zone)
+  "Return the first run of the recurrence EVERY strictly after AFTER, or nil.
+AFTER and the run are float times.  The runs of an interval count from
+ANCHOR, by default AFTER.  Clock times are read in EVERY's zone, else
+ZONE, as `decode-time' takes it, the local zone when nil: a time of day
+keeps its hour across changes of daylight saving time, and a day that
+lacks it, skipped by the spring change, has no run."
+  (if-let* ((interval (plist-get every :interval)))
+      (let ((anchor (or anchor after)))
+        (+ anchor (* interval (1+ (floor (- after anchor) interval)))))
+    (let* ((zone (or (plist-get every :zone) zone))
+           (today (decode-time (seconds-to-time after) zone))
+           (days (plist-get every :days))
+           (clock (plist-get every :at)))
+      (cl-loop for offset from 0 below 15
+               for time = (and (memq (mod (+ (decoded-time-weekday today) offset) 7) days)
+                               (drover-schedule--at (decoded-time-year today) (decoded-time-month today)
+                                                    (+ (decoded-time-day today) offset) clock zone))
+               when (and time (< after (float-time time)))
+               return (float-time time)))))
+
+(defun drover-schedule-describe-recurrence (every)
+  "Describe the recurrence EVERY, such as \"every weekday at 09:00\"."
+  (if-let* ((interval (plist-get every :interval)))
+      (cond ((= interval 3600) "every hour")
+            ((zerop (% interval 3600)) (format "every %d hours" (/ interval 3600)))
+            ((= interval 60) "every minute")
+            (t (format "every %d minutes" (/ interval 60))))
+    (let ((days (plist-get every :days))
+          (at (plist-get every :at))
+          (zone (plist-get every :zone)))
+      (concat (pcase days
+                ('(0 1 2 3 4 5 6) "every day")
+                ('(1 2 3 4 5) "every weekday")
+                ('(0 6) "every Saturday and Sunday")
+                (_ (let ((names (mapcar (lambda (day) (aref drover-schedule--day-names day)) days)))
+                     (concat "every "
+                             (if (cdr names)
+                                 (concat (string-join (butlast names) ", ") " and " (car (last names)))
+                               (car names))))))
+              (format " at %02d:%02d" (car at) (cdr at))
+              (and zone (format " %s" zone))))))
+
+(defun drover-schedule--next-of (job after)
+  "Return the first run of the recurring prompt JOB after AFTER, or nil."
+  (drover-schedule-next-run (plist-get job :every) after (plist-get job :created)))
+
+(defun drover-schedule--runs-from (job from now)
+  "Return (COUNT . LATEST) of the runs of the recurring prompt JOB in FROM..NOW.
+FROM, a run, and NOW are included; COUNT is bounded by
+`drover-schedule--recurrence-runs-limit'.  LATEST is nil when none."
+  (if-let* ((interval (plist-get (plist-get job :every) :interval)))
+      (if (> from now)
+          (cons 0 nil)
+        (let ((count (min drover-schedule--recurrence-runs-limit (1+ (floor (- now from) interval)))))
+          (cons count (+ from (* interval (1- count))))))
+    (let ((count 0) (latest nil) (run from))
+      (while (and run (<= run now) (< count drover-schedule--recurrence-runs-limit))
+        (setq count (1+ count) latest run run (drover-schedule--next-of job run)))
+      (cons count latest))))
+
+(defun drover-schedule--copy-pending (job)
+  "Return the copy of the recurring prompt JOB that has not gone yet, or nil."
+  (seq-find (lambda (other)
+              (and (equal (plist-get other :recurrence) (plist-get job :id))
+                   (memq (plist-get other :status) '(pending opening waiting sending))))
+            (drover-schedule--jobs)))
+
+(defun drover-schedule--prune-copies (job)
+  "Remove the oldest copies of the recurring prompt JOB that went or failed.
+`drover-schedule-recurrence-keep' of them stay."
+  (let* ((queue (drover-schedule--state))
+         (over (seq-filter (lambda (other)
+                             (and (equal (plist-get other :recurrence) (plist-get job :id))
+                                  (memq (plist-get other :status) '(sent failed interrupted cancelled))))
+                           (drover-schedule--queue-jobs queue)))
+         (old (nthcdr drover-schedule-recurrence-keep over)))
+    (when old
+      (setf (drover-schedule--queue-jobs queue) (seq-difference (drover-schedule--queue-jobs queue) old #'eq))
+      (drover-schedule--save))))
+
+(defun drover-schedule--send-copy (job)
+  "Deliver a copy of the prompt of JOB, a recurring prompt, now; return it.
+The copy goes through the queue as any prompt, to the same session,
+with JOB's options, and out of every window when JOB was scheduled so."
+  (apply #'drover-schedule-deliver (drover-schedule--job-target job) (plist-get job :prompt)
+         :origin "recurring" :recurrence (plist-get job :id)
+         (append (and (plist-get job :hidden) (list :hidden t))
+                 (and (plist-get job :by) (list :by (plist-get job :by))))))
+
+(defun drover-schedule--recur (job)
+  "Send a copy of JOB, a recurring prompt whose run fell due, then arm the next.
+The runs JOB missed meanwhile, while Emacs did not run or the machine
+slept, are skipped, but for one copy as `drover-schedule-recurrence-catch-up'
+says; so is a run whose copy before has not gone yet.  JOB is saved
+with its next run before the copy is armed."
+  (let* ((now (float-time))
+         (due (plist-get job :due)))
+    (if (> due (1+ now))
+        (drover-schedule--arm job)
+      (pcase-let* ((`(,count . ,latest) (drover-schedule--runs-from job due now))
+                   (late (- now (or latest due)))
+                   (send (and (not (drover-schedule--copy-pending job))
+                              (or (<= late drover-schedule--recurrence-tolerance)
+                                  (pcase drover-schedule-recurrence-catch-up
+                                    ('nil nil)
+                                    ((pred numberp) (<= late drover-schedule-recurrence-catch-up))
+                                    (_ t)))))
+                   (next (drover-schedule--next-of job (max now due)))
+                   (before (list (plist-get job :due) (plist-get job :fired)
+                                 (plist-get job :sent-at) (plist-get job :skipped))))
+        (if (null next)
+            (drover-schedule--status job 'failed "It has no run in the next two weeks")
+          (let ((skipped (- count (if send 1 0))))
+            (setf (plist-get job :due) next)
+            ;; `plist-put' adds a key in place, where `setf' would add it to a copy.
+            (when (> skipped 0)
+              (plist-put job :skipped (+ skipped (or (plist-get job :skipped) 0))))
+            (condition-case err
+                (if (not send)
+                    (drover-schedule--save)
+                  (plist-put job :fired (1+ (or (plist-get job :fired) 0)))
+                  (plist-put job :sent-at now)
+                  ;; The copy's save carries JOB's next run: one write for both.
+                  (drover-schedule--send-copy job))
+              (error
+               (pcase-let ((`(,due ,fired ,sent-at ,skipped) before))
+                 (plist-put job :due due)
+                 (plist-put job :fired fired)
+                 (plist-put job :sent-at sent-at)
+                 (plist-put job :skipped skipped))
+               (drover-schedule--arm job drover-schedule--minimum-interval)
+               (signal (car err) (cdr err))))
+            (drover-schedule--prune-copies job)
+            (drover-schedule--arm job)
+            (when (and (not send) (> skipped 0))
+              (drover-message "Recurring prompt skipped %d run%s — %s" skipped (if (= skipped 1) "" "s")
+                              (plist-get job :title)))
+            (drover-schedule--refresh)))))))
+
+(defun drover-schedule-add-recurring (target every prompt &optional instruction)
+  "Schedule PROMPT for TARGET at each run of the recurrence EVERY; return it.
+See `drover-schedule-add' for TARGET and INSTRUCTION, and
+`drover-schedule-parse-recurrence' for EVERY.  The prompt stays in the
+queue, due at its next run, and sends a copy at each, until cancelled."
+  (unless (and (drover-schedule-recurrence-valid-p every)
+               (stringp prompt) (not (string-blank-p prompt)))
+    (error "Need a recurrence and a nonempty prompt"))
+  (when-let* ((zone (plist-get every :zone))
+              ((not (drover-schedule-zone-known-p zone))))
+    (error "No time zone %s here" zone))
+  (let* ((now (float-time))
+         (next (or (drover-schedule-next-run every now now)
+                   (error "%s has no run in the next two weeks" (drover-schedule-describe-recurrence every))))
+         (job (drover-schedule--new-job target prompt instruction :due next :every every :fired 0 :skipped 0)))
+    (setf (plist-get job :created) now)
+    (drover-schedule--push job)
+    (drover-schedule--arm job)
+    (drover-schedule--refresh)
+    (drover-message "Scheduled %S %s, first %s — %s" (drover-schedule--prompt-line prompt)
+                    (drover-schedule-describe-recurrence every)
+                    (format-time-string "%a %F %R %Z" (seconds-to-time next)) (plist-get job :title))
+    job))
 
 (defvar drover-schedule--history nil
   "Times read when scheduling prompts.")
@@ -1062,7 +1454,7 @@ An explicit day can be past; the caller refuses it.  ZONE is as for
          (when (drover-schedule--resolve input now)))
     (cond
      ((null when) (propertize "not a time" 'face 'error))
-     ((and (not (symbolp when)) (not (time-less-p now when)))
+     ((drover-schedule--past-p when now)
       (propertize (concat (drover-schedule-describe when now) " is past") 'face 'error))
      (t (concat "→ " (drover-schedule-describe when now))))))
 
@@ -1136,8 +1528,8 @@ is refused and read again."
          ((null when)
           (setq problem (if (equal (drover-schedule--normalize input) "when turn ends")
                             "no turn is running"
-                          (format "cannot read “%s” as a time" (drover-bound-line input 60)))))
-         ((and (not (symbolp when)) (not (time-less-p now when)))
+                          (drover-schedule--unreadable input))))
+         ((drover-schedule--past-p when now)
           (setq problem (format "%s is past" (drover-schedule-describe when now))))
          (t (setq result (list when input now (drover-schedule--read-argument when)))))))
     result))
@@ -1274,6 +1666,106 @@ When it goes is read then (see `drover-schedule-read-when')."
      ((and action (not (eq action 'drover-schedule-prompt)) (commandp action))
       (call-interactively action))
      (t (drover-schedule--from-session)))))
+
+;;;; Scheduling for callers nobody watches
+
+(defun drover-schedule-when (text &optional now)
+  "Return when TEXT asks a prompt to go, as `drover-schedule-read-when' does.
+That is (WHEN TEXT NOW nil), read at NOW, by default the current time,
+without asking: WHEN is `turn-end' for \"when turn ends\", an event, a
+recurrence or a future time (see `drover-schedule-parse-time').  TEXT
+may be a time itself, a number or a Lisp timestamp, such as one read
+from ISO 8601.  Signal a `user-error' telling why TEXT reads as none of
+them, or is past."
+  (let* ((now (or now (current-time)))
+         (time (and (or (numberp text) (consp text)) text))
+         (input (cond (time (format-time-string "%FT%T%z" time))
+                      ((stringp text) (string-trim text))
+                      (t "")))
+         (when (cond (time time)
+                     ((equal (drover-schedule--normalize input) "when turn ends") 'turn-end)
+                     (t (drover-schedule-parse-time input now)))))
+    (cond
+     ((string-empty-p input) (user-error "No time given"))
+     ((null when) (user-error "%s" (drover-schedule--unreadable input)))
+     ((drover-schedule--past-p when now)
+      (user-error "%s is past" (drover-schedule-describe when now)))
+     (t (list when input now nil)))))
+
+(defun drover-schedule-session-named (name)
+  "Return the session of this host NAME names, for a caller with no buffer.
+NAME is an agent-session link to its conversation, such as
+agent-session:opencode/ses_123, or its key, BACKEND/ID.  A conversation
+two front ends show is the one taking prompts, a live buffer first.
+Signal a `user-error' when no session here is named so."
+  (drover-start)
+  (let ((prefix (concat drover-links-type ":")))
+    (or (cond
+         ((not (and (stringp name) (length< name 512))) nil)
+         ((string-prefix-p prefix name)
+          (map-let (:engine :id :host) (drover-links-parse (string-remove-prefix prefix name))
+            (when (and host (not (drover-host-local-p host)))
+              (user-error "%s runs on %s: schedule its prompts there" name host))
+            (let ((sessions (seq-filter (lambda (session)
+                                          (and (null (drover-session-host session))
+                                               (equal (drover-session-engine-key session) (cons engine id))))
+                                        (drover-schedule--sessions))))
+              (or (seq-find (lambda (session) (buffer-live-p (drover-session-buffer session))) sessions)
+                  (seq-find (lambda (session) (drover-supports-p session :submit)) sessions)
+                  (car sessions)))))
+         ((string-match "\\`\\([^/]+\\)/\\(.+\\)\\'" name)
+          (let ((backend (intern-soft (match-string 1 name)))
+                (id (match-string 2 name)))
+            (and backend (memq backend (drover-backends))
+                 (not (drover-backend-property backend :remote))
+                 (or (drover-find backend id)
+                     (seq-find (lambda (session) (and (eq (drover-session-backend session) backend)
+                                                      (equal (drover-session-id session) id)))
+                               (drover-schedule--sessions)))))))
+        (user-error "No session here is named %s" (drover-bound-line (format "%s" name) 200)))))
+
+(defun drover-schedule-for-session (session text prompt &optional properties argument)
+  "Schedule PROMPT for SESSION when TEXT tells, asking nobody; return the prompt.
+TEXT is read as `drover-schedule-when' reads it.  PROPERTIES is a plist
+the prompt keeps, such as :hidden t, delivering it out of every window,
+and :by, naming who scheduled it.  ARGUMENT is what an event taking one
+concerns.  Nothing shows a window, and a question signals.  Signal a
+`user-error' when TEXT reads as no time, or SESSION takes no prompt
+here."
+  (unless (and (stringp prompt) (not (string-blank-p prompt)))
+    (user-error "The prompt is empty"))
+  (drover-quietly
+    (drover-schedule--start)
+    (let ((chosen (drover-schedule-when text))
+          (target (append (drover-schedule-session-target session) properties)))
+      (drover-schedule-enqueue target (append (seq-take chosen 3) (list argument)) prompt))))
+
+(defun drover-schedule-trigger-named (name)
+  "Return the event NAME names, a symbol, or nil.
+Nil unless the event is defined, or a prompt waits for it."
+  (and (stringp name)
+       (or (car (seq-find (lambda (entry) (equal (symbol-name (car entry)) name)) drover-schedule--triggers))
+           (seq-some (lambda (job)
+                       (let ((trigger (plist-get job :trigger)))
+                         (and trigger (symbolp trigger) (equal (symbol-name trigger) name) trigger)))
+                     (drover-schedule--jobs)))))
+
+(defun drover-schedule-fire-event (trigger &optional cancelled text argument)
+  "Release the prompts waiting for the event TRIGGER, a symbol, which happened.
+As `drover-schedule-fire' does for each key they wait for, with
+CANCELLED and TEXT; ARGUMENT, when non-nil, releases only the prompts
+waiting for the event on it.  For callers knowing the event by its name
+rather than the key its request returned.  Return how many prompts
+were released."
+  (drover-schedule-load)
+  (let ((keys (delete-dups
+               (seq-keep (lambda (job)
+                           (and (drover-schedule--waiting-p job)
+                                (eq (plist-get job :trigger) trigger)
+                                (or (null argument) (equal (plist-get job :argument) argument))
+                                (plist-get job :after)))
+                         (drover-schedule--jobs)))))
+    (apply #'+ (mapcar (lambda (key) (drover-schedule-fire key cancelled text)) keys))))
 
 ;;;; Offering to wait for what a prompt names
 
@@ -1461,15 +1953,38 @@ what was accepted once the session started."
 
 ;;;; Delivering
 
+(defun drover-schedule-graphic-terminal ()
+  "Return a graphical terminal of this Emacs, the selected frame's first, or nil.
+Nil when no terminal is graphical, as on a daemon whose clients, if
+any, run in text terminals."
+  (if (display-graphic-p)
+      (frame-terminal)
+    (seq-find #'display-graphic-p (terminal-list))))
+
 (defun drover-schedule-display-frame (buffer title)
   "Return the window of a new frame showing the session of a scheduled prompt.
-The frame is named after TITLE, and shows BUFFER when non-nil.  The
-default `drover-schedule-display-function'."
-  (let ((frame (make-frame `((name . ,(format "Scheduled: %s" (drover-bound-line title)))))))
-    (when buffer
-      (set-window-buffer (frame-selected-window frame) buffer))
-    (make-frame-visible frame)
-    (frame-selected-window frame)))
+The frame is named after TITLE, and shows BUFFER when non-nil.  It is
+made on a graphical terminal, the selected frame's when it is one;
+when no terminal is graphical, no frame is made, and the symbol
+`hidden' returned, for the prompt to be delivered out of every window."
+  (if-let* ((terminal (drover-schedule-graphic-terminal)))
+      (let ((frame (make-frame `((name . ,(format "Scheduled: %s" (drover-bound-line title)))
+                                 ,@(unless (eq terminal (frame-terminal)) `((terminal . ,terminal)))))))
+        (when buffer
+          (set-window-buffer (frame-selected-window frame) buffer))
+        (make-frame-visible frame)
+        (frame-selected-window frame))
+    'hidden))
+
+(defun drover-schedule-display-default (buffer title)
+  "Show the session of a scheduled prompt, or have it delivered hidden.
+The default `drover-schedule-display-function': a new frame showing
+BUFFER, named after TITLE, when a terminal of this Emacs is graphical
+\(see `drover-schedule-display-frame'), else the symbol `hidden', such
+as on a daemon of a host nobody sits at."
+  (if (drover-schedule-graphic-terminal)
+      (drover-schedule-display-frame buffer title)
+    'hidden))
 
 (defun drover-schedule--current-run-p (job run)
   "Return non-nil when RUN is the delivery of JOB in progress."
@@ -1563,7 +2078,8 @@ BODY runs only while RUN is JOB's delivery in progress."
 What the resume calls back with stays scoped to RUN."
   (map-let (:engine :id) (drover-schedule-conversation job)
     (let ((window (plist-get run :window))
-          (directory (plist-get job :directory)))
+          (directory (plist-get job :directory))
+          (hidden (or (plist-get job :hidden) (plist-get run :hidden))))
       (unless (file-directory-p directory)
         (error "Session directory is unavailable: %s" directory))
       (cl-flet ((resume ()
@@ -1572,7 +2088,7 @@ What the resume calls back with stays scoped to RUN."
                         (enable-local-variables :safe)
                         (enable-local-eval nil)
                         (display-buffer-overriding-action
-                         (if (plist-get job :hidden)
+                         (if hidden
                              '(display-buffer-no-window (allow-no-window . t))
                            '(display-buffer-same-window)))
                         (display-buffer-alist nil))
@@ -1583,9 +2099,9 @@ What the resume calls back with stays scoped to RUN."
                                         (lambda (message)
                                           (drover-schedule--guard job run 'failed
                                             (drover-schedule--finish job run 'failed message)))))))
-        (if (plist-get job :hidden)
-            ;; Scheduled by another host, or a goal: resumed out of
-            ;; every window, asking nobody.
+        (if hidden
+            ;; Scheduled by another host, or a goal, or no terminal is
+            ;; graphical: resumed out of every window, asking nobody.
             (save-window-excursion (drover-quietly (resume)))
           (with-selected-window (if (window-live-p window) window (selected-window))
             (resume)))))))
@@ -1659,13 +2175,17 @@ From the prompt's timer."
       (remhash id timers)
       (when-let* ((job (drover-schedule--job id))
                   ((eq (plist-get job :status) 'pending)))
-        (if (seq-some (lambda (other)
-                        (and (equal (plist-get job :link) (plist-get other :link))
-                             (gethash (plist-get other :id) active)))
-                      (drover-schedule--jobs))
-            (drover-schedule--arm job 1)
+        (cond
+         ;; A recurring prompt sends a copy, which waits its turn as any prompt.
+         ((plist-get job :every) (drover-schedule--recur job))
+         ((seq-some (lambda (other)
+                      (and (equal (plist-get job :link) (plist-get other :link))
+                           (gethash (plist-get other :id) active)))
+                    (drover-schedule--jobs))
+          (drover-schedule--arm job 1))
+         (t
           (let ((run (list :deadline (+ (float-time) drover-schedule-wait-seconds)
-                           :window nil :buffer nil :timer nil)))
+                           :window nil :buffer nil :timer nil :hidden nil)))
             (puthash id run active)
             (condition-case err
                 (progn
@@ -1674,33 +2194,47 @@ From the prompt's timer."
                     (error "Conversations of other hosts cannot be reached yet: %s" host))
                   (drover-links-load-front-end (plist-get job :backend))
                   (drover-schedule--restore job)
-                  (let ((buffer (drover-schedule--buffer job)))
-                    ;; Scheduled by another host: nothing shows here.
-                    (setf (plist-get run :window)
-                          (unless (plist-get job :hidden)
-                            (funcall drover-schedule-display-function buffer (plist-get job :title))))
+                  (let* ((buffer (drover-schedule--buffer job))
+                         ;; Scheduled by another host: nothing shows here.
+                         (window (unless (plist-get job :hidden)
+                                   (funcall drover-schedule-display-function buffer (plist-get job :title)))))
+                    (if (eq window 'hidden)
+                        (setf (plist-get run :hidden) t)
+                      (setf (plist-get run :window) window))
                     (if buffer
                         (drover-schedule--attached job run buffer)
                       (drover-schedule--open job run)))
                   (when (drover-schedule--current-run-p job run)
                     (setf (plist-get run :timer) (run-at-time 0.25 0.5 #'drover-schedule--poll job run))))
-              (error (drover-schedule--finish job run 'failed (drover-error-message err))))))))))
+              (error (drover-schedule--finish job run 'failed (drover-error-message err)))))))))))
 
 ;;;; The list of scheduled prompts
 
 (defun drover-schedule--when (job)
   "Return when JOB goes, as the list shows it."
-  (cond ((plist-get job :due)
+  (cond ((and (plist-get job :every) (eq (plist-get job :status) 'pending))
+         (format "%s, next %s" (drover-schedule-describe-recurrence (plist-get job :every))
+                 (format-time-string "%F %R %Z" (seconds-to-time (plist-get job :due)))))
+        ((plist-get job :every) (drover-schedule-describe-recurrence (plist-get job :every)))
+        ((plist-get job :due)
          (format-time-string "%F %R %Z" (seconds-to-time (plist-get job :due))))
         ((plist-get job :turn) (format "after the turn of %s" (plist-get job :title)))
         (t (drover-schedule--event-text job))))
 
 (defun drover-schedule--status-text (job)
-  "Return the status of JOB as the list shows it: a watch waiting is watching."
-  (if (and (plist-get job :repeat) (drover-schedule--waiting-p job))
-      (let ((fired (or (plist-get job :fired) 0)))
-        (if (> fired 0) (format "watching, %d sent" fired) "watching"))
-    (symbol-name (plist-get job :status))))
+  "Return the status of JOB as the list shows it.
+A watch waiting is watching, a recurring prompt pending recurring."
+  (cond
+   ((and (plist-get job :repeat) (drover-schedule--waiting-p job))
+    (let ((fired (or (plist-get job :fired) 0)))
+      (if (> fired 0) (format "watching, %d sent" fired) "watching")))
+   ((and (plist-get job :every) (eq (plist-get job :status) 'pending))
+    (let ((fired (or (plist-get job :fired) 0))
+          (skipped (or (plist-get job :skipped) 0)))
+      (concat "recurring"
+              (and (> fired 0) (format ", %d sent" fired))
+              (and (> skipped 0) (format ", %d skipped" skipped)))))
+   (t (symbol-name (plist-get job :status)))))
 
 (defun drover-schedule--refresh ()
   "Draw the list of scheduled prompts again, if it exists, without displaying it.
@@ -1749,9 +2283,23 @@ waiting for it."
   "Retry JOB, a failed, interrupted or cancelled scheduled prompt, at once.
 One still waiting for an event or for the end of a turn is sent now
 instead, with NOW only.  A watch waiting is sent a copy now and goes on
-waiting; one cancelled, ended or failed waits for its event again.
+waiting; one cancelled, ended or failed waits for its event again.  A
+recurring prompt is sent a copy now, with NOW only, and goes on
+recurring; one cancelled or failed recurs again from its next run.
 Signal an error when JOB can be neither."
   (cond
+   ((and (plist-get job :every) (eq (plist-get job :status) 'pending))
+    (unless now (error "This prompt recurs %s" (drover-schedule-describe-recurrence (plist-get job :every))))
+    (if (drover-schedule--copy-pending job)
+        (error "Its copy before has not gone yet")
+      (drover-schedule--send-copy job))
+    (drover-schedule--refresh))
+   ((and (plist-get job :every) (memq (plist-get job :status) '(failed interrupted cancelled)))
+    ;; From now on: the runs missed meanwhile are not caught up.
+    (setf (plist-get job :due) (or (drover-schedule--next-of job (float-time))
+                                   (error "It has no run in the next two weeks")))
+    (drover-schedule--status job 'pending)
+    (drover-schedule--arm job))
    ((and (plist-get job :repeat) (drover-schedule--waiting-p job))
     (unless now (error "This prompt waits for each %s" (drover-schedule--trigger-label (plist-get job :trigger))))
     (drover-schedule--notify job nil)
@@ -1781,10 +2329,15 @@ Signal an error when JOB can be neither."
   "Retry the failed, interrupted or cancelled prompt at point now.
 A prompt still waiting for an event, or for the end of a turn, is sent
 now instead.  A watch waiting is sent a copy, and goes on waiting; one
-cancelled or ended waits for its event again."
+cancelled or ended waits for its event again.  A recurring prompt is
+sent a copy, and goes on recurring; one cancelled recurs again."
   (interactive)
   (let ((job (drover-schedule--at-point)))
     (cond
+     ((and (plist-get job :every) (eq (plist-get job :status) 'pending))
+      (when (y-or-n-p (format "Send a copy now, still recurring %s? "
+                              (drover-schedule-describe-recurrence (plist-get job :every))))
+        (drover-schedule-retry-job job t)))
      ((and (plist-get job :repeat) (drover-schedule--waiting-p job))
       (when (y-or-n-p (format "Send a copy now, still waiting for each %s? "
                               (drover-schedule--trigger-label (plist-get job :trigger))))
@@ -1822,8 +2375,11 @@ cancelled or ended waits for its event again."
         (insert (format "%s\n%s\n\nScheduled: %s\nStatus: %s\n%s%s\nPrompt:\n%s\n"
                         (plist-get job :title) (plist-get job :link)
                         (string-join
-                         (delq nil (list (when-let* ((due (plist-get job :due)))
-                                           (format-time-string "%F %T %Z" (seconds-to-time due)))
+                         (delq nil (list (when-let* ((every (plist-get job :every)))
+                                           (drover-schedule-describe-recurrence every))
+                                         (when-let* ((due (plist-get job :due)))
+                                           (format-time-string (if (plist-get job :every) "next %F %T %Z" "%F %T %Z")
+                                                               (seconds-to-time due)))
                                          (when (plist-get job :trigger)
                                            (drover-schedule--event-text job))
                                          (when (plist-get job :turn)
@@ -1839,9 +2395,16 @@ cancelled or ended waits for its event again."
       (pop-to-buffer (current-buffer)))))
 
 (defun drover-schedule--watch-facts (job)
-  "Return what the list's details tell of JOB, a watch, after its status, or \"\"."
-  (if (not (plist-get job :repeat))
-      ""
+  "Return what the list's details tell of JOB, a watch, after its status, or \"\".
+For a recurring prompt, when it last sent a copy."
+  (cond
+   ((plist-get job :every)
+    (or (when-let* ((sent (plist-get job :sent-at)))
+          (format "; last sent %s" (format-time-string "%F %R %Z" (seconds-to-time sent))))
+        ""))
+   ((not (plist-get job :repeat))
+    "")
+   (t
     (concat
      (when-let* ((sent (plist-get job :sent-at)))
        (format "; last sent %s" (format-time-string "%F %R %Z" (seconds-to-time sent))))
@@ -1849,7 +2412,7 @@ cancelled or ended waits for its event again."
                  (expires (plist-get job :expires)))
        (format "; ends %s unless sent before" (format-time-string "%F %R %Z" (seconds-to-time expires))))
      (when-let* ((argument (plist-get job :argument)))
-       (format "\nEvent: %s" argument)))))
+       (format "\nEvent: %s" argument))))))
 
 (defun drover-schedule-new ()
   "Schedule a prompt for a session chosen, then when, then the prompt.
