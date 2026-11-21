@@ -1120,6 +1120,37 @@ fields, quote their lines whole too."
         (drover-prompt-test--quotes-whole 1 "$ ls -la")
         (drover-prompt-test--quotes-whole 2 "file")))))
 
+(defun drover-prompt-test--copy-filter (beg end _delete)
+  "Return the text from BEG to END without its characters marked `drover-test-uncopied'.
+As a buffer's `filter-buffer-substring-function' leaves out what it
+does not copy, such as a terminal's newlines between the rows it
+wrapped."
+  (let ((text (buffer-substring beg end)))
+    (apply #'string (cl-loop for i below (length text)
+                             unless (get-text-property i 'drover-test-uncopied text)
+                             collect (aref text i)))))
+
+(ert-deftest drover-prompt-test-quotes-as-buffer-copies ()
+  "The line at point and the region are quoted as the buffer copies them.
+A terminal breaks a long line into rows of its width, and its copy
+filter, as Ghostel's or vterm's, joins the rows again: a terminal
+narrowed after the program wrote cut a word there, and the quote, the
+text as stored, gave the agent that word in two."
+  (drover-prompt-test-with
+    (with-temp-buffer
+      (setq default-directory "/"
+            major-mode 'ghostel-mode)
+      (setq-local filter-buffer-substring-function #'drover-prompt-test--copy-filter)
+      (insert (propertize "> " 'drover-test-uncopied t) "Its node is \"Blo"
+              (propertize "\n" 'drover-test-uncopied t) "cky\".\nnext\n")
+      (drover-prompt-test--quotes-whole 1 "Its node is \"Blo")
+      (let ((transient-mark-mode t)
+            (end (save-excursion (goto-char (point-min)) (forward-line 1) (pos-eol))))
+        (set-mark (point-min))
+        (activate-mark)
+        (should (equal (drover-prompt-test--quoted-from (list end))
+                       (list (cons end "Its node is \"Blocky\"."))))))))
+
 (ert-deftest drover-prompt-test-task-keeps-draft ()
   "Starting a task's prompt asks before replacing a draft, and keeps picks made on an empty prompt."
   (drover-prompt-test-with
@@ -1216,7 +1247,7 @@ fields, quote their lines whole too."
               (widen))))))))
 
 (ert-deftest drover-prompt-test-attach ()
-  "A buffer is quoted whole, a project file linked; the prompt's own region is refused."
+  "A buffer is quoted whole as it copies, a project file linked; the prompt's own region is refused."
   (drover-prompt-test-with
     (let* ((directory (file-name-as-directory (make-temp-file "drover-attach-" t)))
            (file (expand-file-name "a.txt" directory))
@@ -1230,7 +1261,8 @@ fields, quote their lines whole too."
             (with-temp-file file (insert "text"))
             (with-current-buffer source
               (emacs-lisp-mode)
-              (insert "(foo)\n"))
+              (setq-local filter-buffer-substring-function #'drover-prompt-test--copy-filter)
+              (insert "(foo" (propertize "\n" 'drover-test-uncopied t) ")\n"))
             (let ((candidates (drover-prompt--attach-candidates prompt)))
               (should (member "attach-source.el" candidates))
               (should-not (member (buffer-name prompt) candidates))

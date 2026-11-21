@@ -972,7 +972,8 @@ An Org heading line is quoted as any other line:
   "Open the prompt, or add to it the context at point.
 As `drover-prompt-dwim' does, which refuses the prompt buffer first.
 The context is the active region, else the line at point, whole even
-where fields, such as a Comint prompt, divide it, formatted by
+where fields, such as a Comint prompt, divide it, as the buffer copies
+it (see `drover-prompt--copied-text'), formatted by
 `drover-prompt-format-context'; TEXT, when given, is quoted in their
 place, linked to the line at point as they are.  In drover's own lists,
 those setting `drover-view-p', it is the sessions selected, or the one
@@ -990,10 +991,18 @@ window, or while the prompt is hidden where the user left point."
            ;; such as a Comint prompt's.
            (region (cond (text)
                          ((use-region-p)
-                          (buffer-substring-no-properties (region-beginning) (region-end)))
-                         (t (buffer-substring-no-properties (pos-bol) (pos-eol)))))
+                          (drover-prompt--copied-text (region-beginning) (region-end)))
+                         (t (drover-prompt--copied-text (pos-bol) (pos-eol)))))
            (block (drover-prompt-format-context source region (drover-prompt-language major-mode))))
       (drover-prompt--add block default-directory))))
+
+(defun drover-prompt--copied-text (start end)
+  "Return the text from START to END as the current buffer copies it.
+That is through `filter-buffer-substring', without properties.  A
+terminal's copy filter, as Ghostel's or vterm's, joins the rows it
+wrapped at its width: a terminal narrowed after the program wrote cuts
+words there, and the text as stored gave the agent a word in two."
+  (substring-no-properties (filter-buffer-substring start end)))
 
 (defun drover-prompt--add (text directory &optional quietly)
   "Add TEXT to the prompt, and show the prompt.
@@ -1825,9 +1834,10 @@ named like a buffer is marked as a file."
   "Insert at point the context of a buffer or of a project file.
 Buffers come first, most recently used first, then the files of the
 project of the prompt's directory.  A buffer's whole text is quoted as
-`drover-prompt-dwim' quotes a region; a file is named by a link, without
-its text, which agents read themselves.  An active region is refused,
-being prompt text already.  This is the prompt action `attach'."
+`drover-prompt-dwim' quotes a region, as the buffer copies it; a file
+is named by a link, without its text, which agents read themselves.  An
+active region is refused, being prompt text already.  This is the
+prompt action `attach'."
   (interactive)
   (unless drover-prompt-mode
     (user-error "Not in the prompt"))
@@ -1849,7 +1859,7 @@ being prompt text already.  This is the prompt action `attach'."
                      (save-excursion
                        (goto-char (point-min))
                        (drover-prompt-format-context
-                        buffer (buffer-substring-no-properties (point-min) (point-max))
+                        buffer (drover-prompt--copied-text (point-min) (point-max))
                         (drover-prompt-language major-mode)))))
                   (`(file . ,file)
                    (format "From [[file:%s][%s]]\n\n"
