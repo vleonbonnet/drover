@@ -326,23 +326,6 @@ conversation, loaded if need be (see `drover-load-resumer')."
       (drover-session-backend session)
     (car (drover-load-resumer (drover-session-engine session)))))
 
-(defun drover-wrap-up-session (session &optional peer)
-  "Wrap SESSION up: have it clean up, then archive it and close its buffer.
-See `drover-wrap-up'.  PEER, the name of the host that asked, if any,
-hears how it ended.  A session of another host is wrapped up by that
-host (its backend's :wrap-up).  Signal a `user-error' telling why
-SESSION cannot be wrapped up."
-  (let ((title (drover-bound-line (drover-session-display-title session))))
-    (if (drover-session-host session)
-        (if (drover-supports-p session :wrap-up)
-            (drover--call-confirming session :wrap-up #'ignore
-                                     (lambda (message)
-                                       (drover-with-reporting "wrap-up"
-                                         (drover-warn "Could not wrap up %s: %s" title message))))
-          (user-error "%s cannot be wrapped up: its host does not wrap up its sessions for this one" title))
-      (drover-wrap-up--begin session peer))
-    nil))
-
 (defun drover-wrap-up--begin (session peer)
   "Begin wrapping up SESSION, of this host, for PEER, if any; return the wrap-up."
   (let* ((title (drover-bound-line (drover-session-display-title session) 120))
@@ -366,6 +349,8 @@ SESSION cannot be wrapped up."
                    (when (and (drover-wrap-up--current-p entry) (eq (plist-get entry :state) 'preparing))
                      (setf (plist-get entry :hint) hint)
                      (drover-wrap-up--proceed entry)))))
+      (unless (drover-wrap-up--current-p entry)
+        (user-error "Could not start the wrap-up of %s" title))
       entry)))
 
 (defun drover-wrap-up--busy-p (record)
@@ -947,16 +932,39 @@ asks, `drover-wrap-up--recap-attempts' at most."
       (drover--request-kind session :wrap-up)
     'local))
 
-(defun drover-wrap-up--step (session settle)
-  "Wrap SESSION up as `drover-wrap-up-session' does, then SETTLE.
-For `drover--bulk-start': another host's session settles once its host
-took it, this host's once its wrap-up began."
-  (if (drover-session-host session)
-      (drover--call-confirming session :wrap-up
-                               (lambda () (funcall settle t))
-                               (lambda (message) (funcall settle nil message)))
-    (drover-wrap-up--begin session nil)
-    (funcall settle t)))
+(defun drover-wrap-up--step (session settle &optional buffer)
+  "Start wrapping up SESSION and call SETTLE with the outcome.
+An accepted request hands SESSION back, including BUFFER if the user
+acted from another view of SESSION."
+  (cl-flet ((accepted ()
+              (drover-note-handed-off session 'wrap-up 'drover buffer)
+              (funcall settle t)))
+    (cond
+     ((not (drover-session-host session))
+      (drover-wrap-up--begin session nil)
+      (accepted))
+     ((drover-supports-p session :wrap-up)
+      (drover--call-confirming session :wrap-up #'accepted
+                               (lambda (message) (funcall settle nil message))))
+     (t (user-error "%s cannot be wrapped up: its host does not wrap up its sessions for this one"
+                    (drover-session-display-title session))))))
+
+(defun drover-wrap-up-session (session &optional peer)
+  "Wrap SESSION up: have it clean up, then archive it and close its buffer.
+See `drover-wrap-up'.  PEER, the name of the host that asked, if any,
+hears how it ended.  Only the host where the user asked reports the
+handoff.  Signal a `user-error' telling why SESSION cannot be wrapped up."
+  (if peer
+      (drover-wrap-up--begin session peer)
+    (let ((title (drover-bound-line (drover-session-display-title session))))
+      (drover-wrap-up--step session
+                            (lambda (ok &optional message)
+                              (unless ok
+                                (drover-with-reporting "wrap-up"
+                                  (drover-warn "Could not wrap up %s: %s" title message))))
+                            (and (drover-window-shows-session-p (selected-window) session)
+                                 (window-buffer)))))
+  nil)
 
 ;;;###autoload
 (defun drover-wrap-up (sessions)
@@ -967,7 +975,9 @@ and asked to remove what it created that does not belong where it is
 outside repositories, duplicate clones, stray files; drover lists what
 it attributes to it, a hint.  The prompt goes once the session's turn,
 if one runs, ended, with the engine's build agent (see
-`drover-wrap-up-agent').  The session is then archived, and its buffer
+`drover-wrap-up-agent').  Auto-bury applies as soon as this host or
+the session's owner accepts the wrap-up, even during a running turn.
+After the prompt is sent, the session is archived, and its buffer
 closes: at once for a session running without it, as OpenCode's; once
 the cleanup ended for a terminal or a shell.
 

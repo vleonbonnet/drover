@@ -91,6 +91,8 @@ confirming it.  The wrap-ups, the queue and the state are fresh."
                 (drover-schedule-former-files nil)
                 (drover-schedule-display-function #'ignore)
                 (drover-schedule-changed-hook nil)
+                (drover--handed-off nil)
+                (drover--handed-off-timer nil)
                 (drover-wrap-up-attribution-timeout 2)
                 (drover-wrap-up-removal-advice nil)
                 (drover-wrap-up-agent 'build)
@@ -170,6 +172,8 @@ confirming it.  The wrap-ups, the queue and the state are fresh."
                             (push (apply #'format format-string arguments) drover-wrap-up-test-messages))))
                  ,@body)
              (drover-test-wait-commands 10)
+             (when (timerp drover--handed-off-timer)
+               (cancel-timer drover--handed-off-timer))
              (drover-wrap-up-unload-function)
              (when (drover-schedule--queue-p drover-schedule--queue)
                (maphash (lambda (_ timer) (cancel-timer timer)) (drover-schedule--queue-timers drover-schedule--queue))
@@ -361,6 +365,27 @@ PROPERTIES are those of its record as the turn ends."
     (should (string-match-p "close this session" (drover-wrap-up-test-take)))
     (should (drover-wrap-up-test-state 'watching))))
 
+(ert-deftest drover-wrap-up-test-auto-bury ()
+  "An accepted wrap-up respects auto-bury even before the cleanup prompt goes."
+  (dolist (auto-bury '(t nil))
+    (drover-wrap-up-test-with 'terminal
+      (let ((drover-bury-handed-off t)
+            (previous (window-buffer)))
+        (save-window-excursion
+          (switch-to-buffer drover-wrap-up-test-buffer)
+          (drover-wrap-up-test-session :status 'waiting)
+          (should-error (call-interactively #'drover-wrap-up) :type 'user-error)
+          (accept-process-output nil 0.05)
+          (should (eq (window-buffer) drover-wrap-up-test-buffer))
+          (drover-wrap-up-test-session :status 'working)
+          (drover-set-auto-bury (drover-wrap-up-test-record) auto-bury)
+          (call-interactively #'drover-wrap-up)
+          (should (drover-wrap-up-test-state 'waiting-turn))
+          (accept-process-output nil 0.05)
+          (should (eq (window-buffer) (if auto-bury previous drover-wrap-up-test-buffer)))
+          (should (process-live-p (get-buffer-process drover-wrap-up-test-buffer)))
+          (should-not drover-wrap-up-test-submitted))))))
+
 (ert-deftest drover-wrap-up-test-restored-by-the-user ()
   "A session restored while it cleans up is no longer wrapped up: its buffer stays."
   (drover-wrap-up-test-with 'terminal
@@ -398,8 +423,10 @@ PROPERTIES are those of its record as the turn ends."
 (ert-deftest drover-wrap-up-test-tells-the-peer ()
   "A wrap-up another host asked for tells it how it ended, this host named."
   (drover-wrap-up-test-with 'terminal
-    (let ((told nil)
-          (drover-host "core"))
+    (let* ((told nil)
+           (handoffs nil)
+           (drover-handed-off-functions (list (lambda (_session _buffers how _origin) (push how handoffs))))
+           (drover-host "core"))
       (cl-letf (((symbol-function 'drover-remote-tell-peer)
                  (lambda (name text) (push (list name text) told))))
         (setq drover-test-recaps '(("s1" :reply "DROVER-KEEP-OPEN\nThe clone ~/src/x has local commits.")))
@@ -408,6 +435,7 @@ PROPERTIES are those of its record as the turn ends."
         (should (drover-wrap-up-test-state 'watching))
         (drover-wrap-up-test-turn)
         (should (drover-wrap-up-test-ended))
+        (should-not handoffs)
         (should (equal told '(("laptop" "Session s1 on core stays open: the agent asks: The clone ~/src/x has local commits."))))
         ;; Asked here, nobody is told.
         (setq told nil
@@ -418,7 +446,34 @@ PROPERTIES are those of its record as the turn ends."
         (should (drover-wrap-up-test-state 'watching))
         (drover-wrap-up-test-turn)
         (should (drover-wrap-up-test-ended))
-        (should-not told)))))
+        (should-not told)
+        (should (equal handoffs '(wrap-up)))))))
+
+(ert-deftest drover-wrap-up-test-peer-confirms-auto-bury ()
+  "The viewer buries its session view only once the owner accepts."
+  (drover-test-with-backend nil
+    (drover-test-with-state
+      (let ((session (drover-test-session "s1" :host "owner"))
+            (drover-bury-handed-off t)
+            then else)
+        (apply #'drover-register-backend 'fake
+               :wrap-up (lambda (_session success failure) (setq then success else failure))
+               :wrap-up-confirms t (alist-get 'fake drover--backends))
+        (with-temp-buffer
+          (let ((view (current-buffer))
+                (previous (window-buffer)))
+            (setq-local drover-session-at-point-function (lambda () session))
+            (save-window-excursion
+              (switch-to-buffer view)
+              (call-interactively #'drover-wrap-up)
+              (funcall else "refused")
+              (accept-process-output nil 0.05)
+              (should (eq (window-buffer) view))
+              (call-interactively #'drover-wrap-up)
+              (accept-process-output nil 0.05)
+              (should (eq (window-buffer) view))
+              (funcall then)
+              (should (drover-wrap-up-test-wait (lambda () (eq (window-buffer) previous)))))))))))
 
 ;;;; Sessions running elsewhere
 

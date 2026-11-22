@@ -6507,10 +6507,10 @@ prompt sent to wait on a request SESSION awaits gives it nothing (see
 :waits in `drover-register-backend').
 
 HOW is `prompt' for a prompt sent to SESSION, `start' for a session a
-prompt started, `build' for `drover-build-and-go', `answer' for one of
-its requests answered, a permission or a question.  ORIGIN is `drover'
-when drover's prompt or commands gave it, `front-end' when the
-session's front end tells it was given there, which includes an answer
+prompt started, `build' for `drover-build-and-go', `wrap-up' for an
+accepted wrap-up, or `answer' for a permission or a question answered.
+ORIGIN is `drover' when drover's prompt or commands gave it, `front-end'
+when the session's front end tells it was given there, including an answer
 given in the front end's own menu that `drover-respond' opened.
 
 BUFFERS are the live buffers here of SESSION and, for an answer, of the
