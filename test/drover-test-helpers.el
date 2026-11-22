@@ -65,6 +65,11 @@
 (let ((directory drover-state-directory))
   (add-hook 'kill-emacs-hook (lambda () (delete-directory directory t))))
 
+;; Nor take the name of the machine running them for this host's:
+;; fixtures name other hosts, such as "core", and on a machine of that
+;; name the other host was this one.
+(setopt drover-host "drover-test-host")
+
 ;; Nor list what the engines recorded as drover starts, nor load a
 ;; front end to resume a conversation, but in the tests binding them.
 (setq drover-transcript-engines nil

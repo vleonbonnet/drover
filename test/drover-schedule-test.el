@@ -1733,7 +1733,12 @@ prompt or a delivery leading back to the queue would print it all again."
                      "Sat 2026-10-31 15:00"))
       (should (equal (drover-schedule-test-run-at '(:interval 1800) anchor anchor) "Sat 2026-10-31 14:30"))
       ;; Elapsed time: an hour across the fall change reads 1:00 twice.
-      (should (equal (drover-schedule-test-run-at '(:interval 3600) (drover-schedule-test-now 1 1 11) nil)
+      ;; The first 1:00 is asked for by its daylight time: which one an
+      ;; ambiguous time means is the platform's choice, the second on Windows.
+      (should (equal (drover-schedule-test-run-at
+                      '(:interval 3600)
+                      (encode-time (list 0 0 1 1 11 2026 nil t drover-schedule-test-zone))
+                      nil)
                      "Sun 2026-11-01 01:00")))))
 
 (ert-deftest drover-schedule-test-describe-recurrence ()
