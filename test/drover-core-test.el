@@ -772,6 +772,23 @@ holds the identifiers its :session was asked for."
       (drover-changed-now)
       (should (equal (drover-index-parent '(records . "x/agent")) '(fake . "terminal"))))))
 
+(ert-deftest drover-test-index-conversation ()
+  "A conversation's listed session is its record's, then the front end's once one follows it."
+  (let ((records (list (drover-test-record "x") (drover-test-record "z"))))
+    (drover-test-with-recorded records
+      (should (equal (drover-index-conversation '(fake . "x")) '(records . "x")))
+      (should-not (drover-index-conversation '(fake . "unknown")))
+      (setq drover-test-sessions (list (drover-test-session "terminal" :engine 'fake :engine-id "x")))
+      (drover-backend-changed 'fake "terminal")
+      (drover-changed-now)
+      (should (equal (drover-index-conversation '(fake . "x")) '(fake . "terminal")))
+      ;; /clear: the terminal follows another conversation.
+      (setq drover-test-sessions (list (drover-test-session "terminal" :engine 'fake :engine-id "z")))
+      (drover-backend-changed 'fake "terminal")
+      (drover-changed-now)
+      (should (equal (drover-index-conversation '(fake . "z")) '(fake . "terminal")))
+      (should (equal (drover-index-conversation '(fake . "x")) '(records . "x"))))))
+
 (ert-deftest drover-test-recorded-built-index ()
   "An index made anew, and every listing, leave out the records of followed conversations."
   (let ((records (list (drover-test-record "x") (drover-test-record "y"))))

@@ -32,13 +32,14 @@
 ;; project, interrupt, archive and answer the questions of the sessions
 ;; they started, and answer no permission.  The caller is the session
 ;; whose agent calls, as its client tells it (`drover-anvil-callers'):
-;; OpenCode names it in each call's `_meta'.  No tool acts on the caller
-;; itself nor on a session its turn is part of, the sessions above it,
-;; nor waits on one of those, or on a session waiting on the caller:
-;; that would wait on itself.  A caller its client does not name may
-;; only do what applies to any session.  Every call is logged, in
-;; `drover-anvil-log-file', and a mutating call that cannot be logged
-;; is refused.
+;; OpenCode names it in each call's `_meta', and Claude Code records the
+;; conversation of the process that started Anvil's bridge.  No tool
+;; acts on the caller itself nor on a session its turn is part of, the
+;; sessions above it, nor waits on one of those, or on a session
+;; waiting on the caller: that would wait on itself.  A caller its
+;; client does not name may only do what applies to any session.
+;; Every call is logged, in `drover-anvil-log-file', and a mutating
+;; call that cannot be logged is refused.
 ;;
 ;; What ends later (a turn, a recap, a session starting) is a job:
 ;; while the client waits (`anvil-server-can-defer-p', Anvil's stdio
@@ -65,7 +66,9 @@
 (declare-function anvil-server-unregister-tool "ext:anvil-server" (tool-id &optional server-id))
 (declare-function anvil-server-defer "ext:anvil-server" (poll &rest keys))
 (declare-function anvil-server-can-defer-p "ext:anvil-server" ())
+(declare-function drover-claude-code-pid-session-id "drover-claude-code" (pid))
 (defvar anvil-server-request-meta)
+(defvar anvil-server-transport-pid)
 
 ;;;; Options
 
@@ -137,11 +140,12 @@ option :hidden of :create in `drover-register-backend')."
   :type 'string
   :group 'drover-anvil)
 
-(defcustom drover-anvil-callers '(drover-anvil-opencode-caller)
+(defcustom drover-anvil-callers '(drover-anvil-opencode-caller drover-anvil-claude-code-caller)
   "Functions naming the session whose agent calls a tool.
 Each is called with the `_meta' of the call, an alist, and returns the
 key of the calling session, (BACKEND . ID), or nil; the first non-nil
-wins."
+wins.  A function may look at the call's transport too, as
+`drover-anvil-claude-code-caller' does."
   :type '(repeat function)
   :group 'drover-anvil)
 
@@ -280,6 +284,51 @@ as ai.opencode/sessionID."
     (and (stringp id)
          (string-match-p "\\`[A-Za-z0-9_-]\\{1,128\\}\\'" id)
          (cons 'opencode id))))
+
+(defconst drover-anvil--client-depth 3
+  "How many processes above Anvil's bridge are looked at for its client.
+The client is the bridge's parent, or above it when a program, such as
+cmd or env, starts the bridge for it.")
+
+(defun drover-anvil--claude-code-conversation (pid)
+  "Return the conversation of the nearest Claude Code process above PID, or nil.
+PID is a process identifier, as `process-attributes' takes it.  The
+walk stops at a process started after the one below it: it took the
+identifier of a process that ended.  See
+`drover-anvil-claude-code-caller'."
+  (let ((attributes (process-attributes pid))
+        (depth 0)
+        (id nil))
+    (while (and attributes (null id) (< depth drover-anvil--client-depth))
+      (let* ((parent (alist-get 'ppid attributes))
+             (above (and (natnump parent) (> parent 0) (process-attributes parent)))
+             (start (alist-get 'start attributes))
+             (parent-start (alist-get 'start above)))
+        (setq depth (1+ depth)
+              attributes (and above
+                              (not (and start parent-start (time-less-p start parent-start)))
+                              above))
+        (when attributes
+          (setq id (drover-claude-code-pid-session-id parent)))))
+    id))
+
+(defun drover-anvil-claude-code-caller (_meta)
+  "Return the key of the Claude Code session calling the tool, or nil.
+Claude Code names no session in a call's `_meta'.  It starts Anvil's
+stdio bridge, a process for each of its sessions, which tells its
+process (`anvil-server-transport-pid'), and it records the conversation
+each of its processes runs, rewritten as /clear or /resume switches it
+\(`drover-claude-code-pid-session-id').  The caller is the session
+listed for the conversation of the nearest Claude Code process above
+the bridge, among `drover-anvil--client-depth' processes (see
+`drover-index-conversation'): a front end's buffer showing the
+conversation before its transcript.  A conversation drover has not
+learned yet, as that of a terminal just started, names none."
+  (when-let* (((featurep 'drover-claude-code))
+              (pid (bound-and-true-p anvil-server-transport-pid))
+              ((natnump pid))
+              (id (drover-anvil--claude-code-conversation pid)))
+    (drover-index-conversation (cons 'claude-code id))))
 
 (defun drover-anvil--caller ()
   "Return the key of the session calling the tool, or nil when unknown."

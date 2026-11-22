@@ -3636,6 +3636,16 @@ of that record alone, rather than once per front end."
               (eq (car key)
                   (drover--preferred-backend (seq-keep #'drover-index-session keys))))))))
 
+(defun drover-index-conversation (engine-key)
+  "Return the key of the session listed for the conversation ENGINE-KEY, or nil.
+ENGINE-KEY is (ENGINE . ENGINE-ID), as `drover-session-engine-key'
+tells it.  Of the records of several backends showing the conversation
+in the index, it is the one listed (see `drover-index-listed-p')."
+  (seq-find (lambda (key)
+              (when-let* ((record (drover-index-session key)))
+                (drover-index-listed-p key record)))
+            (gethash engine-key (drover--index-engines (drover-index)))))
+
 (defun drover-index-root (key)
   "Return the key of the session at the top of the tree of session KEY."
   (let ((parents (drover--index-parents (drover-index)))

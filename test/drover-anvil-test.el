@@ -29,8 +29,10 @@
 (require 'json)
 (require 'drover-test-helpers)
 (require 'drover-anvil)
+(require 'drover-claude-code)
 
 (defvar anvil-server-request-meta nil)
+(defvar anvil-server-transport-pid nil)
 
 (defvar drover-anvil-test-requests nil
   "Requests of the fake sessions, an alist (ID . REQUESTS), for :requests.")
@@ -163,6 +165,73 @@ CALLER is the identifier of a fake session, or nil for none named."
     (drover-backend-changed 'fake)
     (let ((text (drover-anvil--tool-sessions)))
       (should (< (length text) 2000)))))
+
+;;;; The caller
+
+(defconst drover-anvil-test-conversations
+  '("11111111-1111-4111-8111-111111111111" "22222222-2222-4222-8222-222222222222"
+    "33333333-3333-4333-8333-333333333333")
+  "Identifiers of Claude Code conversations.")
+
+(defun drover-anvil-test-claude-record (pid id &optional later)
+  "Record, as Claude Code does, that its process PID runs the conversation ID.
+LATER, seconds, dates the record that much after now, as a record
+Claude Code rewrites later is."
+  (let ((file (expand-file-name (format "%d.json" pid) (drover-claude-code-sessions-directory))))
+    (drover-test-write file (format "{\"pid\": %d, \"sessionId\": \"%s\", \"kind\": \"interactive\"}" pid id))
+    (when later
+      (set-file-times file (time-add nil later)))))
+
+(defun drover-anvil-test-default-callers ()
+  "Return the functions `drover-anvil-callers' holds by default."
+  (eval (car (get 'drover-anvil-callers 'standard-value)) t))
+
+(defmacro drover-anvil-test-with-processes (processes &rest body)
+  "Run BODY with `process-attributes' telling the processes PROCESSES names.
+PROCESSES is a variable holding a list of (PID PPID START), START in
+seconds since the epoch, which BODY may set."
+  (declare (indent 1) (debug t))
+  `(cl-letf (((symbol-function 'process-attributes)
+              (lambda (pid)
+                (when-let* ((process (assq pid ,processes)))
+                  (list (cons 'ppid (nth 1 process))
+                        (cons 'start (seconds-to-time (nth 2 process))))))))
+     ,@body))
+
+(ert-deftest drover-anvil-test-claude-code-caller ()
+  "A Claude Code caller is the session of the conversation the process above the bridge runs.
+The conversation is followed once /clear switches it, the process is
+found above a program starting the bridge for it, within
+`drover-anvil--client-depth', and never one started after the process
+below it, which took the identifier of one that ended."
+  (pcase-let ((`(,first ,second ,unknown) drover-anvil-test-conversations))
+    (drover-test-with-homes
+      (drover-anvil-test-with (list (drover-test-session "first" :engine 'claude-code :engine-id first)
+                                    (drover-test-session "second" :engine 'claude-code :engine-id second))
+          nil
+        (let ((drover-anvil-callers (drover-anvil-test-default-callers))
+              (processes '((100 200 30) (200 1 20) (1 0 10))))
+          (drover-anvil-test-with-processes processes
+            (drover-anvil-test-claude-record 200 first)
+            ;; No bridge told its process.
+            (should-not (drover-anvil--caller))
+            (let ((anvil-server-transport-pid 100))
+              (should (equal (drover-anvil--caller) '(fake . "first")))
+              (drover-anvil-test-claude-record 200 second 10)
+              (should (equal (drover-anvil--caller) '(fake . "second")))
+              ;; The session OpenCode names comes first.
+              (let ((anvil-server-request-meta '((ai.opencode/sessionID . "ses_1"))))
+                (should (equal (drover-anvil--caller) '(opencode . "ses_1"))))
+              (drover-anvil-test-claude-record 200 unknown 20)
+              (should-not (drover-anvil--caller))
+              ;; cmd started the bridge for Claude Code.
+              (setq processes '((100 150 30) (150 200 25) (200 1 20)))
+              (drover-anvil-test-claude-record 200 first 30)
+              (should (equal (drover-anvil--caller) '(fake . "first")))
+              (setq processes '((100 150 30) (150 160 28) (160 170 26) (170 200 25) (200 1 20)))
+              (should-not (drover-anvil--caller))
+              (setq processes '((100 200 30) (200 1 40)))
+              (should-not (drover-anvil--caller)))))))))
 
 ;;;; Scopes
 
@@ -520,6 +589,37 @@ noted in `drover-anvil-test-requested'."
           (should (string-match-p "runs on core"
                                   (cadr (should-error (drover-anvil--tool-schedule "fake/far" "Hi" "in 1h"))))))
         (should (length= (drover-schedule--jobs) 1))))))
+
+(ert-deftest drover-anvil-test-schedule-claude-code-caller ()
+  "A Claude Code session schedules a prompt for itself, a session of its project.
+Without the bridge telling its process, the caller is unknown, and the
+scope `project' refuses it."
+  (let ((conversation (car drover-anvil-test-conversations))
+        (processes '((100 200 30) (200 1 20))))
+    (drover-test-with-homes
+      (drover-anvil-test-with nil nil
+        (setq drover-test-sessions (list (drover-test-session "terminal-12" :engine 'claude-code
+                                                              :engine-id conversation
+                                                              :directory (drover-anvil-test-project))))
+        (drover-backend-changed 'fake)
+        (drover-anvil-test-with-schedule
+          (drover-test-register-engine 'claude-code :directory #'ignore)
+          (let ((drover-anvil-callers (drover-anvil-test-default-callers)))
+            (drover-anvil-test-claude-record 200 conversation)
+            (drover-anvil-test-with-processes processes
+              (should (string-match-p "caller is unknown"
+                                      (cadr (should-error (drover-anvil--tool-schedule
+                                                           "fake/terminal-12" "Look for BA's email." "in 1h")))))
+              (let* ((anvil-server-transport-pid 100)
+                     (answer (drover-anvil-test-json
+                              (drover-anvil--tool-schedule "fake/terminal-12" "Look for BA's email." "in 1h"))))
+                (should (equal (alist-get 'outcome answer) "scheduled"))
+                (let ((job (drover-schedule--job (alist-get 'id answer))))
+                  (should (equal (plist-get job :by) "agent fake/terminal-12"))
+                  (should (equal (plist-get job :link) (concat "agent-session:claude-code/" conversation))))
+                (should (seq-find (lambda (line)
+                                    (string-match-p "drover-schedule\tcaller=fake/terminal-12\tsession=fake/terminal-12\tdone" line))
+                                  (drover-anvil-test-log)))))))))))
 
 (ert-deftest drover-anvil-test-fire ()
   "An agent fires an event by name only where the user allows it; the prompts waiting go, with what happened."
