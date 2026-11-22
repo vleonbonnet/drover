@@ -1713,7 +1713,7 @@ prompt or a delivery leading back to the queue would print it all again."
                    "2026-12-01 14:00"))))
 
 (ert-deftest drover-schedule-test-next-run ()
-  "Clock times keep their hour across DST, skip a day lacking them; intervals count from their anchor."
+  "Clock times keep their hour across DST, skip a day lacking them, take the first of two; intervals count from their anchor."
   (let ((now (drover-schedule-test-now)))
     (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (7 . 0)) now) "Sun 2026-11-01 07:00"))
     (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (15 . 0)) now) "Sat 2026-10-31 15:00"))
@@ -1728,6 +1728,18 @@ prompt or a delivery leading back to the queue would print it all again."
     ;; 2:30 does not exist on 14 March 2027 in the test zone: the next day's.
     (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (2 . 30)) (drover-schedule-test-now 12 13 3 2027))
                    "Mon 2027-03-15 02:30"))
+    ;; 1:30 happens twice on 1 November 2026: the first, in daylight time,
+    ;; on every platform, once that day.
+    (let ((first (float-time (encode-time (list 0 30 1 1 11 2026 nil t drover-schedule-test-zone)))))
+      (should (= (drover-schedule-next-run '(:days (0 1 2 3 4 5 6) :at (1 . 30)) (float-time now)
+                                           nil drover-schedule-test-zone)
+                 first))
+      (should (equal (drover-schedule-test-run-at '(:days (0 1 2 3 4 5 6) :at (1 . 30)) (seconds-to-time first))
+                     "Mon 2026-11-02 01:30"))
+      (should (= (float-time (drover-schedule-parse-time "tomorrow 1:30" now drover-schedule-test-zone)) first))
+      (should (= (float-time (drover-schedule-parse-time "in 1d" (drover-schedule-test-now 1 31 10)
+                                                         drover-schedule-test-zone))
+                 (- first 1800))))
     (let ((anchor (drover-schedule-test-now 14)))
       (should (equal (drover-schedule-test-run-at '(:interval 1800) (time-add anchor 2700) anchor)
                      "Sat 2026-10-31 15:00"))

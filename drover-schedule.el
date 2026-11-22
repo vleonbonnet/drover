@@ -965,14 +965,31 @@ stays.  Signal an error when the queue cannot be saved."
    ((assoc text drover-schedule-day-parts)
     (cons (cdr (assoc text drover-schedule-day-parts)) 0))))
 
+(defun drover-schedule--local-time (second minute hour day month year zone)
+  "Return the first time reading SECOND MINUTE HOUR on a day in ZONE, or nil.
+The day is DAY of MONTH of YEAR; DAY may overflow the month.  When the
+clock goes back, a local time happens twice, an hour apart: it is the
+first, the one in daylight saving time, on every platform, where
+`encode-time' leaves the choice to the platform's own.  A local time
+the clock skips is nil."
+  (let ((wanted (list hour minute second)))
+    (car (sort (seq-filter (lambda (time)
+                             (let ((back (decode-time time zone)))
+                               (equal (list (decoded-time-hour back) (decoded-time-minute back)
+                                            (decoded-time-second back))
+                                      wanted)))
+                           (seq-keep (lambda (dst)
+                                       (ignore-errors
+                                         (encode-time (list second minute hour day month year nil dst zone))))
+                                     '(t nil)))
+               #'time-less-p))))
+
 (defun drover-schedule--at (year month day clock zone)
   "Return the time of CLOCK, (HOUR . MINUTE), on a day in ZONE, or nil.
 The day is DAY of MONTH of YEAR; DAY may overflow the month.  A local
-time the day does not have is nil."
-  (let* ((time (encode-time (list 0 (cdr clock) (car clock) day month year nil -1 zone)))
-         (back (decode-time time zone)))
-    (when (and (= (decoded-time-hour back) (car clock)) (= (decoded-time-minute back) (cdr clock)))
-      time)))
+time the day has twice is the first, one it does not have nil (see
+`drover-schedule--local-time')."
+  (drover-schedule--local-time 0 (cdr clock) (car clock) day month year zone))
 
 (defun drover-schedule--on-day (day clock now zone)
   "Return the time of CLOCK on DAY, the next one after NOW when DAY recurs.
@@ -1061,11 +1078,16 @@ An explicit day can be past; the caller refuses it.  ZONE is as for
         (pcase unit
           (?m (time-add now (* 60 count)))
           (?h (time-add now (* 3600 count)))
-          (_ (let ((decoded (decode-time now zone)))
-               (setf (decoded-time-day decoded) (+ (decoded-time-day decoded) (* count (if (eq unit ?w) 7 1)))
-                     (decoded-time-dst decoded) -1
-                     (decoded-time-zone decoded) zone)
-               (encode-time decoded))))))
+          (_ (let* ((decoded (decode-time now zone))
+                    (day (+ (decoded-time-day decoded) (* count (if (eq unit ?w) 7 1)))))
+               ;; A time of day the clock skips that day is left to `encode-time'.
+               (or (drover-schedule--local-time (decoded-time-second decoded) (decoded-time-minute decoded)
+                                                (decoded-time-hour decoded) day (decoded-time-month decoded)
+                                                (decoded-time-year decoded) zone)
+                   (progn (setf (decoded-time-day decoded) day
+                                (decoded-time-dst decoded) -1
+                                (decoded-time-zone decoded) zone)
+                          (encode-time decoded))))))))
      ((equal text "tonight") (drover-schedule--on-day "today" '(21 . 0) now zone))
      ((or (string-match (concat "\\`\\(?:on \\)?\\(" day-re "\\)\\(?: \\(?:at \\)?\\(" time-re "\\)\\)?\\'") text)
           (string-match (concat "\\`\\(?:at \\)?\\(?2:" time-re "\\)\\(?: \\(?:on \\)?\\(?1:" day-re "\\)\\)?\\'") text))
@@ -1271,8 +1293,9 @@ See `drover-schedule-parse-recurrence'."
 AFTER and the run are float times.  The runs of an interval count from
 ANCHOR, by default AFTER.  Clock times are read in EVERY's zone, else
 ZONE, as `decode-time' takes it, the local zone when nil: a time of day
-keeps its hour across changes of daylight saving time, and a day that
-lacks it, skipped by the spring change, has no run."
+keeps its hour across changes of daylight saving time, a day that lacks
+it, skipped by the spring change, has no run, and a day that has it
+twice, at the fall change, runs at the first."
   (if-let* ((interval (plist-get every :interval)))
       (let ((anchor (or anchor after)))
         (+ anchor (* interval (1+ (floor (- after anchor) interval)))))

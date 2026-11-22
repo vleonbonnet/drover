@@ -810,7 +810,7 @@ A peer telling it may schedule prompts for this host's sessions, as the Android 
 
 A prompt scheduled with =every= recurs. It stays in the queue, due at its next run, and sends a copy of itself at each run, until you cancel it with =k=. Each copy goes through the queue as any prompt, so a copy waits while the session cannot take it. The list shows when the prompt recurs, its next run, and how many copies it sent.
 
-A clock time keeps its hour across a change of daylight saving time. A day that does not have the time, such as 2:30 on the day clocks spring forward, has no run. A time zone must be one this system knows: =UTC=, =GMT=, POSIX rules such as =EST5EDT,M3.2.0,M11.1.0=, or an IANA name that the zone files hold (=drover-schedule-zoneinfo-directories=). An unknown zone is refused, because the C library would read it as UTC without saying so.
+A clock time keeps its hour across a change of daylight saving time. A day that does not have the time, such as 2:30 on the day clocks spring forward, has no run. A day that has it twice, such as 1:30 on the day clocks fall back, runs at the first, on every system. A time zone must be one this system knows: =UTC=, =GMT=, POSIX rules such as =EST5EDT,M3.2.0,M11.1.0=, or an IANA name that the zone files hold (=drover-schedule-zoneinfo-directories=). An unknown zone is refused, because the C library would read it as UTC without saying so.
 
 Runs missed while Emacs did not run, or while the machine slept, are never sent one by one. =drover-schedule-recurrence-catch-up= decides what happens to them:
 
