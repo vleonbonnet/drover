@@ -1862,7 +1862,7 @@ MCP Parameters:
      :description "Have drover send a prompt to your own session after the next event it knows, such as opencode-restart or emacs-restart.  Use it when a step needs that event, such as tools that load only once the service restarts, then end your turn: the session carries on once it happened.  It asks for the event, as a prompt the user schedules does, and the user can cancel it.")
     (drover-anvil--tool-schedule
      :id "drover-schedule"
-     :description "Have drover send a session a prompt later: once (in 90m, tomorrow 7:00, an ISO 8601 time), recurring (every day 7:00, every weekday 9am Europe/Paris, every 30m), once its running turn ends, or after an event drover knows.  It joins the user's scheduled prompts, survives restarts, and the user may cancel it.  Allowed where the user's policy allows, by default the sessions of the caller's project, the caller's own included.")
+     :description "Have drover send a session a prompt later: once (in 90m, tomorrow 7:00, an ISO 8601 time), recurring (every weekday 9am Europe/Paris, every 30m), when its running turn ends, or after an event drover knows.  It survives restarts, and the user may cancel it.")
     (drover-anvil--tool-fire
      :id "drover-schedule-fire"
      :description "Tell drover an event happened, by name, releasing the prompts waiting for it, with what happened; or that it will not happen, cancelling them.  Allowed nowhere unless the user's policy allows it.")
@@ -1874,7 +1874,7 @@ MCP Parameters:
      :description "Return the prompts the user sent agents over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, conversation, its link, title, directory, time and text.  Subagents' prompts, programs' and what engines add as the user are left out.  For reviews of how the user works with agents.")
     (drover-anvil--tool-permissions
      :id "drover-permissions" :read-only t
-     :description "Return the permission prompts agents gave the user over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, session, its link and title, directory, time, the action asked and its resources, the rules that asked, and the reply (once, always, reject; passed when a plugin let it go unasked; allowed or reject for Claude Code; unknown when never answered).  For reviews of how the user works with agents.")
+     :description "Return the permission prompts agents gave the user over a period, seven days by default and 31 at most, across harnesses and hosts, oldest first, each with its session, action, rules and reply.")
     (drover-anvil--tool-job
      :id "drover-job" :read-only t
      :description "Return the answer of a job another drover tool answered with, for clients that cannot wait for answers."))
