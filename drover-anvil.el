@@ -63,6 +63,11 @@
 (declare-function anvil-server-defer "ext:anvil-server" (poll &rest keys))
 (declare-function anvil-server-can-defer-p "ext:anvil-server" ())
 (declare-function drover-claude-code-pid-session-id "drover-claude-code" (pid))
+(declare-function drover-remote-peer-named "drover-remote" (host))
+(declare-function drover-remote-session-key "drover-remote" (name key))
+(declare-function drover-remote-start-later "drover-remote"
+                  (name directory local harness engine choose text callback))
+(declare-function drover-remote-schedule-later "drover-remote" (session when text argument by callback))
 (defvar anvil-server-request-meta)
 (defvar anvil-server-transport-pid)
 
@@ -945,20 +950,24 @@ MCP Parameters:
 
 ;;;; Starting
 
+(defun drover-anvil--match-model (name models)
+  "Return the model of MODELS NAME names, or nil.
+NAME is PROVIDER/ID, an identifier or a display name, case ignored."
+  (let ((wanted (downcase name)))
+    (seq-find (lambda (model)
+                (or (and (drover-model-provider-id model)
+                         (equal (downcase (concat (drover-model-provider-id model) "/" (drover-model-id model)))
+                                wanted))
+                    (equal (downcase (drover-model-id model)) wanted)
+                    (equal (downcase (or (drover-model-name model) "")) wanted)))
+              models)))
+
 (defun drover-anvil--find-model (name directory)
   "Return the model NAME names among those offered in DIRECTORY, or refuse.
 NAME is PROVIDER/ID, an identifier or a display name."
-  (let* ((models (drover-models directory))
-         (wanted (downcase name)))
-    (or (seq-find (lambda (model)
-                    (or (and (drover-model-provider-id model)
-                             (equal (downcase (concat (drover-model-provider-id model) "/" (drover-model-id model)))
-                                    wanted))
-                        (equal (downcase (drover-model-id model)) wanted)
-                        (equal (downcase (or (drover-model-name model) "")) wanted)))
-                  models)
-        (drover-anvil--refuse "No model %s is offered in %s" (drover-bound-line name 100)
-                              (abbreviate-file-name directory)))))
+  (or (drover-anvil--match-model name (drover-models directory))
+      (drover-anvil--refuse "No model %s is offered in %s" (drover-bound-line name 100)
+                            (abbreviate-file-name directory))))
 
 (defun drover-anvil--find-variant (effort model)
   "Return the variant EFFORT names, a symbol, for MODEL, or refuse."
@@ -983,15 +992,19 @@ NAME is PROVIDER/ID, an identifier or a display name."
         (cons 'opencode (delq 'opencode backends))
       backends)))
 
-(defun drover-anvil--tool-create (&optional harness directory prompt model effort agent title engine)
+(defun drover-anvil--tool-create (&optional harness directory prompt model effort agent title engine host)
   "Start a session, without showing it, and send it PROMPT; return its key.
-HARNESS, DIRECTORY, MODEL, EFFORT, AGENT, TITLE and ENGINE tell what
-starts where, as the parameters below tell.
+HARNESS, DIRECTORY, MODEL, EFFORT, AGENT, TITLE, ENGINE and HOST tell
+what starts where, as the parameters below tell.
 
 MCP Parameters:
   harness - The harness starting it, such as opencode, claude-code-ide
       or agent-shell; opencode by default
-  directory - Its directory, the caller's by default
+  directory - Its directory, the caller's by default; on another host,
+      one of that host's, where the caller's directory maps there by
+      default
+  host - The host starting it, by name, such as core; this one by
+      default
   prompt - Its first prompt, Markdown; none to start it idle
   model - Its model, PROVIDER/ID or ID, the harness's default otherwise
   effort - Its reasoning effort, a variant of the model, such as high
@@ -999,6 +1012,29 @@ MCP Parameters:
   title - Its title
   engine - The engine it runs, for a harness running several"
   (drover-start)
+  (if-let* ((name (drover-anvil--peer-of host)))
+      (drover-anvil--create-there name harness directory prompt model effort agent title engine)
+    (drover-anvil--create-here harness directory prompt model effort agent title engine)))
+
+(defun drover-anvil--peer-of (host)
+  "Return the name of the peer HOST names, or nil for this host; refuse another.
+HOST is nil, empty, \"local\" or \"here\", or this host's name, for this
+one, else a peer's name or label."
+  (cond
+   ((or (not (stringp host)) (string-blank-p host)
+        (member (downcase host) '("local" "here"))
+        (drover-host-local-p host))
+    nil)
+   ((and (featurep 'drover-remote) (drover-remote-peer-named host)))
+   (t (drover-anvil--refuse "No host %s: %s" (drover-bound-line host 60)
+                            (if (featurep 'drover-remote)
+                                "drover-sessions tells the hosts of the sessions drover knows"
+                              "drover-remote-mode is off, so drover knows no other host")))))
+
+(defun drover-anvil--create-here (harness directory prompt model effort agent title engine)
+  "Start a session on this host, as `drover-anvil--tool-create' tells.
+HARNESS, DIRECTORY, PROMPT, MODEL, EFFORT, AGENT, TITLE and ENGINE are
+its parameters."
   (let* ((caller (drover-anvil--caller))
          (record (and caller (drover-index-session caller)))
          (directory (cond ((and (stringp directory) (not (string-blank-p directory)))
@@ -1056,6 +1092,87 @@ MCP Parameters:
                                                    "Send it a prompt with drover-session-send")))))))
          (drover-anvil--else id))
         (drover-anvil--answer id)))))
+
+;; On another host, nothing is waited for in the call: the remote layer
+;; answers from its process filter, settling the job, which then waits
+;; for the session to be listed here, so that its key is of use at once.
+
+(defun drover-anvil--create-there (name harness directory prompt model effort agent title engine)
+  "Have the peer NAME start a session, as `drover-anvil--tool-create' tells.
+HARNESS, DIRECTORY, PROMPT, MODEL, EFFORT, AGENT, TITLE and ENGINE are
+its parameters, DIRECTORY one of NAME's."
+  (let* ((caller (drover-anvil--caller))
+         (record (and caller (drover-index-session caller)))
+         (local (and record (null (drover-session-host record)) (drover-session-directory record)))
+         (symbol (lambda (value)
+                   (and (stringp value) (string-match-p "\\`[a-z0-9-]\\{1,40\\}\\'" value) (intern value))))
+         (harness (and (stringp harness) (not (string-blank-p harness))
+                       (or (funcall symbol harness) (drover-anvil--refuse "No harness %s" (drover-bound-line harness 40)))))
+         (engine (and (stringp engine) (not (string-blank-p engine))
+                      (or (funcall symbol engine) (drover-anvil--refuse "No engine %s" (drover-bound-line engine 40)))))
+         (directory (and (stringp directory) (not (string-blank-p directory)) (string-trim directory)))
+         (prompt (and prompt (not (equal prompt "")) (drover-anvil--prompt prompt)))
+         (model (and (stringp model) (not (string-blank-p model)) model))
+         (effort (and (stringp effort) (not (string-blank-p effort)) effort))
+         (options (list :agent (and (stringp agent) (not (string-blank-p agent)) (drover-bound-line agent 60))
+                        :title (and (stringp title) (not (string-blank-p title)) (drover-bound-line title 160))))
+         (choose (lambda (target catalog)
+                   (let ((chosen (and model (drover-anvil--match-model model (plist-get catalog :models)))))
+                     (cond
+                      ((and model (not chosen))
+                       (format "No model %s is offered for %s on %s" (drover-bound-line model 100)
+                               (plist-get target :label) name))
+                      ((and chosen (drover-model-engines chosen)
+                            (not (memq (plist-get target :engine) (drover-model-engines chosen))))
+                       (format "%s does not run %s" (plist-get target :label) (drover-model-label chosen)))
+                      (t (append options (list :model chosen
+                                               :variant (drover-anvil--find-variant effort chosen))))))))
+         (id nil))
+    (drover-anvil--log "drover-session-create" caller nil "acting"
+                       (format "%s on %s in %s%s" (or harness "default harness") name (or directory "default directory")
+                               (if prompt (concat ", " (drover-anvil--prompt-note prompt)) "")))
+    (setq id (drover-anvil--job
+              "drover-session-create" caller nil :seconds 120
+              :poll (lambda (id)
+                      (when-let* ((key (drover-anvil--job-get id :started))
+                                  ((drover-index-session key)))
+                        (drover-anvil--done id (drover-anvil--job-get id :answer))))
+              :timeout (lambda (id)
+                         (if-let* ((answer (drover-anvil--job-get id :answer)))
+                             (append answer `((listed . :json-false)
+                                              (listed_note . ,(format "%s started it, but it is not listed here yet"
+                                                                      name))))
+                           (error "%s did not answer in time" name)))))
+    (drover-remote-start-later
+     name directory local harness engine choose prompt
+     (lambda (result)
+       (drover-with-reporting "Anvil start"
+         (if-let* ((why (plist-get result :failure)))
+             (drover-anvil--fail id why)
+           (let* ((key (drover-remote-session-key name (plist-get result :key)))
+                  (unsent (plist-get result :unsent))
+                  (sent (and prompt (not unsent))))
+             (drover-anvil--job-put id :key key)
+             (when caller
+               (puthash key caller drover-anvil--started))
+             (when sent
+               (puthash key (float-time) drover-anvil--sent))
+             (drover-anvil--job-put
+              id :answer
+              `((outcome . "started")
+                (key . ,(drover-anvil--key-of key))
+                (host . ,name)
+                (directory . ,(plist-get result :directory))
+                (harness . ,(symbol-name (plist-get result :backend)))
+                (title . ,(plist-get result :title))
+                (sent . ,(if sent t :json-false))
+                (note . ,(cond (unsent (format "Its harness did not take the prompt: %s; send it with drover-session-send"
+                                               unsent))
+                               (prompt "Wait for its first turn with drover-session-wait")
+                               (t "Send it a prompt with drover-session-send")))))
+             (drover-anvil--job-put id :started key)
+             (drover-anvil--advance id))))))
+    (drover-anvil--answer id)))
 
 ;;;; Answering
 
@@ -1387,18 +1504,24 @@ MCP Parameters:
   "\\`\\(?:[0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}T\\|[0-9]\\{9,\\}\\(?:\\.[0-9]+\\)?\\'\\)"
   "Regexp of a time as ISO 8601 or seconds since the epoch, as agents tell times.")
 
-(defun drover-anvil--when (when)
+(defun drover-anvil--when (when &optional there)
   "Return WHEN, as an agent tells it, as `drover-schedule-for-session' takes it.
 The text the user's scheduling reads, or an ISO 8601 time or seconds
-since the epoch, as a time.  Refuse what reads as neither."
+since the epoch, as a time.  Refuse what reads as neither; but with
+THERE non-nil, for another host, which reads the text with its own
+events, the text is left for it to read."
   (unless (and (stringp when) (not (string-blank-p when)) (length< when 200))
     (drover-anvil--refuse "Tell when, such as in 90m, tomorrow 7:00, every day 7:00 or an ISO 8601 time"))
   (if-let* (((string-match-p drover-anvil--iso-time-regexp (string-trim when)))
             (time (drover-anvil--read-time (string-trim when))))
-      (seconds-to-time time)
-    (condition-case err
-        (progn (drover-schedule-when when) when)
-      (user-error (drover-anvil--refuse "%s" (error-message-string err))))))
+      (if (< time (float-time))
+          (drover-anvil--refuse "%s is past" (string-trim when))
+        (seconds-to-time time))
+    (if there
+        (string-trim when)
+      (condition-case err
+          (progn (drover-schedule-when when) when)
+        (user-error (drover-anvil--refuse "%s" (drover-error-message err)))))))
 
 (defun drover-anvil--by (caller)
   "Return how a prompt the session CALLER schedules names who scheduled it."
@@ -1410,7 +1533,8 @@ Once, recurring, or after an event: WHEN tells when, as the user's own
 scheduling reads it; ARGUMENT is what an event taking one concerns.
 The prompt joins the user's scheduled prompts, who sees and may cancel
 it, survives restarts, and is delivered out of every window.  For a
-session of this host; the caller may name its own.
+session of another host, it joins that host's, which reads WHEN with
+its own clock, time zone and events; the caller may name its own.
 
 MCP Parameters:
   key - The session's key, as drover-sessions tells it
@@ -1422,8 +1546,52 @@ MCP Parameters:
   argument - What the event concerns, for an event that takes one"
   (drover-start)
   (require 'drover-schedule)
+  (let ((session (drover-anvil--session key)))
+    (if (drover-session-host session)
+        (drover-anvil--schedule-there session prompt when argument)
+      (drover-anvil--schedule-here session prompt when argument))))
+
+(defun drover-anvil--schedule-there (session prompt when argument)
+  "Have the host of SESSION, a peer's, schedule PROMPT for it, WHEN tells.
+ARGUMENT is what an event taking one concerns.  See
+`drover-anvil--tool-schedule'."
+  (unless (featurep 'drover-remote)
+    (drover-anvil--refuse "%s runs on %s, and drover-remote-mode is off"
+                          (drover-anvil-key-string session) (drover-session-host session)))
   (let* ((caller (drover-anvil--caller))
-         (session (drover-anvil--session key))
+         (key (drover-session-key session))
+         (prompt (drover-anvil--prompt prompt))
+         (when (drover-anvil--when when t))
+         (argument (and (stringp argument) (not (string-blank-p argument)) (drover-bound-line argument 2000)))
+         (host (drover-session-host session))
+         (id nil))
+    (drover-anvil--log "drover-schedule" caller key "acting"
+                       (format "on %s, %s, %s" host
+                               (if (stringp when) (drover-bound-line when 80) (drover-anvil--time (float-time when)))
+                               (drover-anvil--prompt-note prompt)))
+    (setq id (drover-anvil--job "drover-schedule" caller key :seconds 60))
+    (drover-anvil--call
+     id #'drover-remote-schedule-later session when prompt argument (drover-anvil--by caller)
+     (lambda (result)
+       (drover-with-reporting "Anvil schedule"
+         (if-let* ((why (plist-get result :failure)))
+             (drover-anvil--fail id why)
+           (drover-anvil--done
+            id `((outcome . "scheduled")
+                 (id . ,(plist-get result :id))
+                 (key . ,(drover-anvil--key-of key))
+                 (host . ,host)
+                 (when . ,(plist-get result :when))
+                 (next . ,(drover-anvil--time (plist-get result :next)))
+                 (note . ,(format "The user sees it among %s's scheduled prompts, and may cancel it"
+                                  host))))))))
+    (drover-anvil--answer id)))
+
+(defun drover-anvil--schedule-here (session prompt when argument)
+  "Schedule PROMPT for SESSION, of this host, when WHEN tells.
+ARGUMENT is what an event taking one concerns.  See
+`drover-anvil--tool-schedule'."
+  (let* ((caller (drover-anvil--caller))
          (key (drover-session-key session))
          (prompt (drover-anvil--prompt prompt)))
     (let ((when (drover-anvil--when when))
@@ -1652,7 +1820,7 @@ MCP Parameters:
      :description "Read one session by key: status, model, what it waits for, and the recap of its last turn (the user's last prompt, the agent's reply, the files it changed) and the pending requests' identifiers, choices and fields.")
     (drover-anvil--tool-create
      :id "drover-session-create"
-     :description "Start an agent session, unseen, in a directory (the caller's by default), on a harness (opencode by default), model, effort and agent, and send it a first prompt.  Returns its key; follow its turn with drover-session-wait.")
+     :description "Start an agent session, unseen, on this host or another (host), in a directory (the caller's by default), on a harness (opencode by default), model, effort and agent, and send it a first prompt.  Returns its key; follow its turn with drover-session-wait.")
     (drover-anvil--tool-send
      :id "drover-session-send"
      :description "Send a prompt to a session, as its front end delivers prompts (OpenCode queues or steers a running turn).  Then wait for its turn with drover-session-wait.")
@@ -1673,7 +1841,7 @@ MCP Parameters:
      :description "Have drover send a prompt to your own session after the next event it knows, such as opencode-restart or emacs-restart.  Use it when a step needs that event, such as tools that load only once the service restarts, then end your turn: the session carries on once it happened.  It asks for the event, as a prompt the user schedules does, and the user can cancel it.")
     (drover-anvil--tool-schedule
      :id "drover-schedule"
-     :description "Have drover send a session a prompt later: once (in 90m, tomorrow 7:00, an ISO 8601 time), recurring (every weekday 9am Europe/Paris, every 30m), when its running turn ends, or after an event drover knows.  It survives restarts, and the user may cancel it.")
+     :description "Have drover send a session a prompt later: once (in 90m, tomorrow 7:00, an ISO 8601 time), recurring (every weekday 9am Europe/Paris, every 30m), when its running turn ends, or after an event drover knows.  A session of another host is scheduled there, which reads the time with its own clock and events.  It survives restarts, and the user may cancel it.")
     (drover-anvil--tool-fire
      :id "drover-schedule-fire"
      :description "Tell drover an event happened, by name, releasing the prompts waiting for it, with what happened; or that it will not happen, cancelling them.")

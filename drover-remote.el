@@ -107,6 +107,8 @@
 (declare-function drover-schedule-target "drover-schedule" (&optional buffer))
 (declare-function drover-schedule-add-after-trigger "drover-schedule" (target trigger prompt &optional instruction argument))
 (declare-function drover-schedule-cancel "drover-schedule" (&optional job))
+(declare-function drover-schedule-enqueue "drover-schedule" (target chosen text))
+(declare-function drover-schedule-when "drover-schedule" (text &optional now))
 (declare-function drover-schedule-retry-job "drover-schedule" (job &optional now))
 (declare-function drover-schedule-triggers "drover-schedule" (&optional all))
 (declare-function drover-schedule--describe-argument "drover-schedule" (trigger argument))
@@ -339,7 +341,7 @@ that a peer running an older drover keeps working without it.")
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
     "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed"
-    "search-query" "prompts" "permissions")
+    "search-query" "prompts" "permissions" "jobs-when")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -403,7 +405,10 @@ reads the prompts its user sent its sessions over a period from its
 own engines (request `prompts', see `drover-prompts') and sends them;
 \"permissions\": it reads the permission prompts its agents gave over a
 period from its ledger (request `permissions', see
-`drover-permissions') and sends them.")
+`drover-permissions') and sends them; \"jobs-when\": a request
+`schedule' may tell when as text (:w), read here as this host's own
+scheduling reads it, recurring or after one of its events, with what
+the event concerns (:ar) and who asked on the peer (:by).")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -3432,11 +3437,13 @@ For `drover-schedule-changed-hook'."
 (defun drover-remote--on-schedule (state peer key message reply)
   "Schedule for PEER the prompt MESSAGE describes for session KEY, in STATE.
 MESSAGE's :text, then :at, an absolute time of this host's clock in
-the future, :turn, the end of the session's turn, or :trigger, an
-event's name, and :o, the options to apply first.  Its :id has it
-scheduled once, asked again after a stream ended.  It is delivered by
-this host's queue as its own prompts are, out of every window; REPLY
-gets the prompt scheduled, or why it was not."
+the future, :turn, the end of the session's turn, :trigger, an event's
+name, or :w, when as text, read as `drover-schedule-when' reads it
+here, with :ar, what an event concerns; :o, the options to apply
+first, and :by, who asked on PEER.  Its :id has it scheduled once,
+asked again after a stream ended.  It is delivered by this host's queue
+as its own prompts are, out of every window; REPLY gets the prompt
+scheduled, or why it was not."
   (require 'drover-schedule)
   (require 'drover-links)
   (let* ((id (plist-get message :id))
@@ -3457,6 +3464,14 @@ gets the prompt scheduled, or why it was not."
              (turn (eq (plist-get message :turn) t))
              (trigger (and (stringp (plist-get message :trigger))
                            (drover-remote--symbol (plist-get message :trigger))))
+             (text-when (let ((w (plist-get message :w)))
+                          (and (stringp w) (not (string-blank-p w)) (length< w 200) w)))
+             (chosen (and text-when
+                          (condition-case err
+                              (append (seq-take (drover-schedule-when text-when) 3)
+                                      (list (drover-remote--line (plist-get message :ar) 2000)))
+                            (user-error (drover-error-message err)))))
+             (by (drover-remote--line (plist-get message :by) 200))
              (options (let ((o (plist-get message :o)))
                         (if (and (consp o) (keywordp (car o)))
                             (drover-remote--check-options (list :agent (plist-get o :a) :model (plist-get o :m)
@@ -3472,18 +3487,20 @@ gets the prompt scheduled, or why it was not."
                     "no prompt, or one too long")
                    ((stringp options) options)
                    ((not conversation) "its conversation is not known yet")
-                   ((not (or at turn trigger)) "no time, turn nor event")
+                   ((stringp chosen) chosen)
+                   ((not (or at turn trigger chosen)) "no time, turn nor event")
                    ((and at (<= at (float-time))) "a time already past")
                    ((and trigger (not (assq trigger (drover-schedule-triggers))))
                     (format "no event %s here" trigger)))))
         (if why
             (funcall reply nil (drover-remote--refuse-action peer "schedule a prompt" why))
           (drover-remote--begin-outcome state id reply)
-          (let* ((target (drover-remote--schedule-target record conversation options peer))
+          (let* ((target (drover-remote--schedule-target record conversation options peer by))
                  (instruction (format "scheduled from %s" (drover-remote--label peer)))
                  (answer (condition-case err
                              (let* ((job (drover-quietly
-                                          (cond (at (drover-schedule-add target (seconds-to-time at) text instruction))
+                                          (cond (chosen (drover-schedule-enqueue target chosen text))
+                                                (at (drover-schedule-add target (seconds-to-time at) text instruction))
                                                 (turn (drover-schedule-add-after-turn target text instruction))
                                                 (t (drover-schedule-add-after-trigger target trigger text instruction))))))
                                (drover-remote--event peer 'schedule "scheduled a prompt for %s" (plist-get job :title))
@@ -3495,11 +3512,12 @@ gets the prompt scheduled, or why it was not."
                 (drover-with-reporting "remote schedule"
                   (drover-remote--new-reply pending answer)))))))))))
 
-(defun drover-remote--schedule-target (record conversation options peer)
+(defun drover-remote--schedule-target (record conversation options peer &optional by)
   "Return where a prompt PEER schedules for RECORD goes, for `drover-schedule'.
 CONVERSATION is RECORD's (see `drover-links-conversation'); OPTIONS hold
-:agent, :model, (PROVIDER . ID), and :variant, as a peer tells them.
-The prompt resumes the session in no window when it has none."
+:agent, :model, (PROVIDER . ID), and :variant, as a peer tells them;
+BY, who asked on PEER, such as an agent, or nil.  The prompt resumes
+the session in no window when it has none."
   (let* ((engine (drover-session-engine record))
          (asked (plist-get options :model))
          (model (and asked engine (drover-remote--told-model engine (car asked) (cdr asked)))))
@@ -3510,7 +3528,9 @@ The prompt resumes the session in no window when it has none."
           :options (and (or (plist-get options :agent) model (plist-get options :variant))
                         (list :agent (plist-get options :agent) :model model
                               :variant (and model (plist-get options :variant))))
-          :by (drover-remote--peer-name peer)
+          :by (if by
+                  (format "%s on %s" by (drover-remote--peer-name peer))
+                (drover-remote--peer-name peer))
           :hidden t)))
 
 (defun drover-remote--peer-job (peer message reply action)
@@ -6302,6 +6322,168 @@ told; one that has not told yet is asked, and waited for WAIT seconds."
         :open #'drover-remote-open-started)
   "How the prompt starts sessions on other hosts.
 See `drover-prompt-remote-functions'.")
+
+;;;;; For agents, without waiting
+
+(defun drover-remote-peer-named (host)
+  "Return the name of the peer HOST names, by its name or label, or nil.
+Case is ignored."
+  (and (stringp host)
+       (seq-some (lambda (peer)
+                   (and (or (string-equal-ignore-case (drover-remote--peer-name peer) host)
+                            (string-equal-ignore-case (drover-remote--label peer) host))
+                        (drover-remote--peer-name peer)))
+                 (drover-remote--peers))))
+
+(defun drover-remote-session-key (name key)
+  "Return the key here of the session of the peer NAME whose own key is KEY."
+  (cons (drover-remote--backend-name name) key))
+
+(defun drover-remote--agent-target (targets harness engine)
+  "Return the target of TARGETS HARNESS and ENGINE, symbols or nil, choose.
+Without HARNESS, an OpenCode session first, else the first one."
+  (let ((fits (seq-filter (lambda (target)
+                            (and (or (null harness) (eq (plist-get target :backend) harness))
+                                 (or (null engine) (eq (plist-get target :engine) engine))))
+                          targets)))
+    (or (and (null harness) (seq-find (lambda (target) (eq (plist-get target :backend) 'opencode)) fits))
+        (car fits))))
+
+(defun drover-remote--agent-start (peer directory harness engine choose text callback)
+  "Have PEER start a session in DIRECTORY, one of its, for an agent.
+HARNESS, ENGINE, CHOOSE, TEXT and CALLBACK are as for
+`drover-remote-start-later'."
+  (let ((label (drover-remote--label peer)))
+    (drover-remote--catalog-ask
+     peer nil directory
+     (lambda (data error)
+       (drover-with-reporting "remote start for an agent"
+         (let* ((targets (plist-get data :targets))
+                (target (and data (drover-remote--agent-target targets harness engine)))
+                (options (and target
+                              (condition-case err
+                                  (funcall choose target (alist-get (plist-get target :engine)
+                                                                    (plist-get data :engines)))
+                                (error (drover-error-message err))))))
+           (cond
+            (error (funcall callback (list :failure error)))
+            ((plist-get data :missing)
+             (funcall callback (list :failure (format "%s has no directory %s" label directory))))
+            ((not target)
+             (funcall callback
+                      (list :failure (format "%s starts no such session; it starts %s" label
+                                             (if targets
+                                                 (mapconcat (lambda (target)
+                                                              (format "%s (%s)" (plist-get target :backend)
+                                                                      (plist-get target :engine)))
+                                                            targets ", ")
+                                               "none")))))
+            ((stringp options) (funcall callback (list :failure options)))
+            (t (drover-remote--new
+                peer target directory text options
+                (lambda (result)
+                  (drover-with-reporting "remote start for an agent"
+                    (funcall callback (if (plist-get result :failure)
+                                          result
+                                        (append result (list :directory directory
+                                                             :backend (plist-get target :backend))))))))))))))))
+
+(defun drover-remote-start-later (name directory local harness engine choose text callback)
+  "Have the peer NAME start a session, and call CALLBACK once it did, or did not.
+DIRECTORY is one of NAME's, or nil for where a session of LOCAL, a
+directory of this host or nil, starts there (see
+`drover-remote-default-directory').  HARNESS and ENGINE, symbols or
+nil, choose among the sessions NAME starts, OpenCode's first.  CHOOSE
+is a function of the target chosen, (:backend :engine :label), and its
+engine's catalog in the directory, (:agents :models :default),
+returning the start options (:agent :model :variant :title), or a line
+telling why none fit.  TEXT is the first prompt, or nil.  Nothing is
+waited for: CALLBACK gets, once, what NAME answered, as
+`drover-remote--new' gives it, with :directory and :backend, or
+\(:failure WHY)."
+  (let* ((peer (drover-remote--peer name))
+         (why (drover-remote--new-refusal peer)))
+    (cond
+     (why (funcall callback (list :failure why)))
+     ((stringp directory)
+      (if (drover-remote--peer-absolute-p directory)
+          (drover-remote--agent-start peer (drover-remote--peer-directory-name directory)
+                                      harness engine choose text callback)
+        (funcall callback (list :failure (format "%s is not an absolute directory of %s"
+                                                 directory (drover-remote--label peer))))))
+     ((drover-remote--there peer local)
+      (drover-remote--agent-start peer (drover-remote--there peer local) harness engine choose text callback))
+     (t (drover-remote--catalog-ask
+         peer local nil
+         (lambda (data error)
+           (drover-with-reporting "remote start for an agent"
+             (if-let* ((there (or (plist-get data :where) (plist-get data :home))))
+                 (drover-remote--agent-start peer (drover-remote--peer-directory-name there)
+                                             harness engine choose text callback)
+               (funcall callback (list :failure (or error (format "%s told no directory to start in"
+                                                                  (drover-remote--label peer)))))))))))))
+
+(defun drover-remote--agent-scheduled (peer reply error offset)
+  "Return what PEER answered a `schedule', REPLY or ERROR, for an agent.
+OFFSET is how far PEER's clock is ahead.  See
+`drover-remote-schedule-later'."
+  (let* ((job (plist-get reply :job))
+         (w (and (consp job) (plist-get job :w)))
+         (at (and (consp w) (keywordp (car w)) (drover-remote--time (plist-get w :at) offset)))
+         (after (and (consp w) (keywordp (car w)) (drover-remote--line (plist-get w :after) 200))))
+    (cond
+     (error (list :failure error))
+     ((not (and (consp job) (keywordp (car job))))
+      (list :failure (format "%s told no scheduled prompt" (drover-remote--label peer))))
+     (t (list :id (drover-remote--line (plist-get job :id) 100)
+              :title (drover-remote--line (plist-get job :ti))
+              :next at
+              :when (cond ((drover-remote--line (plist-get w :ev) 200))
+                          ((eq (plist-get w :turn) t) "when its turn ends")
+                          (after (concat "after the next " after))
+                          (at "once")))))))
+
+(defun drover-remote-schedule-later (session when text argument by callback)
+  "Have the host of SESSION, a peer's, schedule TEXT for it; call CALLBACK then.
+WHEN is a Lisp time, or what the host reads as its own scheduling reads
+it: \"in 90m\", \"every weekday 9am\", \"when turn ends\", \"after
+LABEL\" of one of its events, ARGUMENT telling what such an event
+concerns.  BY names who asks, such as an agent.  Nothing is waited for:
+CALLBACK gets, once, (:id ID :title TITLE :next TIME :when LINE), TIME
+on this host's clock or nil, or (:failure WHY)."
+  (let* ((name (drover-session-host session))
+         (peer (drover-remote--peer name))
+         (text-when (and (stringp when) (string-trim when)))
+         (turn (and text-when (string-equal-ignore-case text-when "when turn ends")))
+         (full (and peer (drover-remote--capable-p peer "jobs-when")))
+         (connection (and peer (drover-remote--peer-connection peer)))
+         (offset (or (and connection (spyglass-connection-clock-offset connection)) 0)))
+    (cond
+     ((not peer) (funcall callback (list :failure (format "%s is not a peer" name))))
+     ((drover-remote--refusal peer session "send")
+      (funcall callback (list :failure (drover-remote--refusal peer session "send"))))
+     ((not (drover-remote--capable-p peer "jobs"))
+      (funcall callback
+               (list :failure (format "%s runs an older drover, which schedules no prompt for other hosts: update it"
+                                      (drover-remote--label peer)))))
+     ((and (or (and text-when (not turn)) argument) (not full))
+      (funcall callback
+               (list :failure (format "%s runs an older drover, which takes only a time or the end of a turn: update it"
+                                      (drover-remote--label peer)))))
+     (t
+      (drover-remote--request
+       peer (append (list :op "schedule" :id (drover-remote--action-id peer)
+                          :key (drover-remote--wire-key session)
+                          :text (substring-no-properties text))
+                    (cond ((consp when) (list :at (+ (float-time when) offset)))
+                          ((and turn (not full)) (list :turn t))
+                          (t (list :w text-when)))
+                    (and full argument (list :ar argument))
+                    (and full by (list :by by)))
+       (lambda (reply error)
+         (drover-with-reporting "remote schedule for an agent"
+           (funcall callback (drover-remote--agent-scheduled peer reply error offset))))
+       (+ (float-time) drover-remote-request-timeout))))))
 
 (defun drover-remote--report-later (title)
   "Return the function reporting a session of TITLE started in the background."

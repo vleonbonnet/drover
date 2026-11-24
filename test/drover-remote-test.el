@@ -945,6 +945,48 @@ restart of the host's remote layer, its counters rising."
             (ert-info ((format "%S" bad))
               (should (cadr (drover-remote--wait peer bad 10))))))))))
 
+(ert-deftest drover-remote-test-schedule-later ()
+  "An agent schedules prompts on another host without waiting: the time read there, recurring or not, who asked told."
+  (drover-remote-test-with nil
+    (let ((registration (with-environment-variables (("DROVER_AGENT_ACCESS" "act") ("DROVER_AGENT_LINKABLE" "1"))
+                          (drover-remote-test-start-agent dir)))
+          (peer nil)
+          (session nil)
+          (outcome nil))
+      (drover-remote-test-connect registration)
+      (setq peer (drover-remote--peer "agent"))
+      (should (drover-remote--capable-p peer "jobs-when"))
+      (drover-remote-test-command "sessions" :n 2)
+      (drover-remote-test-synced 2)
+      (setq session (drover-remote--peer-session peer '(fake . "s1")))
+      (should session)
+      (cl-flet ((schedule (when &optional argument)
+                  (setq outcome nil)
+                  (drover-remote-schedule-later session when "Do it" argument "agent fake/me"
+                                                (lambda (result) (setq outcome result)))
+                  (drover-remote-test-wait (lambda () outcome) 10)
+                  outcome))
+        (let ((recurring (schedule "every weekday 9:00")))
+          (should (equal (plist-get recurring :when) "every weekday at 09:00"))
+          (should (> (plist-get recurring :next) (float-time)))
+          (should (stringp (plist-get recurring :id))))
+        (let* ((at (+ (float-time) 3600))
+               (once (schedule (seconds-to-time at))))
+          (should (equal (plist-get once :when) "once"))
+          (should (< (abs (- (plist-get once :next) at)) 1)))
+        (should (equal (plist-get (schedule "when turn ends") :when) "when its turn ends"))
+        (should (plist-get (schedule "whenever it suits") :failure))
+        (should (plist-get (schedule "in 1h" "something") :id))
+        ;; Who asked, told there.
+        (pcase-let ((`(,reply ,_) (drover-remote--wait peer (list :op "jobs") 10)))
+          (should (length= (plist-get reply :jobs) 4))
+          (should (seq-every-p (lambda (job) (equal (plist-get job :by) "agent fake/me on viewer"))
+                               (plist-get reply :jobs))))
+        ;; Not connected: a failure, never a signal.
+        (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
+        (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 10)
+        (should (plist-get (schedule "in 1h") :failure))))))
+
 (ert-deftest drover-remote-test-watch-travels ()
   "A watch travels as waiting on each event, what it concerns told; peers are not offered such events."
   (require 'drover-schedule)
@@ -4130,6 +4172,45 @@ too, are listed here once it is connected."
               (kill-buffer mirror))))
         (should (member "new" (mapcar (lambda (event) (aref event 0))
                                       (plist-get (drover-remote-test-command "history" :peer "viewer") :events))))))))
+
+(ert-deftest drover-remote-test-start-later ()
+  "An agent starts a session on another host without waiting, the target and options chosen from what that host offers."
+  (skip-unless (drover-remote-test--ptys-p))
+  (drover-remote-test-with nil
+    (drover-remote-test-start-full dir)
+    (let* ((work (drover-remote-test-mkdir "work"))
+           (outcome nil)
+           (seen nil)
+           (choose (lambda (target catalog)
+                     (setq seen (list target catalog))
+                     (list :agent "plan" :model (cadr (plist-get catalog :models)) :variant 'max
+                           :title "For an agent"))))
+      (should (equal (drover-remote-peer-named "AGENT") "agent"))
+      (should-not (drover-remote-peer-named "mars"))
+      (cl-flet ((start (directory harness)
+                  (setq outcome nil)
+                  (drover-remote-start-later "agent" directory nil harness nil choose "Hello agent"
+                                             (lambda (result) (setq outcome result)))
+                  (drover-remote-test-wait (lambda () outcome) 20)
+                  outcome))
+        (let ((result (start work 'fake)))
+          (should (equal (plist-get result :key) '(fake . "new1")))
+          (should (equal (plist-get result :directory) work))
+          (should (eq (plist-get result :backend) 'fake))
+          (should (eq (plist-get (car seen) :engine) 'fake))
+          (should (equal (mapcar #'drover-model-id (plist-get (cadr seen) :models)) '("fast-1" "deep-2")))
+          (should (equal (drover-remote-test-calls "create")
+                         (list (list "create" work "fake plan deep-2 max For an agent hidden"))))
+          (should (equal (drover-remote-session-key "agent" (plist-get result :key)) '(remote:agent fake . "new1"))))
+        ;; Without a directory, where a session starts there: its home here.
+        (should (equal (plist-get (start nil 'fake) :directory)
+                       (drover-remote--peer-directory-name (plist-get (drover-remote-catalog "agent" nil nil 10) :home))))
+        ;; Refused, as failures, never signals.
+        (should (string-match-p "no directory" (plist-get (start (concat work "nowhere/") 'fake) :failure)))
+        (should (string-match-p "starts no such session; it starts fake" (plist-get (start work 'nosuch) :failure)))
+        (should (string-match-p "not an absolute directory" (plist-get (start "relative/dir" 'fake) :failure)))
+        (setq choose (lambda (_target _catalog) "No model x is offered"))
+        (should (equal (plist-get (start work 'fake) :failure) "No model x is offered"))))))
 
 (ert-deftest drover-remote-test-new-opencode ()
   "A session started on another host's OpenCode service, granting act access, opens in a full buffer through that host."

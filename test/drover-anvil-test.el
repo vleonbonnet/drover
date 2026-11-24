@@ -533,15 +533,14 @@ noted in `drover-anvil-test-requested'."
         (should (length= (drover-schedule--jobs) 3))))))
 
 (ert-deftest drover-anvil-test-schedule-anywhere ()
-  "A prompt is scheduled for any session of this host, by any caller, but not for an unreadable or past time."
+  "A prompt is scheduled for any session, by any caller, but not for an unreadable or past time."
   (let ((project nil) (elsewhere nil))
     (drover-anvil-test-with nil "me"
       (setq project (drover-anvil-test-project)
             elsewhere (drover-anvil-test-project "elsewhere"))
       (setq drover-test-sessions
             (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me" :directory project)
-                  (drover-test-session "other" :engine 'opencode :engine-id "ses_other" :directory elsewhere)
-                  (drover-test-session "far" :engine 'opencode :engine-id "ses_far" :directory project :host "core")))
+                  (drover-test-session "other" :engine 'opencode :engine-id "ses_other" :directory elsewhere)))
       (drover-anvil-test-with-schedule
         (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-schedule "fake/other" "Hi" "in 1h")))
                        "scheduled"))
@@ -554,9 +553,6 @@ noted in `drover-anvil-test-requested'."
         (let ((anvil-server-request-meta nil))
           (let ((answer (drover-anvil-test-json (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))))
             (should (equal (plist-get (drover-schedule--job (alist-get 'id answer)) :by) "agent"))))
-        ;; The queue is this host's: another host schedules its own sessions' prompts.
-        (should (string-match-p "runs on core"
-                                (cadr (should-error (drover-anvil--tool-schedule "fake/far" "Hi" "in 1h")))))
         (should (length= (drover-schedule--jobs) 2))))))
 
 (ert-deftest drover-anvil-test-schedule-claude-code-caller ()
@@ -826,6 +822,132 @@ prompt is told scheduled by an agent alone."
     (should (equal (mapcar #'car (seq-filter (lambda (call) (memq (car call) '(:interrupt :archive :answer)))
                                              (reverse drover-test-calls)))
                    '(:interrupt :answer :answer :archive)))))
+
+;;;; On other hosts
+
+(defmacro drover-anvil-test-with-peer (sessions &rest body)
+  "Run BODY with the peer core, its backend remote:core serving SESSIONS.
+SESSIONS is a variable holding the peer's sessions here, which BODY may
+set; `drover-remote-peer-named' knows core by its name or its label,
+Core."
+  (declare (indent 1) (debug t))
+  `(progn
+     (require 'drover-remote)
+     (drover-test-register-simple 'remote:core (lambda () ,sessions) :remote "core")
+     (cl-letf (((symbol-function 'drover-remote-peer-named)
+                (lambda (host) (and (member (downcase host) '("core")) "core"))))
+       ,@body)))
+
+(defun drover-anvil-test-peer-session (id &rest properties)
+  "Return the session of core whose own key is (opencode . ID), with PROPERTIES."
+  (apply #'drover-session-create
+         (append properties (list :backend 'remote:core :id (cons 'opencode id) :host "core"
+                                  :title (concat "Core " id)))))
+
+(ert-deftest drover-anvil-test-create-on-another-host ()
+  "A session starts on the peer a host names, its model and effort found there; it answers once listed here."
+  (let ((there nil) (asked nil) (answer nil))
+    (drover-anvil-test-with nil "me"
+      (let ((project (drover-anvil-test-project)))
+        (setq drover-test-sessions (list (drover-test-session "me" :directory project)))
+        (drover-backend-changed 'fake)
+        (drover-anvil-test-with-peer there
+          (cl-letf (((symbol-function 'drover-remote-start-later)
+                     (lambda (name directory local harness engine choose text callback)
+                       (setq asked (list name directory local harness engine text))
+                       (let ((catalog (list :models (list (drover-test-model "deep-2" :engines '(opencode)
+                                                                             :variants '((max :effort "max"))
+                                                                             :variants-known t))))
+                             (target (list :backend 'opencode :engine 'opencode :label "OpenCode session")))
+                         (setq answer callback)
+                         (funcall choose target catalog)))))
+            (let* ((pending (drover-anvil-test-json
+                             (drover-anvil--tool-create nil nil "Hello there" "deep-2" "max" "plan" "Far" nil "Core")))
+                   (job (alist-get 'job pending)))
+              (should job)
+              ;; The caller's directory maps there, the host's to choose; OpenCode's by default.
+              (should (equal asked (list "core" nil project nil nil "Hello there")))
+              (funcall answer (list :key '(opencode . "ses_far") :title "Far" :directory "c:/work/"
+                                    :backend 'opencode))
+              ;; Started there, not listed here yet: still pending.
+              (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))
+              (setq there (list (drover-anvil-test-peer-session "ses_far" :status 'working)))
+              (drover-backend-changed 'remote:core)
+              (let ((started (drover-anvil-test-json (drover-anvil--tool-job job))))
+                (should (equal (alist-get 'outcome started) "started"))
+                (should (equal (alist-get 'key started) "remote:core/opencode/ses_far"))
+                (should (equal (alist-get 'host started) "core"))
+                (should (equal (alist-get 'directory started) "c:/work/"))
+                (should (eq (alist-get 'sent started) t)))
+              ;; Told the caller's, and awaited from the prompt it was sent.
+              (should (eq (alist-get 'started_by_caller
+                                     (drover-anvil-test-json (drover-anvil--tool-session "remote:core/opencode/ses_far"
+                                                                                         :json-false)))
+                          t))
+              (should (gethash '(remote:core . (opencode . "ses_far")) drover-anvil--sent)))))))))
+
+(ert-deftest drover-anvil-test-create-on-another-host-chooses ()
+  "On another host, the model must be one it offers, and its effort one the model runs; a refusal there fails the call."
+  (let ((there nil) (choose nil) (answer nil))
+    (drover-anvil-test-with (list (drover-test-session "me")) "me"
+      (drover-anvil-test-with-peer there
+        (cl-letf (((symbol-function 'drover-remote-start-later)
+                   (lambda (_name _directory _local _harness _engine chooser _text callback)
+                     (setq choose chooser answer callback))))
+          (let ((target (list :backend 'opencode :engine 'opencode :label "OpenCode session"))
+                (catalog (list :models (list (drover-test-model "deep-2" :engines '(opencode)
+                                                                :variants '((max :effort "max"))
+                                                                :variants-known t)
+                                             (drover-test-model "other" :engines '(codex))))))
+            (drover-anvil--tool-create nil "c:/work/" "Hi" "deep-2" "max" nil nil nil "core")
+            (let ((options (funcall choose target catalog)))
+              (should (equal (drover-model-id (plist-get options :model)) "deep-2"))
+              (should (eq (plist-get options :variant) 'max)))
+            (drover-anvil--tool-create nil nil "Hi" "nosuch" nil nil nil nil "core")
+            (should (string-match-p "No model nosuch is offered for OpenCode session on core"
+                                    (funcall choose target catalog)))
+            (drover-anvil--tool-create nil nil "Hi" "other" nil nil nil nil "core")
+            (should (string-match-p "does not run" (funcall choose target catalog)))
+            (drover-anvil--tool-create nil nil "Hi" "deep-2" "ultra" nil nil nil "core")
+            (should-error (funcall choose target catalog))
+            ;; The host's refusal is the call's.
+            (let ((job (alist-get 'job (drover-anvil-test-json
+                                        (drover-anvil--tool-create nil nil "Hi" nil nil nil nil nil "core")))))
+              (funcall answer (list :failure "Core has no directory c:/nowhere/"))
+              (should (string-match-p "no directory" (cadr (should-error (drover-anvil--tool-job job))))))
+            (should (string-match-p "No host mars" (cadr (should-error (drover-anvil--tool-create nil nil "Hi" nil nil nil nil nil "mars")))))))))))
+
+(ert-deftest drover-anvil-test-schedule-on-another-host ()
+  "A prompt for a session of another host is scheduled there, the time left for it to read, an ISO time sent as one."
+  (let ((there (list (drover-anvil-test-peer-session "ses_far")))
+        (asked nil)
+        (answer nil))
+    (drover-anvil-test-with (list (drover-test-session "me")) "me"
+      (drover-anvil-test-with-peer there
+        (drover-backend-changed 'remote:core)
+        (cl-letf (((symbol-function 'drover-remote-schedule-later)
+                   (lambda (session when text argument by callback)
+                     (setq asked (list (drover-session-key session) when text argument by)
+                           answer callback))))
+          (let ((job (alist-get 'job (drover-anvil-test-json
+                                      (drover-anvil--tool-schedule "remote:core/opencode/ses_far" "Brief." "after Core restart"
+                                                                   "it")))))
+            ;; Read there, with its own events: not here, where no such event is.
+            (should (equal asked '((remote:core . (opencode . "ses_far")) "after Core restart" "Brief." "it" "agent fake/me")))
+            (funcall answer (list :id "J1" :when "after the next Core restart" :next nil))
+            (let ((scheduled (drover-anvil-test-json (drover-anvil--tool-job job))))
+              (should (equal (alist-get 'outcome scheduled) "scheduled"))
+              (should (equal (alist-get 'id scheduled) "J1"))
+              (should (equal (alist-get 'host scheduled) "core"))
+              (should (equal (alist-get 'when scheduled) "after the next Core restart"))))
+          (drover-anvil--tool-schedule "remote:core/opencode/ses_far" "Later." "2099-01-01T07:00:00Z")
+          (should (equal (cadr asked) (seconds-to-time (float-time (encode-time (iso8601-parse "2099-01-01T07:00:00Z"))))))
+          (should (string-match-p "is past" (cadr (should-error (drover-anvil--tool-schedule "remote:core/opencode/ses_far"
+                                                                                               "Late." "2001-01-01T00:00:00Z")))))
+          (let ((job (alist-get 'job (drover-anvil-test-json
+                                      (drover-anvil--tool-schedule "remote:core/opencode/ses_far" "Hi" "soon")))))
+            (funcall answer (list :failure "cannot read “soon” as a time"))
+            (should (string-match-p "soon" (cadr (should-error (drover-anvil--tool-job job)))))))))))
 
 ;;;; Through Anvil's dispatcher
 
