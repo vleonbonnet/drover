@@ -74,10 +74,6 @@ CALLER is the identifier of a fake session, or nil for none named."
                              (drover-test-with-state
                               (let ((drover-anvil-callers '(drover-anvil-test-caller))
                                     (anvil-server-request-meta (and ,caller (list (cons 'fake.session ,caller))))
-                                    ;; A copy, which a test may change in place.
-                                    (drover-anvil-permissions (copy-tree (default-value 'drover-anvil-permissions)))
-                                    (drover-anvil-scratch-directories nil)
-                                    (drover-anvil-create-harnesses '(fake))
                                     (drover-anvil-log-file nil)
                                     (drover-anvil--jobs (make-hash-table :test #'equal))
                                     (drover-anvil--started (make-hash-table :test #'equal))
@@ -233,10 +229,10 @@ below it, which took the identifier of one that ended."
               (setq processes '((100 200 30) (200 1 40)))
               (should-not (drover-anvil--caller)))))))))
 
-;;;; Scopes
+;;;; Projects
 
-(ert-deftest drover-anvil-test-project-scope ()
-  "The scope `project' takes the sessions of the caller's repository and its worktrees."
+(ert-deftest drover-anvil-test-project-filter ()
+  "The project \"here\" lists the sessions of the caller's repository and its worktrees; any session is prompted."
   (drover-anvil-test-with nil "me"
     (let* ((project (drover-anvil-test-project "repo"))
            (worktree (file-name-as-directory (expand-file-name "wt" drover-state-directory)))
@@ -251,31 +247,25 @@ below it, which took the identifier of one that ended."
                                        (drover-test-session "mine" :directory worktree)
                                        (drover-test-session "theirs" :directory other)))
       (drover-backend-changed 'fake)
-      (setf (alist-get 'list drover-anvil-permissions) 'project)
       (should (equal (sort (drover-anvil-test-keys (drover-anvil-test-json (drover-anvil--tool-sessions))) #'string<)
-                     '("fake/me" "fake/mine")))
-      (should (equal (drover-anvil-test-keys (drover-anvil-test-json (drover-anvil--tool-sessions nil nil other)))
-                     nil))
-      (setf (alist-get 'list drover-anvil-permissions) 'any)
+                     '("fake/me" "fake/mine" "fake/theirs")))
       (should (equal (drover-anvil-test-keys (drover-anvil-test-json (drover-anvil--tool-sessions nil nil other)))
                      '("fake/theirs")))
       (should (equal (sort (drover-anvil-test-keys (drover-anvil-test-json (drover-anvil--tool-sessions nil nil "here")))
                            #'string<)
                      '("fake/me" "fake/mine")))
-      ;; Sending: to the caller's project, not to another.
+      ;; Sending: to the caller's project and to another alike.
       (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-send "fake/mine" "Go on"))) "sent"))
       (should (equal (car drover-test-calls) '(:submit "mine" "Go on")))
-      (let ((err (should-error (drover-anvil--tool-send "fake/theirs" "Go on"))))
-        (should (string-match-p "caller's project" (cadr err))))
-      (setq drover-anvil-scratch-directories (list other))
-      (should (drover-anvil--tool-send "fake/theirs" "Go on")))))
+      (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-send "fake/theirs" "Go on"))) "sent"))
+      (should (equal (car drover-test-calls) '(:submit "theirs" "Go on"))))))
 
 (defun drover-anvil-test-prompts (&rest arguments)
   "Return the answer of drover-prompts called with ARGUMENTS, parsed."
   (drover-anvil-test-json (apply #'drover-anvil--tool-prompts arguments)))
 
 (ert-deftest drover-anvil-test-prompts ()
-  "The prompts of every host, narrowed by host and pages, cut, and within the scope of reading."
+  "The prompts of every host, of any project, narrowed by host and pages, and cut."
   (require 'drover-prompts)
   (drover-anvil-test-with (list (drover-test-session "me" :status 'working)) "me"
     (let* ((project (drover-anvil-test-project))
@@ -326,18 +316,13 @@ below it, which took the identifier of one that ended."
           (should (equal (alist-get 'session (car (alist-get 'prompts page))) "ses_2"))
           (should (length= (alist-get 'text (car (alist-get 'prompts page))) 31))
           (should (= (alist-get 'cut (car (alist-get 'prompts page))) 100)))
-        ;; Reading the caller's project alone: this host's prompts there.
-        (setf (alist-get 'read drover-anvil-permissions) 'project)
-        (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
-                               (alist-get 'prompts (drover-anvil-test-prompts)))
-                       '("ses_1")))
-        (setf (alist-get 'read drover-anvil-permissions) nil)
-        (should-error (drover-anvil--tool-prompts))
-        (setf (alist-get 'read drover-anvil-permissions) 'any)
+        ;; A caller its client does not name reads them all too.
+        (let ((anvil-server-request-meta nil))
+          (should (= (alist-get 'count (drover-anvil-test-prompts)) 3)))
         (should-error (drover-anvil--tool-prompts "1795366800" "1795000000"))))))
 
 (ert-deftest drover-anvil-test-permissions ()
-  "The permission prompts of every host, with their sessions' titles, narrowed by host and within the scope of reading."
+  "The permission prompts of every host, of any project, with their sessions' titles, narrowed by host."
   (require 'drover-permissions)
   (drover-anvil-test-with (list (drover-test-session "me" :status 'working :engine 'opencode :engine-id "ses_1"
                                                      :title "Session me"))
@@ -373,45 +358,36 @@ below it, which took the identifier of one that ended."
         (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
                                (alist-get 'permissions (drover-anvil-test-json (drover-anvil--tool-permissions nil nil "core"))))
                        '("abc")))
-        ;; Reading the caller's project alone: this host's prompts there.
-        (setf (alist-get 'read drover-anvil-permissions) 'project)
-        (should (equal (mapcar (lambda (prompt) (alist-get 'session prompt))
-                               (alist-get 'permissions (drover-anvil-test-json (drover-anvil--tool-permissions))))
-                       '("ses_1")))
-        (setf (alist-get 'read drover-anvil-permissions) nil)
-        (should-error (drover-anvil--tool-permissions))))))
+        (let ((anvil-server-request-meta nil))
+          (should (= (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-permissions))) 3)))))))
 
-(ert-deftest drover-anvil-test-never-the-caller-nor-above ()
-  "No tool acts on the caller nor on a session above it, nor waits for them."
+(ert-deftest drover-anvil-test-never-waits-for-itself ()
+  "No session waits for itself nor for a session above it; every other action on them goes."
   (drover-anvil-test-with (list (drover-test-session "top" :status 'working)
                                 (drover-test-session "me" :status 'working :parent "top"))
       "me"
-    (let ((drover-anvil-permissions '((send . any) (wait . any) (interrupt . any) (archive . any) (read . any))))
-      (dolist (key '("fake/me" "fake/top"))
-        (should-error (drover-anvil--tool-send key "hi"))
-        (should-error (drover-anvil--tool-wait key))
-        (should-error (drover-anvil--tool-interrupt key))
-        (should-error (drover-anvil--tool-archive key)))
-      (should-not (seq-find (lambda (call) (memq (car call) '(:submit :interrupt :archive))) drover-test-calls))
-      ;; Reading oneself is fine.
-      (should (equal (alist-get 'key (drover-anvil-test-json (drover-anvil--tool-session "fake/me" :json-false)))
-                     "fake/me")))))
+    (should (string-match-p "cannot wait for itself" (cadr (should-error (drover-anvil--tool-wait "fake/me")))))
+    (should (string-match-p "its turn waits for the caller's" (cadr (should-error (drover-anvil--tool-wait "fake/top")))))
+    (dolist (key '("fake/me" "fake/top"))
+      (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-send key "hi"))) "sent")))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-interrupt "fake/top"))) "interrupted"))
+    (should (assq :interrupt drover-test-calls))
+    (should (equal (alist-get 'key (drover-anvil-test-json (drover-anvil--tool-session "fake/me" :json-false)))
+                   "fake/me"))))
 
 (ert-deftest drover-anvil-test-unknown-caller ()
-  "A caller its client does not name may only do what applies to any session."
-  (drover-anvil-test-with (list (drover-test-session "a" :status 'idle :directory default-directory)) nil
+  "A caller its client does not name does what any caller does, but what needs to know it."
+  (drover-anvil-test-with (list (drover-test-session "a" :status 'working :directory default-directory)) nil
     (should (drover-anvil--tool-sessions))
-    (should-error (drover-anvil--tool-send "fake/a" "hi"))
-    (let ((drover-anvil-permissions '((send . any))))
-      (should (drover-anvil--tool-send "fake/a" "hi")))
-    (let ((drover-anvil-permissions '((list . nil))))
-      (should-error (drover-anvil--tool-sessions)))))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-send "fake/a" "hi"))) "sent"))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-interrupt "fake/a"))) "interrupted"))
+    (should (string-match-p "needs the caller" (cadr (should-error (drover-anvil--tool-sessions nil nil "here")))))
+    (should (string-match-p "Name the directory" (cadr (should-error (drover-anvil--tool-create nil nil "Start")))))))
 
 (ert-deftest drover-anvil-test-blocker-refuses ()
   "A session whose buffer cannot take a prompt now is sent none, and the agent told why."
   (drover-anvil-test-with (list (drover-test-session "busy" :status 'working)) nil
-    (let ((drover-anvil-permissions '((send . any)))
-          (drover-anvil-test-blocker "a draft is typed"))
+    (let ((drover-anvil-test-blocker "a draft is typed"))
       (let ((err (should-error (drover-anvil--tool-send "fake/busy" "hi"))))
         (should (string-match-p "a draft is typed" (cadr err))))
       (should-not (assq :submit drover-test-calls))
@@ -422,28 +398,33 @@ below it, which took the identifier of one that ended."
 (ert-deftest drover-anvil-test-send-queued ()
   "A prompt the session's host queued rather than took is told queued, with why."
   (drover-anvil-test-with (list (drover-test-session "far" :status 'working)) nil
-    (let ((drover-anvil-permissions '((send . any)))
-          (drover-anvil-test-queued "its turn runs: the prompt goes once it ends"))
+    (let ((drover-anvil-test-queued "its turn runs: the prompt goes once it ends"))
       (let ((answer (drover-anvil-test-json (drover-anvil--tool-send "fake/far" "later"))))
         (should (equal (alist-get 'outcome answer) "queued"))
         (should (string-match-p "its turn runs" (alist-get 'note answer)))))))
 
-(ert-deftest drover-anvil-test-actions-logged-or-refused ()
-  "Every call is logged; an action that cannot be is not taken."
+(ert-deftest drover-anvil-test-actions-logged-or-warned ()
+  "Every call is logged; one that cannot be is taken all the same, and the user warned once."
   (drover-anvil-test-with (list (drover-test-session "a")) nil
-    (let ((drover-anvil-permissions '((send . any) (read . any))))
-      (drover-anvil--tool-send "fake/a" "Hello there")
-      (should (seq-find (lambda (line) (string-match-p "drover-session-send.*acting.*11 characters: Hello there" line))
-                        (drover-anvil-test-log)))
-      (should (seq-find (lambda (line) (string-match-p "drover-session-send.*\tdone\tsent" line))
-                        (drover-anvil-test-log)))
-      (setq drover-test-calls nil)
-      (let ((drover-anvil-log-file (expand-file-name "a-file/anvil.log" drover-state-directory)))
-        (write-region "" nil (expand-file-name "a-file" drover-state-directory))
-        (should-error (drover-anvil--tool-send "fake/a" "Hello"))
-        (should-not (assq :submit drover-test-calls))
-        ;; Reading goes on.
-        (should (drover-anvil--tool-session "fake/a" :json-false))))))
+    (drover-anvil--tool-send "fake/a" "Hello there")
+    (should (seq-find (lambda (line) (string-match-p "drover-session-send.*acting.*11 characters: Hello there" line))
+                      (drover-anvil-test-log)))
+    (should (seq-find (lambda (line) (string-match-p "drover-session-send.*\tdone\tsent" line))
+                      (drover-anvil-test-log)))
+    (setq drover-test-calls nil)
+    (let ((drover-anvil-log-file (expand-file-name "a-file/anvil.log" drover-state-directory))
+          (drover--errors-reported (make-hash-table :test #'equal))
+          (drover-error-interval 60)
+          (warnings nil))
+      (write-region "" nil (expand-file-name "a-file" drover-state-directory))
+      (cl-letf (((symbol-function 'display-warning)
+                 (lambda (_type message &rest _) (push message warnings))))
+        (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-send "fake/a" "Hello"))) "sent"))
+        (should (drover-anvil--tool-send "fake/a" "Again")))
+      (should (equal (mapcar #'car (seq-filter (lambda (call) (eq (car call) :submit)) drover-test-calls))
+                     '(:submit :submit)))
+      (should (length= warnings 1))
+      (should (string-match-p "go unlogged: .*a-file/anvil.log cannot be written" (car warnings))))))
 
 ;;;; Following up
 
@@ -501,7 +482,7 @@ noted in `drover-anvil-test-requested'."
       (should (= (drover-schedule-fire "oc-restart") 1)))))
 
 (ert-deftest drover-anvil-test-follow-up-refused ()
-  "No follow-up waits for an unknown or repeating event, for an unknown caller, or against the user's permissions."
+  "No follow-up waits for an unknown or repeating event, nor for a caller its client does not name."
   (drover-anvil-test-with (list (drover-test-session "me" :status 'working :engine 'opencode
                                                      :engine-id "ses_me" :directory temporary-file-directory))
       "me"
@@ -510,9 +491,6 @@ noted in `drover-anvil-test-requested'."
         (should (string-match-p "No event reply; drover knows opencode-restart (OpenCode restart), emacs-restart (Emacs restart)\\'"
                                 (cadr err))))
       (should-error (drover-anvil--tool-after "opencode-restart" ""))
-      (let ((drover-anvil-permissions '((follow-up . nil))))
-        (should (string-match-p "allows no follow-up"
-                                (cadr (should-error (drover-anvil--tool-after "opencode-restart" "Retry"))))))
       (let ((anvil-server-request-meta nil))
         (should (string-match-p "caller is unknown"
                                 (cadr (should-error (drover-anvil--tool-after "opencode-restart" "Retry"))))))
@@ -554,8 +532,8 @@ noted in `drover-anvil-test-requested'."
                           (drover-anvil-test-log)))
         (should (length= (drover-schedule--jobs) 3))))))
 
-(ert-deftest drover-anvil-test-schedule-refused ()
-  "No prompt is scheduled out of the caller's scope, for an unreadable or past time, nor for another host."
+(ert-deftest drover-anvil-test-schedule-anywhere ()
+  "A prompt is scheduled for any session of this host, by any caller, but not for an unreadable or past time."
   (let ((project nil) (elsewhere nil))
     (drover-anvil-test-with nil "me"
       (setq project (drover-anvil-test-project)
@@ -565,35 +543,26 @@ noted in `drover-anvil-test-requested'."
                   (drover-test-session "other" :engine 'opencode :engine-id "ses_other" :directory elsewhere)
                   (drover-test-session "far" :engine 'opencode :engine-id "ses_far" :directory project :host "core")))
       (drover-anvil-test-with-schedule
-        (should (string-match-p "allows schedule only on the sessions of the caller's project"
-                                (cadr (should-error (drover-anvil--tool-schedule "fake/other" "Hi" "in 1h")))))
+        (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-schedule "fake/other" "Hi" "in 1h")))
+                       "scheduled"))
         (dolist (case '(("soon" "cannot read “soon” as a time") ("2001-01-01T00:00:00Z" "is past")
                         ("every day 7:00 Mars/Olympus_Mons" "no time zone Mars/Olympus_Mons here")
                         ("" "Tell when")))
           (should (string-search (cadr case)
                                  (cadr (should-error (drover-anvil--tool-schedule "fake/me" "Hi" (car case)))))))
         (should-error (drover-anvil--tool-schedule "fake/me" "" "in 1h"))
-        (let ((drover-anvil-permissions '((schedule . self))))
-          (should (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))
-          (should (string-match-p "only on the caller itself"
-                                  (cadr (should-error (drover-anvil--tool-schedule "fake/other" "Hi" "in 1h"))))))
         (let ((anvil-server-request-meta nil))
-          (should (string-match-p "caller is unknown"
-                                  (cadr (should-error (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))))))
-        (let ((drover-anvil-permissions '((schedule . nil))))
-          (should (string-match-p "allows no schedule"
-                                  (cadr (should-error (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))))))
-        (should (string-match-p "only on the sessions of the caller's project"
+          (let ((answer (drover-anvil-test-json (drover-anvil--tool-schedule "fake/me" "Hi" "in 1h"))))
+            (should (equal (plist-get (drover-schedule--job (alist-get 'id answer)) :by) "agent"))))
+        ;; The queue is this host's: another host schedules its own sessions' prompts.
+        (should (string-match-p "runs on core"
                                 (cadr (should-error (drover-anvil--tool-schedule "fake/far" "Hi" "in 1h")))))
-        (let ((drover-anvil-permissions '((schedule . any))))
-          (should (string-match-p "runs on core"
-                                  (cadr (should-error (drover-anvil--tool-schedule "fake/far" "Hi" "in 1h"))))))
-        (should (length= (drover-schedule--jobs) 1))))))
+        (should (length= (drover-schedule--jobs) 2))))))
 
 (ert-deftest drover-anvil-test-schedule-claude-code-caller ()
-  "A Claude Code session schedules a prompt for itself, a session of its project.
+  "A Claude Code session schedules a prompt for itself, named as who scheduled it.
 Without the bridge telling its process, the caller is unknown, and the
-scope `project' refuses it."
+prompt is told scheduled by an agent alone."
   (let ((conversation (car drover-anvil-test-conversations))
         (processes '((100 200 30) (200 1 20))))
     (drover-test-with-homes
@@ -607,9 +576,9 @@ scope `project' refuses it."
           (let ((drover-anvil-callers (drover-anvil-test-default-callers)))
             (drover-anvil-test-claude-record 200 conversation)
             (drover-anvil-test-with-processes processes
-              (should (string-match-p "caller is unknown"
-                                      (cadr (should-error (drover-anvil--tool-schedule
-                                                           "fake/terminal-12" "Look for BA's email." "in 1h")))))
+              (let ((answer (drover-anvil-test-json
+                             (drover-anvil--tool-schedule "fake/terminal-12" "Look for BA's email." "in 1h"))))
+                (should (equal (plist-get (drover-schedule--job (alist-get 'id answer)) :by) "agent")))
               (let* ((anvil-server-transport-pid 100)
                      (answer (drover-anvil-test-json
                               (drover-anvil--tool-schedule "fake/terminal-12" "Look for BA's email." "in 1h"))))
@@ -622,15 +591,13 @@ scope `project' refuses it."
                                   (drover-anvil-test-log)))))))))))
 
 (ert-deftest drover-anvil-test-fire ()
-  "An agent fires an event by name only where the user allows it; the prompts waiting go, with what happened."
+  "An agent fires an event by name; the prompts waiting go, with what happened."
   (drover-anvil-test-with (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me"
                                                      :directory temporary-file-directory))
       "me"
     (drover-anvil-test-with-schedule
       (drover-schedule-add-after-trigger (drover-schedule-session-target (car drover-test-sessions))
                                          'emacs-restart "Verify the restart.")
-      (should (string-match-p "allows no fire" (cadr (should-error (drover-anvil--tool-fire "emacs-restart")))))
-      (setf (alist-get 'fire drover-anvil-permissions) 'any)
       (should (string-match-p "No event weekly; drover knows opencode-restart (OpenCode restart)"
                               (cadr (should-error (drover-anvil--tool-fire "weekly")))))
       (let ((answer (drover-anvil-test-json (drover-anvil--tool-fire "emacs-restart" "Restarted at 3:00"))))
@@ -644,7 +611,7 @@ scope `project' refuses it."
                         (drover-anvil-test-log))))))
 
 (ert-deftest drover-anvil-test-scheduled ()
-  "The list tells each prompt's session, when, status and who scheduled it, within the caller's read scope."
+  "The list tells each prompt's session, when, status and who scheduled it, of every session."
   (let ((project nil) (elsewhere nil))
     (drover-anvil-test-with nil "me"
       (setq project (drover-anvil-test-project)
@@ -665,9 +632,8 @@ scope `project' refuses it."
             (should (equal (alist-get 'prompt mine) "Brief."))))
         (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled "fake/other")))))
         (should (= 0 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil "sent")))))
-        ;; Reading the caller's project alone: the other session's prompt is left out.
-        (setf (alist-get 'read drover-anvil-permissions) 'project)
-        (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled)))))))))
+        (let ((anvil-server-request-meta nil))
+          (should (= 2 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled))))))))))
 
 ;;;; Reading
 
@@ -700,13 +666,12 @@ scope `project' refuses it."
       (should-error (drover-anvil--tool-job job)))))
 
 (ert-deftest drover-anvil-test-job-of-another-caller ()
-  "A job's answer goes to the session that asked for it alone."
+  "A job's answer goes to whichever session asks for it."
   (drover-anvil-test-with (list (drover-test-session "a") (drover-test-session "b")) "a"
     (setq drover-test-recap-later t)
     (let ((job (alist-get 'job (drover-anvil-test-json (drover-anvil--tool-session "fake/b")))))
       (let ((anvil-server-request-meta '((fake.session . "b"))))
-        (should-error (drover-anvil--tool-job job)))
-      (should (drover-anvil--tool-job job)))))
+        (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))))))
 
 ;;;; Waiting
 
@@ -736,14 +701,13 @@ scope `project' refuses it."
 (ert-deftest drover-anvil-test-wait-for-the-turn-of-a-prompt-sent ()
   "After a prompt went, a session still idle from before is not done: its next turn is awaited."
   (drover-anvil-test-with (list (drover-test-session "a" :status 'idle :since 1.0)) nil
-    (let ((drover-anvil-permissions '((send . any) (wait . any))))
-      (drover-anvil--tool-send "fake/a" "Do it")
-      (let ((job (alist-get 'job (drover-anvil-test-json (drover-anvil--tool-wait "fake/a" 60 nil :json-false)))))
-        (should job)
-        (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))
-        ;; The turn ran and ended between two polls.
-        (drover-anvil-test-set-status "a" 'done (+ (float-time) 1))
-        (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-job job))) "ended"))))
+    (drover-anvil--tool-send "fake/a" "Do it")
+    (let ((job (alist-get 'job (drover-anvil-test-json (drover-anvil--tool-wait "fake/a" 60 nil :json-false)))))
+      (should job)
+      (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))
+      ;; The turn ran and ended between two polls.
+      (drover-anvil-test-set-status "a" 'done (+ (float-time) 1))
+      (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-job job))) "ended")))
     ;; Without a prompt sent, a session not running is done at once.
     (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-wait "fake/a" 60 nil :json-false)))
                    "ended"))))
@@ -791,7 +755,7 @@ scope `project' refuses it."
 ;;;; Starting, answering, interrupting, archiving
 
 (ert-deftest drover-anvil-test-create-in-the-project ()
-  "A session starts unseen in the caller's project, takes its prompt, and is the caller's own."
+  "A session starts unseen in the caller's directory, takes its prompt, and is told the caller's."
   (drover-anvil-test-with nil "me"
     (let ((project (drover-anvil-test-project)))
       (setq drover-test-sessions (list (drover-test-session "me" :directory project)))
@@ -805,8 +769,9 @@ scope `project' refuses it."
           (should (equal (plist-get (nth 3 create) :agent) "build"))
           (should (equal (plist-get (nth 3 create) :title) "Child"))
           (should (equal (assq :send drover-test-calls) (list :send (cdr (drover-anvil--parse-key key)) "Start" nil)))
-          ;; Its own: interrupted, archived, its questions answered.
           (drover-anvil-test-set-status (cdr (drover-anvil--parse-key key)) 'working)
+          (should (eq (alist-get 'started_by_caller (drover-anvil-test-json (drover-anvil--tool-session key :json-false)))
+                      t))
           (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-interrupt key)))
                          "interrupted"))
           (should (assq :interrupt drover-test-calls))
@@ -815,29 +780,29 @@ scope `project' refuses it."
                    (:id "q" :kind question :fields ((:key "name" :type "string")))
                    (:id "p" :kind permission :choices ("once" "always" "reject")))))
           (should (equal (alist-get 'outcome (drover-anvil-test-json
-                                               (drover-anvil--tool-answer key "q" nil '((name . "Ada")))))
+                                              (drover-anvil--tool-answer key "q" nil '((name . "Ada")))))
                          "answered"))
           (should (equal (assq :answer drover-test-calls)
                          (list :answer (cdr (drover-anvil--parse-key key)) "q" '(:answer (("name" . "Ada"))))))
-          ;; No permission, by default.
-          (let ((err (should-error (drover-anvil--tool-answer key "p" "once"))))
-            (should (string-match-p "answer-permission" (cadr err))))
-          (let ((drover-anvil-permissions (cons '(answer-permission . own) drover-anvil-permissions)))
-            (drover-anvil--tool-answer key "p" "always")
-            (should (equal (nth 3 (assq :answer drover-test-calls)) '(:decision "always"))))
+          (drover-anvil--tool-answer key "p" "always")
+          (should (equal (nth 3 (assq :answer drover-test-calls)) '(:decision "always")))
           (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-archive key)))
                          "archived"))
           (should (assq :archive drover-test-calls)))))))
 
-(ert-deftest drover-anvil-test-create-refused-elsewhere ()
-  "No session starts outside the caller's project, nor of a harness not allowed."
+(ert-deftest drover-anvil-test-create-anywhere ()
+  "A session starts in any directory, of any harness starting sessions here, but not in a missing directory."
   (drover-anvil-test-with nil "me"
     (let ((project (drover-anvil-test-project))
           (other (drover-anvil-test-project "other")))
       (setq drover-test-sessions (list (drover-test-session "me" :directory project)))
       (drover-backend-changed 'fake)
-      (should-error (drover-anvil--tool-create nil other "Start"))
-      (should-error (drover-anvil--tool-create "opencode" nil "Start"))
+      (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-create "fake" other "Start")))
+                     "started"))
+      (should (equal (nth 1 (assq :create drover-test-calls)) other))
+      (setq drover-test-calls nil)
+      (should (string-match-p "nosuch starts no session here; fake do"
+                              (cadr (should-error (drover-anvil--tool-create "nosuch" nil "Start")))))
       (should-error (drover-anvil--tool-create nil (expand-file-name "missing" project) "Start"))
       ;; A model its engine does not run.
       (drover-test-with-engines
@@ -847,14 +812,20 @@ scope `project' refuses it."
           (should (string-match-p "does not run" (cadr err)))))
       (should-not (assq :create drover-test-calls)))))
 
-(ert-deftest drover-anvil-test-not-own-refused ()
-  "By default, sessions the caller did not start are neither interrupted, archived nor answered."
+(ert-deftest drover-anvil-test-not-own-sessions ()
+  "Sessions the caller did not start are interrupted, answered and archived alike."
   (drover-anvil-test-with (list (drover-test-session "me") (drover-test-session "a" :status 'working)) "me"
-    (setq drover-anvil-test-requests '(("a" (:id "q" :kind question))))
-    (should-error (drover-anvil--tool-interrupt "fake/a"))
-    (should-error (drover-anvil--tool-archive "fake/a"))
-    (should-error (drover-anvil--tool-answer "fake/a" nil nil '((x . "y"))))
-    (should-not (seq-find (lambda (call) (memq (car call) '(:interrupt :archive :answer))) drover-test-calls))))
+    (setq drover-anvil-test-requests '(("a" (:id "q" :kind question :fields ((:key "x" :type "string")))
+                                       (:id "p" :kind permission :choices ("once" "always" "reject")))))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-interrupt "fake/a"))) "interrupted"))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-answer "fake/a" "q" nil '((x . "y")))))
+                   "answered"))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-answer "fake/a" "p" "once")))
+                   "answered"))
+    (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-archive "fake/a"))) "archived"))
+    (should (equal (mapcar #'car (seq-filter (lambda (call) (memq (car call) '(:interrupt :archive :answer)))
+                                             (reverse drover-test-calls)))
+                   '(:interrupt :answer :answer :archive)))))
 
 ;;;; Through Anvil's dispatcher
 
