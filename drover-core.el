@@ -2901,13 +2901,13 @@ lives then."
   "Return SESSIONS in the order `drover-next' visits them.
 First come sessions with a live buffer, shown or not, then those
 without one (see `drover-session-buffer').  Both tiers use the same
-order: live prompt caches at NOW, soonest to expire first, then
-sessions needing the user, then idle sessions.  NOW defaults to the
-current time.  A subagent waiting for the user takes the buffer and
+order: live prompt caches at NOW, soonest to expire first, then list
+order, whether a session needs the user or is idle.  NOW defaults to
+the current time.  A subagent waiting for the user takes the buffer and
 cache of the top of its tree (see `drover-attention-target').  A cache
 is live as lists show it (see `drover-attention-cache').  Within each
-tier, equal cache expiries put sessions needing the user before idle
-ones, then follow list order, as sessions without a cache do.
+tier, equal cache expiries follow list order, as sessions without a
+cache do.
 List order is the order lists draw them (see `drover-view-groups'),
 as `drover-group-by' groups them and `drover-sort-by' sorts them, each
 subagent under its parent: a subagent lists hide comes in the place
@@ -2939,7 +2939,6 @@ tree ranks as lists draw it, without it."
                                       (list session
                                             (if (drover-session-buffer (drover-attention-target session)) 0 1)
                                             expires
-                                            (if (drover-session-attention-p session) 0 1)
                                             (cond ((and stand-in (< stand-in filtered)) stand-in)
                                                   (own)
                                                   (t most-positive-fixnum)))))
@@ -2948,14 +2947,13 @@ tree ranks as lists draw it, without it."
         ;; SESSIONS.
         (mapcar #'car
                 (sort keyed
-                      (pcase-lambda (`(,_ ,buffer-a ,expires-a ,tier-a ,position-a)
-                                     `(,_ ,buffer-b ,expires-b ,tier-b ,position-b))
+                      (pcase-lambda (`(,_ ,buffer-a ,expires-a ,position-a)
+                                     `(,_ ,buffer-b ,expires-b ,position-b))
                         (cond ((/= buffer-a buffer-b) (< buffer-a buffer-b))
                               ((and expires-a expires-b (/= expires-a expires-b))
                                (< expires-a expires-b))
                               ((and expires-a (not expires-b)) t)
                               ((and expires-b (not expires-a)) nil)
-                              ((/= tier-a tier-b) (< tier-a tier-b))
                               (t (< position-a position-b))))))))))
 
 (defun drover-attention-order (sessions &optional now)
@@ -2964,8 +2962,7 @@ That is their order in `drover-visit-order' at NOW, the current time by
 default: sessions with a live buffer first, then those without one.
 Within each tier, live caches come first, soonest to expire first,
 then the others in list order.  Equal expiries follow list order too.
-The mode line's tooltip and `drover-select' use this order.
-`drover-next' visits them in this order among the idle sessions too."
+The mode line's tooltip and `drover-select' use this order."
   (drover-visit-order sessions now))
 
 (defun drover-find (backend id)

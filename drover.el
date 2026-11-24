@@ -36,7 +36,7 @@
 ;; if need be.  `drover-attention-mode' shows how many sessions need you in
 ;; the mode line.  `drover-next' visits open buffers first, then closed
 ;; sessions.  Each tier visits live caches soonest to expire first,
-;; then sessions needing you, then idle sessions.
+;; then the others in list order, needing you or idle alike.
 ;; `drover-list' lists every session in a window, and `drover-list-side'
 ;; in a sidebar beside your work, both at once if you like, each laid
 ;; out for its window's width.

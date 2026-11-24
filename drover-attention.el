@@ -31,8 +31,8 @@
 ;;   chooses a session.
 ;; - `drover-next' lines up the sessions to attend to among those lists
 ;;   show: open buffers first, then closed sessions.  Each tier visits
-;;   live caches soonest to expire first, then sessions needing you,
-;;   then idle sessions, each in list order (`drover-visit-order').
+;;   live caches soonest to expire first, then the others in list
+;;   order, needing you or idle alike (`drover-visit-order').
 ;;   A subagent waiting for you ranks by the buffer and cache at the top
 ;;   of its tree, which is visited for it.  The first press visits the
 ;;   first session, or the second when the first shows already.
@@ -133,7 +133,7 @@ The last lines explain the buffer tiers and their order."
                  (format "\n  … and %d more" (- count drover-attention--help-sessions)))
             (and filter (concat "\n\nFilter: " filter))
             "\n\nmouse-1: visit open buffers first, then closed sessions"
-            "\n  Each tier: live caches, then needing you, then idle"
+            "\n  Each tier: live caches, then list order"
             "\nmouse-3: choose a session")))
 
 (defvar drover-attention--sessions nil
@@ -389,9 +389,10 @@ and every subagent waiting for you in a tree the filter keeps, which
 blocks its parent (see `drover-surfaced-sessions').  Its tooltip lists
 them in the order `drover-next' visits them among themselves; clicking
 it runs `drover-next', which visits open buffers first, then closed
-sessions.  Each tier visits live caches, then sessions needing you,
-then idle sessions.  Clicking with the right button chooses a session
-\(`drover-select').  Enabling the mode starts the backends."
+sessions.  Each tier visits live caches, then the others in list
+order, needing you or idle alike.  Clicking with the right button
+chooses a session (`drover-select').  Enabling the mode starts the
+backends."
   :global t
   :group 'drover
   (if drover-attention-mode
@@ -564,16 +565,16 @@ A first press lines up the sessions and visits the first, or the
 second when the first shows already, whatever its status, the first
 then coming last.  Sessions with a live buffer come before those
 without one, whether that buffer is shown or not.  Both tiers use the
-same order: live prompt caches, soonest to expire first, then sessions
-needing you, then idle sessions.  Equal expiries put sessions needing
-you before idle ones.  Otherwise, each follows list order, as
-`drover-group-by' and `drover-sort-by' arrange them (see
-`drover-visit-order').  Backends may resume closed sessions to show
-them.  Sessions in the middle of a turn are left out,
-and so are those `drover-filter' hides, and subagents, but one waiting
-for you in a tree the filter keeps, which is visited through the top
-of its tree, where you answer it.  Its buffer and cache decide the
-subagent's rank, and the tree comes once.
+same order: live prompt caches, soonest to expire first, then list
+order, as `drover-group-by' and `drover-sort-by' arrange them,
+sessions needing you ranking no higher than idle ones (see
+`drover-visit-order').  Equal expiries follow list order too.
+Backends may resume closed sessions to show them.  Sessions in the
+middle of a turn are left out, and so are those `drover-filter'
+hides, and subagents, but one waiting for you in a tree the filter
+keeps, which is visited through the top of its tree, where you answer
+it.  Its buffer and cache decide the subagent's rank, and the tree
+comes once.
 
 Each press after it visits the next session of that queue, the first
 again after the last, for as long as nothing but this command runs

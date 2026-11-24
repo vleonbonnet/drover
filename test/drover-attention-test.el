@@ -262,7 +262,7 @@ So it does as the count is made anew, and as it follows a change."
                                "  ✓ Session d\n"
                                "\n"
                                "mouse-1: visit open buffers first, then closed sessions\n"
-                               "  Each tier: live caches, then needing you, then idle\n"
+                               "  Each tier: live caches, then list order\n"
                                "mouse-3: choose a session")))
         (should (eq (drover-attention-test-face-at help "cache 4m") 'drover-dim))))))
 
@@ -583,6 +583,25 @@ Not even a session whose cache lives, nor an idle subagent."
                        (drover-attention-test-press))
                      '("1/2" "2/2" "1/2")))
       (should (equal (drover-attention-test-opened) '("i2" "i1" "i2"))))))
+
+(ert-deftest drover-attention-test-next-attention-list-order ()
+  "Sessions needing the user rank no higher than idle ones: lists' order decides.
+Sorted by last activity, an idle session active since comes before
+sessions done or waiting; grouped by status, these come first, as
+lists draw them."
+  (drover-attention-test-with (list (drover-test-session "d" :status 'done :since 30.0 :updated 30.0)
+                                    (drover-test-session "i" :status 'idle :updated 90.0)
+                                    (drover-test-session "w" :status 'waiting :since 50.0 :updated 50.0)
+                                    (drover-test-session "o" :status 'idle :updated 10.0))
+    (pcase-dolist (`(,grouping ,sort ,descending ,expected)
+                   '((nil updated t ("i" "w" "d" "o"))
+                     (status urgency nil ("w" "d" "i" "o"))))
+      (let ((drover-group-by grouping)
+            (drover-sort-by sort)
+            (drover-sort-descending descending))
+        (should (equal (list grouping (drover-attention-test-ids
+                                       (drover-visit-order (drover-attention--round-sessions))))
+                       (list grouping expected)))))))
 
 (ert-deftest drover-attention-test-next-echoes-position ()
   (drover-attention-test-with (list (drover-test-session "w" :status 'waiting :since 1.0
@@ -1059,7 +1078,7 @@ session working does not count, the session being left out."
       (should (equal (drover-attention-test-opened) '("i" "c2" "c1" "w" "root" "x" "d1" "i"))))))
 
 (ert-deftest drover-attention-test-next-tiers ()
-  "Open buffers come first, each tier using cache, attention, then list order.
+  "Open buffers come first, each tier using cache, then list order.
 An expired cache counts as none.  Working sessions are left out.
 Buffer changes affect the next round, not the queue already started."
   (let ((now (float-time))
@@ -1085,8 +1104,8 @@ Buffer changes affect the next round, not the queue already started."
             (setq expected
                   (append expected
                           (mapcar (lambda (name) (concat tier "-" name))
-                                  '("tied-done" "cached-idle" "cached-done" "done" "waiting"
-                                    "idle1" "expired" "idle2")))))
+                                  '("cached-idle" "tied-done" "cached-done" "idle1" "expired"
+                                    "idle2" "done" "waiting")))))
           (drover-attention-test-with sessions
             (let ((drover-group-by nil)
                   (drover-sort-by 'updated)
@@ -1148,7 +1167,7 @@ The root is visited once even when two subagents wait."
       (kill-buffer buffer))))
 
 (ert-deftest drover-attention-test-next-tree-once ()
-  "An idle session whose subagent waits for the user comes once, as that subagent does."
+  "An idle session whose subagent waits for the user comes once, in its place in the list."
   (drover-attention-test-with (list (drover-test-session "other" :status 'idle :updated 90.0)
                                     (drover-test-session "root" :status 'idle :updated 10.0)
                                     (drover-test-session "asking" :parent "root" :status 'waiting
@@ -1160,7 +1179,7 @@ The root is visited once even when two subagents wait."
                        (drover-next)
                        (drover-attention-test-press))
                      '("1/2" "2/2")))
-      (should (equal (drover-attention-test-opened) '("root" "other"))))))
+      (should (equal (drover-attention-test-opened) '("other" "root"))))))
 
 (ert-deftest drover-attention-test-order-subagent-by-root-cache ()
   "A subagent waiting ranks by the cache of the top of its tree, which answering it resumes.
@@ -1481,7 +1500,8 @@ In the place lists draw that top, its tree ranking without the subagent."
                                     (drover-test-session "away" :status 'waiting :project "q" :since 1.0))
     (drover-set-filter :project "p")
     (let ((drover-group-by nil))
-      ;; By last activity: the top first, for its subagent.
+      ;; By last activity: the top first, for its subagent, then the
+      ;; idle session before the one done earlier.
       (let ((drover-sort-by 'updated)
             (drover-sort-descending t))
         (drover-next)
@@ -1493,7 +1513,7 @@ In the place lists draw that top, its tree ranking without the subagent."
       (drover-next)
       (drover-attention-test-press)
       (drover-attention-test-press))
-    (should (equal (drover-attention-test-opened) '("root" "ended" "quiet" "ended" "root" "quiet")))))
+    (should (equal (drover-attention-test-opened) '("root" "quiet" "ended" "ended" "root" "quiet")))))
 
 (ert-deftest drover-attention-test-select-ignores-filter ()
   "`drover-select' offers the sessions the filter hides, after those it keeps."
