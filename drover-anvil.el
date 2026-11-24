@@ -1656,50 +1656,125 @@ MCP Parameters:
       (drover-schedule-session-named (plist-get job :link))
     (user-error nil)))
 
-(defun drover-anvil--tool-scheduled (&optional key status limit)
-  "List the prompts scheduled for later, the newest first.
-KEY, STATUS and LIMIT narrow the list, as the parameters below tell.
+(declare-function drover-remote-jobs-later "drover-remote" (callback &optional seconds))
+
+(defun drover-anvil--local-scheduled (job)
+  "Return the scheduled prompt JOB, of this host's queue, as the list tells it.
+A plist of :key, its session's key or nil, :status, its name, :created
+and :data, what the list answers of it."
+  (let ((session (drover-anvil--job-session job)))
+    (list :key (and session (drover-session-key session))
+          :status (symbol-name (plist-get job :status))
+          :created (plist-get job :created)
+          :data (drover-anvil--compact
+                 `((id . ,(plist-get job :id))
+                   (host . ,drover-host)
+                   (key . ,(and session (drover-anvil-key-string session)))
+                   (link . ,(drover-anvil--line (plist-get job :link) 300))
+                   (title . ,(drover-anvil--line (plist-get job :title) 160))
+                   (when . ,(drover-anvil--line (drover-schedule--when job) 200))
+                   (next . ,(drover-anvil--time (plist-get job :due)))
+                   (status . ,(drover-schedule--status-text job))
+                   (prompt . ,(drover-anvil--line (plist-get job :prompt) 300))
+                   (by . ,(drover-anvil--line (plist-get job :by) 200))
+                   (created . ,(drover-anvil--time (plist-get job :created)))
+                   (sent_at . ,(drover-anvil--time (plist-get job :sent-at)))
+                   (error . ,(drover-anvil--line (plist-get job :error) 300)))))))
+
+(defun drover-anvil--remote-scheduled (job)
+  "Return JOB, a prompt scheduled on another host, as the list tells it.
+JOB is as `drover-remote-jobs-later' gives it; the plist returned is
+as `drover-anvil--local-scheduled' returns."
+  (let ((status (and (plist-get job :status) (symbol-name (plist-get job :status)))))
+    (list :key (plist-get job :key)
+          :status status
+          :created (plist-get job :created)
+          :data (drover-anvil--compact
+                 `((id . ,(plist-get job :id))
+                   (host . ,(plist-get job :host))
+                   (key . ,(and (plist-get job :key) (drover-anvil--key-of (plist-get job :key))))
+                   (link . ,(plist-get job :link))
+                   (title . ,(drover-anvil--line (plist-get job :title) 160))
+                   (when . ,(cond ((plist-get job :every))
+                                  ((plist-get job :turn) "when its turn ends")
+                                  ((plist-get job :after)
+                                   (concat "after the next " (plist-get job :after)
+                                           (if (plist-get job :argument)
+                                               (format " (%s)" (plist-get job :argument))
+                                             "")))
+                                  ((plist-get job :next) "once")))
+                   (next . ,(drover-anvil--time (plist-get job :next)))
+                   (status . ,status)
+                   (prompt . ,(drover-anvil--line (plist-get job :prompt) 300))
+                   (by . ,(plist-get job :by))
+                   (created . ,(drover-anvil--time (plist-get job :created)))
+                   (sent_at . ,(drover-anvil--time (plist-get job :sent)))
+                   (error . ,(plist-get job :error)))))))
+
+(defun drover-anvil--scheduled-answer (entries hosts only statuses limit)
+  "Return the list of ENTRIES, scheduled prompts, the newest first, as data.
+ENTRIES are as `drover-anvil--local-scheduled' returns them; ONLY, a
+session's key or nil, and STATUSES, names, narrow them, LIMIT bounds
+them.  HOSTS tells how each other host answered, plists of :host and
+:jobs or :failure."
+  (let ((kept (sort (seq-filter (lambda (entry)
+                                  (and (or (null statuses) (member (plist-get entry :status) statuses))
+                                       (or (null only) (equal (plist-get entry :key) only))))
+                                entries)
+                    :key (lambda (entry) (or (plist-get entry :created) 0)) :reverse t)))
+    `((count . ,(length kept))
+      (scheduled . ,(vconcat (mapcar (lambda (entry) (plist-get entry :data)) (seq-take kept limit))))
+      (truncated . ,(and (> (length kept) limit) t))
+      (hosts . ,(and hosts
+                     (vconcat (mapcar (lambda (host)
+                                        (drover-anvil--compact
+                                         `((host . ,(plist-get host :host))
+                                           (count . ,(and (plist-member host :jobs) (length (plist-get host :jobs))))
+                                           (message . ,(drover-anvil--line (plist-get host :failure) 300)))))
+                                      hosts)))))))
+
+(defun drover-anvil--tool-scheduled (&optional key status limit host)
+  "List the prompts scheduled for later, of every host, the newest first.
+KEY, STATUS, LIMIT and HOST narrow the list, as the parameters below
+tell.  Each host keeps the prompts of its own sessions, and tells them.
 
 MCP Parameters:
   key - A session's key, whose prompts alone to list
   status - Statuses to keep, comma-separated, among pending, opening,
       waiting, sending, sent, failed, interrupted and cancelled
-  limit - (integer) Prompts listed at most, 50 by default"
+  limit - (integer) Prompts listed at most, 50 by default
+  host - \"local\" for this host's prompts, or a host's name; every
+      host's by default"
   (drover-start)
   (require 'drover-schedule)
   (drover-schedule-load)
   (let* ((caller (drover-anvil--caller))
-         (only (and (stringp key) (not (string-empty-p key)) (drover-anvil--session key)))
+         (only (and (stringp key) (not (string-empty-p key)) (drover-session-key (drover-anvil--session key))))
          (statuses (drover-anvil--split status))
          (limit (max 1 (min 200 (if (natnump limit) limit 50))))
-         (jobs (seq-filter
-                (lambda (job)
-                  (and (or (null statuses) (member (symbol-name (plist-get job :status)) statuses))
-                       (or (null only)
-                           (when-let* ((session (drover-anvil--job-session job)))
-                             (equal (drover-session-key session) (drover-session-key only))))))
-                (sort (drover-schedule--jobs) :key (lambda (job) (or (plist-get job :created) 0)) :reverse t))))
-    (drover-anvil--log "drover-scheduled" caller nil "done" (format "%d listed" (length jobs)))
-    (drover-anvil--json
-     `((count . ,(length jobs))
-       (scheduled
-        . ,(vconcat
-            (mapcar (lambda (job)
-                      (let ((session (drover-anvil--job-session job)))
-                        (drover-anvil--compact
-                         `((id . ,(plist-get job :id))
-                           (key . ,(and session (drover-anvil-key-string session)))
-                           (link . ,(drover-anvil--line (plist-get job :link) 300))
-                           (title . ,(drover-anvil--line (plist-get job :title) 160))
-                           (when . ,(drover-anvil--line (drover-schedule--when job) 200))
-                           (status . ,(drover-schedule--status-text job))
-                           (prompt . ,(drover-anvil--line (plist-get job :prompt) 300))
-                           (by . ,(drover-anvil--line (plist-get job :by) 200))
-                           (created . ,(drover-anvil--time (plist-get job :created)))
-                           (sent_at . ,(drover-anvil--time (plist-get job :sent-at)))
-                           (error . ,(drover-anvil--line (plist-get job :error) 300))))))
-                    (seq-take jobs limit))))
-       (truncated . ,(and (> (length jobs) limit) t))))))
+         (host (and (stringp host) (not (string-blank-p host)) host))
+         (local (and (drover-anvil--host-match-p nil host)
+                     (mapcar #'drover-anvil--local-scheduled (drover-schedule--jobs)))))
+    (if (or (not (featurep 'drover-remote)) (member host '("local" "here")))
+        (let ((answer (drover-anvil--scheduled-answer local nil only statuses limit)))
+          (drover-anvil--log "drover-scheduled" caller nil "done" (format "%d listed" (alist-get 'count answer)))
+          (drover-anvil--json answer))
+      (let* ((stop nil)
+             (id (drover-anvil--job "drover-scheduled" caller nil :seconds 60
+                                    :finally (lambda (_id) (when stop (funcall stop))))))
+        (setq stop
+              (drover-remote-jobs-later
+               (lambda (hosts)
+                 (drover-with-reporting "Anvil scheduled"
+                   (let* ((hosts (seq-filter (lambda (entry) (drover-anvil--host-match-p (plist-get entry :host) host))
+                                             hosts))
+                          (remote (mapcan (lambda (entry)
+                                            (mapcar #'drover-anvil--remote-scheduled (plist-get entry :jobs)))
+                                          hosts))
+                          (answer (drover-anvil--scheduled-answer (append local remote) hosts only statuses limit)))
+                     (drover-anvil--done id (cons `(outcome . ,(format "%d listed" (alist-get 'count answer)))
+                                                  answer)))))))
+        (drover-anvil--answer id)))))
 
 ;;;; Permission prompts
 
@@ -1847,7 +1922,7 @@ MCP Parameters:
      :description "Tell drover an event happened, by name, releasing the prompts waiting for it, with what happened; or that it will not happen, cancelling them.")
     (drover-anvil--tool-scheduled
      :id "drover-scheduled" :read-only t
-     :description "List the prompts scheduled for later, the newest first: when each goes, recurring or not, its status, its session, who scheduled it.")
+     :description "List the prompts scheduled for later, of every host, the newest first: when each goes, recurring or not, its status, its host and session, who scheduled it.")
     (drover-anvil--tool-prompts
      :id "drover-prompts" :read-only t
      :description "Return the prompts the user sent agents over a period (seven days by default, 31 at most), of every harness and host, oldest first: host, engine, conversation, its link, title, directory, time and text.  Subagents' prompts, programs' and what engines add as the user are left out.  For reviews of how the user works with agents.")

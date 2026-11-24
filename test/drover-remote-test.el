@@ -946,7 +946,7 @@ restart of the host's remote layer, its counters rising."
               (should (cadr (drover-remote--wait peer bad 10))))))))))
 
 (ert-deftest drover-remote-test-schedule-later ()
-  "An agent schedules prompts on another host without waiting: the time read there, recurring or not, who asked told."
+  "An agent schedules prompts on another host without waiting, the time read there, and lists them, who asked told."
   (drover-remote-test-with nil
     (let ((registration (with-environment-variables (("DROVER_AGENT_ACCESS" "act") ("DROVER_AGENT_LINKABLE" "1"))
                           (drover-remote-test-start-agent dir)))
@@ -982,10 +982,31 @@ restart of the host's remote layer, its counters rising."
           (should (length= (plist-get reply :jobs) 4))
           (should (seq-every-p (lambda (job) (equal (plist-get job :by) "agent fake/me on viewer"))
                                (plist-get reply :jobs))))
+        ;; Told back, decoded: every host's queue, as an agent lists it.
+        (let ((told nil))
+          (drover-remote-jobs-later (lambda (hosts) (setq told hosts)))
+          (drover-remote-test-wait (lambda () told) 10)
+          (should (equal (mapcar (lambda (host) (plist-get host :host)) told) '("agent")))
+          (let* ((jobs (plist-get (car told) :jobs))
+                 (recurring (seq-find (lambda (job) (plist-get job :every)) jobs))
+                 (after-turn (seq-find (lambda (job) (plist-get job :turn)) jobs)))
+            (should (length= jobs 4))
+            (should (equal (plist-get recurring :every) "every weekday at 09:00"))
+            (should (> (plist-get recurring :next) (float-time)))
+            (should (equal (plist-get recurring :key) '(remote:agent fake . "s1")))
+            (should (equal (plist-get recurring :prompt) "Do it"))
+            (should (eq (plist-get recurring :status) 'pending))
+            (should (equal (plist-get recurring :by) "agent fake/me on viewer"))
+            (should (< (abs (- (plist-get recurring :created) (float-time))) 60))
+            (should after-turn)))
         ;; Not connected: a failure, never a signal.
         (spyglass-connection-drop-stream (drover-remote--peer-connection peer))
         (drover-remote-test-wait (lambda () (not (eq (drover-remote--peer-state peer) 'open))) 10)
-        (should (plist-get (schedule "in 1h") :failure))))))
+        (should (plist-get (schedule "in 1h") :failure))
+        (let ((told nil))
+          (drover-remote-jobs-later (lambda (hosts) (setq told hosts)))
+          (drover-remote-test-wait (lambda () told) 10)
+          (should (equal (plist-get (car told) :failure) "not connected")))))))
 
 (ert-deftest drover-remote-test-watch-travels ()
   "A watch travels as waiting on each event, what it concerns told; peers are not offered such events."

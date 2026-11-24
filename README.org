@@ -1066,7 +1066,7 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 | =drover-session-archive=   | Archives a session                                                                                                                             |
 | =drover-schedule=          | Has drover send a session a prompt later, from its own host's queue: once, recurring, after its turn or after an event (see [[*Scheduled prompts][Scheduled prompts]]) |
 | =drover-schedule-fire=     | Tells drover an event happened, by name, which sends the prompts waiting for it, or cancels them                                               |
-| =drover-scheduled=         | Lists the scheduled prompts: when each goes, its status, its session and who scheduled it                                                      |
+| =drover-scheduled=         | Lists the scheduled prompts of every host: when each goes, its status, its host and session, and who scheduled it                              |
 | =drover-prompts=           | Returns the prompts you sent over a period, every host's, oldest first (see [[*Prompts][Prompts]])                                                           |
 | =drover-job=               | Returns the answer of a job a tool answered with, for clients that cannot wait                                                                 |
 

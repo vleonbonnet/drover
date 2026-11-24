@@ -6485,6 +6485,96 @@ on this host's clock or nil, or (:failure WHY)."
            (funcall callback (drover-remote--agent-scheduled peer reply error offset))))
        (+ (float-time) drover-remote-request-timeout))))))
 
+(defun drover-remote--decode-job (name data offset)
+  "Return DATA, a scheduled prompt the peer NAME told, as a plist, or nil.
+Its times are moved OFFSET seconds, NAME's clock being that far ahead.
+The plist holds :host, :id, :key, the session's key here or nil,
+:link, :title, :prompt, its :length, :status, :error, :by, :created and
+:sent, times of this host's clock, and :next, :every, :turn, :after,
+the event's label, and :argument, what it concerns, as it waits."
+  (when (and (consp data) (keywordp (car data)))
+    (let* ((key (drover-remote--key (plist-get data :k)))
+           (w (and (consp (plist-get data :w)) (keywordp (car (plist-get data :w))) (plist-get data :w)))
+           (status (drover-remote--symbol (plist-get data :st))))
+      (list :host name
+            :id (drover-remote--line (plist-get data :id) 100)
+            :key (and key (drover-remote-session-key name key))
+            :link (drover-remote--line (plist-get data :ln) 300)
+            :title (drover-remote--line (plist-get data :ti))
+            :prompt (drover-remote--text (plist-get data :p))
+            :length (drover-remote--number (plist-get data :pn))
+            :status status
+            :error (drover-remote--line (plist-get data :er))
+            :by (drover-remote--line (plist-get data :by) 200)
+            :created (drover-remote--time (plist-get data :c) offset)
+            :sent (drover-remote--time (plist-get data :sa) offset)
+            :next (drover-remote--time (plist-get w :at) offset)
+            :every (drover-remote--line (plist-get w :ev) 200)
+            :turn (eq (plist-get w :turn) t)
+            :after (drover-remote--line (plist-get w :after) 200)
+            :argument (drover-remote--line (plist-get w :ar) 200)))))
+
+(defun drover-remote-jobs-later (callback &optional seconds)
+  "Ask every peer its queue of scheduled prompts, and call CALLBACK once told.
+Nothing is waited for: CALLBACK gets, once, a list of plists, one by
+peer, of :host, its name, :label, and :jobs, the prompts as
+`drover-remote--decode-job' gives them, the newest first, or
+:failure, why it told none.  A peer has SECONDS, by default
+`drover-remote-request-timeout', to answer.  Return a function
+stopping the asking, after which CALLBACK is not called."
+  (let* ((peers (seq-remove #'drover-remote--viewer-p (drover-remote--peers)))
+         (seconds (or seconds drover-remote-request-timeout))
+         (entries (mapcar (lambda (peer)
+                            (list (drover-remote--peer-name peer) :label (drover-remote--label peer)))
+                          peers))
+         (pending (length peers))
+         (finished nil)
+         (timer nil))
+    (cl-labels
+        ((finish ()
+           (unless finished
+             (setq finished t)
+             (when timer (cancel-timer timer))
+             (funcall callback
+                      (mapcar (lambda (entry)
+                                (append (list :host (car entry)) (cdr entry)
+                                        (unless (or (plist-member (cdr entry) :jobs)
+                                                    (plist-member (cdr entry) :failure))
+                                          (list :failure (format "did not answer within %d seconds" seconds)))))
+                              entries))))
+         (settle (name &rest properties)
+           (let ((entry (assoc name entries)))
+             (unless (or finished (plist-member (cdr entry) :jobs) (plist-member (cdr entry) :failure))
+               (setcdr entry (append (cdr entry) properties))
+               (when (zerop (cl-decf pending))
+                 (finish))))))
+      (if (null peers)
+          (progn (setq finished t) (funcall callback nil))
+        (setq timer (run-at-time seconds nil (lambda () (drover-with-reporting "remote jobs" (finish)))))
+        (dolist (peer peers)
+          (let ((name (drover-remote--peer-name peer)))
+            (cond
+             ((not (eq (drover-remote--peer-state peer) 'open))
+              (settle name :failure "not connected"))
+             ((not (drover-remote--capable-p peer "jobs"))
+              (settle name :failure "it runs an older drover, which tells no scheduled prompt"))
+             (t
+              (let* ((connection (drover-remote--peer-connection peer))
+                     (offset (or (and connection (spyglass-connection-clock-offset connection)) 0)))
+                (drover-remote--request
+                 peer (list :op "jobs")
+                 (lambda (reply error)
+                   (drover-with-reporting "remote jobs"
+                     (let ((jobs (plist-get reply :jobs)))
+                       (cond
+                        (error (settle name :failure error))
+                        ((not (vectorp jobs)) (settle name :failure "it told no scheduled prompts"))
+                        (t (settle name :jobs
+                                   (seq-keep (lambda (data) (drover-remote--decode-job name data offset))
+                                             (seq-take jobs drover-remote-jobs-limit))))))))
+                 (+ (float-time) seconds))))))))
+      (lambda () (setq finished t) (when timer (cancel-timer timer))))))
+
 (defun drover-remote--report-later (title)
   "Return the function reporting a session of TITLE started in the background."
   (lambda (result)

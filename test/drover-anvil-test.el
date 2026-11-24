@@ -949,6 +949,54 @@ Core."
             (funcall answer (list :failure "cannot read “soon” as a time"))
             (should (string-match-p "soon" (cadr (should-error (drover-anvil--tool-job job)))))))))))
 
+(ert-deftest drover-anvil-test-scheduled-on-other-hosts ()
+  "The scheduled prompts of every host are listed together, the newest first, narrowed by host, session and status."
+  (let ((there (list (drover-anvil-test-peer-session "ses_far"))))
+    (drover-anvil-test-with (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me"
+                                                       :directory temporary-file-directory))
+        "me"
+      (drover-anvil-test-with-schedule
+        (drover-anvil-test-with-peer there
+          (drover-backend-changed 'remote:core)
+          (drover-schedule-add (drover-schedule-session-target (car drover-test-sessions))
+                               (time-add (current-time) 3600) "Here.")
+          (cl-letf (((symbol-function 'drover-remote-jobs-later)
+                     (lambda (callback &optional _seconds)
+                       (funcall callback
+                                (list (list :host "core" :label "Core"
+                                            :jobs (list (list :host "core" :id "J1" :key '(remote:core . (opencode . "ses_far"))
+                                                              :title "Core ses_far" :prompt "There." :status 'pending
+                                                              :by "agent x on reaver" :created (+ (float-time) 10)
+                                                              :every "every weekday at 09:00"
+                                                              :next (+ (float-time) 7200))
+                                                        (list :host "core" :id "J2" :status 'sent
+                                                              :created (- (float-time) 10) :after "Emacs restart")))
+                                      (list :host "adept" :label "Adept" :failure "not connected")))
+                       #'ignore)))
+            (let* ((answer (drover-anvil-test-json (drover-anvil--tool-scheduled)))
+                   (listed (alist-get 'scheduled answer)))
+              (should (= (alist-get 'count answer) 3))
+              (should (equal (mapcar (lambda (job) (alist-get 'id job)) listed)
+                             (list "J1" (plist-get (car (drover-schedule--jobs)) :id) "J2")))
+              (let ((far (car listed)))
+                (should (equal (alist-get 'host far) "core"))
+                (should (equal (alist-get 'key far) "remote:core/opencode/ses_far"))
+                (should (equal (alist-get 'when far) "every weekday at 09:00"))
+                (should (equal (alist-get 'by far) "agent x on reaver"))
+                (should (alist-get 'next far)))
+              (should (equal (alist-get 'when (nth 2 listed)) "after the next Emacs restart"))
+              (should (equal (alist-get 'hosts answer)
+                             '(((host . "core") (count . 2)) ((host . "adept") (message . "not connected"))))))
+            (should (equal (mapcar (lambda (job) (alist-get 'id job))
+                                   (alist-get 'scheduled (drover-anvil-test-json
+                                                          (drover-anvil--tool-scheduled "remote:core/opencode/ses_far"))))
+                           '("J1")))
+            (should (equal (mapcar (lambda (job) (alist-get 'id job))
+                                   (alist-get 'scheduled (drover-anvil-test-json (drover-anvil--tool-scheduled nil "sent"))))
+                           '("J2")))
+            (should (= 2 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil nil nil "Core")))))
+            (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil nil nil "local")))))))))))
+
 ;;;; Through Anvil's dispatcher
 
 (defconst drover-anvil-test--anvil (locate-library "anvil-server")
