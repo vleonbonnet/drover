@@ -29,6 +29,7 @@
 (require 'drover-test-helpers)
 (require 'drover-goal)
 (require 'drover-repo)
+(require 'drover-remote-goal)
 (require 'json)
 
 (defvar drover-goal-test-submitted nil
@@ -428,10 +429,114 @@ the queue and the state are fresh, nothing shown, no mode turned on."
       (should (eq (plist-get goal :state) 'stopped))
       (should-error (drover-goal-resume goal) :type 'user-error))))
 
-(ert-deftest drover-goal-test-remote-refused ()
-  "A session of another host gets no goal here."
-  (let ((session (drover-test-session "r1" :host "core" :engine 'claude-code :engine-id "x" :directory "/tmp/")))
-    (should-error (drover-goal-start session :commands '("true")) :type 'user-error)))
+(ert-deftest drover-goal-test-remote-asked-there ()
+  "A goal on a session of another host is asked of that host, which runs it."
+  (let ((session (drover-test-session "r1" :host "core" :engine 'claude-code :engine-id "x" :directory "c:/w/"))
+        (asked nil))
+    (cl-letf (((symbol-function 'drover-remote-goal-set)
+               (lambda (session properties) (setq asked (list (drover-session-id session) properties))
+                 (list :host "core" :id "g1" :state 'waiting))))
+      (should (equal (plist-get (drover-goal-start session :commands '("true") :task "T1") :host) "core"))
+      (should (equal asked '("r1" (:commands ("true") :task "T1")))))))
+
+(defmacro drover-goal-test-with-remote (goals &rest body)
+  "Run BODY with the peer core telling GOALS, a list of goals as decoded here."
+  (declare (indent 1) (debug t))
+  `(let ((drover-remote-goal--peers (make-hash-table :test #'equal))
+         (drover-remote-goal--states (make-hash-table :test #'equal)))
+     (puthash "core" ,goals drover-remote-goal--peers)
+     (cl-letf (((symbol-function 'drover-remote--peers) (lambda () (list 'core-peer)))
+               ((symbol-function 'drover-remote--peer-name) (lambda (_peer) "core")))
+       ,@body)))
+
+(ert-deftest drover-goal-test-remote-shown-and-acted-on ()
+  "The goal another host told shows as its session's, and is acted on there, seen once shown."
+  (let* ((session (drover-test-session "r1" :host "core" :backend 'remote:core :engine 'claude-code :engine-id "x"))
+         (goal (list :host "core" :id "g1" :key (drover-session-key session) :link "agent-session:claude-code/x"
+                     :title "Far" :kind 'check :state 'waiting :iteration 1 :iterations 5 :commands '("make test")
+                     :directory "c:/work/" :started 1.0 :summary "1 follow-up, 3 min" :seen nil))
+         (acted nil) (seen nil))
+    (drover-goal-test-with-remote (list goal)
+      (cl-letf (((symbol-function 'drover-remote-goal-act)
+                 (lambda (goal action) (push action acted) (append (list :state 'paused) goal)))
+                ((symbol-function 'drover-remote-goal-seen) (lambda (goal) (push (plist-get goal :id) seen)))
+                ((symbol-function 'completing-read) (lambda (&rest _) "Pause")))
+        (should (eq (drover-goal-of session) goal))
+        (should (string-match-p "◎ 1/5" (substring-no-properties (drover-goal--list-text session 'column))))
+        (should (string-match-p "Far — waiting for the turn, on core" (drover-goal-describe goal)))
+        (should (string-search "1 follow-up, 3 min" (drover-goal-describe goal)))
+        (drover-goal-dispatch-session session)
+        (should (equal acted '(pause)))
+        (should (equal seen '("g1")))
+        (should-error (drover-goal-resume goal) :type 'user-error)))))
+
+(defmacro drover-goal-test-with-heading (&rest body)
+  "Run BODY with `marker' at the heading of task T1 in an Org buffer of its own."
+  (declare (indent 0) (debug t))
+  `(with-temp-buffer
+     (org-mode)
+     (insert "* TODO Fix it\n:PROPERTIES:\n:ID: T1\n:END:\nThe body.\n")
+     (goto-char (point-min))
+     (let ((marker (point-marker)))
+       (cl-letf (((symbol-function 'drover-task--ensure-id) (lambda (_marker) "T1"))
+                 ((symbol-function 'drover-task-sessions) #'ignore)
+                 ((symbol-function 'drover-goal--confirm)
+                  (lambda (_title directory checks setup baseline _marker)
+                    (list checks setup (and baseline directory t)))))
+         ,@body))))
+
+(ert-deftest drover-goal-test-heading-on-another-host ()
+  "A task working on another host gets a session there under the goal, its checks read there."
+  (drover-goal-test-with-heading
+    (let ((asked nil) (checked nil))
+      (cl-letf (((symbol-function 'drover-task-read) (lambda (_marker _id) (list :id "T1" :title "Fix it")))
+                ((symbol-function 'drover-task-attempt-plan)
+                 (lambda (_marker _info)
+                   (list :id "T1" :host "core" :kind 'worktree :repo "test/repo" :slug "fix-it"
+                         :directory "c:/wt/fix-it/" :worktree "c:/wt/fix-it/" :branch "fix-it")))
+                ((symbol-function 'drover-remote-goal-checks)
+                 (lambda (name &rest where)
+                   (setq checked (cons name where))
+                   (list :directory "c:/wt/fix-it/" :checks (list (list :command "make test" :source "Makefile"))
+                         :setup nil :fresh t)))
+                ((symbol-function 'drover-task--ask-there)
+                 (lambda (host request goal _callback) (setq asked (list host request goal)))))
+        (drover-goal-set-on-heading marker)
+        (should (equal checked '("core" :directory "c:/wt/fix-it/")))
+        (pcase-let ((`(,host ,request ,goal) asked))
+          (should (equal host "core"))
+          (should (equal (plist-get request :kind) "session"))
+          (should (equal (plist-get request :worktree) "c:/wt/fix-it/"))
+          (should (string-search "The body." (plist-get request :body)))
+          (should (equal (plist-get goal :commands) '("make test")))
+          (should (equal (plist-get goal :task) "T1"))
+          (should (eq (plist-get goal :baseline) t)))))))
+
+(ert-deftest drover-goal-test-heading-started-on-another-host ()
+  "With a prefix, a task not started yet starts on the host asked, its session under the goal there."
+  (drover-goal-test-with-heading
+    (let ((started nil))
+      (cl-letf (((symbol-function 'drover-task-read)
+                 (lambda (_marker _id) (list :id "T1" :title "Fix it" :goal-checks "make check")))
+                ((symbol-function 'drover-task-attempt-plan) #'ignore)
+                ((symbol-function 'drover-task--plan-for)
+                 (lambda (_marker ask) (and ask (list :id "T1" :host "core" :kind 'worktree :repo "test/repo"))))
+                ((symbol-function 'drover-task--start-there)
+                 (lambda (_marker plan goal) (setq started (list plan goal)))))
+        (drover-goal-set-on-heading marker t)
+        (pcase-let ((`(,plan ,goal) started))
+          (should (equal (plist-get plan :host) "core"))
+          (should (equal (plist-get goal :commands) '("make check")))
+          (should (equal (plist-get goal :sources) '("DROVER_GOAL_CHECKS on the task's heading")))
+          (should (equal (plist-get goal :task) "T1")))))))
+
+(ert-deftest drover-goal-test-attempt-elsewhere-named-there ()
+  "The place of a task on another host keeps that host's name for it."
+  (let ((plan (drover-task--plan-of-attempt (list :id "T1" :title "x")
+                                            (list :host "core" :repo "nowhere" :directory "c:/wt/x"
+                                                  :worktree "c:/wt/x"))))
+    (should (equal (plist-get plan :directory) "c:/wt/x/"))
+    (should (equal (plist-get plan :worktree) "c:/wt/x/"))))
 
 ;;;; Criterion goals
 

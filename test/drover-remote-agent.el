@@ -572,6 +572,7 @@ noted, and their cancellations."
            (when-let* ((session (gethash id drover-remote-agent--sessions)))
              (let ((copy (copy-sequence session)))
                (when (plist-get args :title) (setf (drover-session-title copy) (plist-get args :title)))
+               (when (plist-get args :directory) (setf (drover-session-directory copy) (plist-get args :directory)))
                (when (plist-get args :status)
                  (setf (drover-session-status copy) (intern (plist-get args :status))))
                (setf (drover-session-updated copy) (float-time))
@@ -641,6 +642,15 @@ noted, and their cancellations."
          (funcall reply (list :ok t))))
       ("calls"
        (funcall reply (list :calls (vconcat (reverse drover-remote-agent--calls)))))
+      ("goals"
+       ;; Its goals as it keeps them: identifier, state, who set them, the peer's task, its own.
+       (require 'drover-goal)
+       (funcall reply (list :goals (vconcat (mapcar (lambda (goal)
+                                                      (vector (plist-get goal :id) (symbol-name (plist-get goal :state))
+                                                              (or (plist-get goal :by) :false)
+                                                              (or (plist-get goal :peer-task) :false)
+                                                              (or (plist-get goal :task) :false)))
+                                                    (drover-goal--goals))))))
       ("hands-on-ret"
        ;; Terminal ID tells, as a claude-code-ide terminal does, that RET
        ;; typed in a peer's mirror hands its session its turn; the peer
@@ -1071,6 +1081,10 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
                                         drover-remote-peers)))
     (add-hook 'spyglass-error-functions
               (lambda (_connection message) (drover-remote-agent--say "spyglass: %s" message)))
+    ;; How a repository works is read from it: no model is asked here.
+    (require 'drover-repo)
+    (setopt drover-repo-generate-function (lambda (_prompt _system callback)
+                                            (funcall callback (list :failure "no model in tests"))))
     (drover-remote-agent--register)
     (when (getenv "DROVER_AGENT_OPENCODE")
       (drover-remote-agent--opencode))
@@ -1078,9 +1092,6 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
       ;; A repository whose tasks it starts and finishes for its peers,
       ;; in sessions of its fake backend.
       (require 'drover-task)
-      ;; How the repository works is read from it: no model is asked here.
-      (setq drover-repo-generate-function (lambda (_prompt _system callback)
-                                            (funcall callback (list :failure "no model in tests"))))
       (setq drover-task-repositories `(("test/repo" :checkout ,checkout))
             drover-task-worktree-root (expand-file-name "worktrees/" dir)
             drover-task-harness '(:backend fake :engine fake)))

@@ -130,6 +130,74 @@ process still uses."
           (should (string-match-p "act access, which finishes no task" error))
           (should (file-directory-p worktree)))))))
 
+(ert-deftest drover-task-remote-test-start-under-a-goal ()
+  "Another host starts a task's session under a goal it runs, and another session in its place; a goal takes full access."
+  (require 'drover-remote-goal)
+  (drover-remote-test-with nil
+    (drover-task-remote-test-with-repo
+      (with-environment-variables (("DROVER_AGENT_ACCESS" "full") ("DROVER_AGENT_TASKS" checkout)
+                                   ("DROVER_AGENT_LINKABLE" "1"))
+        (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted (drover-remote--peer "agent")) 'full)))
+      (let* ((goal (drover-remote-goal-wire-properties (list :commands '("test -f README") :sources '("given")
+                                                             :baseline t :task "T4-GOAL")))
+             (reply (pcase-let ((`(,reply ,error)
+                                 (drover-task-remote-test-ask
+                                  (list :kind "start" :task "T4-GOAL" :title "Task t4-goal" :repo "test/repo"
+                                        :mode "worktree" :slug "t4-goal" :jira :false :base "fresh" :carry :false
+                                        :body "Do it." :goal goal))))
+                      (should-not error)
+                      (should-not (plist-get reply :failure))
+                      reply))
+             (worktree (plist-get reply :worktree)))
+        (should (stringp (plist-get reply :goal)))
+        (should (vectorp (plist-get reply :key)))
+        ;; Its first prompt tells the task, then the goal.
+        (let ((prompt (nth 2 (car (drover-remote-test-calls "prompt")))))
+          (should (string-match-p "id:T4-GOAL" prompt))
+          (should (string-search "test -f README" prompt)))
+        ;; The goal is the agent's, for this host's task, its baseline run there.
+        (let ((there (seq-find (lambda (entry) (equal (aref entry 0) (plist-get reply :goal)))
+                               (plist-get (drover-remote-test-command "goals") :goals))))
+          (should there)
+          (should (equal (aref there 3) "T4-GOAL"))
+          (should (eq (aref there 4) :false))
+          (should (member (aref there 1) '("setup" "waiting"))))
+        ;; Another session in its place, under a goal too.
+        (pcase-let ((`(,again ,error)
+                     (drover-task-remote-test-ask (list :kind "session" :task "T4-GOAL" :title "Task t4-goal"
+                                                        :repo "test/repo" :worktree worktree :in-place :false
+                                                        :branch "t4-goal" :slug "t4-goal" :jira :false
+                                                        :body "Again." :goal goal))))
+          (should-not error)
+          (should (stringp (plist-get again :goal)))
+          (should (equal (nth 1 (car (drover-remote-test-calls "create"))) worktree)))
+        ;; Never in the place of another task, nor without one.
+        (pcase-let ((`(,reply ,error)
+                     (drover-task-remote-test-ask (list :kind "session" :task "T9" :title "x" :repo "test/repo"
+                                                        :worktree worktree :in-place :false))))
+          (should-not reply)
+          (should (string-match-p "serves no task T9" error)))
+        (pcase-let ((`(,reply ,error)
+                     (drover-task-remote-test-ask (list :kind "session" :task "T4-GOAL" :title "x" :repo "test/repo"
+                                                        :worktree :false :in-place :false))))
+          (should-not reply)
+          (should (string-match-p "no place named" error)))))))
+
+(ert-deftest drover-task-remote-test-goal-takes-full-access ()
+  "A peer of act access starts a task's session, but none under a goal."
+  (drover-remote-test-with nil
+    (drover-task-remote-test-with-repo
+      (with-environment-variables (("DROVER_AGENT_ACCESS" "act") ("DROVER_AGENT_TASKS" checkout))
+        (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted (drover-remote--peer "agent")) 'act)))
+      (pcase-let ((`(,reply ,error)
+                   (drover-task-remote-test-ask (list :kind "start" :task "T5" :title "x" :repo "test/repo"
+                                                      :mode "worktree" :slug "t5" :base "fresh"
+                                                      :goal (list :commands ["true"])))))
+        (should-not reply)
+        (should (string-match-p "act access: a goal runs its checks here, which takes full" error))))))
+
 (ert-deftest drover-task-remote-test-older-peer ()
   "A peer whose drover has no tasks is not asked, and says why."
   (drover-remote-test-with nil

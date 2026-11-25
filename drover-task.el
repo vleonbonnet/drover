@@ -73,6 +73,8 @@
 (declare-function drover-prompt-org-task "drover-prompt" ())
 (declare-function drover-remote-ask-task "drover-remote" (name request callback &optional seconds))
 (declare-function drover-remote-open-started "drover-remote" (name result &optional hidden))
+(declare-function drover-remote-goal-task "drover-remote-goal" (name request goal callback))
+(declare-function drover-remote-goal-task-start "drover-remote-goal" (peer-name data info plan then))
 (declare-function sqlite-select "sqlite.c" (db query &optional values return-type))
 (declare-function sqlite-open "sqlite.c" (&optional file readonly disable-trusted-schema))
 (declare-function sqlite-close "sqlite.c" (db))
@@ -1444,16 +1446,18 @@ that function later, with the plan completed, or never."
                               (drover-task--made-note plan))
        (drover-task-read marker)))))
 
-(defun drover-task-start-heading (marker before-session)
-  "Start the task of the heading at MARKER here, calling BEFORE-SESSION first.
-Its place is planned as `drover-task-start' plans it, asking what is
-left to decide, then made; BEFORE-SESSION is called as
+(defun drover-task-start-heading (marker before-session &optional plan goal)
+  "Start the task of the heading at MARKER, calling BEFORE-SESSION first.
+Its place is PLAN, else planned as `drover-task-start' plans it, asking
+what is left to decide, then made; BEFORE-SESSION is called as
 `drover-task--start-here' says, before its session starts.  A task its
-heading places on another host is refused: that host starts it."
-  (let ((plan (drover-task--plan-for marker nil)))
-    (when (plist-get plan :host)
-      (user-error "Task %s starts on %s" (plist-get plan :title) (plist-get plan :host)))
-    (drover-task--start-here marker plan before-session)))
+plan places on another host is started there, its session under GOAL,
+the properties of `drover-goal-start', when given, BEFORE-SESSION not
+called: that host makes its place, and runs its goal."
+  (let ((plan (or plan (drover-task--plan-for marker nil))))
+    (if (plist-get plan :host)
+        (drover-task--start-there marker plan goal)
+      (drover-task--start-here marker plan before-session))))
 
 (defun drover-task-attempt-plan (marker info)
   "Return the plan of the place the task INFO tells of, at MARKER, works in.
@@ -1464,8 +1468,10 @@ of `drover-task-start-session', with the heading's body."
             (list :body (with-current-buffer (marker-buffer marker)
                           (org-with-point-at marker (drover-task-org-body)))))))
 
-(defun drover-task--start-there (marker plan)
-  "Have the host of PLAN start the task at MARKER: its place, a session."
+(defun drover-task--start-there (marker plan &optional goal)
+  "Have the host of PLAN start the task at MARKER: its place, a session.
+With GOAL, the properties of `drover-goal-start', the session starts
+under that goal, which the host runs (see `drover-remote-goal')."
   (require 'drover-remote)
   (let* ((host (plist-get plan :host))
          (title (plist-get plan :title))
@@ -1479,33 +1485,48 @@ of `drover-task-start-session', with the heading's body."
                         :body (or (plist-get plan :body) :false))
                   (drover-task--request-overrides plan '(:placement :setup :target)))))
     (message "Starting %s on %s…" title host)
-    (drover-remote-ask-task
-     host request
-     (lambda (reply error)
-       (drover-with-reporting "task start"
-         (let* ((field (lambda (key) (drover-task--remote-string (and (listp reply) (plist-get reply key)) 1024)))
-                (made (or (funcall field :worktree) (funcall field :directory))))
-           (when made
-             (let ((there (list :kind (plist-get plan :kind) :worktree (funcall field :worktree)
-                                :directory (funcall field :directory) :branch (funcall field :branch)
-                                :base (or (funcall field :base) "") :base-ref (or (funcall field :base-ref) "its base")
-                                :repo (plist-get plan :repo))))
-               (drover-task-org-write marker (drover-task--attempt-properties there host)
-                                      (drover-task--made-note there host))
-               (drover-task-read marker)))
-           (cond
-            (error (drover-warn "Task %s did not start on %s: %s" title host error))
-            ((funcall field :failure)
-             (drover-warn "Task %s on %s: %s" title host (drover-bound-line (funcall field :failure))))
-            (t
-             (when-let* ((key (plist-get reply :key))
-                         ((and (vectorp key) (= (length key) 2)
-                               (stringp (aref key 0)) (string-match-p "\\`[a-z][a-z0-9-]\\{0,40\\}\\'" (aref key 0))
-                               (or (stringp (aref key 1)) (integerp (aref key 1))))))
-               (drover-task-note-session (cons (intern (concat "remote:" host)) (cons (intern (aref key 0)) (aref key 1)))
-                                         (plist-get plan :id)))
-             (drover-message "Task %s started on %s" title host))))))
-     (+ drover-task-setup-timeout 120))))
+    (drover-task--ask-there host request goal
+                            (lambda (reply error)
+                              (drover-task--started-there marker plan host reply error goal)))))
+
+(defun drover-task--ask-there (host request goal callback)
+  "Ask HOST REQUEST about a task, its session under GOAL if any, for CALLBACK.
+GOAL holds the properties of `drover-goal-start'.  CALLBACK gets (REPLY
+ERROR) once."
+  (if goal
+      (progn
+        (require 'drover-remote-goal)
+        (drover-remote-goal-task host request goal callback))
+    (drover-remote-ask-task host request callback (+ drover-task-setup-timeout 120))))
+
+(defun drover-task--started-there (marker plan host reply error goal)
+  "Note what HOST answered, REPLY or ERROR, of the task PLAN at MARKER it starts.
+Where it works goes on the heading, its session is noted as the task's;
+GOAL, non-nil, tells the session runs under a goal there."
+  (drover-with-reporting "task start"
+    (let* ((title (plist-get plan :title))
+           (field (lambda (key) (drover-task--remote-string (and (listp reply) (plist-get reply key)) 1024)))
+           (made (or (funcall field :worktree) (funcall field :directory))))
+      (when made
+        (let ((there (list :kind (plist-get plan :kind) :worktree (funcall field :worktree)
+                           :directory (funcall field :directory) :branch (funcall field :branch)
+                           :base (or (funcall field :base) "") :base-ref (or (funcall field :base-ref) "its base")
+                           :repo (plist-get plan :repo))))
+          (drover-task-org-write marker (drover-task--attempt-properties there host)
+                                 (drover-task--made-note there host))
+          (drover-task-read marker)))
+      (cond
+       (error (drover-warn "Task %s did not start on %s: %s" title host error))
+       ((funcall field :failure)
+        (drover-warn "Task %s on %s: %s" title host (drover-bound-line (funcall field :failure))))
+       (t
+        (when-let* ((key (plist-get reply :key))
+                    ((and (vectorp key) (length= key 2)
+                          (stringp (aref key 0)) (string-match-p "\\`[a-z][a-z0-9-]\\{0,40\\}\\'" (aref key 0))
+                          (or (stringp (aref key 1)) (integerp (aref key 1))))))
+          (drover-task-note-session (cons (intern (concat "remote:" host)) (cons (intern (aref key 0)) (aref key 1)))
+                                    (plist-get plan :id)))
+        (drover-message "Task %s started on %s%s" title host (if goal ", under a goal it runs" "")))))))
 
 ;;;###autoload
 (defun drover-task-start (&optional ask)
@@ -1553,9 +1574,17 @@ only writes a prompt for the task."
       (car attempts))))
 
 (defun drover-task--plan-of-attempt (info attempt)
-  "Return the plan of the task INFO tells of, working as ATTEMPT does."
+  "Return the plan of the task INFO tells of, working as ATTEMPT does.
+The places of an attempt of another host are named as that host names
+them, never as this host's file names."
   (let* ((entry (drover-task-repository (plist-get attempt :repo)))
-         (checkout (and entry (drover-task-checkout entry))))
+         (checkout (and entry (drover-task-checkout entry)))
+         (here (let ((host (plist-get attempt :host))) (or (null host) (drover-host-local-p host))))
+         (place (lambda (path)
+                  (cond ((not path) nil)
+                        (here (file-name-as-directory (drover-task-canonical path)))
+                        ((string-suffix-p "/" path) path)
+                        (t (concat path "/"))))))
     (list :id (plist-get info :id) :title (plist-get info :title) :jira (plist-get info :jira)
           :slug (drover-task-slug (plist-get info :title) (plist-get info :jira))
           :target (or (plist-get (drover-task--overrides (plist-get info :overrides)) :target)
@@ -1566,10 +1595,8 @@ only writes a prompt for the task."
                   (if entry 'in-place 'folder))
           :repo (plist-get attempt :repo) :entry entry
           :checkout checkout
-          :directory (and (plist-get attempt :directory)
-                          (file-name-as-directory (drover-task-canonical (plist-get attempt :directory))))
-          :worktree (and (plist-get attempt :worktree)
-                         (file-name-as-directory (drover-task-canonical (plist-get attempt :worktree))))
+          :directory (funcall place (plist-get attempt :directory))
+          :worktree (funcall place (plist-get attempt :worktree))
           :branch (plist-get attempt :branch) :base (plist-get attempt :base)
           :base-ref (or (plist-get attempt :branch) "its base")
           :host (plist-get attempt :host) :pr (plist-get attempt :pr))))
@@ -2280,11 +2307,12 @@ others, with the task each serves, and whether it is locked."
   (and (stringp value) (not (string-empty-p value))
        (if (and limit (> (length value) limit)) (substring value 0 limit) value)))
 
-(defun drover-task--remote-start (message reply)
-  "Start for a peer the task MESSAGE asks, answering through REPLY.
+(defun drover-task--remote-start (peer message reply)
+  "Start for PEER the task MESSAGE asks, answering through REPLY.
 Its repository is one of `drover-task-repositories' with a checkout
 here; its place is made as here, in no window, and a session started
-there, in none either.  The answer tells where it works."
+there, in none either, under the goal MESSAGE's :goal asks, if any.
+The answer tells where it works."
   (let* ((id (drover-task--remote-string (plist-get message :task) 200))
          (title (drover-task--remote-string (plist-get message :title) 300))
          (entry (drover-task-repository (drover-task--remote-string (plist-get message :repo) 200)))
@@ -2306,11 +2334,11 @@ there, in none either.  The answer tells where it works."
        checkout
        (lambda (facts)
          (drover-with-reporting "remote task start"
-				(drover-task--remote-prepare message reply entry checkout mode slug base id title
+				(drover-task--remote-prepare peer message reply entry checkout mode slug base id title
 							     (drover-task--how facts (drover-task--message-overrides message))))))))))
 
-(defun drover-task--remote-prepare (message reply entry checkout mode slug base id title how)
-  "Make the place MESSAGE asks, for a peer, then a session there, telling REPLY.
+(defun drover-task--remote-prepare (peer message reply entry checkout mode slug base id title how)
+  "Make the place MESSAGE asks, for PEER, then a session there, telling REPLY.
 Of the repository of ENTRY at CHECKOUT, in MODE, named SLUG from BASE,
 for the task ID of TITLE; HOW is how the repository works (see
 `drover-task--how'), read here, as the peer's heading overrides it."
@@ -2337,15 +2365,66 @@ for the task ID of TITLE; HOW is how the repository works (see
 				(cond
 				 ((and why (not (plist-get plan :made)) (eq mode 'worktree)) (funcall reply nil why))
 				 (why (funcall reply (append (list :failure why) made)))
-				 (t (drover-task-start-session
-				     plan t
-				     (lambda (session)
-				       (if (stringp session)
-					   (funcall reply (append (list :failure (concat "no session started: " session)) made))
-					 (funcall reply (append (list :key (vector (symbol-name (drover-session-backend session))
-										   (drover-session-id session))
-								      :title (or (drover-session-title session) :false))
-								made)))))))))))))
+				 (t (drover-task--remote-begin peer message plan made reply)))))))))
+
+(defun drover-task--remote-begin (peer message plan made reply)
+  "Start the session of PLAN for PEER, under MESSAGE's :goal if any, telling REPLY.
+MADE is what the answer tells of the place, a plist."
+  (let ((goal (plist-get message :goal))
+        (answer (lambda (session goal)
+                  (if (stringp session)
+                      (funcall reply (append (list :failure (concat "no session started: " session)) made))
+                    (funcall reply (append (list :key (vector (symbol-name (drover-session-backend session))
+                                                              (drover-session-id session))
+                                                 :title (or (drover-session-title session) :false)
+                                                 :goal (or (plist-get goal :id) :false))
+                                           made))))))
+    (if (and (consp goal) (keywordp (car goal)))
+        (progn
+          (require 'drover-remote-goal)
+          (drover-remote-goal-task-start peer goal (list :id (plist-get plan :id) :title (plist-get plan :title))
+                                         (append (list :hidden t) plan)
+                                         (lambda (session goal)
+                                           (drover-with-reporting "remote task goal"
+                                             (funcall answer session goal)))))
+      (drover-task-start-session plan t (lambda (session) (funcall answer session nil))))))
+
+(defun drover-task--remote-continue (peer message reply)
+  "Start for PEER a session in the place of a task of this host, telling REPLY.
+MESSAGE names the task, its repository of `drover-task-repositories',
+and its place: a worktree of that repository's checkout here whose
+marker names the task, or the checkout itself, for a task working in
+place.  The session starts in no window, under MESSAGE's :goal if
+any."
+  (let* ((id (drover-task--remote-string (plist-get message :task) 200))
+         (title (drover-task--remote-string (plist-get message :title) 300))
+         (entry (drover-task-repository (drover-task--remote-string (plist-get message :repo) 200)))
+         (checkout (and entry (drover-task-checkout entry)))
+         (worktree (let ((path (drover-task--remote-string (plist-get message :worktree) 1024)))
+                     (and path (file-name-absolute-p path) (file-name-as-directory (drover-task-canonical path)))))
+         (in-place (eq (plist-get message :in-place) t))
+         (marker (and worktree (file-directory-p worktree) (drover-task-git-read-marker worktree))))
+    (cond
+     ((not (and id title)) (funcall reply nil "no task named"))
+     ((not (and entry checkout (file-directory-p checkout)))
+      (funcall reply nil (format "no checkout of %s here" (plist-get message :repo))))
+     ((and worktree (not (file-directory-p worktree))) (funcall reply nil (format "no worktree %s here" worktree)))
+     ((and worktree (not (equal (plist-get marker :id) id)))
+      (funcall reply nil (format "%s serves no task %s here" worktree id)))
+     ((and worktree (not (drover-task-same-file-p (drover-task-git-main-checkout worktree) checkout)))
+      (funcall reply nil (format "%s is no worktree of %s here" worktree (car entry))))
+     ((not (or worktree in-place)) (funcall reply nil "no place named"))
+     (t
+      (drover-task--remote-begin
+       peer message
+       (list :id id :title (drover-bound-line title) :jira (drover-task--remote-string (plist-get message :jira) 40)
+             :body (and (stringp (plist-get message :body))
+                        (drover-bound-text (plist-get message :body) 400 drover-task-org-body-limit))
+             :slug (drover-task--remote-string (plist-get message :slug) 100)
+             :kind (if worktree 'worktree 'in-place) :repo (car entry) :entry entry :checkout checkout
+             :worktree worktree :directory (file-name-as-directory (or worktree checkout))
+             :branch (drover-task--remote-string (plist-get message :branch) 200) :hidden t)
+       nil reply)))))
 
 (defun drover-task--remote-finish (message reply)
   "Finish for a peer the task MESSAGE asks, answering through REPLY.
@@ -2426,14 +2505,23 @@ changes are told back unless the peer said to discard them."
 
 (defun drover-task-remote-answer (peer access message reply)
   "Answer the request MESSAGE of PEER, of ACCESS, about tasks, through REPLY.
-Its :kind is \"start\", for an access starting sessions, `act' or
-`full', or \"finish\", for `full' access.  REPLY takes the answer, or
-nil and why it is refused."
+Its :kind is \"start\", starting a task, or \"session\", a session in
+the place of one, for an access starting sessions, `act' or `full', or
+\"finish\", for `full' access.  A session under a goal (:goal) takes
+`full' access: its checks run commands here.  REPLY takes the answer,
+or nil and why it is refused."
   (pcase (plist-get message :kind)
+    ((and (or "start" "session") (guard (let ((goal (plist-get message :goal)))
+                                          (and goal (not (eq goal :false)) (not (eq access 'full))))))
+     (funcall reply nil (format "%s has %s access: a goal runs its checks here, which takes full" peer access)))
     ("start"
      (if (memq access '(act full))
-         (drover-task--remote-start message reply)
+         (drover-task--remote-start peer message reply)
        (funcall reply nil (format "%s has %s access, which starts no task" peer access))))
+    ("session"
+     (if (memq access '(act full))
+         (drover-task--remote-continue peer message reply)
+       (funcall reply nil (format "%s has %s access, which starts no session" peer access))))
     ("finish"
      (if (eq access 'full)
          (drover-task--remote-finish message reply)

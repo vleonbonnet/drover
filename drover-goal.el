@@ -53,9 +53,9 @@
 ;; armed, and come back paused after Emacs restarts; each logs its
 ;; iterations there, bounded.  The list shows a goal by its glyph, the
 ;; follow-ups sent of their limit and how it stands (the field `goal'),
-;; and the heading of a goal's task gets a LOGBOOK note as it ends.  A session
-;; of another host is that host's to drive: goals run on the host owning
-;; the session.
+;; and the heading of a goal's task gets a LOGBOOK note as it ends.  A goal
+;; on a session of another host runs there, on the host owning the
+;; session, which this one asks and follows (`drover-remote-goal').
 
 ;;; Code:
 
@@ -77,6 +77,17 @@
   (load "drover-core" nil t))
 
 (declare-function drover-usage-session-totals "drover-usage" (session))
+(declare-function drover-remote-goal-of "drover-remote-goal" (session))
+(declare-function drover-remote-goal-goals "drover-remote-goal" ())
+(declare-function drover-remote-goal-find "drover-remote-goal" (name id))
+(declare-function drover-remote-goal-set "drover-remote-goal" (session properties))
+(declare-function drover-remote-goal-act "drover-remote-goal" (goal action))
+(declare-function drover-remote-goal-seen "drover-remote-goal" (goal))
+(declare-function drover-remote-goal-checks "drover-remote-goal" (name &rest where))
+(declare-function drover-remote-goal-task "drover-remote-goal" (name request goal callback))
+(declare-function drover-remote-goal-follow-all "drover-remote-goal" ())
+(declare-function drover-remote--wire-key "drover-remote" (session))
+(declare-function drover-task--start-there "drover-task" (marker plan &optional goal))
 (declare-function drover-usage-sum-cost "drover-usage" (sum))
 (defvar drover-list-goal-function)
 
@@ -269,6 +280,16 @@ They are sent first, before the end of the output."
   "Return the goal ID, or nil."
   (seq-find (lambda (goal) (equal (plist-get goal :id) id)) (drover-goal--goals)))
 
+(defun drover-goal--plist-without (plist keys)
+  "Return PLIST without the properties KEYS names."
+  (cl-loop for (key value) on plist by #'cddr
+           unless (memq key keys) nconc (list key value)))
+
+(defun drover-goal--remote-p (goal)
+  "Return the host running GOAL when it is another host's, else nil.
+Such a goal is that host's, as `drover-remote-goal' tells it here."
+  (plist-get goal :host))
+
 (defun drover-goal-load ()
   "Read the goals once; those that ran come back paused.
 A file that does not read is told of, and never written over."
@@ -337,10 +358,13 @@ Never over a file that did not read."
                    (append (drover-known-sessions) (drover-archived-live-sessions))))))
 
 (defun drover-goal-of (session)
-  "Return the latest goal of SESSION, or nil."
-  (when-let* ((key (drover-session-engine-key session)))
-    (seq-find (lambda (goal) (equal (drover-goal--key goal) key))
-              (and (drover-goal--table-loaded (drover-goal--state)) (drover-goal--goals)))))
+  "Return the latest goal of SESSION, or nil.
+Of a session of another host, the goal that host told, its own."
+  (if (drover-session-host session)
+      (and (featurep 'drover-remote-goal) (drover-remote-goal-of session))
+    (when-let* ((key (drover-session-engine-key session)))
+      (seq-find (lambda (goal) (equal (drover-goal--key goal) key))
+                (and (drover-goal--table-loaded (drover-goal--state)) (drover-goal--goals))))))
 
 (defun drover-goal--target (session)
   "Return where the follow-ups of a goal on SESSION go, for the queue."
@@ -390,18 +414,23 @@ Past `drover-goal-log-limit' bytes, only a line that it is full."
     (error (drover-warn "Goal log not written: %s" (drover-error-message err)))))
 
 (defun drover-goal-show-log (goal)
-  "Show the log of GOAL, its end, in a buffer of its own."
-  (setf (plist-get goal :seen) t)
-  (drover-goal--changed goal)
-  (let ((buffer (get-buffer-create (format "*drover goal: %s*" (drover-bound-line (plist-get goal :title) 60))))
-        (file (drover-goal-log-file goal)))
+  "Show the log of GOAL, its end, in a buffer of its own.
+Of a goal of another host, the end of its log there, as it tells it."
+  (let* ((remote (and (drover-goal--remote-p goal)
+                      (progn (require 'drover-remote-goal) (drover-remote-goal-act goal 'log))))
+         (goal (if remote (car remote) goal))
+         (buffer (get-buffer-create (format "*drover goal: %s*" (drover-bound-line (plist-get goal :title) 60))))
+         (file (and (not remote) (drover-goal-log-file goal))))
+    (drover-goal--mark-seen goal)
     (with-current-buffer buffer
       (let ((inhibit-read-only t))
         (erase-buffer)
         (insert (drover-goal-describe goal) "\n\n")
-        (when (file-readable-p file)
+        (cond
+         (remote (insert (cdr remote)))
+         ((file-readable-p file)
           (let ((size (or (file-attribute-size (file-attributes file)) 0)))
-            (insert-file-contents file nil (max 0 (- size drover-goal-log-limit)) size)))
+            (insert-file-contents file nil (max 0 (- size drover-goal-log-limit)) size))))
         (special-mode)
         (goto-char (point-max))))
     (pop-to-buffer buffer)))
@@ -674,7 +703,14 @@ this host's cheap model tells, when it answers."
   (drover-goal--changed goal))
 
 (defun drover-goal--summary (goal)
-  "Return how GOAL went, a line, for its end."
+  "Return how GOAL went, a line, for its end.
+Of a goal of another host, as that host told it."
+  (if (drover-goal--remote-p goal)
+      (or (plist-get goal :summary) "")
+    (drover-goal--summary-here goal)))
+
+(defun drover-goal--summary-here (goal)
+  "Return how GOAL, of this host, went, a line."
   (let ((spent (or (drover-goal--spent goal) (plist-get goal :spent))))
     (format "%d follow-up%s, %d min%s" (plist-get goal :iteration)
             (if (= 1 (plist-get goal :iteration)) "" "s")
@@ -1034,6 +1070,8 @@ Within the 4000 characters a harness's goal takes."
                   :directory (or (plist-get properties :directory) (plist-get target :directory))
                   :title (or (plist-get properties :title) (plist-get target :title))
                   :task (plist-get properties :task)
+                  :peer-task (plist-get properties :peer-task)
+                  :by (plist-get properties :by)
                   :on-end (plist-get properties :on-end)
                   :kind (or (plist-get properties :kind) 'check)
                   :commands (plist-get properties :commands)
@@ -1066,14 +1104,8 @@ Within the 4000 characters a harness's goal takes."
              (signal (car err) (cdr err))))
     goal))
 
-(defun drover-goal--refuse-remote (session)
-  "Signal a `user-error' when SESSION is of another host."
-  (when-let* ((host (drover-session-host session)))
-    (user-error "%s runs on %s: goals run on the host running the session, set it there"
-                (drover-session-display-title session) (drover-host-label host))))
-
 (defun drover-goal-start (session &rest properties)
-  "Set a goal on SESSION, of this host, and return it.
+  "Set a goal on SESSION and return it.
 PROPERTIES is a plist: :kind, `check', the default, or `criterion';
 :commands, the checks, shell commands, run in :directory, by default
 the session's; :sources, where they come from, lines; :setup, commands
@@ -1084,10 +1116,21 @@ criterion goal; :task, the ID of the heading the session serves;
 :title, what logs and notes call it, by default the session's title;
 :on-end, a function of drover called with it once it ends;
 :iterations, :minutes, :budget and :rounds, its limits, by default
-those of the options.  A check goal on a session at work waits for the
-end of its turn; on an idle one, its prompt is sent, else the checks
-run now."
-  (drover-goal--refuse-remote session)
+those of the options; :by, who set it, and :peer-task, the task of
+another host the session serves, as that host's heading names it.  A
+check goal on a session at work waits for the end of its turn; on an
+idle one, its prompt is sent, else the checks run now.  A session of
+another host gets its goal there, which runs it (see
+`drover-remote-goal-set'): the goal returned is what that host told."
+  (if (drover-session-host session)
+      (progn
+        (require 'drover-remote-goal)
+        (drover-remote-goal-set session properties))
+    (drover-goal--start-here session properties)))
+
+(defun drover-goal--start-here (session properties)
+  "Set a goal of PROPERTIES on SESSION, of this host, and return it.
+See `drover-goal-start'."
   (unless (drover-session-local-directory session)
     (user-error "%s has no directory" (drover-session-display-title session)))
   (when-let* ((running (drover-goal-of session))
@@ -1183,10 +1226,33 @@ run now."
 
 ;;;; Acting on goals
 
+(defun drover-goal--remote-act (goal action)
+  "Have the host of GOAL, another's, ACTION it, and say how it stands then."
+  (require 'drover-remote-goal)
+  (let ((now (drover-remote-goal-act goal action)))
+    (drover-message "Goal of %s on %s: %s" (plist-get now :title) (drover-host-label (plist-get now :host))
+                    (drover-goal--state-label now))
+    now))
+
+(defun drover-goal--mark-seen (goal)
+  "Note that the user saw GOAL, of this host or another."
+  (if (drover-goal--remote-p goal)
+      (unless (plist-get goal :seen)
+        (require 'drover-remote-goal)
+        (drover-remote-goal-seen goal))
+    (setf (plist-get goal :seen) t)
+    (drover-goal--changed goal)))
+
 (defun drover-goal-pause (goal)
   "Pause GOAL, running, on the user's word."
   (unless (drover-goal--active-p goal)
     (user-error "This goal does not run"))
+  (if (drover-goal--remote-p goal)
+      (drover-goal--remote-act goal 'pause)
+    (drover-goal--pause-here goal)))
+
+(defun drover-goal--pause-here (goal)
+  "Pause GOAL, of this host, on the user's word."
   (when-let* (((eq (plist-get goal :kind) 'criterion))
               (session (drover-goal--session goal))
               ((drover-supports-p session :goal-command)))
@@ -1201,6 +1267,12 @@ On a session at work, it waits for the end of the turn; on an idle one,
 the checks run now."
   (unless (eq (plist-get goal :state) 'paused)
     (user-error "This goal is not paused"))
+  (if (drover-goal--remote-p goal)
+      (drover-goal--remote-act goal 'resume)
+    (drover-goal--resume-here goal)))
+
+(defun drover-goal--resume-here (goal)
+  "Resume GOAL, of this host, paused."
   (let ((session (or (drover-goal--session goal) (user-error "The session of this goal is not listed"))))
     (when (plist-get goal :flagged)
       (drover-goal--log goal "Resumed, the protected files accepted: %s"
@@ -1222,6 +1294,12 @@ the checks run now."
   "Stop GOAL on the user's word."
   (when (memq (plist-get goal :state) '(met given-up stopped))
     (user-error "This goal is over"))
+  (if (drover-goal--remote-p goal)
+      (drover-goal--remote-act goal 'stop)
+    (drover-goal--stop-here goal)))
+
+(defun drover-goal--stop-here (goal)
+  "Stop GOAL, of this host, on the user's word."
   (when-let* (((eq (plist-get goal :kind) 'criterion))
               (session (drover-goal--session goal))
               ((drover-supports-p session :goal-command)))
@@ -1234,8 +1312,11 @@ the checks run now."
   "Return GOAL described in a few lines."
   (string-join
    (delq nil
-         (list (format "%s %s — %s" drover-goal-glyph (plist-get goal :title)
-                       (drover-goal--state-label goal))
+         (list (format "%s %s — %s%s" drover-goal-glyph (plist-get goal :title)
+                       (drover-goal--state-label goal)
+                       (if-let* ((host (drover-goal--remote-p goal)))
+                           (format ", on %s" (drover-host-label host))
+                         ""))
                (and (plist-get goal :reason) (concat "  " (plist-get goal :reason)))
                (format "  %s in %s" (if (eq (plist-get goal :kind) 'criterion)
                                         (concat "Criterion: " (drover-bound-line (plist-get goal :objective) 200))
@@ -1327,13 +1408,14 @@ repository's own (see `drover-repo-facts'), waited for."
           (drover-repo-setup-needed (plist-get facts :setup) directory)
           (plist-get facts :note))))
 
-(defun drover-goal--read-kind (session)
-  "Return the kind of goal to set on SESSION, read when it may be either."
-  (if (and session (drover-supports-p session :goal-command))
+(defun drover-goal--read-kind (criterion-p &optional label)
+  "Return the kind of goal to set, read when CRITERION-P says it may be either.
+LABEL names the harness judging a criterion."
+  (if criterion-p
       (if (string-prefix-p "Checks"
                            (completing-read "Goal: " (list "Checks pass: drover runs them after each turn"
                                                            (format "A criterion, judged by %s's /goal"
-                                                                   (drover-backend-label session)))
+                                                                   (or label "the harness")))
                                             nil t))
           'check
         'criterion)
@@ -1345,15 +1427,12 @@ repository's own (see `drover-repo-facts'), waited for."
               (marker (drover-task-org-marker id)))
     (cons marker (drover-task-read marker id))))
 
-(defun drover-goal-set-on-session (session)
-  "Set a goal on SESSION, asking its kind, checks and prompt."
-  (drover-goal--refuse-remote session)
-  (let* ((kind (drover-goal--read-kind session))
-         (task (drover-goal--task-context session))
-         (directory (file-name-as-directory (drover-session-local-directory session)))
-         (derived (drover-goal--checks-for directory (cdr task)))
-         (active (memq (drover-session-status session) drover-active-statuses))
-         (baseline-p (and (eq kind 'check) (not active) (drover-goal--fresh-p directory)))
+(defun drover-goal--ask (session kind directory derived baseline-p task)
+  "Ask the user the goal of KIND to set on SESSION, in DIRECTORY; return it.
+DERIVED is (CHECKS SETUP NOTE), as `drover-goal--checks-for' returns
+it; BASELINE-P offers a baseline; TASK, (MARKER . INFO), the task
+SESSION serves, or nil.  Return the properties of `drover-goal-start'."
+  (let* ((active (memq (drover-session-status session) drover-active-statuses))
          (confirmed (if (and (eq kind 'criterion) (null (car derived)))
                         (list nil nil nil)
                       (progn
@@ -1370,14 +1449,45 @@ repository's own (see `drover-repo-facts'), waited for."
                    (read-string (if active
                                     "Prompt sent with the goal now, empty to wait for the turn: "
                                   "Prompt sent with the goal, empty to run the checks now: ")))))
-    (drover-goal-start session :kind kind
-                       :commands (mapcar (lambda (item) (plist-get item :command)) (car confirmed))
-                       :sources (mapcar (lambda (item) (plist-get item :source)) (car confirmed))
-                       :setup (mapcar (lambda (item) (plist-get item :command)) (cadr confirmed))
-                       :baseline (nth 2 confirmed)
-                       :objective objective
-                       :prompt (and prompt (not (string-blank-p prompt)) prompt)
-                       :task (plist-get (cdr task) :id))))
+    (list :kind kind
+          :commands (mapcar (lambda (item) (plist-get item :command)) (car confirmed))
+          :sources (mapcar (lambda (item) (plist-get item :source)) (car confirmed))
+          :setup (mapcar (lambda (item) (plist-get item :command)) (cadr confirmed))
+          :baseline (nth 2 confirmed)
+          :objective objective
+          :prompt (and prompt (not (string-blank-p prompt)) prompt)
+          :task (plist-get (cdr task) :id))))
+
+(defun drover-goal-set-on-session (session)
+  "Set a goal on SESSION, asking its kind, checks and prompt.
+On a session of another host, the checks are those that host reads
+for the session's directory there, and the goal runs there."
+  (if (drover-session-host session)
+      (drover-goal--set-on-remote-session session)
+    (let* ((kind (drover-goal--read-kind (drover-supports-p session :goal-command) (drover-backend-label session)))
+           (task (drover-goal--task-context session))
+           (directory (file-name-as-directory (drover-session-local-directory session)))
+           (derived (drover-goal--checks-for directory (cdr task)))
+           (active (memq (drover-session-status session) drover-active-statuses))
+           (baseline-p (and (eq kind 'check) (not active) (drover-goal--fresh-p directory))))
+      (apply #'drover-goal-start session (drover-goal--ask session kind directory derived baseline-p task)))))
+
+(defun drover-goal--set-on-remote-session (session)
+  "Set a goal on SESSION, of another host, which runs it there."
+  (require 'drover-remote-goal)
+  (let* ((host (drover-session-host session))
+         (facts (drover-remote-goal-checks host :key (drover-remote--wire-key session)))
+         (kind (drover-goal--read-kind (plist-get facts :criterion) (drover-backend-label session)))
+         (task (drover-goal--task-context session))
+         (directory (plist-get facts :directory))
+         (derived (list (or (drover-goal--heading-checks (cdr task)) (plist-get facts :checks))
+                        (plist-get facts :setup) (plist-get facts :note)))
+         (active (memq (drover-session-status session) drover-active-statuses))
+         (baseline-p (and (eq kind 'check) (not active) (plist-get facts :fresh)))
+         (goal (drover-remote-goal-set session (drover-goal--ask session kind directory derived baseline-p task))))
+    (drover-message "Goal set on %s, on %s: %s" (plist-get goal :title) (drover-host-label host)
+                    (drover-goal--state-label goal))
+    goal))
 
 (defun drover-goal--start-task-session (marker info plan confirmed &optional properties then)
   "Start the session of the task INFO at MARKER, in PLAN's place, under a goal.
@@ -1453,25 +1563,87 @@ why not, a string, and nil."
                      (funcall then (concat "its setup failed: " why) nil))))))))))
     (ignore marker)))
 
-(defun drover-goal-set-on-heading (marker)
+(defun drover-goal--confirmed-properties (confirmed info)
+  "Return CONFIRMED, (CHECKS SETUP BASELINE), as properties of `drover-goal-start'.
+INFO is the task the goal's session serves."
+  (list :kind 'check
+        :commands (mapcar (lambda (item) (plist-get item :command)) (car confirmed))
+        :sources (mapcar (lambda (item) (plist-get item :source)) (car confirmed))
+        :setup (mapcar (lambda (item) (plist-get item :command)) (cadr confirmed))
+        :baseline (nth 2 confirmed)
+        :task (plist-get info :id)))
+
+(defun drover-goal--set-on-remote-attempt (marker info plan)
+  "Set a goal on a session started for the task INFO, at MARKER, on its host.
+PLAN, of the task's place there, names the host; the checks are those
+it reads in that place, or the heading's, and the session starts there
+under the goal, which that host runs."
+  (require 'drover-remote-goal)
+  (let* ((host (plist-get plan :host))
+         (heading (drover-goal--heading-checks info))
+         (facts (drover-remote-goal-checks host :directory (plist-get plan :directory)))
+         (confirmed (drover-goal--confirm (plist-get info :title) (plist-get facts :directory)
+                                          (or heading (plist-get facts :checks)) (plist-get facts :setup)
+                                          (plist-get facts :fresh) marker)))
+    (unless confirmed (user-error "No goal set"))
+    (drover-task--ask-there
+     host
+     (list :kind "session" :task (plist-get info :id) :title (plist-get info :title)
+           :repo (plist-get plan :repo) :worktree (or (plist-get plan :worktree) :false)
+           :in-place (if (eq (plist-get plan :kind) 'in-place) t :false)
+           :branch (or (plist-get plan :branch) :false) :jira (or (plist-get info :jira) :false)
+           :slug (plist-get plan :slug)
+           :body (or (with-current-buffer (marker-buffer marker)
+                       (org-with-point-at marker (drover-task-org-body)))
+                     :false))
+     (drover-goal--confirmed-properties confirmed info)
+     (lambda (reply error)
+       (drover-task--started-there marker plan host reply error t)))
+    (drover-message "Starting a session of %s on %s, under a goal…" (plist-get info :title) host)))
+
+(defun drover-goal--start-remote-task (marker info plan)
+  "Start the task INFO, at MARKER, on the host of PLAN, its session under a goal.
+The checks are the heading's, else those the host reads in its
+checkout of the task's repository; that host makes the place, runs the
+baseline, starts the session and runs the goal."
+  (let* ((host (plist-get plan :host))
+         (heading (drover-goal--heading-checks info))
+         (facts (unless heading
+                  (require 'drover-remote-goal)
+                  (drover-remote-goal-checks host :repo (plist-get plan :repo))))
+         ;; The task's place is set up as tasks set it up: the goal adds no setup.
+         (confirmed (drover-goal--confirm (plist-get info :title)
+                                          (or (plist-get facts :directory) (format "%s on %s" (plist-get plan :repo) host))
+                                          (or heading (plist-get facts :checks)) nil t marker)))
+    (unless confirmed (user-error "No goal set"))
+    (drover-task-start-heading marker nil plan (drover-goal--confirmed-properties confirmed info))))
+
+(defun drover-goal-set-on-heading (marker &optional ask)
   "Set a goal on the task of the heading at MARKER.
-On its session, when one runs here, else on a session started for it,
-in its place, made first when it has none."
+On one of its sessions, of this host or another, else on a session
+started for it in its place, made first when it has none, on the host
+the place is on.  With ASK, as with a prefix argument, a task not
+started yet is planned asking how it works, on which host and from
+which base, as `drover-task-start' asks."
   (let* ((id (drover-task--ensure-id marker))
          (info (drover-task-read marker id))
-         (sessions (seq-remove #'drover-session-host (drover-task-sessions info))))
+         (sessions (drover-task-sessions info)))
     (if sessions
         (drover-goal-dispatch-session
          (if (cdr sessions)
-             (let ((choices (mapcar (lambda (session) (cons (drover-session-display-title session) session))
+             (let ((choices (mapcar (lambda (session)
+                                      (cons (concat (drover-session-display-title session)
+                                                    (if-let* ((host (drover-session-host session)))
+                                                        (format " (on %s)" (drover-host-label host))
+                                                      ""))
+                                            session))
                                     sessions)))
                (cdr (assoc (completing-read "Session: " (mapcar #'car choices) nil t) choices)))
            (car sessions)))
       (let ((plan (drover-task-attempt-plan marker info)))
         (cond
-         ((and plan (plist-get plan :host) (not (equal (plist-get plan :host) drover-host)))
-          (user-error "Task %s works on %s: goals run on the host running its session" (plist-get info :title)
-                      (plist-get plan :host)))
+         ((and plan (plist-get plan :host) (not (drover-host-local-p (plist-get plan :host))))
+          (drover-goal--set-on-remote-attempt marker info plan))
          ((and plan (plist-get plan :directory) (file-directory-p (plist-get plan :directory)))
           (let* ((directory (file-name-as-directory (plist-get plan :directory)))
                  (derived (drover-goal--checks-for directory info))
@@ -1480,35 +1652,39 @@ in its place, made first when it has none."
             (unless confirmed (user-error "No goal set"))
             (drover-goal--start-task-session marker info plan confirmed)))
          (t
-          ;; Not started: the place is made, then the goal's setup, baseline and session.
-          (let* ((checkout (or (and (car (plist-get info :repos))
-                                    (when-let* ((entry (drover-task-repository (car (plist-get info :repos)))))
-                                      (drover-task-checkout entry)))
-                               (and (plist-get info :file) (drover-task-git-main-checkout
-                                                            (file-name-directory (plist-get info :file))))
-                               (user-error "Start task %s first (%s), then set its goal" (plist-get info :title)
-                                           (substitute-command-keys "\\[drover-task-start]"))))
-                 (derived (drover-goal--checks-for checkout info))
-                 ;; The task's place is set up as tasks set it up: the goal adds no setup.
-                 (confirmed (drover-goal--confirm (plist-get info :title) checkout (car derived) nil t marker)))
-            (unless confirmed (user-error "No goal set"))
-            (drover-task-start-heading
-             marker
-             (lambda (plan _start)
-               (drover-goal--start-task-session marker info plan
-                                                (list (car confirmed) nil (nth 2 confirmed))))))))))))
+          (let ((plan (and ask (drover-task--plan-for marker t))))
+            (if (and plan (plist-get plan :host))
+                (drover-goal--start-remote-task marker info plan)
+              ;; Not started: the place is made, then the goal's setup, baseline and session.
+              (let* ((checkout (or (and (car (plist-get info :repos))
+                                        (when-let* ((entry (drover-task-repository (car (plist-get info :repos)))))
+                                          (drover-task-checkout entry)))
+                                   (and (plist-get info :file) (drover-task-git-main-checkout
+                                                                (file-name-directory (plist-get info :file))))
+                                   (user-error "Start task %s first (%s), then set its goal" (plist-get info :title)
+                                               (substitute-command-keys "\\[drover-task-start]"))))
+                     (derived (drover-goal--checks-for checkout info))
+                     ;; The task's place is set up as tasks set it up: the goal adds no setup.
+                     (confirmed (drover-goal--confirm (plist-get info :title) checkout (car derived) nil t marker)))
+                (unless confirmed (user-error "No goal set"))
+                (drover-task-start-heading
+                 marker
+                 (lambda (plan _start)
+                   (drover-goal--start-task-session marker info plan
+                                                    (list (car confirmed) nil (nth 2 confirmed))))
+                 plan))))))))))
 
 (defun drover-goal-dispatch-session (session)
-  "Set a goal on SESSION, or act on the one it has."
+  "Set a goal on SESSION, or act on the one it has.
+A goal of a session of another host is that host's: it is set and
+acted on there."
   (let ((goal (drover-goal-of session)))
     (if (not (and goal (memq (plist-get goal :state) (cons 'paused drover-goal--active))))
         (progn
           (when goal
-            (setf (plist-get goal :seen) t)
-            (drover-goal--changed goal))
+            (drover-goal--mark-seen goal))
           (drover-goal-set-on-session session))
-      (setf (plist-get goal :seen) t)
-      (drover-goal--changed goal)
+      (drover-goal--mark-seen goal)
       (let* ((choices (append (if (eq (plist-get goal :state) 'paused)
                                   (list (if (plist-get goal :flagged) "Resume, accepting the files changed" "Resume"))
                                 (list "Pause"))
@@ -1521,7 +1697,7 @@ in its place, made first when it has none."
           (_ (drover-goal-show-log goal)))))))
 
 ;;;###autoload
-(defun drover-goal ()
+(defun drover-goal (&optional ask)
   "Set a goal on the session or the task at point, or act on its goal.
 A goal keeps a session going until a condition holds: the checks of its
 repository pass, or a criterion its harness judges.  The checks are
@@ -1529,15 +1705,15 @@ those the repository tells agents to run, or the heading's
 DROVER_GOAL_CHECKS, shown with their sources to confirm or edit first.
 On a session with a goal running, pause, resume, stop it, or show its
 log.  On an Org heading, its task's session gets the goal, started for
-it if none runs.  See `drover-goal-start'."
-  (interactive)
+it if none runs; with ASK, the prefix argument, a task not started yet
+is planned asking, its host among what is asked.  A goal on a session
+of another host runs on that host.  See `drover-goal-start'."
+  (interactive "P")
   (drover-start)
   (drover-goal-mode-ensure)
   (if (derived-mode-p 'org-mode)
-      (drover-goal-set-on-heading (drover-task--heading-marker))
-    (let ((session (drover-session-at-point)))
-      (drover-goal--refuse-remote session)
-      (drover-goal-dispatch-session session))))
+      (drover-goal-set-on-heading (drover-task--heading-marker) ask)
+    (drover-goal-dispatch-session (drover-session-at-point))))
 
 ;;;; What shows goals
 
@@ -1579,8 +1755,11 @@ The value of `drover-list-goal-function'."
     (with-current-buffer buffer
       (setq tabulated-list-entries
             (mapcar (lambda (goal)
-                      (list (plist-get goal :id)
+                      (list (if-let* ((host (drover-goal--remote-p goal)))
+                                (cons host (plist-get goal :id))
+                              (plist-get goal :id))
                             (vector (drover-bound-line (plist-get goal :title) 60)
+                                    (drover-host-label (drover-goal--remote-p goal))
                                     (drover-goal--state-label goal)
                                     (format "%d/%d" (plist-get goal :iteration) (plist-get goal :iterations))
                                     (format-time-string "%F %R" (plist-get goal :started))
@@ -1590,12 +1769,27 @@ The value of `drover-list-goal-function'."
                                                            80)
                                         "")
                                     (or (drover-bound-line (plist-get goal :reason) 120) ""))))
-                    (drover-goal--goals)))
+                    (append (drover-goal--goals)
+                            (and (featurep 'drover-remote-goal) (drover-remote-goal-goals)))))
       (tabulated-list-print t))))
 
 (defun drover-goal--at-point ()
   "Return the goal of the row at point, or signal a `user-error'."
-  (or (drover-goal--find (tabulated-list-get-id)) (user-error "No goal on this row")))
+  (let ((id (tabulated-list-get-id)))
+    (or (if (consp id)
+            (and (featurep 'drover-remote-goal) (drover-remote-goal-find (car id) (cdr id)))
+          (drover-goal--find id))
+        (user-error "No goal on this row"))))
+
+(defun drover-goal--session-of (goal)
+  "Return the session of GOAL, of this host or another, as drover lists it, or nil."
+  (if (drover-goal--remote-p goal)
+      (or (and (plist-get goal :key) (drover-index-session (plist-get goal :key)))
+          (seq-find (lambda (session)
+                      (and (equal (drover-session-host session) (plist-get goal :host))
+                           (equal (drover-session-engine-key session) (drover-goal--key goal))))
+                    (drover-known-sessions)))
+    (drover-goal--session goal)))
 
 (defun drover-goal-list-log ()
   "Show the log of the goal at point."
@@ -1616,7 +1810,7 @@ The value of `drover-list-goal-function'."
 (defun drover-goal-list-open ()
   "Open the session of the goal at point."
   (interactive)
-  (drover-open (or (drover-goal--session (drover-goal--at-point)) (user-error "Its session is not listed"))))
+  (drover-open (or (drover-goal--session-of (drover-goal--at-point)) (user-error "Its session is not listed"))))
 
 (defvar-keymap drover-goal-list-mode-map
   :doc "Keymap of `drover-goal-list-mode'."
@@ -1628,7 +1822,7 @@ The value of `drover-list-goal-function'."
 
 (define-derived-mode drover-goal-list-mode tabulated-list-mode "Goals"
   "The goals: RET shows a log, o opens a session, p pauses or resumes, k stops."
-  (setq tabulated-list-format [("Session" 30 t) ("State" 20 t) ("Sent" 5 t) ("Started" 16 t)
+  (setq tabulated-list-format [("Session" 30 t) ("Host" 10 t) ("State" 20 t) ("Sent" 5 t) ("Started" 16 t)
                                ("Checks" 40 t) ("Why" 0 t)])
   (add-hook 'tabulated-list-revert-hook #'drover-goal--list-refresh nil t)
   (tabulated-list-init-header))
@@ -1643,6 +1837,10 @@ The value of `drover-list-goal-function'."
   (dolist (goal (drover-goal--goals))
     (setf (plist-get goal :seen) t))
   (condition-case nil (drover-goal--save) (error nil))
+  (when (featurep 'drover-remote-goal)
+    (dolist (goal (drover-remote-goal-goals))
+      (unless (plist-get goal :seen)
+        (drover-remote-goal-seen goal))))
   (drover-goal--list-refresh)
   (pop-to-buffer drover-goal--list-buffer))
 
@@ -1660,7 +1858,12 @@ The goals are read, those that ran before Emacs restarted paused; see
         (drover-with-reporting "goals" (drover-goal-load))
         (add-hook 'drover-changed-hook #'drover-goal--turn-check)
         (add-hook 'drover-schedule-changed-hook #'drover-goal--schedule-changed)
-        (setq drover-list-goal-function #'drover-goal--list-text))
+        (setq drover-list-goal-function #'drover-goal--list-text)
+        ;; The goals of other hosts' sessions, as they tell them.
+        (when (bound-and-true-p drover-remote-mode)
+          (drover-with-reporting "goals"
+            (require 'drover-remote-goal)
+            (drover-remote-goal-follow-all))))
     (remove-hook 'drover-changed-hook #'drover-goal--turn-check)
     (remove-hook 'drover-schedule-changed-hook #'drover-goal--schedule-changed)
     (when (eq drover-list-goal-function #'drover-goal--list-text)
