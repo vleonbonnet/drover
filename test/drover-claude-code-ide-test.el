@@ -436,7 +436,22 @@ session of `buffer', a temporary buffer, active."
           (setq session (drover-claude-code-ide-test-session terminal))
           (should (drover-supports-p session :fork))
           (drover-fork session)
-          (should (equal forked (list (list "conv" (expand-file-name "/work/drover/"))))))))))
+          (should (equal forked (list (list "conv" (expand-file-name "/work/drover/")))))
+          ;; In no window: the fork's session is told, which knows its terminal.
+          (should (drover-supports-p session :fork-hidden))
+          (save-window-excursion
+            (let ((windows (window-list))
+                  (told nil))
+              (drover-backend-call session :fork-hidden (lambda (fork) (push fork told)) #'ignore)
+              (should (length= forked 2))
+              (should (eq (drover-session-backend (car told)) 'claude-code-ide))
+              (should (eq (drover-session-buffer (car told)) terminal))
+              (should (equal (window-list) windows))))
+          ;; No terminal started: it says so.
+          (cl-letf (((symbol-function 'drover-claude-code-ide-fork) #'ignore))
+            (let ((failed nil))
+              (drover-backend-call session :fork-hidden #'ignore (lambda (message) (push message failed)))
+              (should (equal failed '("Could not locate the new Claude Code buffer"))))))))))
 
 (ert-deftest drover-claude-code-ide-test-compact ()
   "Compacting types /compact in the terminal, once its turn ended and it reads input."

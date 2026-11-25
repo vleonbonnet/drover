@@ -92,6 +92,8 @@
   (load "drover-core" nil t))
 
 (declare-function drover-claude-code-ide-fork "drover-claude-code-ide" (session-id directory))
+(declare-function drover-claude-code-ide-fork-hidden "drover-claude-code-ide"
+                  (session-id directory then else))
 
 (defcustom drover-claude-code-history-days nil
   "Days after which a closed Claude Code conversation counts as older.
@@ -1511,6 +1513,15 @@ The backend's :fork."
                                     (drover-claude-code-transcripts--data (drover-session-id session))))
       (user-error "Could not locate the new Claude Code buffer")))
 
+(defun drover-claude-code-transcripts--fork-hidden (session then else)
+  "Fork the conversation of SESSION into a claude-code-ide terminal, unshown.
+THEN gets the fork's session, ELSE a message.  The backend's
+:fork-hidden."
+  (drover-claude-code-ide-fork-hidden (drover-session-id session)
+                                      (drover-claude-code-transcripts--directory
+                                       (drover-claude-code-transcripts--data (drover-session-id session)))
+                                      then else))
+
 (defun drover-claude-code-transcripts--supports (session operation)
   "Return non-nil when OPERATION applies to SESSION.
 A subagent opens its conversation and tells its last turn; forking needs
@@ -1520,7 +1531,8 @@ elsewhere; answering, one waiting there.  The backend's :supports."
     (if (cdr (drover-claude-code-transcripts--split id))
         (memq operation '(:open :recap :preview))
       (pcase operation
-        (:fork (and (fboundp 'drover-claude-code-ide-fork) (featurep 'drover-claude-code-ide) t))
+        ((or :fork :fork-hidden)
+         (and (fboundp 'drover-claude-code-ide-fork) (featurep 'drover-claude-code-ide) t))
         (:delete (not (drover-claude-code-transcripts--running-p id)))
         (:respond (eq (drover-session-status session) 'waiting))
         (_ t)))))
@@ -1614,6 +1626,7 @@ The first time, note it: replies before count as seen (see
    :mark-seen #'drover-claude-code-transcripts--mark-seen
    :delete #'drover-claude-code-transcripts--delete
    :fork #'drover-claude-code-transcripts--fork
+   :fork-hidden #'drover-claude-code-transcripts--fork-hidden
    :supports #'drover-claude-code-transcripts--supports))
 
 (defun drover-claude-code-transcripts-install (front-end)

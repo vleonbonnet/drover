@@ -1268,6 +1268,56 @@ the next sent as answers come; a refusal is reported, the others done."
                        (opencode-session-fork "ses_1")
                        (opencode-session-compact "ses_1")))))))
 
+;;;; Forking in no window
+
+(ert-deftest drover-opencode-test-fork-hidden ()
+  "An unshown fork has the service copy the session, and opens the copy in no window."
+  (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
+    (drover-opencode-test-with-service
+      (let ((session (drover-opencode-test-session "ses_1"))
+            (opened nil) (forked nil) (failed nil))
+        (cl-letf (((symbol-function 'opencode-session-open)
+                   (lambda (info &rest keys) (push (cons info keys) opened)))
+                  ((symbol-function 'opencode-request-data) #'identity))
+          (should (drover-supports-p session :fork-hidden))
+          (drover-backend-call session :fork-hidden
+                               (lambda (fork) (push fork forked)) (lambda (message) (push message failed)))
+          (pcase-let ((`(post ,path . ,keys) (car requests)))
+            (should (equal path "/api/session/ses_1/fork"))
+            (should (equal (plist-get keys :directory) "/work/drover/"))
+            (should (plist-member keys :buffer))
+            (should-not (plist-get keys :buffer))
+            ;; Nothing is told before the copy's buffer exists.
+            (funcall (plist-get keys :then) '((id . "ses_fork") (title . "Fork of one")))
+            (should-not forked)
+            (pcase-let ((`(,info . ,open) (car opened)))
+              (should (equal (alist-get 'id info) "ses_fork"))
+              (should (plist-get open :no-display))
+              (with-temp-buffer
+                (setq-local opencode-session-id "ses_fork")
+                (setq default-directory "/work/drover/")
+                (funcall (plist-get open :callback) info))))
+          (should (equal (drover-session-key (car forked)) '(opencode . "ses_fork")))
+          (should (equal (drover-session-title (car forked)) "Fork of one"))
+          (should (equal (drover-session-directory (car forked)) "/work/drover/"))
+          (should-not failed)
+          ;; A service refusing, and one never answering, say so, once.
+          (drover-backend-call session :fork-hidden
+                               (lambda (fork) (push fork forked)) (lambda (message) (push message failed)))
+          (funcall (plist-get (cddr (car requests)) :else)
+                   (opencode-error--make :status 500 :method 'post :path "/api/session/ses_1/fork" :message "Down"))
+          (should (string-match-p "Down" (car failed)))
+          (should (length= forked 1))
+          (let ((drover-opencode-timeout 0.05))
+            (drover-backend-call session :fork-hidden
+                                 (lambda (fork) (push fork forked)) (lambda (message) (push message failed)))
+            (sleep-for 0.2)
+            (should (string-match-p "Timed out waiting for the fork" (car failed)))
+            ;; Too late, its answer tells nothing more.
+            (funcall (plist-get (cddr (car requests)) :else)
+                     (opencode-error--make :status 500 :method 'post :path "/api/session/ses_1/fork" :message "Late"))
+            (should (length= failed 2))))))))
+
 ;;;; Session buffers
 
 (defvar drover-opencode-test-prompt-actions

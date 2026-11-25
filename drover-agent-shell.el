@@ -1451,6 +1451,26 @@ able to fork.  The backend's :fork."
   (with-current-buffer (drover-agent-shell--live-buffer session)
     (agent-shell-fork)))
 
+(defun drover-agent-shell--fork-hidden (session then else)
+  "Fork SESSION whole into a new shell, shown in no window.
+As agent-shell's own fork starts one, through the ACP session/fork of
+agents able to fork, but undisplayed.  THEN gets the fork's session
+once its shell is initialized, which then knows its conversation, ELSE
+a message when it cannot start.  The backend's :fork-hidden."
+  (let ((shell (drover-agent-shell--live-buffer session)))
+    (condition-case err
+        (let ((fork (with-current-buffer shell
+                      (agent-shell--start :config (map-elt agent-shell--state :agent-config)
+                                          :session-strategy 'new
+                                          :fork-session-id (drover-agent-shell--session-id shell)
+                                          :new-session t
+                                          :no-focus t))))
+          (drover-agent-shell--when-initialized
+           fork
+           (lambda () (funcall then (drover-agent-shell--session fork)))
+           else))
+      (error (funcall else (drover-error-message err))))))
+
 (defun drover-agent-shell--compact (session)
   "Compact the conversation of SESSION, sending its agent /compact.
 The command goes as a prompt, as ACP agents take their commands, queued
@@ -1530,9 +1550,10 @@ command \"compact\", deleting an initialized shell, whose agent tells
 whether it can.  The backend's :supports."
   (let ((buffer (drover-session-buffer session)))
     (pcase operation
-      (:fork (and (drover-agent-shell--session-id buffer)
-                  (map-elt (buffer-local-value 'agent-shell--state buffer) :supports-session-fork)
-                  t))
+      ((or :fork :fork-hidden)
+       (and (drover-agent-shell--session-id buffer)
+            (map-elt (buffer-local-value 'agent-shell--state buffer) :supports-session-fork)
+            t))
       (:compact (drover-agent-shell--offers-command-p buffer "compact"))
       (:delete (and (drover-agent-shell--acp-session buffer) t))
       (_ t))))
@@ -1750,6 +1771,7 @@ see `drover-recorded-run'.  The backend's :caches."
    :runs-in-buffer t
    :rename #'drover-agent-shell--rename
    :fork #'drover-agent-shell--fork
+   :fork-hidden #'drover-agent-shell--fork-hidden
    :compact #'drover-agent-shell--compact
    :delete #'drover-agent-shell--delete
    :supports #'drover-agent-shell--supports

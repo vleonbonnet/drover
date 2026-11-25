@@ -1790,6 +1790,29 @@ The backend's :fork."
                                    (drover-session-directory session))
       (user-error "Could not locate the new Claude Code buffer")))
 
+(defun drover-claude-code-ide-fork-hidden (session-id directory then else)
+  "Fork session SESSION-ID, of DIRECTORY, into a terminal shown in no window.
+As `drover-claude-code-ide-fork' forks it.  THEN gets the fork's
+`drover-session', which knows its conversation at once, ELSE a message
+when no terminal starts."
+  (let (buffer failure)
+    (condition-case err
+        (save-window-excursion
+          (let ((display-buffer-overriding-action '(display-buffer-no-window (allow-no-window . t))))
+            (setq buffer (drover-claude-code-ide-fork session-id directory))))
+      (error (setq failure (drover-error-message err))))
+    (cond (failure (funcall else failure))
+          ((buffer-live-p buffer) (funcall then (drover-claude-code-ide--session-of buffer)))
+          (t (funcall else "Could not locate the new Claude Code buffer")))))
+
+(defun drover-claude-code-ide--fork-hidden (session then else)
+  "Fork SESSION whole into a terminal of its own, shown in no window.
+THEN gets the fork's session, ELSE a message.  The backend's
+:fork-hidden."
+  (drover-claude-code-ide-fork-hidden (drover-session-engine-id session)
+                                      (drover-session-directory session)
+                                      then else))
+
 (defun drover-claude-code-ide--compact (session)
   "Compact the conversation of SESSION, typing /compact in its terminal.
 Only once its turn ended, as far as its status tells, and its interface
@@ -1816,7 +1839,7 @@ need its conversation, which a terminal not started by drover tells
 once Claude Code recorded it.  The backend's :supports."
   (cond ((memq operation drover-claude-code-ide--terminal-operations)
          (and (drover-claude-code-ide--buffer session) t))
-        ((memq operation '(:fork :delete))
+        ((memq operation '(:fork :fork-hidden :delete))
          (and (drover-session-engine-id session) (drover-session-directory session) t))
         (t t)))
 
@@ -1943,6 +1966,7 @@ With several, the most recently used."
    :rename #'drover-claude-code-ide--rename
    :delete #'drover-claude-code-ide--delete
    :fork #'drover-claude-code-ide--fork
+   :fork-hidden #'drover-claude-code-ide--fork-hidden
    :compact #'drover-claude-code-ide--compact
    :supports #'drover-claude-code-ide--supports
    :engines '(claude-code)

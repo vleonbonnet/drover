@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 30
+(defconst drover-core-generation 31
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -1852,6 +1852,12 @@ PROPERTIES is a plist of:
              drover asks the user first.
  :fork       Function of a session copying it whole into a new session,
              and displaying the copy.
+ :fork-hidden
+             Function of a session, THEN and ELSE copying it whole into
+             a new session shown in no window, as an agent forks one
+             (see `drover-anvil'): THEN is called with the copy's
+             `drover-session' once it exists, ELSE with a message, at
+             most one of them once.  It must not wait.
  :compact    Function of a session compacting its conversation.
  :history    Function of a CALLBACK fetching the backend's older
              sessions, those :sessions does not report, and calling
@@ -7248,6 +7254,22 @@ at point."
   (if session
       (drover-backend-call session :fork)
     (drover--prompt-or-backend 'fork)))
+
+(defun drover-fork-refusal (session)
+  "Return why SESSION cannot be forked in no window, or nil when it can.
+A line naming its harness: its backend has no :fork-hidden, or does not
+fork that session, as an agent that cannot; a session of another host is
+forked by its host."
+  (let ((harness (drover-harness-name (drover-session-harness session))))
+    (cond
+     ((drover-supports-p session :fork-hidden) nil)
+     ((drover-session-host session)
+      (format "its harness, %s, runs on %s, which forks no session for another host"
+              harness (drover-host-label (drover-session-host session))))
+     ((not (functionp (drover-backend-property session :fork-hidden)))
+      (format "its harness, %s, forks no session" harness))
+     (t (format "its harness, %s, cannot fork this session: its agent does not fork, or its conversation is not known yet"
+                harness)))))
 
 (defun drover-compact (&optional session)
   "Compact the conversation of SESSION.

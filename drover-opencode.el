@@ -1378,6 +1378,43 @@ The backend's :edit-pending."
   "Compact the conversation of SESSION."
   (opencode-session-compact (drover-session-id session)))
 
+(defun drover-opencode--fork-hidden (session then else)
+  "Fork SESSION whole into a new session, its buffer made but not displayed.
+The service copies the conversation, as for `opencode-session-fork',
+which shows the copy.  THEN receives the fork's `drover-session' once
+its buffer exists, ELSE a message; the fork is waited for at most
+`drover-opencode-timeout' seconds, asynchronously.  The backend's
+:fork-hidden."
+  (let* ((id (drover-session-id session))
+         (timer nil)
+         (settle (drover-opencode--once
+                  (lambda (function value)
+                    (when timer (cancel-timer timer))
+                    ;; Called back from a timer or a process.
+                    (drover-with-reporting "OpenCode fork"
+                      (funcall function value))))))
+    (cl-flet ((fail (message) (funcall settle else message)))
+      (condition-case err
+          (progn
+            (setq timer (run-at-time drover-opencode-timeout nil
+                                     #'fail "Timed out waiting for the fork of the OpenCode session"))
+            (opencode-request
+             'post (format "/api/session/%s/fork" id)
+             :directory (or (plist-get (opencode-state-get id) :directory) (drover-session-directory session))
+             :buffer nil
+             :body (opencode-empty-object)
+             :then (lambda (response)
+                     (opencode-session-open
+                      (opencode-request-data response)
+                      :no-display t
+                      :callback (lambda (info)
+                                  (funcall settle then
+                                           (drover-opencode--session-of
+                                            opencode-session-id (alist-get 'title info) default-directory)))
+                      :else (lambda (error) (fail (opencode-error-describe error)))))
+             :else (lambda (error) (fail (opencode-error-describe error)))))
+        (error (fail (drover-error-message err)))))))
+
 ;;;; Prompt operations
 
 (defun drover-opencode--once (function)
@@ -1944,6 +1981,7 @@ Through the plugin's RPC, `opencode.goal' `get'.  The backend's
      :delete #'drover-opencode--delete
      :delete-confirms t
      :fork #'drover-opencode--fork
+     :fork-hidden #'drover-opencode--fork-hidden
      :compact #'drover-opencode--compact
      :history #'drover-opencode--history
      :search #'drover-opencode--search

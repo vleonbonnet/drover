@@ -1910,6 +1910,38 @@ cancelled turn."
         (drover-fork (drover-agent-shell-test-session shell))
         (should (equal drover-agent-shell-test--calls `((fork ,shell))))))))
 
+(ert-deftest drover-agent-shell-test-fork-hidden ()
+  "An unshown fork starts the fork's shell undisplayed, and tells its session once initialized."
+  (drover-agent-shell-test-with
+    (let ((shell (drover-agent-shell-test-followed 'claude-code "forking unseen"))
+          (fork (drover-agent-shell-test-followed 'claude-code "the fork"))
+          (started nil) (told nil) (failed nil))
+      (should-not (drover-supports-p (drover-agent-shell-test-session shell) :fork-hidden))
+      (with-current-buffer shell
+        (map-put! agent-shell--state :supports-session-fork t)
+        (map-put! agent-shell--state :agent-config '((identifier . claude-code))))
+      (should (drover-supports-p (drover-agent-shell-test-session shell) :fork-hidden))
+      (cl-letf (((symbol-function 'agent-shell--start)
+                 (lambda (&rest keys) (push (cons (current-buffer) keys) started) fork))
+                ((symbol-function 'agent-shell--display-buffer)
+                 (lambda (&rest _) (ert-fail "The fork was displayed"))))
+        (drover-backend-call (drover-agent-shell-test-session shell) :fork-hidden
+                             (lambda (session) (push session told)) (lambda (message) (push message failed)))
+        (pcase-let ((`(,buffer . ,keys) (car started)))
+          (should (eq buffer shell))
+          (should (equal (plist-get keys :fork-session-id) (drover-agent-shell--session-id shell)))
+          (should (equal (plist-get keys :config) '((identifier . claude-code))))
+          (should (eq (plist-get keys :session-strategy) 'new))
+          (should (plist-get keys :no-focus)))
+        (should (eq (drover-session-buffer (car told)) fork))
+        (should-not failed)
+        ;; A fork that cannot start says why.
+        (cl-letf (((symbol-function 'agent-shell--start) (lambda (&rest _) (error "No such agent"))))
+          (drover-backend-call (drover-agent-shell-test-session shell) :fork-hidden
+                               (lambda (session) (push session told)) (lambda (message) (push message failed))))
+        (should (string-match-p "No such agent" (car failed)))
+        (should (length= told 1))))))
+
 (ert-deftest drover-agent-shell-test-compact ()
   "A shell whose agent offers /compact is sent it, as a prompt."
   (drover-agent-shell-test-with
