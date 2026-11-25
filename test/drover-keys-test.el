@@ -147,7 +147,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (equal (sort bindings (lambda (a b) (string< (car a) (car b))))
                    (sort (copy-sequence
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
-                            ("<tab>" . drover-build-and-go)
+                            ("<tab>" . drover-build-and-go) ("h" . drover-handoff)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
@@ -754,7 +754,7 @@ which lists show too."
     ("Prompt runs" ("a" "m" "P" "e" "d"))
     ("Input" ("RET"))
     ("Conversation" ("C" "f" "H" "."))
-    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G" "!")))
+    ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G" "h" "!")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.
 Neither the view settings, which apply while a list is in sight, nor the
 prompt keys editing or reading a prompt buffer show there.")
@@ -1208,6 +1208,25 @@ takes prompts."
         (let ((apt (drover-keys-test-apt 'drover-dispatch)))
           (should-not (member "z" apt))
           (should-not (member "Z" apt)))))))
+
+(ert-deftest drover-keys-test-dispatch-handoff ()
+  "h hands an item off from a session whose backend takes the prompts drover submits."
+  (drover-keys-test-with (list (drover-test-session "s"))
+    (drover-keys-test-in 'view "s"
+      (should-not (member "h" (drover-keys-test-apt 'drover-dispatch))))
+    (setf (alist-get 'fake drover--backends)
+          (append (list :submit #'ignore) (alist-get 'fake drover--backends)))
+    (dolist (kind '(view list prompt))
+      (drover-keys-test-in kind "s"
+        (should (member "h" (drover-keys-test-apt 'drover-dispatch)))))
+    (drover-keys-test-in 'view nil
+      (should-not (member "h" (drover-keys-test-apt 'drover-dispatch))))
+    ;; It runs where the list is, and takes the region where the user is.
+    (let ((suffix (seq-find (lambda (suffix) (eq (oref suffix command) 'drover-handoff))
+                            (cdr (drover-keys-test-in 'view "s" (drover-keys-test-suffixes 'drover-dispatch))))))
+      (should (equal (oref suffix key) "h"))
+      (should (eq (oref suffix advice*) 'drover--dispatch-handoff)))
+    (should (commandp 'drover-handoff))))
 
 (ert-deftest drover-keys-test-dispatch-in-foreign-list ()
   "In a list drover does not draw, =u toggles its subagents, if it does.

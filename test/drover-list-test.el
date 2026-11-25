@@ -2611,7 +2611,9 @@ body beginning with an aligned space would push the next line right."
 
 (ert-deftest drover-list-test-session-keys-win ()
   "Every session key runs its command, whatever Magit and special-mode bind.
-Of their keys, only g is a session key, and it refreshes either way."
+Of their keys, only two are session keys: g, which refreshes either
+way, and h, special-mode's second key for `describe-mode', which ?
+still runs."
   (drover-list-test-with (list (drover-test-session "s" :status 'working))
     (drover-list-test-goto "s")
     (let ((keys nil))
@@ -2620,11 +2622,14 @@ Of their keys, only g is a session key, and it refreshes either way."
                            (theirs (lookup-key magit-section-mode-map key)))
                       (push (key-description key) keys)
                       (should (eq (key-binding key) command))
-                      (if (equal key [?g])
-                          (should (eq theirs #'revert-buffer))
-                        (should-not (commandp theirs)))))
+                      (cond
+                       ((equal key [?g]) (should (eq theirs #'revert-buffer)))
+                       ((equal key [?h])
+                        (should (eq theirs #'describe-mode))
+                        (should (eq (key-binding [??]) #'describe-mode)))
+                       (t (should-not (commandp theirs))))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "<tab>" "E" "K" "s" "w" "!" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "<tab>" "h" "E" "K" "s" "w" "!" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.
@@ -7517,13 +7522,14 @@ set is that of the list in sight."
   "The menu lays its groups out in rows as wide as its window, in few lines.
 The old menu took 24 lines at any width, its View menu apart; before
 the settings of a field shared a row, 14 at 240 columns, 18 at 160, 28
-at 100 and 44 at 60.  The column of the changes and the digits opening
-sessions by number took one more each at 60."
+at 100 and 44 at 60.  The column of the changes, the digits opening
+sessions by number and the key handing an item off took one more each
+at 60."
   (drover-list-test-elsewhere
     ;; The table of fields shows in two halves side by side, or one under
     ;; the other, as room asks; the view settings show, the list being in
     ;; sight, the prompt keys editing a prompt buffer do not.
-    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 41)))
+    (pcase-dolist (`(,width . ,bound) '((240 . 10) (160 . 16) (100 . 26) (60 . 42)))
       (cl-letf (((symbol-function 'drover--menu-width) (lambda () width)))
         (execute-kbd-macro (kbd "C-'"))
         (let ((lines (split-string (string-trim-right (drover-list-test-menu-text)) "\n")))

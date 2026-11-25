@@ -88,7 +88,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 31))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -115,6 +115,7 @@
 (autoload 'drover-schedule-list "drover-schedule" nil t)
 (autoload 'drover-goal "drover-goal" nil t)
 (autoload 'drover-wrap-up "drover-wrap-up" nil t)
+(autoload 'drover-handoff "drover-handoff" nil t)
 (autoload 'drover-goal-list "drover-goal" nil t)
 (autoload 'drover-fanout "drover-fanout" nil t)
 (autoload 'drover-search "drover-search" nil t)
@@ -674,6 +675,20 @@ SESSION awaits, as the user may choose."
                            (when handed-off
                              (drover-note-handed-off session 'build 'drover)))))
 
+;;;; Handing an item off
+
+(defun drover-handoff-p (session)
+  "Return non-nil when SESSION may be asked to hand an item off.
+See `drover-handoff': its backend takes the prompts drover submits, as
+those scheduled."
+  (and session (drover-supports-p session :submit)))
+
+(defvar drover-dispatch-region nil
+  "The text of the region where the dispatch menu was called, or nil.
+Bound while the menu runs, in a list shown beside, a command taking a
+text from where the user is, as `drover-handoff' takes its item: the
+command runs in the list's window, where a region selects sessions.")
+
 ;;;; Session keys
 
 (defvar-keymap drover-session-map
@@ -683,6 +698,7 @@ other lists."
   "o" #'drover-open-other-window
   "A" #'drover-respond
   "<tab>" #'drover-build-and-go
+  "h" #'drover-handoff
   "E" #'drover-edit-pending-prompt
   "K" #'drover-interrupt
   "s" #'drover-mark-seen
@@ -1122,6 +1138,23 @@ the list the menu acts on (see `drover--dispatch-in-list')."
   (if (derived-mode-p 'org-mode)
       (apply function arguments)
     (apply #'drover--dispatch-in-list function arguments)))
+
+(defun drover--dispatch-handoff (function &rest arguments)
+  "Apply FUNCTION to ARGUMENTS in the list the menu acts on, the region kept.
+As `drover--dispatch-in-list' applies it, for `drover-handoff': while
+the menu acts on a list in another window, the text of the region of
+the current buffer is `drover-dispatch-region', and the region ends
+once it was read."
+  (let* ((origin (current-buffer))
+         (drover-dispatch-region
+          (and (drover--dispatch-window)
+               (not (drover-session-list-p))
+               (use-region-p)
+               (buffer-substring-no-properties (region-beginning) (region-end)))))
+    (prog1 (apply #'drover--dispatch-in-list function arguments)
+      (when (and drover-dispatch-region (buffer-live-p origin))
+        (with-current-buffer origin
+          (deactivate-mark))))))
 
 (defun drover--run-local-hook (hook)
   "Run the functions of HOOK local to the current buffer, not the global ones."
@@ -2653,6 +2686,8 @@ session chosen for it, else to one asked for, unshown."
                     ("Z" "Wrap up" drover-wrap-up
                      :inapt-if-not (lambda () (drover-dispatch-selection nil #'drover-wrap-up-p)))
                     ("G" "Goal" drover-goal :advice* drover--dispatch-goal :inapt-if-not drover-dispatch-goal-p)
+                    ("h" "Hand off" drover-handoff :advice* drover--dispatch-handoff
+                     :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-handoff-p)))
                     ;; A setting of the session at point: the menu stays, showing it.
                     ("!" drover--dispatch-notify-description drover-toggle-notify :transient t
                      :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-notify-settable-p)))]
