@@ -1657,6 +1657,37 @@ MCP Parameters:
     (user-error nil)))
 
 (declare-function drover-remote-jobs-later "drover-remote" (callback &optional seconds))
+(declare-function drover-links-conversation "drover-links" (session))
+(declare-function drover-links-parse "drover-links" (path &optional engine))
+(defvar drover-links-type)
+
+(defun drover-anvil--link-conversation (link host)
+  "Return the conversation LINK names, (HOST ENGINE . ID), or nil.
+LINK is an agent-session link without a host, as a scheduled prompt
+keeps it; HOST is the host keeping it, nil for this one."
+  (let ((prefix (concat drover-links-type ":")))
+    (when-let* (((stringp link))
+                ((string-prefix-p prefix link))
+                (conversation (drover-links-parse (substring link (length prefix)))))
+      (cons host (cons (plist-get conversation :engine) (plist-get conversation :id))))))
+
+(defun drover-anvil--scheduled-target (string)
+  "Return the session STRING names, as the list of scheduled prompts finds it.
+A plist of :key and :conversation, (HOST ENGINE . ID) or nil.  The
+session need not be live: an archived or older one drover knows is
+found too, and a key naming none matches the prompts keyed so.  Refuse
+a key of no backend."
+  (let* ((key (or (drover-anvil--parse-key string)
+                  (drover-anvil--refuse "No session %s: list them with drover-sessions"
+                                        (drover-bound-line (format "%s" string) 200))))
+         (record (or (drover-index-session key)
+                     (seq-find (lambda (session) (equal (drover-session-key session) key))
+                               (drover-known-sessions nil t))))
+         (conversation (and record (drover-links-conversation record))))
+    (list :key key
+          :conversation (and conversation
+                             (cons (drover-session-host record)
+                                   (cons (plist-get conversation :engine) (plist-get conversation :id)))))))
 
 (defun drover-anvil--local-scheduled (job)
   "Return the scheduled prompt JOB, of this host's queue, as the list tells it.
@@ -1664,6 +1695,7 @@ A plist of :key, its session's key or nil, :status, its name, :created
 and :data, what the list answers of it."
   (let ((session (drover-anvil--job-session job)))
     (list :key (and session (drover-session-key session))
+          :conversation (drover-anvil--link-conversation (plist-get job :link) nil)
           :status (symbol-name (plist-get job :status))
           :created (plist-get job :created)
           :data (drover-anvil--compact
@@ -1687,6 +1719,7 @@ JOB is as `drover-remote-jobs-later' gives it; the plist returned is
 as `drover-anvil--local-scheduled' returns."
   (let ((status (and (plist-get job :status) (symbol-name (plist-get job :status)))))
     (list :key (plist-get job :key)
+          :conversation (drover-anvil--link-conversation (plist-get job :link) (plist-get job :host))
           :status status
           :created (plist-get job :created)
           :data (drover-anvil--compact
@@ -1714,12 +1747,16 @@ as `drover-anvil--local-scheduled' returns."
 (defun drover-anvil--scheduled-answer (entries hosts only statuses limit)
   "Return the list of ENTRIES, scheduled prompts, the newest first, as data.
 ENTRIES are as `drover-anvil--local-scheduled' returns them; ONLY, a
-session's key or nil, and STATUSES, names, narrow them, LIMIT bounds
-them.  HOSTS tells how each other host answered, plists of :host and
-:jobs or :failure."
+session as `drover-anvil--scheduled-target' finds it, or nil, and
+STATUSES, names, narrow them, LIMIT bounds them.  HOSTS tells how each
+other host answered, plists of :host and :jobs or :failure."
   (let ((kept (sort (seq-filter (lambda (entry)
                                   (and (or (null statuses) (member (plist-get entry :status) statuses))
-                                       (or (null only) (equal (plist-get entry :key) only))))
+                                       (or (null only)
+                                           (equal (plist-get entry :key) (plist-get only :key))
+                                           (and (plist-get only :conversation)
+                                                (equal (plist-get entry :conversation)
+                                                       (plist-get only :conversation))))))
                                 entries)
                     :key (lambda (entry) (or (plist-get entry :created) 0)) :reverse t)))
     `((count . ,(length kept))
@@ -1739,7 +1776,8 @@ KEY, STATUS, LIMIT and HOST narrow the list, as the parameters below
 tell.  Each host keeps the prompts of its own sessions, and tells them.
 
 MCP Parameters:
-  key - A session's key, whose prompts alone to list
+  key - A session's key, whose prompts alone to list, live, archived
+      or older
   status - Statuses to keep, comma-separated, among pending, opening,
       waiting, sending, sent, failed, interrupted and cancelled
   limit - (integer) Prompts listed at most, 50 by default
@@ -1747,9 +1785,10 @@ MCP Parameters:
       host's by default"
   (drover-start)
   (require 'drover-schedule)
+  (require 'drover-links)
   (drover-schedule-load)
   (let* ((caller (drover-anvil--caller))
-         (only (and (stringp key) (not (string-empty-p key)) (drover-session-key (drover-anvil--session key))))
+         (only (and (stringp key) (not (string-empty-p key)) (drover-anvil--scheduled-target key)))
          (statuses (drover-anvil--split status))
          (limit (max 1 (min 200 (if (natnump limit) limit 50))))
          (host (and (stringp host) (not (string-blank-p host)) host))

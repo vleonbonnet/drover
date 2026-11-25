@@ -950,7 +950,7 @@ Core."
             (should (string-match-p "soon" (cadr (should-error (drover-anvil--tool-job job)))))))))))
 
 (ert-deftest drover-anvil-test-scheduled-on-other-hosts ()
-  "The scheduled prompts of every host are listed together, the newest first, narrowed by host, session and status."
+  "The scheduled prompts of every host are listed together, the newest first, narrowed by host, session, live or not, and status."
   (let ((there (list (drover-anvil-test-peer-session "ses_far"))))
     (drover-anvil-test-with (list (drover-test-session "me" :engine 'opencode :engine-id "ses_me"
                                                        :directory temporary-file-directory))
@@ -995,7 +995,24 @@ Core."
                                    (alist-get 'scheduled (drover-anvil-test-json (drover-anvil--tool-scheduled nil "sent"))))
                            '("J2")))
             (should (= 2 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil nil nil "Core")))))
-            (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil nil nil "local")))))))))))
+            (should (= 1 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled nil nil nil "local")))))
+            ;; Gone from here: its prompts on that host are still listed by the key it told,
+            (setq there nil)
+            (drover-backend-changed 'remote:core)
+            (should (equal (mapcar (lambda (job) (alist-get 'id job))
+                                   (alist-get 'scheduled (drover-anvil-test-json
+                                                          (drover-anvil--tool-scheduled "remote:core/opencode/ses_far"))))
+                           '("J1")))
+            ;; and an archived session of this host's by its conversation.
+            (cl-letf (((symbol-function 'drover-known-sessions)
+                       (lambda (&rest _)
+                         (list (drover-test-session "old" :engine 'opencode :engine-id "ses_me"
+                                                    :directory temporary-file-directory)))))
+              (should (equal (alist-get 'title (car (alist-get 'scheduled (drover-anvil-test-json
+                                                                            (drover-anvil--tool-scheduled "fake/old")))))
+                             "Session me"))
+              (should (= 0 (alist-get 'count (drover-anvil-test-json (drover-anvil--tool-scheduled "fake/nosuch"))))))
+            (should-error (drover-anvil--tool-scheduled "nobackend/x"))))))))
 
 ;;;; Through Anvil's dispatcher
 
