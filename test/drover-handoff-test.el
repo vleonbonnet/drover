@@ -50,6 +50,13 @@
 (defvar drover-handoff-test-warnings nil
   "Warnings drover gave, newest first.")
 
+(defvar drover-handoff-test-places nil
+  "What the place reader was asked, newest first, as (PROMPT SESSION BY-ID).")
+
+(defconst drover-handoff-test-place
+  (list :uri "org-id://PLACE-1" :name "work.org/Projects/Drover" :file "/notes/work.org" :id "PLACE-1")
+  "The place the fixture's reader answers, a heading's.")
+
 (defun drover-handoff-test-wait (predicate &optional seconds)
   "Run timers and processes until PREDICATE returns non-nil, SECONDS at most."
   (let ((deadline (+ (float-time) (or seconds 10))) value)
@@ -89,6 +96,7 @@ The queue of scheduled prompts and the state are fresh; what the fake
                (drover-handoff-test-blocker nil)
                (drover-handoff-test-messages nil)
                (drover-handoff-test-warnings nil)
+               (drover-handoff-test-places nil)
                (drover-handoff-test-buffer (generate-new-buffer " *hand-off session*")))
            (drover-test-register-engine 'handfake :directory (lambda (&rest _) temporary-file-directory))
            (with-current-buffer drover-handoff-test-buffer
@@ -105,7 +113,11 @@ The queue of scheduled prompts and the state are fresh; what the fake
                       (funcall then)))
            (drover-handoff-test-session :status 'idle)
            (unwind-protect
-               (cl-letf (((symbol-function 'drover-known-sessions) (lambda (&rest _) drover-test-sessions))
+               (cl-letf (((symbol-function 'drover-handoff-read-place)
+                          (lambda (prompt session by-id)
+                            (push (list prompt (drover-session-id session) by-id) drover-handoff-test-places)
+                            drover-handoff-test-place))
+                         ((symbol-function 'drover-known-sessions) (lambda (&rest _) drover-test-sessions))
                          ((symbol-function 'drover-archived-live-sessions) #'ignore)
                          ((symbol-function 'drover-warn)
                           (lambda (format-string &rest arguments)
@@ -134,7 +146,9 @@ The queue of scheduled prompts and the state are fresh; what the fake
   "The prompt tells the item, the mode, and what the agent does for it."
   (let ((text (drover-handoff-prompt-text "The parser drops 100% of\nthe trailing commas" nil)))
     (should (string-match-p "\\`Hand this item of our work off to a fresh session:\n\nThe parser drops 100% of\nthe trailing commas\n" text))
-    (should-not (string-match-p "%[im]" text))
+    (should-not (string-match-p "%[imp]" text))
+    ;; Without a place, where the work keeps its tasks, as the agent knows.
+    (should (string-search "with an Org ID, where this work keeps its tasks." text))
     (dolist (told '("`handoff` skill" "File an Org heading" "a brief that reads alone"
                     "the goal, what is known, the decisions made, the limits, when it is done, and links"
                     "`drover-task-start`" "`drover-session-fork`" "A refused fork ends the hand-off"
@@ -143,7 +157,13 @@ The queue of scheduled prompts and the state are fresh; what the fake
   (should (string-prefix-p "Hand this item of our work off to a fork of this session:\n\nItem\n"
                            (drover-handoff-prompt-text "Item" t)))
   (let ((drover-handoff-prompt "%m <- %i (100%%)"))
-    (should (equal (drover-handoff-prompt-text "it" t) "a fork of this session <- it (100%)"))))
+    (should (equal (drover-handoff-prompt-text "it" t) "a fork of this session <- it (100%)")))
+  ;; The place chosen, as Anvil's org-add-todo takes it.
+  (should (string-search "with an Org ID, under the place I chose, `org-id://PLACE-1`, the heading \"work.org/Projects/Drover\", which `org-add-todo` takes as its `parent_uri`."
+                         (drover-handoff-prompt-text "Item" nil drover-handoff-test-place)))
+  (should (string-search "under the place I chose, `org-headline:///notes/todo%23old.org`, the top of /notes/todo#old.org,"
+                         (drover-handoff-prompt-text "Item" nil (list :uri "org-headline:///notes/todo%23old.org"
+                                                                      :name "todo#old.org" :file "/notes/todo#old.org")))))
 
 (ert-deftest drover-handoff-test-region ()
   "In the session's buffer, the region is the item: it goes at once, out of every window."
@@ -167,7 +187,11 @@ The queue of scheduled prompts and the state are fresh; what the fake
           (should (equal (plist-get job :link) "agent-session:handfake/conv-1")))
         (let ((text (drover-handoff-test-take)))
           (should (string-match-p "off to a fresh session:\n\nThe cache key ignores the host\\.\n" text))
+          (should (string-search "under the place I chose, `org-id://PLACE-1`" text))
           (should-not (string-search "Before" text)))
+        ;; The place is asked once, after the item, by ID only for another host.
+        (should (equal drover-handoff-test-places
+                       '(("Heading of The cache key ignores the host. goes under" "s1" nil))))
         (should (equal (window-list) windows))
         (should-not (get-buffer-window drover-handoff-test-buffer t))))
     (should (equal (car (last drover-handoff-test-messages))
@@ -341,7 +365,7 @@ The queue of scheduled prompts and the state are fresh; what the fake
           (should-not argument)
           (should (equal by "hand-off"))
           (funcall callback (list :failure "it takes no prompt from another host")))
-        (should (string-match-p "Could not hand off from Core ses_1: .* refused its prompt: it takes no prompt"
+        (should (string-match-p "Could not prompt Core ses_1: .* refused its prompt: it takes no prompt"
                                 (car drover-handoff-test-warnings)))
         (should-not submitted)
         ;; Idle, its host takes it as a prompt sent, queued there behind a draft.
@@ -351,7 +375,13 @@ The queue of scheduled prompts and the state are fresh; what the fake
         (should (length= scheduled 1))
         (should (string-match-p "off to a fresh session:\n\nThe stale lock\n" (nth 1 (car submitted))))
         ;; Nothing of it in this host's queue.
-        (should-not (drover-handoff-test-jobs))))))
+        (should-not (drover-handoff-test-jobs))
+        ;; Asked, its place is a heading, which its host's agent finds by ID.
+        (cl-letf (((symbol-function 'drover-selected-sessions)
+                   (lambda (&rest _) (list (drover-index-session '(remote:core . (opencode . "ses_1"))))))
+                  ((symbol-function 'read-string) (lambda (&rest _) "The stale lock")))
+          (should (equal (nth 3 (drover-handoff--read)) drover-handoff-test-place))
+          (should (equal drover-handoff-test-places '(("Heading of The stale lock goes under" (opencode . "ses_1") t)))))))))
 
 (provide 'drover-handoff-test)
 ;;; drover-handoff-test.el ends here

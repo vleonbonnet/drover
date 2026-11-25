@@ -2629,7 +2629,7 @@ still runs."
                         (should (eq (key-binding [??]) #'describe-mode)))
                        (t (should-not (commandp theirs))))))
                   drover-session-map)
-      (should (seq-set-equal-p keys '("o" "A" "<tab>" "h" "E" "K" "s" "w" "!" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
+      (should (seq-set-equal-p keys '("o" "A" "<tab>" "h" "*" "E" "K" "s" "w" "!" "u" "c" "r" "x" "z" "Z" "g" "+" "v" "R" "G" "V"))))))
 
 (ert-deftest drover-list-test-session-keys-typed ()
   "Typed through the command loop, each session key does its work.

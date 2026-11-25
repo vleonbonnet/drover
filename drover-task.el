@@ -547,6 +547,20 @@ ID is the one it was asked by, perhaps its ORIG_ID."
       (drover-task--views-changed))
     (gethash (or id (plist-get info :id)) drover-task--infos)))
 
+(defun drover-task-info (id)
+  "Return what the heading of ID tells, as `drover-task-org-read' reads it, or nil.
+What was read of it, while its buffer did not change since, else read
+now: from a buffer visiting its file, or the file the ID locations name
+for it (see `drover-task-org-marker').  Nil for a heading found in
+neither, which `drover-task-org-find' may look for."
+  (let ((info (gethash id drover-task--infos)))
+    (if (and info (not (plist-member info :missing)) (drover-task-org-fresh-p info))
+        info
+      (when-let* ((marker (drover-task-org-marker id)))
+        (unwind-protect
+            (drover-task-read marker id)
+          (set-marker marker nil))))))
+
 (defun drover-task--read-pending ()
   "Read the pending headings, for 30 ms at most, then tell views what changed.
 From an idle timer: the headings of visited files and of files the ID

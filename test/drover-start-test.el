@@ -28,6 +28,7 @@
 (require 'drover-transcript-fixtures)
 (require 'drover-goal)
 (require 'drover-fanout)
+(require 'drover-items)
 
 (defconst drover-start-test-codex "019f0000-0000-7000-8000-0000000000c1"
   "The identifier of the Codex conversation of the fixtures.")
@@ -358,7 +359,8 @@ them, once, a function failing stopping none after it."
 (ert-deftest drover-start-test-kept-files ()
   "Drover looks for the files the modules keep their work in."
   (drover-test-with-state
-    (dolist (module '((drover-goal . drover-goal-file) (drover-fanout . drover-fanout-file)))
+    (dolist (module '((drover-goal . drover-goal-file) (drover-fanout . drover-fanout-file)
+                      (drover-items . drover-items-file)))
       (should (equal (expand-file-name (plist-get (alist-get (car module) drover--kept-modules) :file)
                                        drover-state-directory)
                      (funcall (cdr module)))))))

@@ -88,7 +88,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 31))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
   (load "drover-core" nil t))
 
 (autoload 'drover-next "drover-attention" nil t)
@@ -116,6 +116,7 @@
 (autoload 'drover-goal "drover-goal" nil t)
 (autoload 'drover-wrap-up "drover-wrap-up" nil t)
 (autoload 'drover-handoff "drover-handoff" nil t)
+(autoload 'drover-items "drover-items" nil t)
 (autoload 'drover-goal-list "drover-goal" nil t)
 (autoload 'drover-fanout "drover-fanout" nil t)
 (autoload 'drover-search "drover-search" nil t)
@@ -683,6 +684,33 @@ See `drover-handoff': its backend takes the prompts drover submits, as
 those scheduled."
   (and session (drover-supports-p session :submit)))
 
+;;;; The items of a session
+
+(declare-function drover-items-p "drover-items" (session))
+(declare-function drover-items-list-of "drover-items" (session))
+(declare-function drover-items-asked "drover-items" (list))
+(declare-function drover-items-items "drover-items" (list))
+(declare-function drover-items-goes "drover-items" (item))
+
+(defun drover-items-shown-p (session)
+  "Return non-nil when SESSION has a list of items to show (see `drover-items').
+Its agent gave one, which drover reads once its module is loaded: as
+drover starts when its file exists, or as an agent gives a list."
+  (and session (featurep 'drover-items) (drover-items-p session)))
+
+(defun drover--dispatch-items-description ()
+  "Return the description of the list of items in the dispatch menu.
+How many of the items of the session at point are open follows it, and
+\"review\" while its agent asks the user to review them."
+  (if-let* ((session (drover-dispatch-session))
+            ((drover-items-shown-p session))
+            (list (drover-items-list-of session)))
+      (concat "Items "
+              (propertize (format "%d" (seq-count #'drover-items-goes (drover-items-items list)))
+                          'face 'transient-value)
+              (if (drover-items-asked list) (propertize " review" 'face 'transient-value) ""))
+    "Items"))
+
 (defvar drover-dispatch-region nil
   "The text of the region where the dispatch menu was called, or nil.
 Bound while the menu runs, in a list shown beside, a command taking a
@@ -699,6 +727,7 @@ other lists."
   "A" #'drover-respond
   "<tab>" #'drover-build-and-go
   "h" #'drover-handoff
+  "*" #'drover-items
   "E" #'drover-edit-pending-prompt
   "K" #'drover-interrupt
   "s" #'drover-mark-seen
@@ -2645,6 +2674,9 @@ session chosen for it, else to one asked for, unshown."
             :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-clone-p)))
            ("." "Last answer" drover-prompt-last-answer
             :inapt-if-not (lambda () (drover-dispatch-prompt-p 'last-answer)))
+           ("*" drover--dispatch-items-description drover-items
+            :advice* drover--dispatch-in-list
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-items-shown-p)))
            ("O" "Open link" drover-prompt-open-link :if drover-dispatch-prompt-buffer-p
             :inapt-if-not (lambda () (drover-dispatch-prompt-p 'open-link)))]
           ["Session"
@@ -2660,7 +2692,7 @@ session chosen for it, else to one asked for, unshown."
            ("R" "Review" drover-review
             :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
            ("A" "Answer" drover-respond
-            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-answerable-p)))
            ("<tab>" "Build + go" drover-build-and-go
             :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-build-and-go-p)))
            ("K" "Interrupt" drover-interrupt

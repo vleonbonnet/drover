@@ -147,7 +147,7 @@ The value is (PREFIX-OBJECT . SUFFIXES)."
     (should (equal (sort bindings (lambda (a b) (string< (car a) (car b))))
                    (sort (copy-sequence
                           '(("o" . drover-open-other-window) ("A" . drover-respond)
-                            ("<tab>" . drover-build-and-go) ("h" . drover-handoff)
+                            ("<tab>" . drover-build-and-go) ("h" . drover-handoff) ("*" . drover-items)
                             ("E" . drover-edit-pending-prompt) ("G" . drover-goal) ("K" . drover-interrupt) ("s" . drover-mark-seen)
                             ("w" . drover-toggle-auto-bury) ("!" . drover-toggle-notify)
                             ("u" . drover-open-parent) ("c" . drover-open-subagent)
@@ -753,7 +753,7 @@ which lists show too."
     ("Task" ("n" "F" "I" "&" "W"))
     ("Prompt runs" ("a" "m" "P" "e" "d"))
     ("Input" ("RET"))
-    ("Conversation" ("C" "f" "H" "."))
+    ("Conversation" ("C" "f" "H" "." "*"))
     ("Session" ("o" "u" "c" "v" "R" "A" "<tab>" "K" "s") ("+" "g" "r" "x" "z" "Z" "G" "h" "!")))
   "The groups of `drover-dispatch' outside lists, and the keys of their columns.
 Neither the view settings, which apply while a list is in sight, nor the
@@ -791,13 +791,13 @@ prompt buffers."
                          drover-keys-test-dispatch-view-layout))
           ;; In a list, the Input group holds Send alone.
           (should (equal (assoc "Input" groups) '("Input" ("M-RET"))))
-          (should (equal (assoc "Conversation" groups) '("Conversation" ("C" "f" "H" "."))))))
+          (should (equal (assoc "Conversation" groups) '("Conversation" ("C" "f" "H" "." "*"))))))
       (drover-keys-test-in 'prompt "s"
         (let ((groups (layout (drover-keys-test-menu 'drover-dispatch))))
           (should (equal (assoc "Input" groups)
                          '("Input" ("RET" "S-<return>" "i" "k") ("/" "@" "y"))))
           (should (equal (assoc "Conversation" groups)
-                         '("Conversation" ("t" "T" "C" "f" "H" "." "O"))))
+                         '("Conversation" ("t" "T" "C" "f" "H" "." "*" "O"))))
           (should-not (assoc "Field" groups)))))))
 
 (defun drover-keys-test-layout-suffixes (layout)

@@ -48,7 +48,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
   (load "drover-core" nil t))
 
 (declare-function opencode-notify-os-native "opencode-notify" (notification))
@@ -127,8 +127,8 @@ waiting itself, as the phones are pushed (see `drover-remote-push')."
   (when-let* ((record (drover-index-session key))
               ((drover-own-session-p record))
               ((drover-index-listed-p key record))
-              ((memq (drover-session-status record) drover-attention-statuses))
-              ((or (eq (drover-session-status record) 'waiting)
+              ((drover-session-attention-p record))
+              ((or (eq (drover-session-shown-status record) 'waiting)
                    (null (drover-index-parent key)))))
     record))
 
@@ -254,12 +254,14 @@ For `drover-changed-hook'."
   (let ((request (car (drover-session-requests record)))
         (why (or (drover-session-brief record) (drover-session-detail record))))
     (drover-bound-line
-     (pcase (drover-session-status record)
-       ('waiting (if (and request (plist-get request :summary)
-                          (not (string-empty-p (plist-get request :summary))))
-                     (concat (if (eq (plist-get request :kind) 'question) "Asks: " "Permission: ")
-                             (plist-get request :summary))
-                   "Waits for you"))
+     (pcase (drover-session-shown-status record)
+       ('waiting (cond ((and request (plist-get request :summary)
+                             (not (string-empty-p (plist-get request :summary))))
+                        (concat (if (eq (plist-get request :kind) 'question) "Asks: " "Permission: ")
+                                (plist-get request :summary)))
+                       ((drover-session-asked-p record)
+                        (concat "Asks: " (plist-get (drover-session-ask record) :summary)))
+                       (t "Waits for you")))
        ('failed (if why (concat "Failed: " why) "Failed"))
        (_ (or why "Turn ended")))
      240)))
@@ -267,14 +269,16 @@ For `drover-changed-hook'."
 (defun drover-notify-notification (record)
   "Return the notification of RECORD, as `drover-notify-function' takes it."
   (let* ((key (drover-session-key record))
-         (status (drover-session-status record))
+         (status (drover-session-shown-status record))
          (request (car (drover-session-requests record))))
     (list :key key
           :id (format "drover:%s:%s" (car key) (cdr key))
           :session record
           :status status
-          :kind (and (eq status 'waiting) request
-                     (if (eq (plist-get request :kind) 'question) 'question 'permission))
+          ;; What drover asks is a question too, which A answers.
+          :kind (and (eq status 'waiting)
+                     (cond (request (if (eq (plist-get request :kind) 'question) 'question 'permission))
+                           ((drover-session-asked-p record) 'question)))
           :title (drover-bound-line (format "%s" (drover-session-display-title record)) 120)
           :body (drover-notify--body record)
           :engine (drover-session-engine record)

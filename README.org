@@ -116,22 +116,23 @@ The menu has no fixed shape: its groups fill columns of balanced height as wide 
 
 #+begin_example
 Sessions        Task                       Input                 Session                             Field       Filter     Column     Columns
- j Next          n Start or continue        RET Send              o Other window   + New session      subagents  =u [all|active|none]   -b branch
- B Bury quiet    F Finish                   S-<return> Schedule   u Parent         g Refresh          older      =O [hidden|shown]      -x context
- b Select        I Link session             i Attach              c Subagent       r Rename           archived   =z [hidden|shown]      -+ changes
- l List          & Attempts                 k Clear               v Peek           x Delete           project    =p drover  -p shown    -c created
- L Side list     W Worktrees                / Slash command       R Review         z Archive          status     =s any                 -k cache
- p Project                                  @ Mention             A Answer         Z Wrap up          agent      =a any     -a shown    -s summary
- S Search       Prompt runs                 y Copy block          K Interrupt      G Goal             model      =m any     -m shown    -$ cost
- $ Usage         a Agent plan                                     s Mark seen      ! Notify off       provider   =v any     -v shown    -g goal
-                 m Model Opus 5.5          Conversation           w Auto-bury on                      harness    =H any     -H shown    -# attempt
+j Next          n Start or continue        RET Send              o Other window   + New session      subagents  =u [all|active|none]   -b branch
+B Bury quiet    F Finish                   S-<return> Schedule   u Parent         g Refresh          older      =O [hidden|shown]      -x context
+b Select        I Link session             i Attach              c Subagent       r Rename           archived   =z [hidden|shown]      -+ changes
+l List          & Attempts                 k Clear               v Peek           x Delete           project    =p drover  -p shown    -c created
+L Side list     W Worktrees                / Slash command       R Review         z Archive          status     =s any                 -k cache
+p Project                                  @ Mention             A Answer         Z Wrap up          agent      =a any     -a shown    -s summary
+S Search       Prompt runs                 y Copy block          K Interrupt      G Goal             model      =m any     -m shown    -$ cost
+$ Usage         a Agent plan                                     s Mark seen      ! Notify off       provider   =v any     -v shown    -g goal
+m Model Opus 5.5          Conversation           w Auto-bury on                      harness    =H any     -H shown    -# attempt
 Prompt           e Effort max               t Revert here        View                                 host                  -h shown
- " Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
- N Task prompt                              C Compact             =r order [asc|desc]                 text       =f any
- E Edit pending 1                           f Fork                =g group status                                =c clear
- ' Show prompt                              H Clone               -f follow [off|on]
- # Scheduled                                . Last answer
-                                            O Open link
+" Prompt        d Directory ~/src/drover   T Cancel revert       =o sort urgency                     updated    =d any     -d shown
+N Task prompt                              C Compact             =r order [asc|desc]                 text       =f any
+E Edit pending 1                           f Fork                =g group status                                =c clear
+' Show prompt                              H Clone               -f follow [off|on]
+# Scheduled                                . Last answer
+ * Items 4 review
+ O Open link
 #+end_example
 
 The settings of a field share a row of the Field table, aligned: its filter, an option, then whether the list shows its column, a switch, on the same letter, such as ~=m~ and =-m= for the model, the value beside each key; the subagents, older and archived sessions shown head it, as they keep sessions out as the filter does, and ~=c~ under the filters clears them. Where room is short, the table's two halves stack, aligned alike.
@@ -142,7 +143,7 @@ While an action on several sessions runs (see below), the Sessions group shows =
 
 In every list of sessions (drover's list, and the lists of other front ends that turn on =drover-session-keys-mode=) these keys act on the session at point directly; in a prompt buffer, such as an OpenCode session buffer, they act on its session through the menu.
 
-=A= answers in place, from where you are. A session with no request of its own answers the request of its subagent, at any depth, waiting the longest, whether its parent runs it in the foreground or in the background, so you need not go to the subagent first; its own request comes first. It applies when a session of the tree waits for an answer.
+=A= answers in place, from where you are. A session with no request of its own answers the request of its subagent, at any depth, waiting the longest, whether its parent runs it in the foreground or in the background, so you need not go to the subagent first; its own request comes first. It applies when a session of the tree waits for an answer.  A session whose agent asked you to review its list of items, with no request pending, shows that list (see [[*The items of a session][The items of a session]]).
 
 | Key | Command                    | Action                                                         |
 |-----+----------------------------+----------------------------------------------------------------|
@@ -161,6 +162,7 @@ In every list of sessions (drover's list, and the lists of other front ends that
 | =z= | =drover-archive-toggle=    | archive it, and close its buffer; restore it when archived     |
 | =Z= | =drover-wrap-up=           | have it clean up after itself, then archive and close it       |
 | =h= | =drover-handoff=           | have it hand one item of its work off to a session of its own  |
+| =*= | =drover-items=             | show the list of its items, and say where each goes (see [[*The items of a session][The items of a session]]) |
 | =g= | =drover-refresh=           | refresh the list, or reload the session's buffer               |
 | =+= | =drover-new-session=       | start a session in its directory                               |
 | =v= | =drover-peek=              | preview where it stands, without opening (lists)               |
@@ -182,7 +184,7 @@ Set =drover-bury-handed-off= to have drover bury those buffers itself: each wind
 
 =z= archives a session in its front end's archive, such as OpenCode's, or in drover's own when its front end has none, without asking, and closes its buffer (see [[*Archived sessions][Archived sessions]]); on an archived session, from the list showing archived sessions or from the session's buffer while it is open, =z= restores it. The menu names what it does, =Archive= or =Unarchive=. =Z= wraps a session up: its agent is told you are closing it and cleans up what it left behind, then it is archived and its buffer closed, unless the agent asks you something first (see [[*Wrapping sessions up][Wrapping sessions up]]).
 
-=h= hands one item of a session's work off to a session of its own (=drover-handoff=).  The item is the text of the region: in the session's buffer, or, when the menu acts on a list beside, in the buffer you are in.  Without a region, the minibuffer reads the item; so it does in a list, where a region selects sessions.  The session's agent gets a prompt made from =drover-handoff-prompt=, a =format-spec= template: =%i= is the item, =%m= the mode.  The prompt tells the agent to file an Org heading for the item, whose body is a brief that reads alone, to start the task of that heading with the tool =drover-task-start= (see [[*Agents][Agents]]), and to reply with the links of the heading and of the new session.  The mode is a fresh session.  With a prefix argument (=C-u h= in a list, =C-' C-u h= through the menu), the mode is a fork of the session, which the agent makes with =drover-session-fork=; a session of this host whose harness cannot fork is refused, its harness named, and nothing is handed off.  The prompt goes as a wrap-up's does: out of every window, never over a draft, and once the session's turn ended when one runs.  A session of another host gets it through its host.  Drover writes no heading, and the session keeps its buffer.  In the lists, =h= was a second key for =describe-mode=, which =?= still runs.
+=h= hands one item of a session's work off to a session of its own (=drover-handoff=).  The item is the text of the region: in the session's buffer, or, when the menu acts on a list beside, in the buffer you are in.  Without a region, the minibuffer reads the item; so it does in a list, where a region selects sessions.  Then where its heading goes is asked, as Org's refile asks a place (=org-refile-get-location=): your refile targets, with your completion, the place you chose last offered first (=drover-handoff-place-history=, which =savehist-additional-variables= may keep).  A heading without an Org ID gets one, the one thing drover writes there; a file of =drover-task-refused-files=, or one Anvil's Org tools do not write (=anvil-org-allowed-files=), is refused and asked again.  For a session of another host the place is a heading, which that host's agent finds by its ID: the top of a file is refused.  The session's agent gets a prompt made from =drover-handoff-prompt=, a =format-spec= template: =%i= is the item, =%m= the mode, =%p= the place, as Anvil's =org-add-todo= takes its =parent_uri=: =org-id://ID= for a heading, =org-headline://FILE= for the top of a file.  The prompt tells the agent to file an Org heading for the item there, whose body is a brief that reads alone, to start the task of that heading with the tool =drover-task-start= (see [[*Agents][Agents]]), and to reply with the links of the heading and of the new session.  The mode is a fresh session.  With a prefix argument (=C-u h= in a list, =C-' C-u h= through the menu), the mode is a fork of the session, which the agent makes with =drover-session-fork=; a session of this host whose harness cannot fork is refused, its harness named, and nothing is handed off.  The prompt goes as a wrap-up's does: out of every window, never over a draft, and once the session's turn ended when one runs.  A session of another host gets it through its host.  Drover writes no heading, and the session keeps its buffer.  In the lists, =h= was a second key for =describe-mode=, which =?= still runs.
 
 =s=, =K=, =z=, =Z= and =x= act on every session selected, when a region selects several (see [[*Selecting sessions][Selecting sessions]]): =K= on those that run a turn, =s= on those whose turn ended unseen, =z= on those not archived, or restores them all when all are, =Z= on those that may be wrapped up; =K= and =x= after one confirmation naming them all, such as =Delete 3 sessions for good: A, B, C?=, and each with one report, such as =Archived 3 sessions=, naming those that failed without stopping the others; a confirmation names five of them at most, and counts the others.
 
@@ -724,7 +726,7 @@ A heading's properties, inherited, override it for its tasks: =DROVER_FINISH= (=
 
 ** What drover writes on headings
 
-What drover writes on a heading is properties beginning with =DROVER_= and notes in its LOGBOOK, never anything else: not ejira's properties, the title, the TODO keyword (but on your word, finishing), the body, nor a child heading, which ejira would take for an issue or a comment.  It saves the file when it had no unsaved change, as a change ejira counts but does not review.  A copy of a task file in a linked worktree, such as a repository's tracked =todo.org=, and the files of =drover-task-refused-files=, are never read nor written.
+What drover writes on a heading is properties beginning with =DROVER_= and notes in its LOGBOOK, and the Org ID of a heading you chose as the place of headings to come, when it has none (see [[*Session keys][Session keys]], =h=), never anything else: not ejira's properties, the title, the TODO keyword (but on your word, finishing), the body, nor a child heading, which ejira would take for an issue or a comment.  It saves the file when it had no unsaved change, as a change ejira counts but does not review.  A copy of a task file in a linked worktree, such as a repository's tracked =todo.org=, and the files of =drover-task-refused-files=, are never read nor written.
 
 ** Finishing a task
 
@@ -749,6 +751,73 @@ A task belongs to the host running its sessions, =DROVER_HOST=: =C-u C-' n= star
      ("10gen/aegis-security" :checkout "~/local/source/mdb/10gen/aegis-security/"
       :branch-prefix "val.leon/"))))
 #+end_src
+
+* The items of a session
+
+A long session collects items: actions, decisions, follow-ups.  Its agent gives their list to drover with the tool =drover-session-items-set= (see [[*Agents][Agents]]), instead of printing it in the conversation, where a compaction can lose it.  Drover keeps the list of each conversation in =items.eld= of =drover-state-directory=.  It writes the file as the list changes, so the list survives a restart or a crash of Emacs.  It keeps 100 items a list and the 200 lists changed last, and bounds each text: a title to 200 characters, a next step to 300, a note to 20 lines and 2000 characters, a link to 1000.
+
+Each item has:
+
+| Field     | What it is                                                                                     |
+|-----------+------------------------------------------------------------------------------------------------|
+| number    | given as the item is added, never reused                                                       |
+| title     | one line                                                                                        |
+| status    | =open=, =blocked=, =scheduled=, =done= or =decided=                                            |
+| link      | an Org link to what the item names, or none                                                    |
+| next step | one line                                                                                        |
+| note      | a few lines                                                                                     |
+| heading   | the Org ID of its heading, once it has one                                                     |
+| goes      | where you want it to go: it stays here, a new session, a fork of the session, or saved for later |
+
+An item with a heading takes its status from the heading's Org state:
+
+| Heading                                                      | Status      |
+|--------------------------------------------------------------+-------------|
+| a done keyword of =drover-task-decided-states=               | =decided=   |
+| another done keyword                                         | =done=      |
+| not done, with an Org =SCHEDULED= time                       | =scheduled= |
+| a keyword of =drover-task-blocked-states=, not scheduled      | =blocked=   |
+| any other keyword, such as =TODO= or =STARTED=, or none       | =open=      |
+
+=drover-task-decided-states= is =CANCELED= and =CANCELLED= by default, =drover-task-blocked-states= =WAITING=, =BLOCKED= and =HOLD=.  Such an item also tells the sessions that serve its heading (see [[*Sessions of tasks, and projects][Sessions of tasks, and projects]]).  A heading in a file of =drover-task-refused-files= is never read, so an item cannot name it.
+
+** The view
+
+=*= on a session (=drover-items=), in a list or in its buffer, shows its list: one line per item, in the look of drover's lists.  The header line names the columns: where the item goes, its number, status, title, link, the sessions serving its heading, and its next step.  =TAB= shows what the line cuts: the note, the whole link, the heading, its sessions, the place of its heading.
+
+| Key                   | Command                     | Action                                                     |
+|-----------------------+-----------------------------+------------------------------------------------------------|
+| =n=, =<down>=         | =drover-items-next=         | the next item                                              |
+| =p=, =<up>=           | =drover-items-previous=     | the previous item                                          |
+| =<right>=             | =drover-items-goes-next=    | the next place: here, new session, fork, later, here again |
+| =<left>=              | =drover-items-goes-previous= | the place before                                          |
+| =RET=                 | =drover-items-follow=       | show its heading, else open its link                       |
+| =C-c C-c=             | =drover-items-apply=        | apply the choices                                          |
+| =q=                   | =drover-items-leave=        | leave; the choices stay                                    |
+| =g=                   | =revert-buffer=             | read the headings again                                    |
+
+An item goes where the agent proposed, else it stays here.  Your choice shows highlighted, the agent's proposal dimmed, as the menu shows a value chosen and one inherited.  A done or decided item goes nowhere, and shows =—=.  Drover writes each choice to the file as you make it.
+
+The menu shows the key as =* Items= in its Conversation group, with the count of open items and =review= while the agent asks for one.
+
+** Reviews
+
+By default, the tool asks you to review the list.  The session then needs you once its turn ends, as a session asking a question does: it counts in the mode line, shows the waiting icon among the sessions needing you, and notifies you when you chose so.  Its summary reads, for example, =asks: where its 7 items go=.  =A= on it shows the list; a request of the agent's own comes first.  The session's own status stays its backend's: prompts scheduled for the end of its turn, goals and =h= go as usual, and other hosts and phones see the session as its backend tells it.  The session needs you until you apply the choices: =q= leaves the review open.
+
+** Applying the choices
+
+=C-c C-c= asks where the heading of each item leaving the session goes, when it has no heading yet: one question per item, as =h= asks its place (see [[*Session keys][Session keys]]), the place chosen last offered first.  Then the session gets one prompt, made from =drover-items-prompt=, as =h= sends its prompt: out of every window, never over a draft, and once a running turn ends.  The prompt lists each item with where it goes and where its heading goes, as Anvil's =org-add-todo= takes its =parent_uri=.  =%i= is that list in the template.
+
+The default prompt tells the agent:
+
+1. Load its =handoff= skill when it has one, and follow it.
+2. Write each heading at the place given, with a brief that reads alone.
+3. Start a new session with =drover-task-start=, or a fork with =drover-session-fork=.  Start nothing for an item saved for later.
+4. Record each heading on its item with =drover-session-items-set=, =review= false.
+
+The items told of are marked sent; applying again tells only the items sent nowhere yet, or whose destination changed since.  With no item leaving, applying sends nothing and ends the review.  Drover writes no heading: it writes only the ID of a heading you chose as a place, when that heading has none.
+
+The lists of another host's sessions are that host's to keep.  =*= refuses such a session, and so do the tools.
 
 * Goals
 
@@ -1059,7 +1128,7 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 
 * Agents
 
-=drover-anvil= gives agents, through [[https://github.com/zawatton/anvil.el][Anvil]]'s MCP server in your Emacs, the sessions you have, of every harness and host: they list and read them, start sessions, fork them and prompt them, start the tasks of Org headings, wait for their turns to end, answer their questions, interrupt and archive them, and read the prompts you sent.  =drover-anvil-enable= registers the tools with Anvil:
+=drover-anvil= gives agents, through [[https://github.com/zawatton/anvil.el][Anvil]]'s MCP server in your Emacs, the sessions you have, of every harness and host: they list and read them, start sessions, fork them and prompt them, start the tasks of Org headings, wait for their turns to end, answer their questions, interrupt and archive them, keep the lists of their items, and read the prompts you sent.  =drover-anvil-enable= registers the tools with Anvil:
 
 #+begin_src emacs-lisp
   (with-eval-after-load 'anvil
@@ -1083,6 +1152,8 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 | =drover-schedule-fire=     | Tells drover an event happened, by name, which sends the prompts waiting for it, or cancels them                                               |
 | =drover-scheduled=         | Lists the scheduled prompts of every host: when each goes, its status, its host and session, and who scheduled it                              |
 | =drover-prompts=           | Returns the prompts you sent over a period, every host's, oldest first (see [[*Prompts][Prompts]])                                                           |
+| =drover-session-items-set= | Keeps the list of a session's items (=items=), the caller's by default (=key=), and asks you to review it unless =review= is false; returns the list as kept, at once (see below) |
+| =drover-session-items=     | Returns a session's list (=key=, the caller's by default): each item's number, title, status, link, next step, note, heading, sessions and where it goes |
 | =drover-job=               | Returns the answer of a job a tool answered with, for clients that cannot wait                                                                 |
 
 Agents may do everything the tools offer, on every session of every host, whoever started it and wherever it runs: drover refuses only what cannot be done, such as a prompt to a session whose buffer holds a draft, or a directory that does not exist.  What a harness lets its agents call is that harness's permissions to say.  The caller is the session whose agent calls, as its client tells it: OpenCode names it in each call, and Claude Code records the conversation of the process that started Anvil's bridge (with an Anvil whose bridge binds =anvil-server-transport-pid=); a caller not told does the same, but for what needs to know it, such as following itself up.  No session waits for itself, for a session above it, whose turn waits for its own, nor for one waiting for it: such a wait would only end at its timeout.  Every call is logged in =anvil.log= of =drover-state-directory= (=drover-anvil-log-file=); a log that cannot be written is warned about, and the call goes on.  A prompt an agent schedules joins your queue, where you see and cancel it, and is delivered out of every window.  Agents start sessions of any harness starting sessions here or on a peer (with =drover-remote-mode=), OpenCode's by default, without showing them; a session of a peer is scheduled in that peer's queue, which reads the time with its own clock and events.
@@ -1090,6 +1161,32 @@ Agents may do everything the tools offer, on every session of every host, whoeve
 ** Links to sessions
 
 The tools that tell of a session tell its =link= beside its key: =drover-sessions=, =drover-session=, =drover-session-create=, =drover-session-fork= and =drover-task-start=.  It is the target of the session's Org link, as =org-store-link= stores it: =agent-session:opencode/ses_1=, and =agent-session://core/opencode/ses_1= for a session of the host =core=.  An agent writes it in an Org heading as =[[LINK][TITLE]]=.  A key is not a link: =claude-code-ide/terminal-48= names a terminal, not its conversation.  A session whose conversation is not known yet has no =link=.
+
+** Lists of items
+
+=drover-session-items-set= takes =items=, an array of objects.  Each has =title= and =status= (=open=, =blocked=, =scheduled=, =done= or =decided=), and may have:
+
+| Field      | What it is                                                                                       |
+|------------+--------------------------------------------------------------------------------------------------|
+| =link=     | an Org link to what the item names, such as =[[id:ID][title]]=, =[[https://…][title]]= or =agent-session:…= |
+| =next=     | its next step                                                                                    |
+| =note=     | a note                                                                                           |
+| =heading=  | the Org ID of its heading                                                                        |
+| =proposal= | where the agent proposes it goes: =keep=, =session=, =fork= or =save=                            |
+| =id=       | the number of an item the list holds, to update that item                                        |
+
+An item without =id= is added.  An item with =id= takes the fields it gives, and keeps the others; an empty string clears one.  The items the call does not give stay.  =key= names the session, the caller's by default; =review=, true by default, asks you to review the list (see [[*Reviews][Reviews]]).  The tool answers at once with the list as kept, or once ripgrep looked for the headings that no visited file holds.
+
+The tool refuses the whole call, and names each item refused, when a field is wrong or a link cannot be what it says:
+
+- an =id:= link, or a =heading=, whose heading drover does not find;
+- an =agent-session:= link to a session drover does not know;
+- a =file:= link to a file that does not exist;
+- a link of a type Org does not know, such as =sftp:=, or text that is no link.
+
+=http= and =https= links pass, and an item may have no link.  A session of another host is refused: that host keeps its list.
+
+=drover-session-items= returns the list of a session, the caller's by default.  Each item tells its number (=id=), =title=, =status=, =link=, =next=, =note=, =heading= (its ID, title, and whether drover found it), the =sessions= serving that heading, where it goes (=goes=, or =none= for an item done or decided), who chose that (=chosen_by=: =user=, =agent= or =default=), the =place= of its heading, and when it was =sent=.
 
 ** Forks
 

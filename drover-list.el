@@ -128,7 +128,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 22))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -1279,7 +1279,7 @@ number is drawn over it (see `drover-list--draw-numbers')."
 (defun drover-list--subagents-help (subagents)
   "Return the tooltip naming SUBAGENTS, active sessions, by what they do.
 It tells how many do each, which their glyphs do not."
-  (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting))
+  (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-shown-status session) 'waiting))
                               subagents))
          (working (seq-difference subagents waiting #'eq))
          (line (lambda (sessions doing)
@@ -1302,9 +1302,9 @@ or waiting to retry, a space between, each in the subagent cell of
 METRICS.  They stay still and tell no number: their tooltip names the
 subagents and tells how many."
   (when subagents
-    (let* ((waiting (seq-some (lambda (session) (eq (drover-session-status session) 'waiting))
+    (let* ((waiting (seq-some (lambda (session) (eq (drover-session-shown-status session) 'waiting))
                               subagents))
-           (working (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))
+           (working (seq-some (lambda (session) (not (eq (drover-session-shown-status session) 'waiting)))
                               subagents))
            (cell (plist-get metrics :subagent-cell)))
       (propertize (mapconcat (lambda (kind) (drover-list--in-cell (opencode-subagent-glyph kind) cell))
@@ -1335,7 +1335,7 @@ of each session and the time."
                          (gethash (drover-session-key session) (plist-get metrics :active)))
                     metrics))
         (archived (drover-list--archived-glyph session (plist-get metrics :now))))
-    (concat (drover-list--status-glyph (drover-session-status session) metrics
+    (concat (drover-list--status-glyph (drover-session-shown-status session) metrics
                                        (drover-session-stale session))
             " "
             (and indicator (concat indicator " "))
@@ -1358,7 +1358,7 @@ arrow, carries the session's key as its property `drover-list-title',
 so that its face may change in place."
   (let* ((title (drover-list--one-line (drover-session-display-title session)))
          (faces (delq nil (list (drover-list--title-face state)
-                                (and (or (eq (drover-session-status session) 'idle)
+                                (and (or (eq (drover-session-shown-status session) 'idle)
                                          (drover-session-archived session)
                                          (drover-session-stale session))
                                      'drover-dim)))))
@@ -1781,7 +1781,7 @@ cost shows (see `drover-list-usage-function'), the task it serves,
 whose project its project shows (see `drover-session-task'), and its
 goal (see `drover-list-goal-function')."
   (let* ((now (plist-get metrics :now))
-         (status (drover-session-status session))
+         (status (drover-session-shown-status session))
          (archived (drover-session-archived session))
          (frames (and (not (drover-session-stale session))
                       (alist-get status (plist-get metrics :frames)))))
@@ -3293,12 +3293,15 @@ list TEXT is its lines, each cut.  FACE, if any, is that of TEXT."
       (dolist (request (drover-session-requests session))
         (add (if (eq (plist-get request :kind) 'question) "Question" "Permission")
              (plist-get request :summary) 'request 'opencode-session-status-waiting))
+      (when-let* ((ask (drover-session-ask session)))
+        (add "Asks" (plist-get ask :summary) 'request 'opencode-session-status-waiting))
       ;; Not what the line shows whole already, the same text.
       (unless (and summary problem
                    (eq (drover-list--one-line problem) problem)
                    (equal (drover-session-summary session) problem))
         (add (if (eq status 'retrying) "Retrying" "Error") problem 'error (opencode-session-status-face status)))
-      (unless (or summary problem (drover-session-brief session) (drover-session-requests session))
+      (unless (or summary problem (drover-session-brief session) (drover-session-requests session)
+                  (drover-session-ask session))
         (add "Status" (drover-session-detail session) nil (opencode-session-status-face status)))
       (add "Prompt" (plist-get recap :prompt) 'prompt)
       (add "Reply" (plist-get recap :reply) 'reply)
@@ -3522,7 +3525,7 @@ washer `magit-insert-section-body' makes does, for the section
   "Count the session of ROW DELTA times in COUNTS, a hash table by status.
 Archived sessions count apart, as `archived'."
   (let* ((session (drover-list--row-session row))
-         (key (if (drover-session-archived session) 'archived (drover-session-status session))))
+         (key (if (drover-session-archived session) 'archived (drover-session-shown-status session))))
     (puthash key (+ (gethash key counts 0) delta) counts)))
 
 (defun drover-list--status-counts (counts)

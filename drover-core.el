@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 31
+(defconst drover-core-generation 32
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -746,7 +746,14 @@ what comes next, which its buffer shows above its input, so that the
 last turn reads in its context (see `drover-brief-of-buffer').")
   (notify nil :documentation "Non-nil when the user chose to be notified of the session's conversation.
 As kept for it (see `drover-notify-chosen-p'); a session of another
-host carries its owner's choice."))
+host carries its owner's choice.")
+  (ask nil :documentation "What drover itself asks the user of the session, a plist, or nil.
+Such as where the items of its list go (see `drover-items'): :kind, a
+symbol, :summary, a line telling what is asked, and :since, when it was
+asked.  Given to the records of this host's sessions (see
+`drover-ask-function'), never to those of another host, whose owner
+asks.  The session shows as waiting for the user while its turn does
+not run (see `drover-session-shown-status')."))
 
 (drover-note-layout 'drover-session)
 
@@ -804,6 +811,44 @@ whose changes its owner read, or when the function fails."
                (and (drover-session-p changed) changed))))
       record))
 
+(defvar drover-ask-function nil
+  "Function giving a record of this host what drover asks the user of it, or nil.
+Called with each record drover takes in from a backend of this host, it
+returns nil, or a plist the record carries in its slot `ask': :kind, a
+symbol, such as `items' for a list of items to say where each goes
+\(see `drover-items'); :summary, a line telling what is asked; :since,
+when it was asked, a float.  It is called for every record listed,
+thousands at once: it must cost a lookup, and return the same plist,
+`eq', while the question stands, so that records listed again compare
+alike.")
+
+(defvar drover--ask-copies (make-hash-table :test #'eq :weakness 'key)
+  "Records given what drover asks the user of them, each mapped to (ASK . COPY).
+The same record and question give the same copy, so that records
+listed again compare alike.")
+
+(defun drover--with-ask (record)
+  "Return RECORD, or a copy telling what drover asks the user of its session.
+The slot `ask' of a record of this host follows `drover-ask-function', in
+a copy made once per record and question; a record of another host is
+left as its owner sent it, its owner asking for it (see
+`drover-session-ask')."
+  (if (or (not (drover-session-p record)) (drover-session-host record))
+      record
+    (let ((ask (and drover-ask-function
+                    (drover-with-reporting "session ask"
+                      (let ((ask (funcall drover-ask-function record)))
+                        (and (plistp ask) (stringp (plist-get ask :summary)) ask))))))
+      (if (eq ask (drover-session-ask record))
+          record
+        (let ((made (gethash record drover--ask-copies)))
+          (if (and made (eq (car made) ask))
+              (cdr made)
+            (let ((copy (copy-sequence record)))
+              (setf (drover-session-ask copy) ask)
+              (puthash record (cons ask copy) drover--ask-copies)
+              copy)))))))
+
 (defun drover--whole-record (record)
   "Return RECORD, or a copy of it with the slots it lacks, nil.
 A record a backend made with an older drover, still running as this one
@@ -827,8 +872,9 @@ to as many lines and `drover-brief-session-limit' characters.  RECORD
 itself when within those, and of all the slots of a `drover-session'
 now (see `drover--whole-record'), unless `drover-brief-function' gives
 it a brief (see `drover--briefed'), `drover-changes-function' what it
-changed (see `drover--with-changes') or the user chose otherwise of its
-notifications (see `drover--with-notify')."
+changed (see `drover--with-changes'), the user chose otherwise of its
+notifications (see `drover--with-notify') or drover asks the user
+something of it (see `drover--with-ask')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -878,7 +924,7 @@ notifications (see `drover--with-notify')."
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (drover--with-notify (drover--with-changes (drover--briefed (or copy record)))))))
+      (drover--with-ask (drover--with-notify (drover--with-changes (drover--briefed (or copy record))))))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -926,20 +972,56 @@ else the one its backend tells (`drover-session-project')."
 Its record is as that host last told it; see `drover-session-stale'."
   (and (drover-session-stale session) t))
 
+(defun drover-session-asked-p (session)
+  "Return non-nil when SESSION shows as waiting for what drover asks the user.
+That is when drover asks the user something of it (see
+`drover-session-ask') while its turn does not run: its backend tells it
+idle or done."
+  (and (memq (drover-session-status session) '(idle done))
+       (drover-session-ask session)
+       t))
+
+(defun drover-session-shown-status (session)
+  "Return the status SESSION shows and ranks in: its own, or `waiting'.
+A session drover asks the user something of shows as waiting for the
+user once its turn no longer runs, as a session asking a question does
+\(see `drover-session-asked-p'): its glyph, its group, its place among
+sessions, the filter and the mode-line count follow.  Its own status
+stays what its backend tells, which what waits for the end of its turn
+reads (see `drover-session-active-p')."
+  (if (drover-session-asked-p session) 'waiting (drover-session-status session)))
+
+(defun drover-session-shown-since (session)
+  "Return when the status SESSION shows in began, a float, or nil.
+The start of its own status, but for a session waiting for what drover
+asks (see `drover-session-asked-p'): the later of that start and the
+asking."
+  (let ((since (drover-session-since session)))
+    (if-let* (((drover-session-asked-p session))
+              (asked (plist-get (drover-session-ask session) :since))
+              ((numberp asked)))
+        (max asked (or since 0))
+      since)))
+
 (defun drover-session-attention-p (session)
-  "Return non-nil when SESSION needs the user."
-  (memq (drover-session-status session) drover-attention-statuses))
+  "Return non-nil when SESSION needs the user.
+Its shown status is one of `drover-attention-statuses' (see
+`drover-session-shown-status')."
+  (memq (drover-session-shown-status session) drover-attention-statuses))
 
 (defun drover-session-need-signature (session)
   "Return what tells how SESSION needs the user, a short string.
-Its status, and the kinds and summaries of its first requests: a
-notification of it is told again when this changes, and only then."
+Its shown status, the kinds and summaries of its first requests, and
+what drover asks of it: a notification of it is told again when this
+changes, and only then."
   (string-limit
-   (string-join (cons (symbol-name (drover-session-status session))
-                      (mapcar (lambda (request)
-                                (format "%s:%s" (plist-get request :kind)
-                                        (drover-bound-line (or (plist-get request :summary) "") 80)))
-                              (seq-take (drover-session-requests session) 4)))
+   (string-join (append (list (symbol-name (drover-session-shown-status session)))
+                        (mapcar (lambda (request)
+                                  (format "%s:%s" (plist-get request :kind)
+                                          (drover-bound-line (or (plist-get request :summary) "") 80)))
+                                (seq-take (drover-session-requests session) 4))
+                        (when-let* ((ask (drover-session-ask session)))
+                          (list (format "ask:%s" (drover-bound-line (plist-get ask :summary) 80)))))
                 "|")
    400))
 
@@ -963,8 +1045,12 @@ See `drover-active-statuses'."
   "Return one line on why SESSION has its status, or nil.
 Its brief, written by a model, while it tells where the session stands
 \(see `drover-session-brief'); else a waiting session shows its oldest
-request, another its detail."
-  (or (drover-session-brief session)
+request, another its detail.  A session waiting for what drover asks
+\(see `drover-session-asked-p') shows what is asked, which its brief,
+written of its last turn, cannot tell."
+  (or (and (drover-session-asked-p session)
+           (concat "asks: " (plist-get (drover-session-ask session) :summary)))
+      (drover-session-brief session)
       (if-let* ((request (car (drover-session-requests session))))
           (concat (if (eq (plist-get request :kind) 'question) "asks: " "permit: ")
                   (plist-get request :summary))
@@ -1161,7 +1247,7 @@ A session needing the user counts from when its status began, as it
 has done nothing since; the others from their last activity.  Lists
 show its age."
   (if (drover-session-attention-p session)
-      (or (drover-session-since session) (drover-session-updated session))
+      (or (drover-session-shown-since session) (drover-session-updated session))
     (or (drover-session-updated session) (drover-session-since session))))
 
 (defvar drover--activity-times (make-hash-table :test #'equal)
@@ -1238,8 +1324,10 @@ see `drover-session-activity'."
                 (lambda (a b)
                   (let ((session-a (car a))
                         (session-b (car b)))
-                    (drover--before-p (drover-session-status session-a) (drover-session-since session-a) (cdr a)
-                                      (drover-session-status session-b) (drover-session-since session-b) (cdr b)))))))
+                    (drover--before-p (drover-session-shown-status session-a) (drover-session-shown-since session-a)
+                                      (cdr a)
+                                      (drover-session-shown-status session-b) (drover-session-shown-since session-b)
+                                      (cdr b)))))))
 
 ;;;; Trees
 
@@ -1279,8 +1367,8 @@ Each is a value of `drover-session-activity', or nil when unknown."
 (defun drover--node (session children)
   "Return the tree of SESSION with CHILDREN, trees of its subagents."
   (let* ((children (sort children #'drover--node-before-p))
-         (status (drover-session-status session))
-         (since (drover-session-since session))
+         (status (drover-session-shown-status session))
+         (since (drover-session-shown-since session))
          (updated (drover-session-updated session))
          (activity (drover-session-activity session)))
     (dolist (child children)
@@ -2280,7 +2368,8 @@ looked at: the backends read what was recorded later, in slices."
 (defconst drover--kept-modules
   '((drover-goal :file "goals.eld" :restore drover-goal-restore)
     (drover-fanout :file "fanouts.eld" :restore drover-fanout-restore)
-    (drover-wrap-up :file "wrap-ups.eld" :restore drover-wrap-up-restore))
+    (drover-wrap-up :file "wrap-ups.eld" :restore drover-wrap-up-restore)
+    (drover-items :file "items.eld" :restore drover-items-restore))
   "The modules keeping work across Emacs sessions, by feature, as plists.
 :file is the file of `drover-state-directory' keeping it, and :restore
 the module's function following it again when some is not over.")
@@ -2808,7 +2897,7 @@ their order in SESSIONS."
                   (let ((key (drover-session-key session)))
                     (and (not (drover-session-stale session))
                          (or (gethash key shown)
-                             (and (eq (drover-session-status session) 'waiting)
+                             (and (eq (drover-session-shown-status session) 'waiting)
                                   (or (not filtered) (gethash key listed)))))))
                 sessions)))
 
@@ -2884,7 +2973,7 @@ the top of its tree, as the index tells it, whose buffer answers its
 subagents' requests (see `drover-session-to-answer') and whose turn the
 answer resumes.  A subagent whose tree the index does not hold is its
 own."
-  (or (and (eq (drover-session-status session) 'waiting)
+  (or (and (eq (drover-session-shown-status session) 'waiting)
            (drover-session-parent session)
            (let* ((key (drover-session-key session))
                   (root (drover-index-root key)))
@@ -3820,7 +3909,7 @@ SESSION must satisfy every member of FILTER that is set."
          (search (drover--filter-value filter :search))
          (hosts (drover--filter-value filter :host)))
     (and (drover-filter-selection-match-p (drover-session-view-project session) project)
-         (drover-filter-selection-match-p (drover-session-status session) statuses)
+         (drover-filter-selection-match-p (drover-session-shown-status session) statuses)
          (drover-filter-selection-match-p (drover-session-agent session) agent)
          (drover-filter-selection-match-p (drover-session-model session) model)
          (drover-filter-selection-match-p (drover-session-provider-name session) provider)
@@ -6492,13 +6581,58 @@ answers requests count; nil when none of the tree has requests."
             (setq stack (append (drover-index-children key) stack)))))
       oldest)))
 
+(defvar drover-ask-respond-function nil
+  "Function of a session showing what drover asks the user of it, or nil.
+`drover-respond' calls it for a session of a tree with no request
+pending, of which drover asks something (see `drover-session-asking'),
+as `drover-items' shows the list a session asks the user to review.")
+
+(defun drover-session-asking (session)
+  "Return the session of SESSION's tree waiting for what drover asks, or nil.
+That is SESSION when it shows so (see `drover-session-asked-p'), else
+the subagent below it, at any depth, asked of the longest, as requests
+are answered from the top of a tree.  Nil without
+`drover-ask-respond-function', which answers it."
+  (when drover-ask-respond-function
+    (if (drover-session-asked-p session)
+        session
+      (let ((seen (make-hash-table :test #'equal))
+            (stack (drover-index-children (drover-session-key session)))
+            (oldest nil))
+        (while stack
+          (let ((key (pop stack)))
+            (unless (gethash key seen)
+              (puthash key t seen)
+              (when-let* ((record (drover-index-session key))
+                          ((drover-session-asked-p record)))
+                (when (or (null oldest)
+                          (< (drover--time (drover-session-shown-since record))
+                             (drover--time (drover-session-shown-since oldest))))
+                  (setq oldest record)))
+              (setq stack (append (drover-index-children key) stack)))))
+        oldest))))
+
+(defun drover-session-answerable-p (session)
+  "Return non-nil when `drover-respond' answers something of SESSION.
+A request of its tree (see `drover-session-to-answer'), else what
+drover asks of it (see `drover-session-asking')."
+  (and session
+       (or (drover-session-to-answer session) (drover-session-asking session))
+       t))
+
 (defun drover-respond (session)
   "Answer the oldest request of SESSION, else of its subagents.
 SESSION without a request of its own answers the subagent below it
-waiting the longest, at any depth: see `drover-session-to-answer'.
+waiting the longest, at any depth: see `drover-session-to-answer'.  A
+tree with no request pending answers what drover asks of it, such as
+where the items of its list go (see `drover-session-asking').
 Interactively, SESSION is the session at point."
   (interactive (list (drover-session-at-point)))
-  (drover-backend-call (or (and session (drover-session-to-answer session)) session) :respond))
+  (let* ((target (and session (drover-session-to-answer session)))
+         (asking (and session (null target) (drover-session-asking session))))
+    (if asking
+        (funcall drover-ask-respond-function asking)
+      (drover-backend-call (or target session) :respond))))
 
 ;;;; Turns handed back
 

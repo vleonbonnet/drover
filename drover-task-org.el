@@ -46,6 +46,7 @@
 
 (declare-function org-id-locations-load "org-id" ())
 (declare-function org-id-files "org-id" ())
+(declare-function org-id-get-create "org-id" (&optional force))
 (defvar org-id-locations)
 (defvar ejira-push-on-save)
 
@@ -54,6 +55,21 @@
 Such as an old clone of a repository holding a copy of a task file
 another checkout tracks.  Files of linked worktrees are refused anyway."
   :type '(repeat file)
+  :group 'drover)
+
+(defcustom drover-task-decided-states '("CANCELED" "CANCELLED")
+  "Done keywords of the headings of items decided rather than done.
+An item of a session's list whose heading has one of these is
+`decided'; another done keyword is `done' (see
+`drover-task-org-status')."
+  :type '(repeat string)
+  :group 'drover)
+
+(defcustom drover-task-blocked-states '("WAITING" "BLOCKED" "HOLD")
+  "Keywords of the headings of items blocked.
+An item of a session's list whose heading has one of these, not done
+and not scheduled, is `blocked' (see `drover-task-org-status')."
+  :type '(repeat string)
   :group 'drover)
 
 (defconst drover-task-org-jira-regexp "\\`[A-Z][A-Z0-9]+-[0-9]+\\'"
@@ -260,7 +276,8 @@ Bounded to `drover-task-org-body-limit' characters; nil when empty."
   "Return what the heading at MARKER tells of its task, as a plist.
 :id, its ID, :orig-id, the ID ejira replaced, :title, plain text, its
 links shown as their descriptions, :todo, its TODO
-keyword, :done, non-nil for a done one, :category, its Org category,
+keyword, :done, non-nil for a done one, :scheduled, non-nil when it has
+an Org SCHEDULED time, :category, its Org category,
 the task's project, :jira, its Jira key (see `drover-task-org-jira-key'),
 :ejira, non-nil for a heading ejira syncs, :file, :repos, the
 repositories DROVER_REPO names, inherited, :kind, DROVER_KIND,
@@ -292,6 +309,7 @@ worktrees or directories it works in, each with its :number, and
               :title (org-link-display-format (substring-no-properties (org-get-heading t t t t)))
               :todo todo
               :done (and todo (member todo org-done-keywords) t)
+              :scheduled (and (org-entry-get nil "SCHEDULED") t)
               :category (let ((category (org-get-category)))
                           (and (stringp category) (not (string-empty-p category))
                                (substring-no-properties category)))
@@ -308,6 +326,21 @@ worktrees or directories it works in, each with its :number, and
                                 (substring-no-properties (string-trim goal-checks)))
               :attempts (nreverse attempts)
               :tick (cons (current-buffer) (buffer-chars-modified-tick)))))))
+
+(defun drover-task-org-status (info)
+  "Return the status of an item whose heading INFO tells.
+INFO is what `drover-task-org-read' read of it.  The status is
+`decided' for a done keyword of `drover-task-decided-states', `done'
+for another done one; `scheduled' for a heading not done with an Org
+SCHEDULED time; else `blocked' for a keyword of
+`drover-task-blocked-states', `open' for any other, or for none.  A
+scheduled heading is scheduled, blocked or not."
+  (let ((todo (plist-get info :todo)))
+    (cond ((plist-get info :done)
+           (if (member todo drover-task-decided-states) 'decided 'done))
+          ((plist-get info :scheduled) 'scheduled)
+          ((member todo drover-task-blocked-states) 'blocked)
+          (t 'open))))
 
 (defun drover-task-org-fresh-p (info)
   "Return non-nil when INFO, of `drover-task-org-read', still tells its heading."
@@ -381,6 +414,30 @@ saved."
       (when (and clean (buffer-file-name base))
         (drover-task-org--save base)
         t))))
+
+(defun drover-task-org-place-id (marker)
+  "Return the Org ID of the heading at MARKER, given one when it has none.
+The heading is a place the user chose for the headings agents write:
+its ID is how Anvil's Org tools name it, the one thing drover writes on
+a heading but DROVER_ properties and LOGBOOK notes.  The file is saved
+when it had no unsaved change before, as `drover-task-org-write'
+saves.  Signal an error for a refused file."
+  (let ((buffer (marker-buffer marker)))
+    (unless (buffer-live-p buffer)
+      (error "The heading is gone"))
+    (let* ((base (or (buffer-base-buffer buffer) buffer))
+           (clean (not (buffer-modified-p base)))
+           (id nil))
+      (when (drover-task-org-refused-p (buffer-file-name base))
+        (error "Headings are not written in %s" (buffer-name base)))
+      (with-current-buffer buffer
+        (org-with-point-at marker
+          (setq id (or (org-entry-get nil "ID")
+                       (progn (require 'org-id)
+                              (org-id-get-create))))))
+      (when (and clean (buffer-modified-p base) (buffer-file-name base))
+        (drover-task-org--save base))
+      (substring-no-properties id))))
 
 (defun drover-task-org-mark-done (marker)
   "Set the heading at MARKER to its first done keyword, the normal Org way.
