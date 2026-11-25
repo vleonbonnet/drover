@@ -1473,21 +1473,33 @@ of `drover-task-start-session', with the heading's body."
 With GOAL, the properties of `drover-goal-start', the session starts
 under that goal, which the host runs (see `drover-remote-goal')."
   (require 'drover-remote)
-  (let* ((host (plist-get plan :host))
-         (title (plist-get plan :title))
-         (request (append
-                   (list :kind "start" :task (plist-get plan :id) :title title
-                        :repo (plist-get plan :repo) :mode (symbol-name (plist-get plan :kind))
-                        :slug (plist-get plan :slug) :jira (or (plist-get plan :jira) :false)
-                        :base (let ((base (plist-get plan :base-choice)))
-                                (if (stringp base) base (symbol-name (or base 'fresh))))
-                        :carry (if (plist-get plan :carry) t :false)
-                        :body (or (plist-get plan :body) :false))
-                  (drover-task--request-overrides plan '(:placement :setup :target)))))
+  (let ((host (plist-get plan :host))
+        (title (plist-get plan :title)))
     (message "Starting %s on %s…" title host)
-    (drover-task--ask-there host request goal
+    (drover-task--ask-there host (drover-task--start-request plan) goal
                             (lambda (reply error)
                               (drover-task--started-there marker plan host reply error goal)))))
+
+(defun drover-task--start-request (plan)
+  "Return the request having the host of PLAN start its task."
+  (append
+   (list :kind "start" :task (plist-get plan :id) :title (plist-get plan :title)
+         :repo (plist-get plan :repo) :mode (symbol-name (plist-get plan :kind))
+         :slug (plist-get plan :slug) :jira (or (plist-get plan :jira) :false)
+         :base (let ((base (plist-get plan :base-choice)))
+                 (if (stringp base) base (symbol-name (or base 'fresh))))
+         :carry (if (plist-get plan :carry) t :false)
+         :body (or (plist-get plan :body) :false))
+   (drover-task--request-overrides plan '(:placement :setup :target))))
+
+(defun drover-task--session-request (plan)
+  "Return the request having the host of PLAN start a session in its place."
+  (list :kind "session" :task (plist-get plan :id) :title (plist-get plan :title)
+        :repo (plist-get plan :repo) :worktree (or (plist-get plan :worktree) :false)
+        :in-place (if (eq (plist-get plan :kind) 'in-place) t :false)
+        :branch (or (plist-get plan :branch) :false) :jira (or (plist-get plan :jira) :false)
+        :slug (plist-get plan :slug)
+        :body (or (plist-get plan :body) :false)))
 
 (defun drover-task--ask-there (host request goal callback)
   "Ask HOST REQUEST about a task, its session under GOAL if any, for CALLBACK.
@@ -1499,34 +1511,51 @@ ERROR) once."
         (drover-remote-goal-task host request goal callback))
     (drover-remote-ask-task host request callback (+ drover-task-setup-timeout 120))))
 
-(defun drover-task--started-there (marker plan host reply error goal)
+(defun drover-task--note-started-there (marker plan host reply error)
   "Note what HOST answered, REPLY or ERROR, of the task PLAN at MARKER it starts.
-Where it works goes on the heading, its session is noted as the task's;
-GOAL, non-nil, tells the session runs under a goal there."
+Where it works goes on the heading, and its session is noted as the
+task's.  Return a plist: :failure, why it did not start, ERROR when the
+host did not answer; else :key, its session's key here, or nil when
+the answer names none; and with either, :directory and :branch, where
+it works there, when the answer tells."
+  (let* ((field (lambda (key) (drover-task--remote-string (and (listp reply) (plist-get reply key)) 1024)))
+         (made (or (funcall field :worktree) (funcall field :directory)))
+         (place (list :directory made :branch (funcall field :branch))))
+    (when made
+      (let ((there (list :kind (plist-get plan :kind) :worktree (funcall field :worktree)
+                         :directory (funcall field :directory) :branch (funcall field :branch)
+                         :base (or (funcall field :base) "") :base-ref (or (funcall field :base-ref) "its base")
+                         :repo (plist-get plan :repo))))
+        (drover-task-org-write marker (drover-task--attempt-properties there host)
+                               (drover-task--made-note there host))
+        (drover-task-read marker)))
+    (cond
+     (error (append (list :failure error) place))
+     ((funcall field :failure)
+      (append (list :failure (drover-bound-line (funcall field :failure))) place))
+     (t
+      (let ((key (when-let* ((key (plist-get reply :key))
+                             ((and (vectorp key) (length= key 2)
+                                   (stringp (aref key 0))
+                                   (string-match-p "\\`[a-z][a-z0-9-]\\{0,40\\}\\'" (aref key 0))
+                                   (or (stringp (aref key 1)) (integerp (aref key 1))))))
+                   (cons (intern (concat "remote:" host)) (cons (intern (aref key 0)) (aref key 1))))))
+        (when key
+          (drover-task-note-session key (plist-get plan :id)))
+        (append (list :key key) place))))))
+
+(defun drover-task--started-there (marker plan host reply error goal)
+  "Tell what HOST answered, REPLY or ERROR, of the task PLAN at MARKER it starts.
+Noted as `drover-task--note-started-there' notes it; GOAL, non-nil,
+tells the session runs under a goal there."
   (drover-with-reporting "task start"
-    (let* ((title (plist-get plan :title))
-           (field (lambda (key) (drover-task--remote-string (and (listp reply) (plist-get reply key)) 1024)))
-           (made (or (funcall field :worktree) (funcall field :directory))))
-      (when made
-        (let ((there (list :kind (plist-get plan :kind) :worktree (funcall field :worktree)
-                           :directory (funcall field :directory) :branch (funcall field :branch)
-                           :base (or (funcall field :base) "") :base-ref (or (funcall field :base-ref) "its base")
-                           :repo (plist-get plan :repo))))
-          (drover-task-org-write marker (drover-task--attempt-properties there host)
-                                 (drover-task--made-note there host))
-          (drover-task-read marker)))
+    (let ((title (plist-get plan :title))
+          (outcome (drover-task--note-started-there marker plan host reply error)))
       (cond
        (error (drover-warn "Task %s did not start on %s: %s" title host error))
-       ((funcall field :failure)
-        (drover-warn "Task %s on %s: %s" title host (drover-bound-line (funcall field :failure))))
-       (t
-        (when-let* ((key (plist-get reply :key))
-                    ((and (vectorp key) (length= key 2)
-                          (stringp (aref key 0)) (string-match-p "\\`[a-z][a-z0-9-]\\{0,40\\}\\'" (aref key 0))
-                          (or (stringp (aref key 1)) (integerp (aref key 1))))))
-          (drover-task-note-session (cons (intern (concat "remote:" host)) (cons (intern (aref key 0)) (aref key 1)))
-                                    (plist-get plan :id)))
-        (drover-message "Task %s started on %s%s" title host (if goal ", under a goal it runs" "")))))))
+       ((plist-get outcome :failure)
+        (drover-warn "Task %s on %s: %s" title host (plist-get outcome :failure)))
+       (t (drover-message "Task %s started on %s%s" title host (if goal ", under a goal it runs" "")))))))
 
 ;;;###autoload
 (defun drover-task-start (&optional ask)
@@ -1689,6 +1718,333 @@ them, never as this host's file names."
     (when-let* ((key (plist-get result :key)))
       (drover-task-note-session (cons (intern (concat "remote:" host)) key) (plist-get plan :id))
       (drover-remote-open-started host result))))
+
+;;;; Starting for a caller nobody watches
+
+;; An agent starts a task as the user does on its heading (see
+;; `drover-anvil'), but nothing may show, ask nor wait: what the heading
+;; and the caller leave open is refused, naming what is missing and the
+;; values that work, and each step answers through a callback.
+
+(defun drover-task--once (callback)
+  "Return a function calling CALLBACK with its argument, the first time only."
+  (let ((called nil))
+    (lambda (result)
+      (unless called
+        (setq called t)
+        (funcall callback result)))))
+
+(define-error 'drover-task-refused "The task cannot start as asked")
+
+(defconst drover-task--refusal-length 1000
+  "Characters at most of a refusal, which names the values that work.")
+
+(defun drover-task--refuse (format-string &rest arguments)
+  "Refuse to start a task, as FORMAT-STRING and ARGUMENTS tell.
+What is told names what is missing and the values that work, so it is
+told whole, on a line of `drover-task--refusal-length' characters at
+most, where an error's report is cut short."
+  (signal 'drover-task-refused
+          (list (drover-bound-line (replace-regexp-in-string "[\n\r]+" " " (apply #'format-message format-string arguments))
+                                   drover-task--refusal-length))))
+
+(defmacro drover-task--quietly (callback &rest body)
+  "Run BODY showing nothing and asking nothing, an error told to CALLBACK.
+CALLBACK then gets (:failure WHY), a refusal's WHY whole (see
+`drover-task--refuse').  For the steps of `drover-task-start-quietly',
+which run from processes and timers."
+  (declare (indent 1) (debug t))
+  (let ((err (make-symbol "err")))
+    `(condition-case ,err
+         (drover-quietly ,@body)
+       (drover-task-refused (funcall ,callback (list :failure (cadr ,err))))
+       (error (funcall ,callback (list :failure (drover-error-message ,err)))))))
+
+(defun drover-task--repository-choices ()
+  "Return how a refusal names the repositories a task may work in, or nil."
+  (when drover-task-repositories
+    (concat "repo, one of " (mapconcat #'car drover-task-repositories ", "))))
+
+(defun drover-task--checkout-hosts (entry)
+  "Return the hosts where the repository of ENTRY has a checkout, by its settings."
+  (let ((checkout (plist-get (cdr entry) :checkout)))
+    (and (consp checkout)
+         (seq-filter #'stringp (mapcar #'car-safe checkout)))))
+
+(defun drover-task--repository-unasked (info directory)
+  "Return the repository of the task INFO tells of, an entry, or `folder'.
+As `drover-task--resolve-repository' finds it, asking nothing:
+DIRECTORY, the folder the caller gives, makes it a folder's; else
+DROVER_REPO, inherited, names it; else it is the repository of the
+heading's file; else a folder the heading names.  Refuse, naming what
+is missing and the values that work, when that leaves a choice (see
+`drover-task--refuse')."
+  (let ((repos (plist-get info :repos))
+        (file (plist-get info :file))
+        (choices (drover-task--repository-choices)))
+    (cond
+     (directory 'folder)
+     ((cdr repos)
+      (drover-task--refuse "The heading names several repositories: give repo, one of %s" (string-join repos ", ")))
+     (repos
+      (or (drover-task-repository (car repos))
+          (drover-task--refuse "The heading names the repository %s, which `drover-task-repositories' does not: give %s"
+                      (car repos) (or choices "directory, the folder it works in"))))
+     ((and file (drover-task-repository-of (file-name-directory file))))
+     ((plist-get info :folder) 'folder)
+     (t (drover-task--refuse "The heading names neither a repository nor a folder: give %sdirectory, the folder it works in"
+                    (if choices (concat choices ", or ") ""))))))
+
+(defun drover-task--plan-unasked (marker info directory host)
+  "Return the plan starting the task INFO tells of, at MARKER, asking nothing.
+DIRECTORY is the folder the caller gives, or nil, HOST the peer starting
+it, or nil for this host.  As `drover-task--plan-for' plans it without a
+prefix argument, but for how its repository works, which
+`drover-task--plan-how' adds.  Refuse, naming what is missing and the
+values that work, when a choice is left (see `drover-task--refuse')."
+  (let* ((repository (drover-task--repository-unasked info directory))
+         (plan (list :id (plist-get info :id) :title (plist-get info :title) :jira (plist-get info :jira)
+                     :category (plist-get info :category)
+                     :body (with-current-buffer (marker-buffer marker)
+                             (org-with-point-at marker (drover-task-org-body)))
+                     :slug (drover-task-slug (plist-get info :title) (plist-get info :jira))
+                     :host host)))
+    (if (eq repository 'folder)
+        (progn
+          (when host
+            (drover-task--refuse "A task in a folder starts on this host: leave host out"))
+          (append (list :kind 'folder
+                        :directory (file-name-as-directory
+                                    (drover-task-canonical (or directory (plist-get info :folder)))))
+                  plan))
+      (let* ((entry repository)
+             (properties (cdr entry))
+             (kind (or (plist-get info :kind) (plist-get properties :kind) 'worktree))
+             (checkout (and (null host) (drover-task-checkout entry))))
+        (unless (memq kind '(worktree in-place))
+          (drover-task--refuse "DROVER_KIND is %s: a task of a repository works in a worktree or in-place" kind))
+        (when (and (null host) (not (and checkout (file-directory-p checkout))))
+          (drover-task--refuse "No checkout of %s on this host: %s" (car entry)
+                      (if-let* ((hosts (drover-task--checkout-hosts entry)))
+                          (concat "give host, one of " (string-join hosts ", "))
+                        "see `drover-task-repositories'")))
+        (append (list :kind kind :repo (car entry) :entry entry :checkout checkout
+                      :branch-prefix (or (plist-get properties :branch-prefix) "")
+                      :base-choice 'fresh :carry nil
+                      :directory (and (eq kind 'in-place) checkout)
+                      :overrides (plist-get info :overrides))
+                plan)))))
+
+(defun drover-task--plan-how (plan info callback)
+  "Call CALLBACK with PLAN, of the task of INFO, and how its repository works.
+Read in its checkout here, never waited for (see `drover-repo-facts').
+CALLBACK gets the plan, or a string: why it cannot start, the facts of
+its repository not accepted by the user yet, which only the user does,
+as `drover-task-start' shows them.  A plan without a checkout here, a
+folder's or another host's, is given as it is, with its target."
+  (let ((checkout (plist-get plan :checkout)))
+    (cond
+     ((eq (plist-get plan :kind) 'folder) (funcall callback plan))
+     ((not checkout) (funcall callback (append (list :target "main") plan)))
+     (t
+      (drover-repo-facts
+       checkout
+       (lambda (facts)
+         (drover-with-reporting "task start"
+           (funcall
+            callback
+            (condition-case err
+                (if (not (plist-get facts :confirmed))
+                    (format "How %s works was not accepted yet: the user accepts it once, starting a task of it with `drover-task-start' in Emacs, which shows what drover read of its instructions"
+                            (plist-get plan :repo))
+                  (let ((how (drover-task--how facts (drover-task--overrides (plist-get info :overrides)))))
+                    (append (list :target (or (plist-get how :target) (drover-git-default-branch checkout) "main")
+                                  :finish (plist-get how :finish) :placement (plist-get how :placement)
+                                  :setup (plist-get how :setup) :checks (plist-get how :checks)
+                                  :teardown (plist-get how :teardown))
+                            plan)))
+              (error (drover-error-message err)))))))))))
+
+(defun drover-task--started-plist (outcome plan session &optional note)
+  "Return what `drover-task-start-quietly' answers for SESSION started for PLAN.
+OUTCOME is `started' or `continued', NOTE a line more, or nil."
+  (list :outcome outcome :session session
+        :id (plist-get plan :id) :title (plist-get plan :title)
+        :directory (plist-get plan :directory)
+        :branch (or (plist-get plan :branch) (drover-session-branch session))
+        :note note))
+
+(defun drover-task--start-unshown (marker plan callback)
+  "Start PLAN, the task at MARKER, here, in no window; then call CALLBACK.
+As `drover-task--start-here' starts it, its setup's buffer and its
+session undisplayed.  CALLBACK gets what `drover-task-start-quietly'
+answers."
+  (let ((unwritten nil))
+    (drover-task-prepare
+     (append (list :hidden t) plan)
+     (lambda (outcome)
+       (drover-task--quietly callback
+         (pcase-let ((`(,plan . ,why) outcome))
+           (cond
+            ((and why (not (plist-get plan :made)) (eq (plist-get plan :kind) 'worktree))
+             (funcall callback (list :failure why)))
+            ;; A heading not telling its place would get another at the next start.
+            (unwritten
+             (funcall callback
+                      (list :failure (format "its place, %s, is made, but its heading could not be written: %s"
+                                             (abbreviate-file-name (plist-get plan :directory)) unwritten)
+                            :directory (plist-get plan :directory) :branch (plist-get plan :branch))))
+            (why
+             (drover-task-org-write marker nil (format "Setup failed: %s" why))
+             (funcall callback
+                      (list :failure (format "%s; no session started: its place, %s, stays, and starting the task again starts a session there"
+                                             why (abbreviate-file-name (plist-get plan :directory)))
+                            :directory (plist-get plan :directory) :branch (plist-get plan :branch))))
+            (t
+             (drover-task-start-session
+              plan t
+              (lambda (session)
+                (funcall callback
+                         (if (stringp session)
+                             (list :failure (concat "its place is made, but no session started: " session)
+                                   :directory (plist-get plan :directory) :branch (plist-get plan :branch))
+                           (drover-task--started-plist 'started plan session))))))))))
+     (lambda (plan)
+       (condition-case err
+           (drover-quietly
+             (drover-task-org-write marker (drover-task--attempt-properties plan)
+                                    (drover-task--made-note plan))
+             (drover-task-read marker))
+         (error (setq unwritten (drover-error-message err))))))))
+
+(defun drover-task--same-place-p (a b)
+  "Return non-nil when A and B name one directory, of this host or another."
+  (and (stringp a) (stringp b)
+       (or (equal (directory-file-name a) (directory-file-name b))
+           (ignore-errors (drover-task-same-file-p a b)))))
+
+(defun drover-task--attempt-unasked (info directory)
+  "Return the attempt of INFO to continue, asking nothing.
+The one it has; of several, the one working in DIRECTORY, else refuse,
+naming them (see `drover-task--refuse')."
+  (let ((attempts (plist-get info :attempts)))
+    (cond
+     ((null (cdr attempts)) (car attempts))
+     ((and directory
+           (seq-find (lambda (attempt) (drover-task--same-place-p (plist-get attempt :directory) directory))
+                     attempts)))
+     (t (drover-task--refuse "The task works in several places: give directory, one of %s"
+                    (mapconcat (lambda (attempt) (plist-get attempt :directory)) attempts ", "))))))
+
+(defun drover-task--continue-unshown (marker info directory callback)
+  "Start another session in the place of the task INFO tells of, at MARKER.
+In no window, on the host the place is on; DIRECTORY names the place
+among several.  CALLBACK gets what `drover-task-start-quietly' answers."
+  (let* ((attempt (drover-task--attempt-unasked info directory))
+         (plan (append (drover-task--plan-of-attempt info attempt)
+                       (list :body (with-current-buffer (marker-buffer marker)
+                                     (org-with-point-at marker (drover-task-org-body))))))
+         (host (plist-get plan :host))
+         (place (plist-get plan :directory)))
+    (cond
+     ((not (or (null host) (drover-host-local-p host)))
+      (drover-task--ask-quietly marker plan host (drover-task--session-request plan) 'continued callback))
+     ((not (and place (file-directory-p place)))
+      (drover-task--refuse "Its place, %s, is gone: `drover-task-start' in Emacs makes it again from its branch %s"
+                  (if place (abbreviate-file-name place) "none") (or (plist-get plan :branch) "none")))
+     (t
+      (let ((failed (and (plist-get plan :worktree)
+                         (eq (plist-get (drover-task-git-read-marker (plist-get plan :worktree)) :setup) 'failed))))
+        (drover-task-start-session
+         plan t
+         (lambda (session)
+           (funcall callback
+                    (if (stringp session)
+                        (list :failure (concat "no session started: " session))
+                      (drover-task--started-plist
+                       'continued plan session
+                       (and failed "The setup of its worktree failed when it was made: run it again there")))))))))))
+
+(defun drover-task--ask-quietly (marker plan host request outcome callback)
+  "Ask HOST REQUEST about the task PLAN at MARKER, then call CALLBACK.
+REQUEST starts it there, or a session in its place; OUTCOME is `started'
+or `continued'.  Nothing is waited for.  CALLBACK gets what
+`drover-task-start-quietly' answers, its session named by :key, its key
+here, which this host may not list yet."
+  (require 'drover-remote)
+  (drover-remote-ask-task
+   host request
+   (lambda (reply error)
+     (drover-task--quietly callback
+       (let ((noted (drover-task--note-started-there marker plan host reply error)))
+         (funcall callback
+                  (cond
+                   ((plist-get noted :failure)
+                    (list :failure (format "%s: %s" host (plist-get noted :failure))
+                          :directory (plist-get noted :directory) :branch (plist-get noted :branch)))
+                   ((not (plist-get noted :key))
+                    (list :failure (format "%s told no session it started" host)
+                          :directory (plist-get noted :directory) :branch (plist-get noted :branch)))
+                   (t (list :outcome outcome :key (plist-get noted :key) :host host
+                            :id (plist-get plan :id) :title (plist-get plan :title)
+                            :directory (or (plist-get noted :directory) (plist-get plan :directory))
+                            :branch (or (plist-get noted :branch) (plist-get plan :branch)))))))))
+   (+ drover-task-setup-timeout 120)))
+
+(defun drover-task-start-quietly (marker choices callback)
+  "Start the task of the heading at MARKER, or continue it, asking nothing.
+As `drover-task-start' does on the heading, for a caller nobody watches,
+such as an agent: nothing shows, nothing asks and nothing waits.
+CHOICES is a plist of what the caller chooses: :repo, a name of
+`drover-task-repositories', written on the heading as DROVER_REPO
+first; :directory, the folder of a task working in a folder, written as
+DROVER_FOLDER, or, for a task working in several places, the one to
+continue in; :host, the peer starting it, nil for this host.
+
+A task working somewhere already continues: another session starts in
+its place, on the host it is on, nothing written.  Otherwise its place
+is made and a session started there, sent a prompt linking the heading.
+What the heading and CHOICES leave open is refused, never asked:
+several repositories, neither a repository nor a folder, a repository
+whose facts the user has not accepted yet.
+
+CALLBACK is called once, perhaps before this returns, with a plist:
+\(:failure WHY), WHY naming what is missing and the values that work,
+with :directory and :branch when its place was made all the same; else
+:outcome, `started' or `continued', :session, its session, or for one
+of another host :key, its key here, and :host, then :id and :title, the
+task's, :directory and :branch, where it works, and :note, a line more
+or nil."
+  (let ((callback (drover-task--once callback))
+        (repo (plist-get choices :repo))
+        (directory (plist-get choices :directory))
+        (host (plist-get choices :host)))
+    (drover-task--quietly callback
+      (let* ((id (drover-task--ensure-id marker))
+             (info (drover-task-read marker id)))
+        (if (plist-get info :attempts)
+            (drover-task--continue-unshown marker info directory callback)
+          (when (and repo directory)
+            (drover-task--refuse "Give repo or directory, not both: a task works in a repository or in a folder"))
+          (when (and repo (not (drover-task-repository repo)))
+            (drover-task--refuse "No repository %s in `drover-task-repositories': give %s" repo
+                        (or (drover-task--repository-choices) "directory, the folder it works in")))
+          (when (or repo directory)
+            (drover-task-org-write marker (if repo
+                                              (list (cons "DROVER_REPO" repo))
+                                            (list (cons "DROVER_FOLDER" (abbreviate-file-name directory)))))
+            (setq info (drover-task-read marker id)))
+          (let ((plan (drover-task--plan-unasked marker info directory host)))
+            (drover-task--plan-how
+             plan info
+             (lambda (plan)
+               (drover-task--quietly callback
+                 (cond
+                  ((stringp plan) (funcall callback (list :failure plan)))
+                  ((plist-get plan :host)
+                   (drover-task--ask-quietly marker plan (plist-get plan :host)
+                                             (drover-task--start-request plan) 'started callback))
+                  (t (drover-task--start-unshown marker plan callback))))))))))))
 
 ;;;; Finishing
 

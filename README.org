@@ -705,6 +705,14 @@ Starting a task:
 - writes =DROVER_WORKTREE=, =DROVER_BRANCH=, =DROVER_BASE=, =DROVER_HOST= on the heading, and a note in its LOGBOOK;
 - starts a session there, of the prompt's first new session (=drover-task-harness=), its first prompt linking the heading and quoting its body (=drover-task-prompt-function=).
 
+** Tasks agents start
+
+An agent starts the task of a heading with the tool =drover-task-start= (see [[*Agents][Agents]]), as =C-' n= starts it, in no window and asking nothing.  It names the heading by its ID, or by a link to it.  =repo=, a name of =drover-task-repositories=, is written on the heading as =DROVER_REPO= first.  =directory=, the folder of a task that works in a folder, is written as =DROVER_FOLDER=, and the folder is made.  =host= names the host that starts it.  The tool returns the session's key, its link, its directory and its branch.
+
+What =C-' n= would ask, the tool refuses, and the refusal names what is missing and the values that work.  That is a heading naming several repositories, a heading naming neither a repository nor a folder, and a repository whose way of working you have not accepted yet (see [[*How a repository works][How a repository works]]): you accept it once, starting a task of it with =C-' n=.  A task that works somewhere already continues: another session starts in its place, on the host of that place, and nothing is written on the heading.  When it works in several places, =directory= names the one.  A place that is gone is not made again: =C-' n= does that.
+
+=h= on a session has its agent start such a task for one item of its work (see [[*Session keys][Session keys]]).
+
 ** How a repository works
 
 How a task's repository works is the repository's to say, never your configuration's: how finished work lands, where its worktrees go when it says, the setup of a new worktree and the checks before a push.  Drover reads it from the repository as a task starts (=drover-repo.el=): its AGENTS.md and CLAUDE.md, read by the host's cheap model, which reports what they prescribe with the line each item comes from quoted, an item whose quote is not in the text, or a command neither the text nor the repository's files name, dropped, so that nothing is invented; and its conventional files, the scripts of =package.json=, the targets of a Makefile, the recipes of a justfile, =pyproject.toml=, =go.mod=, =Cargo.toml= and the lockfiles, whose checks and setup are taken when the instructions name none.  The first time, or once the instructions changed, it shows what it read, each with its source, to accept, or to change for the task, which writes the heading's =DROVER_= properties.  What was read is kept in =repo-facts.eld= of =drover-state-directory=, a cache by repository and by the content of what was read: it can be deleted at any time.
@@ -1048,7 +1056,7 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 
 * Agents
 
-=drover-anvil= gives agents, through [[https://github.com/zawatton/anvil.el][Anvil]]'s MCP server in your Emacs, the sessions you have, of every harness and host: they list and read them, start sessions and prompt them, wait for their turns to end, answer their questions, interrupt and archive them, and read the prompts you sent.  =drover-anvil-enable= registers the tools with Anvil:
+=drover-anvil= gives agents, through [[https://github.com/zawatton/anvil.el][Anvil]]'s MCP server in your Emacs, the sessions you have, of every harness and host: they list and read them, start sessions, fork them and prompt them, start the tasks of Org headings, wait for their turns to end, answer their questions, interrupt and archive them, and read the prompts you sent.  =drover-anvil-enable= registers the tools with Anvil:
 
 #+begin_src emacs-lisp
   (with-eval-after-load 'anvil
@@ -1058,9 +1066,11 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 
 | Tool                       | Does                                                                                                                                           |
 |----------------------------+------------------------------------------------------------------------------------------------------------------------------------------------|
-| =drover-sessions=          | Lists the sessions, the most urgent first, filtered by status, harness, project, host and attention                                            |
-| =drover-session=           | Reads one: where it stands, its model, the recap of its last turn, what its pending requests ask                                               |
-| =drover-session-create=    | Starts a session, unseen, on this host or another, with a harness, directory, model, effort, agent and first prompt; returns its key           |
+| =drover-sessions=          | Lists the sessions, the most urgent first, filtered by status, harness, project, host and attention, each with its key and link                |
+| =drover-session=           | Reads one: its link, where it stands, its model, the recap of its last turn, what its pending requests ask                                     |
+| =drover-session-create=    | Starts a session, unseen, on this host or another, with a harness, directory, model, effort, agent and first prompt; returns its key and link  |
+| =drover-session-fork=      | Forks a session whole, unseen, the caller's by default (=key=); links the fork to an Org heading (=task=) and sends it a =prompt=; returns its key and link |
+| =drover-task-start=        | Starts the task of an Org heading (=id=), unseen and asking nothing, in its =repo= or =directory=, on a =host=; returns its session's key, link, directory and branch (see [[*Tasks agents start][Tasks agents start]]) |
 | =drover-session-send=      | Sends a session a prompt, as its front end delivers prompts: OpenCode queues or steers the running turn                                        |
 | =drover-session-wait=      | Waits until a session's turn ends or it needs you, with a timeout; Emacs never waits, the call does                                            |
 | =drover-session-answer=    | Answers a pending question or permission, or dismisses it                                                                                      |
@@ -1073,6 +1083,15 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 | =drover-job=               | Returns the answer of a job a tool answered with, for clients that cannot wait                                                                 |
 
 Agents may do everything the tools offer, on every session of every host, whoever started it and wherever it runs: drover refuses only what cannot be done, such as a prompt to a session whose buffer holds a draft, or a directory that does not exist.  What a harness lets its agents call is that harness's permissions to say.  The caller is the session whose agent calls, as its client tells it: OpenCode names it in each call, and Claude Code records the conversation of the process that started Anvil's bridge (with an Anvil whose bridge binds =anvil-server-transport-pid=); a caller not told does the same, but for what needs to know it, such as following itself up.  No session waits for itself, for a session above it, whose turn waits for its own, nor for one waiting for it: such a wait would only end at its timeout.  Every call is logged in =anvil.log= of =drover-state-directory= (=drover-anvil-log-file=); a log that cannot be written is warned about, and the call goes on.  A prompt an agent schedules joins your queue, where you see and cancel it, and is delivered out of every window.  Agents start sessions of any harness starting sessions here or on a peer (with =drover-remote-mode=), OpenCode's by default, without showing them; a session of a peer is scheduled in that peer's queue, which reads the time with its own clock and events.
+
+** Links to sessions
+
+The tools that tell of a session tell its =link= beside its key: =drover-sessions=, =drover-session=, =drover-session-create=, =drover-session-fork= and =drover-task-start=.  It is the target of the session's Org link, as =org-store-link= stores it: =agent-session:opencode/ses_1=, and =agent-session://core/opencode/ses_1= for a session of the host =core=.  An agent writes it in an Org heading as =[[LINK][TITLE]]=.  A key is not a link: =claude-code-ide/terminal-48= names a terminal, not its conversation.  A session whose conversation is not known yet has no =link=.
+
+** Forks
+
+=drover-session-fork= forks through the session's harness: OpenCode's service, a new claude-code-ide terminal (for a conversation of Claude Code no front end shows too), agent-shell when its agent forks.  The fork holds the conversation so far.  Its first prompt is the original's, so =task= links it to its heading (see [[*Sessions of tasks, and projects][Sessions of tasks, and projects]]).  A session whose harness cannot fork, such as Codex's or another host's, is refused, the harness named, and nothing else starts in its place.
+
 * License
 
 GPL-3.0-or-later. Copyright Valentin Leon.
