@@ -734,24 +734,27 @@ without the route."
         (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
         (should (= called 2))
         (should-not (eq (drover-cheap-signed-in "openai") 'subscription))
-        ;; A read under way is not started again; all waiting are told once.
+        ;; A read under way is not started again; each function waiting
+        ;; is told once, however many providers it asked of.
         (let ((pending nil))
           (cl-letf (((symbol-function 'drover-model-cheap-fetch) (lambda (callback) (push callback pending))))
             (drover-cheap--integrations-changed)
             (should (eq (drover-cheap-signed-in "openai") 'unknown))
-            (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
-            (should (eq (drover-cheap-signed-in "anthropic" #'then) 'unknown))
-            (should (= (length pending) 1))
+            (dotimes (_ 3)
+              (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
+              (should (eq (drover-cheap-signed-in "anthropic" #'then) 'unknown)))
+            (should (length= pending 1))
+            (should (equal drover-cheap--signed-in-waiters (list #'then)))
             (funcall (car pending) '(:none "none"))
-            (should (= called 4))
+            (should (= called 3))
             (should-not drover-cheap--signed-in-waiters)
             ;; A failure tells none, and a next question reads again.
             (setq pending nil)
             (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
             (funcall (car pending) '(:failure "Boom"))
-            (should (= called 4))
+            (should (= called 3))
             (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
-            (should (= (length pending) 2))))
+            (should (length= pending 2))))
         ;; A service not running is never asked.
         (cl-letf (((symbol-function 'opencode-service-read-registration) (lambda () nil)))
           (setq drover-cheap--signed-in-waiters nil
@@ -760,6 +763,37 @@ without the route."
           (should (eq (drover-cheap-signed-in "openai" #'then) 'unknown))
           (should-not drover-cheap-test-requests)
           (should-not drover-cheap--signed-in-waiters))))))
+
+(ert-deftest drover-cheap-test-catalog-changed ()
+  "Only the home directory's provider catalog changing has the integrations read again.
+Its model catalog changing has the model of the titles named again
+alone; a catalog of another kind or location changes neither."
+  (let ((catalogs `((model . ,drover-cheap-test-reaver-models) (provider . ,drover-cheap-test-reaver-providers)))
+        (integrations drover-cheap-test-reaver-integrations)
+        (home (file-name-as-directory (expand-file-name "~")))
+        (titled 0))
+    (drover-cheap-test-with-service catalogs integrations
+      (cl-letf (((symbol-function 'opencode-normalize-directory) #'file-name-as-directory)
+                ((symbol-function 'drover-cheap--title-schedule) (lambda () (cl-incf titled))))
+        (let ((drover-cheap-title-mode t))
+          (should (eq (drover-cheap-signed-in "github-copilot") 'unknown))
+          (should (eq (drover-cheap-signed-in "github-copilot") 'subscription))
+          (dolist (change `((agent ,home) (command ,home) (provider "/elsewhere/") (model "/elsewhere/")))
+            (apply #'drover-cheap--catalog-changed change))
+          (should (= drover-cheap--epoch 0))
+          (should (= titled 0))
+          (should (eq (drover-cheap-signed-in "github-copilot") 'subscription))
+          (drover-cheap--catalog-changed 'model home)
+          (should (= drover-cheap--epoch 0))
+          (should (= titled 1))
+          (drover-cheap--catalog-changed 'provider home)
+          (should (= drover-cheap--epoch 1))
+          (should (= titled 2))
+          ;; The integrations are read again as asked.
+          (setq drover-cheap-test-requests nil)
+          (should (eq (drover-cheap-signed-in "github-copilot") 'unknown))
+          (should (member '(get "/api/integration" nil) drover-cheap-test-requests))
+          (should (eq (drover-cheap-signed-in "github-copilot") 'subscription)))))))
 
 ;;;; Asking it
 

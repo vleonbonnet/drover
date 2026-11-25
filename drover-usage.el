@@ -1294,27 +1294,65 @@ through ChatGPT.  Of the files read, only that is kept."
                'priced))
       (_ 'priced))))
 
+(defvar drover-usage--opencode-logins (make-hash-table :test #'equal)
+  "Whether OpenCode's usage of each provider is priced as included, by provider.
+What the usage is priced by: `drover-usage--signed-in-read' alone
+changes it once set, pricing the usage anew as it does.")
+
+(defvar drover-usage--logins-timer nil
+  "Timer comparing OpenCode's logins with the service's, or nil.")
+
 (defun drover-usage--opencode-login-p (provider)
   "Return non-nil when this host's OpenCode logs in to PROVIDER's subscription.
-As `drover-cheap-signed-in' tells it.  While that is not known, nil:
-once it is read, the usage is priced anew (see
-`drover-usage--signed-in-read')."
-  (and (stringp provider)
-       (eq (drover-cheap-signed-in provider #'drover-usage--signed-in-read) 'subscription)))
+As `drover-cheap-signed-in' told it, as priced by: the first time,
+nil while not known, and once known, as last told, until the logins
+are compared with the service's (see `drover-usage--signed-in-read').
+The service telling of a change makes the logins unknown until read
+again: the usage is priced as before meanwhile, then anew only when a
+login changed.  An answer the service gave otherwise than as asked
+here, read for the cheap model, is compared soon."
+  (when (stringp provider)
+    (let ((answer (drover-cheap-signed-in provider #'drover-usage--signed-in-read))
+          (known (gethash provider drover-usage--opencode-logins 'none)))
+      (cond ((eq known 'none)
+             (puthash provider (eq answer 'subscription) drover-usage--opencode-logins))
+            ((and (not (eq answer 'unknown))
+                  (not (eq (eq answer 'subscription) known))
+                  (not (timerp drover-usage--logins-timer)))
+             ;; Priced from within a total: compared out of it.
+             (setq drover-usage--logins-timer (run-at-time 0 nil #'drover-usage--signed-in-read))
+             known)
+            (t known)))))
 
 (defun drover-usage--signed-in-read ()
-  "Price the usage anew, now that how OpenCode is signed in is read.
-The sessions of OpenCode listed are drawn again, and the change hook
-runs, as for any change of the usage."
-  (cl-incf drover-usage--generation)
-  (when (and (fboundp 'drover-views-changed) drover--index)
-    (let ((keys nil))
-      (dolist (session (drover-index-sessions))
-        (when (and (not (drover-session-host session))
-                   (eq (car (drover-usage--session-key session)) 'opencode))
-          (push (drover-session-key session) keys)))
-      (drover-views-changed keys)))
-  (drover-run-hook-reporting 'drover-usage-changed-hook))
+  "Price OpenCode's usage anew if how its service is signed in changed.
+The login each provider is priced by (see
+`drover-usage--opencode-login-p') is compared with what the service
+tells now; when one changed, the usage is priced anew, the sessions of
+OpenCode listed are drawn again, and the change hook runs, as for any
+change of the usage.  Logins not known again, the service having told
+of another change meanwhile, are read again, and compared once read."
+  (drover-with-reporting "OpenCode's logins"
+    (when (timerp drover-usage--logins-timer)
+      (cancel-timer drover-usage--logins-timer))
+    (setq drover-usage--logins-timer nil)
+    (let ((changed nil))
+      (dolist (provider (hash-table-keys drover-usage--opencode-logins))
+        (let ((answer (drover-cheap-signed-in provider #'drover-usage--signed-in-read)))
+          (unless (or (eq answer 'unknown)
+                      (eq (eq answer 'subscription) (gethash provider drover-usage--opencode-logins)))
+            (puthash provider (eq answer 'subscription) drover-usage--opencode-logins)
+            (setq changed t))))
+      (when changed
+        (cl-incf drover-usage--generation)
+        (when (and (fboundp 'drover-views-changed) drover--index)
+          (let ((keys nil))
+            (dolist (session (drover-index-sessions))
+              (when (and (not (drover-session-host session))
+                         (eq (car (drover-usage--session-key session)) 'opencode))
+                (push (drover-session-key session) keys)))
+            (drover-views-changed keys)))
+        (drover-run-hook-reporting 'drover-usage-changed-hook)))))
 
 (defun drover-usage--normal-model (model)
   "Return MODEL's identifier compared with catalogs': downcased, dots as dashes.

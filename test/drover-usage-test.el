@@ -54,6 +54,8 @@ OpenCode's catalog prices nothing."
              (drover-usage--notify-timer nil)
              (drover-usage--remote (make-hash-table :test #'equal))
              (drover-usage--logins (make-hash-table :test #'equal))
+             (drover-usage--opencode-logins (make-hash-table :test #'equal))
+             (drover-usage--logins-timer nil)
              (drover-usage--catalog nil)
              (drover-usage-changed-hook nil)
              (drover-usage-filter nil)
@@ -70,8 +72,9 @@ OpenCode's catalog prices nothing."
            (unwind-protect
                (progn ,@body)
              (drover-usage-stop)
-             (when (timerp drover-usage--notify-timer)
-               (cancel-timer drover-usage--notify-timer))))))))
+             (dolist (timer (list drover-usage--notify-timer drover-usage--logins-timer))
+               (when (timerp timer)
+                 (cancel-timer timer)))))))))
 
 (defun drover-usage-test-home ()
   "Return the directory of the homes of `drover-test-with-homes'."
@@ -440,10 +443,13 @@ and a gateway, priced; one of three days ago; one running."
       (should (eq (drover-usage-billing 'opencode "github-copilot") 'priced))
       (should (eq (drover-usage-billing 'opencode "prodsec-gateway") 'priced)))))
 
+;; -*- lexical-binding: t; -*-
 (ert-deftest drover-usage-test-billing-opencode ()
   "OpenCode's usage through a login is included, as the service tells; Copilot's is priced.
-While the service's logins are not read, its usage is priced; once
-they are, it is priced anew, and views told."
+While the service's logins were never read, its usage is priced; once
+they are, it is priced anew, and views told.  Once the service told of
+a change, its usage is priced as before until they are read again, then
+anew only when a login changed."
   (drover-usage-test-with
     (let* ((drover-usage-billing (eval (car (get 'drover-usage-billing 'standard-value)) t))
            (auths '(("openai" . subscription) ("github-copilot" . subscription) ("gateway" . api)))
@@ -455,30 +461,73 @@ they are, it is priced anew, and views told."
       (cl-letf (((symbol-function 'drover-cheap-signed-in)
                  (lambda (provider &optional then)
                    (push provider asked)
-                   (if auths
+                   (if (not (eq auths 'unknown))
                        (alist-get provider auths nil nil #'equal)
-                     (when then (push then waiting))
+                     (when (and then (not (memq then waiting)))
+                       (push then waiting))
                      'unknown))))
-        (should (eq (drover-usage-billing 'opencode "openai") 'included))
-        (should (eq (drover-usage-billing 'opencode "gateway") 'priced))
-        (should (eq (drover-usage-billing 'opencode "nowhere") 'priced))
-        ;; Copilot, though logged in, bills its tokens: not even asked.
-        (should (eq (drover-usage-billing 'opencode "github-copilot") 'priced))
-        (should-not (member "github-copilot" asked))
-        ;; What OpenCode's ChatGPT login used would have cost, at list prices.
-        (let ((fact (drover-usage--fact-make :harness 'opencode :provider "openai" :model "gpt-6" :id "ses_x"
-                                             :input 1000000 :output 100000 :cost 0)))
-          (should (equal (funcall (drover-usage--pricer) fact) '(included nil "included" 3.0))))
-        ;; Not read yet: priced, then anew once read.
-        (setq auths nil)
-        (should (eq (drover-usage-billing 'opencode "openai") 'priced))
-        (should (= (length waiting) 1))
-        (let ((generation drover-usage--generation))
-          (setq auths '(("openai" . subscription)))
-          (funcall (car waiting))
-          (should (> drover-usage--generation generation))
-          (should (= hooked 1))
-          (should (eq (drover-usage-billing 'opencode "openai") 'included)))))))
+        (cl-flet ((read (logins)
+                    ;; The service's logins are read as LOGINS: those waiting are told.
+                    (setq auths logins)
+                    (let ((told waiting))
+                      (setq waiting nil)
+                      (mapc #'funcall told))))
+          (should (eq (drover-usage-billing 'opencode "openai") 'included))
+          (should (eq (drover-usage-billing 'opencode "gateway") 'priced))
+          (should (eq (drover-usage-billing 'opencode "nowhere") 'priced))
+          ;; Copilot, though logged in, bills its tokens: not even asked.
+          (should (eq (drover-usage-billing 'opencode "github-copilot") 'priced))
+          (should-not (member "github-copilot" asked))
+          ;; What OpenCode's ChatGPT login used would have cost, at list prices.
+          (let ((fact (drover-usage--fact-make :harness 'opencode :provider "openai" :model "gpt-6" :id "ses_x"
+                                               :input 1000000 :output 100000 :cost 0)))
+            (should (equal (funcall (drover-usage--pricer) fact) '(included nil "included" 3.0))))
+          ;; Never read: priced, then anew once read.
+          (setq auths 'unknown)
+          (should (eq (drover-usage-billing 'opencode "anthropic") 'priced))
+          (should (length= waiting 1))
+          (let ((generation drover-usage--generation))
+            (read '(("openai" . subscription) ("gateway" . api) ("anthropic" . subscription)))
+            (should (> drover-usage--generation generation))
+            (should (= hooked 1))
+            (should (eq (drover-usage-billing 'opencode "anthropic") 'included)))
+          ;; A change told: priced as before, however often, until read again.
+          (setq auths 'unknown)
+          (dotimes (_ 5)
+            (should (eq (drover-usage-billing 'opencode "openai") 'included))
+            (should (eq (drover-usage-billing 'opencode "gateway") 'priced)))
+          (should (length= waiting 1))
+          ;; Read the same: nothing is priced anew.
+          (let ((generation drover-usage--generation))
+            (read '(("openai" . subscription) ("gateway" . api) ("anthropic" . subscription)))
+            (should (= drover-usage--generation generation))
+            (should (= hooked 1)))
+          ;; ChatGPT's login gone: priced anew.
+          (setq auths 'unknown)
+          (should (eq (drover-usage-billing 'opencode "openai") 'included))
+          (let ((generation drover-usage--generation))
+            (read '(("openai" . api) ("gateway" . api) ("anthropic" . subscription)))
+            (should (> drover-usage--generation generation))
+            (should (= hooked 2))
+            (should (eq (drover-usage-billing 'opencode "openai") 'priced)))
+          ;; Read for the cheap model, not as asked here: compared soon, out of the pricing.
+          (setq auths '(("openai" . subscription) ("gateway" . api) ("anthropic" . subscription)))
+          (should (eq (drover-usage-billing 'opencode "openai") 'priced))
+          (should (timerp drover-usage--logins-timer))
+          (drover-usage--signed-in-read)
+          (should-not drover-usage--logins-timer)
+          (should (= hooked 3))
+          (should (eq (drover-usage-billing 'opencode "openai") 'included))
+          ;; Read stale, the service having told of another change meanwhile:
+          ;; read again, and compared once read.
+          (setq auths 'unknown)
+          (should (eq (drover-usage-billing 'opencode "openai") 'included))
+          (read 'unknown)
+          (should (length= waiting 1))
+          (should (= hooked 3))
+          (read '(("openai" . api) ("gateway" . api) ("anthropic" . subscription)))
+          (should (= hooked 4))
+          (should (eq (drover-usage-billing 'opencode "openai") 'priced)))))))
 
 (ert-deftest drover-usage-test-prices ()
   "Prices come from the user's table, then OpenCode's catalog, then drover's own."

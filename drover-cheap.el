@@ -69,6 +69,7 @@
 
 (declare-function opencode-call-with-service "opencode-common" (service function &rest arguments))
 (declare-function opencode-service-remote-p "opencode-common" (&optional service))
+(declare-function opencode-normalize-directory "opencode-common" (directory))
 (declare-function opencode-catalog "opencode-session" (kind &optional directory))
 (declare-function opencode-catalog-cached-p "opencode-session" (kind &optional directory))
 (declare-function opencode-catalog-fetch "opencode-session" (kind callback &optional directory else))
@@ -615,12 +616,33 @@ Nothing here ever starts it."
 
 (defun drover-cheap--integrations-changed (&rest _)
   "Note that the local service's integrations may have changed.
-For opencode.el's events and `opencode-catalog-changed-functions'."
+For opencode.el's events, and the provider catalog read here changed
+\(see `drover-cheap--catalog-changed')."
   (drover-with-reporting "cheap model"
     (unless (drover-cheap--remote-p)
       (cl-incf drover-cheap--epoch)
       (when (bound-and-true-p drover-cheap-title-mode)
         (drover-cheap--title-schedule)))))
+
+(defun drover-cheap--catalog-changed (kind directory)
+  "Note that the KIND catalog of DIRECTORY changed, when it is one read here.
+For `opencode-catalog-changed-functions'.  Of the local service's
+catalogs, only the model and provider catalogs of
+`drover-cheap--directory' are read: a change of the provider catalog
+may change how the service is signed in, so the integrations are read
+again; one of the model catalog may change the cheap model alone.  Other
+kinds and locations change neither: the drover list fetches the
+catalogs of every session's location, and each arriving, or changing,
+once had the integrations read again."
+  (drover-with-reporting "cheap model"
+    (when (and (memq kind '(model provider))
+               (stringp directory)
+               (not (drover-cheap--remote-p))
+               (equal directory (drover-cheap--local #'opencode-normalize-directory (drover-cheap--directory))))
+      (if (eq kind 'provider)
+          (drover-cheap--integrations-changed)
+        (when (bound-and-true-p drover-cheap-title-mode)
+          (drover-cheap--title-schedule))))))
 
 (defun drover-cheap--follow ()
   "Follow the changes of the local service's integrations, once."
@@ -629,7 +651,14 @@ For opencode.el's events and `opencode-catalog-changed-functions'."
     (require 'opencode-events)
     (opencode-events-register "integration.updated" #'drover-cheap--integrations-changed)
     (opencode-events-register "server.connected" #'drover-cheap--integrations-changed)
-    (add-hook 'opencode-catalog-changed-functions #'drover-cheap--integrations-changed)))
+    (add-hook 'opencode-catalog-changed-functions #'drover-cheap--catalog-changed)))
+
+;; A drover before took every catalog's change for one of the
+;; integrations: loaded over it, follow the catalogs as this one does.
+(when (and (boundp 'opencode-catalog-changed-functions)
+           (memq #'drover-cheap--integrations-changed opencode-catalog-changed-functions))
+  (remove-hook 'opencode-catalog-changed-functions #'drover-cheap--integrations-changed)
+  (add-hook 'opencode-catalog-changed-functions #'drover-cheap--catalog-changed))
 
 (defun drover-cheap--settle-auths (failure)
   "Call the callbacks waiting for the integrations, with FAILURE or nil."
@@ -739,7 +768,10 @@ does not know or cannot use.  `unknown' while the provider catalog and
 the integrations are not read, as of their last change: they are read
 in the background, the local service running, and THEN, if any, is
 called without argument once they are, so that what depended on the
-answer is made anew.  A read under way is not started again."
+answer is made anew.  A read under way is not started again, and THEN
+waiting for it already, the same function (`eq'), is not queued again:
+each function waiting is called once per read, however many providers
+it asked of meanwhile."
   (if (and (drover-cheap--ready-p) (eql (car drover-cheap--auths) drover-cheap--epoch))
       (when-let* ((provider (seq-find (lambda (provider)
                                         (and (consp provider) (equal (alist-get 'id provider) provider-id)))
@@ -747,9 +779,11 @@ answer is made anew.  A read under way is not started again."
                                                            (drover-cheap--directory)))))
         (drover-cheap-provider-auth provider (cdr drover-cheap--auths)))
     (if drover-cheap--signed-in-waiters
-        (when then
-          (setq drover-cheap--signed-in-waiters
-                (cons then (and (listp drover-cheap--signed-in-waiters) drover-cheap--signed-in-waiters))))
+        (let ((waiters (and (listp drover-cheap--signed-in-waiters) drover-cheap--signed-in-waiters)))
+          ;; Callers ask once per provider they price: queued as often,
+          ;; one read ran them thousands of times on 2026-11-25.
+          (when (and then (not (memq then waiters)))
+            (setq drover-cheap--signed-in-waiters (cons then waiters))))
       (when (drover-cheap-service-running-p)
         (setq drover-cheap--signed-in-waiters (if then (list then) t))
         (condition-case err
@@ -1110,7 +1144,7 @@ Only the local service reads the file; each host names its own."
   (when drover-cheap--following
     (opencode-events-unregister "integration.updated" #'drover-cheap--integrations-changed)
     (opencode-events-unregister "server.connected" #'drover-cheap--integrations-changed)
-    (remove-hook 'opencode-catalog-changed-functions #'drover-cheap--integrations-changed))
+    (remove-hook 'opencode-catalog-changed-functions #'drover-cheap--catalog-changed))
   nil)
 
 (provide 'drover-cheap)
