@@ -1263,7 +1263,7 @@ A wait ends once the session runs no turn and has no prompt pending (=drover-pen
 
 ** Bounded
 
-What the tools answer is bounded as drover bounds what it takes in: titles and lines to a line, texts as =drover-bound-text= cuts them, lists to =drover-anvil-list-limit= sessions, requests and fields to a few.  Records hold nothing of the credentials of hosts or services, nor do the tools add any.
+What the tools answer is bounded as drover bounds what it takes in: titles and lines to a line, texts as =drover-bound-text= cuts them, lists to =drover-anvil-list-limit= sessions, requests and fields to a few.  What agents send is not: a prompt goes to its session whole, whatever its length, and an agent may leave any number of jobs waiting, each forgotten =drover-anvil--job-keep= seconds after it settled or its deadline passed.  Both had caps at first, 50,000 characters and 200 jobs, with no reason recorded for either; the user removed them, as nothing in drover handles such a prompt but to pass it on.  A prompt to a session of another host still meets that host's =drover-remote-prompt-limit=, which guards it against its peers.  Records hold nothing of the credentials of hosts or services, nor do the tools add any.
 
 ** Scheduling
 

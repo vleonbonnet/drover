@@ -107,11 +107,6 @@ wins.  A function may look at the call's transport too, as
   :type 'natnum
   :group 'drover-anvil)
 
-(defcustom drover-anvil-prompt-limit 50000
-  "Characters a prompt sent through the tools may hold at most."
-  :type 'natnum
-  :group 'drover-anvil)
-
 (defcustom drover-anvil-log-file nil
   "File logging every call of the tools, or nil for the default.
 The default is anvil.log in `drover-state-directory'.  Each line tells
@@ -406,9 +401,6 @@ since what agents do then leaves no account."
 (defconst drover-anvil--job-keep 600
   "Seconds a job settled and not taken is kept.")
 
-(defconst drover-anvil--jobs-max 200
-  "Jobs kept at most; past it, new ones are refused.")
-
 (defun drover-anvil--job-get (id property)
   "Return PROPERTY of the job ID."
   (plist-get (gethash id drover-anvil--jobs) property))
@@ -437,8 +429,6 @@ their deadline."
 POLL, TIMEOUT and FINALLY are its functions, SECONDS how long it may
 take; see the plist of jobs."
   (drover-anvil--sweep)
-  (when (>= (hash-table-count drover-anvil--jobs) drover-anvil--jobs-max)
-    (drover-anvil--refuse "Too many jobs pending; take their answers with drover-job"))
   (let ((id (format "j%d-%d" (cl-incf drover-anvil--job-counter) (truncate (float-time)))))
     (puthash id (list :tool tool :caller caller :key key :state 'pending
                       :poll poll :timeout timeout :finally finally
@@ -894,8 +884,6 @@ MCP Parameters:
   (cond
    ((not (and (stringp prompt) (not (string-blank-p prompt))))
     (drover-anvil--refuse "The prompt is empty"))
-   ((> (length prompt) drover-anvil-prompt-limit)
-    (drover-anvil--refuse "The prompt is longer than %d characters" drover-anvil-prompt-limit))
    (t (substring-no-properties prompt))))
 
 (defun drover-anvil--prompt-note (prompt)

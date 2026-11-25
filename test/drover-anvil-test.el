@@ -395,6 +395,16 @@ below it, which took the identifier of one that ended."
       (should (drover-anvil--tool-send "fake/busy" "hi"))
       (should (assq :submit drover-test-calls)))))
 
+(ert-deftest drover-anvil-test-no-caps ()
+  "A prompt of any length goes whole, and any number of jobs wait."
+  (drover-anvil-test-with (list (drover-test-session "a" :status 'working)) nil
+    (let ((long (make-string 300000 ?x)))
+      (should (equal (alist-get 'outcome (drover-anvil-test-json (drover-anvil--tool-send "fake/a" long))) "sent"))
+      (should (equal (nth 2 (assq :submit drover-test-calls)) long)))
+    (dotimes (_ 250)
+      (should (alist-get 'job (drover-anvil-test-json (drover-anvil--tool-wait "fake/a" 60)))))
+    (should (= (hash-table-count drover-anvil--jobs) 250))))
+
 (ert-deftest drover-anvil-test-send-queued ()
   "A prompt the session's host queued rather than took is told queued, with why."
   (drover-anvil-test-with (list (drover-test-session "far" :status 'working)) nil
