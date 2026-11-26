@@ -70,7 +70,7 @@
 (require 'drover-selection)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 35))
   (load "drover-core" nil t))
 
 (autoload 'drover-wrap-up-session "drover-wrap-up")
@@ -818,6 +818,8 @@ identifier cannot travel."
                                    (vector (symbol-name state) (or (drover-remote--number size) 0)
                                            (or (drover-remote--plain label) ""))))))
         (put :detail (drover-remote--plain (drover-session-detail record)))
+        (put :background (let ((lines (seq-keep #'drover-remote--plain (drover-session-background record))))
+                           (and lines (vconcat lines))))
         (put :engine (and (drover-session-engine record) (symbol-name (drover-session-engine record))))
         (put :engine-id (drover-remote--wire-id (drover-session-engine-id record)))
         (put :cache-expires (drover-remote--number (drover-session-cache-expires record)))
@@ -1027,6 +1029,9 @@ minus this host's.  Nil when DATA names no session."
                                    (or (drover-remote--count (aref tier 1)) 0)
                                    (or (drover-remote--line (aref tier 2) 20) ""))))
         :detail (drover-remote--text (plist-get data :detail))
+        :background (let ((lines (plist-get data :background)))
+                      (and (vectorp lines)
+                           (seq-keep #'drover-remote--line (seq-take lines drover-background-limit))))
         :engine (drover-remote--symbol (plist-get data :engine))
         :engine-id (let ((id (plist-get data :engine-id)))
                      (and (stringp id) (<= (length id) 1024) id))

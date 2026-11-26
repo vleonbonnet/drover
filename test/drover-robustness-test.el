@@ -297,7 +297,8 @@ came after: the accessors of today read past its end."
          (summary (make-string 500000 ?q))
          (session (drover-test-session "big" :status 'waiting
                                        :requests `((:kind question :summary ,summary))
-                                       :detail summary)))
+                                       :detail summary
+                                       :background (cons title (make-list 50 "Probe")))))
     (setf (drover-session-title session) title)
     (drover-test-with-backend (list session)
       (let ((record (drover-find 'fake "big"))
@@ -307,11 +308,18 @@ came after: the accessors of today read past its end."
             (should (equal (drover-session-title record) "Fix the build"))
             (should (<= (length (drover-session-detail record)) (1+ drover-text-limit)))
             (should (<= (length (plist-get (car (drover-session-requests record)) :summary))
-                        (1+ drover-text-limit))))))
+                        (1+ drover-text-limit)))
+            (should (length= (drover-session-background record) drover-background-limit))
+            (should (equal (car (drover-session-background record)) "Fix the build")))))
       ;; The backend's record is the backend's.
       (should (eq (drover-session-title session) title)))
-    (let ((plain (drover-test-session "plain")))
-      (should (eq (drover--bound-record plain) plain)))))
+    (let ((plain (drover-test-session "plain" :background '("Probe"))))
+      (should (eq (drover--bound-record plain) plain)))
+    ;; Work told otherwise than as lines is none.
+    (dolist (background '("Probe" (1 . 2) (1 "Probe")))
+      (should (equal (drover-session-background
+                      (drover--bound-record (drover-test-session "odd" :background background)))
+                     (and (consp background) (proper-list-p background) '("Probe")))))))
 
 (defun drover-robustness-test-older-record (record)
   "Return RECORD as drover d61bfdf made it, without the slots that came after."

@@ -59,7 +59,10 @@
 ;; Claude Code compacts a large conversation of its own as it sits idle,
 ;; shortly before its prompt cache expires: the summary is no message,
 ;; and the conversation stays as it stood after its last turn (see
-;; `drover-claude-code-transcripts-work-between').
+;; `drover-claude-code-transcripts-work-between').  A front end whose
+;; CLI works on after its turn ended, for work left running in the
+;; background, learns the end here too (see
+;; `drover-claude-code-transcripts-turn-ended').
 ;;
 ;; Opening a conversation resumes it in a front end (`drover-resume'):
 ;; claude-code-ide runs \"claude --resume ID\" in a terminal, agent-shell
@@ -1129,6 +1132,24 @@ as a title.  Return non-nil when the transcript is to be read again."
   (when-let* ((index (drover-claude-code-transcripts--current-index))
               (file (drover-claude-code-transcripts--file id)))
     (drover-transcript-check index file)))
+
+(defun drover-claude-code-transcripts-turn-ended (id)
+  "Return how the newest turn of conversation ID ended, as its transcript tells.
+The value is a plist of :outcome, `done' when a reply ended it, `failed'
+when an error of the API did, :ended, its time, and :error, the error's
+text.  It is nil while a turn runs, its newest message a prompt, a
+tool's call or result, or a reply cut short, and `unknown' while the
+transcript was never read or changed since it was: what was read may
+tell as ended a turn the CLI has begun since.  A changed transcript is
+read again soon (see `drover-claude-code-transcripts-check'), and the
+conversation told as changed then."
+  (let* ((index (drover-claude-code-transcripts--current-index))
+         (file (and index (drover-claude-code-transcripts--file id)))
+         (data (and file (drover-transcript-lookup index file))))
+    (cond ((or (null data) (drover-transcript-check index file)) 'unknown)
+          ((memq (plist-get data :outcome) '(done failed))
+           (list :outcome (plist-get data :outcome) :ended (plist-get data :ended)
+                 :error (plist-get data :error))))))
 
 (defconst drover-claude-code-transcripts--clock-slack 10
   "Seconds by which a transcript's times and this Emacs's may differ.

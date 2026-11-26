@@ -1329,6 +1329,144 @@ A transcript read late has its time to tell a compaction."
         (should (eq (drover-session-status (session)) 'done))
         (should (eql (drover-session-since (session)) (+ start 4066)))))))
 
+(ert-deftest drover-claude-code-ide-test-turn-left-running ()
+  "A turn that ended while subagents run in the background is done, then idle.
+The CLI works on while they run: once the transcript tells the turn
+ended, the session's record tells the work left running, until a
+subagent's report starts a turn of its own.  A transcript changed since
+read tells nothing yet, so that no turn begun shows as ended, nor one
+ended as begun; the work changing leaves the turn seen."
+  (drover-claude-code-ide-test-compacting
+    (let* ((start clock)
+           (file (drover-fixture-claude "b1" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* background agents" :directory project))
+           (probe '("a1" :state working :app "claude-code" :title "Probe"))
+           (watch '("a2" :state working :app "claude-code" :title "Watch")))
+      (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "b1"))
+        (scan)
+        ;; A turn starts two subagents in the background.
+        (setq clock (+ start 100))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (drover-fixture-claude-append
+         file
+         (drover-fixture-claude-user "b1" project (+ start 100) "Probe it")
+         (drover-fixture-claude-assistant "b1" project (+ start 101) "Starting" :stop "tool_use"))
+        ;; Read before the turn, the transcript tells the one before ended.
+        (drover-claude-code-ide-test-status terminal (list watch probe '("" :state working)))
+        (should (eq (drover-session-status (session)) 'working))
+        (setq clock (+ start 105))
+        (should (eq (drover-session-status (session)) 'working))
+        (scan)
+        (should (eq (drover-session-status (session)) 'working))
+        (should-not (drover-session-background (session)))
+        ;; Its reply ends the turn, which the transcript tells once read.
+        (setq clock (+ start 110))
+        (drover-fixture-claude-append
+         file (drover-fixture-claude-assistant "b1" project (+ start 110) "Probing in the background."
+                                               :parent "b1-a101"))
+        (should (eq (drover-session-status (session)) 'working))
+        (scan)
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should (equal (drover-session-background session) '("Probe" "Watch")))
+          (should (equal (drover-session-detail session) "Waiting for 2 tasks in the background: Probe, Watch"))
+          (should (eql (drover-session-since session) (+ start 110)))
+          (should (drover-session-busy-p session))
+          (should-not (drover-session-active-p session)))
+        (drover-mark-seen (session))
+        (should (eq (drover-session-status (session)) 'idle))
+        (should (equal (drover-session-background (session)) '("Probe" "Watch")))
+        ;; The probe ends; its report starts a turn, not read yet.
+        (setq clock (+ start 200))
+        (drover-claude-code-ide-test-status terminal (list watch '("" :state working)))
+        (drover-fixture-claude-append
+         file (drover-fixture-claude-user "b1" project (+ start 200)
+                                          "<task-notification>\n<task-id>a1</task-id>\n</task-notification>"))
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'idle))
+          (should (equal (drover-session-background session) '("Watch")))
+          (should (equal (drover-session-detail session) "Waiting for a task in the background: Watch")))
+        (scan)
+        (should (eq (drover-session-status (session)) 'working))
+        (should-not (drover-session-background (session)))
+        ;; Its reply ends that turn, unseen, the watch running still.
+        (setq clock (+ start 230))
+        (drover-fixture-claude-append
+         file (drover-fixture-claude-assistant "b1" project (+ start 230) "The probe found it."))
+        (scan)
+        (should (eq (drover-session-status (session)) 'done))
+        (should (equal (drover-session-background (session)) '("Watch")))
+        ;; The watch ends too, and the CLI with it: done, as the terminal tells.
+        (setq clock (+ start 300))
+        (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should-not (drover-session-background session))
+          (should-not (drover-session-detail session))
+          (should-not (drover-session-busy-p session)))))))
+
+(ert-deftest drover-claude-code-ide-test-turn-left-shell ()
+  "A turn that ended while a shell runs in the background is done; one an error ended failed.
+The process record tells the shell when the terminal tells no task, as
+once the turn's records are acknowledged.  Without a conversation, or
+while busy with no work in the background, the session works."
+  (drover-claude-code-ide-test-compacting
+    (let* ((start clock)
+           (file (drover-fixture-claude "s1" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* background shell" :directory project)))
+      (with-current-buffer terminal
+        (setq-local ghostel--pid 12345))
+      (cl-flet ((session () (drover-claude-code-ide-test-session terminal)))
+        (scan)
+        (setq clock (+ start 100)
+              drover-claude-code-ide-test-process-records '((12345 (status . "busy"))))
+        (drover-claude-code-ide-test-status terminal '(("" :state working)))
+        (drover-fixture-claude-append
+         file
+         (drover-fixture-claude-user "s1" project (+ start 100) "Serve it")
+         (drover-fixture-claude-assistant "s1" project (+ start 120) "Serving in the background."))
+        (scan)
+        ;; Its conversation unknown, the terminal tells nothing of the turn.
+        (setq drover-claude-code-ide-test-process-records '((12345 (status . "shell"))))
+        (drover-claude-code-ide-test-status
+         terminal '(("b1" :state working :title "npm run dev") ("" :state working :msg "1 shell still running")))
+        (should (eq (drover-session-status (session)) 'working))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "s1"))
+        (setq clock (+ start 121))
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'done))
+          (should (equal (drover-session-background session) '("npm run dev")))
+          (should (eql (drover-session-since session) (+ start 121))))
+        ;; Acknowledged, its records gone: the process record tells the shell.
+        (drover-claude-code-ide-test-status terminal nil)
+        (should (eq (drover-session-status (session)) 'done))
+        (should (equal (drover-session-background (session)) '("background shell")))
+        ;; Busy with no work in the background, as in a turn: it works.
+        (setq drover-claude-code-ide-test-process-records '((12345 (status . "busy"))))
+        (should (eq (drover-session-status (session)) 'working))
+        (should-not (drover-session-background (session)))
+        ;; The next turn ends in an error of the API, the shell running.
+        (setq clock (+ start 200)
+              drover-claude-code-ide-test-process-records '((12345 (status . "shell"))))
+        (drover-fixture-claude-append file (drover-fixture-claude-user "s1" project (+ start 200) "Check it"))
+        (scan)
+        (should (eq (drover-session-status (session)) 'working))
+        (drover-fixture-claude-append
+         file (drover-fixture-claude-api-error "s1" project (+ start 201) "API Error: 529 Overloaded"))
+        (scan)
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'failed))
+          (should (equal (drover-session-detail session) "API Error: 529 Overloaded"))
+          (should (equal (drover-session-background session) '("background shell"))))
+        (drover-mark-seen (session))
+        (let ((session (session)))
+          (should (eq (drover-session-status session) 'idle))
+          (should (equal (drover-session-detail session)
+                         "Waiting for a task in the background: background shell")))))))
+
 (ert-deftest drover-claude-code-ide-test-background-shell ()
   "A reply ending or acknowledged does not finish a shell still running."
   (drover-claude-code-ide-test-with

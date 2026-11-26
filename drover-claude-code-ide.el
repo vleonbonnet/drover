@@ -50,7 +50,12 @@
 ;; expires, reports work and its end as a turn does, but is none: once
 ;; the conversation's transcript tells so, the terminal stands as it did
 ;; before, as old, its turn seen or not as it was (see
-;; `drover-claude-code-ide--settle').
+;; `drover-claude-code-ide--settle').  The CLI also works on once its
+;; turn ended while work it began in the background runs, a subagent or a
+;; shell, whose report it goes on with in a turn of its own: once the
+;; transcript tells the turn ended, the session is done, then idle, as
+;; any turn, its record telling the work left running (see
+;; `drover-claude-code-ide--left-running').
 ;;
 ;; The prompt starts sessions with the flags its options stand for,
 ;; switches a running session's permission mode with Shift+Tab, reading
@@ -92,7 +97,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 25))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 35))
   (load "drover-core" nil t))
 
 ;; Drover does not require claude-code-ide, so this file compiles
@@ -578,6 +583,16 @@ A plist of :id, the conversation then; :start, when the work began;
 compacting the conversation as it sat idle, is no turn: the terminal
 stands again as it did before (see `drover-claude-code-ide--settle').")
 
+(defvar-local drover-claude-code-ide--background nil
+  "The work this terminal's ended turn left running when last noted, or nil.
+See `drover-claude-code-ide--left-running'.")
+
+(defvar-local drover-claude-code-ide--turn-ended nil
+  "How the newest turn of this terminal's conversation ended, as last read, or nil.
+A cons (ID . END): END is what `drover-claude-code-transcripts-turn-ended'
+told of conversation ID the last time it read the transcript up to
+date, while the CLI worked with work running in the background.")
+
 (defconst drover-claude-code-ide--settle-wait 2
   "Seconds ended work waits for its transcript to tell whether it was a turn.
 The CLI records a turn's prompt as the turn starts, and a compaction
@@ -597,27 +612,82 @@ are, else the root record, the program's own.  RECORDS are
       (when-let* ((root (assoc "" records)))
         (list root))))
 
-(defun drover-claude-code-ide--live-entries ()
-  "Return the current terminal's governing records, including its live process.
-Requests take precedence over errors, then work.  Terminal records give
-the details first.  The process adds work and requests OSC does not tell,
-never a completion or its acknowledgment, which remain the terminal's."
-  (let* ((entries (drover-claude-code-ide--governing (drover-claude-code-ide--records)))
+(defun drover-claude-code-ide--live ()
+  "Return the current terminal's governing records and the work left running.
+The value is (ENTRIES . BACKGROUND).  ENTRIES are the governing records,
+including its live process: requests take precedence over errors, then
+work.  Terminal records give the details first.  The process adds work
+and requests OSC does not tell, never a completion or its
+acknowledgment, which remain the terminal's.  Work the CLI runs in the
+background once its turn ended is no turn: ENTRIES are then the turn's
+end, and BACKGROUND that work (see `drover-claude-code-ide--left-running')."
+  (let* ((records (drover-claude-code-ide--records))
+         (entries (drover-claude-code-ide--governing records))
          (terminal-state (drover-claude-code-ide--state-of entries))
          (record (drover-claude-code-pid-session (drover-claude-code-ide--pid)))
          (status (or (alist-get 'status record) (alist-get 'state record)))
-         (state (drover-claude-code-run-state status)))
-    (cond ((eq terminal-state 'blocked) entries)
-          ((eq state 'blocked)
-           (list (list "process" :state 'blocked
-                       :msg (or (drover-bound-line (alist-get 'waitingFor record)) "Waiting for input"))))
-          ((eq terminal-state 'error) entries)
-          ((eq state 'working)
-           (if (eq terminal-state 'working)
-               entries
-             (list (list "process" :state 'working
-                         :msg (if (equal status "shell") "Waiting for background shell" "Working")))))
-          (t entries))))
+         (state (drover-claude-code-run-state status))
+         (live (cond ((eq terminal-state 'blocked) entries)
+                     ((eq state 'blocked)
+                      (list (list "process" :state 'blocked
+                                  :msg (or (drover-bound-line (alist-get 'waitingFor record))
+                                           "Waiting for input"))))
+                     ((eq terminal-state 'error) entries)
+                     ((eq state 'working)
+                      (if (eq terminal-state 'working)
+                          entries
+                        (list (list "process" :state 'working
+                                    :msg (if (equal status "shell") "Waiting for background shell" "Working")))))
+                     (t entries))))
+    (if (eq (drover-claude-code-ide--state-of live) 'working)
+        (or (drover-claude-code-ide--left-running records status) (list live))
+      (setq-local drover-claude-code-ide--turn-ended nil)
+      (list live))))
+
+(defun drover-claude-code-ide--background-work (records status)
+  "Return the work the CLI runs in the background, one line each, oldest first.
+RECORDS are the terminal's program status records, newest first: each
+working but the root, the program's own, is a task of the CLI's, a
+subagent or a shell, which its title names.  STATUS, the process
+record's, is \"shell\" while a shell runs in the background, which a
+terminal without records does not tell otherwise."
+  (or (nreverse (seq-keep (lambda (entry)
+                            (and (not (equal (car entry) ""))
+                                 (eq (plist-get (cdr entry) :state) 'working)
+                                 (or (drover-bound-line (plist-get (cdr entry) :title))
+                                     "background task")))
+                          records))
+      (and (equal status "shell") (list "background shell"))))
+
+(defun drover-claude-code-ide--left-running (records status)
+  "Return (ENTRIES . BACKGROUND) of a turn ended with work left running, or nil.
+The CLI works on as its turn ends while work it began in the background
+runs, a subagent or a shell, which RECORDS, the terminal's program
+status records, and STATUS, its process record's, tell (see
+`drover-claude-code-ide--background-work').  It waits for that work, as
+it would for the user: once the work reports back, its agent goes on
+with the report, in a turn of its own.  When the conversation's
+transcript tells its newest turn ended, ENTRIES are a record of that
+end, done, or an error as an error of the API ended it, and BACKGROUND
+is the work.  A transcript changed since read tells nothing yet: the
+terminal stands as it did when last read (see
+`drover-claude-code-ide--turn-ended'), so that a turn the CLI began
+since never shows as ended."
+  (let ((work (drover-claude-code-ide--background-work records status))
+        (id drover-claude-code-ide-session-id))
+    (if (not (and work id))
+        (setq-local drover-claude-code-ide--turn-ended nil)
+      (let ((told (drover-claude-code-transcripts-turn-ended id)))
+        (cond ((not (eq told 'unknown))
+               (setq-local drover-claude-code-ide--turn-ended (cons id told)))
+              ((not (equal (car drover-claude-code-ide--turn-ended) id))
+               (setq-local drover-claude-code-ide--turn-ended nil))))
+      (when-let* ((ended (and (equal (car drover-claude-code-ide--turn-ended) id)
+                              (cdr drover-claude-code-ide--turn-ended))))
+        (cons (list (list "transcript"
+                          :state (if (eq (plist-get ended :outcome) 'failed) 'error 'done)
+                          :msg (plist-get ended :error)))
+              work)))))
 
 (defun drover-claude-code-ide--state-of (entries)
   "Return the state the governing ENTRIES stand for, a symbol.
@@ -636,7 +706,8 @@ work beginning or ending is noted (see `drover-claude-code-ide--note-work').
 SEEN non-nil marks the state seen whatever changed, and the turn before
 work not yet ended: the terminal shows it while the CLI works of its
 own."
-  (let ((entries (drover-claude-code-ide--live-entries)))
+  (pcase-let ((`(,entries . ,background) (drover-claude-code-ide--live)))
+    (setq-local drover-claude-code-ide--background background)
     (unless (equal entries drover-claude-code-ide--entries)
       (let ((state (drover-claude-code-ide--state-of entries))
             (before (or drover-claude-code-ide--state 'idle))
@@ -800,11 +871,11 @@ over, the session still works.  Past them, it was a turn."
       (dolist (entry buffers)
         (with-current-buffer (car entry)
           (let ((before (list drover-claude-code-ide--entries drover-claude-code-ide--seen
-                              drover-claude-code-ide-session-id)))
+                              drover-claude-code-ide-session-id drover-claude-code-ide--background)))
             (drover-claude-code-ide-live-session-id)
             (drover-claude-code-ide--note-status (memq (current-buffer) focused))
             (unless (equal before (list drover-claude-code-ide--entries drover-claude-code-ide--seen
-                                        drover-claude-code-ide-session-id))
+                                        drover-claude-code-ide-session-id drover-claude-code-ide--background))
               (drover-backend-changed 'claude-code-ide drover-claude-code-ide--token))))))))
 
 (defun drover-claude-code-ide--unseen-p ()
@@ -861,15 +932,29 @@ and `after-focus-change-function'."
                        (plist-get record :title)
                        (symbol-name (or kind 'permission))))))
 
+(defun drover-claude-code-ide--background-detail (work)
+  "Return the line telling that a session waits for WORK, left running, or nil.
+WORK is the work its ended turn left running, one line each (see
+`drover-claude-code-ide--left-running')."
+  (when work
+    (format "Waiting for %s in the background: %s"
+            (if (cdr work) (format "%d tasks" (length work)) "a task")
+            (string-join work ", "))))
+
 (defun drover-claude-code-ide--status (buffer)
-  "Return the status of terminal BUFFER, as (STATUS REQUESTS DETAIL).
+  "Return the status of terminal BUFFER, as (STATUS REQUESTS DETAIL BACKGROUND).
 Work ended that its transcript does not tell yet works still, and work
 the CLI did of its own leaves the status it found (see
-`drover-claude-code-ide--settle')."
+`drover-claude-code-ide--settle').  A turn that ended with work left
+running is done, or failed, then idle once seen, as any turn: BACKGROUND
+is that work, which DETAIL tells unless it tells an error (see
+`drover-claude-code-ide--left-running')."
   (with-current-buffer buffer
     (drover-claude-code-ide--note-status nil)
     (let* ((entries drover-claude-code-ide--entries)
-           (records (mapcar #'cdr entries)))
+           (records (mapcar #'cdr entries))
+           (background drover-claude-code-ide--background)
+           (detail (drover-claude-code-ide--background-detail background)))
       (pcase (if (drover-claude-code-ide--settle) 'settling drover-claude-code-ide--state)
         ;; Its records tell the end of work that may be no turn.
         ('settling (list 'working nil nil))
@@ -885,12 +970,12 @@ the CLI did of its own leaves the status it found (see
                  (or (plist-get record :msg)
                      (when-let* ((progress (plist-get record :progress)))
                        (format "%d%%" progress))))))
-        ('done (list (if drover-claude-code-ide--seen 'idle 'done) nil nil))
+        ('done (list (if drover-claude-code-ide--seen 'idle 'done) nil detail background))
         ('error
          (if drover-claude-code-ide--seen
-             (list 'idle nil nil)
+             (list 'idle nil detail background)
            (let ((record (seq-find (lambda (record) (eq (plist-get record :state) 'error)) records)))
-             (list 'failed nil (or (plist-get record :msg) (plist-get record :title))))))
+             (list 'failed nil (or (plist-get record :msg) (plist-get record :title) detail) background))))
         (_ (list 'idle nil nil))))))
 
 ;;;; Sessions
@@ -949,6 +1034,7 @@ what was read.  Nil without a turn."
                :status (nth 0 status)
                :requests (nth 1 status)
                :detail (nth 2 status)
+               :background (nth 3 status)
                :since drover-claude-code-ide--since
                ;; A conversation resumed is as old as it is until a turn here.
                :updated (cdr times)

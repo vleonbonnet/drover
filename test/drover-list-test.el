@@ -6275,6 +6275,32 @@ The one waiting to retry is a subagent of the working one."
                    (concat "2 subagents waiting for you: Session a1, Session a2\n"
                            "1 subagent working: Session w")))))
 
+(ert-deftest drover-list-test-background-work-indicator ()
+  "A session whose ended turn left work running tells it as working subagents do."
+  (drover-list-test-with
+      (list (drover-test-session "p" :status 'idle :background '("Probe" "npm run dev"))
+            (drover-test-session "a" :parent "p" :status 'waiting)
+            (drover-test-session "q" :status 'done :background '("Watch")))
+    (setopt drover-show-subagents 'none
+            drover-list-collapsed-groups nil)
+    (revert-buffer)
+    (should (string-prefix-p "  · ? * Session p" (drover-list-test-heading "p")))
+    (should (string-prefix-p "  ✓ * Session q" (drover-list-test-heading "q")))
+    (drover-list-test-goto "p")
+    (search-forward "*")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face) 'opencode-session-status-working))
+    (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                   (concat "1 subagent waiting for you: Session a
+"
+                           "2 tasks in the background: Probe, npm run dev")))
+    (drover-list-test-goto "q")
+    (search-forward "*")
+    (should (equal (get-text-property (match-beginning 0) 'help-echo) "1 task in the background: Watch"))
+    ;; Once the work ended, nothing.
+    (setf (drover-session-background (drover-list-test-find "q")) nil)
+    (drover-list-test-refresh)
+    (should (string-prefix-p "  ✓ Session q" (drover-list-test-heading "q")))))
+
 (ert-deftest drover-list-test-active-subagents-aligned ()
   "With the indicator, one space still parts each glyph, and columns align."
   (drover-list-test-with-font

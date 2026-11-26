@@ -681,13 +681,15 @@ prompt is told scheduled by an agent alone."
 
 ;;;; Waiting
 
-(defun drover-anvil-test-set-status (id status &optional since)
-  "Give the fake session ID STATUS, begun at SINCE, and report it."
+(defun drover-anvil-test-set-status (id status &optional since background)
+  "Give the fake session ID STATUS, begun at SINCE, and BACKGROUND, and report it.
+BACKGROUND is the work its ended turn left running."
   (let ((session (seq-find (lambda (session) (equal (drover-session-id session) id)) drover-test-sessions)))
     (setq drover-test-sessions
           (cons (let ((copy (copy-sequence session)))
                   (setf (drover-session-status copy) status
-                        (drover-session-since copy) (or since (float-time)))
+                        (drover-session-since copy) (or since (float-time))
+                        (drover-session-background copy) background)
                   copy)
                 (delq session drover-test-sessions)))
     (drover-backend-changed 'fake id)))
@@ -703,6 +705,27 @@ prompt is told scheduled by an agent alone."
         (should (equal (alist-get 'outcome answer) "ended"))
         (should (equal (alist-get 'status answer) "idle"))
         (should (equal (alist-get 'reply answer) "Reply of a"))))))
+
+(ert-deftest drover-anvil-test-wait-for-work-left-running ()
+  "A turn that ended with work left running ends once the session went on with its report.
+Reading the session tells the work meanwhile."
+  (drover-anvil-test-with (list (drover-test-session "a" :status 'working :since 1.0)) nil
+    (let ((job (alist-get 'job (drover-anvil-test-json (drover-anvil--tool-wait "fake/a" 60)))))
+      (cl-flet ((set (status background) (drover-anvil-test-set-status "a" status nil background)))
+        (set 'done '("Probe"))
+        (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))
+        (let ((answer (drover-anvil-test-json (drover-anvil--tool-session "fake/a" :json-false))))
+          (should (equal (alist-get 'status answer) "done"))
+          (should (equal (alist-get 'background answer) '("Probe"))))
+        (set 'idle '("Probe"))
+        (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))
+        ;; The report starts a turn, whose end is the result.
+        (set 'working nil)
+        (should (eq (alist-get 'pending (drover-anvil-test-json (drover-anvil--tool-job job))) t))
+        (set 'done nil)
+        (let ((answer (drover-anvil-test-json (drover-anvil--tool-job job))))
+          (should (equal (alist-get 'outcome answer) "ended"))
+          (should-not (alist-get 'background answer)))))))
 
 (ert-deftest drover-anvil-test-wait-for-the-turn-of-a-prompt-sent ()
   "After a prompt went, a session still idle from before is not done: its next turn is awaited."

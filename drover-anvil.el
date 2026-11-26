@@ -61,7 +61,7 @@
 (require 'drover-links)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 35))
   (load "drover-core" nil t))
 
 (declare-function anvil-server-register-tool "ext:anvil-server" (handler &rest properties))
@@ -579,6 +579,9 @@ deferral answering once the job did; otherwise the job, for
        (needs_user . ,(and (drover-session-attention-p session) t))
        (summary . ,(drover-anvil--line (drover-session-summary session) 300))
        (requests . ,(and (drover-session-requests session) (drover-anvil--requests-data session)))
+       (background . ,(and (drover-session-background session)
+                           (vconcat (mapcar (lambda (line) (drover-anvil--line line 160))
+                                            (drover-session-background session)))))
        (harness . ,(symbol-name (drover-session-harness session)))
        (engine . ,(and (drover-session-engine session) (symbol-name (drover-session-engine session))))
        (host . ,(drover-anvil--line (drover-session-host session) 100))
@@ -817,8 +820,11 @@ Through these tools, directly or through other sessions waiting."
     found))
 
 (defun drover-anvil--turn-active-p (session)
-  "Return non-nil while SESSION runs a turn, or has prompts waiting to run."
-  (or (memq (drover-session-status session) '(working retrying))
+  "Return non-nil while SESSION runs a turn, or has prompts waiting to run.
+A turn that ended with work left running in the background, such as a
+subagent, runs on: its agent goes on with the work's report, in a turn
+of its own, whose end is the result (see `drover-session-busy-p')."
+  (or (drover-session-busy-p session)
       (> (drover-pending-prompts session) 0)))
 
 (defun drover-anvil--outcome (session)
@@ -857,9 +863,11 @@ to fetch the last turn's recap once it ended."
 
 (defun drover-anvil--tool-wait (key &optional timeout since recap)
   "Wait until the turn of the session KEY ends, or it needs the user.
-TIMEOUT bounds the wait, SINCE tells which turn, RECAP whether its
-recap comes, as the parameters below tell.  Emacs never waits: the
-client does, while Anvil polls.
+A turn that ended with work left running in the background ends once
+the session went on with the work's report (see
+`drover-anvil--turn-active-p').  TIMEOUT bounds the wait, SINCE tells
+which turn, RECAP whether its recap comes, as the parameters below tell.
+Emacs never waits: the client does, while Anvil polls.
 
 MCP Parameters:
   key - The session's key, as drover-sessions tells it
@@ -2522,10 +2530,10 @@ MCP Parameters:
 (defconst drover-anvil--tools
   '((drover-anvil--tool-sessions
      :id "drover-sessions" :read-only t
-     :description "List the agent sessions drover knows, across harnesses (OpenCode, Claude Code, agent-shell, Codex) and hosts, most urgent first: key, link (the target of its Org link), title, status, what it waits for, harness, host, project, directory, model.  Filter by status, harness, project, host, attention.  The caller's own session is marked caller.")
+     :description "List the agent sessions drover knows, across harnesses (OpenCode, Claude Code, agent-shell, Codex) and hosts, most urgent first: key, link (the target of its Org link), title, status, what it waits for, the work its ended turn left running in the background, harness, host, project, directory, model.  Filter by status, harness, project, host, attention.  The caller's own session is marked caller.")
     (drover-anvil--tool-session
      :id "drover-session" :read-only t
-     :description "Read one session by key: its link, status, model, what it waits for, and the recap of its last turn (the user's last prompt, the agent's reply, the files it changed) and the pending requests' identifiers, choices and fields.")
+     :description "Read one session by key: its link, status, model, what it waits for, the work its ended turn left running in the background, and the recap of its last turn (the user's last prompt, the agent's reply, the files it changed) and the pending requests' identifiers, choices and fields.")
     (drover-anvil--tool-create
      :id "drover-session-create"
      :description "Start an agent session, unseen, on this host or another (host), in a directory (the caller's by default), on a harness (opencode by default), model, effort and agent, and send it a first prompt.  Returns its key and its link; follow its turn with drover-session-wait.")
@@ -2540,7 +2548,7 @@ MCP Parameters:
      :description "Send a prompt to a session, as its front end delivers prompts (OpenCode queues or steers a running turn).  Then wait for its turn with drover-session-wait.")
     (drover-anvil--tool-wait
      :id "drover-session-wait" :read-only t
-     :description "Wait until a session's turn ends or it needs the user (a permission or a question), with a timeout; answers the outcome, its status and the recap of the turn.  Emacs never waits: the call does.  Never on the caller itself nor a session waiting on it.")
+     :description "Wait until a session's turn ends or it needs the user (a permission or a question), with a timeout; answers the outcome, its status and the recap of the turn.  A turn that ended with work left running in the background (background, such as a subagent) ends once the session went on with that work's report.  Emacs never waits: the call does.  Never on the caller itself nor a session waiting on it.")
     (drover-anvil--tool-answer
      :id "drover-session-answer"
      :description "Answer a session's pending question (answers by field key) or permission (decision once, always or reject), or dismiss it.")

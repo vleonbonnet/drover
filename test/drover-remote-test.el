@@ -288,7 +288,7 @@ have drover's own heartbeat; a test of silent peers sets
                   :context-tier '(near 200000 "2×") :detail "Busy\nreally" :engine 'opencode
                   :engine-id "ses_1" :cache-expires 400.0 :cache-ttl 300 :cache-tokens 10
                   :cache-prompt-tokens 20 :agent-display agent :context-estimated t :archived 300.0
-                  :changes '(12 nil 3)))
+                  :changes '(12 nil 3) :background '("Probe" "npm run dev")))
          (decoded (drover-remote-test--roundtrip record nil '(opencode . "ses_0") 10)))
     (should (equal (drover-session-id decoded) '(opencode . "ses_1")))
     (should (eq (drover-session-backend decoded) 'remote:core))
@@ -299,7 +299,8 @@ have drover's own heartbeat; a test of silent peers sets
     (should (equal (drover-session-engine-key decoded) '("core" opencode . "ses_1")))
     (dolist (slot '(title directory project branch status requests agent model effort effort-default
                           provider-name context-tokens context-limit context-tier detail engine
-                          engine-id cache-ttl cache-tokens cache-prompt-tokens context-estimated changes))
+                          engine-id cache-ttl cache-tokens cache-prompt-tokens context-estimated changes
+                          background))
       (should (equal (cl-struct-slot-value 'drover-session slot decoded)
                      (cl-struct-slot-value 'drover-session slot record))))
     ;; The owner's clock is 10 s ahead of this host's.
@@ -394,6 +395,15 @@ have drover's own heartbeat; a test of silent peers sets
         (should-not (drover-session-engine record))
         (should-not (drover-session-requests record))
         (should-not (drover-session-context-tier record)))
+      ;; Work left running: lines, as many as a record holds.
+      (let ((record (decode (list :k ["opencode" "s"] :background (vconcat (make-list 50 (concat huge "
+x")))))))
+        (should (length= (drover-session-background record) drover-background-limit))
+        (should (<= (length (car (drover-session-background record))) (1+ drover-line-limit))))
+      (should (equal (drover-session-background (decode (list :k ["opencode" "s"] :background [1 "Probe" nil])))
+                     '("Probe")))
+      (dolist (background (list "Probe" (list "Probe") 42))
+        (should-not (drover-session-background (decode (list :k ["opencode" "s"] :background background)))))
       ;; What a session changed: three counts, files counted, a wrong
       ;; count unknown.
       (dolist (changes (list [1 2] [1 2 0] [1 2 -3] [1 2 "3"] "1 2 3" (list 1 2 3)))

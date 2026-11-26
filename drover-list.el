@@ -134,7 +134,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 22))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 35))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -1314,9 +1314,11 @@ number is drawn over it (see `drover-list--draw-numbers')."
        (drover-list--in-cell glyph cell))
      'drover-list-status-cell t)))
 
-(defun drover-list--subagents-help (subagents)
+(defun drover-list--subagents-help (subagents &optional background)
   "Return the tooltip naming SUBAGENTS, active sessions, by what they do.
-It tells how many do each, which their glyphs do not."
+It tells how many do each, which their glyphs do not, then the work
+BACKGROUND, which a session's ended turn left running (see
+`drover-session-background')."
   (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting))
                               subagents))
          (working (seq-difference subagents waiting #'eq))
@@ -1327,28 +1329,36 @@ It tells how many do each, which their glyphs do not."
                                         (drover-list--one-line (drover-session-display-title session)))
                                       sessions ", "))))))
     (drover-bound-lines (string-join (delq nil (list (funcall line waiting "waiting for you")
-                                                     (funcall line working "working")))
+                                                     (funcall line working "working")
+                                                     (and background
+                                                          (format "%d task%s in the background: %s"
+                                                                  (length background) (if (cdr background) "s" "")
+                                                                  (mapconcat #'drover-list--one-line
+                                                                             background ", ")))))
                                      "\n")
-                        2)))
+                        3)))
 
-(defun drover-list--indicator (subagents metrics)
+(defun drover-list--indicator (subagents metrics &optional background)
   "Return the glyphs telling that SUBAGENTS are in the middle of a turn, or nil.
 SUBAGENTS are the active subagents of a session, at any depth (see
-`drover-tree-active-subagents').  The glyph of `opencode-subagent-icons'
-for those waiting for the user comes first, then that for those working
-or waiting to retry, a space between, each in the subagent cell of
-METRICS.  They stay still and tell no number: their tooltip names the
-subagents and tells how many."
-  (when subagents
+`drover-tree-active-subagents'), and BACKGROUND the work its ended turn
+left running (see `drover-session-background'), which works as they
+do.  The glyph of `opencode-subagent-icons' for those waiting for the
+user comes first, then that for those working or waiting to retry, a
+space between, each in the subagent cell of METRICS.  They stay still
+and tell no number: their tooltip names the subagents and the work, and
+tells how many."
+  (when (or subagents background)
     (let* ((waiting (seq-some (lambda (session) (eq (drover-session-status session) 'waiting))
                               subagents))
-           (working (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))
-                              subagents))
+           (working (or background
+                        (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))
+                                  subagents)))
            (cell (plist-get metrics :subagent-cell)))
       (propertize (mapconcat (lambda (kind) (drover-list--in-cell (opencode-subagent-glyph kind) cell))
                              (append (and waiting '(waiting)) (and working '(working)))
                              " ")
-                  'help-echo (drover-list--subagents-help subagents)))))
+                  'help-echo (drover-list--subagents-help subagents background)))))
 
 (defun drover-list--archived-glyph (session now)
   "Return the glyph telling that SESSION is archived, in a cell of its own, or nil.
@@ -1372,7 +1382,8 @@ In a cell of its own, or nil while none waits (see
   "Return what comes before the title of SESSION: its glyphs and a space.
 The glyph of its status comes first, still for a session of a host not
 connected, whose status may be past, then, when subagents of SESSION are
-in the middle of a turn, the glyphs telling so, then, while its list of
+in the middle of a turn, or work its ended turn left running runs, the
+glyphs telling so, then, while its list of
 items waits for a review, the glyph telling so, then, when SESSION is
 archived, the glyph telling so; one space separates each.  METRICS give
 the cells of glyphs, the frames of animated ones, the active subagents
@@ -1380,7 +1391,7 @@ of each session and the time."
   (let ((indicator (drover-list--indicator
                     (and (plist-get metrics :active)
                          (gethash (drover-session-key session) (plist-get metrics :active)))
-                    metrics))
+                    metrics (drover-session-background session)))
         (review (drover-list--review-glyph session))
         (archived (drover-list--archived-glyph session (plist-get metrics :now))))
     (concat (drover-list--status-glyph (drover-session-status session) metrics

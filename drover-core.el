@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 34
+(defconst drover-core-generation 35
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -357,6 +357,10 @@ long as it shows."
 
 (defconst drover-text-lines 40
   "Lines at most of a text of several lines drover takes in.")
+
+(defconst drover-background-limit 20
+  "Lines at most of the work a record tells its ended turn left running.
+See `drover-session-background'.")
 
 (defun drover--unbounded-line-p (string &optional limit)
   "Return non-nil when STRING is longer than LIMIT characters, or is not one line.
@@ -746,7 +750,13 @@ what comes next, which its buffer shows above its input, so that the
 last turn reads in its context (see `drover-brief-of-buffer').")
   (notify nil :documentation "Non-nil when the user chose to be notified of the session's conversation.
 As kept for it (see `drover-notify-chosen-p'); a session of another
-host carries its owner's choice."))
+host carries its owner's choice.")
+  (background nil :documentation "The work the session's ended turn left running, or nil.
+A list of one line each, such as the title of a subagent or a shell
+run in the background, oldest first: its agent goes on with it once it
+reports back, in a turn of its own.  The session's turn ended, so its
+status is not one of `drover-active-statuses'; waiting for its result
+waits for that work too (see `drover-session-busy-p')."))
 
 (drover-note-layout 'drover-session)
 
@@ -821,7 +831,8 @@ signal reading past its end."
 Its title and the other fields shown on a line are cut to their first
 line and `drover-line-limit' characters (see `drover-bound-line'), its
 detail and the summaries of its requests to `drover-text-lines' lines
-and `drover-text-limit' characters, its brief to a line, its recap to
+and `drover-text-limit' characters, the work its ended turn left
+running to `drover-background-limit' lines, its brief to a line, its recap to
 `drover-brief-recap-lines' lines and what it tells of the whole session
 to as many lines and `drover-brief-session-limit' characters.  RECORD
 itself when within those, and of all the slots of a `drover-session'
@@ -865,6 +876,17 @@ notifications (see `drover--with-notify')."
           (unless copy (setq copy (copy-sequence whole)))
           (setf (drover-session-brief-session copy)
                 (drover-bound-text story drover-brief-recap-lines drover-brief-session-limit))))
+      (let ((background (drover-session-background whole)))
+        (when (and background
+                   (or (not (proper-list-p background))
+                       (length> background drover-background-limit)
+                       (seq-some (lambda (line) (or (not (stringp line)) (drover--unbounded-line-p line)))
+                                 background)))
+          (unless copy (setq copy (copy-sequence whole)))
+          (setf (drover-session-background copy)
+                (and (proper-list-p background)
+                     (mapcar #'drover-bound-line
+                             (seq-take (seq-filter #'stringp background) drover-background-limit))))))
       (let ((requests (drover-session-requests whole)))
         (when (seq-some (lambda (request)
                           (let ((summary (and (listp request) (plist-get request :summary))))
@@ -954,6 +976,14 @@ alone, to its peers, its phones and its desktop."
   "Return non-nil when SESSION is in the middle of a turn.
 See `drover-active-statuses'."
   (memq (drover-session-status session) drover-active-statuses))
+
+(defun drover-session-busy-p (session)
+  "Return non-nil while the result of SESSION is not in yet.
+That is while it works or waits to retry, or while its ended turn left
+work running, whose report its agent goes on with, in a turn of its own
+\(see `drover-session-background')."
+  (or (memq (drover-session-status session) '(working retrying))
+      (and (drover-session-background session) t)))
 
 (defun drover-session-display-title (session)
   "Return the title of SESSION, or its identifier."
