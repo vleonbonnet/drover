@@ -54,7 +54,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
   (load "drover-core" nil t))
 
 (defcustom drover-attention-echo t
@@ -101,7 +101,7 @@ at NOW, the current time by default, tells how long it has left (see
         (cache (and (drover-session-shown-cache-fraction session now)
                     (drover-session-cache-remaining session now))))
     (drover-bound-line
-     (concat (opencode-session-status-glyph (drover-session-shown-status session)) " "
+     (concat (opencode-session-status-glyph (drover-session-status session)) " "
              (and host (concat (propertize (drover-host-label host) 'face 'drover-dim) ": "))
              (format "%s" (drover-session-display-title session))
              (and location (concat "  " (propertize location 'face 'drover-dim)))
@@ -193,7 +193,7 @@ again only when the number or the state changed."
       (global-status-set 'drover (length sessions)
                          (drover-attention--state
                           (car (seq-sort-by #'drover-status-rank #'<
-                                            (delete-dups (mapcar #'drover-session-shown-status sessions)))))
+                                            (delete-dups (mapcar #'drover-session-status sessions)))))
                          #'drover-attention--help-echo)
     (global-status-clear 'drover)))
 
@@ -225,7 +225,7 @@ tell what `drover-filter' keeps, which depends on the whole tree (see
 `drover-attention--follow-trees')."
   (and (drover-session-attention-p session)
        (not (drover-session-stale session))
-       (or (eq (drover-session-shown-status session) 'waiting)
+       (or (eq (drover-session-status session) 'waiting)
            (null (drover-session-parent session))
            (pcase drover-show-subagents
              ('all t)
@@ -295,7 +295,7 @@ session of a host not connected."
                   (shown-p root))
           (down root))
         (maphash (lambda (key node)
-                   (when (eq (drover-session-shown-status (car node)) 'waiting)
+                   (when (eq (drover-session-status (car node)) 'waiting)
                      (surface key (car node))))
                  nodes)))
     surfaced))
@@ -641,12 +641,12 @@ status."
       (when-let* ((session (cdr (assoc name candidates))))
         (let ((summary (drover-session-summary session)))
           (concat (drover-attention--pad "" (- width (string-width name)))
-                  "  " (opencode-session-status-glyph (drover-session-shown-status session)) " "
+                  "  " (opencode-session-status-glyph (drover-session-status session)) " "
                   (propertize (drover-attention--pad (or (drover-session-location session) "")
                                                      location-width)
                               'face 'drover-dim)
                   "  "
-                  (propertize (string-pad (opencode-format-age (or (drover-session-shown-since session)
+                  (propertize (string-pad (opencode-format-age (or (drover-session-since session)
                                                                  (drover-session-updated session))
                                                              now)
                                           3 nil t)
@@ -665,7 +665,7 @@ Their completion category is `drover-session'."
                   (if transform
                       name
                     (opencode-session-status-label
-                     (drover-session-shown-status (alist-get name candidates nil nil #'equal))))))
+                     (drover-session-status (alist-get name candidates nil nil #'equal))))))
          (table (lambda (string predicate action)
                   (if (eq action 'metadata)
                       `(metadata (category . drover-session)

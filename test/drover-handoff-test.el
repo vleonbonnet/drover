@@ -143,27 +143,42 @@ The queue of scheduled prompts and the state are fresh; what the fake
   (seq-filter (lambda (job) (equal (plist-get job :origin) "hand-off")) (drover-schedule--jobs)))
 
 (ert-deftest drover-handoff-test-prompt ()
-  "The prompt tells the item, the mode, and what the agent does for it."
-  (let ((text (drover-handoff-prompt-text "The parser drops 100% of\nthe trailing commas" nil)))
+  "The prompt tells the item, the mode, and every step: it stands alone, naming no skill."
+  (let* ((session (drover-test-session "s1"))
+         (text (drover-handoff-prompt-text "The parser drops 100% of\nthe trailing commas" session)))
     (should (string-match-p "\\`Hand this item of our work off to a fresh session:\n\nThe parser drops 100% of\nthe trailing commas\n" text))
-    (should-not (string-match-p "%[imp]" text))
+    (should-not (string-match-p "%[impk]" text))
+    (should-not (string-match-p "skill" text))
     ;; Without a place, where the work keeps its tasks, as the agent knows.
-    (should (string-search "with an Org ID, where this work keeps its tasks." text))
-    (dolist (told '("`handoff` skill" "File an Org heading" "a brief that reads alone"
-                    "the goal, what is known, the decisions made, the limits, when it is done, and links"
-                    "`drover-task-start`" "`drover-session-fork`" "A refused fork ends the hand-off"
-                    "without asking for a review" "the heading's link" "the new session's link"))
-      (should (string-search told text))))
-  (should (string-prefix-p "Hand this item of our work off to a fork of this session:\n\nItem\n"
-                           (drover-handoff-prompt-text "Item" t)))
-  (let ((drover-handoff-prompt "%m <- %i (100%%)"))
-    (should (equal (drover-handoff-prompt-text "it" t) "a fork of this session <- it (100%)")))
-  ;; The place chosen, as Anvil's org-add-todo takes it.
-  (should (string-search "with an Org ID, under the place I chose, `org-id://PLACE-1`, the heading \"work.org/Projects/Drover\", which `org-add-todo` takes as its `parent_uri`."
-                         (drover-handoff-prompt-text "Item" nil drover-handoff-test-place)))
-  (should (string-search "under the place I chose, `org-headline:///notes/todo%23old.org`, the top of /notes/todo#old.org,"
-                         (drover-handoff-prompt-text "Item" nil (list :uri "org-headline:///notes/todo%23old.org"
-                                                                      :name "todo#old.org" :file "/notes/todo#old.org")))))
+    (should (string-search "1. Write an Org heading for the item with `org-add-todo`, where this work keeps its tasks.  The tool gives the heading its ID.\n" text))
+    (dolist (told '("2. Write the body of the heading as a brief that reads alone, for a reader who saw nothing of this conversation.  The brief holds the goal, what is known with paths and links, the decisions already made, the limits, when the item is done, and a report paragraph.\n"
+                    ;; The item's session reports to this one, by the key the tools take.
+                    "3. Write the report paragraph for the session that takes the item: \"When the item is done or blocked, send one message to the session `fake/s1` with `drover-session-send`.  Then set the state of this heading.\"\n"
+                    "4. Start the item at once.  Do not ask me to review the brief.\n"
+                    "5. For a fresh session, call `drover-task-start` with the ID of the heading, `repo` or `directory`, and `agent`.\n"
+                    "6. For a fork of this session, call `drover-session-fork` with the ID of the heading as `task`, `agent`, and a `prompt` that names the item and links the heading."
+                    "A refused fork ends the hand-off: report the refusal.\n"
+                    ;; The agent chooses whether the session plans or builds.
+                    "7. Choose `agent` yourself: `build` when the research is done and the brief says what to build, `plan` when design decisions remain.\n"
+                    "8. Reply with the link of the heading, `[[id:ID][title]]`, and the link of the new session, the `link` that the tool returned.\n"
+                    "Done when the new session runs and your reply holds both links."))
+      (should (string-search told text)))
+    (should (string-prefix-p "Hand this item of our work off to a fork of this session:\n\nItem\n"
+                             (drover-handoff-prompt-text "Item" session t)))
+    (let ((drover-handoff-prompt "%m <- %i (100%%) -> %k"))
+      (should (equal (drover-handoff-prompt-text "it" session t) "a fork of this session <- it (100%) -> fake/s1")))
+    ;; The place chosen, as Anvil's org-add-todo takes it.
+    (should (string-search "with `org-add-todo`, under the place I chose, the heading \"work.org/Projects/Drover\": give `org-id://PLACE-1` as its `parent_uri`.  The tool gives"
+                           (drover-handoff-prompt-text "Item" session nil drover-handoff-test-place)))
+    (should (string-search "under the place I chose, the top of /notes/todo#old.org: give `org-headline:///notes/todo%23old.org` as its `parent_uri`."
+                           (drover-handoff-prompt-text "Item" session nil
+                                                       (list :uri "org-headline:///notes/todo%23old.org"
+                                                             :name "todo#old.org" :file "/notes/todo#old.org"))))
+    ;; The key is the one the tools of the session's own host take.
+    (should (equal (drover-handoff-session-key session) "fake/s1"))
+    (should (equal (drover-handoff-session-key
+                    (drover-session-create :backend 'remote:core :id '(opencode . "ses_1") :host "core"))
+                   "opencode/ses_1"))))
 
 (ert-deftest drover-handoff-test-region ()
   "In the session's buffer, the region is the item: it goes at once, out of every window."
@@ -187,7 +202,8 @@ The queue of scheduled prompts and the state are fresh; what the fake
           (should (equal (plist-get job :link) "agent-session:handfake/conv-1")))
         (let ((text (drover-handoff-test-take)))
           (should (string-match-p "off to a fresh session:\n\nThe cache key ignores the host\\.\n" text))
-          (should (string-search "under the place I chose, `org-id://PLACE-1`" text))
+          (should (string-search "give `org-id://PLACE-1` as its `parent_uri`" text))
+          (should (string-search "to the session `fake/s1` with `drover-session-send`" text))
           (should-not (string-search "Before" text)))
         ;; The place is asked once, after the item, by ID only for another host.
         (should (equal drover-handoff-test-places

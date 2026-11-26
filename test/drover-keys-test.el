@@ -918,11 +918,12 @@ With drover's prompt as the default prompt buffer, as by default, the
 agent, model, effort and directory of the next prompt are among them."
   (drover-keys-test-with (list (drover-test-session "s"))
     (with-temp-buffer
-      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W")))
+      ;; The side list of items toggles from anywhere, as the sidebar does.
+      (should (equal (drover-keys-test-apt 'drover-dispatch) '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "*")))
       (setq drover-default-prompt-buffer-function
             (eval (car (get 'drover-default-prompt-buffer-function 'standard-value)) t))
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d"))))))
+                     '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d" "*"))))))
 
 (defun drover-keys-test-description (function)
   "Return what description FUNCTION gives in `drover-dispatch' set up here."
@@ -1113,14 +1114,14 @@ a list in a window.")
                                (drover-test-session "sub" :parent "s"))
     (drover-keys-test-in 'view "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "C" "f"
+                     (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "C" "f" "*"
                                "o" "u" "c" "v" "A" "K" "+" "g" "r" "x" "z" "G" "!")
                              drover-keys-test-view-keys
                              '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "1" "RET")))))
     ;; Off a session, only what needs none.
     (drover-keys-test-in 'view nil
       (should (equal (drover-keys-test-apt 'drover-dispatch)
-                     (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "+" "g")
+                     (append '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "*" "+" "g")
                              drover-keys-test-view-keys
                              '("C-n" "C-p" "M-n" "M-p" "M-<" "M->" "1"))))
       ;; Moving between groups needs groups.
@@ -1249,7 +1250,7 @@ Drover's view settings apply only while one of drover's views shows."
     (drover-keys-test-in 'prompt "s"
       (should (equal (drover-keys-test-apt 'drover-dispatch)
                      '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d"
-                       "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T" "C" "f" "." "O"
+                       "RET" "S-<return>" "i" "k" "/" "@" "y" "t" "T" "C" "f" "." "*" "O"
                        "o" "K" "+" "g" "r" "x" "z" "G" "!"))))))
 
 (ert-deftest drover-keys-test-dispatch-prompt-from-list ()
@@ -1299,7 +1300,7 @@ shows, so they apply only there."
             (setq drover-default-prompt-buffer-function (lambda () default))
             (with-temp-buffer
               (should (equal (drover-keys-test-apt 'drover-dispatch)
-                             '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d")))
+                             '("j" "b" "l" "L" "p" "S" "$" "\"" "'" "#" "W" "a" "m" "P" "e" "d" "*")))
               (call-interactively #'drover-prompt-model)
               (should (equal drover-keys-test-actions (list (list 'model default)))))
             ;; Deciding what applies never calls the function, which may

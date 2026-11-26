@@ -577,8 +577,6 @@ deferral answering once the job did; otherwise the job, for
        (since . ,(drover-anvil--time (drover-session-since session)))
        (updated . ,(drover-anvil--time (drover-session-updated session)))
        (needs_user . ,(and (drover-session-attention-p session) t))
-       (asks . ,(and (drover-session-ask session)
-                     (drover-anvil--line (plist-get (drover-session-ask session) :summary) 200)))
        (summary . ,(drover-anvil--line (drover-session-summary session) 300))
        (requests . ,(and (drover-session-requests session) (drover-anvil--requests-data session)))
        (harness . ,(symbol-name (drover-session-harness session)))
@@ -2232,6 +2230,8 @@ MCP Parameters:
 (declare-function drover-items-check "drover-items" (session given callback))
 (declare-function drover-items-set "drover-items" (session items review))
 (declare-function drover-items-find-headings "drover-items" (list callback))
+(declare-function drover-items-want-archived "drover-items" (list))
+(declare-function drover-items--serving-table "drover-items" ())
 (declare-function drover-items-heading-info "drover-items" (item))
 (declare-function drover-items-heading-sessions "drover-items" (item))
 (declare-function drover-items-item-status "drover-items" (item))
@@ -2239,10 +2239,11 @@ MCP Parameters:
 (declare-function drover-items-chosen-by "drover-items" (item))
 (declare-function drover-items-link-text "drover-items" (item))
 (defvar drover-items-limit)
+(defvar drover-items--serving)
 
 (defconst drover-anvil--item-fields
   '((title . :title) (status . :status) (link . :link) (next . :next) (note . :note)
-    (heading . :heading) (proposal . :proposal) (id . :id))
+    (heading . :heading) (id . :id))
   "The fields of an item an agent gives, by their names, and as drover takes them.")
 
 (defun drover-anvil--items-given (value)
@@ -2290,7 +2291,9 @@ A session of another host is refused: its host keeps its list."
     session))
 
 (defun drover-anvil--item-data (item)
-  "Return ITEM, of a list of `drover-items', as data the tools answer with."
+  "Return ITEM, of a list of `drover-items', as data the tools answer with.
+The sessions serving its heading are told with their status, one
+archived as such: it took the item, and is where its work was done."
   (let ((info (drover-items-heading-info item))
         (sent (plist-get item :sent))
         (place (plist-get item :place)))
@@ -2312,7 +2315,8 @@ A session of another host is refused: its host keeps its list."
                                           `((key . ,(drover-anvil-key-string session))
                                             (link . ,(drover-anvil--link session))
                                             (title . ,(drover-anvil--line (drover-session-display-title session) 160))
-                                            (status . ,(symbol-name (drover-session-status session))))))
+                                            (status . ,(symbol-name (drover-session-status session)))
+                                            (archived . ,(and (drover-session-archived session) t)))))
                                        (seq-take sessions 10)))))
        (goes . ,(symbol-name (or (drover-items-goes item) 'none)))
        (chosen_by . ,(symbol-name (drover-items-chosen-by item)))
@@ -2321,8 +2325,9 @@ A session of another host is refused: its host keeps its list."
 
 (defun drover-anvil--items-answer (session list &optional outcome)
   "Return what the tools answer of SESSION's LIST, as data, with OUTCOME."
-  (let ((asked (and list (drover-items-asked list)))
-        (items (and list (drover-items-items list))))
+  (let* ((asked (and list (drover-items-asked list)))
+         (items (and list (drover-items-items list)))
+         (drover-items--serving (and items (drover-items--serving-table))))
     `((outcome . ,(or outcome "read"))
       (key . ,(drover-anvil-key-string session))
       (link . ,(drover-anvil--link session))
@@ -2331,10 +2336,8 @@ A session of another host is refused: its host keeps its list."
       (asked_since . ,(drover-anvil--time asked))
       (count . ,(length items))
       (items . ,(vconcat (mapcar #'drover-anvil--item-data items)))
-      (note . ,(cond
-                ((null list) "This session has no list: give one with drover-session-items-set")
-                (asked "The user is asked where each item goes; their choices come back to the session as a prompt.  Update an item with drover-session-items-set and its id")
-                (t "Update an item with drover-session-items-set and its id; review true asks the user where each goes"))))))
+      (note . ,(cond ((null list) "This session has no list")
+                     (asked "The user is asked to review the list"))))))
 
 (defun drover-anvil--items-refusal (problems)
   "Return the refusal of a list whose items PROBLEMS tell, each a string."
@@ -2343,28 +2346,25 @@ A session of another host is refused: its host keeps its list."
 
 (defun drover-anvil--tool-items-set (items &optional key review)
   "Keep ITEMS as the list of the session KEY, the caller's by default.
-Drover keeps the list of a session's items rather than its agent
-prints it: across a compaction of the conversation and restarts of
-Emacs.  An item given without id is added, numbered; one with the id of
-an item the list holds updates it, the fields it gives replacing those
-it had; the items not given stay.  Unless REVIEW is false, the user is
-asked where each item goes: the session needs the user once its turn
-ends, and the choices come back as a prompt.  A call naming a link
-that cannot be what it says is refused, each such item named, and
-nothing is kept.  It answers at once, with the list as kept.
+Drover keeps the list of a session's items across a compaction of the
+conversation and restarts of Emacs.  An item given without id is added,
+numbered; one with the id of an item the list holds updates it, the
+fields it gives replacing those it had; the items not given stay.
+Unless REVIEW is false, the user is asked to review the list.  A call
+naming a link that cannot be what it says is refused, each such item
+named, and nothing is kept.  It answers with the list as kept.
 
 MCP Parameters:
   items - (array) The items, each an object with title and status, one
       of open, blocked, scheduled, done and decided; and optionally link,
       an Org link to what it names, such as [[id:ID][title]],
       [[https://…][title]] or agent-session:…; next, its next step; note;
-      heading, the Org ID of its heading; proposal, where you propose it
-      goes: keep, session, fork or save; id, the number of an item the
+      heading, the Org ID of its heading; id, the number of an item the
       list holds, to update it
   key - The session whose list it is, as drover-sessions tells it; the
       caller's own by default
-  review - (boolean) true by default, asking the user where each item
-      goes; false keeps the list alone"
+  review - (boolean) true by default, asking the user to review the
+      list; false keeps the list alone"
   (drover-start)
   (require 'drover-items)
   (let* ((caller (drover-anvil--caller))
@@ -2389,12 +2389,30 @@ MCP Parameters:
                                          session (drover-items-set session (car result) review) "kept")))))))
       (drover-anvil--answer id))))
 
+(defconst drover-anvil--items-archived-wait 10
+  "Seconds at most drover-session-items waits for the archived sessions fetched.
+A session that took an item is often archived since: its backend tells
+of it once the archived sessions are fetched, which may never answer.")
+
+(defun drover-anvil--items-poll (id)
+  "Settle the job ID, of drover-session-items, once its sessions are known.
+That is once its headings were looked for, and the archived sessions
+fetched for them arrived, or `drover-anvil--items-archived-wait' seconds
+passed."
+  (when-let* ((ready (drover-anvil--job-get id :ready)))
+    (let ((session (drover-index-session (drover-anvil--job-get id :key))))
+      (cond ((null session) (drover-anvil--fail id "Its session is gone"))
+            ((and (< (- (float-time) ready) drover-anvil--items-archived-wait)
+                  (drover-fetch-pending-p drover-anvil--items-archived-wait))
+             nil)
+            (t (drover-anvil--done id (drover-anvil--items-answer session (drover-items-list-of session))))))))
+
 (defun drover-anvil--tool-items (&optional key)
   "Return the list of items of the session KEY, the caller's by default.
 Each item with its number, title, status, link, next step, note, its
-heading and the sessions serving it, where it goes and who chose it,
-and the place of its heading once the user chose one.  An item with a
-heading takes the heading's status.
+heading and the sessions serving it, those archived since too, where
+the user said it goes, and the place of its heading once the user chose
+one.  An item with a heading takes the heading's status.
 
 MCP Parameters:
   key - The session whose list it is, as drover-sessions tells it; the
@@ -2405,17 +2423,20 @@ MCP Parameters:
          (session (drover-anvil--items-session key caller))
          (source (drover-session-key session))
          (list (drover-items-list-of session))
-         (id (drover-anvil--job "drover-session-items" caller source :seconds 60)))
+         (id (drover-anvil--job "drover-session-items" caller source :seconds 60
+                                :poll #'drover-anvil--items-poll)))
     (drover-anvil--log "drover-session-items" caller source "done"
                        (format "%d items" (length (and list (drover-items-items list)))))
     (if (null list)
         (drover-anvil--done id (drover-anvil--items-answer session nil))
+      ;; The sessions archived since, which serve its headings, are fetched meanwhile.
+      (drover-items-want-archived list)
       ;; Headings in no file visited are looked for first.
       (drover-anvil--call id #'drover-items-find-headings list
                           (lambda ()
                             (drover-anvil--call id (lambda ()
-                                                     (drover-anvil--done id (drover-anvil--items-answer
-                                                                             session (drover-items-list-of session))))))))
+                                                     (drover-anvil--job-put id :ready (float-time))
+                                                     (drover-anvil--advance id))))))
     (drover-anvil--answer id)))
 
 ;;;; Jobs' answers
@@ -2485,10 +2506,10 @@ MCP Parameters:
      :description "Return the permission prompts agents gave the user over a period, seven days by default and 31 at most, across harnesses and hosts, oldest first, each with its session, action, rules and reply.")
     (drover-anvil--tool-items-set
      :id "drover-session-items-set"
-     :description "Hand drover the list of the items of a session, the caller's by default, rather than print it: actions, decisions, follow-ups, each with a title and a status (open, blocked, scheduled, done, decided), and optionally a link, a next step, a note, its Org heading's ID and where you propose it goes (keep, session, fork, save).  Drover keeps it across compactions and restarts, numbers each item, and asks the user where each goes (review false does not); the choices come back as a prompt.  Give an item's id to update it; the items not given stay.  A link that cannot be what it says is refused, each such item named.  Returns the list as kept, at once.")
+     :description "Keep the list of the items of a session, the caller's by default: actions, decisions, follow-ups, each with a title and a status (open, blocked, scheduled, done, decided), and optionally a link, a next step, a note and its Org heading's ID.  Drover keeps the list across compactions and restarts, and numbers each item.  Give an item's id to update it; the items not given stay.  The user is asked to review the list, unless review is false.  A link that cannot be what it says is refused, each such item named.  Returns the list as kept.")
     (drover-anvil--tool-items
      :id "drover-session-items" :read-only t
-     :description "Read the list of items drover keeps for a session, the caller's by default: each item's number, title, status (an item with an Org heading takes the heading's), link, next step, note, heading, the sessions serving that heading, where it goes and who chose it, and the place of its heading.")
+     :description "Return the list of items drover keeps for a session, the caller's by default: each item's number, title, status (an item with an Org heading takes the heading's), link, next step, note, heading, the sessions serving that heading, where the user said it goes, and the place of its heading.")
     (drover-anvil--tool-job
      :id "drover-job" :read-only t
      :description "Return the answer of a job another drover tool answered with, for clients that cannot wait for answers."))

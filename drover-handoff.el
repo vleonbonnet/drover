@@ -26,7 +26,9 @@
 ;; drover-task-start and drover-session-fork.  Drover writes no heading:
 ;; the agent knows the item.  Where its heading goes is the user's to
 ;; say, read as Org's refile reads a place (`drover-handoff-read-place'),
-;; and given to the agent as Anvil's Org tools name it.
+;; and given to the agent as Anvil's Org tools name it.  The prompt
+;; stands alone: it names no skill, and tells the agent every step, so
+;; that an agent learns of handing off only once the user asks for it.
 ;;
 ;; The item is the text of the region, where the user reads the session,
 ;; else it is read in the minibuffer.  The prompt
@@ -73,11 +75,14 @@
 
 %i
 
-Load your `handoff` skill if you have one, and follow it.  Without that skill, do these steps:
-
-1. File an Org heading for the item, with an Org ID, %p.  Write its body as a brief that reads alone, for a reader who saw nothing of this conversation: the goal, what is known, the decisions made, the limits, when it is done, and links.
-2. Start it at once, without asking for a review of the brief.  For a fresh session, call `drover-task-start` with the heading's ID.  For a fork of this session, call `drover-session-fork` with the heading's ID as `task`, and a `prompt` that names the item and links the heading.  A fork starts from this whole conversation, so only that prompt tells it which item is its own.  A refused fork ends the hand-off: report the refusal.
-3. Reply with the heading's link, `[[id:ID][title]]`, and the new session's link, the `link` the tool returned.
+1. Write an Org heading for the item with `org-add-todo`, %p.  The tool gives the heading its ID.
+2. Write the body of the heading as a brief that reads alone, for a reader who saw nothing of this conversation.  The brief holds the goal, what is known with paths and links, the decisions already made, the limits, when the item is done, and a report paragraph.
+3. Write the report paragraph for the session that takes the item: \"When the item is done or blocked, send one message to the session `%k` with `drover-session-send`.  Then set the state of this heading.\"
+4. Start the item at once.  Do not ask me to review the brief.
+5. For a fresh session, call `drover-task-start` with the ID of the heading, `repo` or `directory`, and `agent`.
+6. For a fork of this session, call `drover-session-fork` with the ID of the heading as `task`, `agent`, and a `prompt` that names the item and links the heading.  A fork starts from this whole conversation, so only that prompt tells the fork which item is its own.  A refused fork ends the hand-off: report the refusal.
+7. Choose `agent` yourself: `build` when the research is done and the brief says what to build, `plan` when design decisions remain.
+8. Reply with the link of the heading, `[[id:ID][title]]`, and the link of the new session, the `link` that the tool returned.
 
 Done when the new session runs and your reply holds both links."
   "The prompt asking a session to hand an item off to a session of its own.
@@ -85,7 +90,11 @@ A `format-spec' template: %i is the item, the text `drover-handoff' was
 given; %m the mode, \"a fresh session\", or \"a fork of this session\"
 when a fork is asked; %p where its heading goes, the place the user
 chose, as Anvil's org-add-todo takes it (see
-`drover-handoff-place-text'); %% is a percent sign."
+`drover-handoff-place-text'); %k the key of the session asked, as the
+tools of its host name it, for the item's session to report to (see
+`drover-handoff-session-key'); %% is a percent sign.  The default names
+no skill and tells every step: the agent is told nothing of handing
+off before."
   :type 'string
   :group 'drover)
 
@@ -211,11 +220,11 @@ PLACE is what `drover-handoff-read-place' returns, or nil, for where
 the work keeps its tasks, as the agent knows."
   (if (null place)
       "where this work keeps its tasks"
-    (format "under the place I chose, `%s`, %s, which `org-add-todo` takes as its `parent_uri`"
-            (plist-get place :uri)
+    (format "under the place I chose, %s: give `%s` as its `parent_uri`"
             (if (plist-get place :id)
                 (format "the heading \"%s\"" (plist-get place :name))
-              (format "the top of %s" (abbreviate-file-name (plist-get place :file)))))))
+              (format "the top of %s" (abbreviate-file-name (plist-get place :file))))
+            (plist-get place :uri))))
 
 ;;;; The prompt
 
@@ -223,21 +232,32 @@ the work keeps its tasks, as the agent knows."
   "Return how the item goes, as the prompt tells it: forked when FORK is non-nil."
   (if fork "a fork of this session" "a fresh session"))
 
-(defun drover-handoff-prompt-text (item &optional fork place)
-  "Return the prompt handing ITEM off, to a fork of the session with FORK.
+(defun drover-handoff-session-key (session)
+  "Return the key of SESSION as the tools of its own host name it, a string.
+BACKEND/ID, what `drover-session-send' takes there: the prompts give it
+to SESSION's agent, for the session an item goes to, which that agent
+starts on its host, to report to SESSION.  A session of another host is
+named by its owner's key, as that host's tools name it."
+  (let ((id (drover-session-id session)))
+    (if (and (drover-session-host session) (consp id))
+        (format "%s/%s" (car id) (cdr id))
+      (format "%s/%s" (drover-session-backend session) id))))
+
+(defun drover-handoff-prompt-text (item session &optional fork place)
+  "Return the prompt asking SESSION to hand ITEM off, to a fork of it with FORK.
 Its heading goes to PLACE, as `drover-handoff-read-place' returns it;
 nil leaves it to the agent."
   (format-spec drover-handoff-prompt
                `((?i . ,item)
                  (?m . ,(drover-handoff-mode fork))
-                 (?p . ,(drover-handoff-place-text place)))))
+                 (?p . ,(drover-handoff-place-text place))
+                 (?k . ,(drover-handoff-session-key session)))))
 
 ;;;; Delivering
 
 (defun drover-handoff--busy-p (session)
   "Return non-nil while SESSION runs a turn, or holds prompts not taken yet.
-A question it asks is part of its turn; what drover asks of it is not
-\(see `drover-session-shown-status')."
+A question it asks is part of its turn."
   (or (memq (drover-session-status session) drover-active-statuses)
       (> (drover-pending-prompts session) 0)))
 
@@ -374,7 +394,7 @@ agent finds a heading by its ID, takes a heading."
     (when-let* (((and fork (not (drover-session-host session))))
                 (why (drover-fork-refusal session)))
       (user-error "%s cannot be forked: %s" title why))
-    (let ((waits (drover-handoff-send session (drover-handoff-prompt-text item fork place))))
+    (let ((waits (drover-handoff-send session (drover-handoff-prompt-text item session fork place))))
       (drover-message "%s hands off to %s%s: %s" title (drover-handoff-mode fork)
                       (if waits ", once its turn ends" "")
                       (drover-bound-line (replace-regexp-in-string "[\n\r]+" " " item) 120)))))

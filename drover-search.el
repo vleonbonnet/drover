@@ -66,7 +66,7 @@
 (require 'drover-query)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
   (load "drover-core" nil t))
 
 (declare-function drover-list-reveal "drover-list" (session))
@@ -378,7 +378,7 @@ contain, case ignored, but for `status', which it must begin, and
               ("host" (let ((host (drover-session-host session)))
                         (or (and (null host) (string-match-p regexp "local"))
                             (string-match-p regexp (drover-host-label host)))))
-              ("status" (eq (string-match-p regexp (symbol-name (drover-session-shown-status session))) 0))
+              ("status" (eq (string-match-p regexp (symbol-name (drover-session-status session))) 0))
               ("archived" (eq (and (drover-session-archived-p session) t)
                               (and (string-match-p "\\`\\(?:yes\\|y\\|true\\|t\\|1\\)\\'" regexp) t))))))
       (if negated (not holds) (and holds t)))))
@@ -935,7 +935,7 @@ snippet of a match of what was said, else why it has its status."
                       (hit (gethash (drover-search--entry-key entry) hits))
                       (summary (drover-session-summary session)))
                  (list name
-                       (concat (opencode-session-status-glyph (drover-session-shown-status session)) " "
+                       (concat (opencode-session-status-glyph (drover-session-status session)) " "
                                (drover-harness-glyph (drover-session-harness session)) " "
                                (if (drover-session-archived session) (concat (opencode-archived-glyph) " ") "")
                                (if (> (drover-search--entry-depth entry) 0) (drover-face "↳ " 'drover-dim) ""))

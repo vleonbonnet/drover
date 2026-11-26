@@ -693,15 +693,15 @@ those scheduled."
 (declare-function drover-items-goes "drover-items" (item))
 
 (defun drover-items-shown-p (session)
-  "Return non-nil when SESSION has a list of items to show (see `drover-items').
+  "Return non-nil when SESSION has a list of items (see `drover-items').
 Its agent gave one, which drover reads once its module is loaded: as
 drover starts when its file exists, or as an agent gives a list."
   (and session (featurep 'drover-items) (drover-items-p session)))
 
 (defun drover--dispatch-items-description ()
-  "Return the description of the list of items in the dispatch menu.
+  "Return the description of the side list of items in the dispatch menu.
 How many of the items of the session at point are open follows it, and
-\"review\" while its agent asks the user to review them."
+\"review\" while its list waits for the user's review."
   (if-let* ((session (drover-dispatch-session))
             ((drover-items-shown-p session))
             (list (drover-items-list-of session)))
@@ -2674,9 +2674,7 @@ session chosen for it, else to one asked for, unshown."
             :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-clone-p)))
            ("." "Last answer" drover-prompt-last-answer
             :inapt-if-not (lambda () (drover-dispatch-prompt-p 'last-answer)))
-           ("*" drover--dispatch-items-description drover-items
-            :advice* drover--dispatch-in-list
-            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-items-shown-p)))
+           ("*" drover--dispatch-items-description drover-items)
            ("O" "Open link" drover-prompt-open-link :if drover-dispatch-prompt-buffer-p
             :inapt-if-not (lambda () (drover-dispatch-prompt-p 'open-link)))]
           ["Session"
@@ -2692,7 +2690,7 @@ session chosen for it, else to one asked for, unshown."
            ("R" "Review" drover-review
             :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-reviewable-p)))
            ("A" "Answer" drover-respond
-            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-answerable-p)))
+            :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-session-to-answer)))
            ("<tab>" "Build + go" drover-build-and-go
             :inapt-if-not (lambda () (drover-dispatch-session nil #'drover-build-and-go-p)))
            ("K" "Interrupt" drover-interrupt

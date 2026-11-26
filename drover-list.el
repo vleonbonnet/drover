@@ -100,7 +100,13 @@
 ;;
 ;; With `drover-show-archived', the list shows archived sessions too,
 ;; dimmed, after `opencode-archived-icon', in a group of their own when
-;; grouped by status.
+;; grouped by status.  A session whose list of items waits for a review
+;; shows `drover-list-review-icon' after its status (see
+;; `drover-list-review-function').
+;;
+;; Another side list may take the sidebar's look, and measure and cut
+;; its lines with the functions of this file: `drover-list-sidebar-look',
+;; which the side list of a session's items uses (see `drover-items').
 ;;
 ;; A buffer follows the changes backends report, but only while it is
 ;; displayed: a hidden list notes which sessions changed, and draws
@@ -128,7 +134,7 @@
 (require 'opencode-look)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 32))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 22))
   (load "drover-core" nil t))
 
 ;; A row's tree and section, a tree's group and a group's section were
@@ -702,6 +708,11 @@ and every line begins with `drover-list--line-start'.  The sidebar
 folds nothing (see `drover-list-sidebar-mode'): its lines begin with
 their glyphs, at the window's edge.")
 
+(defvar-local drover-list-sidebar-look nil
+  "Non-nil in a buffer taking the sidebar's look without listing sessions.
+Such as the side list of a session's items (see `drover-items'): set by
+`drover-list-sidebar-look'.")
+
 (defvar-keymap drover-list-group-section-map
   :doc "Keys on the heading of a group of sessions."
   "RET" #'magit-section-toggle
@@ -1182,6 +1193,33 @@ the field `goal' is hidden."
        (drover-with-reporting "goal"
          (funcall drover-list-goal-function session form))))
 
+(defvar drover-list-review-function nil
+  "Function of a session returning since when its list of items waits for a review.
+A float, or nil while none waits: the session's row then shows
+`drover-list-review-icon' (see `drover-list--review-glyph').  It is
+called for every row drawn, so it must cost a lookup.  `drover-items'
+sets it.")
+
+(defcustom drover-list-review-icon "\U000F0756" ; nf-md-format_list_checks
+  "Icon telling that the list of items of a session waits for your review.
+It shows on the session's row, after its status, in the face
+`drover-list-review', and in the side list of items (see
+`drover-items').  A Nerd Font icon by default; any short string will
+do."
+  :type 'string
+  :group 'drover-list)
+
+(defface drover-list-review '((t :inherit opencode-session-status-waiting))
+  "Face of the icon telling that a session's list of items waits for a review."
+  :group 'drover-faces)
+
+(defun drover-list--review (session)
+  "Return since when the list of items of SESSION waits for a review, or nil.
+See `drover-list-review-function'."
+  (and drover-list-review-function
+       (drover-with-reporting "items review"
+         (funcall drover-list-review-function session))))
+
 (defun drover-list--attempt-text (session &optional any)
   "Return the attempt SESSION works in as its column shows it, or nil.
 Its number, then its label, of the task SESSION serves (see
@@ -1279,7 +1317,7 @@ number is drawn over it (see `drover-list--draw-numbers')."
 (defun drover-list--subagents-help (subagents)
   "Return the tooltip naming SUBAGENTS, active sessions, by what they do.
 It tells how many do each, which their glyphs do not."
-  (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-shown-status session) 'waiting))
+  (let* ((waiting (seq-filter (lambda (session) (eq (drover-session-status session) 'waiting))
                               subagents))
          (working (seq-difference subagents waiting #'eq))
          (line (lambda (sessions doing)
@@ -1302,9 +1340,9 @@ or waiting to retry, a space between, each in the subagent cell of
 METRICS.  They stay still and tell no number: their tooltip names the
 subagents and tells how many."
   (when subagents
-    (let* ((waiting (seq-some (lambda (session) (eq (drover-session-shown-status session) 'waiting))
+    (let* ((waiting (seq-some (lambda (session) (eq (drover-session-status session) 'waiting))
                               subagents))
-           (working (seq-some (lambda (session) (not (eq (drover-session-shown-status session) 'waiting)))
+           (working (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))
                               subagents))
            (cell (plist-get metrics :subagent-cell)))
       (propertize (mapconcat (lambda (kind) (drover-list--in-cell (opencode-subagent-glyph kind) cell))
@@ -1322,11 +1360,20 @@ when known."
                                (format "Archived %s ago" (opencode-format-age archived now))
                              "Archived"))))
 
+(defun drover-list--review-glyph (session)
+  "Return the glyph telling that the list of items of SESSION waits for a review.
+In a cell of its own, or nil while none waits (see
+`drover-list-review-function' and `drover-list-review-icon')."
+  (when (and (drover-list--review session) (not (string-empty-p drover-list-review-icon)))
+    (propertize (drover-list--icon (drover-face drover-list-review-icon 'drover-list-review))
+                'help-echo "Its list of items waits for your review")))
+
 (defun drover-list--icons (session metrics)
   "Return what comes before the title of SESSION: its glyphs and a space.
 The glyph of its status comes first, still for a session of a host not
 connected, whose status may be past, then, when subagents of SESSION are
-in the middle of a turn, the glyphs telling so, then, when SESSION is
+in the middle of a turn, the glyphs telling so, then, while its list of
+items waits for a review, the glyph telling so, then, when SESSION is
 archived, the glyph telling so; one space separates each.  METRICS give
 the cells of glyphs, the frames of animated ones, the active subagents
 of each session and the time."
@@ -1334,11 +1381,13 @@ of each session and the time."
                     (and (plist-get metrics :active)
                          (gethash (drover-session-key session) (plist-get metrics :active)))
                     metrics))
+        (review (drover-list--review-glyph session))
         (archived (drover-list--archived-glyph session (plist-get metrics :now))))
-    (concat (drover-list--status-glyph (drover-session-shown-status session) metrics
+    (concat (drover-list--status-glyph (drover-session-status session) metrics
                                        (drover-session-stale session))
             " "
             (and indicator (concat indicator " "))
+            (and review (concat review " "))
             (and archived (concat archived " ")))))
 
 (defun drover-list--title-face (state)
@@ -1358,7 +1407,7 @@ arrow, carries the session's key as its property `drover-list-title',
 so that its face may change in place."
   (let* ((title (drover-list--one-line (drover-session-display-title session)))
          (faces (delq nil (list (drover-list--title-face state)
-                                (and (or (eq (drover-session-shown-status session) 'idle)
+                                (and (or (eq (drover-session-status session) 'idle)
                                          (drover-session-archived session)
                                          (drover-session-stale session))
                                      'drover-dim)))))
@@ -1757,6 +1806,7 @@ place, is the same row; see `drover-list--inputs'."
                 (plist-get metrics :frames))
         opencode-session-status-icons opencode-subagent-icons opencode-session-status-animations
         opencode-archived-icon opencode-session-status-animation-interval drover-list-context-bar-width
+        drover-list-review-icon
         ;; Printed with each row, so a digest of the harnesses, not them.
         (md5 (prin1-to-string (list drover-harnesses opencode-provider-icons drover-harness-default-icon
                                     drover-host drover-host-labels drover-host-icon drover-context-pie-icons)))
@@ -1778,10 +1828,11 @@ its prompt cache is live, the frame of its animated glyph, the age of
 its archiving and since when its host is not connected, the stamp of
 METRICS (see `drover-list--metrics-stamp'), its usage, which its
 cost shows (see `drover-list-usage-function'), the task it serves,
-whose project its project shows (see `drover-session-task'), and its
-goal (see `drover-list-goal-function')."
+whose project its project shows (see `drover-session-task'), its goal
+\(see `drover-list-goal-function'), and whether its list of items waits
+for a review (see `drover-list-review-function')."
   (let* ((now (plist-get metrics :now))
-         (status (drover-session-shown-status session))
+         (status (drover-session-status session))
          (archived (drover-session-archived session))
          (frames (and (not (drover-session-stale session))
                       (alist-get status (plist-get metrics :frames)))))
@@ -1798,7 +1849,8 @@ goal (see `drover-list-goal-function')."
             (plist-get metrics :stamp)
             (drover-list--usage session 'value)
             (drover-session-task session)
-            (drover-list--goal session 'value))))
+            (drover-list--goal session 'value)
+            (and (drover-list--review session) t))))
 
 (defun drover-list--same-inputs-p (a b &optional any-stamp)
   "Return non-nil when row inputs A and B are the same.
@@ -3293,15 +3345,12 @@ list TEXT is its lines, each cut.  FACE, if any, is that of TEXT."
       (dolist (request (drover-session-requests session))
         (add (if (eq (plist-get request :kind) 'question) "Question" "Permission")
              (plist-get request :summary) 'request 'opencode-session-status-waiting))
-      (when-let* ((ask (drover-session-ask session)))
-        (add "Asks" (plist-get ask :summary) 'request 'opencode-session-status-waiting))
       ;; Not what the line shows whole already, the same text.
       (unless (and summary problem
                    (eq (drover-list--one-line problem) problem)
                    (equal (drover-session-summary session) problem))
         (add (if (eq status 'retrying) "Retrying" "Error") problem 'error (opencode-session-status-face status)))
-      (unless (or summary problem (drover-session-brief session) (drover-session-requests session)
-                  (drover-session-ask session))
+      (unless (or summary problem (drover-session-brief session) (drover-session-requests session))
         (add "Status" (drover-session-detail session) nil (opencode-session-status-face status)))
       (add "Prompt" (plist-get recap :prompt) 'prompt)
       (add "Reply" (plist-get recap :reply) 'reply)
@@ -3525,7 +3574,7 @@ washer `magit-insert-section-body' makes does, for the section
   "Count the session of ROW DELTA times in COUNTS, a hash table by status.
 Archived sessions count apart, as `archived'."
   (let* ((session (drover-list--row-session row))
-         (key (if (drover-session-archived session) 'archived (drover-session-shown-status session))))
+         (key (if (drover-session-archived session) 'archived (drover-session-status session))))
     (puthash key (+ (gethash key counts 0) delta) counts)))
 
 (defun drover-list--status-counts (counts)
@@ -5681,8 +5730,12 @@ Return nil when there is none, ALIST being the action's alist."
   "Timer giving titles their faces, once a session buffer killed is gone.")
 
 (defun drover-list--view-window-p (window)
-  "Return non-nil when WINDOW shows one of drover's views."
-  (buffer-local-value 'drover-view-p (window-buffer window)))
+  "Return non-nil when WINDOW shows one of drover's views.
+Or a side list given the sidebar's look (see `drover-list-sidebar-look'):
+the user works in neither."
+  (let ((buffer (window-buffer window)))
+    (or (buffer-local-value 'drover-view-p buffer)
+        (buffer-local-value 'drover-list-sidebar-look buffer))))
 
 (defun drover-list--active-window ()
   "Return the window the user works in, or nil.
@@ -7009,11 +7062,25 @@ otherwise."
            (drover-list--rehighlight)))
   :group 'drover-list)
 
+(defvar drover-list--look-buffers nil
+  "The buffers `drover-list-sidebar-look' gave the sidebar's look.")
+
+(defun drover-list--sidebar-look-p ()
+  "Return non-nil when the current buffer looks as the sidebar does.
+The sidebar itself, or a buffer given its look (see
+`drover-list-sidebar-look')."
+  (or drover-list-sidebar-look (derived-mode-p 'drover-list-sidebar-mode)))
+
+(defun drover-list--look-buffers ()
+  "Return the live buffers given the sidebar's look, those killed forgotten."
+  (setq drover-list--look-buffers (seq-filter #'buffer-live-p drover-list--look-buffers)))
+
 (defun drover-list--rehighlight ()
-  "Draw the highlight of the row at point anew in every sidebar."
-  (dolist (buffer (drover-list--buffers))
+  "Draw the highlight of the row at point anew in every sidebar.
+And in the buffers given its look (see `drover-list-sidebar-look')."
+  (dolist (buffer (append (drover-list--buffers) (drover-list--look-buffers)))
     (with-current-buffer buffer
-      (when (derived-mode-p 'drover-list-sidebar-mode)
+      (when (drover-list--sidebar-look-p)
         (drover-list--remap-highlight)))))
 
 (defvar-local drover-list--highlight-cookie nil
@@ -7078,7 +7145,7 @@ Each window showing the sidebar gets the window parameter
 `drover-list-selected', t when `drover-list--shows-highlight-p' says so,
 else nil, which `drover-list--highlight-filter' reads; a window whose
 value changes is drawn anew.  In another buffer, it does nothing."
-  (when (derived-mode-p 'drover-list-sidebar-mode)
+  (when (drover-list--sidebar-look-p)
     (dolist (window (get-buffer-window-list nil 'nomini t))
       (let ((value (and (drover-list--shows-highlight-p window) t)))
         (unless (eq (window-parameter window 'drover-list-selected) value)
@@ -7102,11 +7169,12 @@ A region selecting rows shows them in every window.  For the sidebar's
     (drover-list--set-highlight-windows)))
 
 (defun drover-list--sidebar-window-p (window)
-  "Return non-nil when WINDOW is a side window showing the sidebar."
+  "Return non-nil when WINDOW is a side window showing the sidebar.
+Or a buffer given its look (see `drover-list-sidebar-look')."
   (and (window-live-p window)
        (window-parameter window 'window-side)
        (with-current-buffer (window-buffer window)
-         (derived-mode-p 'drover-list-sidebar-mode))))
+         (drover-list--sidebar-look-p))))
 
 (defun drover-list--set-up-side-window (window)
   "Give WINDOW, if a side window showing the sidebar, the sidebar's settings.
@@ -7141,6 +7209,46 @@ As it draws, before measuring the width they leave (see
 For the sidebar's `window-buffer-change-functions'."
   (drover-with-reporting "sidebar window"
     (drover-list--set-up-side-window window)))
+
+(defun drover-list--look-window-changed (window)
+  "Give WINDOW the sidebar's settings, and mark where its highlight shows.
+For the `window-buffer-change-functions' and
+`window-selection-change-functions' of a buffer given the sidebar's
+look (see `drover-list-sidebar-look'), which run in that buffer."
+  (drover-with-reporting "sidebar look"
+    (when (and (window-live-p window) (buffer-live-p (window-buffer window)))
+      (drover-list--set-up-side-window window)
+      (with-current-buffer (window-buffer window)
+        (drover-list--set-highlight-windows)))))
+
+(defun drover-list-sidebar-look ()
+  "Give the current buffer, a side list of its own, the look of the sidebar.
+For a buffer of Magit's sections listing something else than sessions
+beside the sidebar, such as the items of a session (see `drover-items'),
+so that both read as one: its text in the face `drover-list', no cursor
+but the highlight of the row at point, the sidebar's, shown while its
+window is selected (see `drover-list--remap-highlight'), point kept at
+the start of a row (see `drover-list--sidebar-settle'), no indicator
+that a section folds, and in a side window the sidebar's settings,
+without fringes (see `drover-list--set-up-side-window').  Its lines are
+then measured and cut with the functions the sidebar's are, in pixels
+\(`drover-list--pixel-width', `drover-list--truncate',
+`drover-list--icon', `drover-list--line-width')."
+  (setq-local drover-list-sidebar-look t)
+  (setq-local magit-section-visibility-indicators nil)
+  (setq-local cursor-type nil)
+  (setq-local cursor-in-non-selected-windows nil)
+  (setq-local auto-hscroll-mode nil)
+  (setq-local truncate-lines t)
+  (drover-remap-default-face 'drover-list)
+  (drover-list--remap-highlight)
+  (add-hook 'post-command-hook #'drover-list--sidebar-settle nil t)
+  (add-hook 'window-buffer-change-functions #'drover-list--look-window-changed nil t)
+  (add-hook 'window-selection-change-functions #'drover-list--look-window-changed nil t)
+  (add-hook 'activate-mark-hook #'drover-list--region-toggled nil t)
+  (add-hook 'deactivate-mark-hook #'drover-list--region-toggled nil t)
+  (add-hook 'pre-redisplay-functions #'drover-list--reorder nil t)
+  (cl-pushnew (current-buffer) drover-list--look-buffers))
 
 (define-derived-mode drover-list-sidebar-mode drover-list-mode "Drover"
   "Major mode of the sidebar, the list of agent sessions of a side window.

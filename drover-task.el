@@ -1611,12 +1611,20 @@ only writes a prompt for the task."
 
 ;;;; Continuing
 
-(defun drover-task-sessions (info)
-  "Return the live sessions serving the task INFO tells of, most recent first."
-  (let ((ids (delq nil (list (plist-get info :id) (plist-get info :orig-id)))))
-    (sort (seq-filter (lambda (session) (member (drover-task-id-of session) ids))
-                      (drover-sessions))
-          :key (lambda (session) (- (or (drover-session-updated session) 0))))))
+(defun drover-task-sessions (info &optional all)
+  "Return the live sessions serving the task INFO tells of, most recent first.
+With ALL, every session drover knows that serves it: after the live
+ones, those archived and the older ones, most recent first too, as
+`drover-known-sessions' tells them all.  A session its backend archived
+is among them once the archived sessions were fetched (see
+`drover-keep-fetched')."
+  (let* ((ids (delq nil (list (plist-get info :id) (plist-get info :orig-id))))
+         (live (drover-sessions))
+         (recent (lambda (sessions)
+                   (sort (seq-filter (lambda (session) (member (drover-task-id-of session) ids)) sessions)
+                         :key (lambda (session) (- (or (drover-session-updated session) 0)))))))
+    (append (funcall recent live)
+            (and all (funcall recent (seq-difference (drover-known-sessions live t) live #'eq))))))
 
 (defun drover-task--attempt-here (info)
   "Return the attempt of INFO to act on, asked among several."
