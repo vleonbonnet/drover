@@ -91,7 +91,7 @@
 (require 'drover-command)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 36))
   (load "drover-core" nil t))
 
 (declare-function drover-claude-code-ide-fork "drover-claude-code-ide" (session-id directory))
@@ -893,19 +893,23 @@ or looking at a front end following it."
          outcome)))
 
 (defun drover-claude-code-transcripts--status (id &optional data)
-  "Return (STATUS REQUESTS DETAIL) of conversation ID, as the CLI runs it.
-A session \"claude agents\" lists as working or waiting does so; else,
-with DATA, what was read of it, a turn that ended unseen is done, or
-failed, its error the detail (see
+  "Return (STATUS REQUESTS DETAIL BACKGROUND) of conversation ID, as run.
+That is as the CLI runs it.  A session \"claude agents\" lists as
+working or waiting does so, but for a shell running in the background
+once its turn ended, which the CLI tells as \"shell\": that turn is
+over, as any (see `drover-session-status'), BACKGROUND the shell.
+Else, with DATA, what was read of it, a turn that ended unseen is done,
+or failed, its error the detail (see
 `drover-claude-code-transcripts--unseen'); else it is idle."
   (let* ((agent (gethash id drover-claude-code-transcripts--agents))
          (state (and agent (or (plist-get agent :state) "")))
          (where (if (equal (plist-get agent :kind) "background")
                     "in the background"
-                  "in another terminal")))
-    (pcase (drover-claude-code-run-state state)
+                  "in another terminal"))
+         (background (and (equal state "shell") (list "background shell"))))
+    (pcase (and (not background) (drover-claude-code-run-state state))
       ('working
-       (list 'working nil (concat (if (equal state "shell") "shell running " "working ") where)))
+       (list 'working nil (concat "working " where)))
       ('blocked
        (list 'waiting
              (list (list :kind 'permission
@@ -913,9 +917,12 @@ failed, its error the detail (see
                                           (or (plist-get agent :short) id))))
              nil))
       (_ (pcase (and data (drover-claude-code-transcripts--unseen data))
-           ('done (list 'done nil nil))
-           ('failed (list 'failed nil (plist-get data :error)))
-           (_ (list 'idle nil (and agent (string-trim (concat state " " where))))))))))
+           ('done (list 'done nil (drover-background-detail background) background))
+           ('failed (list 'failed nil (plist-get data :error) background))
+           (_ (list 'idle nil
+                    (or (drover-background-detail background)
+                        (and agent (string-trim (concat state " " where))))
+                    background)))))))
 
 (defcustom drover-claude-code-context-limits '(("\\[1m\\]\\'" . 1000000))
   "Context sizes of Claude's models, as (REGEXP . TOKENS), the first match winning.
@@ -1012,6 +1019,7 @@ it once."
              :project (plist-get data :project)
              :branch (and branch (not (equal branch "HEAD")) branch)
              :status (nth 0 status) :requests (nth 1 status) :detail (nth 2 status)
+             :background (nth 3 status)
              ;; A turn runs from the newest prompt, a wait from the newest
              ;; message, and a turn ended from its end.
              :since (pcase (nth 0 status)

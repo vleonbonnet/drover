@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 35
+(defconst drover-core-generation 36
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -665,7 +665,10 @@ copy of a structure holding one may be linked elsewhere."
   (project nil :documentation "Project name, or nil.")
   (branch nil :documentation "Git branch of the directory, or nil.")
   (parent nil :documentation "Identifier of the parent session of a subagent, or nil.")
-  (status 'idle :documentation "One of `drover-status-order'.")
+  (status 'idle :documentation "One of `drover-status-order': the status of the session's turn.
+Work the turn left running in the background is no turn: once the turn
+ended, the session is done, failed or idle, as any turn, and the work
+is BACKGROUND, whatever front end runs it.")
   (requests nil :documentation "Pending requests, oldest first.
 Each is a plist with :kind, `permission' or `question', and :summary.")
   (since nil :documentation "Time, as a float, at which STATUS began, or nil.")
@@ -976,6 +979,16 @@ alone, to its peers, its phones and its desktop."
   "Return non-nil when SESSION is in the middle of a turn.
 See `drover-active-statuses'."
   (memq (drover-session-status session) drover-active-statuses))
+
+(defun drover-background-detail (background)
+  "Return the line telling that a session waits for BACKGROUND, or nil.
+BACKGROUND is the work its ended turn left running, one line each (see
+`drover-session-background'): backends give it as their record's detail
+when nothing else tells more."
+  (when background
+    (format "Waiting for %s in the background: %s"
+            (if (cdr background) (format "%d tasks" (length background)) "a task")
+            (string-join background ", "))))
 
 (defun drover-session-busy-p (session)
   "Return non-nil while the result of SESSION is not in yet.
@@ -1779,6 +1792,9 @@ PROPERTIES is a plist of:
  :sessions   Function of no argument returning the backend's sessions
              as `drover-session' records, from what it already knows:
              those it follows, but archived ones (see :archived).
+             A record's status is its turn's; work its ended turn left
+             running in the background, a subagent or a shell, is its
+             background, never work (see `drover-session-background').
  :session    Function of an ID returning the record :sessions would
              return for session ID, or nil when :sessions would not
              list it.  It is called for each session the backend

@@ -872,7 +872,7 @@ archived, and come back under it as it is restored."
         (should (drover-supports-p b3 :delete))))))
 
 (ert-deftest drover-claude-code-transcripts-test-interactive-agent-status ()
-  "Interactive sessions report status, including a shell running after a reply."
+  "Interactive sessions report status; a shell left running ends the turn, its work told."
   (drover-claude-code-transcripts-test-with
     (let ((project (expand-file-name "work/" home)))
       (dolist (id '("busy" "shell" "waiting" "idle" "legacy"))
@@ -886,10 +886,15 @@ archived, and come back under it as it is restored."
           {\"kind\":\"interactive\",\"sessionId\":\"idle\",\"status\":\"idle\"},
           {\"kind\":\"background\",\"sessionId\":\"legacy\",\"state\":\"working\"}]"))
       (drover-changed-now)
-      (dolist (id '("busy" "shell" "legacy"))
-        (should (eq (drover-session-status (drover-find 'claude-code id)) 'working)))
-      (should (equal (drover-session-detail (drover-find 'claude-code "shell"))
-                     "shell running in another terminal"))
+      (dolist (id '("busy" "legacy"))
+        (should (eq (drover-session-status (drover-find 'claude-code id)) 'working))
+        (should-not (drover-session-background (drover-find 'claude-code id))))
+      ;; The CLI tells a shell only once no turn runs: its turn ended, seen.
+      (let ((shell (drover-find 'claude-code "shell")))
+        (should (eq (drover-session-status shell) 'idle))
+        (should (equal (drover-session-background shell) '("background shell")))
+        (should (equal (drover-session-detail shell) "Waiting for a task in the background: background shell"))
+        (should (drover-session-busy-p shell)))
       (should (eq (drover-session-status (drover-find 'claude-code "waiting")) 'waiting))
       (should (eq (drover-session-status (drover-find 'claude-code "idle")) 'idle)))))
 

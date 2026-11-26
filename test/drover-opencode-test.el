@@ -565,6 +565,34 @@ PROJECTS defaults to `drover-opencode-test-projects'."
       (should-not (drover-session-since session))
       (should-not (drover-session-detail session)))))
 
+(ert-deftest drover-opencode-test-status-jobs-left-running ()
+  "A turn that ended with background jobs running is done, then idle; the jobs are its work.
+While a turn runs or waits for the user, its jobs are that turn's."
+  (let ((jobs '(((id . "ses_child") (kind . "subagent") (title . "Android client items")
+                 (description . "Inspect")) ((id . "sh_1") (kind . "shell") (command . "npm run dev"))
+                ((id . "img_1") (kind . "image")))))
+    (drover-opencode-test-with
+        (list (drover-opencode-test-entry "ses_1" :idle 70.0 :outcome 'succeeded :jobs jobs)
+              (drover-opencode-test-entry "ses_2" :idle 70.0 :viewed 70.0 :outcome 'failed :error "Seen"
+                                          :jobs (cdr jobs))
+              (drover-opencode-test-entry "ses_3" :running t :started 90.0 :jobs jobs)
+              (drover-opencode-test-entry "ses_4" :idle 70.0 :jobs jobs
+                                          :requests '((:kind question :summary "Which?" :time 80.0))))
+      (let ((session (drover-opencode-test-session "ses_1")))
+        (should (eq (drover-session-status session) 'done))
+        (should (eql (drover-session-since session) 70.0))
+        (should (equal (drover-session-background session) '("Android client items" "npm run dev" "image")))
+        (should (equal (drover-session-detail session)
+                       "Waiting for 3 tasks in the background: Android client items, npm run dev, image"))
+        (should (drover-session-busy-p session)))
+      (let ((session (drover-opencode-test-session "ses_2")))
+        (should (eq (drover-session-status session) 'idle))
+        (should (equal (drover-session-background session) '("npm run dev" "image"))))
+      (dolist (id '("ses_3" "ses_4"))
+        (let ((session (drover-opencode-test-session id)))
+          (should (memq (drover-session-status session) '(working waiting)))
+          (should-not (drover-session-background session)))))))
+
 (ert-deftest drover-opencode-test-every-entry-in-order ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1")
                                    (drover-opencode-test-entry "ses_2")

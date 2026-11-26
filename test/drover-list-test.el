@@ -6280,7 +6280,9 @@ The one waiting to retry is a subagent of the working one."
   (drover-list-test-with
       (list (drover-test-session "p" :status 'idle :background '("Probe" "npm run dev"))
             (drover-test-session "a" :parent "p" :status 'waiting)
-            (drover-test-session "q" :status 'done :background '("Watch")))
+            (drover-test-session "q" :status 'done :background '("Watch"))
+            (drover-test-session "r" :status 'idle :background '("Session w" "npm run dev"))
+            (drover-test-session "w" :parent "r" :status 'working))
     (setopt drover-show-subagents 'none
             drover-list-collapsed-groups nil)
     (revert-buffer)
@@ -6296,6 +6298,13 @@ The one waiting to retry is a subagent of the working one."
     (drover-list-test-goto "q")
     (search-forward "*")
     (should (equal (get-text-property (match-beginning 0) 'help-echo) "1 task in the background: Watch"))
+    ;; Work that is a subagent listed is told once, as the subagent.
+    (drover-list-test-goto "r")
+    (search-forward "*")
+    (should (equal (get-text-property (match-beginning 0) 'help-echo)
+                   (concat "1 subagent working: Session w
+"
+                           "1 task in the background: npm run dev")))
     ;; Once the work ended, nothing.
     (setf (drover-session-background (drover-list-test-find "q")) nil)
     (drover-list-test-refresh)

@@ -1347,9 +1347,15 @@ do.  The glyph of `opencode-subagent-icons' for those waiting for the
 user comes first, then that for those working or waiting to retry, a
 space between, each in the subagent cell of METRICS.  They stay still
 and tell no number: their tooltip names the subagents and the work, and
-tells how many."
+tells how many.  Work that is also a subagent listed, as an OpenCode
+subagent in the background is, is told once, as a subagent."
   (when (or subagents background)
-    (let* ((waiting (seq-some (lambda (session) (eq (drover-session-status session) 'waiting))
+    (let* ((background (seq-remove (lambda (line)
+                                     (seq-some (lambda (session)
+                                                 (equal (drover-session-display-title session) line))
+                                               subagents))
+                                   background))
+           (waiting (seq-some (lambda (session) (eq (drover-session-status session) 'waiting))
                               subagents))
            (working (or background
                         (seq-some (lambda (session) (not (eq (drover-session-status session) 'waiting)))

@@ -95,7 +95,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 28))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 36))
   (load "drover-core" nil t))
 
 ;; Recent additions to opencode.el.
@@ -694,10 +694,30 @@ Sessions are drawn again only when what names them changed."
 
 ;;;; Sessions
 
-(defun drover-opencode--detail (entry status)
-  "Return one line on STATUS, the status of registry ENTRY, or nil."
+(defun drover-opencode--background (entry)
+  "Return the work the ended turn of registry ENTRY left running, or nil.
+Its background jobs, oldest first, one line each: a job's title, else
+its description or command, else its kind.  None while a turn runs or
+waits for the user: its jobs are then that turn's work.  opencode.el
+tells the status of the turn alone (see `opencode-state-status'); one
+older than this drover tells jobs as work, which leaves the session
+working, its work told all the same."
+  (unless (or (plist-get entry :running) (plist-get entry :requests))
+    (seq-keep (lambda (job)
+                (seq-some (lambda (key)
+                            (let ((value (alist-get key job)))
+                              (and (stringp value) (not (string-blank-p value))
+                                   (drover-bound-line value))))
+                          '(title description command kind)))
+              (plist-get entry :jobs))))
+
+(defun drover-opencode--detail (entry status &optional background)
+  "Return one line on STATUS, the status of registry ENTRY, or nil.
+BACKGROUND is the work its ended turn left running, which the line
+tells unless STATUS tells more (see `drover-background-detail')."
   (pcase status
     ('failed (plist-get entry :error))
+    ((or 'done 'idle) (drover-background-detail background))
     ('retrying
      (when-let* ((retry (plist-get entry :retry)))
        (let ((attempt (plist-get retry :attempt))
@@ -746,6 +766,7 @@ that one directory is one string; opencode.el spells it as the service
 does again whenever it is sent."
   (let ((directory (plist-get entry :directory))
         (status (opencode-state-status entry))
+        (background (drover-opencode--background entry))
         (cache (opencode-state-cache (plist-get entry :id))))
     (apply #'drover-session-create
            :backend 'opencode
@@ -769,7 +790,8 @@ does again whenever it is sent."
            ;; Plain until the agent catalog arrives, which redraws.
            :agent-display (when-let* ((agent (plist-get entry :agent)))
                             (or (opencode-agent-display agent directory) agent))
-           :detail (drover-opencode--detail entry status)
+           :detail (drover-opencode--detail entry status background)
+           :background background
            :cache-expires (plist-get cache :expires)
            :cache-ttl (plist-get cache :ttl)
            :cache-tokens (plist-get cache :tokens)
