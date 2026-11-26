@@ -61,6 +61,14 @@
 (defvar drover-fake-opencode-directory "C:/Users/agent/project"
   "The directory of the sessions, as another host spells it.")
 
+(defvar drover-fake-opencode-moved-functions nil
+  "Functions called with the identifier of a session once it moved.")
+
+(defvar drover-fake-opencode-files
+  '("C:/Users/agent/" "C:/Users/agent/project/" "C:/Users/agent/other/" "C:/Users/agent/notes.txt")
+  "The files of the service's host that `/api/fs/list' lists, directories ending in a slash.
+A session moves only to one of these directories.")
+
 (defun drover-fake-opencode--id (prefix)
   "Return a new identifier of PREFIX, increasing as the service's do."
   (format "%s_%014d%012d" prefix (truncate (* 1000 (float-time))) (cl-incf drover-fake-opencode--serial)))
@@ -116,9 +124,9 @@ would wait for itself forever on a large answer.")
     (dolist (stream drover-fake-opencode--streams)
       (drover-fake-opencode--write stream frame))))
 
-(defun drover-fake-opencode--event (type data)
-  "Send an event of TYPE with DATA; return its identifier."
-  (let ((id (drover-fake-opencode--id "evt")))
+(defun drover-fake-opencode--event (type data &optional id)
+  "Send an event of TYPE with DATA, identified by ID or a new identifier; return it."
+  (let ((id (or id (drover-fake-opencode--id "evt"))))
     (drover-fake-opencode--send `((id . ,id) (created . ,(drover-fake-opencode--now)) (type . ,type)
                                   (location (directory . ,drover-fake-opencode-directory))
                                   (data . ,data)))
@@ -141,6 +149,73 @@ would wait for itself forever on a large answer.")
          (messages (if type (seq-filter (lambda (m) (equal (alist-get 'type m) type)) messages) messages)))
     `((data . ,(vconcat (if limit (seq-take messages limit) messages)))
       (cursor . ,(make-hash-table)))))
+
+(defun drover-fake-opencode--directory (name)
+  "Return NAME, a directory of the service's host, ending in a slash."
+  (if (string-suffix-p "/" name) name (concat name "/")))
+
+(defun drover-fake-opencode--relative (file location)
+  "Return FILE relative to LOCATION, both of the service's host, as the service tells entries.
+As a service on Windows does: with backslashes, LOCATION itself \".\",
+a directory's name ending in a backslash."
+  (let ((from (split-string location "/" t))
+        (to (split-string file "/" t)))
+    (while (and from to (equal (car from) (car to)))
+      (setq from (cdr from) to (cdr to)))
+    (concat (string-join (or (append (make-list (length from) "..") to) '(".")) "\\")
+            (if (string-suffix-p "/" file) "\\" ""))))
+
+(defun drover-fake-opencode--list (connection query headers)
+  "Answer on CONNECTION the files in the directory QUERY's path names, as `/api/fs/list'.
+The location is the one HEADERS name, else the sessions' directory."
+  (let* ((location (drover-fake-opencode--directory
+                    (if-let* ((named (alist-get "x-opencode-directory" headers nil nil #'equal)))
+                        (url-unhex-string named)
+                      drover-fake-opencode-directory)))
+         (path (alist-get "path" query nil nil #'equal))
+         (parent (drover-fake-opencode--directory
+                  (cond ((null path) location)
+                        ((string-match-p "\\`\\(?:/\\|[A-Za-z]:/\\)" path) path)
+                        (t (concat location path))))))
+    (if (not (member parent drover-fake-opencode-files))
+        (drover-fake-opencode--respond connection 404 `((_tag . "FileNotFoundError")
+                                                        (message . ,(format "Directory not found: %s" parent))))
+      (drover-fake-opencode--respond
+       connection 200
+       ;; Its host's name: `directory-file-name' would lowercase a drive on Windows.
+       `((location (directory . ,(string-remove-suffix "/" location)))
+         (data . ,(vconcat
+                   (seq-keep (lambda (file)
+                               (when (and (string-prefix-p parent file) (not (equal parent file))
+                                          (not (string-search "/" (string-remove-suffix "/" (substring file (length parent))))))
+                                 `((path . ,(drover-fake-opencode--relative file location))
+                                   (type . ,(if (string-suffix-p "/" file) "directory" "file")))))
+                             drover-fake-opencode-files))))))))
+
+(defun drover-fake-opencode--move (connection id body)
+  "Move session ID to the directory BODY names, answering on CONNECTION.
+The move is told as the service tells it, by a message of the transcript
+and the event naming it."
+  (let* ((sent (condition-case nil (json-parse-string body :object-type 'alist) (error nil)))
+         (directory (alist-get 'directory sent)))
+    (if (not (and (stringp directory)
+                  (member (drover-fake-opencode--directory directory) drover-fake-opencode-files)))
+        (drover-fake-opencode--respond connection 400 `((_tag . "InvalidRequestError")
+                                                        (message . ,(format "Not a directory: %s" directory))))
+      (let ((info (gethash id drover-fake-opencode--sessions))
+            (event (drover-fake-opencode--id "evt")))
+        (setf (alist-get 'location info) `((directory . ,directory)))
+        (puthash id info drover-fake-opencode--sessions)
+        (puthash id (append (gethash id drover-fake-opencode--messages)
+                            (list `((id . ,(concat "msg_" (string-remove-prefix "evt_" event)))
+                                    (time (created . ,(drover-fake-opencode--now)))
+                                    (type . "location-switched") (location (directory . ,directory)))))
+                 drover-fake-opencode--messages)
+        (drover-fake-opencode--respond connection 200 `((data . ,info)))
+        (drover-fake-opencode--event "session.moved" `((sessionID . ,id) (projectID . "project_moved")
+                                                       (location (directory . ,directory)))
+                                     event)
+        (run-hook-with-args 'drover-fake-opencode-moved-functions id)))))
 
 (defun drover-fake-opencode--handle (connection method path headers body)
   "Answer METHOD on PATH with HEADERS and BODY, from CONNECTION."
@@ -172,6 +247,8 @@ would wait for itself forever on a large answer.")
       (drover-fake-opencode--respond connection 200 '((data . [((id . "build") (mode . "primary"))]))))
      ((member bare '("/api/model" "/api/provider" "/api/command"))
       (drover-fake-opencode--respond connection 200 '((data . []))))
+     ((equal bare "/api/fs/list")
+      (drover-fake-opencode--list connection query headers))
      ((string-match "\\`/api/experimental/session/\\([^/]+\\)/export\\'" bare)
       (let* ((id (match-string 1 bare))
              (info (gethash id drover-fake-opencode--sessions)))
@@ -225,6 +302,8 @@ would wait for itself forever on a large answer.")
           (drover-fake-opencode--respond connection 200 '((data . []))))
          ((equal rest "/view")
           (drover-fake-opencode--respond connection 200 '((data . t))))
+         ((and (equal rest "/move") (equal method "POST"))
+          (drover-fake-opencode--move connection id body))
          ((and (equal rest "/prompt") (equal method "POST"))
           (let* ((sent (condition-case nil (json-parse-string body :object-type 'alist) (error nil)))
                  (item `((id . ,(or (alist-get 'id sent) (drover-fake-opencode--id "msg")))

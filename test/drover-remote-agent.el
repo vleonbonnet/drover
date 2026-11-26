@@ -465,7 +465,9 @@ directory named \"fail\"; in one named \"slow\", a second later."
   "Return the record of the fake OpenCode service's session ID, or nil."
   (when-let* ((info (gethash id drover-fake-opencode--sessions)))
     (drover-session-create :backend 'opencode :id id :title (alist-get 'title info)
-                           :directory drover-fake-opencode-directory :status 'idle
+                           :directory (or (alist-get 'directory (alist-get 'location info))
+                                          drover-fake-opencode-directory)
+                           :status 'idle
                            :engine 'opencode :engine-id id :agent "build"
                            :archived (gethash id drover-remote-agent--oc-archived)
                            :updated (float-time) :created (float-time))))
@@ -531,6 +533,8 @@ noted, and their cancellations."
   (drover-register-engine 'opencode :label "OpenCode"
                           :defaults (lambda (_directory callback) (funcall callback nil))
                           :agents (lambda (_directory) (list "build")))
+  ;; Its sessions' records follow a move, as drover's OpenCode backend follows its registry.
+  (add-hook 'drover-fake-opencode-moved-functions (lambda (id) (drover-backend-changed 'opencode id)))
   (drover-register-backend
    'opencode :label "OpenCode"
    :sessions (lambda () (delq nil (mapcar #'drover-remote-agent--opencode-session drover-fake-opencode--order)))

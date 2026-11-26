@@ -3460,6 +3460,35 @@ user's service: only the services BODY registers are reached."
           (drover-remote-test-wait (lambda () (= (plist-get (drover-remote-test-command "oc-streams") :streams) 0)) 10)
           (should (= (plist-get (drover-remote-test-command "oc-streams") :streams) 0)))))))
 
+(ert-deftest drover-remote-test-oc-move ()
+  "The directory action moves another host's OpenCode session to a directory of that host.
+The directories are its host's, which its service lists through the relay."
+  (drover-remote-test-with nil
+    (drover-remote-test-with-oc
+      (drover-remote-test-start-oc dir "act")
+      (save-window-excursion
+        (let ((buffer (drover-remote-test-open-oc "ses_a"))
+              (offered nil))
+          (drover-remote-test-shows buffer "First reply of Agent work")
+          (with-current-buffer buffer
+            (cl-letf (((symbol-function 'completing-read)
+                       (lambda (_prompt table _predicate _require initial &rest _)
+                         (setq offered (list initial (sort (all-completions "C:/Users/agent/" table) #'string<)))
+                         "../other")))
+              (call-interactively #'drover-prompt-directory)))
+          (should (equal offered '("C:/Users/agent/project/" ("other/" "project/"))))
+          (should (drover-remote-test-wait (lambda ()
+                                             (seq-find (lambda (request) (equal (nth 1 request) "/api/session/ses_a/move"))
+                                               (drover-remote-test-oc-requests "POST")))))
+          ;; The buffer follows its session once the service tells the move, and says so.
+          (should (drover-remote-test-wait (lambda () (equal (buffer-local-value 'opencode-session-location buffer)
+                                                     "C:/Users/agent/other/"))))
+          (drover-remote-test-shows buffer "Moved to C:/Users/agent/other/")
+          ;; Its host's record follows too.
+          (should (drover-remote-test-wait (lambda () (equal (drover-session-directory (drover-remote-test-oc-session "ses_a"))
+                                                     "C:/Users/agent/other"))))
+          (kill-buffer buffer))))))
+
 (ert-deftest drover-remote-test-oc-read-only ()
   "A host granting read access lets this one read its OpenCode sessions, not change them."
   (drover-remote-test-with nil
