@@ -21,8 +21,9 @@
 ;; drover-session-fork, on the fake backend, with the repository and
 ;; the Org file of the tasks' tests: a start with each argument, each
 ;; refusal, a task that continues, a fork linked to a task, a backend
-;; that cannot fork.  Then the links the tools telling of a session
-;; tell.  Nothing is shown.
+;; that cannot fork, the agent a session or a fork runs, and one its
+;; harness does not offer.  Then the links the tools telling of a
+;; session tell.  Nothing is shown.
 
 ;;; Code:
 
@@ -229,6 +230,51 @@ whose facts the user has not accepted yet."
       ;; Nothing is written on a task that continues.
       (should-not (drover-anvil-task-test-property "compare" "DROVER_FOLDER")))))
 
+(ert-deftest drover-anvil-task-test-task-start-agent ()
+  "A task's session runs the agent given; one its harness does not offer is refused, those it offers named."
+  (drover-anvil-task-test-with-task drover-anvil-task-test-org
+    (drover-repo-confirm (drover-repo-facts-now checkout))
+    (setq drover-test-engine-agents '((fake "build" "plan")))
+    (let ((worktree (expand-file-name "worktrees/test-repo/fix-the-login/" root)))
+      ;; Refused before its place is made: nothing starts.
+      (should (equal (drover-anvil-task-test-refusal drover-anvil-task-test-id nil nil nil "review")
+                     (format "Fake offers no agent review in %s: it offers build, plan; nothing started"
+                             (abbreviate-file-name checkout))))
+      (should-not (file-directory-p worktree))
+      (should-not (assq :create drover-test-calls))
+      (should-not (drover-anvil-task-test-property drover-anvil-task-test-id "DROVER_WORKTREE"))
+      ;; Its harness asked for its agents where the task works, never waited for.
+      (should (equal (car drover-test-engine-calls) (list :agents 'fake checkout)))
+      ;; One it offers: its session runs it.
+      (let ((answer (drover-anvil-task-test-start drover-anvil-task-test-id nil nil nil "plan")))
+        (should (equal (alist-get 'outcome answer) "started"))
+        (pcase-let ((`(:create ,directory fake ,options) (assq :create drover-test-calls)))
+          (should (equal directory worktree))
+          (should (equal (plist-get options :agent) "plan"))))
+      (should (seq-find (lambda (line) (string-match-p "drover-task-start\t.*\tacting\ttask .*, agent plan" line))
+                        (drover-anvil-test-log)))
+      ;; Continued, another session in its place, with the agent given.
+      (setq drover-test-calls nil)
+      (should (string-match-p "\\`Fake offers no agent review in .*: it offers build, plan; no session started"
+                              (drover-anvil-task-test-refusal drover-anvil-task-test-id nil nil nil "review")))
+      (should-not (assq :create drover-test-calls))
+      (should (equal (alist-get 'outcome (drover-anvil-task-test-start drover-anvil-task-test-id nil nil nil "build"))
+                     "continued"))
+      (should (equal (plist-get (nth 3 (assq :create drover-test-calls)) :agent) "build"))
+      ;; Without one, as before: the harness's default, or the user's for tasks.
+      (setq drover-test-calls nil)
+      (drover-anvil-task-test-start drover-anvil-task-test-id)
+      (should-not (plist-get (nth 3 (assq :create drover-test-calls)) :agent))
+      (let ((drover-task-agent "plan"))
+        (setq drover-test-calls nil)
+        (drover-anvil-task-test-start drover-anvil-task-test-id)
+        (should (equal (plist-get (nth 3 (assq :create drover-test-calls)) :agent) "plan")))
+      ;; A harness that cannot tell its agents refuses none: the agent is tried.
+      (setq drover-test-engine-agents nil
+            drover-test-calls nil)
+      (drover-anvil-task-test-start drover-anvil-task-test-id nil nil nil "review")
+      (should (equal (plist-get (nth 3 (assq :create drover-test-calls)) :agent) "review")))))
+
 (ert-deftest drover-anvil-task-test-task-start-on-another-host ()
   "A task starts on the host named, which answers where; it is told once listed here."
   (let ((there nil) (asked nil) (reply nil))
@@ -267,12 +313,17 @@ whose facts the user has not accepted yet."
               (should (equal (alist-get 'directory started) "c:/w/fix-the-login/"))
               (should (equal (alist-get 'branch started) "fix-the-login")))
             (should (equal (drover-task-id-of (car there)) drover-anvil-task-test-id))
-            ;; Continued, a session starts in its place there.
-            (let ((job (alist-get 'job (drover-anvil-test-json (drover-anvil--tool-task-start drover-anvil-task-test-id)))))
+            ;; No agent given: the request names none, which any drover reads.
+            (should-not (plist-member (cadr asked) :agent))
+            ;; Continued, a session starts in its place there, with the agent given:
+            ;; its host tells whether its harness offers it.
+            (let ((job (alist-get 'job (drover-anvil-test-json
+                                        (drover-anvil--tool-task-start drover-anvil-task-test-id nil nil nil "plan")))))
               (should (equal (plist-get (cadr asked) :kind) "session"))
               (should (equal (plist-get (cadr asked) :worktree) "c:/w/fix-the-login/"))
-              (funcall reply nil "core is not connected")
-              (should (string-match-p "core: core is not connected"
+              (should (equal (plist-get (cadr asked) :agent) "plan"))
+              (funcall reply nil "OpenCode offers no agent plan in c:/w/fix-the-login/: it offers build")
+              (should (string-match-p "core: OpenCode offers no agent plan in c:/w/fix-the-login/: it offers build"
                                       (cadr (should-error (drover-anvil--tool-job job))))))))))))
 
 ;;;; Forking
@@ -372,6 +423,56 @@ until BODY gives it a :fork-hidden."
     (should (string-match-p "the service refused"
                             (cadr (should-error (drover-anvil-task-test-answer (drover-anvil--tool-fork))))))))
 
+(ert-deftest drover-anvil-task-test-session-fork-agent ()
+  "A fork runs the agent given, set before its prompt goes; one its harness does not offer is refused."
+  (drover-anvil-task-test-with-fork
+    (drover-anvil-task-test-add :fork-hidden #'drover-anvil-task-test-fork-hidden)
+    (setq drover-test-engine-agents '((fake "build" "plan")))
+    ;; Refused, those it offers named: nothing is forked.
+    (should (equal (cadr (should-error (drover-anvil-task-test-answer
+                                        (drover-anvil--tool-fork nil nil "Take the logs on." "review"))))
+                   (format "Fake offers no agent review in %s: it offers build, plan: nothing was forked"
+                           (abbreviate-file-name temporary-file-directory))))
+    (should-not (assq :fork-hidden drover-test-calls))
+    ;; One it offers: the fork is switched to it, then sent its prompt.
+    (let ((answer (drover-anvil-task-test-answer
+                   (drover-anvil--tool-fork nil drover-anvil-task-test-id "Take the logs on." "plan"))))
+      (should (equal (alist-get 'outcome answer) "forked"))
+      (should (equal (alist-get 'key answer) "fake/fork-1"))
+      (should (equal (alist-get 'agent answer) "plan"))
+      (should (eq (alist-get 'sent answer) t))
+      (pcase-let ((`(,forked ,applied ,sent)
+                   (seq-filter (lambda (call) (memq (car call) '(:fork-hidden :apply-options :send)))
+                               (reverse drover-test-calls))))
+        (should (equal forked '(:fork-hidden "me")))
+        (should (equal (seq-take applied 2) '(:apply-options "fork-1")))
+        (should (equal (plist-get (nth 2 applied) :agent) "plan"))
+        (should (equal sent '(:send "fork-1" "Take the logs on." nil))))
+      (should (equal (drover-task-id-of (drover-find 'fake "fork-1")) drover-anvil-task-test-id)))
+    (should (seq-find (lambda (line) (string-match-p "drover-session-fork\t.*\tacting\t.*, agent plan" line))
+                      (drover-anvil-test-log)))
+    ;; Without one, the fork runs what its session runs: nothing is set.
+    (setq drover-test-calls nil)
+    (let ((answer (drover-anvil-task-test-answer (drover-anvil--tool-fork nil nil "Go on."))))
+      (should-not (assq 'agent answer))
+      (should-not (assq :apply-options drover-test-calls)))
+    ;; A harness that sets no agent on a running session refuses, before forking.
+    (setq drover-test-calls nil
+          drover-test-settable '(("me" :model)))
+    (should (equal (cadr (should-error (drover-anvil--tool-fork nil nil nil "plan")))
+                   "fake/me cannot be forked to run plan: its harness, Fake, sets no agent on a running session: leave agent out"))
+    (should-not (assq :fork-hidden drover-test-calls))
+    ;; The agent could not be set: the fork exists, is named, and is sent nothing.
+    (setq drover-test-settable nil)
+    (drover-anvil-task-test-add :apply-options (lambda (_session _options _then else)
+                                                 (funcall else "the service refused the agent")))
+    (let ((why (cadr (should-error (drover-anvil-task-test-answer
+                                    (drover-anvil--tool-fork nil nil "Take the logs on." "build"))))))
+      (should (string-match-p "\\`The fork exists, fake/fork-3, but its agent could not be set to build, and it was sent nothing: the service refused the agent"
+                              why)))
+    (should (assq :fork-hidden drover-test-calls))
+    (should-not (assq :send drover-test-calls))))
+
 ;;;; Through Anvil
 
 (ert-deftest drover-anvil-task-test-registered ()
@@ -385,8 +486,8 @@ until BODY gives it a :fork-hidden."
                     :object-type 'alist :array-type 'list))
              (tools (alist-get 'tools (alist-get 'result list))))
         (pcase-dolist (`(,name ,required . ,arguments)
-                       '(("drover-task-start" ("id") "directory" "host" "id" "repo")
-                         ("drover-session-fork" nil "key" "prompt" "task")))
+                       '(("drover-task-start" ("id") "agent" "directory" "host" "id" "repo")
+                         ("drover-session-fork" nil "agent" "key" "prompt" "task")))
           (let* ((tool (seq-find (lambda (tool) (equal (alist-get 'name tool) name)) tools))
                  (schema (alist-get 'inputSchema tool)))
             (should tool)

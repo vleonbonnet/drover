@@ -198,6 +198,62 @@ process still uses."
         (should-not reply)
         (should (string-match-p "act access: a goal runs its checks here, which takes full" error))))))
 
+(ert-deftest drover-task-remote-test-agent ()
+  "Another host starts a task's session with the agent asked, and refuses one its harness does not offer."
+  (drover-remote-test-with nil
+    (drover-task-remote-test-with-repo
+      (with-environment-variables (("DROVER_AGENT_ACCESS" "act") ("DROVER_AGENT_TASKS" checkout))
+        (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+      (drover-remote-test-wait (lambda () (eq (drover-remote--peer-granted (drover-remote--peer "agent")) 'act)))
+      (should (drover-remote--capable-p (drover-remote--peer "agent") "task-agent"))
+      (cl-flet ((start (slug agent)
+                  (drover-task-remote-test-ask (list :kind "start" :task (upcase slug) :title (concat "Task " slug)
+                                                     :repo "test/repo" :mode "worktree" :slug slug :jira :false
+                                                     :base "fresh" :carry :false :body "Do it." :agent agent)))
+                (created ()
+                  (mapcar (lambda (call) (list (nth 1 call) (nth 2 call))) (drover-remote-test-calls "create"))))
+        ;; One its harness there does not offer: refused, those it offers named, nothing made.
+        (pcase-let ((`(,reply ,error) (start "t1" "review")))
+          (should-not reply)
+          (should (string-match-p "\\`Fake offers no agent review in .*: it offers build, plan" error))
+          (should-not (file-exists-p (expand-file-name "agent/worktrees/test-repo/t1/" dir)))
+          (should-not (created)))
+        ;; A name of no known shape.
+        (pcase-let ((`(,reply ,error) (start "t1" (make-string 80 ?a))))
+          (should-not reply)
+          (should (string-match-p "no agent of a known shape" error)))
+        ;; One it offers: its session runs it.
+        (pcase-let* ((`(,reply ,error) (start "t1" "plan"))
+                     (worktree (plist-get reply :worktree)))
+          (should-not error)
+          (should (file-directory-p worktree))
+          (should (seq-find (lambda (call) (and (equal (car call) worktree) (string-prefix-p "fake plan " (cadr call))))
+                            (created)))
+          ;; Another session in its place, with its agent, or refused.
+          (cl-flet ((session (agent)
+                      (drover-task-remote-test-ask (list :kind "session" :task "T1" :title "Task t1" :repo "test/repo"
+                                                         :worktree worktree :in-place :false :branch "t1"
+                                                         :jira :false :slug "t1" :body "Do it." :agent agent))))
+            (pcase-let ((`(,reply ,error) (session "review")))
+              (should-not reply)
+              (should (string-match-p "\\`Fake offers no agent review in .*: it offers build, plan" error)))
+            (pcase-let ((`(,reply ,error) (session "build")))
+              (should-not error)
+              (should (vectorp (plist-get reply :key)))
+              (should (seq-find (lambda (call) (and (equal (car call) worktree)
+                                                    (string-prefix-p "fake build " (cadr call))))
+                                (created))))))))))
+
+(ert-deftest drover-task-remote-test-agent-older-peer ()
+  "A peer whose drover reads no agent of a task is not asked for one, and says why."
+  (drover-remote-test-with nil
+    (with-environment-variables (("DROVER_AGENT_ACCESS" "full")
+                                 ("DROVER_AGENT_CAPS" "actions,bye,grant,mirror,unsent,search,clone,new,task"))
+      (drover-remote-test-connect (drover-remote-test-start-agent dir)))
+    (pcase-let ((`(,reply ,error) (drover-task-remote-test-ask (list :kind "start" :agent "plan"))))
+      (should-not reply)
+      (should (string-match-p "older drover, whose tasks run its own agent: leave agent out" error)))))
+
 (ert-deftest drover-task-remote-test-older-peer ()
   "A peer whose drover has no tasks is not asked, and says why."
   (drover-remote-test-with nil

@@ -712,9 +712,9 @@ Starting a task:
 
 ** Tasks agents start
 
-An agent starts the task of a heading with the tool =drover-task-start= (see [[*Agents][Agents]]), as =C-' n= starts it, in no window and asking nothing.  It names the heading by its ID, or by a link to it.  =repo=, a name of =drover-task-repositories=, is written on the heading as =DROVER_REPO= first.  =directory=, the folder of a task that works in a folder, is written as =DROVER_FOLDER=, and the folder is made.  =host= names the host that starts it.  The tool returns the session's key, its link, its directory and its branch.
+An agent starts the task of a heading with the tool =drover-task-start= (see [[*Agents][Agents]]), as =C-' n= starts it, in no window and asking nothing.  It names the heading by its ID, or by a link to it.  =repo=, a name of =drover-task-repositories=, is written on the heading as =DROVER_REPO= first.  =directory=, the folder of a task that works in a folder, is written as =DROVER_FOLDER=, and the folder is made.  =host= names the host that starts it.  =agent= names the agent its session runs, such as =build= or =plan=; without it, the session runs =drover-task-agent=, else the harness's default.  The tool returns the session's key, its link, its directory and its branch.
 
-What =C-' n= would ask, the tool refuses, and the refusal names what is missing and the values that work.  That is a heading naming several repositories, a heading naming neither a repository nor a folder, and a repository whose way of working you have not accepted yet (see [[*How a repository works][How a repository works]]): you accept it once, starting a task of it with =C-' n=.  A task that works somewhere already continues: another session starts in its place, on the host of that place, and nothing is written on the heading.  When it works in several places, =directory= names the one.  A place that is gone is not made again: =C-' n= does that.
+What =C-' n= would ask, the tool refuses, and the refusal names what is missing and the values that work.  That is a heading naming several repositories, a heading naming neither a repository nor a folder, and a repository whose way of working you have not accepted yet (see [[*How a repository works][How a repository works]]): you accept it once, starting a task of it with =C-' n=.  An agent the harness does not offer where the task works is refused too, before its place is made, and the refusal names the agents it offers; a harness that cannot tell its agents refuses none.  The host that starts the task tells of its own harness, and a host running an older drover is not asked for an agent.  A task that works somewhere already continues: another session starts in its place, on the host of that place, and nothing is written on the heading.  When it works in several places, =directory= names the one.  A place that is gone is not made again: =C-' n= does that.
 
 =h= on a session has its agent start such a task for one item of its work (see [[*Session keys][Session keys]]).
 
@@ -1141,8 +1141,8 @@ Each dial runs SSH to Aiur's host, reads spyglass's registration file there, and
 | =drover-sessions=          | Lists the sessions, the most urgent first, filtered by status, harness, project, host and attention, each with its key and link                |
 | =drover-session=           | Reads one: its link, where it stands, its model, the recap of its last turn, what its pending requests ask                                     |
 | =drover-session-create=    | Starts a session, unseen, on this host or another, with a harness, directory, model, effort, agent and first prompt; returns its key and link  |
-| =drover-session-fork=      | Forks a session whole, unseen, the caller's by default (=key=); links the fork to an Org heading (=task=) and sends it a =prompt=; returns its key and link |
-| =drover-task-start=        | Starts the task of an Org heading (=id=), unseen and asking nothing, in its =repo= or =directory=, on a =host=; returns its session's key, link, directory and branch (see [[*Tasks agents start][Tasks agents start]]) |
+| =drover-session-fork=      | Forks a session whole, unseen, the caller's by default (=key=); links the fork to an Org heading (=task=), sets the =agent= it runs and sends it a =prompt=; returns its key and link |
+| =drover-task-start=        | Starts the task of an Org heading (=id=), unseen and asking nothing, in its =repo= or =directory=, on a =host=, its session running an =agent=; returns its session's key, link, directory and branch (see [[*Tasks agents start][Tasks agents start]]) |
 | =drover-session-send=      | Sends a session a prompt, as its front end delivers prompts: OpenCode queues or steers the running turn                                        |
 | =drover-session-wait=      | Waits until a session's turn ends or it needs you, with a timeout; Emacs never waits, the call does                                            |
 | =drover-session-answer=    | Answers a pending question or permission, or dismisses it                                                                                      |
@@ -1191,6 +1191,8 @@ The tool refuses the whole call, and names each item refused, when a field is wr
 ** Forks
 
 =drover-session-fork= forks through the session's harness: OpenCode's service, a new claude-code-ide terminal (for a conversation of Claude Code no front end shows too), agent-shell when its agent forks.  The fork holds the conversation so far.  Its first prompt is the original's, so =task= links it to its heading (see [[*Sessions of tasks, and projects][Sessions of tasks, and projects]]).  A session whose harness cannot fork, such as Codex's or another host's, is refused, the harness named, and nothing else starts in its place.
+
+=agent= names the agent the fork runs, such as =build= or =plan=; without it, the fork runs what its session runs.  The fork is switched to that agent once it exists, as the prompt switches a running session, then sent its =prompt=.  An agent the harness does not offer in the session's directory is refused before anything is forked, and the refusal names the agents it offers; so is any agent for a harness that sets no agent on a running session.  When the switch fails, the tool fails, names the fork, and sends it nothing.
 
 * License
 

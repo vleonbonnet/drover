@@ -279,6 +279,42 @@ table's metadata."
     (setq drover-test-engine-agents nil)
     (should-not (drover-agent-names "/work/"))))
 
+(ert-deftest drover-model-test-agents-later ()
+  "An engine tells its agents through a callback: its :agents-later, else its :agents."
+  (drover-test-with-engines
+    (let ((answers nil)
+          (warnings nil))
+      (cl-flet ((ask (engine)
+                  (setq answers nil)
+                  (drover-engine-agents-later engine "/work/" (lambda (names) (push (or names 'none) answers)))
+                  answers))
+        (drover-test-register-engine 'now)
+        (drover-test-register-engine 'later :agents (lambda (_) (error "Would wait"))
+                                     :agents-later (lambda (directory callback)
+                                                     (funcall callback (list "plan" directory))))
+        (drover-test-register-engine 'broken :agents nil
+                                     :agents-later (lambda (&rest _) (error "No service")))
+        (drover-test-register-engine 'mute :agents nil)
+        (setq drover-test-engine-agents '((now "build" "plan")))
+        ;; One that answers at once is asked as commands ask it.
+        (should (equal (ask 'now) '(("build" "plan"))))
+        ;; One that may wait is asked without waiting.
+        (should (equal (ask 'later) '(("plan" "/work/"))))
+        ;; One that cannot tell, fails, or is not registered tells none, once.
+        (should (equal (ask 'mute) '(none)))
+        (cl-letf (((symbol-function 'drover-warn)
+                   (lambda (format-string &rest arguments) (push (apply #'format format-string arguments) warnings))))
+          (should (equal (ask 'broken) '(none))))
+        (should (equal warnings '("Could not read the agents of Broken: No service")))
+        (should (equal (ask 'nowhere) '(none)))))
+    ;; An agent not among those told is refused, those offered named; none told refuses nothing.
+    (drover-test-register-engine 'now)
+    (should (equal (drover-agent-refusal "review" 'now "/work/" '("build" "plan"))
+                   "Now offers no agent review in /work/: it offers build, plan"))
+    (should-not (drover-agent-refusal "plan" 'now "/work/" '("build" "plan")))
+    (should-not (drover-agent-refusal "review" 'now "/work/" nil))
+    (should-not (drover-agent-refusal nil 'now "/work/" '("build")))))
+
 ;;;; Model sources
 
 (ert-deftest drover-model-test-sources-first-answer ()

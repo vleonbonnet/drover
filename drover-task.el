@@ -59,6 +59,7 @@
 (require 'ucs-normalize)
 (require 'drover-core)
 (require 'drover-ui)
+(require 'drover-model)
 (require 'drover-command)
 (require 'drover-task-git)
 (require 'drover-task-org)
@@ -1504,16 +1505,26 @@ under that goal, which the host runs (see `drover-remote-goal')."
                  (if (stringp base) base (symbol-name (or base 'fresh))))
          :carry (if (plist-get plan :carry) t :false)
          :body (or (plist-get plan :body) :false))
+   (drover-task--request-agent plan)
    (drover-task--request-overrides plan '(:placement :setup :target))))
+
+(defun drover-task--request-agent (plan)
+  "Return the agent PLAN's session runs, as a request carries it, or nil.
+Only a plan naming one carries it: a peer of an older drover is then
+told nothing it does not read (see `drover-remote-ask-task')."
+  (when-let* ((agent (plist-get plan :agent)))
+    (list :agent agent)))
 
 (defun drover-task--session-request (plan)
   "Return the request having the host of PLAN start a session in its place."
-  (list :kind "session" :task (plist-get plan :id) :title (plist-get plan :title)
-        :repo (plist-get plan :repo) :worktree (or (plist-get plan :worktree) :false)
-        :in-place (if (eq (plist-get plan :kind) 'in-place) t :false)
-        :branch (or (plist-get plan :branch) :false) :jira (or (plist-get plan :jira) :false)
-        :slug (plist-get plan :slug)
-        :body (or (plist-get plan :body) :false)))
+  (append
+   (list :kind "session" :task (plist-get plan :id) :title (plist-get plan :title)
+         :repo (plist-get plan :repo) :worktree (or (plist-get plan :worktree) :false)
+         :in-place (if (eq (plist-get plan :kind) 'in-place) t :false)
+         :branch (or (plist-get plan :branch) :false) :jira (or (plist-get plan :jira) :false)
+         :slug (plist-get plan :slug)
+         :body (or (plist-get plan :body) :false))
+   (drover-task--request-agent plan)))
 
 (defun drover-task--ask-there (host request goal callback)
   "Ask HOST REQUEST about a task, its session under GOAL if any, for CALLBACK.
@@ -1733,6 +1744,28 @@ them, never as this host's file names."
       (drover-task-note-session (cons (intern (concat "remote:" host)) key) (plist-get plan :id))
       (drover-remote-open-started host result))))
 
+;;;; The agent of a session
+
+(defun drover-task--plan-engine (plan)
+  "Return the engine the session of PLAN runs: its harness's, else the default's."
+  (plist-get (or (plist-get plan :harness) (drover-task--harness)) :engine))
+
+(defun drover-task--agent-refusal (plan callback)
+  "Call CALLBACK with why the session of PLAN cannot run its :agent, or with nil.
+A line naming the agents its harness offers where it works: its
+directory, else its repository's checkout, before its worktree is made.
+Nil without an :agent, or when its harness cannot tell its agents.
+Nothing is waited for (see `drover-engine-agents-later')."
+  (let ((agent (plist-get plan :agent))
+        (directory (or (plist-get plan :directory) (plist-get plan :checkout))))
+    (if (not (and agent directory))
+        (funcall callback nil)
+      (let ((engine (drover-task--plan-engine plan)))
+        (drover-engine-agents-later
+         engine directory
+         (lambda (names)
+           (funcall callback (drover-agent-refusal agent engine directory names))))))))
+
 ;;;; Starting for a caller nobody watches
 
 ;; An agent starts a task as the user does on its heading (see
@@ -1950,12 +1983,15 @@ naming them (see `drover-task--refuse')."
      (t (drover-task--refuse "The task works in several places: give directory, one of %s"
                     (mapconcat (lambda (attempt) (plist-get attempt :directory)) attempts ", "))))))
 
-(defun drover-task--continue-unshown (marker info directory callback)
+(defun drover-task--continue-unshown (marker info directory agent callback)
   "Start another session in the place of the task INFO tells of, at MARKER.
 In no window, on the host the place is on; DIRECTORY names the place
-among several.  CALLBACK gets what `drover-task-start-quietly' answers."
+among several, and AGENT the agent the session runs, or nil for the
+harness's default.  CALLBACK gets what `drover-task-start-quietly'
+answers."
   (let* ((attempt (drover-task--attempt-unasked info directory))
-         (plan (append (drover-task--plan-of-attempt info attempt)
+         (plan (append (and agent (list :agent agent))
+                       (drover-task--plan-of-attempt info attempt)
                        (list :body (with-current-buffer (marker-buffer marker)
                                      (org-with-point-at marker (drover-task-org-body))))))
          (host (plist-get plan :host))
@@ -1969,15 +2005,21 @@ among several.  CALLBACK gets what `drover-task-start-quietly' answers."
      (t
       (let ((failed (and (plist-get plan :worktree)
                          (eq (plist-get (drover-task-git-read-marker (plist-get plan :worktree)) :setup) 'failed))))
-        (drover-task-start-session
-         plan t
-         (lambda (session)
-           (funcall callback
-                    (if (stringp session)
-                        (list :failure (concat "no session started: " session))
-                      (drover-task--started-plist
-                       'continued plan session
-                       (and failed "The setup of its worktree failed when it was made: run it again there")))))))))))
+        (drover-task--agent-refusal
+         plan
+         (lambda (why)
+           (drover-task--quietly callback
+             (if why
+                 (funcall callback (list :failure (concat why "; no session started")))
+               (drover-task-start-session
+                plan t
+                (lambda (session)
+                  (funcall callback
+                           (if (stringp session)
+                               (list :failure (concat "no session started: " session))
+                             (drover-task--started-plist
+                              'continued plan session
+                              (and failed "The setup of its worktree failed when it was made: run it again there")))))))))))))))
 
 (defun drover-task--ask-quietly (marker plan host request outcome callback)
   "Ask HOST REQUEST about the task PLAN at MARKER, then call CALLBACK.
@@ -2013,14 +2055,19 @@ CHOICES is a plist of what the caller chooses: :repo, a name of
 `drover-task-repositories', written on the heading as DROVER_REPO
 first; :directory, the folder of a task working in a folder, written as
 DROVER_FOLDER, or, for a task working in several places, the one to
-continue in; :host, the peer starting it, nil for this host.
+continue in; :host, the peer starting it, nil for this host; :agent,
+the agent its session runs, nil for `drover-task-agent', else the
+harness's default.
 
 A task working somewhere already continues: another session starts in
 its place, on the host it is on, nothing written.  Otherwise its place
 is made and a session started there, sent a prompt linking the heading.
 What the heading and CHOICES leave open is refused, never asked:
 several repositories, neither a repository nor a folder, a repository
-whose facts the user has not accepted yet.
+whose facts the user has not accepted yet.  So is an agent its harness
+does not offer where it works, those it offers named, before its place
+is made (see `drover-task--agent-refusal'); the host starting it tells
+of its own.
 
 CALLBACK is called once, perhaps before this returns, with a plist:
 \(:failure WHY), WHY naming what is missing and the values that work,
@@ -2032,12 +2079,13 @@ or nil."
   (let ((callback (drover-task--once callback))
         (repo (plist-get choices :repo))
         (directory (plist-get choices :directory))
-        (host (plist-get choices :host)))
+        (host (plist-get choices :host))
+        (agent (plist-get choices :agent)))
     (drover-task--quietly callback
       (let* ((id (drover-task--ensure-id marker))
              (info (drover-task-read marker id)))
         (if (plist-get info :attempts)
-            (drover-task--continue-unshown marker info directory callback)
+            (drover-task--continue-unshown marker info directory agent callback)
           (when (and repo directory)
             (drover-task--refuse "Give repo or directory, not both: a task works in a repository or in a folder"))
           (when (and repo (not (drover-task-repository repo)))
@@ -2048,7 +2096,8 @@ or nil."
                                               (list (cons "DROVER_REPO" repo))
                                             (list (cons "DROVER_FOLDER" (abbreviate-file-name directory)))))
             (setq info (drover-task-read marker id)))
-          (let ((plan (drover-task--plan-unasked marker info directory host)))
+          (let ((plan (append (and agent (list :agent agent))
+                              (drover-task--plan-unasked marker info directory host))))
             (drover-task--plan-how
              plan info
              (lambda (plan)
@@ -2058,7 +2107,14 @@ or nil."
                   ((plist-get plan :host)
                    (drover-task--ask-quietly marker plan (plist-get plan :host)
                                              (drover-task--start-request plan) 'started callback))
-                  (t (drover-task--start-unshown marker plan callback))))))))))))
+                  (t
+                   (drover-task--agent-refusal
+                    plan
+                    (lambda (why)
+                      (drover-task--quietly callback
+                        (if why
+                            (funcall callback (list :failure (concat why "; nothing started")))
+                          (drover-task--start-unshown marker plan callback))))))))))))))))
 
 ;;;; Finishing
 
@@ -2677,6 +2733,18 @@ others, with the task each serves, and whether it is locked."
   (and (stringp value) (not (string-empty-p value))
        (if (and limit (> (length value) limit)) (substring value 0 limit) value)))
 
+(defconst drover-task--agent-regexp "\\`[^[:cntrl:]]\\{1,60\\}\\'"
+  "What the name of an agent a peer asks for may be.")
+
+(defun drover-task--remote-agent (message)
+  "Return the agent MESSAGE, a peer's request, asks its session to run.
+A name, nil when it asks for none, or `refused' for one of no known
+shape."
+  (let ((agent (plist-get message :agent)))
+    (cond ((or (null agent) (eq agent :false)) nil)
+          ((and (stringp agent) (string-match-p drover-task--agent-regexp agent)) agent)
+          (t 'refused))))
+
 (defun drover-task--remote-start (peer message reply)
   "Start for PEER the task MESSAGE asks, answering through REPLY.
 Its repository is one of `drover-task-repositories' with a checkout
@@ -2699,13 +2767,21 @@ The answer tells where it works."
      ((not mode) (funcall reply nil "a task works in a worktree or in place here"))
      ((not (and slug (string-match-p drover-task--slug-regexp slug))) (funcall reply nil "no name of a known shape"))
      ((not base) (funcall reply nil "no base of a known shape"))
+     ((eq (drover-task--remote-agent message) 'refused) (funcall reply nil "no agent of a known shape"))
      (t
-      (drover-repo-facts
-       checkout
-       (lambda (facts)
+      ;; Before its place is made: an agent refused makes nothing.
+      (drover-task--agent-refusal
+       (list :agent (drover-task--remote-agent message) :checkout checkout)
+       (lambda (why)
          (drover-with-reporting "remote task start"
-				(drover-task--remote-prepare peer message reply entry checkout mode slug base id title
-							     (drover-task--how facts (drover-task--message-overrides message))))))))))
+           (if why
+               (funcall reply nil why)
+             (drover-repo-facts
+              checkout
+              (lambda (facts)
+                (drover-with-reporting "remote task start"
+                  (drover-task--remote-prepare peer message reply entry checkout mode slug base id title
+                                               (drover-task--how facts (drover-task--message-overrides message))))))))))))))
 
 (defun drover-task--remote-prepare (peer message reply entry checkout mode slug base id title how)
   "Make the place MESSAGE asks, for PEER, then a session there, telling REPLY.
@@ -2721,6 +2797,7 @@ for the task ID of TITLE; HOW is how the repository works (see
                      :branch-prefix (or (plist-get properties :branch-prefix) "")
                      :base-choice base :carry (eq (plist-get message :carry) t)
                      :directory (and (eq mode 'in-place) checkout) :hidden t
+                     :agent (drover-task--remote-agent message)
                      :placement (plist-get how :placement) :setup (plist-get how :setup))))
     (drover-task-prepare
      plan
@@ -2784,17 +2861,24 @@ any."
      ((and worktree (not (drover-task-same-file-p (drover-task-git-main-checkout worktree) checkout)))
       (funcall reply nil (format "%s is no worktree of %s here" worktree (car entry))))
      ((not (or worktree in-place)) (funcall reply nil "no place named"))
+     ((eq (drover-task--remote-agent message) 'refused) (funcall reply nil "no agent of a known shape"))
      (t
-      (drover-task--remote-begin
-       peer message
-       (list :id id :title (drover-bound-line title) :jira (drover-task--remote-string (plist-get message :jira) 40)
-             :body (and (stringp (plist-get message :body))
-                        (drover-bound-text (plist-get message :body) 400 drover-task-org-body-limit))
-             :slug (drover-task--remote-string (plist-get message :slug) 100)
-             :kind (if worktree 'worktree 'in-place) :repo (car entry) :entry entry :checkout checkout
-             :worktree worktree :directory (file-name-as-directory (or worktree checkout))
-             :branch (drover-task--remote-string (plist-get message :branch) 200) :hidden t)
-       nil reply)))))
+      (let ((plan (list :id id :title (drover-bound-line title)
+                        :jira (drover-task--remote-string (plist-get message :jira) 40)
+                        :body (and (stringp (plist-get message :body))
+                                   (drover-bound-text (plist-get message :body) 400 drover-task-org-body-limit))
+                        :slug (drover-task--remote-string (plist-get message :slug) 100)
+                        :kind (if worktree 'worktree 'in-place) :repo (car entry) :entry entry :checkout checkout
+                        :worktree worktree :directory (file-name-as-directory (or worktree checkout))
+                        :branch (drover-task--remote-string (plist-get message :branch) 200) :hidden t
+                        :agent (drover-task--remote-agent message))))
+        (drover-task--agent-refusal
+         plan
+         (lambda (why)
+           (drover-with-reporting "remote task session"
+             (if why
+                 (funcall reply nil why)
+               (drover-task--remote-begin peer message plan nil reply))))))))))
 
 (defun drover-task--remote-finish (message reply)
   "Finish for a peer the task MESSAGE asks, answering through REPLY.

@@ -345,7 +345,7 @@ that a peer running an older drover keeps working without it.")
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
     "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed"
-    "search-query" "prompts" "permissions" "jobs-when" "goals")
+    "search-query" "prompts" "permissions" "jobs-when" "goals" "task-agent")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -416,7 +416,9 @@ the event concerns (:ar) and who asked on the peer (:by); \"goals\":
 it runs goals on its sessions for its peers, tells them as they change
 \(requests `goals', `goal-checks', `goal-set' and `goal-act', message
 `goals'), and starts a task's session under one (see
-`drover-remote-goal').")
+`drover-remote-goal'); \"task-agent\": a request `task' starting a
+session may name the agent it runs (:agent), refused when its harness
+does not offer it.")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -6857,7 +6859,8 @@ This host starts and finishes its own tasks (see
 REQUEST is a plist, its :kind \"start\" or \"finish\" (see
 `drover-task-remote-answer'); CALLBACK gets (REPLY ERROR) once, within
 SECONDS, by default `drover-remote-request-timeout'.  It is asked once,
-not again after a stream dropped: a task is not started twice."
+not again after a stream dropped: a task is not started twice.  A
+REQUEST naming an :agent is not asked of a peer that would not read it."
   (let ((peer (drover-remote--peer name)))
     (cond
      ((not peer) (funcall callback nil (format "%s is not a peer" name)))
@@ -6865,6 +6868,10 @@ not again after a stream dropped: a task is not started twice."
       (funcall callback nil (format "%s is not connected" (drover-remote--label peer))))
      ((not (drover-remote--capable-p peer "task"))
       (funcall callback nil (format "%s runs an older drover, which has no tasks: update it there"
+                                    (drover-remote--label peer))))
+     ;; An older drover would start it with its own agent, saying nothing.
+     ((and (stringp (plist-get request :agent)) (not (drover-remote--capable-p peer "task-agent")))
+      (funcall callback nil (format "%s runs an older drover, whose tasks run its own agent: leave agent out, or update it there"
                                     (drover-remote--label peer))))
      (t (drover-remote--request peer (append (list :op "task") request) callback
                                 (+ (float-time) (or seconds drover-remote-request-timeout)) t)))))

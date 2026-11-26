@@ -2979,6 +2979,7 @@ PATH . KEYS), newest first; `warnings' the warnings of drover."
     (should (eq (drover-opencode-test-target (plist-get engine :defaults)) #'drover-opencode--fetch-defaults))
     (should (eq (drover-opencode-test-target (plist-get engine :resolve)) #'drover-opencode--resolve))
     (should (eq (drover-opencode-test-target (plist-get engine :agents)) #'drover-opencode--agents))
+    (should (eq (drover-opencode-test-target (plist-get engine :agents-later)) #'drover-opencode--agents-later))
     (should (eq (drover-opencode-test-target (plist-get engine :last-used)) #'drover-opencode--last-used))
     (should (plist-get engine :model-resets-variant))
     ;; Its defaults are fetched, not read from local files.
@@ -3107,6 +3108,25 @@ answers.  `fetches' collects (KIND DIRECTORY), newest first, and
   (let ((drover-opencode-timeout 0.05))
     (drover-opencode-test-with-catalogs nil
       (should-not (drover-opencode--agents "/work/drover/")))))
+
+(ert-deftest drover-opencode-test-agents-later ()
+  "The engine tells its agents through a callback, never waiting, for what runs outside a command."
+  (let ((answers nil))
+    (drover-opencode-test-with-catalogs `((agent . ,drover-opencode-fixtures-agents))
+      ;; Those a session can run: neither subagents nor hidden ones.
+      (drover-opencode--agents-later "/work/drover/" (lambda (names) (push names answers)))
+      (should (equal answers '(("build" "plan"))))
+      (should (equal fetches '((agent "/work/drover/")))))
+    ;; A catalog that does not arrive tells none, once its time is up, and nothing waited.
+    (setq answers nil)
+    (let ((drover-opencode-timeout 0.05))
+      (drover-opencode-test-with-catalogs nil
+        (drover-opencode--agents-later "/work/drover/" (lambda (names) (push (or names 'none) answers)))
+        (should-not answers)
+        (let ((deadline (+ (float-time) 2)))
+          (while (and (not answers) (< (float-time) deadline))
+            (accept-process-output nil 0.02)))
+        (should (equal answers '(none)))))))
 
 ;;;; Prompt operations: running sessions
 

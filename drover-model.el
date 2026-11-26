@@ -299,6 +299,12 @@ NAME is the agent program sessions run, such as `opencode',
              (:agent :model :variant) a new session would run.
  :agents     Function of a DIRECTORY returning the agent names the
              engine offers there, possibly after a bounded wait, or nil.
+ :agents-later
+             Function of a DIRECTORY and a CALLBACK calling CALLBACK
+             once with those names, or nil when it cannot tell them,
+             possibly before returning, and never waiting: an engine
+             whose :agents may wait gives it, for what runs outside a
+             command (see `drover-engine-agents-later').
  :last-used  Function of no argument returning when the engine last
              took a prompt, as a float time, or nil.
  :build-agent
@@ -965,6 +971,35 @@ none."
                (copy-sequence (drover-with-reporting "engine agents"
                                 (funcall function directory)))))
            (drover-engines))))
+
+(defun drover-engine-agents-later (engine directory callback)
+  "Call CALLBACK with the names of the agents ENGINE offers in DIRECTORY.
+Once, possibly before returning, with nil when ENGINE cannot tell them.
+Nothing is waited for, for what runs outside a command, such as a tool
+an agent calls: through the engine's :agents-later, else its :agents,
+which then answers at once (see `drover-register-engine')."
+  (let ((later (drover-engine-property engine :agents-later))
+        (now (drover-engine-property engine :agents)))
+    (cond ((functionp later)
+           (condition-case err
+               (funcall later directory callback)
+             (error (drover-warn "Could not read the agents of %s: %s" (drover-engine-label engine)
+                                 (drover-error-message err))
+                    (funcall callback nil))))
+          ((functionp now)
+           (funcall callback (drover-with-reporting "engine agents"
+                               (funcall now directory))))
+          (t (funcall callback nil)))))
+
+(defun drover-agent-refusal (agent engine directory names)
+  "Say why a session of ENGINE in DIRECTORY cannot run AGENT, or nil when it can.
+NAMES are the agents ENGINE offers there, as
+`drover-engine-agents-later' told them; nil, when it could not tell
+them, refuses nothing.  The refusal, a line, names those it offers."
+  (when (and agent names (not (member agent names)))
+    (format "%s offers no agent %s in %s: it offers %s" (drover-engine-label engine)
+            (drover-bound-line agent 60) (abbreviate-file-name directory)
+            (string-join names ", "))))
 
 (defun drover-read-agent (&optional default directory names)
   "Read an agent among those the engines offer in DIRECTORY, or the default.

@@ -1213,6 +1213,7 @@ its parameters, DIRECTORY one of NAME's."
 (declare-function drover-task-org-find "drover-task-org" (id callback))
 (declare-function drover-task-start-quietly "drover-task" (marker choices callback))
 (declare-function drover-task-link "drover-task" (session id))
+(declare-function drover-prompt-apply-options "drover-prompt" (session options then &optional else))
 (declare-function org-entry-get "org" (epom property &optional inherit literal-nil))
 (defvar drover-task-setup-timeout)
 
@@ -1283,14 +1284,20 @@ that its key is of use (see `drover-anvil--listed-poll')."
         (drover-anvil--job-put id :started key)
         (drover-anvil--advance id)))))
 
-(defun drover-anvil--tool-task-start (id &optional repo directory host)
+(defun drover-anvil--agent (value)
+  "Return the agent VALUE names, a parameter received, or nil for none."
+  (when-let* ((agent (drover-anvil--given value 200)))
+    (drover-bound-line agent 60)))
+
+(defun drover-anvil--tool-task-start (id &optional repo directory host agent)
   "Start the task of the Org heading ID, as `drover-task-start' does on it.
 In no window, asking nothing: its place is made, a worktree of its
 repository, its main checkout or a folder, and a session started there,
 whose first prompt links the heading and quotes its body.  REPO,
-DIRECTORY and HOST choose what the heading leaves open, as the
-parameters below tell; a choice still open is refused, naming what is
-missing and the values that work, never asked.  A task working
+DIRECTORY and HOST choose what the heading leaves open, and AGENT the
+agent the session runs, as the parameters below tell; a choice still
+open is refused, naming what is missing and the values that work, never
+asked, and so is an agent its harness does not offer.  A task working
 somewhere already continues: another session starts in its place.
 
 MCP Parameters:
@@ -1302,7 +1309,10 @@ MCP Parameters:
       under ~, written on the heading as DROVER_FOLDER; for a task
       working in several places already, the one to continue in
   host - The host starting it, by name, such as core; this one by
-      default"
+      default
+  agent - The agent its session runs, such as build or plan; the
+      harness's default otherwise.  One the harness does not offer is
+      refused, those it offers named"
   (drover-start)
   (require 'drover-task)
   (let* ((caller (drover-anvil--caller))
@@ -1310,12 +1320,14 @@ MCP Parameters:
          (repo (drover-anvil--given repo 200))
          (directory (drover-anvil--task-directory directory))
          (peer (drover-anvil--peer-of host))
+         (agent (drover-anvil--agent agent))
          (job nil))
     (drover-anvil--log "drover-task-start" caller nil "acting"
                        (concat "task " id
                                (if repo (concat ", repo " repo) "")
                                (if directory (concat ", in " (abbreviate-file-name directory)) "")
-                               (if peer (concat ", on " peer) "")))
+                               (if peer (concat ", on " peer) "")
+                               (if agent (concat ", agent " agent) "")))
     (setq job (drover-anvil--job
                "drover-task-start" caller nil
                ;; Its place is made, then set up, before its session starts.
@@ -1334,52 +1346,99 @@ MCP Parameters:
                   (drover-anvil--fail job (format "No heading of ID %s in the Org files drover reads: those visited, and those the ID locations and the agenda name"
                                                   id))
                 (drover-task-start-quietly
-                 marker (list :repo repo :directory directory :host peer)
+                 marker (list :repo repo :directory directory :host peer :agent agent)
                  (lambda (result)
                    (drover-anvil--call job #'drover-anvil--task-started job caller result))))))))
     (drover-anvil--answer job)))
 
 ;;;; Forking
 
-(defun drover-anvil--fork (id caller session task prompt)
+(defun drover-anvil--fork-agent-refusal (session)
+  "Say why a fork of SESSION cannot be given an agent, or nil when it can.
+A fork runs what its original runs: its agent is set once it exists, as
+the prompt sets the options of a running session, which its backend
+must apply (see :apply-options and :settable in
+`drover-register-backend')."
+  (unless (and (drover-session-engine session)
+               (drover-supports-p session :apply-options)
+               (or (not (drover-supports-p session :settable))
+                   (memq :agent (drover-backend-call session :settable))))
+    (format "its harness, %s, sets no agent on a running session: leave agent out"
+            (drover-harness-name (drover-session-harness session)))))
+
+(defun drover-anvil--fork (id caller session task prompt &optional agent)
   "Fork SESSION in no window for the job ID, of CALLER, and settle it.
-The fork is linked to TASK, the ID of an Org heading, when given, and
-sent PROMPT, when given."
+The fork is linked to TASK, the ID of an Org heading, when given,
+switched to AGENT, when given, then sent PROMPT, when given.  A fork
+whose agent could not be set is sent nothing: the job fails, naming it."
   (let ((source (drover-anvil-key-string session)))
     (drover-anvil--call
      id #'drover-backend-call session :fork-hidden
      (lambda (fork)
        (drover-anvil--call
         id (lambda ()
-             (let ((key (drover-session-key fork)))
+             (let ((key (drover-session-key fork))
+                   (finish
+                    (lambda ()
+                      (when prompt
+                        (drover-backend-call fork :send prompt nil)
+                        (puthash (drover-session-key fork) (float-time) drover-anvil--sent))
+                      (drover-anvil--done
+                       id `((outcome . "forked")
+                            (key . ,(drover-anvil-key-string fork))
+                            (link . ,(drover-anvil--link fork))
+                            (forked_from . ,source)
+                            (task . ,task)
+                            (agent . ,agent)
+                            (directory . ,(and (stringp (drover-session-directory fork))
+                                               (drover-anvil--line (abbreviate-file-name (drover-session-directory fork)) 300)))
+                            (sent . ,(if prompt t :json-false))
+                            (note . ,(if prompt
+                                         "Wait for its turn with drover-session-wait"
+                                       "It holds the conversation so far: send it a prompt with drover-session-send")))))))
                (when caller
                  (puthash key caller drover-anvil--started))
                ;; A fork's first prompt is the original's, which names no item.
                (when task
                  (drover-task-link fork task))
-               (when prompt
-                 (drover-backend-call fork :send prompt nil)
-                 (puthash key (float-time) drover-anvil--sent))
-               (drover-anvil--done
-                id `((outcome . "forked")
-                     (key . ,(drover-anvil-key-string fork))
-                     (link . ,(drover-anvil--link fork))
-                     (forked_from . ,source)
-                     (task . ,task)
-                     (directory . ,(and (stringp (drover-session-directory fork))
-                                        (drover-anvil--line (abbreviate-file-name (drover-session-directory fork)) 300)))
-                     (sent . ,(if prompt t :json-false))
-                     (note . ,(if prompt
-                                  "Wait for its turn with drover-session-wait"
-                                "It holds the conversation so far: send it a prompt with drover-session-send"))))))))
+               (if (null agent)
+                   (funcall finish)
+                 (drover-prompt-apply-options
+                  fork (list :agent agent)
+                  (lambda () (drover-anvil--call id finish))
+                  (lambda (why)
+                    (drover-anvil--fail
+                     id (format "The fork exists, %s, but its agent could not be set to %s, and it was sent nothing: %s"
+                                (drover-anvil-key-string fork) agent why)))))))))
      (drover-anvil--else id))))
 
-(defun drover-anvil--tool-fork (&optional key task prompt)
+(defun drover-anvil--fork-checked (id caller session task prompt agent)
+  "Fork SESSION for the job ID, of CALLER, once AGENT is known to be offered.
+As `drover-anvil--fork', TASK, PROMPT and AGENT its own.  An AGENT the
+harness of SESSION does not offer in its directory fails the job,
+naming those it offers, and nothing is forked; one it cannot tell of is
+tried."
+  (let ((engine (drover-session-engine session))
+        (directory (drover-session-local-directory session)))
+    (if (not (and agent directory))
+        (drover-anvil--fork id caller session task prompt agent)
+      (drover-engine-agents-later
+       engine directory
+       (lambda (names)
+         (drover-anvil--call
+          id (lambda ()
+               (if-let* ((why (drover-agent-refusal agent engine directory names)))
+                   (drover-anvil--fail id (concat why ": nothing was forked"))
+                 (drover-anvil--fork id caller session task prompt agent)))))))))
+
+(defun drover-anvil--tool-fork (&optional key task prompt agent)
   "Fork the session KEY whole into a new session, in no window; return its key.
 The fork holds the conversation so far, and goes its own way from
-there.  TASK links it to an Org heading, PROMPT is sent to it, as the
-parameters below tell.  A session whose harness cannot fork is refused,
-its harness named: nothing else is started in its place.
+there.  TASK links it to an Org heading, AGENT is the agent it runs,
+PROMPT is sent to it, as the parameters below tell.  A session whose
+harness cannot fork is refused, its harness named: nothing else is
+started in its place.  So is an agent its harness does not offer, or
+cannot set.
 
 MCP Parameters:
   key - The session to fork, as drover-sessions tells it; the caller's
@@ -1388,7 +1447,10 @@ MCP Parameters:
       linked to that heading as its task, which its first prompt, the
       original's, cannot tell
   prompt - A prompt sent to the fork once it exists, Markdown, such as
-      the item of the conversation it takes on"
+      the item of the conversation it takes on
+  agent - The agent the fork runs, such as build or plan, set before
+      the prompt goes; the agent the session runs otherwise.  One the
+      harness does not offer is refused, those it offers named"
   (drover-start)
   (let* ((caller (drover-anvil--caller))
          (session (if (drover-anvil--given key)
@@ -1398,16 +1460,22 @@ MCP Parameters:
          (source (drover-session-key session))
          (task (and (drover-anvil--given task)
                     (progn (require 'drover-task) (drover-anvil--task-id task))))
-         (prompt (and prompt (not (equal prompt "")) (drover-anvil--prompt prompt))))
-    (when-let* ((why (drover-fork-refusal session)))
+         (prompt (and prompt (not (equal prompt "")) (drover-anvil--prompt prompt)))
+         (agent (drover-anvil--agent agent)))
+    (when-let* ((why (or (drover-fork-refusal session)
+                         (and agent (drover-anvil--fork-agent-refusal session)))))
       (drover-anvil--log "drover-session-fork" caller source "refused" why)
-      (drover-anvil--refuse "%s cannot be forked: %s" (drover-anvil-key-string session) why))
+      (drover-anvil--refuse "%s cannot be forked%s: %s" (drover-anvil-key-string session)
+                            (if (drover-fork-refusal session) "" (format " to run %s" agent)) why))
+    (when agent
+      (require 'drover-prompt))
     (drover-anvil--log "drover-session-fork" caller source "acting"
                        (concat (if task (concat "task " task) "no task")
+                               (if agent (concat ", agent " agent) "")
                                (if prompt (concat ", " (drover-anvil--prompt-note prompt)) "")))
     (let ((id (drover-anvil--job "drover-session-fork" caller source :seconds 90)))
       (if (null task)
-          (drover-anvil--fork id caller session nil prompt)
+          (drover-anvil--fork-checked id caller session nil prompt agent)
         ;; The heading first: a fork linked to no heading would be lost to its task.
         (drover-anvil--call
          id #'drover-task-org-find task
@@ -1417,7 +1485,8 @@ MCP Parameters:
                  (if (null marker)
                      (drover-anvil--fail id (format "No heading of ID %s in the Org files drover reads: nothing was forked"
                                                     task))
-                   (drover-anvil--fork id caller session (or (org-entry-get marker "ID") task) prompt)))))))
+                   (drover-anvil--fork-checked id caller session (or (org-entry-get marker "ID") task)
+                                               prompt agent)))))))
       (drover-anvil--answer id))))
 
 ;;;; Answering
@@ -2377,10 +2446,10 @@ MCP Parameters:
      :description "Start an agent session, unseen, on this host or another (host), in a directory (the caller's by default), on a harness (opencode by default), model, effort and agent, and send it a first prompt.  Returns its key and its link; follow its turn with drover-session-wait.")
     (drover-anvil--tool-fork
      :id "drover-session-fork"
-     :description "Fork a session whole into a new session, unseen: the caller's own by default.  The fork holds the conversation so far.  Link it to an Org heading as its task (task), and send it a prompt (prompt).  Returns its key and its link.  A harness that cannot fork is refused, and named.")
+     :description "Fork a session whole into a new session, unseen: the caller's own by default.  The fork holds the conversation so far.  Link it to an Org heading as its task (task), choose the agent it runs (agent, such as build or plan), and send it a prompt (prompt).  Returns its key and its link.  A harness that cannot fork is refused, and named; so is an agent it does not offer.")
     (drover-anvil--tool-task-start
      :id "drover-task-start"
-     :description "Start the task of an Org heading, by its ID, as the user does on the heading: its place is made (a worktree of its repository, its main checkout or a folder), and a session starts there, unseen, whose first prompt links the heading and quotes its body.  A task working somewhere already continues: another session starts in its place.  Returns the session's key, link, directory and branch.  Nothing is asked: a choice the heading leaves open (repo, directory) is refused, with the values that work.")
+     :description "Start the task of an Org heading, by its ID, as the user does on the heading: its place is made (a worktree of its repository, its main checkout or a folder), and a session starts there, unseen, whose first prompt links the heading and quotes its body.  A task working somewhere already continues: another session starts in its place.  Returns the session's key, link, directory and branch.  Its session runs the agent given (agent, such as build or plan), the harness's default otherwise.  Nothing is asked: a choice the heading leaves open (repo, directory) is refused, with the values that work, and so is an agent the harness does not offer.")
     (drover-anvil--tool-send
      :id "drover-session-send"
      :description "Send a prompt to a session, as its front end delivers prompts (OpenCode queues or steers a running turn).  Then wait for its turn with drover-session-wait.")

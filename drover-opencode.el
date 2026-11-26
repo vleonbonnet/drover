@@ -324,6 +324,17 @@ The agent catalog is waited for, as `drover-opencode--catalog-wait' does."
   (when (drover-opencode--catalog-wait 'agent directory)
     (mapcar (lambda (agent) (alist-get 'id agent)) (opencode-primary-agents directory))))
 
+(defun drover-opencode--agents-later (directory callback)
+  "Call CALLBACK with the names of the agents a session in DIRECTORY can run.
+Or with nil when the agent catalog does not arrive, never waiting (see
+`drover-opencode--catalog-fetch').  The engine's :agents-later."
+  (drover-opencode--catalog-fetch
+   'agent directory
+   (lambda (catalog)
+     (funcall callback
+              (mapcar (lambda (agent) (alist-get 'id agent))
+                      (seq-filter #'opencode-agent-selectable-p catalog))))))
+
 ;;;;; Defaults
 
 (defun drover-opencode--model-identity (model)
@@ -509,6 +520,7 @@ does (`drover-opencode--model-identity')."
                 :defaults #'drover-opencode--fetch-defaults
                 :resolve #'drover-opencode--resolve
                 :agents #'drover-opencode--agents
+                :agents-later #'drover-opencode--agents-later
                 :last-used #'drover-opencode--last-used
                 :build-agent "build"
                 :model-resets-variant t
