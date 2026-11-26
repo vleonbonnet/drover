@@ -37,6 +37,7 @@
 (require 'drover-items)
 (require 'drover-keys)
 (require 'drover-attention)
+(require 'drover-prompt)
 
 ;;;; Fixtures
 
@@ -682,17 +683,17 @@ characters, one column wide in every Emacs."
         (goto-char (oref (drover-list--find-session '(fake . "s3")) start))
         (drover-items--follow)
         (should (equal (drover-items-test-lines) '("· Session s3" "No items"))))
-      ;; From a buffer telling no session, the session at point in the list shown.
+      ;; From a buffer telling no session, it keeps what it shows, whatever
+      ;; the session at point in the list shown.
       (select-window origin)
       (switch-to-buffer (get-buffer-create "*other notes*"))
       (with-current-buffer (window-buffer (drover-list--side-window))
         (set-window-point (drover-list--side-window) (oref (drover-list--find-session '(fake . "s2")) start)))
       (drover-items--follow)
-      (should (equal (car (drover-items-test-lines)) "◐ Session s2"))
-      ;; No list of sessions shown either: it keeps what it shows.
+      (should (equal (car (drover-items-test-lines)) "· Session s3"))
       (drover-list-side)
       (drover-items--follow)
-      (should (equal (car (drover-items-test-lines)) "◐ Session s2"))
+      (should (equal (car (drover-items-test-lines)) "· Session s3"))
       ;; Back in a session's buffer, that session's.
       (switch-to-buffer drover-handoff-test-buffer)
       (drover-items--follow)
@@ -728,6 +729,172 @@ characters, one column wide in every Emacs."
       (kill-buffer (drover-items--buffer))
       (should-not (memq #'drover-items--follow-soon (default-value 'post-command-hook)))
       (should-not (memq #'drover-items--on-change drover-changed-hook)))))
+
+;;;; The session the side list follows
+
+(defmacro drover-items-test-with-sessions (&rest body)
+  "Run BODY over the view fixture with sessions s2, working, and s3, idle, more.
+`other' is the buffer of s2, which tells it; `notes' a buffer telling no
+session.  Each of s1, s2 and s3 has a list, of one item named after it
+for s2 and s3.  The prompt, if BODY shows it, is killed after."
+  (declare (indent 0) (debug t))
+  `(drover-items-test-with-view
+     (let ((other (generate-new-buffer " *s2 session*"))
+           (notes (generate-new-buffer "*other notes*")))
+       (setq drover-test-sessions
+             (append drover-test-sessions
+                     (list (drover-test-session "s2" :engine 'handfake :engine-id "conv-2" :status 'working)
+                           (drover-test-session "s3" :engine 'handfake :engine-id "conv-3" :status 'idle))))
+       (drover-backend-changed 'fake)
+       (drover-changed-now)
+       (drover-items-set (drover-find 'fake "s2") (list (list :title "Of s2" :status 'open)) nil)
+       (drover-items-set (drover-find 'fake "s3") (list (list :title "Of s3" :status 'open)) nil)
+       (with-current-buffer other
+         (setq-local drover-session-at-point-function (lambda () (drover-find 'fake "s2"))))
+       (unwind-protect
+           (progn ,@body)
+         (when-let* ((prompt (get-buffer drover-prompt-buffer-name)))
+           (kill-buffer prompt))
+         (kill-buffer other)
+         (kill-buffer notes)))))
+
+(defun drover-items-test-followed ()
+  "Have the side list follow the user, and return the first line it shows."
+  (drover-items--follow)
+  (car (drover-items-test-lines)))
+
+(defun drover-items-test-sidebar-at (id)
+  "Show the sidebar, without selecting it, its point on the fake session ID."
+  (unless (drover-list--side-window)
+    (drover-list-side))
+  (with-current-buffer (window-buffer (drover-list--side-window))
+    (set-window-point (drover-list--side-window) (oref (drover-list--find-session (cons 'fake id)) start))))
+
+(ert-deftest drover-items-test-follows-a-session-buffer ()
+  "The selected window showing a session's buffer, the side list follows that session.
+Whatever the session at point in the sidebar; a buffer a front end
+shows a session in, without being its own, is that session's too."
+  (drover-items-test-with-sessions
+    (drover-items)
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    (drover-items-test-sidebar-at "s3")
+    ;; Its own buffer.
+    (switch-to-buffer other)
+    (should (equal (drover-items-test-followed) "◐ Session s2"))
+    (should (equal (drover-items-test-lines) '("◐ Session s2" "= o 1 Of s2")))
+    (switch-to-buffer drover-handoff-test-buffer)
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    ;; A buffer telling no session of its own, in which a front end shows one,
+    ;; as agent-shell shows a shell in its viewport.
+    (let ((drover-shown-session-functions
+           (list (lambda (buffer) (and (eq buffer notes) (drover-find 'fake "s2"))))))
+      (switch-to-buffer notes)
+      (should (eq (drover-shown-session notes) (drover-find 'fake "s2")))
+      (should (equal (drover-items-test-followed) "◐ Session s2")))
+    ;; In another window of the frame, selected.
+    (switch-to-buffer drover-handoff-test-buffer)
+    (select-window (split-window-right))
+    (switch-to-buffer other)
+    (should (equal (drover-items-test-followed) "◐ Session s2"))
+    (other-window -1)
+    (should (eq (window-buffer) drover-handoff-test-buffer))
+    (should (equal (drover-items-test-followed) "· Session s1"))))
+
+(ert-deftest drover-items-test-follows-beside-the-prompt ()
+  "The selected window showing drover's prompt, the side list follows the session beside it.
+The session the frame's main window shows; when it shows none, the
+session the prompt was set to go to; else it keeps what it shows.  Never
+the session at point in the sidebar."
+  (drover-items-test-with-sessions
+    (drover-items)
+    (drover-items-test-sidebar-at "s3")
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    ;; The prompt, in its side window, beside the buffer of s2.
+    (switch-to-buffer other)
+    (let ((main (selected-window)))
+      (drover-prompt--display (drover-prompt-buffer t))
+      (should (eq (window-buffer) (drover-prompt-buffer)))
+      (should (window-parameter nil 'window-side))
+      (should (eq (drover-items--beside (selected-window)) main))
+      (should (equal (drover-items-test-followed) "◐ Session s2"))
+      ;; The main window shows another session: that one.
+      (with-selected-window main
+        (switch-to-buffer drover-handoff-test-buffer))
+      (should (equal (drover-items-test-followed) "· Session s1"))
+      ;; It shows no session, and the prompt goes nowhere chosen: kept.
+      (with-selected-window main
+        (switch-to-buffer notes))
+      (should (equal (drover-items-test-followed) "· Session s1"))
+      ;; No session shown, the session the prompt was set to go to.
+      (with-current-buffer (drover-prompt-buffer)
+        (setq drover-prompt--chosen-session
+              (list :key '(fake . "s3") :title "Session s3" :session (drover-find 'fake "s3"))))
+      (should (equal (drover-items-test-followed) "· Session s3"))
+      (should (equal (drover-items-test-lines) '("· Session s3" "= o 1 Of s3")))
+      ;; A session shown again comes before the one chosen.
+      (with-selected-window main
+        (switch-to-buffer other))
+      (should (equal (drover-items-test-followed) "◐ Session s2")))
+    ;; A prompt shown in an ordinary window sits beside the window used before it.
+    (let ((drover-prompt-display-action '((display-buffer-pop-up-window))))
+      (kill-buffer (drover-prompt-buffer))
+      (switch-to-buffer drover-handoff-test-buffer)
+      (let ((main (selected-window)))
+        (drover-prompt--display (drover-prompt-buffer t))
+        (should (eq (window-buffer) (drover-prompt-buffer)))
+        (should-not (window-parameter nil 'window-side))
+        (should (eq (drover-items--beside (selected-window)) main))
+        (should (equal (drover-items-test-followed) "· Session s1"))))))
+
+(ert-deftest drover-items-test-follows-the-list ()
+  "The selected window showing drover's sidebar or list, the side list follows the session at point."
+  (drover-items-test-with-sessions
+    (drover-items)
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    ;; The sidebar.
+    (drover-list-side '(4))
+    (should (eq (selected-window) (drover-list--side-window)))
+    (goto-char (oref (drover-list--find-session '(fake . "s2")) start))
+    (should (equal (drover-items-test-followed) "◐ Session s2"))
+    (goto-char (oref (drover-list--find-session '(fake . "s3")) start))
+    (should (equal (drover-items-test-followed) "· Session s3"))
+    ;; The list, in an ordinary window.
+    (select-window (drover-list--main-window))
+    (let ((drover-list-display-action '((display-buffer-same-window))))
+      (drover-list))
+    (should (buffer-local-value 'drover-view-p (window-buffer)))
+    (should-not (window-parameter nil 'window-side))
+    (goto-char (oref (drover-list--find-session '(fake . "s2")) start))
+    (should (equal (drover-items-test-followed) "◐ Session s2"))))
+
+(ert-deftest drover-items-test-keeps-elsewhere ()
+  "The selected window showing no session, the side list keeps what it shows.
+Whatever the session at point in the sidebar, or the session another
+window shows; and so while it is itself selected, or a minibuffer is."
+  (drover-items-test-with-sessions
+    (drover-items)
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    (drover-items-test-sidebar-at "s2")
+    (switch-to-buffer notes)
+    (should-not (drover-items--session-on))
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    ;; Another window showing a session, not selected.
+    (let ((beside (split-window-right)))
+      (set-window-buffer beside other)
+      (should (equal (drover-items-test-followed) "· Session s1"))
+      (delete-window beside))
+    ;; The side list itself.
+    (select-window (drover-items--side-window))
+    (should (equal (drover-items-test-followed) "· Session s1"))
+    ;; Shown anew from such a buffer, it shows the session the menu acts on:
+    ;; the one at point in the sidebar.
+    (select-window (drover-list--main-window))
+    (drover-items)
+    (should-not (drover-items--side-window))
+    (drover-items)
+    (should (equal (car (drover-items-test-lines)) "◐ Session s2"))))
+
+;;;; Lines
 
 (ert-deftest drover-items-test-lines ()
   "One line per item, cut to the window: where it goes, its status, its number, its title, its sessions."

@@ -95,7 +95,7 @@
 (require 'subr-x)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 15))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 34))
   (load "drover-core" nil t))
 
 ;; Drover does not require agent-shell, so this file compiles without
@@ -287,6 +287,16 @@ It is the :identifier of the shell's configuration, such as
       (cond ((derived-mode-p 'agent-shell-mode) buffer)
             ((derived-mode-p 'agent-shell-viewport-view-mode 'agent-shell-viewport-edit-mode)
              (agent-shell-viewport--shell-buffer buffer))))))
+
+(defun drover-agent-shell--viewport-session (buffer)
+  "Return the session of the shell BUFFER, a viewport, shows, or nil.
+For `drover-shown-session-functions': a viewport tells no session of its
+own, and shows its shell's."
+  (when-let* ((shell (drover-agent-shell--shell-of buffer))
+              ((not (eq shell buffer)))
+              ((buffer-live-p shell)))
+    (with-current-buffer shell
+      (drover-agent-shell--buffer-session))))
 
 (defun drover-agent-shell--initialized-p (buffer)
   "Return non-nil when the shell of BUFFER finished initializing."
@@ -1813,6 +1823,7 @@ see `drover-recorded-run'.  The backend's :caches."
   (dolist (buffer (drover-agent-shell--shells))
     (with-current-buffer buffer
       (drover-agent-shell--setup t)))
+  (add-hook 'drover-shown-session-functions #'drover-agent-shell--viewport-session)
   (add-hook 'window-selection-change-functions #'drover-agent-shell--window-changed)
   (add-hook 'window-buffer-change-functions #'drover-agent-shell--window-changed)
   (add-function :after after-focus-change-function #'drover-agent-shell--window-changed))
@@ -1823,6 +1834,7 @@ see `drover-recorded-run'.  The backend's :caches."
   (dolist (buffer (drover-agent-shell--shells))
     (with-current-buffer buffer
       (drover-agent-shell--teardown)))
+  (remove-hook 'drover-shown-session-functions #'drover-agent-shell--viewport-session)
   (remove-hook 'window-selection-change-functions #'drover-agent-shell--window-changed)
   (remove-hook 'window-buffer-change-functions #'drover-agent-shell--window-changed)
   (remove-function after-focus-change-function #'drover-agent-shell--window-changed))

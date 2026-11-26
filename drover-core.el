@@ -76,7 +76,7 @@
 (require 'subr-x)
 (require 'opencode-look)
 
-(defconst drover-core-generation 33
+(defconst drover-core-generation 34
   "The generation of drover-core, which grows as other files need more of it.
 A file of drover loaded into an Emacs running an older drover-core, as
 reloading drover's files does, loads drover-core anew first when its
@@ -3028,6 +3028,29 @@ tells no session."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (drover-session-at-point t))))
+
+(defvar drover-shown-session-functions nil
+  "Functions of a buffer returning the session it shows, or nil.
+For a buffer showing a session without being its own, which tells none
+through `drover-session-at-point-function', as the viewport agent-shell
+shows a shell in.  Each is called with a buffer telling no session of
+its own, so it must cost no more than a look at that buffer.")
+
+(defun drover-shown-session (buffer)
+  "Return the session BUFFER shows, or nil.
+The session BUFFER belongs to (see `drover-buffer-session'), unless it
+lists sessions, whose session at point is only where its point is;
+else the one a front end tells BUFFER shows (see
+`drover-shown-session-functions')."
+  (when (buffer-live-p buffer)
+    (if (buffer-local-value 'drover-session-at-point-function buffer)
+        (with-current-buffer buffer
+          (and (not (drover-session-list-p))
+               (drover-session-at-point t)))
+      (seq-some (lambda (function)
+                  (drover-with-reporting "session shown"
+                    (funcall function buffer)))
+                drover-shown-session-functions))))
 
 (defun drover-parent (session)
   "Return the parent session of SESSION, a subagent, or nil.

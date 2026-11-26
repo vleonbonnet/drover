@@ -787,15 +787,16 @@ An item with a heading takes its status from the heading's Org state:
 
 =*= (=drover-items=), in a list or through the menu, shows the side list of items, and hides it again, as =L= does the sidebar.  It shows in a side window on the side opposite to the sidebar's (=drover-list-side-window-side=), with the sidebar's width and slot, and in its look: the face =drover-list=, no cursor but the highlight of the row at point, no fringes.  =*= does not select it.  =C-u *= selects it, showing it first if needed; in the side list, =C-u *= goes back to the window where you work.
 
-The side list shows the list of the session you are on, and follows as that changes:
+The side list shows the list of the session you are on, and follows as that changes.  The selected window tells the session:
 
-| Where you are                          | The session                                              |
-|----------------------------------------+----------------------------------------------------------|
-| a session's buffer                     | that session                                             |
-| a list of sessions                     | the session at point                                     |
-| another buffer, a list of drover shown | the session at point in that list, as the menu acts on it |
-| another buffer, no list shown          | the one it showed before                                 |
-| the side list itself                   | the one it shows                                         |
+| The selected window shows                 | The session                                                                                        |
+|-------------------------------------------+----------------------------------------------------------------------------------------------------|
+| a session's buffer, of any front end      | that session; a buffer a front end shows a session in, as agent-shell's viewport, tells that session too |
+| drover's prompt, =*drover*=               | the session shown in the window the prompt sits beside, the frame's main window; when that window shows no session, the session the prompt was set to go to |
+| drover's sidebar or list, or another list of sessions | the session at point there                                                              |
+| any other buffer, or the side list itself | the one it showed before                                                                           |
+
+=*= itself, called from a buffer that tells no session, shows the session at point in the list of drover shown on the frame, as the menu acts on that session.  The side list then keeps that session until you move to a session's buffer, to the prompt or to a list.
 
 Its first line names the session, after the glyph of its status.  Then come the items, one line each, cut to the window's width as the sidebar cuts its rows.  There is no header line.
 

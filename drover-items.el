@@ -70,8 +70,10 @@
 (require 'drover-handoff)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 33))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 34))
   (load "drover-core" nil t))
+
+(declare-function drover-prompt--chosen-target "drover-prompt" (&optional buffer))
 
 ;;;; Options
 
@@ -1388,21 +1390,72 @@ The value of `revert-buffer-function' in the side list."
 
 ;;;;; The session the user is on
 
+(defun drover-items--prompt-p (buffer)
+  "Return non-nil when BUFFER is drover's prompt (see `drover-prompt-mode')."
+  (and (local-variable-p 'drover-prompt-mode buffer)
+       (buffer-local-value 'drover-prompt-mode buffer)))
+
+(defun drover-items--beside (window)
+  "Return the window WINDOW, showing drover's prompt, sits beside, or nil.
+The main window of its frame, where the user works beside the lists
+\(see `drover-list--main-window'); when that is WINDOW itself, a prompt
+shown in an ordinary window, the window of the frame used most recently
+before it that shows neither a list nor a side window."
+  (let* ((frame (window-frame window))
+         (main (drover-list--main-window frame)))
+    (if (and main (not (eq main window)))
+        main
+      (let ((best nil))
+        (dolist (other (window-list frame 'nomini))
+          (unless (or (eq other window)
+                      (window-parameter other 'window-side)
+                      (drover-list--view-window-p other)
+                      (and best (<= (window-use-time other) (window-use-time best))))
+            (setq best other)))
+        best))))
+
+(defun drover-items--prompt-session (window)
+  "Return the session the prompt WINDOW shows is written beside, or nil.
+The session shown in the window the prompt sits beside (see
+`drover-items--beside' and `drover-shown-session'); when that window
+shows none, the session the prompt was set to go to (see
+`drover-prompt-edit-for')."
+  (or (when-let* ((beside (drover-items--beside window)))
+        (drover-shown-session (window-buffer beside)))
+      (and (fboundp 'drover-prompt--chosen-target)
+           (drover-prompt--chosen-target (window-buffer window)))))
+
 (defun drover-items--session-on ()
   "Return the session the user is on, or nil when nothing tells one.
-The session of the selected window's buffer: its own, or in a list of
-sessions the one at point (see `drover-session-at-point-function');
-else the session at point in the list of drover shown on the selected
-frame, the most recently used of several, as the dispatch menu acts on
-it from a buffer telling no session.  The side list of items itself
-tells none: it keeps showing what it shows."
-  (let ((buffer (window-buffer (selected-window))))
-    (unless (eq buffer (drover-items--buffer))
-      (or (with-current-buffer buffer
-            (drover-session-at-point t))
-          (when-let* ((window (drover--shown-list-window)))
-            (with-selected-window window
-              (drover-session-at-point t)))))))
+By the buffer of the selected window:
+- a list of sessions, drover's sidebar or list or another front end's,
+  tells the session at point there;
+- drover's prompt tells the session shown in the window it sits beside,
+  else the session it was set to go to (see
+  `drover-items--prompt-session');
+- any other buffer tells the session it shows: its own, or the one a
+  front end shows in it (see `drover-shown-session').
+A buffer showing no session tells none, and neither does the side list
+of items itself: it then keeps showing what it shows."
+  (let* ((window (selected-window))
+         (buffer (window-buffer window)))
+    (cond ((eq buffer (drover-items--buffer)) nil)
+          ((with-current-buffer buffer (drover-session-list-p))
+           (with-current-buffer buffer
+             (drover-session-at-point t)))
+          ((drover-items--prompt-p buffer) (drover-items--prompt-session window))
+          (t (drover-shown-session buffer)))))
+
+(defun drover-items--session-named ()
+  "Return the session `drover-items' is called on, or nil.
+The session the user is on (see `drover-items--session-on'); when
+nothing tells one, the session at point in the list of drover shown on
+the selected frame, the most recently used of several, as the dispatch
+menu acts on it from a buffer telling no session."
+  (or (drover-items--session-on)
+      (when-let* ((window (drover--shown-list-window)))
+        (with-selected-window window
+          (drover-session-at-point t)))))
 
 (defun drover-items--show-session (session)
   "Have the side list, the current buffer, show the list of SESSION.
@@ -1420,8 +1473,9 @@ And draw it."
 (defun drover-items--follow ()
   "Have the side list show the list of the session the user is on.
 When it shows in a window, and that session is another than the one it
-shows (see `drover-items--session-on').  Not while a minibuffer is
-active, whose windows are provisional, as a buffer previewed is."
+shows (see `drover-items--session-on'); where nothing tells a session,
+it keeps what it shows.  Not while a minibuffer is active, whose
+windows are provisional, as a buffer previewed is."
   (when-let* ((buffer (drover-items--shown-p))
               ((zerop (minibuffer-depth)))
               (session (drover-items--session-on))
@@ -1657,7 +1711,7 @@ its buffer stops showing it, so that it is laid out for the side
 window's width."
   (drover-start)
   (let ((buffer (drover-items--buffer t))
-        (session (drover-items--session-on)))
+        (session (drover-items--session-named)))
     (dolist (window (get-buffer-window-list buffer nil (selected-frame)))
       (unless (window-parameter window 'window-side)
         (quit-window nil window)))
@@ -1687,9 +1741,12 @@ key moves back and forth.
 
 It shows in a side window on the side opposite to the sidebar's, in the
 sidebar's look, the list its agent gave drover of the session you are
-on (see `drover-anvil'): the session of the selected window, its own or
-the one at point in a list of sessions, else the session at point in
-the list of drover shown on the frame.  It follows as that changes.
+on (see `drover-anvil'): the session the selected window shows, the one
+at point in a list of sessions, or the one shown beside drover's
+prompt; when the selected window tells none, the session at point in
+the list of drover shown on the frame.  It then follows the session you
+are on as you move to a session's buffer, to the prompt or to a list,
+and keeps what it shows elsewhere (see `drover-items--session-on').
 See `drover-items-mode' for what it shows and its keys.  A session
 without a list has one line saying so, and so has a session of another
 host, which keeps its list."

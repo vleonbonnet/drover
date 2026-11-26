@@ -2178,6 +2178,28 @@ cancelled turn."
         (should (equal (drover-session-id renamed) (drover-session-id session)))
         (should (equal (drover-session-title renamed) "Fix the build"))))))
 
+(ert-deftest drover-agent-shell-test-viewport-shows-its-shell ()
+  "A viewport tells drover it shows its shell's session, though it is not its buffer."
+  (drover-agent-shell-test-with
+    (let* ((shell (drover-agent-shell-test-followed 'codex "seen"))
+           (viewport (generate-new-buffer "seen [viewport]"))
+           (other (generate-new-buffer "notes"))
+           (session (drover-agent-shell-test-session shell)))
+      (push viewport drover-agent-shell-test--buffers)
+      (push other drover-agent-shell-test--buffers)
+      (with-current-buffer viewport
+        (setq major-mode 'agent-shell-viewport-view-mode))
+      ;; It tells no session of its own, as a session's buffer does.
+      (should-not (drover-buffer-session viewport))
+      (should (equal (drover-session-key (drover-agent-shell--viewport-session viewport))
+                     (drover-session-key session)))
+      (should-not (drover-agent-shell--viewport-session shell))
+      (should-not (drover-agent-shell--viewport-session other))
+      (let ((drover-shown-session-functions (list #'drover-agent-shell--viewport-session)))
+        (should (equal (drover-session-key (drover-shown-session viewport)) (drover-session-key session)))
+        (should (equal (drover-session-key (drover-shown-session shell)) (drover-session-key session)))
+        (should-not (drover-shown-session other))))))
+
 (defun drover-agent-shell-test-title (buffer title)
   "Title the session of the shell of BUFFER TITLE, as agent-shell does.
 That is with the first prompt, then with what the agent tells."
