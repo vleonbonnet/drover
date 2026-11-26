@@ -34,4 +34,4 @@ You may evaluate code in the user's running Emacs through Anvil, to inspect stat
 
 ## Finishing
 
-Commit messages: an imperative subject, then prose paragraphs saying what changed and why. Merge the branch onto the local main, run `make compile lint test` there, push main, remove the worktree and its branch, then update drover on this Mac and on Core as above.
+Ensure feature parity between local, remote host, mobile, and web. Commit messages: an imperative subject, then prose paragraphs saying what changed and why. Merge the branch onto the local main, run `make compile lint test` there, push main, remove the worktree and its branch, then update drover on local, remote, mobile and web hosts.
