@@ -1458,11 +1458,15 @@ rendering of a prompt and of output."
       (let ((ran nil))
         (cl-letf (((symbol-function 'opencode-revert-to-point) (lambda () (interactive) (push 'revert ran)))
                   ((symbol-function 'drover-opencode--choose-model) (lambda () (interactive) (push 'model ran)))
-                  ((symbol-function 'drover-opencode--choose-provider) (lambda () (interactive) (push 'provider ran))))
+                  ((symbol-function 'drover-opencode--choose-provider) (lambda () (interactive) (push 'provider ran)))
+                  ;; It reads the directory of the session's host, another host's included.
+                  ((symbol-function 'opencode-session-move) (lambda () (interactive) (push 'move ran)))
+                  ((symbol-function 'cd) (lambda (&rest _) (interactive) (ert-fail "Moved with cd"))))
           (call-interactively #'drover-prompt-revert)
           (call-interactively #'drover-prompt-model)
-          (call-interactively #'drover-prompt-provider))
-        (should (equal ran '(provider model revert))))
+          (call-interactively #'drover-prompt-provider)
+          (call-interactively #'drover-prompt-directory))
+        (should (equal ran '(move provider model revert))))
       ;; Compacting goes through the service function.
       (call-interactively #'drover-compact)
       (should (equal (car drover-opencode-test-calls) '(opencode-session-compact "ses_1"))))))
@@ -1576,15 +1580,25 @@ in the destination's native name, without touching drover's prompt."
                                (providerID . ,provider) (variant . "high")))))))))))
 
 (ert-deftest drover-opencode-test-directory-action ()
-  "Moving a session is `cd' in its buffer, which opencode.el forwards."
+  "Moving a session of this host reads one of its directories, and asks the service.
+The buffer's directory changes only once the service tells the move."
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1"))
-    (let ((target (file-name-as-directory (make-temp-file "drover-cd" t))))
+    (let ((target (file-name-as-directory (make-temp-file "drover-cd" t)))
+          (requests nil))
       (unwind-protect
           (with-temp-buffer
-            (drover-opencode--setup-session-buffer)
-            (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) target)))
-              (call-interactively #'drover-prompt-directory))
-            (should (equal default-directory target)))
+            (opencode-session-mode)
+            (setq opencode-session-id "ses_1")
+            (let ((before default-directory))
+              (drover-opencode--setup-session-buffer)
+              (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) target))
+                        ((symbol-function 'opencode-request)
+                         (lambda (method path &rest arguments)
+                           (push (list method path (plist-get arguments :body)) requests))))
+                (call-interactively #'drover-prompt-directory))
+              (should (equal requests `((post "/api/session/ses_1/move"
+                                              ((directory . ,(opencode-directory-name target)))))))
+              (should (equal default-directory before))))
         (delete-directory target t)))))
 
 (ert-deftest drover-opencode-test-teardown-keeps-other-actions ()

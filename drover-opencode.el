@@ -2040,11 +2040,12 @@ knows through that host (see `drover-remote-mode')."
                                  (alist-get 'parentID opencode-session-info))))
 
 (defun drover-opencode--move-session ()
-  "Move this session to another directory, which `cd' reads.
-opencode.el asks the service to move a session whose buffer changes
-directory."
+  "Move this session to another directory, of the host its service runs on.
+`opencode-session-move' reads it, among another host's directories for
+a session of that host's service; an opencode.el without it moves only
+this host's sessions, with `cd'."
   (interactive)
-  (call-interactively #'cd))
+  (call-interactively (if (fboundp 'opencode-session-move) #'opencode-session-move #'cd)))
 
 (defun drover-opencode--clear-input ()
   "Erase the input being written at the prompt of this session buffer.
