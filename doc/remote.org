@@ -900,6 +900,97 @@ The viewer follows the goals of each connected peer telling =goals= while =drove
 
 Tests: =drover-remote-goal-test-set-and-follow= sets a goal on the agent's session from its checks read there, follows the session's turn there to the goal met, notes the heading here and reads the log; =drover-remote-goal-test-acts= pauses, resumes and stops goals there; =drover-remote-goal-test-refused= refuses a peer of =act= access, commands and limits of no known shape and an unknown goal; =drover-remote-goal-test-older-peer= asks nothing of an older drover.  =drover-task-remote-test-start-under-a-goal= starts a task and another session in its place under goals, refusing the place of another task; =drover-task-remote-test-goal-takes-full-access= refuses a goal to a peer of =act= access.  =drover-goal-test= checks the viewer: a goal told shown and acted on, a heading's session started on a host under a goal, a task started there under one.
 
+* The items of other hosts' sessions, as built
+
+The list of a session's items (see design.org, [[file:design.org::*The items of a session][The items of a session]]) is kept by the host that runs the session, in its =items.eld=.  The session's agent gives the list there, the headings of its items are in that host's Org files, and the prompt that applies the user's choices goes through that host's queue.  Another host reads the list, shows it as one of its own, and asks the owner for each change (=drover-remote-items.el=).  The owner asks its own user nothing for a peer, and shows no window.
+
+| What                   | Shape                                                                                                                                                                                                                                                                                                                                                    | Access |
+|------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+--------|
+| capability =items=     | told by a host that keeps the lists of its sessions for its peers                                                                                                                                                                                                                                                                                        | -      |
+| request =items=        | =key=, a session of the owner, and =follow=, each optional.  With =key=: answered {=list=}, the list, or false for a session without one, once the owner looked for the headings of its items; =wait= true has the owner wait for the archived sessions it fetches, 10 s at most.  With =follow= true: answered also {=reviews=}, and the peer is told of each change | read   |
+| message =items=        | the owner, to the peers that follow, a tenth of a second after a list changed: {=k=, the keys of the sessions showing it that the owner serves, 8 at most, =a=, since when it waits for a review, or false, =u=, when it changed}                                                                                                                          | -      |
+| request =items-goes=   | =key=, =n=, the number of an item, =goes=, one of =keep=, =subagent=, =session=, =fork= and =save=: answered {=list=}                                                                                                                                                                                                                                    | act    |
+| request =items-places= | =key=: answered {=places=}, [{=id=, =name=}], 30 at most: the headings the owner offers as places                                                                                                                                                                                                                                                        | act    |
+| request =items-apply=  | =id=, =key=, =places=, [{=n=, =id=, =name=}], one for each item that needs a place: answered {=sent=, how many items the session was told of, =waits=, true when the prompt waits for the session's turn to end, =list=}, or {=refused=}, lines.  The same =id= applies once                                                                               | act    |
+| request =items-set=    | =id=, =key=, =items=, the items an agent gives, =review=, false to ask for no review: answered {=kept=, how many items were given, =list=}, or {=refused=}, lines, one for each item refused.  The same =id= keeps once                                                                                                                                    | act    |
+
+A key is =[BACKEND, ID]=, as records name sessions.  A time is the owner's clock, in seconds since the epoch: the viewer subtracts the clock offset of the connection.
+
+** A list
+
+| Member  | Meaning                                                                                                              |
+|---------+----------------------------------------------------------------------------------------------------------------------|
+| =k=     | the key of the session                                                                                               |
+| =ti=    | the session's title                                                                                                  |
+| =a=     | since when the list waits for a review, or false                                                                     |
+| =u=     | when the list changed last                                                                                           |
+| =more=  | true while the owner still fetches archived sessions: the list asked again with =wait= may tell more sessions (=ss=) |
+| =items= | the items, oldest first, 100 at most                                                                                 |
+
+An item:
+
+| Member      | Meaning                                                                                                                                              |
+|-------------+------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =n=         | its number, which stays                                                                                                                              |
+| =ti=        | its title, 200 characters at most                                                                                                                    |
+| =st=        | its status as the owner computes it: =open=, =blocked=, =scheduled=, =done= or =decided=.  An item with a heading takes the heading's                |
+| =ln=        | its link, =[TARGET, DESCRIPTION or false]=, or false                                                                                                 |
+| =nx=, =nt=  | its next step and its note, or false                                                                                                                 |
+| =h=         | the Org ID of its heading, or false                                                                                                                  |
+| =ht=, =hf=  | the title of its heading as the owner read it, or false, and true when the owner found the heading                                                   |
+| =g=         | where the user said it goes, or false while unchosen: it then stays in its session.  An item =done= or =decided= goes nowhere, whatever =g= tells    |
+| =pl=        | the place of its heading, {=uri=, =name=, =id=, an Org ID or false}, or false                                                                        |
+| =sn=        | =[GOES, TIME]=, where it went as its session was told last, and when, or false                                                                       |
+| =ss=        | the sessions serving its heading, 10 at most: {=k=, the session's key on its host, or false, =h=, that host when it is not the owner, else false, =ti=, =st=, =ar=, true for an archived one} |
+| =c=, =u=    | when it was made and changed                                                                                                                         |
+
+The session is to be told of an item when =g= is =subagent=, =session=, =fork= or =save=, =sn= does not hold the same place already, and the item is not saved with a heading.  Such an item needs a place when =g= is not =subagent= and =h= is false.  The owner computes both again (=drover-items--to-send-p=, =drover-items--needs-place-p=).
+
+Whatever a peer sends is checked as it comes, and whatever the owner answers too.  The owner takes 100 items and 100 places at most, a field of 4000 characters at most, cut, then bounded as for its own agents, numbers as natural numbers, an Org ID of the shape of one, a place of a name of 1000 characters.  The viewer (=drover-remote-items--decode=) keeps an item only with a number and a status among the five, drops a number told twice, bounds each text as drover bounds its own items, and interns only the names of statuses, places and backends.
+
+** How a place travels
+
+A place travels as the Org ID of a heading, with the name the user's completion gave it.  The viewer asks the place where the user is, with =org-refile-get-location= and that host's refile targets (=drover-handoff-read-place= with BY-ID, which gives a heading without an ID one).  The owner then looks for a heading of that ID in its own Org files (=drover-task-org-find=): those visited, those its ID locations and its agenda name, the others through ripgrep.  The owner's agent writes the new heading with Anvil's =org-add-todo= under =org-id://ID=, on the owner.
+
+| Choice                 | Why                                                                                                                                          |
+|------------------------+----------------------------------------------------------------------------------------------------------------------------------------------|
+| an Org ID              | it is the same on both hosts when both read the same Org file, as a file both sync; the owner's Anvil resolves it                            |
+| not a path             | a path names a file of the viewer: =~/Google Drive/My Drive/mongodb.org= on Reaver is another path on Core                                   |
+| not the top of a file  | it has no ID; =C-c C-c= offers headings only for a session of another host                                                                   |
+| checked by the owner   | the owner refuses a place it cannot use, before anything is sent: nothing is kept, and the answer's =refused= names each item and its reason |
+
+The owner refuses: an ID of which it finds no heading (=item 1: Core finds no heading of ID … in its Org files=), a heading in a file of its =drover-task-refused-files=, and a heading in a file its Anvil does not write.  A heading the viewer just gave an ID reaches the owner only once the file synced: the refusal says so by the first reason, and applying again works later.  The name told is kept on the item as its place's name; without one, the owner uses the heading's title.
+
+A phone has no refile targets.  It gives, for each item that needs a place, one of two things.  The first is the =id= of one of the places the owner offers (=items-places=): the heading of the task the session serves, the places the list's items have, then the places chosen last on the owner (=drover-handoff-places=), which a place a peer gave joins.  The second is =id= false: the place is left to the session's agent, and the prompt says =where this work keeps its tasks=, as a hand-off without a place does.  An item that needs a place and has no entry in =places= is refused, =… needs a place for the heading of item 1: read its list again=: the list changed since the peer read it.
+
+** The owner
+
+A read costs the owner what =drover-session-items= costs it: the headings of the items read again, ripgrep for those in no visited file, the archived sessions of its backends kept fetched.  A status that a heading changed is kept, and told to the peers that follow.  The owner tells a change from =drover-items-changed-hook=, which every change of a list runs: items given, where an item goes, the choices applied, a review asked or over, a status read anew.  Changes within a tenth of a second go in one message for each list.  A list is its conversation's, and the session showing a conversation changes: a terminal that resumes it takes the place of the record of its transcript, under another key.  The owner then tells the review of the new session (=drover-remote-items--sessions-changed=, on =drover-changed-hook=), once.
+
+=items-apply= and =items-set= are performed from a timer, out of the stream's filter, in =drover-quietly=.  Each carries an identifier, as actions do: the owner keeps the outcome of the last 256 requests, and answers it to a request asked again after its stream ended, rather than send a prompt twice or add items twice.  The outcome kept holds no list: such an answer has none, and the viewer reads the list again.  =items-goes= needs no identifier: asked twice, it keeps the same place.
+
+=items-apply= answers =refused= when an item needs a place and has none, or when a place cannot be used.  It fails with one line when the session is not served, has no list, or takes no prompt from drover.  It then keeps each place on its item, sends the session the prompt of =drover-items-prompt=, as for the owner's own user (=drover-items-tell=, =drover-handoff-send=: through the queue of scheduled prompts, after a running turn), marks the items sent and ends the review.  =items-set= checks the items as the tool checks them for an agent of the owner (=drover-items-check=): a link must be what it says on the owner, where the list is kept.
+
+An owner without a list loads nothing to answer: with no =items.eld= and =drover-items= not loaded, it answers no review and no list.
+
+** The viewer
+
+A viewer follows each connected peer that tells =items= and is no viewer itself, as that peer grants it access (=drover-remote-items-follow=, on =grant=, so again after each reconnection).  The answer tells the sessions whose lists wait for a review, 200 at most; each message =items= then tells one more, or one less.  Lists ask =drover-list-review-function= for each row, which =drover-items= answers once loaded, and =drover-remote-items--row-review= before.
+
+A list is read when the side list first shows its session, when =g= is typed there, when a message =items= tells a version the viewer does not hold, and again after a reconnection, for the lists read before.  The viewer keeps 50 lists, those read last, in memory.  It writes none.  While a list is being read, the side list shows the one read before, or =Reading its list on Core…=.  Nothing is waited for in a command, a timer or a filter: each request has a callback, and the side list is drawn again from =drover-items-changed-hook=.
+
+| What the user does | What the viewer does                                                                                                                                                                              |
+|--------------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| =<left>=, =<right>= | changes its copy at once, asks =items-goes=, and replaces the copy with the owner's answer to the last change asked.  A refusal is warned of, and the list read again                             |
+| =C-c C-c=          | asks each place here, then =items-apply=; says =Asking Core to tell … where its items go…=, then what the owner did, or one warning with every reason of a refusal                                 |
+| the tools          | =drover-session-items= reads with =wait=; =drover-session-items-set= sends the items as the agent gave them, and a =refused= answer is the tool's refusal, each item named                        |
+
+A peer that tells no =items= is asked nothing.  The side list shows =Core runs an older drover, which keeps no list of items for other hosts: update it there=, on as many lines as that takes, and both tools refuse with the same sentence after the session's key.  A peer not connected, and one that grants only =read= access for a change, are refused by name alike.
+
+** Tests
+
+=drover-remote-items-test.el= runs two batch Emacs, the agent keeping lists and Org files of its own.  It covers: a list read and drawn with the lines and details of a local one, the status and the sessions of a heading as the agent found them; a host of no list loading nothing; where an item goes, three keys at once, kept there and back; a host of =read= access changing nothing, here or there; an apply with a place read here, the prompt there naming =org-id://PLACE-DROVER=, the review over on both; a place the agent does not hold refused, its reason shown, nothing sent; what a phone asks, with a place offered, with none, asked twice; a list changing there shown here, hidden, and after a drop; the review icon, told again after a restart, gone once applied there, and told of the session that comes to show its conversation; both tools, a refusal of the agent's told as the tool's; an older peer named everywhere; what a peer tells decoded, hostile values dropped or cut.
+
 * The phone, as built
 
 The eighth milestone, otherwise than planned: the Android client (=drover-android=, a repository of its own) is no gateway's client but a peer of each host, as hosts are of each other.  It dials each host through SSH, reads spyglass's registration with an exec and opens a =direct-tcpip= channel to its listener, as =ssh -W= does, and speaks spyglass's frames and drover's channel; its key lives in the phone's hardware.  Each host stays the authority over its sessions: the phone's actions are requests, checked against its =:access=.
@@ -968,6 +1059,21 @@ A session's agent, model and effort are its host's to change, as its prompt ther
 A model is named as =catalogs= named it, =[PROVIDER, ID]=, and found among those the host told (=drover-remote--told-model=), so that the session runs this host's record of it. Provider-independent prompt choices resolve against these owner catalogs before crossing the wire as a concrete offering; the owner validates them again. A chosen existing remote session also supplies its pickers from its owner's catalogs. Tests cover argument validation, refused options, and switching before sending.
 
 Another Emacs applies options too, not the phone alone: the proxy of a peer's sessions had =:send= but neither =:apply-options= nor =:settable=, so the options chosen in the prompt for a session of another host were dropped, and =<tab>= (=drover-build-and-go=) never applied there.  It now applies them through the action =options=, before its =:send=, once the owner confirmed (=drover-remote--apply-options-there=); the action needs the peer's capability =opts=, besides =options= among the record's =ops= and an access of =act=.  =:settable= must answer at once, as menus ask it when drawn, so the owner tells it in each record, =set=, rather than in an =opts= request: like =ops=, it is kept beside the record (the peer's =settable=), never in it, and reaches the peer when the record is sent again.  Tests: =drover-remote-test-settable-travels= encodes and notes it, hostile names dropped; =drover-remote-test-build-and-go-there= switches the agent's session to the build agent then sends, in that order there; =drover-remote-test-options-refused-there= warns of options refused and sends anyway.
+
+** Lists of items
+
+The phone reads and changes the list of a session's items with the requests of [[*The items of other hosts' sessions, as built][The items of other hosts' sessions]], as a host does.  Nothing more is built for it on drover's side but =items-places=.  The client lives in =drover-android=, which this repository does not hold: it does not send these requests yet.  What it must do:
+
+| To                              | The phone sends                                                                                                   | It receives                                                                                                              |
+|---------------------------------+-------------------------------------------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------------------|
+| know which sessions ask a review | request =items= {=follow=: true}, on each connection, to a host telling the capability =items=                     | {=reviews=: [[KEY, SINCE]]}; then a message =items= {=k=, =a=, =u=} for each list that changes                            |
+| show a session's items          | request =items= {=key=}, with =wait= true to have every session serving a heading                                  | {=list=}, or {=list=: false}; an error =no such session here=                                                             |
+| keep the list current           | on a message =items= naming the session shown, with =u= other than the list's =u=: request =items= again          | the list                                                                                                                 |
+| change where an item goes       | request =items-goes= {=key=, =n=, =goes=}                                                                         | {=list=}; an error for an item done or decided, for no such item, for =read= access                                       |
+| offer places                    | request =items-places= {=key=}                                                                                    | {=places=: [{=id=, =name=}]}                                                                                              |
+| apply                           | request =items-apply= {=id=, =key=, =places=: [{=n=, =id=}]}, =id= an identifier of its own, the same when asked again | {=sent=, =waits=, =list=}; {=refused=: [lines]} to show; after a reconnection, {=sent=, =waits=} alone: read the list again |
+
+A place is, for each item with =g= of =session=, =fork= or =save=, without =h=, and not sent there already: the =id= of a place the host offers, or =id= false, which leaves the place to the session's agent.  The push tells nothing of lists: a review does not make its session need the user, on the phone as on the desktop (see design.org, Reviews), so the phone learns of a review once connected.
 
 ** Scheduled prompts
 

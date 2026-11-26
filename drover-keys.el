@@ -691,6 +691,7 @@ those scheduled."
 (declare-function drover-items-asked "drover-items" (list))
 (declare-function drover-items-items "drover-items" (list))
 (declare-function drover-items-goes "drover-items" (item))
+(declare-function drover-items-review-since "drover-items" (session))
 
 (defun drover-items-shown-p (session)
   "Return non-nil when SESSION has a list of items (see `drover-items').
@@ -701,15 +702,19 @@ drover starts when its file exists, or as an agent gives a list."
 (defun drover--dispatch-items-description ()
   "Return the description of the side list of items in the dispatch menu.
 How many of the items of the session at point are open follows it, and
-\"review\" while its list waits for the user's review."
-  (if-let* ((session (drover-dispatch-session))
-            ((drover-items-shown-p session))
-            (list (drover-items-list-of session)))
-      (concat "Items "
-              (propertize (format "%d" (seq-count #'drover-items-goes (drover-items-items list)))
-                          'face 'transient-value)
-              (if (drover-items-asked list) (propertize " review" 'face 'transient-value) ""))
-    "Items"))
+\"review\" while its list waits for the user's review.  A session of
+another host whose list was not read from there yet tells the review
+alone, which its host told."
+  (let ((session (drover-dispatch-session)))
+    (if-let* (((drover-items-shown-p session))
+              (list (drover-items-list-of session)))
+        (concat "Items "
+                (propertize (format "%d" (seq-count #'drover-items-goes (drover-items-items list)))
+                            'face 'transient-value)
+                (if (drover-items-asked list) (propertize " review" 'face 'transient-value) ""))
+      (if (and session (featurep 'drover-items) (drover-items-review-since session))
+          (concat "Items" (propertize " review" 'face 'transient-value))
+        "Items"))))
 
 (defvar drover-dispatch-region nil
   "The text of the region where the dispatch menu was called, or nil.

@@ -117,6 +117,22 @@ session to the next.")
 (defconst drover-handoff-place-history-length 30
   "Places `drover-handoff-place-history' keeps at most.")
 
+(defvar drover-handoff-places nil
+  "The headings chosen as places, newest first, as plists of :id and :name.
+:id is the Org ID of the heading, :name the place as completion names
+it.  What this host offers a host that cannot read a place as Org's
+refile reads one, such as a phone (see `drover-handoff-note-place').")
+
+(defun drover-handoff-note-place (place)
+  "Note PLACE, a heading chosen as a place, among `drover-handoff-places'.
+PLACE is what `drover-handoff-read-place' returns; the top of a file,
+which has no ID, is not noted."
+  (when-let* ((id (plist-get place :id)))
+    (setq drover-handoff-places
+          (seq-take (cons (list :id id :name (plist-get place :name))
+                          (seq-remove (lambda (other) (equal (plist-get other :id) id)) drover-handoff-places))
+                    drover-handoff-place-history-length))))
+
 ;;;; Places of headings
 
 (defun drover-handoff--place-buffer (session)
@@ -209,6 +225,7 @@ saying why; so is the place offered when it is no longer one."
           (if-let* ((refusal (drover-handoff--place-refusal location by-id)))
               (setq why refusal)
             (setq place (drover-handoff--place-of location))
+            (drover-handoff-note-place place)
             (setq drover-handoff-place-history
                   (seq-take (cons (car location) (delete (car location) drover-handoff-place-history))
                             drover-handoff-place-history-length))))))

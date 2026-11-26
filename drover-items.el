@@ -48,8 +48,14 @@
 ;; An agent may ask the user to review its list.  The session does not
 ;; need the user for it: its row shows an icon in drover's lists (see
 ;; `drover-list-review-function'), and the side list says so, until the
-;; choices are applied.  The lists of the sessions of other hosts are
-;; their hosts' to keep, and are neither kept nor shown here.
+;; choices are applied.
+;;
+;; The list of a session of another host is its host's to keep.  This
+;; host reads it from there and shows it as its own, asks that host for
+;; each change, where an item goes and the choices applied, and is told
+;; as it changes there (see `drover-remote-items').  It is kept here by
+;; the session's own key, in memory, as its host told it last: each
+;; item with the status, the heading and the sessions its host found.
 
 ;;; Code:
 
@@ -73,6 +79,13 @@
 (unless (and (boundp 'drover-core-generation) (>= drover-core-generation 34))
   (load "drover-core" nil t))
 
+(declare-function drover-remote-items-list "drover-remote-items" (key))
+(declare-function drover-remote-items-state "drover-remote-items" (session))
+(declare-function drover-remote-items-read "drover-remote-items" (session &optional callback wait))
+(declare-function drover-remote-items-review-since "drover-remote-items" (session))
+(declare-function drover-remote-items-refusal "drover-remote-items" (session &optional action))
+(declare-function drover-remote-items-set-goes "drover-remote-items" (session number goes))
+(declare-function drover-remote-items-apply "drover-remote-items" (session places callback))
 (declare-function drover-prompt--chosen-target "drover-prompt" (&optional buffer))
 
 ;;;; Options
@@ -229,6 +242,13 @@ started longer ago (see `drover-keep-fetched').")
 ;; user said it goes; :place, where its heading goes, a place of
 ;; `drover-handoff-read-place'; :sent, (GOES . TIME) once the session
 ;; was told; :created, :updated.
+;;
+;; The list of a session of another host, as its host told it, has
+;; :host, that host's name, and each of its items :there, a plist of
+;; what that host found: :found, whether it found the heading, and
+;; :sessions, those serving the heading, each a plist of :key, its key
+;; here when this host can name it, :host, :title, :status and
+;; :archived.  Its :status is the one that host computed.
 
 (cl-defstruct (drover-items--table (:constructor drover-items--table-make)
                                    (:copier nil))
@@ -374,18 +394,34 @@ Never over a file that did not read."
     (error (drover-warn "The lists of items were not kept: %s" (drover-error-message err)))))
 
 (defun drover-items--key (session)
-  "Return the key SESSION's list is kept by, its conversation's."
-  (drover--conversation-key session))
+  "Return the key SESSION's list is kept by.
+Its conversation's, on this host.  The list of a session of another
+host is kept there, by its conversation there: here it goes by the
+session's own key, which names that host."
+  (if (drover-session-host session)
+      (drover-session-key session)
+    (drover--conversation-key session)))
+
+(defun drover-items--there-p (key)
+  "Return non-nil when KEY is the key of a list another host keeps.
+That is the key here of a session of that host, whose identifier is its
+owner's key (see `drover-items--key')."
+  (consp (cdr-safe key)))
 
 (defun drover-items--list (key)
-  "Return the list of the conversation KEY, or nil."
-  (gethash key (drover-items--table-lists (drover-items-load))))
+  "Return the list of KEY, or nil.
+KEY is the key of a conversation of this host, or of a session of
+another, whose list is the one its host told last (see
+`drover-remote-items-list')."
+  (if (drover-items--there-p key)
+      (and (featurep 'drover-remote-items) (drover-remote-items-list key))
+    (gethash key (drover-items--table-lists (drover-items-load)))))
 
 (defun drover-items-list-of (session)
   "Return the list of SESSION, a plist, or nil when it has none.
-A session of another host has none here: its host keeps it."
-  (and session (not (drover-session-host session))
-       (drover-items--list (drover-items--key session))))
+The list of a session of another host is the one its host, which keeps
+it, told last: nil until it was read from there."
+  (and session (drover-items--list (drover-items--key session))))
 
 (defun drover-items-items (list)
   "Return the items of LIST, oldest first."
@@ -400,25 +436,49 @@ A session of another host has none here: its host keeps it."
   (seq-find (lambda (item) (eql (plist-get item :id) number)) (plist-get list :items)))
 
 (defun drover-items-p (session)
-  "Return non-nil when SESSION has a list of items here.
-Cheap: the menu asks it of the session at point."
-  (and (drover-items--loaded-p)
+  "Return non-nil when SESSION has a list of items, as this host knows.
+Cheap: the menu asks it of the session at point.  A session of another
+host has one once its host told it."
+  (and session
+       (or (drover-session-host session) (drover-items--loaded-p))
        (drover-items-list-of session)
        t))
 
 ;;;; Items
 
+(defun drover-items--there (item)
+  "Return what the host keeping ITEM told of it, a plist, or nil.
+Nil for an item of a list of this host.  See the plist of lists."
+  (plist-get item :there))
+
 (defun drover-items-heading-info (item)
   "Return what the heading of ITEM tells, of `drover-task-org-read', or nil.
 Nil for an item without a heading, or one not found in the buffers
-visiting files nor in those the ID locations name."
-  (when-let* ((id (plist-get item :heading)))
+visiting files nor in those the ID locations name; and for an item of
+another host's list, whose heading that host reads (see
+`drover-items-heading-told')."
+  (when-let* ((id (plist-get item :heading))
+              ((not (drover-items--there item))))
     (drover-task-info id)))
+
+(defun drover-items-heading-told (item)
+  "Return what is known of the heading of ITEM, as (TITLE . FOUND), or nil.
+Nil for an item without a heading.  TITLE is its title as it reads now,
+else as it read last, or nil; FOUND is non-nil when the heading was
+found, by this host for an item of its own, else by the host keeping
+ITEM."
+  (when (plist-get item :heading)
+    (if-let* ((there (drover-items--there item)))
+        (cons (plist-get item :heading-title) (and (plist-get there :found) t))
+      (if-let* ((info (drover-items-heading-info item)))
+          (cons (plist-get info :title) t)
+        (cons (plist-get item :heading-title) nil)))))
 
 (defun drover-items-item-status (item)
   "Return the status of ITEM, one of `drover-items-statuses'.
 That of its heading, when it has one found (see
-`drover-task-org-status'), else the status kept."
+`drover-task-org-status'), else the status kept.  An item of another
+host's list has the status that host told, computed there so."
   (if-let* ((info (drover-items-heading-info item)))
       (drover-task-org-status info)
     (plist-get item :status)))
@@ -467,20 +527,35 @@ See `drover-items-heading-sessions'."
   `(let ((drover-items--serving (or drover-items--serving (drover-items--serving-table))))
      ,@body))
 
+(defun drover-items--told-session (told)
+  "Return the session TOLD names, a session another host told serves a heading.
+TOLD is a plist of :key, :host, :title, :status and :archived (see the
+plist of lists).  The record this host lists for it, when it lists
+one; else a record made of what was told, of no index."
+  (let ((key (plist-get told :key)))
+    (or (and key (drover-index-session key))
+        (drover-session-create :backend (car key) :id (cdr key) :host (plist-get told :host)
+                               :title (plist-get told :title) :status (plist-get told :status)
+                               :archived (plist-get told :archived)))))
+
 (defun drover-items-heading-sessions (item)
   "Return the sessions serving the heading of ITEM.
 The live ones, most recent first, then those archived since and the
 older ones drover knows: a session that took an item is archived once
 it is done, and still tells where the item went.  One its backend
 archived is known once the archived sessions were fetched (see
-`drover-items-want-archived')."
-  (when-let* ((info (drover-items-heading-info item)))
-    (if drover-items--serving
-        (seq-uniq (append (gethash (plist-get info :id) drover-items--serving)
-                          (and (plist-get info :orig-id)
-                               (gethash (plist-get info :orig-id) drover-items--serving)))
-                  #'eq)
-      (drover-task-sessions info t))))
+`drover-items-want-archived').  An item of another host's list has
+those that host told, as this host lists them when it does (see
+`drover-items--told-session')."
+  (if-let* ((there (drover-items--there item)))
+      (mapcar #'drover-items--told-session (plist-get there :sessions))
+    (when-let* ((info (drover-items-heading-info item)))
+      (if drover-items--serving
+          (seq-uniq (append (gethash (plist-get info :id) drover-items--serving)
+                            (and (plist-get info :orig-id)
+                                 (gethash (plist-get info :orig-id) drover-items--serving)))
+                    #'eq)
+        (drover-task-sessions info t)))))
 
 (defun drover-items-want-archived (list)
   "Have drover keep the archived sessions fetched, for the headings of LIST.
@@ -489,7 +564,8 @@ fetched from each backend whose last fetch started more than
 `drover-items-archived-fetch-age' seconds ago, and kept from then on,
 as a search keeps them (see `drover-keep-fetched').  Return non-nil
 while a fetch is awaited."
-  (when (seq-some (lambda (item) (plist-get item :heading)) (plist-get list :items))
+  (when (and (not (plist-get list :host))
+             (seq-some (lambda (item) (plist-get item :heading)) (plist-get list :items)))
     (drover-keep-fetched '(archived) drover-items-archived-fetch-age)
     (drover-fetch-pending-p 10)))
 
@@ -503,17 +579,35 @@ while a fetch is awaited."
 (defun drover-items--refresh (list)
   "Bring the statuses of the items of LIST with a heading up to date.
 As their headings tell them now (see `drover-items-item-status'), and
-the titles of those headings; return non-nil when one changed."
+the titles of those headings; return non-nil when one changed, LIST
+then changed now.  The list of another host is as that host told it."
   (let ((changed nil))
-    (dolist (item (plist-get list :items))
-      (when-let* ((info (drover-items-heading-info item)))
-        (let ((status (drover-task-org-status info))
-              (title (and (stringp (plist-get info :title)) (drover-bound-line (plist-get info :title) 300))))
-          (unless (and (eq status (plist-get item :status)) (equal title (plist-get item :heading-title)))
-            (setf (plist-get item :status) status
-                  (plist-get item :heading-title) title)
-            (setq changed t)))))
+    (unless (plist-get list :host)
+      (dolist (item (plist-get list :items))
+        (when-let* ((info (drover-items-heading-info item)))
+          (let ((status (drover-task-org-status info))
+                (title (and (stringp (plist-get info :title)) (drover-bound-line (plist-get info :title) 300))))
+            (unless (and (eq status (plist-get item :status)) (equal title (plist-get item :heading-title)))
+              (setf (plist-get item :status) status
+                    (plist-get item :heading-title) title)
+              (setq changed t)))))
+      (when changed
+        (setf (plist-get list :updated) (float-time))))
     changed))
+
+(defvar drover-items--drawing nil
+  "Non-nil while the side list is drawn.
+A list found changed then, the status of a heading, is told without
+drawing the side list again (see `drover-items--told-changed').")
+
+(defun drover-items--told-changed (list)
+  "Tell that LIST changed as its headings were read again, and keep it.
+`drover-items-changed-hook' runs, for the hosts following this host's
+lists; the side list, which reads the headings as it draws, is not
+drawn again for it."
+  (drover-items--keep)
+  (let ((drover-items--drawing t))
+    (drover-run-hook-reporting 'drover-items-changed-hook (plist-get list :key))))
 
 (defun drover-items-find-headings (list callback)
   "Look for the headings of LIST found nowhere yet, then call CALLBACK.
@@ -521,15 +615,16 @@ With no argument, at once when every heading is in a buffer visiting
 its file or a file the ID locations name, else once ripgrep looked for
 the others (see `drover-task-org-find').  The statuses of the items
 are brought up to date then, and kept."
-  (let* ((ids (seq-uniq (seq-keep (lambda (item)
-                                    (and (plist-get item :heading)
-                                         (null (drover-items-heading-info item))
-                                         (plist-get item :heading)))
-                                  (plist-get list :items))))
+  (let* ((ids (and (not (plist-get list :host))
+                   (seq-uniq (seq-keep (lambda (item)
+                                         (and (plist-get item :heading)
+                                              (null (drover-items-heading-info item))
+                                              (plist-get item :heading)))
+                                       (plist-get list :items)))))
          (left (length ids))
          (finish (lambda ()
                    (when (drover-items--refresh list)
-                     (drover-items--keep))
+                     (drover-items--told-changed list))
                    (funcall callback))))
     (if (null ids)
         (funcall finish)
@@ -550,11 +645,15 @@ are brought up to date then, and kept."
 (defun drover-items-review-since (session)
   "Return since when the list of SESSION waits for the user's review, or nil.
 The value of `drover-list-review-function', called for every row a list
-draws: a lookup, and nil until the lists were read."
-  (and (drover-items--loaded-p)
-       (not (drover-session-host session))
-       (plist-get (gethash (drover--conversation-key session) (drover-items--table-lists drover-items--table))
-                  :asked)))
+draws: a lookup, and nil until the lists were read.  A session of
+another host tells what its host told of its reviews (see
+`drover-remote-items-review-since')."
+  (if (drover-session-host session)
+      (and (featurep 'drover-remote-items)
+           (drover-remote-items-review-since session))
+    (and (drover-items--loaded-p)
+         (plist-get (gethash (drover--conversation-key session) (drover-items--table-lists drover-items--table))
+                    :asked))))
 
 (defun drover-items--changed (key)
   "Note that the list of the conversation KEY changed: tell views and lists.
@@ -821,7 +920,11 @@ room for new ones past `drover-items-limit', the oldest first.  With
 REVIEW, the user is asked to review the list, unless asked already:
 the rows of SESSION show so (see `drover-items-review-since'), and
 SESSION needs the user no more for it.  The file is written before this
-returns; signal an error, keeping nothing, when it cannot be."
+returns; signal an error, keeping nothing, when it cannot be.  SESSION
+is one of this host: the list of another's is given to its host."
+  (when (drover-session-host session)
+    (error "The list of %s is kept on %s" (drover-session-display-title session)
+           (drover-host-label (drover-session-host session))))
   (let* ((table (drover-items-load))
          (key (drover-items--key session))
          (old (gethash key (drover-items--table-lists table)))
@@ -880,8 +983,9 @@ returns; signal an error, keeping nothing, when it cannot be."
   "The section of an item in the side list of items; its value is its number.")
 
 (defvar-local drover-items--view-key nil
-  "The key of the conversation whose list the side list shows, or nil.
-Nil while it shows no session, or one of another host.")
+  "The key of the list the side list shows, or nil while it shows no session.
+The key of a conversation of this host, or of a session of another (see
+`drover-items--key').")
 
 (defvar-local drover-items--view-session nil
   "The key of the session the side list shows the list of, or nil.")
@@ -1091,7 +1195,7 @@ What its line cuts or leaves out: its title, unless WHOLE, where it
 goes and its status in words, its next step, its note, its link, its
 heading, the sessions serving it and the place of its heading.  TEXT
 takes at most LINES lines, wrapped; FACE, if any, is that of TEXT."
-  (let ((info (drover-items-heading-info item))
+  (let ((told (drover-items-heading-told item))
         (details nil))
     (cl-flet ((add (label text lines &optional face)
                 (when (and text (not (string-blank-p text)))
@@ -1106,11 +1210,11 @@ takes at most LINES lines, wrapped; FACE, if any, is that of TEXT."
       (add "Link" (when-let* ((link (plist-get item :link)))
                     (if (cdr link) (concat (cdr link) "\n" (car link)) (car link)))
            4)
-      (add "Heading" (when-let* ((id (plist-get item :heading)))
-                       (if info
-                           (plist-get info :title)
-                         (concat (or (plist-get item :heading-title) id) ", not found")))
-           2 (and (not info) 'drover-dim))
+      (add "Heading" (when told
+                       (if (cdr told)
+                           (or (car told) (plist-get item :heading))
+                         (concat (or (car told) (plist-get item :heading)) ", not found")))
+           2 (and (not (cdr told)) 'drover-dim))
       (dolist (session (drover-items-heading-sessions item))
         (add "Session" (concat (drover-items--session-glyph session) " "
                                (drover-list--one-line (drover-session-display-title session)))
@@ -1204,9 +1308,10 @@ Cut to METRICS."
 
 (defun drover-items--seek (list)
   "Look for the headings of the items of LIST found nowhere yet.
-Once for each session shown; each found has the side list drawn again."
+Once for each session shown; each found has the side list drawn again.
+The headings of another host's list are that host's to look for."
   (let ((buffer (current-buffer)))
-    (dolist (item (plist-get list :items))
+    (dolist (item (and (not (plist-get list :host)) (plist-get list :items)))
       (when-let* ((id (plist-get item :heading))
                   ((not (gethash id drover-items--sought)))
                   ((null (drover-items-heading-info item))))
@@ -1223,8 +1328,9 @@ Once for each session shown; each found has the side list drawn again."
   "Draw the side list anew for the session it shows, point kept on its item.
 The session's line, then, while its list waits for a review, a line
 saying so, then a line per item (see `drover-items--line'), its details
-under it, hidden unless they showed; a session without a list, or of
-another host, has one line saying so."
+under it, hidden unless they showed; a session without a list has one
+line saying so, and so has a session of another host whose list is not
+read yet, or cannot be (see `drover-items--there-note')."
   (let* ((inhibit-read-only t)
          ;; Drawing, often from a timer, must not end the user's region.
          (deactivate-mark nil)
@@ -1242,7 +1348,7 @@ another host, has one line saying so."
     (mapc #'drover-list--set-up-side-window windows)
     (drover-list--measure-begin)
     (when (and list (drover-items--refresh list))
-      (drover-items--keep))
+      (drover-items--told-changed list))
     (when list
       (drover-items-want-archived list))
     (when record
@@ -1269,11 +1375,10 @@ another host, has one line saying so."
             (insert (drover-items--session-line record (or drover-items--view-title (plist-get list :title)) metrics)
                     "\n")
             (cond
-             ((and record (drover-session-host record))
-              (insert (drover-items--note-line (format "Its list is kept on %s"
-                                                       (drover-host-label (drover-session-host record)))
-                                               metrics)
-                      "\n"))
+             ((and (null list) record (drover-session-host record))
+              ;; Why another host tells no list may take several lines.
+              (dolist (line (drover-list--wrap (drover-items--there-note record) (plist-get metrics :width) 6))
+                (insert (drover-face line 'drover-dim) "\n")))
              ((null items)
               (insert (drover-items--note-line "No items" metrics) "\n"))
              (t
@@ -1321,9 +1426,11 @@ Nil otherwise."
     buffer))
 
 (defun drover-items--refresh-views (key)
-  "Draw the side list again when it shows the list of the conversation KEY.
-On `drover-items-changed-hook'.  Hidden, it is drawn as it is shown again."
-  (when-let* ((buffer (drover-items--buffer))
+  "Draw the side list again when it shows the list of KEY.
+On `drover-items-changed-hook'.  Hidden, it is drawn as it is shown
+again; while it is drawn, it is not drawn anew."
+  (when-let* (((not drover-items--drawing))
+              (buffer (drover-items--buffer))
               ((equal (buffer-local-value 'drover-items--view-key buffer) key)))
     (with-current-buffer buffer
       (if (drover-items--shown-p)
@@ -1384,8 +1491,13 @@ depend on, and the highlight of its row at point.  On its
 
 (defun drover-items--revert (&rest _)
   "Read the headings of the items again, and draw the side list anew.
-The value of `revert-buffer-function' in the side list."
+The value of `revert-buffer-function' in the side list.  The list of a
+session of another host is read from its host again, and drawn once it
+answered."
   (clrhash drover-items--sought)
+  (when-let* ((record (drover-items--view-record))
+              ((drover-session-host record)))
+    (drover-items--read-there record))
   (drover-items--draw))
 
 ;;;;; The session the user is on
@@ -1457,17 +1569,36 @@ menu acts on it from a buffer telling no session."
         (with-selected-window window
           (drover-session-at-point t)))))
 
+(defun drover-items--there-note (session)
+  "Return the line the side list shows instead of the list of SESSION.
+SESSION is one of another host, whose list does not show: it is being
+read from its host, or cannot be, and why (see
+`drover-remote-items-state'); else it has none."
+  (if (featurep 'drover-remote-items)
+      (or (drover-remote-items-state session) "No items")
+    (format "Its list is kept on %s" (drover-host-label (drover-session-host session)))))
+
+(defun drover-items--read-there (session)
+  "Ask the host of SESSION, another host's, for its list of items.
+Without waiting: the side list is drawn again once it answered (see
+`drover-remote-items-read')."
+  (when (and (featurep 'drover-remote) (require 'drover-remote-items nil t))
+    (drover-remote-items-read session)))
+
 (defun drover-items--show-session (session)
   "Have the side list, the current buffer, show the list of SESSION.
-And draw it."
+And draw it.  The list of a session of another host is read from its
+host meanwhile: what that host told last shows until it answers."
   (setq drover-items--view-session (drover-session-key session)
-        drover-items--view-key (and (not (drover-session-host session)) (drover-items--key session))
+        drover-items--view-key (drover-items--key session)
         drover-items--view-title (drover-bound-line (format "%s" (drover-session-display-title session)) 200))
   (clrhash drover-items--sought)
   ;; Another list: what showed its details, and where point was, are not its own.
   (let ((inhibit-read-only t))
     (erase-buffer)
     (setq magit-root-section nil))
+  (when (drover-session-host session)
+    (drover-items--read-there session))
   (drover-items--draw))
 
 (defun drover-items--follow ()
@@ -1550,19 +1681,33 @@ On the `kill-buffer-hook' and `change-major-mode-hook' of the side list."
   (interactive "p" drover-items-mode)
   (drover-items--move (- (or count 1))))
 
-(defun drover-items--set-goes (item goes)
-  "Say ITEM goes to GOES, the user's choice, and keep it."
-  (let* ((list (drover-items--list drover-items--view-key))
+(defun drover-items-set-goes (key number goes)
+  "Say the item NUMBER of the list of KEY goes to GOES, and keep it.
+The user's choice, GOES one of `drover-items-destinations'; KEY is the
+key of a conversation of this host.  Return the list."
+  (let* ((list (drover-items--list key))
          (now (float-time)))
     (setf (plist-get list :items)
           (mapcar (lambda (other)
-                    (if (eql (plist-get other :id) (plist-get item :id))
+                    (if (eql (plist-get other :id) number)
                         (plist-put (plist-put other :goes goes) :updated now)
                       other))
                   (plist-get list :items)))
     (setf (plist-get list :updated) now)
     (drover-items--keep)
-    (drover-items--changed drover-items--view-key)))
+    (drover-items--changed key)
+    list))
+
+(defun drover-items--set-goes (item goes)
+  "Say ITEM, of the list the side list shows, goes to GOES, the user's choice.
+The list of a session of another host is its host's to change: it is
+asked to, and what it keeps shows once it answered (see
+`drover-remote-items-set-goes')."
+  (if (drover-items--there-p drover-items--view-key)
+      (drover-remote-items-set-goes (or (drover-items--view-record)
+                                        (user-error "The session of this list is gone"))
+                                    (plist-get item :id) goes)
+    (drover-items-set-goes drover-items--view-key (plist-get item :id) goes)))
 
 (defun drover-items--turn (step)
   "Have the item at point go STEP places further among the destinations."
@@ -1666,8 +1811,9 @@ than the click it starts with, as in the sidebar."
 (define-derived-mode drover-items-mode magit-section-mode "Drover items"
   "Major mode of the side list of the items of a session.
 \\<drover-items-mode-map>
-It shows the list of the session you are on, in the look of the
-sidebar: the session, then an item a line.  Each line begins with the
+It shows the list of the session you are on, of this host or another,
+in the look of the sidebar: the session, then an item a line.  Each
+line begins with the
 icon of where the item goes (see `drover-items-destination-icons'),
 then the icon of its status (`drover-items-status-icons'), its number
 and its title; at its end, the glyphs of the sessions serving its
@@ -1748,8 +1894,9 @@ the list of drover shown on the frame.  It then follows the session you
 are on as you move to a session's buffer, to the prompt or to a list,
 and keeps what it shows elsewhere (see `drover-items--session-on').
 See `drover-items-mode' for what it shows and its keys.  A session
-without a list has one line saying so, and so has a session of another
-host, which keeps its list."
+without a list has one line saying so.  The list of a session of
+another host shows as one of this host: its host keeps it, and takes
+each change."
   (interactive "P")
   (let ((window (drover-items--side-window)))
     (cond (select
@@ -1780,11 +1927,14 @@ yet: one going to a subagent gets none."
        (not (plist-get item :heading))))
 
 (defun drover-items--place-text (place)
-  "Return where a heading goes, PLACE, as the prompt's items tell it."
-  (format "under `%s` (%s)" (plist-get place :uri)
-          (if (plist-get place :id)
-              (format "the heading \"%s\"" (plist-get place :name))
-            (format "the top of %s" (abbreviate-file-name (plist-get place :file))))))
+  "Return where a heading goes, PLACE, as the prompt's items tell it.
+Nil, a place left to the agent, as a host that reads no place leaves
+it, is where the work keeps its tasks (see `drover-handoff-place-text')."
+  (cond ((null place) "where this work keeps its tasks")
+        ((plist-get place :id)
+         (format "under `%s` (the heading \"%s\")" (plist-get place :uri) (plist-get place :name)))
+        (t (format "under `%s` (the top of %s)" (plist-get place :uri)
+                   (abbreviate-file-name (plist-get place :file))))))
 
 (defun drover-items--prompt-item (item)
   "Return the lines of ITEM in the prompt telling where items go."
@@ -1826,6 +1976,74 @@ KEY is the key of the list's conversation."
                   (plist-get list :items)))
     (drover-items--keep)))
 
+(defun drover-items-tell (session key)
+  "Tell SESSION, of this host, where the items of its list, of KEY, go.
+One prompt tells it of each item it is to be told of (see
+`drover-items--to-send-p' and `drover-items-prompt'), as the prompt of
+a hand-off goes (see `drover-handoff-send').  Those items are marked
+sent, and the list no longer waits for a review; with none to tell of,
+nothing is sent, and the review is over all the same.  Return (COUNT
+. WAITS): how many items SESSION is told of, and non-nil when its
+prompt waits for its turn to end."
+  (let* ((list (drover-items--list key))
+         (now (float-time))
+         (sending (seq-filter #'drover-items--to-send-p (plist-get list :items)))
+         (waits (and sending
+                     (drover-handoff-send session (drover-items-prompt-text sending session)
+                                          drover-items-origin))))
+    (setf (plist-get list :items)
+          (mapcar (lambda (item)
+                    (if (memq item sending)
+                        (plist-put item :sent (cons (drover-items-goes item) now))
+                      item))
+                  (plist-get list :items)))
+    (setf (plist-get list :asked) nil
+          (plist-get list :updated) now)
+    (drover-items--keep)
+    (drover-items--changed key)
+    (cons (length sending) waits)))
+
+(defun drover-items--told-message (title count waits)
+  "Say that the session TITLE is told where COUNT items go.
+WAITS is non-nil when its prompt waits for its turn to end."
+  (if (> count 0)
+      (drover-message "%s is told where %d item%s go%s%s" title count
+                      (if (> count 1) "s" "") (if (> count 1) "" "es")
+                      (if waits ", once its turn ends" ""))
+    (drover-message "No item of %s is to be told of: nothing sent" title)))
+
+(defun drover-items--place-prompt (item)
+  "Return the question asking where the heading of ITEM goes."
+  (format "Item %d, %s, its heading goes under" (plist-get item :id)
+          (drover-bound-line (plist-get item :title) 50)))
+
+(defun drover-items--apply-there (session title list)
+  "Have the host of SESSION, another host's, apply where the items of LIST go.
+TITLE names SESSION.  The place of each heading is asked here, among
+this host's refile targets, a heading alone: it goes to SESSION's host
+by its Org ID, which that host finds it by (see
+`drover-handoff-read-place').  That host then keeps the places, tells
+its session and answers, without being waited for: what it did is told
+once it answers, and a place it cannot use, or any other refusal, with
+its reason (see `drover-remote-items-apply')."
+  (let ((host (drover-host-label (drover-session-host session))))
+    (when-let* ((why (if (and (featurep 'drover-remote) (require 'drover-remote-items nil t))
+                         (drover-remote-items-refusal session "apply")
+                       (format "%s runs on %s, and `drover-remote-mode' is off" title host))))
+      (user-error "%s" why))
+    (let ((places (mapcar (lambda (item)
+                            (cons (plist-get item :id)
+                                  (drover-handoff-read-place (drover-items--place-prompt item) session t)))
+                          (seq-filter #'drover-items--needs-place-p (plist-get list :items)))))
+      (drover-message "Asking %s to tell %s where its items go…" host title)
+      (drover-remote-items-apply
+       session places
+       (lambda (result)
+         (drover-with-reporting "items of another host"
+           (if-let* ((why (plist-get result :failure)))
+               (drover-warn "%s is not told where its items go: %s" title why)
+             (drover-items--told-message title (plist-get result :count) (plist-get result :waits)))))))))
+
 (defun drover-items-apply ()
   "Apply where the items of the list the side list shows go.
 Where the heading of each item leaving the session goes, with no
@@ -1837,45 +2055,35 @@ heading goes (see `drover-items-prompt'), as the prompt of a hand-off
 goes: out of every window, never over a draft, and once a running turn
 ended.  The items it told of are marked sent, and the list no longer
 waits for a review.  With no item to tell of, nothing is sent: the
-review is over.  Drover writes no heading."
+review is over.  Drover writes no heading.
+
+The list of a session of another host is applied by its host, which
+keeps it: the places are asked here, headings alone, and go there by
+their Org IDs; that host tells its session, and what it did, or why it
+refused, is told once it answers (see `drover-items--apply-there')."
   (interactive nil drover-items-mode)
   (let* ((key (or drover-items--view-key (user-error "No list of items here")))
          (session (or (drover-items--view-record) (user-error "The session of this list is gone")))
          (title (drover-bound-line (format "%s" (drover-session-display-title session)) 80))
-         (list (or (drover-items--list key) (user-error "%s has no list of items" title))))
-    ;; Refused before any place is asked: a session no prompt reaches.
-    (unless (drover-supports-p session :submit)
-      (user-error "%s takes no prompt from drover: its harness, %s, cannot be told where its items go"
-                  title (drover-backend-label (drover-session-backend session))))
-    (drover-schedule-session-target session)
-    (drover-items--refresh list)
-    (dolist (item (seq-filter #'drover-items--needs-place-p (plist-get list :items)))
-      (drover-items--put key (plist-get item :id) :place
-                         (drover-handoff-read-place
-                          (format "Item %d, %s, its heading goes under" (plist-get item :id)
-                                  (drover-bound-line (plist-get item :title) 50))
-                          session)))
-    (let* ((list (drover-items--list key))
-           (now (float-time))
-           (sending (seq-filter #'drover-items--to-send-p (plist-get list :items)))
-           (waits (and sending
-                       (drover-handoff-send session (drover-items-prompt-text sending session)
-                                            drover-items-origin))))
-      (setf (plist-get list :items)
-            (mapcar (lambda (item)
-                      (if (memq item sending)
-                          (plist-put item :sent (cons (drover-items-goes item) now))
-                        item))
-                    (plist-get list :items)))
-      (setf (plist-get list :asked) nil
-            (plist-get list :updated) now)
-      (drover-items--keep)
-      (drover-items--changed key)
-      (if sending
-          (drover-message "%s is told where %d item%s go%s%s" title (length sending)
-                          (if (cdr sending) "s" "") (if (cdr sending) "" "es")
-                          (if waits ", once its turn ends" ""))
-        (drover-message "No item of %s is to be told of: nothing sent" title)))))
+         (list (or (drover-items--list key)
+                   ;; Another host's, not read: why, as the side list says.
+                   (user-error "%s" (or (and (drover-session-host session)
+                                             (featurep 'drover-remote-items)
+                                             (drover-remote-items-state session))
+                                        (format "%s has no list of items" title))))))
+    (if (drover-session-host session)
+        (drover-items--apply-there session title list)
+      ;; Refused before any place is asked: a session no prompt reaches.
+      (unless (drover-supports-p session :submit)
+        (user-error "%s takes no prompt from drover: its harness, %s, cannot be told where its items go"
+                    title (drover-backend-label (drover-session-backend session))))
+      (drover-schedule-session-target session)
+      (drover-items--refresh list)
+      (dolist (item (seq-filter #'drover-items--needs-place-p (plist-get list :items)))
+        (drover-items--put key (plist-get item :id) :place
+                           (drover-handoff-read-place (drover-items--place-prompt item) session)))
+      (pcase-let ((`(,count . ,waits) (drover-items-tell session key)))
+        (drover-items--told-message title count waits)))))
 
 ;;;; Restoring
 
@@ -1904,7 +2112,9 @@ drawn again: the backends listed them before the lists were read (see
   "Stop telling lists of reviews, and following the user.
 The lists stay in their file."
   (when (eq drover-list-review-function #'drover-items-review-since)
-    (setq drover-list-review-function nil))
+    (setq drover-list-review-function
+          ;; The reviews other hosts told are still told.
+          (and (fboundp 'drover-remote-items--row-review) #'drover-remote-items--row-review)))
   (remove-hook 'drover-items-changed-hook #'drover-items--refresh-views)
   (drover-items--unwatch)
   nil)

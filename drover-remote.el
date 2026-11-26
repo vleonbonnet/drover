@@ -110,6 +110,9 @@
 (declare-function drover-remote-goal-answer "drover-remote-goal" (state peer connection message reply))
 (declare-function drover-remote-goal-on-message "drover-remote-goal" (peer message))
 (declare-function drover-remote-goal-follow "drover-remote-goal" (peer))
+(declare-function drover-remote-items-answer "drover-remote-items" (state peer connection message reply))
+(declare-function drover-remote-items-on-message "drover-remote-items" (peer message))
+(declare-function drover-remote-items-follow "drover-remote-items" (peer))
 (defvar drover-goal-mode)
 (declare-function drover-schedule-enqueue "drover-schedule" (target chosen text))
 (declare-function drover-schedule-when "drover-schedule" (text &optional now))
@@ -345,7 +348,7 @@ that a peer running an older drover keeps working without it.")
 (defconst drover-remote-capabilities
   '("actions" "bye" "grant" "mirror" "opencode" "unsent" "search" "clone" "review" "new" "usage" "task"
     "push" "opts" "dirs" "conv" "jobs" "queued" "changes" "wrap-up" "send-archived" "waits" "handed"
-    "search-query" "prompts" "permissions" "jobs-when" "goals" "task-agent")
+    "search-query" "prompts" "permissions" "jobs-when" "goals" "task-agent" "items")
   "What this drover adds to its protocol's version, told in its greeting.
 \"actions\": it performs actions on its sessions for its peers, and
 tells which each session allows; \"bye\": its farewells say why it goes
@@ -418,7 +421,14 @@ it runs goals on its sessions for its peers, tells them as they change
 `goals'), and starts a task's session under one (see
 `drover-remote-goal'); \"task-agent\": a request `task' starting a
 session may name the agent it runs (:agent), refused when its harness
-does not offer it.")
+does not offer it; \"items\": it keeps the lists of the items of its
+sessions for its peers (see `drover-remote-items'): it tells one, and
+the sessions whose lists wait for a review (request `items'), each list
+as it changes (message `items'), says where an item goes
+\(`items-goes'), applies the choices, with the places of headings by
+their Org IDs (`items-apply'), keeps the items an agent of the peer
+gives (`items-set'), and offers places to a peer reading none
+\(`items-places').")
 
 (defconst drover-remote-action-batch 100
   "Sessions at most in one request of an action on a peer's sessions.")
@@ -6698,7 +6708,13 @@ when of that peer, opened here once started.  For
                  (not (drover-remote--viewer-p peer))
                  (drover-remote--capable-p peer "goals"))
         (require 'drover-remote-goal)
-        (drover-remote-goal-follow peer))))
+        (drover-remote-goal-follow peer))
+      ;; Its lists of items: the reviews waiting, which rows show.
+      (when (and (eq connection (drover-remote--peer-connection peer))
+                 (not (drover-remote--viewer-p peer))
+                 (drover-remote--capable-p peer "items"))
+        (require 'drover-remote-items)
+        (drover-remote-items-follow peer))))
    ((equal type "bye") (drover-remote--on-bye peer connection message))
    ((equal type "cvc") (drover-remote--cv-stop connection (plist-get message :id) nil))
    ((member type '("cvd" "cve"))
@@ -6708,6 +6724,9 @@ when of that peer, opened here once started.  For
    ((equal type "goals")
     (when (featurep 'drover-remote-goal)
       (drover-remote-goal-on-message peer message)))
+   ((equal type "items")
+    (when (featurep 'drover-remote-items)
+      (drover-remote-items-on-message peer message)))
    ((equal type "fg")
     (when (featurep 'drover-remote-push)
       (drover-remote-push-foreground peer (eq (plist-get message :on) t))))
@@ -6796,6 +6815,9 @@ message `chg'."
         ((or "goals" "goal-checks" "goal-set" "goal-act")
          (require 'drover-remote-goal)
          (drover-remote-goal-answer state peer connection message reply))
+        ((or "items" "items-goes" "items-apply" "items-set" "items-places")
+         (require 'drover-remote-items)
+         (drover-remote-items-answer state peer connection message reply))
         ("triggers" (drover-remote--on-triggers reply))
         ("schedule" (drover-remote--on-schedule state peer key message reply))
         ("unschedule" (drover-remote--on-unschedule peer message reply))

@@ -39,6 +39,9 @@
 ;; as a front end resuming a conversation would, displayed as front ends
 ;; display them.  DROVER_AGENT_UNSHARE is `drover-remote-unshare-delay',
 ;; DROVER_AGENT_PERMISSIONS `drover-permissions-directory'.
+;; On command it keeps lists of items for its sessions, as their agents
+;; give them, and writes Org files of its own for their headings and
+;; places, its ID locations and agenda its own.
 ;; With DROVER_AGENT_OPENCODE set, it runs a fake OpenCode service
 ;; (test/drover-fake-opencode.el), which opencode.el finds as its
 ;; service, and a backend `opencode' of its sessions, which drover's
@@ -85,7 +88,13 @@
 (defvar drover-summary-catch-up)
 (defvar drover-summary-generate-function)
 (defvar drover-changes-delay)
+(defvar org-id-locations-file)
+(defvar org-agenda-files)
+(defvar org-todo-keywords)
 (declare-function drover-summary-mode "drover-summary" (&optional arg))
+(declare-function drover-items-set "drover-items" (session items review))
+(declare-function drover-items-list-of "drover-items" (session))
+(declare-function drover-task-note-session "drover-task" (key id))
 (declare-function drover-fake-opencode-start "drover-fake-opencode" (directory))
 (declare-function drover-fake-opencode-add "drover-fake-opencode" (id title))
 (declare-function drover-fake-opencode-turn "drover-fake-opencode" (id text &optional inbox))
@@ -651,6 +660,57 @@ noted, and their cancellations."
                                                               (or (plist-get goal :peer-task) :false)
                                                               (or (plist-get goal :task) :false)))
                                                     (drover-goal--goals))))))
+      ("org"
+       ;; An Org file NAME of its own directory holding TEXT, visited:
+       ;; the headings its lists of items and their places name.
+       (require 'org)
+       (let ((file (expand-file-name (plist-get args :name)
+                                     (or (getenv "DROVER_AGENT_DIR") default-directory))))
+         (with-temp-file file
+           (insert (plist-get args :text)))
+         (find-file-noselect file)
+         (funcall reply (list :file file))))
+      ("items-set"
+       ;; The list of session ID given ITEMS, as its agent gives them,
+       ;; each [TITLE STATUS HEADING NUMBER], the last two when it has a
+       ;; heading and updates an item; REVIEW asks its user to review it.
+       (require 'drover-items)
+       (drover-changed-now)
+       (drover-items-set
+        (drover-index-session (cons 'fake (plist-get args :id)))
+        (mapcar (lambda (item)
+                  (append (list :title (aref item 0) :status (intern (aref item 1)))
+                          (and (length> item 2) (stringp (aref item 2)) (list :heading (aref item 2)))
+                          (and (length> item 3) (natnump (aref item 3)) (list :id (aref item 3)))))
+                (plist-get args :items))
+        (plist-get args :review))
+       (funcall reply (list :ok t)))
+      ("items"
+       ;; The list of session ID as it keeps it: since when it waits for
+       ;; a review, and each item as [NUMBER TITLE STATUS GOES PLACE SENT].
+       (require 'drover-items)
+       (let* ((record (drover-index-session (cons 'fake (plist-get args :id))))
+              (list (and record (drover-items-list-of record))))
+         (funcall reply
+                  (list :asked (or (plist-get list :asked) :false)
+                        :items (vconcat
+                                (mapcar (lambda (item)
+                                          (vector (plist-get item :id) (plist-get item :title)
+                                                  (symbol-name (plist-get item :status))
+                                                  (if (plist-get item :goes) (symbol-name (plist-get item :goes)) :false)
+                                                  (or (plist-get (plist-get item :place) :uri) :false)
+                                                  (if (plist-get item :sent)
+                                                      (symbol-name (car (plist-get item :sent)))
+                                                    :false)))
+                                        (plist-get list :items)))))))
+      ("feature"
+       ;; Whether the feature NAME is loaded here.
+       (funcall reply (list :loaded (if (featurep (intern (plist-get args :name))) t :false))))
+      ("task-session"
+       ;; Session ID serves the task of the heading HEADING.
+       (require 'drover-task)
+       (drover-task-note-session (cons 'fake (plist-get args :id)) (plist-get args :heading))
+       (funcall reply (list :ok t)))
       ("hands-on-ret"
        ;; Terminal ID tells, as a claude-code-ide terminal does, that RET
        ;; typed in a peer's mirror hands its session its turn; the peer
@@ -1033,6 +1093,11 @@ A batch Emacs waiting longer does not wake for timers armed meanwhile."
           drover-transcript-engines (append (and (getenv "DROVER_AGENT_CLAUDE") '(claude-code))
                                             (and (getenv "DROVER_AGENT_CODEX") '(codex)))
           drover-refresh-delay 0.02
+          ;; Its headings are those of the Org files a test has it
+          ;; write, never the user's ID locations nor agenda.
+          org-id-locations-file (expand-file-name "id-locations" dir)
+          org-agenda-files nil
+          org-todo-keywords '((sequence "TODO" "WAITING" "|" "DONE" "CANCELED"))
           ;; Kills stay in its kill ring, off the system's clipboard (see
           ;; test/batch-tests.el).
           interprogram-cut-function nil

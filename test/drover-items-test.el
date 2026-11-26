@@ -100,6 +100,7 @@ fixture: TODO, STARTED and WAITING, then DONE and CANCELED."
           (org-refile-targets '((org-agenda-files :maxlevel . 3)))
           (org-refile-history nil)
           (drover-handoff-place-history nil)
+          (drover-handoff-places nil)
           (org-todo-keywords '((sequence "TODO" "STARTED" "WAITING" "|" "DONE" "CANCELED")))
           (drover-task--infos (make-hash-table :test #'equal))
           (drover-task--noted (make-hash-table :test #'equal))
@@ -335,15 +336,20 @@ ITEMS is a list of alists, as JSON objects arrive."
       (should (eq (drover-task-org-status '(:todo "WAITING")) 'open)))))
 
 (ert-deftest drover-items-test-other-hosts ()
-  "The lists of another host's sessions are kept by that host: the tools refuse them."
+  "The list of another host's session is that host's: one this host cannot ask is refused, the host named.
+drover-remote-items-test.el reads and changes the lists of a host that answers."
   (drover-items-test-with-tools
     (let ((there (list (drover-anvil-test-peer-session "ses_1" :engine 'opencode :engine-id "ses_1"))))
       (drover-anvil-test-with-peer there
                                    (drover-backend-changed 'remote:core)
-                                   (should (string-match-p "runs on core, which keeps its list"
+                                   (should (string-match-p "runs on core, which keeps its list: core is not a peer of this host"
                                                            (drover-items-test-refusal '(((title . "A") (status . "open")))
                                                                                       "remote:core/opencode/ses_1")))
-                                   (should (string-match-p "runs on core" (cadr (should-error (drover-anvil--tool-items "remote:core/opencode/ses_1")))))
+                                   (should (string-match-p "runs on core, which keeps its list: core is not a peer"
+                                                           (cadr (should-error (drover-anvil--tool-items "remote:core/opencode/ses_1")))))
+                                   ;; Nothing of it is kept nor shown here.
+                                   (should-not (drover-items-list-of
+                                                (drover-index-session '(remote:core . (opencode . "ses_1")))))
                                    ;; A link to it is to a session drover knows.
                                    (should (drover-items-test-set '(((title . "There") (status . "open")
                                                                      (link . "agent-session://core/opencode/ses_1")))))
@@ -1255,12 +1261,16 @@ window shows; and so while it is itself selected, or a minibuffer is."
         (should (equal (drover-handoff-read-place "Where")
                        (list :uri "org-id://PLACE-DROVER" :name "work.org/Projects/Drover" :file file
                              :id "PLACE-DROVER")))
+        ;; A heading chosen is among those offered a host reading no place.
+        (should (equal drover-handoff-places '((:id "PLACE-DROVER" :name "work.org/Projects/Drover"))))
         (setq answers (list (list "work.org" file nil nil)))
         (should (equal (plist-get (drover-handoff-read-place "Where") :uri)
                        (concat "org-headline://" (string-replace "#" "%23" file))))
         ;; The place chosen last is offered first.
         (should (equal offered '("work.org/Projects/Drover/" nil)))
         (should (equal drover-handoff-place-history '("work.org" "work.org/Projects/Drover/")))
+        ;; The top of a file, which has no ID, is not.
+        (should (length= drover-handoff-places 1))
         ;; For another host's agent, a heading alone: asked again, saying why.
         (setq answers (list (list "work.org" file nil nil)
                             (list "work.org/Projects/Drover/" file nil
