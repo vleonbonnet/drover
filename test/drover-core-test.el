@@ -2066,6 +2066,68 @@ defines Send, and a function failing tells none."
     ;; Without a size, nothing is estimated.
     (should-not (drover-session-context-description (session :context-estimated t)))))
 
+(ert-deftest drover-test-seen-as-looked-at ()
+  "A turn ended is marked seen as the user looks at its session, whatever runs it.
+Done or failed, once per session at most every few seconds; a turn
+running, or a session another frame shows without the focus, is not."
+  (drover-test-with-backend nil
+    (let* ((drover--running t)
+           (drover--seen-asked (make-hash-table :test #'equal))
+           (drover--unseen-failures (make-hash-table :test #'equal))
+           (shown nil)
+           (drover-test-calls nil))
+      (cl-letf (((symbol-function 'drover-looked-at-sessions) (lambda () shown)))
+        (cl-flet ((marked () (prog1 (mapcar #'cadr (seq-filter (lambda (call) (eq (car call) :mark-seen))
+                                                              drover-test-calls))
+                               (setq drover-test-calls nil))))
+          (setq shown (list (drover-test-session "w" :status 'working)
+                            (drover-test-session "i" :status 'idle)))
+          (drover--see-looked-at)
+          (should-not (marked))
+          (setq shown (list (drover-test-session "d" :status 'done)
+                            (drover-test-session "f" :status 'failed)))
+          (drover--see-looked-at)
+          (should (equal (sort (marked) #'string<) '("d" "f")))
+          ;; Asked again only after a while.
+          (drover--see-looked-at)
+          (should-not (marked))
+          (clrhash drover--seen-asked)
+          (let ((drover--running nil))
+            (drover--see-looked-at))
+          (should-not (marked)))))
+    ;; What the user looks at: the selected windows of focused frames.
+    (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) nil)))
+      (should-not (drover-looked-at-sessions)))))
+
+(ert-deftest drover-test-unseen-failure-outlives-success ()
+  "A failure the user did not see stays failed past a later success, until seen."
+  (let ((drover--unseen-failures (make-hash-table :test #'equal)))
+    (cl-flet ((taken (status &optional detail)
+                (drover--with-unseen-failure (drover-test-session "s" :status status :detail detail
+                                                                  :since (if detail 10.0 20.0)))))
+      (should (eq (drover-session-status (taken 'done)) 'done))
+      (should (eq (drover-session-status (taken 'failed "Overloaded")) 'failed))
+      (let ((later (taken 'done)))
+        (should (eq (drover-session-status later) 'failed))
+        (should (equal (drover-session-detail later) "Overloaded"))
+        (should (eql (drover-session-since later) 10.0)))
+      ;; A turn running shows as it is.
+      (should (eq (drover-session-status (taken 'working)) 'working))
+      (should (eq (drover-session-status (taken 'done)) 'failed))
+      ;; Seen, its front end tells it idle: the failure is forgotten.
+      (should (eq (drover-session-status (taken 'idle)) 'idle))
+      (should (eq (drover-session-status (taken 'done)) 'done))
+      ;; Marked seen through drover, too.
+      (taken 'failed "Again")
+      (cl-letf (((symbol-function 'drover--act) #'ignore))
+        (drover-mark-seen (drover-test-session "s" :status 'failed)))
+      (should (eq (drover-session-status (taken 'done)) 'done))
+      ;; Another host's sessions are their owner's.
+      (should (eq (drover-session-status
+                   (drover--with-unseen-failure (drover-test-session "r" :status 'failed :host "core")))
+                  'failed))
+      (should-not (gethash (drover-session-key (drover-test-session "r" :host "core")) drover--unseen-failures)))))
+
 (ert-deftest drover-test-turn-predicates ()
   "Each question asked of a session's turn has one answer, whatever its front end."
   (drover-test-with-backend nil

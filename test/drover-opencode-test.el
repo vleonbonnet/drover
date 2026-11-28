@@ -160,6 +160,8 @@ REFUSAL is the error's message: ELSE gets the `opencode-error' of a
          (drover--changed-all nil)
          (drover--changed-applied nil)
          (drover--index nil)
+         (drover--unseen-failures (make-hash-table :test #'equal))
+         (drover--seen-asked (make-hash-table :test #'equal))
          (drover-changed-hook nil)
          (drover--closing nil)
          (drover--closing-saved nil)

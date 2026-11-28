@@ -65,6 +65,8 @@ isolated, engines read their local state from the throwaway homes of
            (drover--changed-all nil)
            (drover--changed-applied nil)
            (drover--index nil)
+           (drover--unseen-failures (make-hash-table :test #'equal))
+           (drover--seen-asked (make-hash-table :test #'equal))
            (drover-changed-hook nil)
            (drover--closing nil)
            (drover--closing-saved nil)
@@ -270,10 +272,9 @@ effort for a model without effort."
                                (lambda (a b) (string< (car a) (car b))))
                          '((claude-code . -10) (codex . 0) (gemini-cli . 0) (opencode . 10))))
           (should (memq #'drover-agent-shell--setup agent-shell-mode-hook))
-          (should (memq #'drover-agent-shell--window-changed window-selection-change-functions))
-          (should (memq #'drover-agent-shell--window-changed window-buffer-change-functions))
-          (should (advice-function-member-p #'drover-agent-shell--window-changed
-                                            after-focus-change-function))
+          ;; Drover follows the windows, not the backend.
+          (should-not window-selection-change-functions)
+          (should-not window-buffer-change-functions)
           (should (eq (buffer-local-value 'drover-session-at-point-function shell)
                       #'drover-agent-shell--buffer-session))
           (should (= (length (drover-agent-shell-test-subscriptions shell)) 1))
@@ -317,6 +318,8 @@ effort for a model without effort."
         (drover--changed-all nil)
         (drover--changed-applied nil)
         (drover--index nil)
+        (drover--unseen-failures (make-hash-table :test #'equal))
+        (drover--seen-asked (make-hash-table :test #'equal))
         (drover-agent-shell--gemini-registered nil))
     (unwind-protect
         (progn
@@ -1697,9 +1700,10 @@ loading it."
       (drover-agent-shell-test-emit shell 'input-submitted :prompt "again")
       (drover-agent-shell-test-emit shell 'error :code -32603 :message "Overloaded")
       (should (equal (drover-agent-shell-test-status shell) '(failed "Overloaded" nil)))
-      ;; A failure is not hidden by a later success it was not seen before.
+      ;; The shell tells the later success: drover keeps the failure
+      ;; unseen (see `drover--with-unseen-failure').
       (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
-      (should (equal (drover-agent-shell-test-status shell) '(failed "Overloaded" nil)))
+      (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
       (drover-agent-shell--mark-seen (drover-agent-shell-test-session shell))
       (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))
       (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
@@ -1718,32 +1722,43 @@ loading it."
        ,@body)))
 
 (ert-deftest drover-agent-shell-test-status-seen-in-front ()
-  "A turn ending in front of the user is seen; looking at a shell sees its turn."
+  "A turn ending in front of the user is seen, as drover follows the windows.
+Looking at a shell later sees its turn; its viewport is the shell too.
+A frame without the focus shows nothing to the user."
   (drover-agent-shell-test-with
     (let ((shell (drover-agent-shell-test-followed 'claude-code "front"))
-          (viewport (generate-new-buffer "front [viewport]")))
+          (viewport (generate-new-buffer "front [viewport]"))
+          (drover--running t)
+          (drover--seen-asked (make-hash-table :test #'equal))
+          (drover--unseen-failures (make-hash-table :test #'equal)))
       (push viewport drover-agent-shell-test--buffers)
       (drover-agent-shell-test-with-focus shell
         (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+        (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
+        ;; As drover takes the change in.
+        (drover--see-looked-at)
         (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))
       ;; Shown, but in a frame without the focus.
       (save-window-excursion
         (set-window-buffer (selected-window) shell)
         (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
-        (should (equal (drover-agent-shell-test-status shell) '(done nil nil)))
-        (drover-agent-shell--window-changed)
+        (clrhash drover--seen-asked)
+        (drover--see-looked-at)
         (should (equal (drover-agent-shell-test-status shell) '(done nil nil))))
       (drover-agent-shell-test-with-focus shell
-        (drover-agent-shell--window-changed (selected-frame))
+        (drover--see-looked-at)
         (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))
       ;; Its viewport is the shell too.
       (drover-agent-shell-test-emit shell 'turn-complete :stop-reason "end_turn")
+      (clrhash drover--seen-asked)
       (with-current-buffer viewport
         (setq major-mode 'agent-shell-viewport-edit-mode))
-      (drover-agent-shell-test-with-focus viewport
-        (should (drover-agent-shell--focused-p shell))
-        (drover-agent-shell--window-changed)
-        (should (equal (drover-agent-shell-test-status shell) '(idle nil nil)))))))
+      (cl-letf (((symbol-function 'drover-agent-shell--shell-of)
+                 (lambda (buffer) (if (eq buffer viewport) shell buffer)))
+                (drover-shown-session-functions (list #'drover-agent-shell--viewport-session)))
+        (drover-agent-shell-test-with-focus viewport
+          (drover--see-looked-at)
+          (should (equal (drover-agent-shell-test-status shell) '(idle nil nil))))))))
 
 (ert-deftest drover-agent-shell-test-changes-reported ()
   "A shell reports its events to drover, but not those streaming within a turn."

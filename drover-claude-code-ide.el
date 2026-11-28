@@ -874,8 +874,7 @@ over, the session still works.  Past them, it was a turn."
   "Follow live process records, reporting only terminals whose state changed."
   (drover-with-reporting "Claude process status"
     (let ((buffers (and drover-claude-code-ide-status-interval
-                        (drover-claude-code-ide--buffers)))
-          (focused (drover-claude-code-ide--focused-buffers)))
+                        (drover-claude-code-ide--buffers))))
       (unless buffers
         (drover-claude-code-ide--stop-status))
       (dolist (entry buffers)
@@ -883,7 +882,7 @@ over, the session still works.  Past them, it was a turn."
           (let ((before (list drover-claude-code-ide--entries drover-claude-code-ide--seen
                               drover-claude-code-ide-session-id drover-claude-code-ide--background)))
             (drover-claude-code-ide-live-session-id)
-            (drover-claude-code-ide--note-status (memq (current-buffer) focused))
+            (drover-claude-code-ide--note-status nil)
             (unless (equal before (list drover-claude-code-ide--entries drover-claude-code-ide--seen
                                         drover-claude-code-ide-session-id drover-claude-code-ide--background))
               (drover-backend-changed 'claude-code-ide drover-claude-code-ide--token))))))))
@@ -893,46 +892,23 @@ over, the session still works.  Past them, it was a turn."
   (and (memq drover-claude-code-ide--state '(done error))
        (not drover-claude-code-ide--seen)))
 
-(defun drover-claude-code-ide--focused-buffers ()
-  "Return the buffers in front of the user.
-They are those of the selected windows of the frames that have the
-focus."
-  (delq nil (mapcar (lambda (frame)
-                      (and (eq (frame-focus-state frame) t)
-                           (window-buffer (frame-selected-window frame))))
-                    (frame-list))))
-
-(defun drover-claude-code-ide--focused-p (buffer)
-  "Return non-nil when BUFFER is in front of the user.
-See `drover-claude-code-ide--focused-buffers'."
-  (memq buffer (drover-claude-code-ide--focused-buffers)))
-
 (defun drover-claude-code-ide--status-changed (_id _old _new)
   "Note a change of the program status of the current terminal.
 For `ghostel-program-status-functions'."
   (drover-with-reporting "Claude terminal"
-    (drover-claude-code-ide--note-status
-     (drover-claude-code-ide--focused-p (current-buffer)))
+    (drover-claude-code-ide--note-status nil)
     (when (drover-claude-code-ide--claude-buffer-p (current-buffer))
       (drover-backend-changed 'claude-code-ide))))
 
 (defun drover-claude-code-ide--see (buffer)
-  "Mark the turn terminal BUFFER ended seen, if it is not yet."
+  "Mark the turn terminal BUFFER ended seen, if it is not yet.
+Drover asks it as the user looks at the terminal (see
+`drover--see-looked-at')."
   (with-current-buffer buffer
     (drover-claude-code-ide--note-status nil)
     (when (drover-claude-code-ide--unseen-p)
       (drover-claude-code-ide--note-status t)
       (drover-backend-changed 'claude-code-ide))))
-
-(defun drover-claude-code-ide--note-focus (&rest _)
-  "Mark seen the turns of the terminals in front of the user.
-For `window-selection-change-functions', `window-buffer-change-functions'
-and `after-focus-change-function'."
-  (drover-with-reporting "Claude terminal windows"
-    (dolist (buffer (drover-claude-code-ide--focused-buffers))
-      ;; Only terminals whose status was ever noted can have a turn to see.
-      (when (buffer-local-value 'drover-claude-code-ide--state buffer)
-        (drover-claude-code-ide--see buffer)))))
 
 (defun drover-claude-code-ide--request (record)
   "Return the request a `blocked' program status RECORD stands for."
@@ -2128,6 +2104,12 @@ customization option not yet defined would replace its default value."
   "Return the live buffers in a terminal mode."
   (seq-filter #'drover-claude-code-ide--terminal-p (buffer-list)))
 
+(defun drover-claude-code-ide--note-focus (&rest _)
+  "Do nothing: drover follows the windows (see `drover--see-looked-at').
+An older drover hooked it to window and focus changes; installing the
+backend removes it."
+  nil)
+
 (defun drover-claude-code-ide--install ()
   "Register the backend and follow terminals, existing and future.
 Unless set already, `drover-claude-code-start-flags-function' and
@@ -2146,9 +2128,10 @@ claude-code-ide starts sessions."
   (drover-claude-code-ide--add-hooks)
   ;; Terminal packages may load later.
   (add-hook 'after-load-functions #'drover-claude-code-ide--add-hooks)
-  (add-hook 'window-selection-change-functions #'drover-claude-code-ide--note-focus)
-  (add-hook 'window-buffer-change-functions #'drover-claude-code-ide--note-focus)
-  (add-function :after after-focus-change-function #'drover-claude-code-ide--note-focus)
+  ;; An older drover followed the windows itself: drover does now.
+  (remove-hook 'window-selection-change-functions #'drover-claude-code-ide--note-focus)
+  (remove-hook 'window-buffer-change-functions #'drover-claude-code-ide--note-focus)
+  (remove-function after-focus-change-function #'drover-claude-code-ide--note-focus)
   (dolist (buffer (drover-claude-code-ide--terminals))
     (with-current-buffer buffer
       (drover-claude-code-ide--setup-terminal))))
@@ -2169,9 +2152,6 @@ claude-code-ide starts sessions."
                  #'drover-claude-code-ide--track-terminal)
   (drover-claude-code-ide--remove-hooks)
   (remove-hook 'after-load-functions #'drover-claude-code-ide--add-hooks)
-  (remove-hook 'window-selection-change-functions #'drover-claude-code-ide--note-focus)
-  (remove-hook 'window-buffer-change-functions #'drover-claude-code-ide--note-focus)
-  (remove-function after-focus-change-function #'drover-claude-code-ide--note-focus)
   (mapc #'drover-claude-code-ide--stop-watching drover-claude-code-ide--watchers)
   (dolist (buffer (drover-claude-code-ide--terminals))
     (with-current-buffer buffer

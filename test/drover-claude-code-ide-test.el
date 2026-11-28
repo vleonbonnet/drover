@@ -188,6 +188,8 @@ Terminals BODY makes are killed."
          (drover-claude-code-ide-test-changes nil)
          (drover-claude-code-ide-test-warnings nil)
          (drover-claude-code-ide-test-focused nil)
+         (drover--seen-asked (make-hash-table :test #'equal))
+         (drover--unseen-failures (make-hash-table :test #'equal))
          (drover-claude-code-ide-test-timers nil)
          (drover-claude-code-ide-test-cancelled nil))
      (cl-letf (((symbol-function 'claude-code-ide-mcp--active-sessions)
@@ -201,10 +203,8 @@ Terminals BODY makes are killed."
                   (alist-get directory drover-claude-code-ide-test-newest nil nil #'equal)))
                ((symbol-function 'drover-git-branch)
                 (lambda (directory) (and directory "main")))
-               ((symbol-function 'drover-claude-code-ide--focused-p)
-                (lambda (buffer) (memq buffer drover-claude-code-ide-test-focused)))
-               ((symbol-function 'drover-claude-code-ide--focused-buffers)
-                (lambda () drover-claude-code-ide-test-focused))
+               ((symbol-function 'drover-looked-at-sessions)
+                (lambda () (seq-keep #'drover-claude-code-ide-test-session drover-claude-code-ide-test-focused)))
                ((symbol-function 'drover-backend-changed)
                 (lambda (&rest arguments) (push arguments drover-claude-code-ide-test-changes)))
                ;; Asking the models would read the CLI's own catalog.
@@ -1110,27 +1110,30 @@ conversation's, or an OpenCode session's."
       (should (eq (drover-session-status (drover-claude-code-ide-test-session terminal)) 'done)))))
 
 (ert-deftest drover-claude-code-ide-test-turns-seen ()
-  "A turn ending in front of the user, or looked at since, is seen."
+  "A turn ending in front of the user, or looked at since, is seen.
+Drover looks, as it does for every front end (see `drover--see-looked-at')."
   (drover-claude-code-ide-test-with
     (let ((terminal (drover-claude-code-ide-test-terminal "*claude* seen")))
       (cl-flet ((status () (drover-session-status (drover-claude-code-ide-test-session terminal))))
         (setq drover-claude-code-ide-test-focused (list terminal))
         (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (drover-claude-code-ide-test-look)
         (should (eq (status) 'idle))
         (setq drover-claude-code-ide-test-focused nil)
         (drover-claude-code-ide-test-status terminal '(("" :state working)))
         (drover-claude-code-ide-test-status terminal '(("" :state done)))
+        (drover-claude-code-ide-test-look)
         (should (eq (status) 'done))
         ;; Records of other programs leave the turn unseen.
         (drover-claude-code-ide-test-status terminal '(("other" :state working) ("" :state done)))
         (should (eq (status) 'done))
         (setq drover-claude-code-ide-test-changes nil)
         (setq drover-claude-code-ide-test-focused (list terminal))
-        (drover-claude-code-ide--note-focus (selected-frame))
+        (drover-claude-code-ide-test-look)
         (should (eq (status) 'idle))
         (should (equal drover-claude-code-ide-test-changes '((claude-code-ide))))
         ;; Seeing it again changes nothing.
-        (drover-claude-code-ide--note-focus)
+        (drover-claude-code-ide-test-look)
         (should (= (length drover-claude-code-ide-test-changes) 1))
         (setq drover-claude-code-ide-test-focused nil)
         (drover-claude-code-ide-test-status terminal '(("" :state error :msg "Failed")))
@@ -1141,6 +1144,14 @@ conversation's, or an OpenCode session's."
         (drover-claude-code-ide-test-status terminal '(("" :state working)))
         (drover-claude-code-ide-test-status terminal '(("" :state done)))
         (should (eq (status) 'done))))))
+
+(defun drover-claude-code-ide-test-look ()
+  "Look at the terminals `drover-claude-code-ide-test-focused' holds, as drover does.
+As a window change, or the change of a session the user looks at, runs
+`drover--see-looked-at'."
+  (let ((drover--running t))
+    (clrhash drover--seen-asked)
+    (drover--see-looked-at)))
 
 (defmacro drover-claude-code-ide-test-compacting (&rest body)
   "Run BODY with the backend installed, the clock stopped, in the fixtures' homes.
@@ -1189,6 +1200,7 @@ was, its context the summary's, estimated, and no cache."
           (setq clock (+ start 60))
           (drover-claude-code-ide-test-status terminal '(("" :state done :msg "Fixed")))
           (scan)
+          (drover-claude-code-ide-test-look)
           (should (eq (drover-session-status (session)) (if seen 'idle 'done)))
           (setq drover-claude-code-ide-test-focused nil)
           ;; Fifty-four minutes on, the CLI compacts the conversation.
@@ -1640,15 +1652,6 @@ running; requests and errors still need the user."
         (should (eq (drover-session-status session) 'idle))
         (should-not (drover-session-since session))
         (should-not (drover-session-requests session))))))
-
-(ert-deftest drover-claude-code-ide-test-focused-buffers ()
-  "The terminals in front of the user are those of focused frames' selected windows."
-  (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) t)))
-    (should (equal (drover-claude-code-ide--focused-buffers) (list (window-buffer (selected-window)))))
-    (should (drover-claude-code-ide--focused-p (window-buffer (selected-window)))))
-  (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) nil)))
-    (should-not (drover-claude-code-ide--focused-buffers))
-    (should-not (drover-claude-code-ide--focused-p (window-buffer (selected-window))))))
 
 ;;;; Sending
 
@@ -2480,9 +2483,8 @@ gave the buffer stays."
       (should (memq #'drover-claude-code-ide--terminal-exited ghostel-exit-functions))
       (should (memq #'drover-claude-code-ide--follow-titles drover-changed-hook))
       (should (memq #'drover-claude-code-ide--add-hooks after-load-functions))
-      (should (memq #'drover-claude-code-ide--note-focus window-selection-change-functions))
-      (should (memq #'drover-claude-code-ide--note-focus window-buffer-change-functions))
-      (should (advice-function-member-p #'drover-claude-code-ide--note-focus after-focus-change-function))
+      ;; Drover follows the windows, not the backend.
+      (should-not (memq 'drover-claude-code-ide--note-focus window-selection-change-functions))
       (with-current-buffer terminal
         (should (eq drover-session-at-point-function #'drover-claude-code-ide--buffer-session))
         (should (memq #'drover-claude-code-ide--terminal-killed kill-buffer-hook)))
@@ -2501,9 +2503,6 @@ gave the buffer stays."
       (should-not ghostel-exit-functions)
       (should-not (memq #'drover-claude-code-ide--follow-titles drover-changed-hook))
       (should-not (memq #'drover-claude-code-ide--add-hooks after-load-functions))
-      (should-not (memq #'drover-claude-code-ide--note-focus window-selection-change-functions))
-      (should-not (memq #'drover-claude-code-ide--note-focus window-buffer-change-functions))
-      (should-not (advice-function-member-p #'drover-claude-code-ide--note-focus after-focus-change-function))
       (with-current-buffer terminal
         (should-not drover-session-at-point-function)
         (should-not (memq #'drover-claude-code-ide--terminal-killed kill-buffer-hook)))

@@ -842,7 +842,8 @@ itself when within those, and of all the slots of a `drover-session'
 now (see `drover--whole-record'), unless `drover-brief-function' gives
 it a brief (see `drover--briefed'), `drover-changes-function' what it
 changed (see `drover--with-changes') or the user chose otherwise of its
-notifications (see `drover--with-notify')."
+notifications (see `drover--with-notify'), or a failure it did not see
+outlives the turn after it (see `drover--with-unseen-failure')."
   (if (not (drover-session-p record))
       record
     (let* ((whole (drover--whole-record record))
@@ -903,7 +904,8 @@ notifications (see `drover--with-notify')."
                                 (plist-put (copy-sequence request) :summary (drover-bound-text summary))
                               request)))
                         requests))))
-      (drover--with-notify (drover--with-changes (drover--briefed (or copy record)))))))
+      (drover--with-unseen-failure
+       (drover--with-notify (drover--with-changes (drover--briefed (or copy record))))))))
 
 (defun drover-session-key (session)
   "Return the key of SESSION, unique across backends."
@@ -2393,6 +2395,7 @@ time, the modules keeping work from an earlier Emacs session are
 restored (see `drover--kept-modules'), then `drover-start-hook' runs."
   (let ((first (not drover--running)))
     (setq drover--running t)
+    (drover--watch-looking)
     (drover--closing-restore)
     (drover--install-transcript-backends)
     (mapc #'drover--start-backend (drover-backends))
@@ -6998,6 +7001,96 @@ default.  It is this host's desktop that tells (`drover-notify-mode'),
 and the phones it pushes to (`drover-remote-push')."
   (drover-notify-chosen-p (drover--notify-root session)))
 
+(defvar drover--unseen-failures (make-hash-table :test #'equal)
+  "The failures of this host's sessions the user did not see, by session key.
+Each a record of the session as its turn failed.")
+
+(defun drover--with-unseen-failure (record)
+  "Return RECORD, or a copy failed still, as a failure it did not see was.
+A turn that failed while the user was elsewhere stays failed, its error
+the detail, until the user sees it: a turn ending done after it, such as
+a prompt queued behind it, hides nothing.  The session seen, its front
+end tells it idle, which forgets the failure; a turn running, or the
+user's answer awaited, shows as it is meanwhile.  This host's sessions
+alone: a session of another host is its owner's to tell."
+  (if (or (not (drover-session-p record)) (drover-session-host record))
+      record
+    (let ((key (drover-session-key record)))
+      (pcase (drover-session-status record)
+        ('failed (puthash key record drover--unseen-failures) record)
+        ('idle (remhash key drover--unseen-failures) record)
+        ('done
+         (if-let* ((failed (gethash key drover--unseen-failures)))
+             (let ((copy (copy-sequence record)))
+               (setf (drover-session-status copy) 'failed
+                     (drover-session-detail copy) (drover-session-detail failed)
+                     (drover-session-since copy) (drover-session-since failed))
+               copy)
+           record))
+        (_ record)))))
+
+;;;; Seen as the user looks
+
+(defconst drover--seen-again-wait 2
+  "Seconds before a session asked to be marked seen is asked again.
+A session of another host tells it seen once its owner answers.")
+
+(defvar drover--seen-asked (make-hash-table :test #'equal)
+  "When each session was last asked to be marked seen, by key, a float time.")
+
+(defun drover-looked-at-sessions ()
+  "Return the sessions the user looks at.
+Those the selected windows of the frames that have the focus show (see
+`drover-shown-session'): a session's buffer, the view of a session of
+another host, or the viewport of a shell."
+  (delete-dups
+   (seq-keep (lambda (frame)
+               (and (eq (frame-focus-state frame) t)
+                    (drover-shown-session (window-buffer (frame-selected-window frame)))))
+             (frame-list))))
+
+(defun drover-looking-at-p (session)
+  "Return non-nil when the user looks at SESSION.
+A session the user looks at (see `drover-looked-at-sessions') is
+SESSION, or runs its conversation in another front end."
+  (let ((key (drover-session-key session))
+        (engine (drover-session-engine-key session)))
+    (seq-some (lambda (shown)
+                (or (equal (drover-session-key shown) key)
+                    (and engine (equal (drover-session-engine-key shown) engine))))
+              (drover-looked-at-sessions))))
+
+(defun drover--see-looked-at (&rest _)
+  "Mark seen the ended turns of the sessions the user looks at.
+Whatever runs them: a turn the user sees end, or comes back to, is
+seen, its front end told through its backend's :mark-seen.  For
+`window-selection-change-functions', `window-buffer-change-functions',
+`after-focus-change-function' and `drover-changed-hook': a turn ending
+in front of the user is seen as it ends.  A session is asked again only
+after `drover--seen-again-wait' seconds."
+  (drover-with-reporting "sessions seen"
+    (when drover--running
+      (let ((now (float-time)))
+        ;; The record of the front end shown, not the index's, which may
+        ;; be another backend's record of the same conversation.
+        (dolist (shown (drover-looked-at-sessions))
+          (let ((key (drover-session-key shown)))
+            (when (and (memq (drover-session-status shown) '(done failed))
+                       (drover-supports-p shown :mark-seen)
+                       (> (- now (gethash key drover--seen-asked 0)) drover--seen-again-wait))
+              (puthash key now drover--seen-asked)
+              (remhash key drover--unseen-failures)
+              (drover-backend-call shown :mark-seen))))))))
+
+(defun drover--watch-looking ()
+  "Follow what the user looks at, to mark seen the ended turns there.
+See `drover--see-looked-at'."
+  (add-hook 'window-selection-change-functions #'drover--see-looked-at)
+  (add-hook 'window-buffer-change-functions #'drover--see-looked-at)
+  (add-hook 'drover-changed-hook #'drover--see-looked-at)
+  (unless (advice-function-member-p #'drover--see-looked-at after-focus-change-function)
+    (add-function :after after-focus-change-function #'drover--see-looked-at)))
+
 (defun drover--with-notify (record)
   "Return RECORD, or a copy telling whether its conversation notifies the user.
 The slot `notify' of a record of this host follows the choice kept (see
@@ -7214,6 +7307,8 @@ Interactively, SESSIONS are the selected sessions whose turn ended
 unseen, or the session at point (see `drover--selected-for')."
   (interactive (list (drover--selected-for :mark-seen #'drover--ended-unseen-p
                                            "ended a turn unseen")))
+  (dolist (session (if (drover-session-p sessions) (list sessions) sessions))
+    (remhash (drover-session-key session) drover--unseen-failures))
   (drover--act sessions :mark-seen "Marked %s seen" :verb "Marking seen"))
 
 (defun drover-preview (session callback)

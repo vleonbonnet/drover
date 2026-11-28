@@ -1854,7 +1854,6 @@ finds those."
       (drover-backend-changed backend))
      (t (dolist (key keys)
           (drover-backend-changed backend key))))
-    (drover-remote--seen-mirrors peer keys)
     (drover-remote--close-archived-mirrors peer keys)
     (drover-remote--oc-archived peer keys)))
 
@@ -7410,9 +7409,6 @@ Rather than mirror its terminal: a line.")
   "What the current buffer mirrors of a session of a peer, \"terminal\" or \"shell\".
 Nil in a buffer that mirrors none.")
 
-(defvar-local drover-remote--seen-sent 0
-  "When the session the current mirror shows was last marked seen from here.")
-
 (defvar-local drover-remote--reopens 0
   "Times the current mirror was opened anew since it was last live.")
 
@@ -8061,24 +8057,6 @@ last told them."
                          (format "%d%%" (/ (* 100 tokens) limit)))))
         "  ")
        200))))
-
-(defun drover-remote--seen-mirrors (peer keys)
-  "Mark seen those of PEER's sessions KEYS the selected window mirrors.
-Their turns ended there while the user looked here: at most once a
-second each."
-  (when (> (hash-table-count (drover-remote--peer-mirrors peer)) 0)
-    (let* ((buffer (window-buffer (selected-window)))
-           (shown (buffer-local-value 'drover-remote--shown buffer)))
-      (when (and shown
-                 (buffer-local-value 'drover-remote--mirror-kind buffer)
-                 (equal (car shown) (drover-remote--peer-name peer))
-                 (member (cdr shown) keys)
-                 (frame-focus-state)
-                 (> (- (float-time) (buffer-local-value 'drover-remote--seen-sent buffer)) 1))
-        (when-let* ((session (drover-remote--peer-session peer (cdr shown)))
-                    ((memq (drover-session-status session) '(done failed))))
-          (with-current-buffer buffer (setq drover-remote--seen-sent (float-time)))
-          (drover-remote--seen-here peer session))))))
 
 (defun drover-remote--open-conversation (conversation)
   "Show CONVERSATION, of another host, as `drover-links-parse' returns it.

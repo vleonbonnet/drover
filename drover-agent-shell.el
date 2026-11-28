@@ -1096,28 +1096,12 @@ searches every variable local there, hundreds in an Org buffer."
 They stream many times a turn: reporting them would hold back the
 redraw drover runs once backends are quiet.")
 
-(defun drover-agent-shell--focused-p (buffer)
-  "Return non-nil when the shell of BUFFER, or its viewport, has the focus.
-It does when shown in the selected window of a frame that has the
-focus."
-  (let ((viewport (ignore-errors (agent-shell-viewport--buffer :shell-buffer buffer :existing-only t))))
-    (seq-some (lambda (window)
-                (let ((frame (window-frame window)))
-                  (and (eq (frame-focus-state frame) t)
-                       (eq window (frame-selected-window frame)))))
-              (append (get-buffer-window-list buffer nil t)
-                      (and viewport (get-buffer-window-list viewport nil t))))))
-
 (defun drover-agent-shell--end-turn (status detail)
   "Note that the current shell's turn ended with STATUS and DETAIL.
-STATUS is `done' or `failed'.  The user looking at the shell sees it
-end; otherwise it stays to be seen, a failure winning over a later
-success."
-  (cond
-   ((drover-agent-shell--focused-p (current-buffer))
-    (setq drover-agent-shell--outcome nil))
-   ((not (and (eq status 'done) (eq (plist-get drover-agent-shell--outcome :status) 'failed)))
-    (setq drover-agent-shell--outcome (list :status status :detail detail :time (float-time))))))
+STATUS is `done' or `failed'.  It stays to be seen: drover marks it
+seen as the user looks at the shell (see `drover--see-looked-at'), and
+keeps a failure unseen past a later success."
+  (setq drover-agent-shell--outcome (list :status status :detail detail :time (float-time))))
 
 (defun drover-agent-shell--handed-back (how)
   "Note that the user handed the current shell its turn back, as HOW.
@@ -1370,19 +1354,6 @@ agent-shell takes from its queue."
     (with-current-buffer buffer
       (setq drover-agent-shell--outcome nil))
     (drover-backend-changed 'agent-shell (buffer-local-value 'drover-agent-shell--id buffer))))
-
-(defun drover-agent-shell--window-changed (&optional frame)
-  "Mark seen the shell the user now looks at in FRAME.
-FRAME is the selected frame by default.  This runs from
-`window-selection-change-functions', `window-buffer-change-functions'
-and `after-focus-change-function'."
-  (drover-with-reporting "agent-shell windows"
-    (let* ((frame (if (frame-live-p frame) frame (selected-frame)))
-           (shell (drover-agent-shell--shell-of (window-buffer (frame-selected-window frame)))))
-      (when (and shell
-                 (buffer-local-value 'drover-agent-shell--outcome shell)
-                 (drover-agent-shell--focused-p shell))
-        (drover-agent-shell--seen shell)))))
 
 ;;;; Actions
 
@@ -1967,6 +1938,12 @@ see `drover-recorded-run'.  The backend's :caches."
     (setq drover-agent-shell--gemini-registered nil))
   (drover-unregister-backend 'agent-shell))
 
+(defun drover-agent-shell--window-changed (&rest _)
+  "Do nothing: drover follows the windows (see `drover--see-looked-at').
+An older drover hooked it to window and focus changes; installing the
+backend removes it."
+  nil)
+
 (defun drover-agent-shell--install ()
   "Follow agent-shell's shells, existing and future, and where the user looks."
   (add-hook 'agent-shell-mode-hook #'drover-agent-shell--setup)
@@ -1974,9 +1951,10 @@ see `drover-recorded-run'.  The backend's :caches."
     (with-current-buffer buffer
       (drover-agent-shell--setup t)))
   (add-hook 'drover-shown-session-functions #'drover-agent-shell--viewport-session)
-  (add-hook 'window-selection-change-functions #'drover-agent-shell--window-changed)
-  (add-hook 'window-buffer-change-functions #'drover-agent-shell--window-changed)
-  (add-function :after after-focus-change-function #'drover-agent-shell--window-changed))
+  ;; An older drover followed the windows itself: drover does now.
+  (remove-hook 'window-selection-change-functions #'drover-agent-shell--window-changed)
+  (remove-hook 'window-buffer-change-functions #'drover-agent-shell--window-changed)
+  (remove-function after-focus-change-function #'drover-agent-shell--window-changed))
 
 (defun drover-agent-shell--uninstall ()
   "Undo `drover-agent-shell--install'."
@@ -1984,10 +1962,7 @@ see `drover-recorded-run'.  The backend's :caches."
   (dolist (buffer (drover-agent-shell--shells))
     (with-current-buffer buffer
       (drover-agent-shell--teardown)))
-  (remove-hook 'drover-shown-session-functions #'drover-agent-shell--viewport-session)
-  (remove-hook 'window-selection-change-functions #'drover-agent-shell--window-changed)
-  (remove-hook 'window-buffer-change-functions #'drover-agent-shell--window-changed)
-  (remove-function after-focus-change-function #'drover-agent-shell--window-changed))
+  (remove-hook 'drover-shown-session-functions #'drover-agent-shell--viewport-session))
 
 (defun drover-agent-shell--activate ()
   "Load agent-shell, register the backend and follow agent-shell's shells.

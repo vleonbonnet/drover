@@ -48,7 +48,7 @@
 (require 'drover-core)
 
 ;; Reloaded into an Emacs running an older drover, load its core anew.
-(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 30))
+(unless (and (boundp 'drover-core-generation) (>= drover-core-generation 37))
   (load "drover-core" nil t))
 
 (declare-function opencode-notify-os-native "opencode-notify" (notification))
@@ -134,16 +134,12 @@ waiting itself, as the phones are pushed (see `drover-remote-push')."
 
 (defun drover-notify-looking-p (session)
   "Return non-nil when you look at SESSION.
-That is when the selected window of a frame with focus shows it, or the
+That is when you look at it (see `drover-looking-at-p'), or at the
 session you answer it from (see `drover-attention-target')."
   (let ((target (drover-attention-target session)))
-    (seq-some (lambda (frame)
-                (and (eq (frame-focus-state frame) t)
-                     (let ((window (frame-selected-window frame)))
-                       (or (drover-window-shows-session-p window session)
-                           (and (not (eq target session))
-                                (drover-window-shows-session-p window target))))))
-              (frame-list))))
+    (or (drover-looking-at-p session)
+        (and (not (eq target session))
+             (drover-looking-at-p target)))))
 
 (defun drover-notify--new-p (state record)
   "Return non-nil when RECORD came to need you once STATE's mode ran.
