@@ -152,11 +152,13 @@ its parent gone, that does not match."
                      '("kept" "asking" "out" "blocked" "lost" "found"))))))
 
 (ert-deftest drover-test-attention-sessions-follow-subagent-mode ()
-  "The sessions needing the user are those lists show, and every subagent asking."
+  "The sessions needing the user are those lists show, and every subagent asking.
+A subagent whose turn ended needs nothing of the user, whatever shows:
+its reply went to its parent."
   (drover-test-with-backend (drover-test-subagent-family)
-    (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "path" "alone")))
+    (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "alone")))
     (let ((drover-show-subagents 'all))
-      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "path" "ended" "alone"))))
+      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "alone"))))
     (let ((drover-show-subagents 'none))
       (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "alone"))))))
 
@@ -1203,7 +1205,7 @@ did under a session archived alone while its subagents stayed."
     (should (equal (drover-test-tree-shape (drover-view-trees)) '(("asking") ("root"))))
     (should (equal (drover-view-subagent-counts) '(3 . 2)))
     (let ((drover-show-subagents 'all))
-      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking" "ended")))
+      (should (equal (drover-test-ids (drover-attention-sessions)) '("asking")))
       (should (equal (drover-view-subagent-counts) '(3 . 0))))
     ;; None: one waiting for the user still surfaces, not in lists.
     (let ((drover-show-subagents 'none))
@@ -1306,14 +1308,14 @@ matching under a listed parent still shows."
   (let ((nodes (drover-tree (list (drover-test-session "parent" :status 'idle)
                                   (drover-test-session "ended" :parent "parent" :status 'done)
                                   (drover-test-session "busy" :parent "parent" :status 'working)))))
-    (should (eq (drover-node-status (car nodes)) 'done))
-    ;; The finished subagent hides, so its parent is not listed as done.
+    ;; The finished subagent needs nothing: its parent ranks as the one working.
+    (should (eq (drover-node-status (car nodes)) 'working))
     (let ((drover-show-subagents 'active))
       (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'working)))
     (let ((drover-show-subagents 'none))
       (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'idle)))
     (let ((drover-show-subagents 'all))
-      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'done)))))
+      (should (eq (drover-node-status (car (drover-tree-visible nodes))) 'working)))))
 
 (defun drover-test--record-windows ()
   "Make the fake backend's :open record the window selected, as (:open ID OTHER WINDOW).
@@ -1935,7 +1937,7 @@ defines Send, and a function failing tells none."
     (should (= (drover-view-hidden-count) 2))
     (let ((drover-show-subagents 'all))
       (should (equal (drover-test-tree-shape (drover-view-trees))
-                     '(("root" ("explore" ("deep")) ("build")))))
+                     '(("root" ("build") ("explore" ("deep"))))))
       (should (= (drover-view-hidden-count) 0)))
     (let ((drover-show-subagents 'none))
       (should (equal (drover-test-tree-shape (drover-view-trees)) '(("root"))))
@@ -2098,6 +2100,25 @@ running, or a session another frame shows without the focus, is not."
     ;; What the user looks at: the selected windows of focused frames.
     (cl-letf (((symbol-function 'frame-focus-state) (lambda (&rest _) nil)))
       (should-not (drover-looked-at-sessions)))))
+
+(ert-deftest drover-test-interrupted-turn-seen ()
+  "A turn the user interrupts through drover is seen once it ended, whatever runs it."
+  (drover-test-with-backend (list (drover-test-session "s" :status 'working)
+                                  (drover-test-session "t" :status 'working))
+    (let ((drover-test-calls nil))
+      (cl-flet ((marked () (mapcar #'cadr (seq-filter (lambda (call) (eq (car call) :mark-seen))
+                                                      drover-test-calls))))
+        (drover-interrupt (drover-index-session '(fake . "s")))
+        (drover--see-interrupted)
+        (should-not (marked))
+        (setq drover-test-sessions (list (drover-test-session "s" :status 'done :since (float-time))
+                                         (drover-test-session "t" :status 'done :since (float-time))))
+        (drover-backend-changed 'fake)
+        (drover-changed-now)
+        (drover--see-interrupted)
+        ;; The other turn ended of its own: news.
+        (should (equal (marked) '("s")))
+        (should-not (gethash '(fake . "s") drover--interrupted))))))
 
 (ert-deftest drover-test-unseen-failure-outlives-success ()
   "A failure the user did not see stays failed past a later success, until seen."
@@ -2415,11 +2436,12 @@ running, or a session another frame shows without the focus, is not."
     ;; By the root of each tree; a group comes with its most urgent tree.
     (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
                            (drover-group-trees trees 'branch))
-                   '(("dev" ("b")) ("main" ("a" ("kid")) ("c")))))
-    (should (equal (mapcar #'car (drover-group-trees trees 'agent)) '("plan" "build" nil)))
+                   '(("dev" ("b")) ("main" ("c") ("a" ("kid"))))))
+    (should (equal (mapcar #'car (drover-group-trees trees 'agent)) '("plan" nil "build")))
     (should (equal (mapcar #'car (drover-group-trees trees 'model)) '(nil "opus")))
     (should (equal (mapcar #'car (drover-group-trees trees 'provider)) '(nil)))
-    (should (equal (mapcar #'car (drover-group-trees trees 'status)) '(waiting done working)))
+    ;; A subagent whose turn ended ranks its tree as idle.
+    (should (equal (mapcar #'car (drover-group-trees trees 'status)) '(waiting working idle)))
     (should (equal (mapcar #'car (drover-group-trees trees 'project)) '(nil)))
     (should (equal (drover-group-trees trees nil) (list (cons nil trees))))
     (should-not (drover-group-trees nil nil))
@@ -2435,7 +2457,7 @@ running, or a session another frame shows without the focus, is not."
                       (drover-test-session "d" :status 'idle)))))
     (should (equal (mapcar (lambda (group) (cons (car group) (drover-test-tree-shape (cdr group))))
                            (drover-group-trees trees 'provider))
-                   '(("OpenAI" ("b")) ("Anthropic" ("a" ("kid")) ("c")) (nil ("d")))))
+                   '(("OpenAI" ("b")) ("Anthropic" ("c") ("a" ("kid"))) (nil ("d")))))
     (should (equal (drover-group-label 'provider nil) "No provider"))))
 
 (ert-deftest drover-test-activity-buckets ()

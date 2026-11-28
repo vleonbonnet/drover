@@ -214,8 +214,9 @@ Those in a tree the filter keeps, whatever the subagent mode."
     (drover-attention-mode 1)
     ;; Active subagents: those whose turn ended hide, so do not count.
     (should (equal (drover-attention-test-count) '(2 waiting)))
+    ;; All: those whose turn ended show, and need nothing of the user.
     (drover-set-show-subagents 'all)
-    (should (equal (drover-attention-test-count) '(4 waiting)))
+    (should (equal (drover-attention-test-count) '(2 waiting)))
     ;; None: the subagent waiting for the user still counts.
     (drover-set-show-subagents 'none)
     (should (equal (drover-attention-test-count) '(2 waiting)))
@@ -240,8 +241,9 @@ So it does as the count is made anew, and as it follows a change."
     (drover-backend-changed 'fake "ended")
     (drover-changed-now)
     (should (equal (drover-attention-test-count) '(1 waiting)))
+    ;; Shown, a subagent whose turn ended needs nothing still.
     (drover-set-show-subagents 'all)
-    (should (equal (drover-attention-test-count) '(2 alert)))))
+    (should (equal (drover-attention-test-count) '(1 waiting)))))
 
 (ert-deftest drover-attention-test-help-echo-lists-sessions ()
   "The tooltip lists the sessions in the order `drover-next' visits them."

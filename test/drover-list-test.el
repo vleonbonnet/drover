@@ -733,7 +733,7 @@ The View menu of the list holds it, in its View group."
           (should (equal (drover-list-test-line) "Working (1)")))
         (drover-list-test-type "V = u C-g")
         (should (eq drover-show-subagents 'all))
-        (should (equal (drover-list-test-groups) '((waiting "root" "asking" "ended" "child"))))
+        (should (equal (drover-list-test-groups) '((waiting "root" "asking" "child" "ended"))))
         (should (string-prefix-p "        ◐ Session child" (drover-list-test-heading "child")))
         (should (equal (drover-list--mode-line-process) " by status +subagents"))
         (should (equal (drover-list-test-id-at-point) "root"))
@@ -772,8 +772,10 @@ The View menu of the list holds it, in its View group."
     (drover-list-test-refresh)
     (drover-list-test-goto "sub")
     (magit-section-show (magit-current-section))
-    ;; The tree moves from Needs you to Failed.
-    (setf (drover-session-status (drover-list-test-find "sub")) 'failed)
+    ;; The tree moves from Needs you to Failed: its root fails, its
+    ;; subagent answered.
+    (setf (drover-session-status (drover-list-test-find "sub")) 'idle
+          (drover-session-status (drover-list-test-find "root")) 'failed)
     (drover-list-test-refresh)
     (should (equal (drover-list-test-groups)
                    '((failed "root" "sub" "deep") (working "other" "quiet"))))
@@ -798,7 +800,8 @@ The View menu of the list holds it, in its View group."
     (let ((offset (- (point) (line-beginning-position))))
       ;; A new tree above, and deep's tree moves to Failed.
       (push (drover-test-session "new" :status 'waiting) drover-test-sessions)
-      (setf (drover-session-status (drover-list-test-find "sub")) 'failed)
+      (setf (drover-session-status (drover-list-test-find "sub")) 'idle
+            (drover-session-status (drover-list-test-find "root")) 'failed)
       (drover-list-test-refresh)
       (should (equal (mapcar #'car (drover-list-test-groups)) '(waiting failed working)))
       (should (equal (drover-list-test-id-at-point) "deep"))
@@ -6247,7 +6250,7 @@ The one waiting to retry is a subagent of the working one."
     ;; title; a subagent tells its own.
     (setq drover-show-subagents 'all)
     (drover-list-test-refresh)
-    (should (equal (drover-list-test-groups) '((waiting "p" "a" "d" "w" "r"))))
+    (should (equal (drover-list-test-groups) '((waiting "p" "a" "w" "r" "d"))))
     (should (string-prefix-p "  · ? * Session p" (drover-list-test-heading "p")))
     (should (string-prefix-p "        ◐ * Session w" (drover-list-test-heading "w")))
     (should (string-prefix-p "        ! Session a" (drover-list-test-heading "a")))

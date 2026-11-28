@@ -953,9 +953,21 @@ else the one its backend tells (`drover-session-project')."
 Its record is as that host last told it; see `drover-session-stale'."
   (and (drover-session-stale session) t))
 
+(defun drover-session-ended-subagent-p (session)
+  "Return non-nil when SESSION is a subagent whose turn ended, done or failed.
+Its reply, or its failure, went to its parent, whose turn goes on with
+it, whatever front end runs it: it needs nothing of the user, and its
+tree ranks as its parent's turn does."
+  (and (drover-session-parent session)
+       (memq (drover-session-status session) '(done failed))
+       t))
+
 (defun drover-session-attention-p (session)
-  "Return non-nil when SESSION needs the user."
-  (memq (drover-session-status session) drover-attention-statuses))
+  "Return non-nil when SESSION needs the user.
+A subagent whose turn ended does not (see
+`drover-session-ended-subagent-p')."
+  (and (memq (drover-session-status session) drover-attention-statuses)
+       (not (drover-session-ended-subagent-p session))))
 
 (defun drover-session-need-signature (session)
   "Return what tells how SESSION needs the user, a short string.
@@ -1340,10 +1352,13 @@ Each is a value of `drover-session-activity', or nil when unknown."
         (t (if (>= (cdr a) (cdr b)) a b))))
 
 (defun drover--node (session children)
-  "Return the tree of SESSION with CHILDREN, trees of its subagents."
+  "Return the tree of SESSION with CHILDREN, trees of its subagents.
+A subagent whose turn ended ranks its tree as idle: it needs nothing of
+the user (see `drover-session-ended-subagent-p')."
   (let* ((children (sort children #'drover--node-before-p))
-         (status (drover-session-status session))
-         (since (drover-session-since session))
+         (ended (drover-session-ended-subagent-p session))
+         (status (if ended 'idle (drover-session-status session)))
+         (since (unless ended (drover-session-since session)))
          (updated (drover-session-updated session))
          (activity (drover-session-activity session)))
     (dolist (child children)
@@ -7082,12 +7097,40 @@ after `drover--seen-again-wait' seconds."
               (remhash key drover--unseen-failures)
               (drover-backend-call shown :mark-seen))))))))
 
+(defvar drover--interrupted (make-hash-table :test #'equal)
+  "When the user interrupted each session through drover, by key, a float time.")
+
+(defconst drover--interrupted-wait 60
+  "Seconds within which a turn ending after an interrupt is the interrupted one.")
+
+(defun drover--see-interrupted (&rest _)
+  "Mark seen the turns the user interrupted through drover, once they ended.
+The user stopped them, so their end is no news, whatever front end ran
+them; their front end is told through :mark-seen.  For
+`drover-changed-hook'."
+  (drover-with-reporting "turns interrupted"
+    (let ((now (float-time)))
+      (maphash (lambda (key time)
+                 (let ((record (drover-index-session key)))
+                   (cond
+                    ((or (null record) (> (- now time) drover--interrupted-wait))
+                     (remhash key drover--interrupted))
+                    ((memq (drover-session-status record) '(done failed))
+                     (remhash key drover--interrupted)
+                     (remhash key drover--unseen-failures)
+                     (when (drover-supports-p record :mark-seen)
+                       (drover-backend-call record :mark-seen)))
+                    ((eq (drover-session-status record) 'idle)
+                     (remhash key drover--interrupted)))))
+               (copy-hash-table drover--interrupted)))))
+
 (defun drover--watch-looking ()
   "Follow what the user looks at, to mark seen the ended turns there.
 See `drover--see-looked-at'."
   (add-hook 'window-selection-change-functions #'drover--see-looked-at)
   (add-hook 'window-buffer-change-functions #'drover--see-looked-at)
   (add-hook 'drover-changed-hook #'drover--see-looked-at)
+  (add-hook 'drover-changed-hook #'drover--see-interrupted)
   (unless (advice-function-member-p #'drover--see-looked-at after-focus-change-function)
     (add-function :after after-focus-change-function #'drover--see-looked-at)))
 
@@ -7248,6 +7291,9 @@ the session at point (see `drover--selected-for'), after confirmation."
   (interactive (let ((sessions (drover--selected-for :interrupt #'drover--running-p "runs a turn")))
                  (drover--confirm "Interrupt" sessions)
                  (list sessions)))
+  (let ((now (float-time)))
+    (dolist (session (if (drover-session-p sessions) (list sessions) sessions))
+      (puthash (drover-session-key session) now drover--interrupted)))
   (drover--act sessions :interrupt "Interrupted %s" :verb "Interrupting"))
 
 (defun drover-archive (sessions)
