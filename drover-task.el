@@ -82,7 +82,7 @@
 (declare-function sqlite-available-p "sqlite.c" ())
 (defvar drover-prompt-new-targets)
 (defvar drover-prompt-remote-functions)
-(defvar drover-opencode-database)
+(declare-function drover-opencode-read-first-prompts "drover-opencode" (days))
 
 ;;;; Options
 
@@ -275,12 +275,6 @@ found; never kept.")
 (defvar drover-task--prompts (make-hash-table :test #'eq :weakness 'key)
   "The task the first prompt of each record links, ID or `none', by record.")
 
-(defvar drover-task--oc-prompts (make-hash-table :test #'equal)
-  "The task the first prompt of each OpenCode session links, by its identifier.")
-
-(defvar drover-task--oc-read nil
-  "When OpenCode's first prompts were read until, in milliseconds, or nil.")
-
 (defun drover-task-links-file ()
   "Return the file of the sessions linked to tasks, in `drover-state-directory'."
   (expand-file-name "task-links.eld" drover-state-directory))
@@ -383,23 +377,12 @@ look at their files."
 
 (defun drover-task--prompt-id (session)
   "Return the task the first prompt of SESSION links, or nil.
-The engines recording conversations tell it of theirs (:search-text),
-and OpenCode's database of its sessions (see `drover-task--oc-read')."
+Its first prompt is its backend's, or the engine's that records its
+conversation, to tell (see `drover-session-first-prompt')."
   (let ((cached (gethash session drover-task--prompts)))
     (if cached
         (and (not (eq cached 'none)) cached)
-      (let ((id (or (and (eq (drover-session-engine session) 'opencode)
-                         (not (drover-session-host session))
-                         (gethash (drover-session-engine-id session) drover-task--oc-prompts))
-                    (and (not (drover-session-host session))
-                         (drover-session-engine session)
-                         (seq-some (lambda (backend)
-                                     (when-let* ((function (drover-backend-property backend :search-text))
-                                                 ((functionp function)))
-                                       (drover-task-prompt-id
-                                        (car (last (drover-with-reporting "task prompts"
-                                                     (funcall function session)))))))
-                                   (drover--recording-backends (drover-session-engine session)))))))
+      (let ((id (drover-task-prompt-id (drover-session-first-prompt session))))
         (puthash session (or id 'none) drover-task--prompts)
         id))))
 
@@ -623,49 +606,6 @@ for with ripgrep, one at a time."
                  (puthash id (plist-put info :view (drover-task--make-view info)) drover-task--infos)))
              drover-task--infos)
     (drover-task--views-changed)))
-
-;;;; First prompts of OpenCode's sessions
-
-(defun drover-task--oc-database ()
-  "Return OpenCode's database file, readable, or nil."
-  (and (boundp 'drover-opencode-database)
-       (stringp drover-opencode-database)
-       (file-readable-p drover-opencode-database)
-       drover-opencode-database))
-
-(defun drover-task--oc-read ()
-  "Read which tasks the first prompts of OpenCode's sessions link, since last.
-From its database, read only: the first prompt of each session written
-since the last read, back `drover-task-prompt-days' days the first time,
-that links a heading.  Views are told of the sessions found."
-  (drover-with-reporting "task prompts of OpenCode"
-    (when-let* (((fboundp 'sqlite-available-p))
-                ((sqlite-available-p))
-                (file (drover-task--oc-database)))
-      (let ((db (sqlite-open file t))
-            (found nil))
-        (unwind-protect
-            (let* ((since (or drover-task--oc-read
-                              (* 1000 (floor (- (float-time) (* 86400 drover-task-prompt-days))))))
-                   (rows (sqlite-select
-                          db
-                          "SELECT m.session_id, json_extract(m.data, '$.text'), m.time_created FROM session_message m WHERE m.type = 'user' AND m.time_created > ?1 AND m.data LIKE '%id:%' AND m.seq = (SELECT min(seq) FROM session_message WHERE session_id = m.session_id AND type = 'user') ORDER BY m.time_created LIMIT 5000"
-                          (list since))))
-              (pcase-dolist (`(,session ,text ,time) rows)
-                (when (numberp time)
-                  (setq since (max since time)))
-                (when-let* (((stringp session))
-                            (id (drover-task-prompt-id
-                                 (and (stringp text) (substring text 0 (min (length text) 2000))))))
-                  (unless (equal (gethash session drover-task--oc-prompts) id)
-                    (puthash session id drover-task--oc-prompts)
-                    (setq found t))))
-              (setq drover-task--oc-read since))
-          (sqlite-close db))
-        (when found
-          (clrhash drover-task--prompts)
-          (drover-task--changed)
-          (drover-task--views-changed))))))
 
 ;;;; Waiting in a command
 
@@ -2995,14 +2935,24 @@ or nil and why it is refused."
 (defvar drover-task--oc-timer nil
   "The timer reading the first prompts of OpenCode's sessions, or nil.")
 
+(defvar drover-task--oc-ticked nil
+  "Non-nil once OpenCode's first prompts were read for the tasks they link.")
+
 (defun drover-task--oc-tick ()
-  "Read the first prompts of OpenCode's sessions now and then, while lists show."
+  "Have OpenCode's first prompts read now and then, while lists show.
+Their sessions serve the tasks they link (see
+`drover-opencode-read-first-prompts')."
   (drover-with-reporting "task prompts of OpenCode"
-    (when (or (null drover-task--oc-read)
-              (seq-some (lambda (buffer) (and (buffer-local-value 'drover-view-p buffer)
-                                              (get-buffer-window buffer t)))
-                        (buffer-list)))
-      (drover-task--oc-read))))
+    (when (and (fboundp 'drover-opencode-read-first-prompts)
+               (or (not drover-task--oc-ticked)
+                   (seq-some (lambda (buffer) (and (buffer-local-value 'drover-view-p buffer)
+                                                   (get-buffer-window buffer t)))
+                             (buffer-list))))
+      (setq drover-task--oc-ticked t)
+      (when (drover-opencode-read-first-prompts drover-task-prompt-days)
+        (clrhash drover-task--prompts)
+        (drover-task--changed)
+        (drover-task--views-changed)))))
 
 ;;;###autoload
 (define-minor-mode drover-task-mode

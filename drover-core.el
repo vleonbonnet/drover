@@ -2060,6 +2060,19 @@ PROPERTIES is a plist of:
              answer at once.  A front end that cannot
              tell a turn left work running asks it (see
              `drover-recorded-turn').
+ :buffer-name
+             Function of a title returning the name the backend gives
+             a buffer of that title, as it names one (see
+             `drover-follow-title').
+ :name-buffer
+             Function of a buffer and a name naming the buffer so, as
+             its front end names its buffers (see
+             `drover-follow-title').
+ :default-buffer-name-p
+             Function of a buffer returning non-nil while it has the
+             name its front end gives its buffers, which drover may
+             name after their sessions' titles; a name the user gave
+             stays (see `drover-follow-title').
  :recorded-title
              Function of an engine identifier returning the title of
              that conversation as recorded, a string, or nil when it
@@ -2078,6 +2091,12 @@ The search of sessions (`drover-search') matches what records tell,
 and asks backends for more through the following operations, both
 optional.
 
+ :first-prompt
+             Function of a session returning the first prompt of its
+             conversation, what started it, a string, or nil when it
+             knows none; the backend's own sessions and those of the
+             engines it records (see :recorded).  It must answer at
+             once (see `drover-session-first-prompt').
  :search-text
              Function of a session returning more texts the search
              matches it by, strings, such as its first and last
@@ -2584,6 +2603,22 @@ come first and win."
                                    (funcall function engine-id))))
                   (and (plistp run) run)))
               (drover--recording-backends engine))))
+
+(defun drover-session-first-prompt (session)
+  "Return the first prompt of SESSION's conversation, what started it, or nil.
+As its own backend tells it, else the backends recording its engine's
+conversations (see :first-prompt in `drover-register-backend').  A
+session of another host tells none here."
+  (unless (drover-session-host session)
+    (let ((engine (drover-session-engine session)))
+      (seq-some (lambda (backend)
+                  (when-let* ((function (drover-backend-property backend :first-prompt))
+                              ((functionp function))
+                              (text (drover-with-reporting "first prompt"
+                                      (funcall function session))))
+                    (and (stringp text) text)))
+                (delete-dups (cons (drover-session-backend session)
+                                   (and engine (drover--recording-backends engine))))))))
 
 (defun drover-recorded-turn (engine engine-id &optional since)
   "Return how ENGINE's conversation ENGINE-ID's newest turn stands, as recorded.
@@ -7026,6 +7061,74 @@ default.  It is this host's desktop that tells (`drover-notify-mode'),
 and the phones it pushes to (`drover-remote-push')."
   (drover-notify-chosen-p (drover--notify-root session)))
 
+;;;; Buffers named after their sessions' titles
+
+(defcustom drover-name-buffers-after-titles t
+  "Whether a session's buffer is named after the session's title.
+Non-nil names it after the title drover lists the session under, as the
+title changes, cut to `drover-buffer-name-limit' characters, in the
+front end's way: a Claude terminal keeps its *claude* prefix.  It does
+until the user names the buffer.  Nil leaves the names the front ends
+give their buffers."
+  :type 'boolean
+  :group 'drover)
+
+(defcustom drover-buffer-name-limit 60
+  "Characters at most of a buffer name taken from its session's title.
+A longer title, such as a first prompt, is cut, ending in an ellipsis
+\(see `drover-name-buffers-after-titles')."
+  :type 'natnum
+  :group 'drover)
+
+(defvar-local drover--given-buffer-name nil
+  "The name drover last gave this buffer after its session's title, or nil.")
+(put 'drover--given-buffer-name 'permanent-local t)
+
+(defun drover-follow-title (session)
+  "Name the buffer of SESSION after its title, unless the user named it.
+As `drover-name-buffers-after-titles' says, while the buffer keeps the
+name drover gave it, or before drover named it, the name its front end
+gives its buffers (the backend's :default-buffer-name-p): a name the
+user gave it stays.  The backend tells the name a title gives
+\(:buffer-name) and names the buffer (:name-buffer).  A title that is
+the buffer's name, as a session telling no other has, names nothing."
+  (when-let* ((drover-name-buffers-after-titles)
+              ((null (drover-session-host session)))
+              (buffer (drover-session-buffer session))
+              ((buffer-live-p buffer))
+              (name-for (drover-backend-property session :buffer-name))
+              (namer (drover-backend-property session :name-buffer))
+              (title (drover-session-title session))
+              ((not (string-blank-p title)))
+              ((not (equal title (buffer-name buffer))))
+              ((with-current-buffer buffer
+                 (if drover--given-buffer-name
+                     (equal (buffer-name) drover--given-buffer-name)
+                   (when-let* ((default-p (drover-backend-property session :default-buffer-name-p)))
+                     (funcall default-p buffer)))))
+              (name (funcall name-for (substring-no-properties
+                                       (drover-bound-line title drover-buffer-name-limit))))
+              ;; Named so already, or uniquely so.
+              ((not (equal (generate-new-buffer-name name (buffer-name buffer)) (buffer-name buffer)))))
+    (funcall namer buffer name)
+    (with-current-buffer buffer
+      (setq drover--given-buffer-name (buffer-name)))
+    (drover-backend-changed (drover-session-backend session) (drover-session-id session))))
+
+(defun drover--follow-titles ()
+  "Name the buffers of the sessions that changed after their titles.
+For `drover-changed-hook' (see `drover-follow-title')."
+  (when drover-name-buffers-after-titles
+    (drover-with-reporting "naming buffers"
+      (dolist (session (if (eq drover-changed-sessions t)
+                           (drover-index-sessions)
+                         ;; A conversation's title changed: the front ends following it.
+                         (let ((keys drover-changed-sessions))
+                           (seq-keep #'drover-index-session
+                                     (delete-dups (append keys (drover--index-followers
+                                                                (drover-index) keys)))))))
+        (drover-follow-title session)))))
+
 ;;;; Seen as the user looks
 
 (defconst drover--seen-again-wait 2
@@ -7111,6 +7214,7 @@ See `drover--see-looked-at'."
   (add-hook 'window-buffer-change-functions #'drover--see-looked-at)
   (add-hook 'drover-changed-hook #'drover--see-looked-at)
   (add-hook 'drover-changed-hook #'drover--see-interrupted)
+  (add-hook 'drover-changed-hook #'drover--follow-titles)
   (unless (advice-function-member-p #'drover--see-looked-at after-focus-change-function)
     (add-function :after after-focus-change-function #'drover--see-looked-at)))
 

@@ -2365,7 +2365,7 @@ That is with the first prompt, then with what the agent tells."
   "A shell named after a title takes it on one line, cut to the limit.
 A blank title leaves its name."
   (drover-agent-shell-test-with
-    (let ((drover-agent-shell-name-limit 20)
+    (let ((drover-buffer-name-limit 20)
           (shell (drover-agent-shell-test-followed 'codex "Codex Agent @ drover")))
       (drover-agent-shell-test-title shell "Look at\n  the failing tests of the list and fix them")
       (should (equal (buffer-name shell) "Look at the failing…"))
@@ -2389,9 +2389,9 @@ A blank title leaves its name."
       (should (equal (drover-session-title (drover-agent-shell-test-session by-hand)) "Second title")))))
 
 (ert-deftest drover-agent-shell-test-not-named-after-title ()
-  "With `drover-agent-shell-name-after-title' nil, a shell keeps agent-shell's name."
+  "With `drover-name-buffers-after-titles' nil, a shell keeps agent-shell's name."
   (drover-agent-shell-test-with
-    (let ((drover-agent-shell-name-after-title nil)
+    (let ((drover-name-buffers-after-titles nil)
           (shell (drover-agent-shell-test-followed 'codex "Codex Agent @ drover")))
       (drover-agent-shell-test-title shell "Fix the build")
       (should (equal (buffer-name shell) "Codex Agent @ drover"))

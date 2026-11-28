@@ -669,18 +669,10 @@ agent's final reply, the files changed and the error: redacted, at most
 (defun drover-summary--first-prompt (session recap)
   "Return the first prompt of SESSION, what started it, or nil.
 Its RECAP tells it when its backend fetches it (:first-prompt), else
-the engines recording its conversation, as they tell what searches read
-first (:search-text)."
+its backend or the engine recording its conversation (see
+`drover-session-first-prompt')."
   (or (plist-get recap :first-prompt)
-      (let ((engine (and (not (drover-session-host session)) (drover-session-engine session))))
-        (seq-some (lambda (backend)
-                    (when-let* ((function (drover-backend-property backend :search-text))
-                                ((functionp function))
-                                (text (car (drover-with-reporting "first prompt"
-                                             (funcall function session)))))
-                      (and (stringp text) text)))
-                  (delete-dups (cons (drover-session-backend session)
-                                     (and engine (drover--recording-backends engine))))))))
+      (drover-session-first-prompt session)))
 
 (defun drover-summary-context (session first previous)
   "Return what the model reads of SESSION as a whole, or nil.

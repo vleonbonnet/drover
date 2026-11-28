@@ -703,6 +703,15 @@ of the user Codex added itself, its context and the instructions of
 AGENTS.md, as `drover-codex--context-regexp' tells them (see
 `drover-transcript-search-regexp').")
 
+(defun drover-codex-rollouts--conversation-first-prompt (session)
+  "Return the first prompt of the conversation of SESSION, or nil.
+As its rollout tells it, for any backend's session of Codex's
+conversation.  The backend's :first-prompt."
+  (when-let* ((id (drover-session-engine-id session))
+              ((eq (drover-session-engine session) 'codex))
+              (data (drover-codex-rollouts--data id)))
+    (plist-get data :prompt)))
+
 (defun drover-codex-rollouts--search-text (session)
   "Return the first prompt of the conversation of SESSION, or nil.
 As its rollout tells it, for any backend's session of Codex's
@@ -952,6 +961,7 @@ The first time, note it: replies before count as seen (see
    :archived #'drover-codex-rollouts--archived
    :search #'drover-codex-rollouts--search
    :search-text #'drover-codex-rollouts--search-text
+   :first-prompt #'drover-codex-rollouts--conversation-first-prompt
    :open #'drover-codex-rollouts--open
    :preview #'drover-codex-rollouts--preview
    :recap #'drover-codex-rollouts--recap

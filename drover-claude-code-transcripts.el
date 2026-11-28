@@ -1755,6 +1755,15 @@ the CLI gives the model, as the user's.")
 Its notes (isMeta), such as the caveat of a local command, the reminders
 it gives the model and the text of a skill invoked.")
 
+(defun drover-claude-code-transcripts--first-prompt (session)
+  "Return the first prompt of the conversation of SESSION, or nil.
+As its transcript tells it, for any backend's session of Claude Code's
+conversation.  The backend's :first-prompt."
+  (when-let* ((id (drover-session-engine-id session))
+              ((eq (drover-session-engine session) 'claude-code))
+              (data (drover-claude-code-transcripts--data id)))
+    (plist-get data :prompt)))
+
 (defun drover-claude-code-transcripts--search-text (session)
   "Return the first and last prompts of the conversation of SESSION, or nil.
 As its transcript tells them, for any backend's session of Claude
@@ -1819,6 +1828,7 @@ The first time, note it: replies before count as seen (see
    :history #'drover-claude-code-transcripts--history
    :search #'drover-claude-code-transcripts--search
    :search-text #'drover-claude-code-transcripts--search-text
+   :first-prompt #'drover-claude-code-transcripts--first-prompt
    :open #'drover-claude-code-transcripts--open
    :respond #'drover-claude-code-transcripts--respond
    :preview #'drover-claude-code-transcripts--preview

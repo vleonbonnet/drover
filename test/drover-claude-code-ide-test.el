@@ -2285,8 +2285,11 @@ gave the buffer stays."
           (setq-local vterm-buffer-name-string "*claude* %s"))
         (cl-flet ((title () (drover-session-title (drover-claude-code-ide-test-session terminal)))
                   (follow (changed)
+                    ;; As the index takes the terminals' changes in, which
+                    ;; this backend reports to a stub here.
+                    (setq drover--index nil)
                     (let ((drover-changed-sessions changed))
-                      (drover-claude-code-ide--follow-titles))))
+                      (drover--follow-titles))))
           (drover-transcript-scan drover-claude-code-transcripts--index)
           ;; Its conversation unknown, the buffer's name.
           (should (equal (title) "~/work"))
@@ -2332,7 +2335,7 @@ gave the buffer stays."
           (should (equal (title) "Again"))
           (should (equal (buffer-name vterm) "*claude* Again"))
           ;; Not named after titles at all.
-          (let ((drover-claude-code-ide-name-after-title nil))
+          (let ((drover-name-buffers-after-titles nil))
             (drover-fixture-claude-append file (drover-fixture-claude-meta "c3" "custom-title" :customTitle "Third"))
             (drover-transcript-scan drover-claude-code-transcripts--index)
             (follow t)
@@ -2492,7 +2495,6 @@ gave the buffer stays."
       (should (equal ghostel-program-status-functions
                      '(drover-claude-code-ide--status-changed ghostel-status-mode-line)))
       (should (memq #'drover-claude-code-ide--terminal-exited ghostel-exit-functions))
-      (should (memq #'drover-claude-code-ide--follow-titles drover-changed-hook))
       (should (memq #'drover-claude-code-ide--add-hooks after-load-functions))
       ;; Drover follows the windows, not the backend.
       (should-not (memq 'drover-claude-code-ide--note-focus window-selection-change-functions))
@@ -2512,7 +2514,6 @@ gave the buffer stays."
       (should-not vterm-mode-hook)
       (should (equal ghostel-program-status-functions '(ghostel-status-mode-line)))
       (should-not ghostel-exit-functions)
-      (should-not (memq #'drover-claude-code-ide--follow-titles drover-changed-hook))
       (should-not (memq #'drover-claude-code-ide--add-hooks after-load-functions))
       (with-current-buffer terminal
         (should-not drover-session-at-point-function)

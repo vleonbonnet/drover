@@ -1398,6 +1398,50 @@ SESSION unless the user chose otherwise (see
 The backend's :edit-pending."
   (opencode-edit-pending-prompt nil (drover-session-id session)))
 
+(defvar drover-opencode--first-prompts (make-hash-table :test #'equal)
+  "The first prompt of each OpenCode session read, by its identifier.")
+
+(defvar drover-opencode--first-prompts-read nil
+  "When OpenCode's first prompts were read until, in milliseconds, or nil.")
+
+(defun drover-opencode-read-first-prompts (days)
+  "Read the first prompts of OpenCode's sessions from its database, since last.
+The first prompt of each session written since the last read, back DAYS
+days the first time, read only, cut to 2000 characters.  Return non-nil
+when one was new.  Its sessions' :first-prompt tells them (see
+`drover-session-first-prompt')."
+  (drover-with-reporting "first prompts of OpenCode"
+    (when-let* (((fboundp 'sqlite-available-p))
+                ((sqlite-available-p))
+                ((stringp drover-opencode-database))
+                ((file-readable-p drover-opencode-database)))
+      (let ((db (sqlite-open drover-opencode-database t))
+            (found nil))
+        (unwind-protect
+            (let* ((since (or drover-opencode--first-prompts-read
+                              (* 1000 (floor (- (float-time) (* 86400 days))))))
+                   (rows (sqlite-select
+                          db
+                          "SELECT m.session_id, json_extract(m.data, '$.text'), m.time_created FROM session_message m WHERE m.type = 'user' AND m.time_created > ?1 AND m.seq = (SELECT min(seq) FROM session_message WHERE session_id = m.session_id AND type = 'user') ORDER BY m.time_created LIMIT 5000"
+                          (list since))))
+              (pcase-dolist (`(,session ,text ,time) rows)
+                (when (numberp time)
+                  (setq since (max since time)))
+                (when (and (stringp session) (stringp text))
+                  (let ((text (string-limit text 2000)))
+                    (unless (equal (gethash session drover-opencode--first-prompts) text)
+                      (puthash session text drover-opencode--first-prompts)
+                      (setq found t)))))
+              (setq drover-opencode--first-prompts-read since))
+          (sqlite-close db))
+        found))))
+
+(defun drover-opencode--first-prompt (session)
+  "Return the first prompt of SESSION's OpenCode session, as last read, or nil.
+See `drover-opencode-read-first-prompts'.  The backend's :first-prompt."
+  (and (eq (drover-session-engine session) 'opencode)
+       (gethash (drover-session-engine-id session) drover-opencode--first-prompts)))
+
 (defun drover-opencode--fork (session)
   "Fork SESSION whole into a new session, and display it."
   (opencode-session-fork (drover-session-id session)))
@@ -1991,6 +2035,7 @@ Through the plugin's RPC, `opencode.goal' `get'.  The backend's
      :answer #'drover-opencode--answer
      :interrupt #'drover-opencode--interrupt
      :interrupt-confirms t
+     :first-prompt #'drover-opencode--first-prompt
      :pending-prompts #'drover-opencode--pending-prompts
      :edit-pending #'drover-opencode--edit-pending
      :archive #'drover-opencode--archive

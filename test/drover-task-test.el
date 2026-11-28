@@ -775,34 +775,23 @@ Said once.
         (setq drover-task--links nil)
         (should-not (drover-task-id-of session))))))
 
-(ert-deftest drover-task-test-opencode-first-prompts ()
-  "OpenCode's sessions serve the task their first prompt links, as its database tells."
-  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
-  (let* ((directory (make-temp-file "drover-task-oc" t))
-         (drover-opencode-database (expand-file-name "opencode.db" directory))
-         (drover-task--oc-prompts (make-hash-table :test #'equal))
-         (drover-task--oc-read nil)
-         (drover-task--prompts (make-hash-table :test #'eq :weakness 'key))
-         (now (* 1000 (floor (float-time)))))
-    (unwind-protect
-        (let ((db (sqlite-open drover-opencode-database)))
-          (sqlite-execute db "CREATE TABLE session_message (id text PRIMARY KEY, session_id text, type text, seq integer, time_created integer, time_updated integer, data text)")
-          (pcase-dolist (`(,id ,session ,type ,seq ,text)
-                         `(("m1" "ses_a" "user" 1 "Work on [[id:T1][Fix]]. Plan it.")
-                           ("m2" "ses_a" "user" 3 "Then [[id:T2][other]]")
-                           ("m3" "ses_b" "user" 1 "Hello")
-                           ("m4" "ses_b" "user" 2 "see [[id:T3][x]]")
-                           ("m5" "ses_c" "assistant" 1 "[[id:T4][x]]")))
-            (sqlite-execute db "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)"
-                            (list id session type seq now now (json-encode `((text . ,text))))))
-          (sqlite-close db)
-          (drover-task--oc-read)
-          (should (equal (gethash "ses_a" drover-task--oc-prompts) "T1"))
-          (should-not (gethash "ses_b" drover-task--oc-prompts))
-          (should-not (gethash "ses_c" drover-task--oc-prompts))
-          (let ((session (drover-session-create :backend 'opencode :id "ses_a" :engine 'opencode :engine-id "ses_a")))
-            (should (equal (drover-task--prompt-id session) "T1"))))
-      (delete-directory directory t))))
+(ert-deftest drover-task-test-first-prompt-links ()
+  "A session serves the task its first prompt links, whatever prompts come after.
+Its backend, or the engine recording its conversation, tells its first
+prompt (see `drover-session-first-prompt')."
+  (drover-test-with-backend nil
+    (let ((drover-task--prompts (make-hash-table :test #'eq :weakness 'key))
+          (prompts '(("e1" . "Work on [[id:T1][Fix]]. Plan it.") ("e2" . "Hello"))))
+      (drover-test-register-simple 'firsts nil
+                                   :first-prompt (lambda (session)
+                                                   (alist-get (drover-session-engine-id session) prompts
+                                                              nil nil #'equal)))
+      (should (equal (drover-task--prompt-id (drover-session-create :backend 'firsts :id "a" :engine-id "e1"))
+                     "T1"))
+      (should-not (drover-task--prompt-id (drover-session-create :backend 'firsts :id "b" :engine-id "e2")))
+      ;; Of another host, its owner's to tell.
+      (should-not (drover-task--prompt-id (drover-session-create :backend 'firsts :id "c" :engine-id "e1"
+                                                                 :host "core"))))))
 
 ;;;; From a heading to the end
 

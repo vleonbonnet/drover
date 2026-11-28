@@ -986,6 +986,17 @@ a permission or a question, as the CLI sorts its waits."
         (drover-changed-now)
         (should (eq (drover-session-status (drover-find 'claude-code "retry")) 'working))))))
 
+(ert-deftest drover-claude-code-transcripts-test-first-prompt ()
+  "A conversation's first prompt is what started it, not its last."
+  (drover-claude-code-transcripts-test-with
+    (let* ((project (expand-file-name "work/" home))
+           (file (drover-fixture-claude "first" project :prompt "Work on [[id:T1][Fix]]")))
+      (drover-fixture-claude-append file (drover-fixture-claude-user "first" project 1790000500.0
+                                                                     "Then [[id:T2][Other]]"))
+      (drover-claude-code-transcripts-test-scan)
+      (let ((session (drover-find 'claude-code "first")))
+        (should (equal (drover-session-first-prompt session) "Work on [[id:T1][Fix]]"))))))
+
 (ert-deftest drover-claude-code-transcripts-test-interactive-agent-status ()
   "Interactive sessions report status; a shell left running ends the turn, its work told."
   (drover-claude-code-transcripts-test-with

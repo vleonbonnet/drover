@@ -594,6 +594,35 @@ While a turn runs or waits for the user, its jobs are that turn's."
           (should (memq (drover-session-status session) '(working waiting)))
           (should-not (drover-session-background session)))))))
 
+(ert-deftest drover-opencode-test-first-prompts ()
+  "OpenCode's first prompts are read from its database, each session's first of the user's."
+  (skip-unless (and (fboundp 'sqlite-available-p) (sqlite-available-p)))
+  (let* ((directory (make-temp-file "drover-oc-first" t))
+         (drover-opencode-database (expand-file-name "opencode.db" directory))
+         (drover-opencode--first-prompts (make-hash-table :test #'equal))
+         (drover-opencode--first-prompts-read nil)
+         (now (* 1000 (floor (float-time)))))
+    (unwind-protect
+        (let ((db (sqlite-open drover-opencode-database)))
+          (sqlite-execute db "CREATE TABLE session_message (id text PRIMARY KEY, session_id text, type text, seq integer, time_created integer, time_updated integer, data text)")
+          (pcase-dolist (`(,id ,session ,type ,seq ,text)
+                         `(("m1" "ses_a" "user" 1 "Work on [[id:T1][Fix]]. Plan it.")
+                           ("m2" "ses_a" "user" 3 "Then [[id:T2][other]]")
+                           ("m3" "ses_b" "user" 1 "Hello")
+                           ("m5" "ses_c" "assistant" 1 "[[id:T4][x]]")))
+            (sqlite-execute db "INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)"
+                            (list id session type seq now now (json-serialize `((text . ,text))))))
+          (sqlite-close db)
+          (should (drover-opencode-read-first-prompts 60))
+          (cl-flet ((first (id) (drover-opencode--first-prompt
+                                 (drover-session-create :backend 'opencode :id id :engine 'opencode :engine-id id))))
+            (should (equal (first "ses_a") "Work on [[id:T1][Fix]]. Plan it."))
+            (should (equal (first "ses_b") "Hello"))
+            (should-not (first "ses_c")))
+          ;; Read again: nothing new.
+          (should-not (drover-opencode-read-first-prompts 60)))
+      (delete-directory directory t))))
+
 (ert-deftest drover-opencode-test-every-entry-in-order ()
   (drover-opencode-test-with (list (drover-opencode-test-entry "ses_1")
                                    (drover-opencode-test-entry "ses_2")

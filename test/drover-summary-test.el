@@ -306,15 +306,15 @@ SLOTS is a plist of slot names as keywords and values."
                    "Adding search to the app: the index and ranking are done."))))
 
 (ert-deftest drover-summary-test-first-prompt ()
-  "The first prompt is its backend's, else what the engines recording the conversation tell first."
+  "The first prompt is its backend's recap's, else what its backend or the engine recording it tells."
   (drover-summary-test-with nil
     (let ((session (drover-summary-test-session "s1")))
       (should (equal (drover-summary--first-prompt session '(:first-prompt "Told by the backend")) "Told by the backend"))
       (cl-letf (((symbol-function 'drover--recording-backends) (lambda (_) '(recorder)))
                 ((symbol-function 'drover-backend-property)
                  (lambda (backend property)
-                   (and (eq backend 'recorder) (eq property :search-text)
-                        (lambda (_) (list "The first prompt" "The last prompt"))))))
+                   (and (eq backend 'recorder) (eq property :first-prompt)
+                        (lambda (_) "The first prompt")))))
         (should (equal (drover-summary--first-prompt session nil) "The first prompt")))
       (should-not (drover-summary--first-prompt session nil)))))
 
