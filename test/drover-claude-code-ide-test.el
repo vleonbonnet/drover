@@ -1531,6 +1531,20 @@ its turn ended, and tasks its process started not ended."
         (should (equal (drover-session-requests (drover-claude-code-ide-test-session terminal))
                        `((:kind ,kind :summary ,waiting))))))))
 
+(ert-deftest drover-claude-code-ide-test-slash-commands-wait-for-the-turn ()
+  "Compacting and renaming, typed as slash commands, are offered once no turn runs."
+  (drover-claude-code-ide-test-with
+    (let ((terminal (drover-claude-code-ide-test-terminal "*claude* busy")))
+      (drover-claude-code-ide-test-status terminal '(("" :state working)))
+      (let ((session (drover-claude-code-ide-test-session terminal)))
+        (should-not (drover-supports-p session :compact))
+        (should-not (drover-supports-p session :rename))
+        (should (drover-supports-p session :interrupt)))
+      (drover-claude-code-ide-test-status terminal '(("" :state done)))
+      (let ((session (drover-claude-code-ide-test-session terminal)))
+        (should (drover-supports-p session :compact))
+        (should (drover-supports-p session :rename))))))
+
 (ert-deftest drover-claude-code-ide-test-background-shell ()
   "A shell left running ends the turn, acknowledged or not: the CLI tells it once no turn runs.
 The session is done, then idle once seen, the shell its work left
@@ -2181,48 +2195,28 @@ are recorded, as `drover-claude-code-ide-test-typing' does."
         (delete-file transcript)))))
 
 (ert-deftest drover-claude-code-ide-test-session-runs ()
-  "A session shows the model and effort of its newest turn, read again once it changed."
-  (drover-claude-code-ide-test-with
-    (let* ((transcript (make-temp-file "drover-transcript" nil ".jsonl" "{}\n"))
-           (terminal (drover-claude-code-ide-test-terminal "*claude* runs"))
-           (turn '("claude-opus-4-5" . high))
-           (reads 0))
-      (unwind-protect
-          (cl-letf (((symbol-function 'drover-claude-code-transcript)
-                     (lambda (id directory)
-                       (should (equal (list id directory) (list "known" (expand-file-name "/work/drover/"))))
-                       transcript))
-                    ((symbol-function 'drover-claude-code-last-turn)
-                     (lambda (file) (should (equal file transcript)) (cl-incf reads) turn))
-                    ((symbol-function 'drover-claude-code-catalog) (lambda () 'catalog))
-                    ((symbol-function 'drover-claude-code-model)
-                     (lambda (id _layers _catalog)
-                       (drover-model-create :id id :name (and (equal id "claude-opus-4-5")
-                                                              "Claude Opus 4.5")))))
-            ;; No transcript known: nothing guessed.
-            (let ((session (drover-claude-code-ide-test-session terminal)))
-              (should-not (drover-session-model session))
-              (should (= reads 0)))
-            (with-current-buffer terminal
-              (setq-local drover-claude-code-ide-session-id "known"))
-            (let ((session (drover-claude-code-ide-test-session terminal)))
-              (should (equal (drover-session-model session) "Opus 4.5"))
-              (should (equal (drover-session-effort session) "high"))
-              ;; Neither whether it is the default nor the provider is known.
-              (should-not (drover-session-effort-default session))
-              (should-not (drover-session-provider session))
-              (should-not (drover-session-provider-name session)))
-            ;; Listed again, the unchanged transcript is not read again.
-            (drover-claude-code-ide-test-session terminal)
-            (should (= reads 1))
-            ;; A new turn appends to it: read again.
-            (setq turn '("claude-sonnet-9" . nil))
-            (write-region "{\"more\": true}\n" nil transcript t 'silent)
-            (let ((session (drover-claude-code-ide-test-session terminal)))
-              (should (= reads 2))
-              (should (equal (drover-session-model session) "claude-sonnet-9"))
-              (should-not (drover-session-effort session))))
-        (delete-file transcript)))))
+  "A session shows the model and effort of its newest turn, as its conversation records them.
+The effort its model's catalog serves by default dims; no transcript
+known, nothing is guessed."
+  (drover-claude-code-ide-test-compacting
+    (let* ((file (drover-fixture-claude "runs" project))
+           (terminal (drover-claude-code-ide-test-terminal "*claude* runs" :directory project))
+           (catalog '((config (models ((id . "claude-opus-5-5") (name . "Opus 5.5")
+                                       (effortLevels . ["low" "high" "max"]) (defaultEffort . "high")))))))
+      (cl-letf (((symbol-function 'drover-claude-code-catalog) (lambda () catalog)))
+        (should-not (drover-session-model (drover-claude-code-ide-test-session terminal)))
+        (with-current-buffer terminal
+          (setq-local drover-claude-code-ide-session-id "runs"))
+        (drover-fixture-claude-append
+         file
+         (drover-fixture-claude-user "runs" project (+ clock 1) "Go on")
+         (drover-fixture-claude-assistant "runs" project (+ clock 2) "Done." :effort "high"))
+        (scan)
+        (let ((session (drover-claude-code-ide-test-session terminal)))
+          (should (equal (drover-session-model session)
+                         (drover-session-model (drover-find 'claude-code "runs"))))
+          (should (drover-session-model session))
+          (should (equal (drover-session-effort session) "high")))))))
 
 ;;;; Actions
 

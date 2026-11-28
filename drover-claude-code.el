@@ -928,6 +928,17 @@ settings: there only to the models of
                  (member key drover-claude-code-user-effort-models))
              (alist-get 'effortLevel settings)))))
 
+(defun drover-claude-code-default-effort-p (model-id effort catalog)
+  "Return non-nil when EFFORT, a string, is the default of MODEL-ID in CATALOG.
+The level Claude Code's catalog serves as the model's default (see
+`drover-claude-code--default-effort'): a transcript tells the effort a
+turn ran, not whether it was chosen, and the default dims."
+  (when-let* (((stringp effort))
+              ((stringp model-id))
+              (entry (drover-claude-code--catalog-model catalog model-id))
+              (default (drover-claude-code--default-effort entry catalog)))
+    (equal (format "%s" default) effort)))
+
 (defun drover-claude-code--default-effort (entry catalog)
   "Return the effort CATALOG serves as the default of its model ENTRY, or nil.
 It is the level CATALOG's state keeps for the model, else the default

@@ -965,9 +965,13 @@ its summary, first prompt or last prompt."
 (defun drover-claude-code-transcripts--listed-p (data)
   "Return non-nil when the transcript read as DATA records one to list.
 One with no message, or naming nothing, as a session that ran a command
-and left, the CLI's picker leaves out too."
+and left, the CLI's picker leaves out too; nor one a program ran,
+\"claude -p\" or the Python SDK, unless `drover-show-program-sessions'
+says so."
   (and (plist-get data :messages)
        (drover-claude-code-transcripts--title data)
+       (or drover-show-program-sessions
+           (not (member (plist-get data :entrypoint) drover-claude-code-transcripts--batch-entrypoints)))
        t))
 
 (defun drover-claude-code-transcripts--recent-p (data &optional now)
@@ -1160,6 +1164,7 @@ it once."
              :agent (and mode (drover-claude-code-mode-agent mode))
              :model (and model (drover-claude-code-transcripts--model-name model catalog))
              :effort (plist-get data :effort)
+             :effort-default (drover-claude-code-default-effort-p model (plist-get data :effort) catalog)
              :provider (plist-get run :provider)
              :provider-name (plist-get run :provider-name)
              :context-tokens (plist-get run :context-tokens)
@@ -1352,10 +1357,17 @@ seconds at most."
 (defun drover-claude-code-transcripts--recorded-run (id)
   "Return what conversation ID ran on, as its transcript tells, or nil.
 Keyword arguments of `drover-session-create' (see
-`drover-claude-code-transcripts--ran-on'), for a front end following it.
-The backend's :recorded-run."
+`drover-claude-code-transcripts--ran-on'), and its newest turn's model,
+named as its catalog names it, and effort, dimmed when the model's
+default, for a front end following it.  The backend's :recorded-run."
   (when-let* ((data (drover-claude-code-transcripts--data id)))
-    (drover-claude-code-transcripts--ran-on data (drover-claude-code-catalog))))
+    (let ((catalog (drover-claude-code-catalog))
+          (model (plist-get data :model))
+          (effort (plist-get data :effort)))
+      (append (and model (list :model (drover-claude-code-transcripts--model-name model catalog)))
+              (and effort (list :effort effort
+                                :effort-default (drover-claude-code-default-effort-p model effort catalog)))
+              (drover-claude-code-transcripts--ran-on data catalog)))))
 
 (defun drover-claude-code-transcripts--seen-now (id)
   "Return when the user sees conversation ID now, as its transcript dates replies.

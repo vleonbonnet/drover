@@ -39,7 +39,7 @@
 ;; name is the one session_index.jsonl gave it last, else its first
 ;; prompt.  Sessions
 ;; run by `codex exec' are left out, as the CLI's own picker leaves them
-;; out, unless `drover-codex-include-non-interactive' says otherwise; a
+;; out, unless `drover-show-program-sessions' says otherwise; a
 ;; subagent's rollout names its parent.
 ;;
 ;; A turn completed, or ended in an error, the user did not see is done,
@@ -83,11 +83,10 @@
   :type 'string
   :group 'drover)
 
-(defcustom drover-codex-include-non-interactive nil
-  "Whether drover lists the conversations `codex exec' ran.
-Codex's own picker leaves them out unless asked."
-  :type 'boolean
-  :group 'drover)
+;; Which conversations a program ran is drover's to show, for every engine.
+(drover--adopt-option 'drover-codex-include-non-interactive 'drover-show-program-sessions)
+(define-obsolete-variable-alias 'drover-codex-include-non-interactive
+  'drover-show-program-sessions "0.2.0")
 
 (defcustom drover-codex-history-days nil
   "Days after which a closed Codex conversation counts as older.
@@ -454,7 +453,7 @@ appended to: Codex appends a line per name given."
   "Return non-nil when the rollout read as DATA records a conversation to list."
   (and (plist-get data :messages)
        (plist-get data :id)
-       (or drover-codex-include-non-interactive
+       (or drover-show-program-sessions
            (not (member (plist-get data :source) '("exec" "mcp"))))
        t))
 

@@ -7073,6 +7073,15 @@ default.  It is this host's desktop that tells (`drover-notify-mode'),
 and the phones it pushes to (`drover-remote-push')."
   (drover-notify-chosen-p (drover--notify-root session)))
 
+(defcustom drover-show-program-sessions nil
+  "Whether drover lists the conversations a program ran, not a user.
+Such as \"claude -p\", Claude's Python SDK and \"codex exec\": their
+replies went to the program, and drover's own cheap model runs so.
+Each engine tells which of its conversations a program ran; nil leaves
+them out, as Codex's picker does."
+  :type 'boolean
+  :group 'drover)
+
 ;;;; Buffers named after their sessions' titles
 
 (defcustom drover-name-buffers-after-titles t

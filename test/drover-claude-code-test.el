@@ -383,6 +383,17 @@ serves and a model without effort.")
                                     (drover-claude-code-model "claude-opus-5" nil (drover-claude-code-catalog))))
                      '(low high))))))
 
+(ert-deftest drover-claude-code-test-default-effort-p ()
+  "A turn's effort is its model's default when its catalog serves it so."
+  (drover-test-with-homes
+    (drover-test-write-claude-catalog)
+    (let ((catalog (drover-claude-code-catalog)))
+      (should (drover-claude-code-default-effort-p "claude-opus-5-5" "medium" catalog))
+      (should-not (drover-claude-code-default-effort-p "claude-opus-5-5" "max" catalog))
+      (should (drover-claude-code-default-effort-p "claude-opus-5" "high" catalog))
+      (should-not (drover-claude-code-default-effort-p "claude-mythos-5-1" "high" catalog))
+      (should-not (drover-claude-code-default-effort-p "claude-opus-5-5" nil catalog)))))
+
 (ert-deftest drover-claude-code-test-alias-targets ()
   "Aliases resolve to the targets the catalog gives them, a cloud's its own."
   (drover-test-with-homes

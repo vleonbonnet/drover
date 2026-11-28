@@ -1238,7 +1238,8 @@ failed idles, for good, until the next turn ends."
         (should (eql (plist-get data :ended) (+ start 503)))))))
 
 (ert-deftest drover-claude-code-transcripts-test-batch-turns ()
-  "A turn of \"claude -p\" or an SDK's program is idle: its reply went to the program."
+  "A turn of \"claude -p\" or an SDK's program is idle: its reply went to the program.
+Such conversations are listed only as `drover-show-program-sessions' says."
   (drover-claude-code-transcripts-test-with
     (drover-claude-code-transcripts-test-since 1789990000)
     (let ((project (expand-file-name "work/" home)))
@@ -1247,9 +1248,15 @@ failed idles, for good, until the next turn ends."
       (drover-fixture-claude "p3" project :entrypoint "sdk-ts")
       (drover-fixture-claude "p4" project :entrypoint "claude-desktop")
       (drover-claude-code-transcripts-test-scan)
-      (should (equal (mapcar (lambda (id) (drover-session-status (drover-find 'claude-code id)))
-                             '("p1" "p2" "p3" "p4"))
-                     '(idle idle done done))))))
+      ;; A program's conversations are left out, as Codex's are.
+      (should-not (drover-find 'claude-code "p1"))
+      (should-not (drover-find 'claude-code "p2"))
+      (let ((drover-show-program-sessions t))
+        (drover-backend-changed 'claude-code)
+        (drover-changed-now)
+        (should (equal (mapcar (lambda (id) (drover-session-status (drover-find 'claude-code id)))
+                               '("p1" "p2" "p3" "p4"))
+                       '(idle idle done done)))))))
 
 (ert-deftest drover-claude-code-transcripts-test-flood-guard ()
   "Replies before drover first read the transcripts count as seen.

@@ -942,37 +942,6 @@ is that work, which DETAIL tells unless it tells an error (see
 
 ;;;; Sessions
 
-(defvar-local drover-claude-code-ide--last-run nil
-  "What the terminal's session ran in its newest turn, as (STAMP . PLIST), or nil.
-STAMP is the transcript read, its size and its modification time;
-PLIST is what `drover-claude-code-ide--run' returns.")
-
-(defun drover-claude-code-ide--run (id directory)
-  "Return what session ID, started in DIRECTORY, ran in its newest turn.
-The value is a plist of keyword arguments of `drover-session-create':
-:model, the compact name Claude Code's catalog gives the model, else its
-identifier, and :effort, the effort of the turn.  Whether that effort
-is the model's default the transcript does not tell, nor which provider
-served it, as the CLI may reach Claude through a cloud's.  The
-transcript is read again only once it changed, so that listing sessions
-costs a file status; the current buffer, the session's terminal, keeps
-what was read.  Nil without a turn."
-  (drover-with-reporting "Claude Code run"
-    (when-let* ((file (drover-claude-code-transcript id directory))
-                (attributes (file-attributes file)))
-      (let ((stamp (list file (file-attribute-size attributes)
-                         (file-attribute-modification-time attributes))))
-        (unless (equal (car drover-claude-code-ide--last-run) stamp)
-          (setq drover-claude-code-ide--last-run
-                (cons stamp
-                      (when-let* ((turn (drover-claude-code-last-turn file))
-                                  ((car turn)))
-                        (let ((model (drover-claude-code-model (car turn) nil (drover-claude-code-catalog))))
-                          (list :model (drover-model-short-name
-                                        (or (drover-model-name model) (drover-model-id model)))
-                                :effort (and (cdr turn) (symbol-name (cdr turn)))))))))
-        (cdr drover-claude-code-ide--last-run)))))
-
 (defun drover-claude-code-ide--session-of (buffer)
   "Return the `drover-session' of terminal BUFFER."
   (drover-claude-code-ide--watch-status)
@@ -1004,9 +973,9 @@ what was read.  Nil without a turn."
                :engine 'claude-code
                ;; Never a guess: drover merges sessions of one engine identifier.
                :engine-id id
-               ;; Its context and cache, which a terminal does not tell.
-               (append (and id directory (drover-claude-code-ide--run id directory))
-                       (drover-recorded-run 'claude-code id)))))))
+               ;; Its model, effort, context and cache, which a terminal
+               ;; does not tell, as its conversation records them.
+               (drover-recorded-run 'claude-code id))))))
 
 (defun drover-claude-code-ide--sessions ()
   "Return the sessions of the Claude terminals."
@@ -1882,10 +1851,14 @@ reads input, as when switching models.  The backend's :compact."
 (defun drover-claude-code-ide--supports (session operation)
   "Return non-nil when OPERATION applies to SESSION.
 Those of `drover-claude-code-ide--terminal-operations' need its live
-terminal, which a session archived may have lost; forking and deleting
+terminal, which a session archived may have lost, compacting and
+renaming a turn over too, as slash commands typed; forking and deleting
 need its conversation, which a terminal not started by drover tells
 once Claude Code recorded it.  The backend's :supports."
-  (cond ((memq operation drover-claude-code-ide--terminal-operations)
+  (cond ((and (memq operation '(:compact :rename)) (drover-session-active-p session))
+         ;; Typed as slash commands, they wait for the turn to end.
+         nil)
+        ((memq operation drover-claude-code-ide--terminal-operations)
          (and (drover-claude-code-ide--buffer session) t))
         ((memq operation '(:fork :fork-hidden :delete))
          (and (drover-session-engine-id session) (drover-session-directory session) t))
